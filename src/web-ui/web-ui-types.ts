@@ -6,7 +6,12 @@ import type { SessionSource } from '../session/session-manager.js';
 import type { SessionStatus, DiagnosticEvent, ConversationTurn } from '../session/types.js';
 import type { JobDefinition, RunRecord } from '../cron/types.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
-import type { HumanGateRequest } from '../workflow/types.js';
+import type { HumanGateRequest, WorkflowId } from '../workflow/types.js';
+import type { MessageLogEntry } from '../workflow/message-log.js';
+
+// Re-export MessageLogEntry so frontends can import it from the wire-types
+// module without reaching into the workflow domain package directly.
+export type { MessageLogEntry } from '../workflow/message-log.js';
 
 // ---------------------------------------------------------------------------
 // JSON-RPC Frame Protocol
@@ -51,6 +56,7 @@ export type MethodName =
   | 'workflows.artifacts'
   | 'workflows.listDefinitions'
   | 'workflows.listResumable'
+  | 'workflows.messageLog'
   | 'personas.get'
   | 'personas.compile';
 
@@ -86,6 +92,7 @@ export type ErrorCode =
   | 'ESCALATION_EXPIRED'
   | 'SESSION_BUSY'
   | 'WORKFLOW_NOT_FOUND'
+  | 'WORKFLOW_CORRUPTED'
   | 'WORKFLOW_NOT_AT_GATE'
   | 'ARTIFACT_NOT_FOUND'
   | 'PERSONA_NOT_FOUND'
@@ -169,24 +176,67 @@ export interface JobListDto {
 // Workflow DTO Types
 // ---------------------------------------------------------------------------
 
-/** Slim summary returned by `workflows.list`. */
-export interface WorkflowSummaryDto {
-  readonly workflowId: string;
-  readonly name: string;
-  readonly phase: 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
-  readonly currentState: string;
-  readonly startedAt: string;
+/** Phases that appear only on past-run records loaded from disk. */
+export type PastRunPhase = 'completed' | 'failed' | 'aborted' | 'waiting_human' | 'interrupted';
+
+/** Phases reported by the orchestrator for a workflow currently tracked in memory. */
+export type LiveWorkflowPhase = 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+
+/**
+ * Latest verdict observed for a workflow.
+ *
+ * On a completed/failed/aborted workflow this is the final verdict; on a live
+ * workflow it is the most recently emitted one.
+ */
+export interface LatestVerdictDto {
+  readonly stateId: string;
+  readonly verdict: string;
+  readonly confidence?: number;
 }
 
-/** Full detail returned by `workflows.get`. */
-export interface WorkflowDetailDto extends WorkflowSummaryDto {
+/**
+ * Shared fields for any workflow card-style record (live summaries and past runs).
+ *
+ * `phase` is typed as the wide union of live and past-run phases on the base.
+ * Subtypes may tighten it (e.g. `WorkflowSummaryDto` keeps the live-only union,
+ * `PastRunDto` narrows to `PastRunPhase`).
+ */
+export interface WorkflowCardDto {
+  readonly workflowId: WorkflowId;
+  readonly name: string;
+  readonly phase: LiveWorkflowPhase | PastRunPhase;
+  readonly currentState: string;
+  readonly taskDescription: string;
+  readonly round: number;
+  readonly maxRounds: number;
+  readonly totalTokens: number;
+  readonly latestVerdict?: LatestVerdictDto;
+  readonly error?: string;
+}
+
+/** Slim summary returned by `workflows.list`. */
+export type WorkflowSummaryDto = WorkflowCardDto & {
+  readonly phase: LiveWorkflowPhase;
+  readonly startedAt: string;
+};
+
+/**
+ * Full detail returned by `workflows.get`.
+ *
+ * Extends {@link WorkflowCardDto} (not `WorkflowSummaryDto`) so that the wide
+ * `phase` union — including the `'interrupted'` value synthesized for past runs
+ * loaded from disk — is preserved here. Live-path responses still emit a
+ * `LiveWorkflowPhase` value; only the disk-fallback path can emit `'interrupted'`.
+ */
+export type WorkflowDetailDto = WorkflowCardDto & {
+  readonly startedAt: string;
   readonly description: string;
   readonly stateGraph: StateGraphDto;
   readonly transitionHistory: readonly TransitionRecordDto[];
   readonly context: WorkflowContextDto;
   readonly gate?: HumanGateRequestDto;
   readonly workspacePath: string;
-}
+};
 
 /** Minimal representation of the state machine graph for frontend rendering. */
 export interface StateGraphDto {
@@ -295,13 +345,40 @@ export interface ArtifactContentDto {
 // Workflow Definition DTO Types
 // ---------------------------------------------------------------------------
 
-/** Resumable workflow returned by `workflows.listResumable`. */
-export interface ResumableWorkflowDto {
-  readonly workflowId: string;
-  readonly lastState: string;
+/**
+ * Past-run record returned by `workflows.listResumable`.
+ *
+ * Covers terminal runs (completed/failed/aborted), runs paused at a human gate
+ * (`waiting_human`), and runs whose checkpoint exists on disk with no live
+ * orchestrator instance and no recorded `finalStatus` (`interrupted` — typically
+ * a daemon crash mid-run; the phase is synthesized at the DTO boundary).
+ */
+export type PastRunDto = WorkflowCardDto & {
+  readonly phase: PastRunPhase;
   readonly timestamp: string;
-  readonly taskDescription: string;
+  readonly lastState: string;
+  readonly durationMs?: number;
   readonly workspacePath?: string;
+};
+
+/**
+ * @deprecated Use {@link PastRunDto} instead. This alias is preserved for one
+ * release to avoid an abrupt RPC return-type rename for `workflows.listResumable`.
+ */
+export type ResumableWorkflowDto = PastRunDto;
+
+/**
+ * Response from `workflows.messageLog`: a page of {@link MessageLogEntry}
+ * records for a workflow, sorted newest-first by `ts`.
+ *
+ * Cursor pagination per design decision D5: callers fetch the next page by
+ * passing the last entry's `ts` as the next request's `before` parameter.
+ * `hasMore` is true iff the returned page is full *and* at least one strictly
+ * older entry exists on disk; otherwise false.
+ */
+export interface MessageLogResponseDto {
+  readonly entries: readonly MessageLogEntry[];
+  readonly hasMore: boolean;
 }
 
 /** Available workflow definition returned by `workflows.listDefinitions`. */

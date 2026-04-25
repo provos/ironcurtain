@@ -25,6 +25,7 @@ import type {
   FileTreeResponseDto,
   FileContentResponseDto,
   ArtifactContentDto,
+  MessageLogResponseDto,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
@@ -488,6 +489,23 @@ export async function getWorkflowFileContent(workflowId: string, path: string): 
 
 export async function getWorkflowArtifacts(workflowId: string, artifactName: string): Promise<ArtifactContentDto> {
   return getWsClient().request<ArtifactContentDto>('workflows.artifacts', { workflowId, artifactName });
+}
+
+/**
+ * Fetch a page of message-log entries for a workflow. No client-side caching:
+ * every call hits the daemon so live runs see fresh entries on each invocation.
+ *
+ * Cursor pagination per design D5: pass the oldest entry's `ts` as `before`
+ * to fetch the next (older) page. RPC errors bubble to the caller.
+ */
+export async function getWorkflowMessageLog(
+  workflowId: string,
+  opts?: { before?: string; limit?: number },
+): Promise<MessageLogResponseDto> {
+  const params: Record<string, unknown> = { workflowId };
+  if (opts?.before !== undefined) params.before = opts.before;
+  if (opts?.limit !== undefined) params.limit = opts.limit;
+  return getWsClient().request<MessageLogResponseDto>('workflows.messageLog', params);
 }
 
 // ── Persona RPC actions (extended) ─────────────────────────────────────

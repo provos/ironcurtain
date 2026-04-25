@@ -627,6 +627,228 @@ function buildWorkflowDetailDto(wf: MockWorkflow, gate?: MockGate) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Past-run + message-log fixtures (F7)
+//
+// These fixtures back the widened `workflows.listResumable` (covering all five
+// `PastRunPhase` values) and the new `workflows.messageLog` RPC (covering all
+// eight `MessageLogEntry` variants) so the e2e suite renders every variant
+// without depending on a real workflow run.
+// ---------------------------------------------------------------------------
+
+interface MockLatestVerdict {
+  readonly stateId: string;
+  readonly verdict: string;
+  readonly confidence?: number;
+}
+
+interface MockPastRun {
+  readonly workflowId: string;
+  readonly name: string;
+  readonly phase: 'completed' | 'failed' | 'aborted' | 'waiting_human' | 'interrupted';
+  readonly currentState: string;
+  readonly lastState: string;
+  readonly taskDescription: string;
+  readonly round: number;
+  readonly maxRounds: number;
+  readonly totalTokens: number;
+  readonly latestVerdict?: MockLatestVerdict;
+  readonly error?: string;
+  readonly timestamp: string;
+  readonly durationMs?: number;
+  readonly workspacePath?: string;
+}
+
+function buildPastRunFixtures(): MockPastRun[] {
+  return [
+    {
+      workflowId: 'wf-past-completed',
+      name: 'design-and-code',
+      phase: 'completed',
+      currentState: 'completed',
+      lastState: 'completed',
+      taskDescription: 'Implement circle of fifths visualization component with SVG',
+      round: 2,
+      maxRounds: 3,
+      totalTokens: 48200,
+      latestVerdict: { stateId: 'design_review', verdict: 'approved', confidence: 0.94 },
+      timestamp: new Date(Date.now() - 3600_000).toISOString(),
+      durationMs: 720_000,
+      workspacePath: '/home/user/projects/music-app',
+    },
+    {
+      workflowId: 'wf-past-failed',
+      name: 'vuln-discovery',
+      phase: 'failed',
+      currentState: 'analyze',
+      lastState: 'analyze',
+      taskDescription: 'Audit auth middleware for CVE-2024-XXXX exposure',
+      round: 1,
+      maxRounds: 4,
+      totalTokens: 12300,
+      error: 'Provider returned 429 Too Many Requests after 3 retries; aborting run.',
+      timestamp: new Date(Date.now() - 7200_000).toISOString(),
+      durationMs: 95_000,
+      workspacePath: '/home/user/projects/auth-service',
+    },
+    {
+      workflowId: 'wf-past-aborted',
+      name: 'code-review',
+      phase: 'aborted',
+      currentState: 'aborted',
+      lastState: 'plan_review',
+      taskDescription: 'Refactor session manager into a pure module',
+      round: 1,
+      maxRounds: 2,
+      totalTokens: 4100,
+      error: 'Workflow aborted by user at plan_review gate.',
+      timestamp: new Date(Date.now() - 10800_000).toISOString(),
+      durationMs: 38_000,
+      workspacePath: '/home/user/projects/session-refactor',
+    },
+    {
+      workflowId: 'wf-past-waiting',
+      name: 'design-and-code',
+      phase: 'waiting_human',
+      currentState: 'plan_review',
+      lastState: 'plan_review',
+      taskDescription: 'Add SAML SSO to the admin console',
+      round: 1,
+      maxRounds: 3,
+      totalTokens: 18900,
+      latestVerdict: { stateId: 'plan', verdict: 'success', confidence: 0.81 },
+      timestamp: new Date(Date.now() - 86400_000).toISOString(),
+      workspacePath: '/home/user/projects/admin-console',
+    },
+    {
+      workflowId: 'wf-past-interrupted',
+      name: 'vuln-discovery',
+      phase: 'interrupted',
+      currentState: 'fuzz',
+      lastState: 'fuzz',
+      taskDescription: 'Fuzz the new JSON-RPC dispatch surface',
+      round: 2,
+      maxRounds: 5,
+      totalTokens: 33600,
+      error: 'Daemon restarted while workflow was active; checkpoint left without finalStatus.',
+      timestamp: new Date(Date.now() - 172800_000).toISOString(),
+      workspacePath: '/home/user/projects/jsonrpc-fuzz',
+    },
+    // Legacy / pre-B3b completed run: checkpoint.json was deleted on completion,
+    // so the discovery scan synthesizes the row from messages.jsonl + the workflow
+    // definition. No round/verdict/workspace metadata survives.
+    {
+      workflowId: 'wf-past-completed-legacy',
+      name: 'design-and-code',
+      phase: 'completed',
+      currentState: 'completed',
+      lastState: 'completed',
+      taskDescription: 'Add a /healthz endpoint to the orchestrator HTTP server',
+      round: 0,
+      maxRounds: 0,
+      totalTokens: 0,
+      timestamp: new Date(Date.now() - 5 * 86400_000).toISOString(),
+    },
+    // Post-B3b completed run: checkpoint retained on disk with full finalStatus
+    // metadata, so every numeric/verdict/workspace field is populated.
+    {
+      workflowId: 'wf-past-completed-checkpointed',
+      name: 'design-and-code',
+      phase: 'completed',
+      currentState: 'completed',
+      lastState: 'completed',
+      taskDescription: 'Wire the checkpoint retention path through the past-runs UI',
+      round: 3,
+      maxRounds: 4,
+      totalTokens: 56_300,
+      latestVerdict: { stateId: 'design_review', verdict: 'approved', confidence: 0.97 },
+      timestamp: new Date(Date.now() - 1800_000).toISOString(),
+      durationMs: 540_000,
+      workspacePath: '/home/user/projects/checkpoint-retention',
+    },
+  ];
+}
+
+function buildMessageLogFixtures(workflowId: string): Array<Record<string, unknown> & { ts: string }> {
+  // Spaced 30s apart; written newest-last in source so sorting is exercised.
+  const base = Date.now() - 600_000;
+  const ts = (offsetSeconds: number): string => new Date(base + offsetSeconds * 1000).toISOString();
+
+  return [
+    {
+      type: 'state_transition',
+      ts: ts(0),
+      workflowId,
+      state: 'plan',
+      from: 'start',
+      event: 'auto',
+    },
+    {
+      type: 'agent_sent',
+      ts: ts(30),
+      workflowId,
+      state: 'plan',
+      role: 'planner',
+      message:
+        '# Task\n\nDecompose the request into ordered implementation steps. Reply with a `STATUS: success` block when the plan is ready for review.',
+    },
+    {
+      type: 'agent_received',
+      ts: ts(90),
+      workflowId,
+      state: 'plan',
+      role: 'planner',
+      message:
+        '## Plan\n\n1. Read the existing module\n2. Sketch the new interface\n3. Implement and test\n\n```status\nverdict: success\nconfidence: 0.82\n```',
+      verdict: 'success',
+      confidence: '0.82',
+    },
+    {
+      type: 'agent_retry',
+      ts: ts(120),
+      workflowId,
+      state: 'implement',
+      role: 'coder',
+      reason: 'missing_status_block',
+      details: 'Agent reply did not contain a STATUS block; resending with a stronger reminder.',
+      retryMessage:
+        'Reminder: every reply must end with a fenced ```status``` block containing `verdict:` and `confidence:`. Please redo your previous response.',
+    },
+    {
+      type: 'gate_raised',
+      ts: ts(180),
+      workflowId,
+      state: 'plan_review',
+      acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+    },
+    {
+      type: 'gate_resolved',
+      ts: ts(240),
+      workflowId,
+      state: 'plan_review',
+      event: 'APPROVE',
+      prompt: 'Looks good — proceed with implementation but keep the new module under 200 lines.',
+    },
+    {
+      type: 'quota_exhausted',
+      ts: ts(300),
+      workflowId,
+      state: 'implement',
+      role: 'coder',
+      resetAt: new Date(base + 600_000).toISOString(),
+      rawMessage: '429 Too Many Requests: anthropic-ratelimit-tokens-reset=2026-04-23T17:30:00Z',
+    },
+    {
+      type: 'error',
+      ts: ts(360),
+      workflowId,
+      state: 'review',
+      error: 'Reviewer agent crashed with non-zero exit code 137 (out of memory).',
+      context: 'state=review, attempt=2, lastTool=filesystem__read_file',
+    },
+  ];
+}
+
 // Mutable copy of canned jobs so enable/disable/remove are stateful
 const jobs = structuredClone(CANNED_JOBS);
 
@@ -1047,7 +1269,12 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         setTimeout(() => {
           const wf = workflows.get(newId);
           if (wf && wf.phase === 'running') {
-            broadcast('workflow.agent_completed', { workflowId: newId, stateId: 'plan', verdict: 'success' });
+            broadcast('workflow.agent_completed', {
+              workflowId: newId,
+              stateId: 'plan',
+              verdict: 'success',
+              confidence: 0.87,
+            });
             wf.currentState = 'plan_review';
             wf.phase = 'waiting_human';
             const gateId = `${newId}-plan_review`;
@@ -1144,6 +1371,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 workflowId: resolveWfId,
                 stateId: nextState,
                 verdict: 'success',
+                confidence: 0.79,
               });
               if (nextState === 'implement') {
                 wf.currentState = 'review';
@@ -1158,21 +1386,31 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     case 'workflows.listResumable': {
       if (replayConfig) return [];
-      return [
-        {
-          workflowId: 'wf-resumable-001',
-          lastState: 'plan_review',
-          timestamp: new Date(Date.now() - 3600_000).toISOString(),
-          taskDescription: 'Implement circle of fifths visualization component with SVG',
-          workspacePath: '/home/user/projects/music-app',
-        },
-        {
-          workflowId: 'wf-resumable-002',
-          lastState: 'code_review',
-          timestamp: new Date(Date.now() - 86400_000).toISOString(),
-          taskDescription: 'Add unit tests for authentication middleware',
-        },
-      ];
+      return buildPastRunFixtures();
+    }
+
+    case 'workflows.messageLog': {
+      const wfId = params.workflowId as string | undefined;
+      if (typeof wfId !== 'string' || wfId.length === 0) {
+        return errorResult('INVALID_PARAMS', 'workflowId is required');
+      }
+      const before = typeof params.before === 'string' ? params.before : undefined;
+      const limitParam = params.limit;
+      const limit =
+        typeof limitParam === 'number' && Number.isFinite(limitParam) && limitParam > 0
+          ? Math.min(Math.floor(limitParam), 2000)
+          : 200;
+      const all = buildMessageLogFixtures(wfId);
+      const filtered = before === undefined ? all : all.filter((e) => e.ts < before);
+      // Newest-first
+      filtered.sort((a, b) => (a.ts === b.ts ? 0 : a.ts < b.ts ? 1 : -1));
+      const entries = filtered.slice(0, limit);
+      let hasMore = false;
+      if (entries.length === limit) {
+        const cursor = entries[entries.length - 1].ts;
+        hasMore = filtered.some((e) => e.ts < cursor);
+      }
+      return { entries, hasMore };
     }
 
     case 'workflows.import':

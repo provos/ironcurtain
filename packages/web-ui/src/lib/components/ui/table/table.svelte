@@ -11,7 +11,7 @@
   } = $props();
 </script>
 
-<div class={cn('bg-card border border-border rounded-xl overflow-hidden', className)}>
+<div class={cn('bg-card border border-border rounded-xl overflow-x-auto', className)}>
   <table class="w-full text-sm">
     {#if children}
       {@render children()}

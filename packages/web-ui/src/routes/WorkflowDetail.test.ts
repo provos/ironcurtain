@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import type { WorkflowSummaryDto, WorkflowDetailDto, HumanGateRequestDto, TransitionRecordDto } from '$lib/types.js';
+import type {
+  WorkflowSummaryDto,
+  WorkflowDetailDto,
+  HumanGateRequestDto,
+  TransitionRecordDto,
+  MessageLogEntry,
+  MessageLogResponseDto,
+} from '$lib/types.js';
+import { RpcError } from '$lib/ws-client.js';
 
 // jsdom does not provide ResizeObserver -- stub it globally
 vi.stubGlobal(
@@ -22,6 +30,7 @@ const {
   mockGetWorkflowFileTree,
   mockGetWorkflowFileContent,
   mockGetWorkflowArtifacts,
+  mockGetWorkflowMessageLog,
   mockAppState,
 } = vi.hoisted(() => ({
   mockGetWorkflowDetail: vi.fn<(id: string) => Promise<WorkflowDetailDto>>(),
@@ -29,6 +38,8 @@ const {
   mockGetWorkflowFileTree: vi.fn(),
   mockGetWorkflowFileContent: vi.fn(),
   mockGetWorkflowArtifacts: vi.fn(),
+  mockGetWorkflowMessageLog:
+    vi.fn<(id: string, opts?: { before?: string; limit?: number }) => Promise<MessageLogResponseDto>>(),
   mockAppState: {
     pendingGates: new Map<string, HumanGateRequestDto>(),
   },
@@ -43,6 +54,8 @@ vi.mock('$lib/stores.svelte.js', () => ({
   getWorkflowFileTree: (...args: unknown[]) => mockGetWorkflowFileTree(...args),
   getWorkflowFileContent: (...args: unknown[]) => mockGetWorkflowFileContent(...args),
   getWorkflowArtifacts: (...args: unknown[]) => mockGetWorkflowArtifacts(...args),
+  getWorkflowMessageLog: (...args: unknown[]) =>
+    mockGetWorkflowMessageLog(...(args as [string, { before?: string; limit?: number } | undefined])),
 }));
 
 vi.mock('$lib/utils.js', async (importOriginal) => {
@@ -75,6 +88,10 @@ function makeSummary(overrides: Partial<WorkflowSummaryDto> = {}): WorkflowSumma
     phase: 'running',
     currentState: 'implement',
     startedAt: '2026-01-15T10:00:00Z',
+    taskDescription: 'Review the codebase',
+    round: 0,
+    maxRounds: 5,
+    totalTokens: 0,
     ...overrides,
   };
 }
@@ -97,6 +114,10 @@ function makeDetail(overrides: Partial<WorkflowDetailDto> = {}): WorkflowDetailD
     phase: 'running',
     currentState: 'implement',
     startedAt: '2026-01-15T10:00:00Z',
+    taskDescription: 'Review the codebase',
+    round: 2,
+    maxRounds: 5,
+    totalTokens: 15000,
     description: 'Automated code review workflow',
     stateGraph: { states: [], transitions: [] },
     transitionHistory: [],
@@ -140,11 +161,23 @@ function makeProps(overrides: Record<string, unknown> = {}) {
 describe('WorkflowDetail', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // `restoreAllMocks` does not reset the call history of the hoisted
+    // `vi.fn()` instances; explicitly clear so per-test assertions on
+    // call counts (e.g. message-log fetch counts) start from zero.
+    mockGetWorkflowDetail.mockReset();
+    mockResolveWorkflowGate.mockReset();
+    mockGetWorkflowFileTree.mockReset();
+    mockGetWorkflowFileContent.mockReset();
+    mockGetWorkflowArtifacts.mockReset();
+    mockGetWorkflowMessageLog.mockReset();
     mockAppState.pendingGates = new Map();
     mockGetWorkflowDetail.mockResolvedValue(makeDetail());
     // WorkspaceBrowser's FileTree calls fetchFileTree on mount
     mockGetWorkflowFileTree.mockResolvedValue({ entries: [] });
     mockGetWorkflowFileContent.mockResolvedValue({ content: '' });
+    // Default to an empty message log; tests that exercise the timeline
+    // override per-call.
+    mockGetWorkflowMessageLog.mockResolvedValue({ entries: [], hasMore: false });
   });
 
   /** Render with a gate in the waiting_human phase. */
@@ -678,5 +711,245 @@ describe('WorkflowDetail', () => {
     });
 
     expect(screen.queryByText(/Failed to resolve gate/)).toBeNull();
+  });
+
+  // ── Error callout (failed / interrupted with error) ───────────────
+
+  it('shows error callout when phase is failed and error is set', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(makeDetail({ phase: 'failed', error: 'Agent step crashed unexpectedly' }));
+    const summary = makeSummary({ phase: 'failed' });
+    render(WorkflowDetail, { props: makeProps({ summary }) });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('workflow-error-callout')).toBeTruthy();
+    });
+    expect(screen.getByText('Workflow failed')).toBeTruthy();
+    expect(screen.getByTestId('workflow-error-text').textContent).toBe('Agent step crashed unexpectedly');
+  });
+
+  it('shows error callout when phase is interrupted and error is set', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(makeDetail({ phase: 'interrupted', error: 'Daemon restarted mid-run' }));
+    const summary = makeSummary({ phase: 'failed' });
+    render(WorkflowDetail, { props: makeProps({ summary }) });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('workflow-error-callout')).toBeTruthy();
+    });
+    expect(screen.getByText('Workflow interrupted')).toBeTruthy();
+    expect(screen.getByTestId('workflow-error-text').textContent).toBe('Daemon restarted mid-run');
+  });
+
+  it('does not show error callout for completed workflows', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(makeDetail({ phase: 'completed' }));
+    const summary = makeSummary({ phase: 'completed' });
+    render(WorkflowDetail, { props: makeProps({ summary }) });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('2/5')).toBeTruthy();
+    });
+
+    expect(screen.queryByTestId('workflow-error-callout')).toBeNull();
+  });
+
+  it('does not show error callout for aborted workflows without error text', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(makeDetail({ phase: 'aborted' }));
+    const summary = makeSummary({ phase: 'aborted' });
+    render(WorkflowDetail, { props: makeProps({ summary }) });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('2/5')).toBeTruthy();
+    });
+
+    expect(screen.queryByTestId('workflow-error-callout')).toBeNull();
+  });
+
+  it('does not show error callout for interrupted workflows without error text', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(makeDetail({ phase: 'interrupted' }));
+    const summary = makeSummary({ phase: 'failed' });
+    render(WorkflowDetail, { props: makeProps({ summary }) });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('2/5')).toBeTruthy();
+    });
+
+    expect(screen.queryByTestId('workflow-error-callout')).toBeNull();
+  });
+
+  // ── Latest verdict row ────────────────────────────────────────────
+
+  it('shows latest verdict card when latestVerdict is set', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(
+      makeDetail({
+        latestVerdict: { stateId: 'review', verdict: 'APPROVE', confidence: 0.92 },
+      }),
+    );
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('latest-verdict-card')).toBeTruthy();
+    });
+
+    expect(screen.getByTestId('latest-verdict-value').textContent).toBe('APPROVE');
+    expect(screen.getByTestId('latest-verdict-confidence').textContent?.trim()).toBe('— 92%');
+    expect(screen.getByTestId('latest-verdict-state').textContent?.trim()).toBe('review');
+  });
+
+  it('shows latest verdict card without confidence when confidence is omitted', async () => {
+    mockGetWorkflowDetail.mockResolvedValue(
+      makeDetail({
+        latestVerdict: { stateId: 'plan', verdict: 'CONTINUE' },
+      }),
+    );
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('latest-verdict-value').textContent).toBe('CONTINUE');
+    });
+    expect(screen.queryByTestId('latest-verdict-confidence')).toBeNull();
+  });
+
+  it('does not show latest verdict card when latestVerdict is unset', async () => {
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('2/5')).toBeTruthy();
+    });
+    expect(screen.queryByTestId('latest-verdict-card')).toBeNull();
+  });
+
+  // ── Message log section ───────────────────────────────────────────
+
+  function makeMessageEntry(overrides: Partial<MessageLogEntry> = {}): MessageLogEntry {
+    return {
+      type: 'agent_sent',
+      ts: '2026-01-15T10:05:00Z',
+      workflowId: 'wf-1',
+      state: 'plan',
+      role: 'planner',
+      message: 'Plan the work',
+      ...overrides,
+    } as MessageLogEntry;
+  }
+
+  it('starts with the message log section collapsed and does not fetch on mount', async () => {
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Message log')).toBeTruthy();
+    });
+
+    // Toggle is collapsed: aria-expanded=false
+    const toggle = screen.getByTestId('message-log-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(mockGetWorkflowMessageLog).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('message-log-timeline')).toBeNull();
+  });
+
+  it('fetches and renders the message log when the section is expanded', async () => {
+    mockGetWorkflowMessageLog.mockResolvedValue({
+      entries: [makeMessageEntry({ ts: '2026-01-15T11:00:00Z' })],
+      hasMore: false,
+    });
+    render(WorkflowDetail, { props: makeProps({ workflowId: 'wf-42' }) });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('message-log-toggle')).toBeTruthy();
+    });
+
+    await fireEvent.click(screen.getByTestId('message-log-toggle'));
+
+    await vi.waitFor(() => {
+      expect(mockGetWorkflowMessageLog).toHaveBeenCalledWith('wf-42', { limit: 200 });
+      expect(screen.getByTestId('message-log-timeline')).toBeTruthy();
+    });
+  });
+
+  it('appends older entries when "Load older" is clicked', async () => {
+    const newest = makeMessageEntry({ ts: '2026-01-15T12:00:00Z', message: 'Newest' });
+    const middle = makeMessageEntry({ ts: '2026-01-15T11:00:00Z', message: 'Middle' });
+    const older = makeMessageEntry({ ts: '2026-01-15T09:00:00Z', message: 'Older' });
+
+    mockGetWorkflowMessageLog
+      .mockResolvedValueOnce({ entries: [newest, middle], hasMore: true })
+      .mockResolvedValueOnce({ entries: [older], hasMore: false });
+
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('message-log-toggle')).toBeTruthy();
+    });
+
+    await fireEvent.click(screen.getByTestId('message-log-toggle'));
+
+    await vi.waitFor(() => {
+      expect(screen.getAllByTestId('message-log-entry').length).toBe(2);
+      expect(screen.getByTestId('message-log-load-older')).toBeTruthy();
+    });
+
+    await fireEvent.click(screen.getByTestId('message-log-load-older'));
+
+    await vi.waitFor(() => {
+      // Expect the second call to use the oldest entry's ts as the cursor.
+      expect(mockGetWorkflowMessageLog).toHaveBeenNthCalledWith(2, 'wf-1', {
+        limit: 200,
+        before: '2026-01-15T11:00:00Z',
+      });
+      // Three entries now, in newest-first order.
+      expect(screen.getAllByTestId('message-log-entry').length).toBe(3);
+    });
+  });
+
+  it('does not refetch when the section is collapsed and re-expanded', async () => {
+    mockGetWorkflowMessageLog.mockResolvedValue({
+      entries: [makeMessageEntry()],
+      hasMore: false,
+    });
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('message-log-toggle')).toBeTruthy();
+    });
+
+    const toggle = screen.getByTestId('message-log-toggle');
+    await fireEvent.click(toggle);
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('message-log-timeline')).toBeTruthy();
+    });
+
+    await fireEvent.click(toggle);
+    await fireEvent.click(toggle);
+
+    // Still exactly one fetch — the second expand is a no-op since the
+    // log was already fetched.
+    expect(mockGetWorkflowMessageLog).toHaveBeenCalledTimes(1);
+  });
+
+  // ── WORKFLOW_CORRUPTED handling ──────────────────────────────────
+
+  it('shows the dedicated corruption panel when WORKFLOW_CORRUPTED is returned', async () => {
+    mockGetWorkflowDetail.mockRejectedValue(
+      new RpcError('WORKFLOW_CORRUPTED', 'Failed to parse checkpoint.json: unexpected token at line 12'),
+    );
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Workflow checkpoint is corrupted')).toBeTruthy();
+    });
+    expect(screen.getByTestId('corruption-message').textContent).toBe(
+      'Failed to parse checkpoint.json: unexpected token at line 12',
+    );
+    // The generic destructive banner must NOT also appear.
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('falls back to the generic error banner for non-corruption RPC errors', async () => {
+    mockGetWorkflowDetail.mockRejectedValue(new RpcError('WORKFLOW_NOT_FOUND', 'Workflow wf-x not found'));
+    render(WorkflowDetail, { props: makeProps() });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Workflow wf-x not found')).toBeTruthy();
+    });
+    // No corruption-specific panel
+    expect(screen.queryByText('Workflow checkpoint is corrupted')).toBeNull();
   });
 });

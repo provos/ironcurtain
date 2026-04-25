@@ -25,7 +25,13 @@ import {
   type HumanGateEventType,
 } from './types.js';
 import type { WorkflowOrchestrator, WorkflowLifecycleEvent, WorkflowTabHandle } from './orchestrator.js';
-import { FileCheckpointStore } from './checkpoint.js';
+import { FileCheckpointStore, isCheckpointResumable } from './checkpoint.js';
+import { findResumableCheckpoints } from './checkpoint-selection.js';
+
+// Re-export for backward compatibility — the canonical location is now
+// `./checkpoint.js`, but external callers (e.g. `workflow-manager.ts`,
+// the test suite) historically imported it from here.
+export { isCheckpointResumable };
 
 // ---------------------------------------------------------------------------
 // ANSI colors
@@ -355,44 +361,40 @@ export function printResumeInfo(baseDir: string, workflowId: WorkflowId, checkpo
 
 /**
  * Picks the most-recent resumable workflow from a checkpoint store.
+ *
+ * Delegates enumeration + filtering + sorting to
+ * {@link findResumableCheckpoints} (single source of truth shared with the
+ * daemon). Adds the CLI-specific banner that lists every candidate when
+ * more than one is present.
+ *
  * Exits with code 1 if no resumable workflows are found.
  */
-export function selectResumableWorkflow(checkpointStore: FileCheckpointStore): {
-  workflowId: WorkflowId;
-  checkpoint: WorkflowCheckpoint;
-} {
-  const resumable = checkpointStore.listAll();
+export function selectResumableWorkflow(
+  checkpointStore: FileCheckpointStore,
+  baseDir: string,
+): { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint } {
+  const candidates = findResumableCheckpoints(baseDir, checkpointStore);
 
-  if (resumable.length === 0) {
+  if (candidates.length === 0) {
     writeStderr(`${RED}No resumable workflows found in this directory.${RESET}`);
     writeStderr(`${DIM}Expected checkpoint files at: <baseDir>/<workflowId>/checkpoint.json${RESET}`);
     process.exit(1);
   }
 
-  if (resumable.length === 1) {
-    const workflowId = resumable[0];
-    const checkpoint = checkpointStore.load(workflowId);
-    if (!checkpoint) {
-      writeStderr(`${RED}Checkpoint not found for workflow ${workflowId}${RESET}`);
-      process.exit(1);
-    }
-    return { workflowId, checkpoint };
+  if (candidates.length === 1) {
+    return { workflowId: candidates[0].workflowId, checkpoint: candidates[0].checkpoint };
   }
 
-  // Multiple: pick the most recently saved
-  const candidates = resumable
-    .map((id) => ({ id, checkpoint: checkpointStore.load(id) }))
-    .filter((c): c is { id: WorkflowId; checkpoint: WorkflowCheckpoint } => c.checkpoint !== undefined)
-    .sort((a, b) => new Date(b.checkpoint.timestamp).getTime() - new Date(a.checkpoint.timestamp).getTime());
-
   writeStdout(`${YELLOW}Found ${candidates.length} resumable workflows. Using most recent:${RESET}`);
-  for (const { id, checkpoint } of candidates) {
-    const marker = id === candidates[0].id ? `${GREEN}>>` : `${DIM}  `;
-    writeStdout(`${marker} ${id} — state: ${String(checkpoint.machineState)}, saved: ${checkpoint.timestamp}${RESET}`);
+  for (const { workflowId, checkpoint } of candidates) {
+    const marker = workflowId === candidates[0].workflowId ? `${GREEN}>>` : `${DIM}  `;
+    writeStdout(
+      `${marker} ${workflowId} — state: ${String(checkpoint.machineState)}, saved: ${checkpoint.timestamp}${RESET}`,
+    );
   }
   writeStdout('');
 
-  return { workflowId: candidates[0].id, checkpoint: candidates[0].checkpoint };
+  return { workflowId: candidates[0].workflowId, checkpoint: candidates[0].checkpoint };
 }
 
 /**

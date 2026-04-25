@@ -73,6 +73,8 @@ import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } fro
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
+import { discoverWorkflowRuns } from './workflow-discovery.js';
+import { isCheckpointResumable } from './checkpoint.js';
 import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
@@ -1005,9 +1007,17 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   listResumable(): WorkflowId[] {
-    const allCheckpointed = this.deps.checkpointStore.listAll();
+    const runs = discoverWorkflowRuns(this.deps.baseDir);
     const activeIds = new Set(this.listActive());
-    return allCheckpointed.filter((id) => !activeIds.has(id));
+    const resumable: WorkflowId[] = [];
+    for (const run of runs) {
+      if (!run.hasCheckpoint || activeIds.has(run.workflowId)) continue;
+      const cp = this.deps.checkpointStore.load(run.workflowId);
+      if (cp !== undefined && isCheckpointResumable(cp)) {
+        resumable.push(run.workflowId);
+      }
+    }
+    return resumable;
   }
 
   getStatus(id: WorkflowId): WorkflowStatus | undefined {
@@ -1310,15 +1320,27 @@ export class WorkflowOrchestrator implements WorkflowController {
     return definition.states[stateValue].type === 'terminal';
   }
 
-  private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
-    const checkpoint: WorkflowCheckpoint = {
+  // `waiting_human` would smuggle a ReadonlyMap (gate.presentedArtifacts) into
+  // JSON.stringify, which silently emits `{}`. handleWorkflowComplete only
+  // assigns `completed` or `aborted`, so the cycle is safe today.
+  private buildCheckpoint(
+    instance: WorkflowInstance,
+    snapshot: { value: unknown; context: unknown },
+    finalStatus?: WorkflowStatus,
+  ): WorkflowCheckpoint {
+    return {
       machineState: snapshot.value,
       context: snapshot.context as WorkflowContext,
       timestamp: new Date().toISOString(),
       transitionHistory: [...instance.transitionHistory],
       definitionPath: instance.definitionPath,
       workspacePath: instance.workspacePath,
+      ...(finalStatus !== undefined ? { finalStatus } : {}),
     };
+  }
+
+  private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
+    const checkpoint = this.buildCheckpoint(instance, snapshot);
     try {
       this.deps.checkpointStore.save(instance.id, checkpoint);
     } catch (err) {
@@ -1865,15 +1887,14 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    // Only remove the checkpoint when the workflow completes successfully.
-    // Aborted runs keep their checkpoint on disk so `workflow resume` can
-    // restart them from the last saved state.
-    if (instance.finalStatus.phase === 'completed') {
-      try {
-        this.deps.checkpointStore.remove(workflowId);
-      } catch (err) {
-        writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
-      }
+    // Persist finalStatus so isCheckpointResumable can later distinguish
+    // completed (excluded) from aborted/failed (still resumable).
+    try {
+      const snapshot = instance.actor.getSnapshot() as { value: unknown; context: unknown };
+      const checkpoint = this.buildCheckpoint(instance, snapshot, instance.finalStatus);
+      this.deps.checkpointStore.save(workflowId, checkpoint);
+    } catch (err) {
+      writeStderr(`[workflow] Failed to save terminal checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
     }
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
