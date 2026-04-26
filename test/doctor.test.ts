@@ -626,6 +626,19 @@ describe('checkAgentApiRoundtrip', () => {
     expect(r.message).toContain('cause=fetch failed');
     expect(r.message).toContain('code=ECONNREFUSED');
   });
+
+  it('passes a timeout abortSignal to generateText so a hung provider cannot block doctor', async () => {
+    vi.mocked(createLanguageModel).mockResolvedValueOnce(fakeModel);
+    vi.mocked(generateText).mockResolvedValueOnce({} as never);
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    await checkAgentApiRoundtrip(configWithApiKey('anthropic', 'sk-test'));
+    const callArgs = vi.mocked(generateText).mock.calls[0][0] as {
+      abortSignal?: AbortSignal;
+      maxRetries?: number;
+    };
+    expect(callArgs.abortSignal).toBeInstanceOf(AbortSignal);
+    expect(callArgs.maxRetries).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

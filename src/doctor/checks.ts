@@ -400,6 +400,11 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
       model,
       prompt: 'Reply with the single word OK.',
       maxOutputTokens: 1,
+      // Cap the round-trip so a network blackhole or DNS stall can't hang
+      // doctor. maxRetries: 0 turns off the SDK's default 3-attempt retry —
+      // for diagnostics we want fast failure, not eventual failure.
+      abortSignal: AbortSignal.timeout(API_ROUNDTRIP_TIMEOUT_MS),
+      maxRetries: 0,
     });
     const elapsed = formatElapsed(Date.now() - start);
     return { name, status: 'ok', message: `responded in ${elapsed}` };
@@ -412,6 +417,9 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
     };
   }
 }
+
+/** Hard cap on the agent-model API round-trip; healthy calls are 1-3s. */
+const API_ROUNDTRIP_TIMEOUT_MS = 15_000;
 
 /**
  * Renders an AI SDK error with as much diagnostic info as we can extract.
