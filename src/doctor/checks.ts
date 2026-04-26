@@ -16,6 +16,7 @@ import {
   saveOAuthCredentials,
   extractFromKeychain,
   extractFromKeychainWithService,
+  writeToKeychain,
   OAUTH_CLIENT_ID,
   OAUTH_TOKEN_URL,
   type AuthMethod,
@@ -476,7 +477,7 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
   const name = `${label} API round-trip`;
   const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
   if (apiKey.length === 0) {
-    if (provider === 'anthropic' && loadOAuthCredentials() !== null) {
+    if (provider === 'anthropic' && loadOAuthFromAnySource() !== null) {
       return {
         name,
         status: 'skip',
@@ -561,17 +562,17 @@ function formatProviderLabel(provider: ProviderId): string {
  * isn't actionable. Used only under --check-api.
  */
 export async function checkOAuthRefresh(): Promise<CheckResult> {
-  const creds = loadOAuthCredentials();
-  if (!creds) {
+  const found = loadOAuthFromAnySource();
+  if (!found) {
     return {
       name: 'OAuth refresh',
       status: 'skip',
-      message: 'no OAuth credentials file',
+      message: 'no OAuth credentials in file or Keychain',
     };
   }
   try {
     const start = Date.now();
-    const result = await probeOAuthRefresh(creds.refreshToken);
+    const result = await probeOAuthRefresh(found.credentials.refreshToken);
     const elapsed = formatElapsed(Date.now() - start);
     if (result.kind === 'http-error') {
       return {
@@ -592,8 +593,9 @@ export async function checkOAuthRefresh(): Promise<CheckResult> {
         hint: result.detail,
       };
     }
-    saveOAuthCredentials(result.credentials);
-    return { name: 'OAuth refresh', status: 'ok', message: `valid (${elapsed})` };
+    persistRefreshedOAuth(found.source, result.credentials);
+    const sourceLabel = found.source.kind === 'keychain' ? 'Keychain' : 'file';
+    return { name: 'OAuth refresh', status: 'ok', message: `valid (${elapsed}, ${sourceLabel})` };
   } catch (err) {
     const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
     return {
@@ -601,6 +603,33 @@ export async function checkOAuthRefresh(): Promise<CheckResult> {
       status: 'fail',
       message: (err instanceof Error ? err.message : String(err)) + cause,
     };
+  }
+}
+
+type OAuthSource = { kind: 'file' } | { kind: 'keychain'; serviceName: string };
+
+/**
+ * Loads OAuth credentials from the credentials file or, on macOS, the
+ * Keychain. Returns the credentials together with the source so callers
+ * can write rotated tokens back to the same place.
+ */
+function loadOAuthFromAnySource(): { credentials: OAuthCredentials; source: OAuthSource } | null {
+  const fileCreds = loadOAuthCredentials();
+  if (fileCreds) {
+    return { credentials: fileCreds, source: { kind: 'file' } };
+  }
+  const kc = extractFromKeychainWithService();
+  if (kc) {
+    return { credentials: kc.credentials, source: { kind: 'keychain', serviceName: kc.serviceName } };
+  }
+  return null;
+}
+
+function persistRefreshedOAuth(source: OAuthSource, credentials: OAuthCredentials): void {
+  if (source.kind === 'file') {
+    saveOAuthCredentials(credentials);
+  } else {
+    writeToKeychain(credentials, source.serviceName);
   }
 }
 
