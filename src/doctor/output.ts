@@ -11,12 +11,12 @@ import type { CheckResult } from './checks.js';
 /** Width of the name column in the doctor output table. */
 const NAME_COLUMN_WIDTH = 24;
 
-/** Status -> glyph mapping. The glyphs are ASCII-friendly fallbacks. */
+/** Status -> glyph mapping. Uses Unicode symbols; terminals without UTF-8 will see replacement chars. */
 const STATUS_GLYPH: Record<CheckResult['status'], string> = {
-  ok: chalk.green('✓'), // ✓
-  warn: chalk.yellow('⚠'), // ⚠
-  fail: chalk.red('✗'), // ✗
-  skip: chalk.dim('↷'), // ↷
+  ok: chalk.green('✓'),
+  warn: chalk.yellow('⚠'),
+  fail: chalk.red('✗'),
+  skip: chalk.dim('↷'),
 };
 
 /**

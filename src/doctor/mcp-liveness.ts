@@ -13,8 +13,11 @@ import type { MCPServerConfig } from '../config/types.js';
 import { permissiveJsonSchemaValidator } from '../trusted-process/permissive-output-validator.js';
 import { VERSION } from '../version.js';
 
-/** Per-server probe deadline. 5s is enough for npx warm-cache servers. */
+/** Per-server probe deadline (covers connect + listTools combined). */
 const PROBE_TIMEOUT_MS = 5_000;
+
+/** Hard cap on close() — best-effort cleanup; the subprocess is reaped on doctor exit anyway. */
+const CLOSE_TIMEOUT_MS = 1_000;
 
 export interface ProbeOk {
   readonly status: 'ok';
@@ -75,13 +78,20 @@ export async function probeServer(name: string, config: MCPServerConfig): Promis
       transport.stderr.on('data', () => {});
     }
 
-    client = new Client(
+    const c = new Client(
       { name: `ironcurtain-doctor:${name}`, version: VERSION },
       { jsonSchemaValidator: permissiveJsonSchemaValidator },
     );
+    client = c;
 
-    await withDeadline(client.connect(transport), PROBE_TIMEOUT_MS, `connect(${name})`);
-    const toolsResult = await withDeadline(client.listTools(), PROBE_TIMEOUT_MS, `listTools(${name})`);
+    const toolsResult = await withDeadline(
+      (async () => {
+        await c.connect(transport);
+        return c.listTools();
+      })(),
+      PROBE_TIMEOUT_MS,
+      `probe(${name})`,
+    );
 
     return {
       status: 'ok',
@@ -96,11 +106,9 @@ export async function probeServer(name: string, config: MCPServerConfig): Promis
     };
   } finally {
     if (client) {
-      try {
-        await client.close();
-      } catch {
-        // Best-effort cleanup.
-      }
+      // close() can hang when the server is wedged; cap it so a stuck server
+      // can't block the rest of the doctor run.
+      await withDeadline(client.close(), CLOSE_TIMEOUT_MS, `close(${name})`).catch(() => undefined);
     }
   }
 }
