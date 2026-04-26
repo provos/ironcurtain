@@ -18,7 +18,7 @@ import {
   type ClientState,
   type ProxiedTool,
 } from '../src/trusted-process/tool-call-pipeline.js';
-import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+import type { CompiledPolicyFile, StoredToolAnnotationsFile } from '../src/pipeline/types.js';
 import type { McpRoot } from '../src/trusted-process/mcp-client-manager.js';
 
 /**
@@ -112,7 +112,7 @@ describe('argument name validation -- real filesystem server', () => {
       ],
     };
 
-    const toolAnnotations: ToolAnnotationsFile = {
+    const toolAnnotations: StoredToolAnnotationsFile = {
       generatedAt: 'test-fixture',
       servers: {
         filesystem: {
@@ -123,6 +123,7 @@ describe('argument name validation -- real filesystem server', () => {
               serverName: 'filesystem',
               comment: 'Reads file contents.',
               args: { path: ['read-path'] },
+              inputSchema: {},
             },
           ],
         },

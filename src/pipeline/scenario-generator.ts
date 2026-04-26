@@ -15,14 +15,7 @@ import type { LanguageModel, SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import { DEFAULT_MAX_TOKENS, generateObjectWithRepair } from './generate-with-repair.js';
 import { chunk } from './tool-annotator.js';
-import type {
-  ArgumentRoleSpec,
-  ConditionalRoles,
-  DynamicListsFile,
-  StoredToolAnnotation,
-  ToolAnnotation,
-  TestScenario,
-} from './types.js';
+import type { ConditionalRoles, DynamicListsFile, StoredToolAnnotation, TestScenario } from './types.js';
 import { isConditionalRoles } from '../types/argument-roles.js';
 import { buildScenarioArgsSuperRefine, buildToolArgNamesMap, formatToolArgNames } from './scenario-schema-validator.js';
 
@@ -105,18 +98,16 @@ export function formatConditionalRoles(argName: string, spec: ConditionalRoles):
 
 /**
  * Formats a tool annotation summary line for the scenario generator prompt.
- * When a stored annotation is available, includes conditional role details
- * so the LLM knows the exact discriminator argument names and valid values.
+ * Conditional role specs are surfaced with their discriminator argument names
+ * and valid values; static role arrays render as flat lists.
  */
-function formatAnnotationForPrompt(annotation: ToolAnnotation, storedAnnotation?: StoredToolAnnotation): string {
-  const args = storedAnnotation?.args ?? annotation.args;
-  const argsDesc = Object.entries(args)
-    .map(([name, spec]: [string, ArgumentRoleSpec]) => {
+function formatAnnotationForPrompt(annotation: StoredToolAnnotation): string {
+  const argsDesc = Object.entries(annotation.args)
+    .map(([name, spec]) => {
       if (isConditionalRoles(spec)) {
         return formatConditionalRoles(name, spec);
       }
-      // After isConditionalRoles check, spec is always ArgumentRole[]
-      return `${name}: [${(spec as string[]).join(', ')}]`;
+      return `${name}: [${spec.join(', ')}]`;
     })
     .join(', ');
   return `  ${annotation.serverName}/${annotation.toolName}: ${annotation.comment}, args={${argsDesc || 'none'}}`;
@@ -126,33 +117,15 @@ function formatAnnotationForPrompt(annotation: ToolAnnotation, storedAnnotation?
  * Builds the stable system prompt portion for the scenario generator.
  * Contains: role preamble, constitution, annotations, system config, and instructions.
  * This is the cacheable part.
- *
- * @param storedAnnotations - Optional raw annotations with conditional role specs.
- *   When provided, the prompt includes discriminator argument names and valid values
- *   so the LLM generates scenarios with correct argument names for multi-mode tools.
  */
 export function buildGeneratorSystemPrompt(
   constitutionText: string,
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
   sandboxDirectory: string,
   permittedDirectories?: string[],
   dynamicLists?: DynamicListsFile,
-  storedAnnotations?: StoredToolAnnotation[],
 ): string {
-  // Build a lookup from stored annotations for conditional role detail
-  const storedByKey = new Map<string, StoredToolAnnotation>();
-  if (storedAnnotations) {
-    for (const sa of storedAnnotations) {
-      storedByKey.set(`${sa.serverName}/${sa.toolName}`, sa);
-    }
-  }
-
-  const annotationsSummary = annotations
-    .map((a) => {
-      const stored = storedByKey.get(`${a.serverName}/${a.toolName}`);
-      return formatAnnotationForPrompt(a, stored);
-    })
-    .join('\n');
+  const annotationsSummary = annotations.map(formatAnnotationForPrompt).join('\n');
 
   return `You are generating test scenarios for a security policy engine. Each scenario is a concrete tool call with an expected policy decision.
 
@@ -164,7 +137,7 @@ ${constitutionText}
 
 ${annotationsSummary}
 
-${storedAnnotations ? `## Valid Tool Arguments (from MCP input schemas)\n\n${formatToolArgNames(storedAnnotations)}\n\nCRITICAL: Only use argument names listed above for each tool. Using unlisted argument names will cause validation failure.\n` : ''}
+${annotations.length > 0 ? `## Valid Tool Arguments (from MCP input schemas)\n\n${formatToolArgNames(annotations)}\n\nCRITICAL: Only use argument names listed above for each tool. Using unlisted argument names will cause validation failure.\n` : ''}
 ## System Configuration
 
 - Sandbox directory: ${sandboxDirectory}
@@ -260,7 +233,7 @@ Generate test scenarios following the instructions above.`;
  */
 export async function generateScenarios(
   constitutionText: string,
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
   handwrittenScenarios: TestScenario[],
   sandboxDirectory: string,
   llm: LanguageModel,
@@ -268,20 +241,11 @@ export async function generateScenarios(
   onProgress?: (message: string) => void,
   dynamicLists?: DynamicListsFile,
   wrapSystemPrompt?: (prompt: string) => string | SystemModelMessage,
-  storedAnnotations?: StoredToolAnnotation[],
 ): Promise<TestScenario[]> {
   if (annotations.length === 0) return [...handwrittenScenarios];
 
   const batches = chunk(annotations, SCENARIO_BATCH_SIZE);
   const allGenerated: TestScenario[] = [];
-
-  // Build stored annotation lookup for batching
-  const storedByKey = new Map<string, StoredToolAnnotation>();
-  if (storedAnnotations) {
-    for (const sa of storedAnnotations) {
-      storedByKey.set(`${sa.serverName}/${sa.toolName}`, sa);
-    }
-  }
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
@@ -292,15 +256,9 @@ export async function generateScenarios(
     // Scoped schema: only this batch's server/tool names
     const serverNames = [...new Set(batch.map((a) => a.serverName))] as [string, ...string[]];
     const toolNames = [...new Set(batch.map((a) => a.toolName))] as [string, ...string[]];
-    // Filter stored annotations to this batch
-    const batchStored = storedAnnotations
-      ? batch
-          .map((a) => storedByKey.get(`${a.serverName}/${a.toolName}`))
-          .filter((sa): sa is StoredToolAnnotation => sa !== undefined)
-      : undefined;
 
     // Build Zod schema with superRefine that validates argument names at parse time
-    const argsSuperRefine = batchStored ? buildScenarioArgsSuperRefine(buildToolArgNamesMap(batchStored)) : undefined;
+    const argsSuperRefine = buildScenarioArgsSuperRefine(buildToolArgNamesMap(batch));
     const schema = buildGeneratorResponseSchema(serverNames, toolNames, argsSuperRefine);
 
     // Per-batch system prompt with only this batch's annotations
@@ -310,7 +268,6 @@ export async function generateScenarios(
       sandboxDirectory,
       permittedDirectories,
       dynamicLists,
-      batchStored,
     );
 
     // Apply cache strategy wrapping if provided
@@ -360,19 +317,16 @@ export async function generateScenarios(
 export async function repairScenarios(
   discardedScenarios: { scenario: TestScenario; feedback: string }[],
   constitutionText: string,
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
   sandboxDirectory: string,
   llm: LanguageModel,
   permittedDirectories?: string[],
   dynamicLists?: DynamicListsFile,
   onProgress?: (message: string) => void,
-  storedAnnotations?: StoredToolAnnotation[],
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
-  const argsSuperRefine = storedAnnotations
-    ? buildScenarioArgsSuperRefine(buildToolArgNamesMap(storedAnnotations))
-    : undefined;
+  const argsSuperRefine = buildScenarioArgsSuperRefine(buildToolArgNamesMap(annotations));
   const schema = buildGeneratorResponseSchema(serverNames, toolNames, argsSuperRefine);
 
   const discardedList = discardedScenarios
@@ -395,7 +349,6 @@ Generate one replacement scenario per discarded scenario.`;
     sandboxDirectory,
     permittedDirectories,
     dynamicLists,
-    storedAnnotations,
   );
 
   const { output } = await generateObjectWithRepair({

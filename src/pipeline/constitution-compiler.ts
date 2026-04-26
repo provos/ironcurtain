@@ -17,7 +17,8 @@ import {
   schemaToPromptHint,
 } from './generate-with-repair.js';
 import type {
-  ToolAnnotation,
+  StoredToolAnnotation,
+  ArgumentRoleSpec,
   CompiledRule,
   RepairContext,
   ListDefinition,
@@ -158,18 +159,34 @@ ${lines.join('\n\n')}
 
 /**
  * Formats tool annotations into a multi-line summary for LLM system prompts.
- * Each entry shows server/tool name, comment, and per-argument roles.
+ * Each entry shows server/tool name, comment, and per-argument roles. For
+ * conditional role specs, surfaces the `default` plus per-`when` listings so
+ * the LLM can see which roles co-activate for which call shape.
+ *
  * Used by both the constitution compiler and task-policy compiler prompts.
  */
-export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string {
+export function formatAnnotationsSummary(annotations: StoredToolAnnotation[]): string {
   return annotations
     .map((a) => {
       const argsDesc = Object.entries(a.args)
-        .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
+        .map(([name, spec]) => `    ${name}: ${formatRoleSpec(spec)}`)
         .join('\n');
       return `  ${a.serverName}/${a.toolName}: ${a.comment}\n    args:\n${argsDesc || '    (none)'}`;
     })
     .join('\n');
+}
+
+function formatRoleSpec(spec: ArgumentRoleSpec): string {
+  if (Array.isArray(spec)) return `[${spec.join(', ')}]  (always co-active)`;
+  const defaultPart = `default=[${spec.default.join(', ')}]`;
+  const whenPart = spec.when.map((w) => `when ${formatCondition(w.condition)} → [${w.roles.join(', ')}]`).join('; ');
+  return `${defaultPart}; ${whenPart}  (conditional)`;
+}
+
+function formatCondition(cond: { arg: string; equals?: unknown; in?: readonly unknown[] }): string {
+  if (cond.equals !== undefined) return `${cond.arg}=${JSON.stringify(cond.equals)}`;
+  if (cond.in !== undefined) return `${cond.arg}∈${JSON.stringify(cond.in)}`;
+  return `${cond.arg}=?`;
 }
 
 /**
@@ -191,7 +208,7 @@ export interface CompilerPromptOptions {
 
 export function buildCompilerSystemPrompt(
   constitutionText: string,
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
   config: CompilerConfig,
   handwrittenScenarios?: TestScenario[],
   promptOptions?: CompilerPromptOptions,
@@ -256,37 +273,84 @@ CRITICAL RULES:
    handles them. Only write rules for things the constitution explicitly allows or
    requires human judgment on.
 
-## Multi-Mode Tools and Role Scoping
+## Multi-Role Argument Coordination (CRITICAL — most common bug)
 
-IMPORTANT: The engine evaluates each argument role independently and takes the most
-restrictive result (deny > escalate > allow). A rule WITHOUT a "roles" condition is
-**role-agnostic** — it matches during evaluation of ANY role. This has critical
-implications:
+The engine evaluates EACH argument role INDEPENDENTLY against the rule chain
+and aggregates with **most restrictive wins** (deny > escalate > allow). When
+a single tool call exercises multiple roles simultaneously, EVERY active role
+must have a matching rule for the desired outcome to win. If ANY active role
+default-denies (no matching rule), the whole call denies — even if other roles
+would escalate or allow.
 
-- A tool-only rule like {"tool": ["X"]} with "then": "allow" is a blanket allow
-  for ALL roles on that tool, including write and delete roles.
-- To allow a tool only for READ operations, add "roles": ["read-path"] to scope the
-  rule. Mutation roles (write-path, write-history, delete-path, delete-history) will
-  then have no matching rule and fall through to default-deny.
+### Identifying co-active roles
 
-Look at each tool's argument roles in the annotations above. If a tool has BOTH read
-roles (read-path) AND mutation roles (write-path, write-history, delete-path,
-delete-history), it is a **multi-mode tool** — its behavior depends on how it is called.
-At runtime, the engine resolves which roles are active based on the actual arguments.
+Look at each tool's argument-role specs in the annotations above:
+- A static list \`[read-path, write-history]\`  \`(always co-active)\` means BOTH
+  roles are active on every call to that tool.
+- A \`(conditional)\` spec like \`default=[A, B]; when X=foo → [A]; when X=bar → [A, C]\`
+  means the active set depends on a discriminator argument. CRITICAL: once
+  resolved, ALL listed roles for the matching clause are co-active in that call.
+  E.g., \`when mode=remove → [read-path, delete-history]\` makes BOTH read-path
+  AND delete-history active for \`mode=remove\` calls — not just delete-history.
 
-For multi-mode tools:
-- If the roles are distinct (e.g., read-path vs write-history), you MUST scope allow
-  rules using the "roles" condition. Example: {"tool": ["X"], "roles": ["read-path"]}
-  allows read-only calls; mutation calls fall to default-deny because their write/delete
-  roles have no matching rule.
-- NEVER create an unconditional allow rule (without "roles") for a multi-mode tool.
-  An unconditional allow fires during mutation-role evaluation too, making it impossible
-  for any escalate or deny to take effect. Always include "roles": ["read-path"] on
-  allow rules for tools that also have mutation roles.
-- If all modes share the same roles (e.g., a tool always has both read-path and
-  write-path regardless of operation), role scoping cannot distinguish modes. Choose
-  one disposition for the entire tool — prefer escalate if the constitution restricts
-  mutations.
+### Heuristic for escalate rules: rarely use a \`roles:\` filter
+
+The dominant bug is emitting an escalate rule with a \`roles:\` filter naming
+ONE of the co-active roles, expecting the other roles to "fall through". They
+don't — they default-deny independently, and deny overrides your escalate.
+
+❌ WRONG:
+\`\`\`json
+{"tool": ["git_remote"], "roles": ["write-history"], "then": "escalate"}
+\`\`\`
+On a \`git_remote add\` call (mode=add resolves path roles to [read-path, write-history]):
+- read-path role evaluation: rule's roles filter excludes it → no match → default-deny
+- write-history role evaluation: rule's roles filter matches → escalate
+- Most restrictive across roles: **deny** — your escalate is silently overridden.
+
+✓ RIGHT (preferred — drop the role filter):
+\`\`\`json
+{"tool": ["git_remote"], "then": "escalate"}
+\`\`\`
+A rule with no \`roles:\` filter is **role-agnostic** — it matches during
+evaluation of ANY role on the tool. All co-active roles escalate uniformly.
+Place it AFTER any sandbox-allow rules so the allow rules take precedence
+inside the sandbox.
+
+✓ RIGHT (alternative — parallel rules per role, when modes need different dispositions):
+\`\`\`json
+{"tool": ["git_remote"], "roles": ["read-path"], "then": "escalate"}
+{"tool": ["git_remote"], "roles": ["write-history"], "then": "escalate"}
+{"tool": ["git_remote"], "roles": ["delete-history"], "then": "escalate"}
+\`\`\`
+Each co-active role has a covering rule, so none default-deny.
+
+### Allow rules behave differently
+
+For ALLOW rules, the role filter IS correct — it deliberately limits the allow
+to specific roles, so mutation roles correctly default-deny (or get caught by
+later escalate rules). For example, on a multi-mode tool with both read and
+mutation roles:
+- \`{"tool": ["git_log"], "roles": ["read-path"], "paths": {"within": SANDBOX}, "then": "allow"}\`
+  allows read inside sandbox.
+- If a write role were ever active on this tool, the role filter excludes it,
+  so write-path falls through to whatever escalate/deny rule covers it next.
+- NEVER write a role-agnostic allow on a multi-mode tool — it would allow ALL
+  roles including writes/deletes, defeating policy.
+
+### Verification checklist (apply to EVERY rule you emit)
+
+For each rule with a \`roles:\` filter:
+1. List the tool's co-active roles from the annotations (resolve conditional
+   specs to their per-clause role sets).
+2. For each co-active role NOT named in your filter, identify which OTHER rule
+   covers that role for the same input region.
+3. If any co-active role is uncovered (will default-deny), either drop your
+   role filter (escalate rules) or add a parallel rule for that role.
+
+For "outside-sandbox should require human approval" patterns, the simplest
+correct rule is \`{"tool": ["X"], "then": "escalate"}\` with NO role filter
+and NO paths filter — placed below any sandbox-allow rules.
 
 Be concise in descriptions and reasons -- one sentence each.
 ${formatServerScopeSection(promptOptions?.serverScope)}${formatGroundTruthSection(handwrittenScenarios)}
@@ -357,12 +421,14 @@ ${existingListsText}
 2. Do NOT break scenarios that were already passing — only fix the failures.
 3. Pay close attention to the judge analysis for specific guidance on what went wrong.
 4. Return a complete, corrected rule set (not just the changed rules).
+5. If the judge identified a **region coverage gap** (a tool with rules for some inputs but not their complement), re-read the constitution clause that authorized the existing rule. If the constitution speaks to the complementary region — explicitly allowing it OR explicitly requiring approval for it — emit a rule covering it. Default-deny is acceptable only when the constitution is silent on that region.
+6. If the judge identified a **name/decision mismatch**, decide which is correct per the constitution and fix the other. Do not leave the rule with a misleading name or an unintended decision.
 ${formatGroundTruthSection(repairContext.handwrittenScenarios)}`;
 }
 
 export async function compileConstitution(
   constitutionText: string,
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
   config: CompilerConfig,
   llm: LanguageModel,
   repairContext?: RepairContext,
@@ -426,7 +492,7 @@ export class ConstitutionCompilerSession {
   constructor(options: {
     system: string | SystemModelMessage;
     model: LanguageModel;
-    annotations: ToolAnnotation[];
+    annotations: StoredToolAnnotation[];
     schemaOptions?: CompilerSchemaOptions;
   }) {
     this.systemPrompt = options.system;
