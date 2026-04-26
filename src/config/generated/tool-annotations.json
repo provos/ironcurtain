@@ -1937,39 +1937,9 @@
             "name": [
               "none"
             ],
-            "url": {
-              "default": [
-                "git-remote-url"
-              ],
-              "when": [
-                {
-                  "condition": {
-                    "arg": "mode",
-                    "in": [
-                      "list",
-                      "get-url"
-                    ]
-                  },
-                  "roles": [
-                    "none"
-                  ]
-                },
-                {
-                  "condition": {
-                    "arg": "mode",
-                    "in": [
-                      "add",
-                      "rename",
-                      "set-url",
-                      "remove"
-                    ]
-                  },
-                  "roles": [
-                    "git-remote-url"
-                  ]
-                }
-              ]
-            },
+            "url": [
+              "none"
+            ],
             "newName": [
               "none"
             ],
