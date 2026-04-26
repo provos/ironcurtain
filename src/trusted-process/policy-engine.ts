@@ -704,9 +704,8 @@ export class PolicyEngine {
     role: ArgumentRole,
     paths: string[],
   ): EvaluationResult {
-    // No paths extracted (role has no path-bearing args, or args are absent):
-    // run the standard linear scan. ruleMatches handles the no-paths case
-    // (e.g. domain/list conditions) and short-circuits on first match.
+    // No paths to discharge: linear scan covers role-agnostic and domain/list
+    // rules (first match wins).
     if (paths.length === 0) {
       for (const rule of this.compiledPolicy.rules) {
         if (hasRoleConditions(rule) && !ruleRelevantToRole(rule, role)) continue;
@@ -718,22 +717,22 @@ export class PolicyEngine {
     const remainingPaths = new Set(paths);
     let mostRestrictive: EvaluationResult | undefined;
 
-    // Structural per-path sandbox discharge.
-    //
-    // The compiler is instructed to never emit `paths.within: <sandbox>`
-    // rules (sandbox containment is structural), so without this discharge
-    // sandbox paths would be undischarged and the call would default-deny.
-    // Applies whether the call is single- or multi-path; in the multi-path
-    // case it also handles arrays that mix sandbox paths with paths in
-    // another permitted directory.
+    // Sandbox containment is structural, not rule-based — the compiler is
+    // forbidden from emitting `paths.within: <sandbox>` rules — so we
+    // discharge each sandbox-resident path here before consulting compiled
+    // rules. Required for mixed-directory calls (e.g. read_multiple_files
+    // spanning sandbox + Downloads) where no single rule could match the
+    // whole array.
     if (this.allowedDirectory && request.serverName === 'filesystem' && SANDBOX_SAFE_PATH_ROLES.has(role)) {
       const sandboxDir = this.allowedDirectory;
-      const sandboxDischarged: string[] = [];
+      let dischargedAny = false;
       for (const p of remainingPaths) {
-        if (isWithinDirectory(p, sandboxDir)) sandboxDischarged.push(p);
+        if (isWithinDirectory(p, sandboxDir)) {
+          remainingPaths.delete(p);
+          dischargedAny = true;
+        }
       }
-      if (sandboxDischarged.length > 0) {
-        for (const p of sandboxDischarged) remainingPaths.delete(p);
+      if (dischargedAny) {
         mostRestrictive = {
           decision: 'allow',
           rule: 'structural-sandbox-allow',
@@ -751,10 +750,9 @@ export class PolicyEngine {
       // Non-path conditions (server, tool, roles) must hold uniformly
       if (!this.ruleMatchesNonPathConditions(rule, request, annotation)) continue;
 
-      // Domain and list conditions are also rule-wide (URL/value-set checks),
-      // not per-path. Reuse the full ruleMatches predicate with the path
-      // condition stripped: build a synthetic rule shape that omits paths,
-      // since paths are about to be handled per-element below.
+      // Domain and list conditions apply uniformly across all paths. Check
+      // them once via ruleMatches with the path condition stripped — paths
+      // are then discharged per-element below.
       if (rule.if.domains !== undefined || rule.if.lists !== undefined) {
         const ruleWithoutPaths: CompiledRule = { ...rule, if: { ...rule.if, paths: undefined } };
         if (!this.ruleMatches(ruleWithoutPaths, request, annotation, role)) continue;

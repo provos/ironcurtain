@@ -1420,8 +1420,9 @@ export class PipelineRunner {
         reporter.warn(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
       }
 
+      const attributionByDescription = new Map(attributedFailures.map((a) => [a.scenarioDescription, a]));
       const ruleBlamedFailures = state.verificationResult.failedScenarios.filter((f) => {
-        const attr = attributedFailures.find((a) => a.scenarioDescription === f.scenario.description);
+        const attr = attributionByDescription.get(f.scenario.description);
         if (!attr || attr.blame.kind === 'rule' || attr.blame.kind === 'both') return true;
         return handwrittenWarnings.some((w) => w.includes(f.scenario.description));
       });
