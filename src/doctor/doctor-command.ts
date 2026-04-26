@@ -15,26 +15,35 @@ import { checkHelp, type CommandSpec } from '../cli-help.js';
 import {
   checkAgentApiRoundtrip,
   checkAnnotationDrift,
-  checkAnthropicCredentials,
   checkConfigLoad,
   checkConstitutionDrift,
   checkDocker,
   checkMcpServerLiveness,
   checkNodeVersion,
-  checkOAuthRefresh,
   checkPolicyArtifacts,
   checkSandbox,
   checkServerCredentials,
   type CheckResult,
 } from './checks.js';
+import { checkAnthropicCredentials, checkOAuthRefresh } from './oauth-checks.js';
+import { probeServer } from './mcp-liveness.js';
 import { printCheck, printSection, printSummary } from './output.js';
+
+/**
+ * Injectable dependencies for runDoctorCommand. Tests pass a probe stub
+ * to avoid spawning real MCP servers; production calls receive the
+ * default probe automatically.
+ */
+export interface DoctorDeps {
+  readonly probeMcpServer?: typeof probeServer;
+}
 
 const DOCTOR_HELP: CommandSpec = {
   name: 'ironcurtain doctor',
   description: 'Diagnose installation, credentials, and MCP server health',
   usage: ['ironcurtain doctor [options]'],
   options: [
-    { flag: 'check-api', description: 'Also run an Anthropic API round-trip and OAuth refresh probe' },
+    { flag: 'check-api', description: 'Also run an agent-model API round-trip and OAuth refresh probe' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: ['ironcurtain doctor', 'ironcurtain doctor --check-api'],
@@ -63,7 +72,7 @@ export function parseDoctorArgs(argv: string[]): DoctorCliArgs {
 /**
  * Runs the doctor pipeline. Exits with 1 if any check returned `fail`.
  */
-export async function runDoctorCommand(argv: string[]): Promise<void> {
+export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): Promise<void> {
   let args: DoctorCliArgs;
   try {
     args = parseDoctorArgs(argv);
@@ -141,7 +150,7 @@ export async function runDoctorCommand(argv: string[]): Promise<void> {
 
   // MCP servers — parallel probes.
   printSection('MCP servers');
-  const livenessResults = await checkMcpServerLiveness(config);
+  const livenessResults = await checkMcpServerLiveness(config, { probe: deps.probeMcpServer });
   for (const r of livenessResults) {
     printCheck(r);
     collected.push(r);
@@ -154,7 +163,7 @@ export async function runDoctorCommand(argv: string[]): Promise<void> {
     printCheck(apiResult);
     collected.push(apiResult);
 
-    const refreshResult = await checkOAuthRefresh();
+    const refreshResult = await checkOAuthRefresh(config);
     printCheck(refreshResult);
     collected.push(refreshResult);
   }

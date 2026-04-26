@@ -628,7 +628,7 @@ describe('refreshOAuthToken', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns new credentials on successful refresh', async () => {
+  it('returns ok with new credentials on successful refresh', async () => {
     const mockResponse = {
       ok: true,
       json: async () => ({
@@ -640,10 +640,11 @@ describe('refreshOAuthToken', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as Response);
 
     const result = await refreshOAuthToken('old-refresh-token');
-    expect(result).not.toBeNull();
-    expect(result!.accessToken).toBe('new-access-token');
-    expect(result!.refreshToken).toBe('new-refresh-token');
-    expect(result!.expiresAt).toBeGreaterThan(Date.now());
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('expected ok');
+    expect(result.credentials.accessToken).toBe('new-access-token');
+    expect(result.credentials.refreshToken).toBe('new-refresh-token');
+    expect(result.credentials.expiresAt).toBeGreaterThan(Date.now());
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(fetchCall[0]).toBe('https://platform.claude.com/v1/oauth/token');
@@ -656,31 +657,47 @@ describe('refreshOAuthToken', () => {
     expect(opts.signal).toBeDefined();
   });
 
-  it('returns null on HTTP error', async () => {
+  it('returns http-error with status on non-2xx response', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: false,
       status: 400,
     } as Response);
 
     const result = await refreshOAuthToken('bad-refresh-token');
-    expect(result).toBeNull();
+    expect(result).toEqual({ kind: 'http-error', status: 400 });
   });
 
-  it('returns null on network error', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network error'));
+  it('returns network-error with message when fetch rejects', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connect ECONNREFUSED'));
 
     const result = await refreshOAuthToken('any-token');
-    expect(result).toBeNull();
+    expect(result.kind).toBe('network-error');
+    if (result.kind !== 'network-error') throw new Error('expected network-error');
+    expect(result.message).toBe('connect ECONNREFUSED');
   });
 
-  it('returns null when response lacks access_token and expires_in', async () => {
+  it('returns parse-error when response lacks expires_in', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({ access_token: 'token' }), // missing expires_in
     } as Response);
 
     const result = await refreshOAuthToken('any-token');
-    expect(result).toBeNull();
+    expect(result.kind).toBe('parse-error');
+    if (result.kind !== 'parse-error') throw new Error('expected parse-error');
+    expect(result.detail).toMatch(/expires_in/);
+  });
+
+  it('returns parse-error when response lacks access_token', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ expires_in: 3600 }),
+    } as Response);
+
+    const result = await refreshOAuthToken('any-token');
+    expect(result.kind).toBe('parse-error');
+    if (result.kind !== 'parse-error') throw new Error('expected parse-error');
+    expect(result.detail).toMatch(/access_token/);
   });
 
   it('preserves original refresh token when response omits refresh_token', async () => {
@@ -690,12 +707,13 @@ describe('refreshOAuthToken', () => {
     } as Response);
 
     const result = await refreshOAuthToken('original-refresh-token');
-    expect(result).not.toBeNull();
-    expect(result!.accessToken).toBe('new-access');
-    expect(result!.refreshToken).toBe('original-refresh-token');
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('expected ok');
+    expect(result.credentials.accessToken).toBe('new-access');
+    expect(result.credentials.refreshToken).toBe('original-refresh-token');
   });
 
-  it('returns null when expires_in is invalid', async () => {
+  it('returns parse-error when expires_in is invalid', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -706,7 +724,26 @@ describe('refreshOAuthToken', () => {
     } as Response);
 
     const result = await refreshOAuthToken('any-token');
-    expect(result).toBeNull();
+    expect(result.kind).toBe('parse-error');
+  });
+});
+
+describe('refreshResultToCreds', () => {
+  it('flattens ok to credentials', async () => {
+    const { refreshResultToCreds } = await import('../src/docker/oauth-credentials.js');
+    const creds: OAuthCredentials = {
+      accessToken: 'a',
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+    };
+    expect(refreshResultToCreds({ kind: 'ok', credentials: creds })).toBe(creds);
+  });
+
+  it('flattens non-ok variants to null', async () => {
+    const { refreshResultToCreds } = await import('../src/docker/oauth-credentials.js');
+    expect(refreshResultToCreds({ kind: 'http-error', status: 401 })).toBeNull();
+    expect(refreshResultToCreds({ kind: 'parse-error', detail: 'x' })).toBeNull();
+    expect(refreshResultToCreds({ kind: 'network-error', message: 'x' })).toBeNull();
   });
 });
 

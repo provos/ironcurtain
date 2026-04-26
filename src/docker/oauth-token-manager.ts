@@ -19,6 +19,7 @@ import {
   isTokenExpired,
   loadCredentialsFromFile,
   refreshOAuthToken,
+  refreshResultToCreds,
   saveOAuthCredentials,
   getCredentialsFilePath,
   extractFromKeychain,
@@ -43,7 +44,7 @@ export interface TokenManagerDeps {
 const defaultDeps: TokenManagerDeps = {
   loadCredentials: loadCredentialsFromFile,
   loadFromKeychain: extractFromKeychain,
-  refreshToken: refreshOAuthToken,
+  refreshToken: async (rt) => refreshResultToCreds(await refreshOAuthToken(rt)),
   saveCredentials: saveOAuthCredentials,
   credentialsFilePath: getCredentialsFilePath(),
 };

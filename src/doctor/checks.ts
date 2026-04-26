@@ -9,19 +9,7 @@
 
 import { checkSandboxViability } from '../utils/preflight-checks.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
-import {
-  detectAuthMethod,
-  loadOAuthCredentials,
-  isTokenExpired,
-  saveOAuthCredentials,
-  extractFromKeychain,
-  extractFromKeychainWithService,
-  writeToKeychain,
-  OAUTH_CLIENT_ID,
-  OAUTH_TOKEN_URL,
-  type AuthMethod,
-  type OAuthCredentials,
-} from '../docker/oauth-credentials.js';
+import { detectAuthMethod, readOnlyCredentialSources } from '../docker/oauth-credentials.js';
 import {
   resolveApiKeyForProvider,
   createLanguageModel,
@@ -31,11 +19,8 @@ import {
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
 import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
+import { isObjectWithProp } from '../utils/is-plain-object.js';
 import { probeServer, type ProbeResult } from './mcp-liveness.js';
-
-// ---------------------------------------------------------------------------
-// Shared types
-// ---------------------------------------------------------------------------
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -46,10 +31,6 @@ export interface CheckResult {
   /** Optional remediation suggestion shown indented under the result. */
   readonly hint?: string;
 }
-
-// ---------------------------------------------------------------------------
-// Environment checks
-// ---------------------------------------------------------------------------
 
 /** Minimum and maximum supported Node.js major versions. */
 const NODE_MIN_MAJOR = 22;
@@ -115,10 +96,6 @@ export async function checkDocker(
     hint: status.detailedMessage,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Configuration / policy checks
-// ---------------------------------------------------------------------------
 
 export interface ConfigLoadOk {
   readonly result: CheckResult;
@@ -259,77 +236,6 @@ export function checkAnnotationDrift(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Credential checks
-// ---------------------------------------------------------------------------
-
-/**
- * Computes a human-readable description for an OAuth-typed AuthMethod,
- * including expiry information.
- */
-function describeOAuthExpiry(auth: Extract<AuthMethod, { kind: 'oauth' }>): {
-  message: string;
-  status: CheckStatus;
-  hint?: string;
-} {
-  const remainingMs = auth.credentials.expiresAt - Date.now();
-  if (remainingMs <= 0) {
-    return {
-      message: 'OAuth (expired)',
-      status: 'warn',
-      hint: 'Token will be refreshed automatically on next use, or run `claude login` to re-authenticate.',
-    };
-  }
-  const remainingDays = Math.floor(remainingMs / (24 * 60 * 60 * 1000));
-  if (remainingDays >= 1) {
-    return {
-      message: `OAuth (expires in ${remainingDays} day${remainingDays === 1 ? '' : 's'})`,
-      status: 'ok',
-    };
-  }
-  const remainingHours = Math.max(1, Math.floor(remainingMs / (60 * 60 * 1000)));
-  if (isTokenExpired(auth.credentials)) {
-    return {
-      message: `OAuth (expires in ${remainingHours}h, will auto-refresh)`,
-      status: 'ok',
-    };
-  }
-  return {
-    message: `OAuth (expires in ${remainingHours}h)`,
-    status: 'ok',
-  };
-}
-
-/**
- * Checks Anthropic credential availability. Uses the production
- * detectAuthMethod by default, but injects no-op refresh/save so doctor
- * doesn't accidentally rewrite credential files when invoked.
- */
-export async function checkAnthropicCredentials(config: IronCurtainConfig): Promise<CheckResult> {
-  const auth = await detectAuthMethod(config, {
-    loadFromFile: loadOAuthCredentials,
-    loadFromKeychain: extractFromKeychain,
-    // No refresh/save during diagnostics: the user did not opt into
-    // mutating their credential store. --check-api can verify the
-    // refresh token works without persisting the result.
-    loadFromKeychainWithService: extractFromKeychainWithService,
-  });
-
-  if (auth.kind === 'oauth') {
-    const desc = describeOAuthExpiry(auth);
-    return { name: 'Anthropic', status: desc.status, message: desc.message, hint: desc.hint };
-  }
-  if (auth.kind === 'apikey') {
-    return { name: 'Anthropic', status: 'ok', message: 'API key set' };
-  }
-  return {
-    name: 'Anthropic',
-    status: 'warn',
-    message: 'no credentials detected',
-    hint: 'Set ANTHROPIC_API_KEY or run `claude login` to obtain OAuth credentials.',
-  };
-}
-
 /**
  * Reports per-MCP-server credential presence. Looks at:
  *   - `-e <VAR>` arguments (Docker convention used by mcp-servers.json)
@@ -404,10 +310,6 @@ function looksLikeCredentialEnv(name: string): boolean {
   return CREDENTIAL_KEYWORDS.some((kw) => upper.includes(kw));
 }
 
-// ---------------------------------------------------------------------------
-// MCP server liveness
-// ---------------------------------------------------------------------------
-
 export interface ServerLivenessOptions {
   readonly probe?: typeof probeServer;
 }
@@ -462,10 +364,6 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-// ---------------------------------------------------------------------------
-// Optional API round-trip checks (--check-api)
-// ---------------------------------------------------------------------------
-
 /**
  * Runs a 1-token generateText call against the configured agent model,
  * checking the API key for that model's provider (which may not be
@@ -477,7 +375,7 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
   const name = `${label} API round-trip`;
   const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
   if (apiKey.length === 0) {
-    if (provider === 'anthropic' && loadOAuthFromAnySource() !== null) {
+    if (provider === 'anthropic' && (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth') {
       return {
         name,
         status: 'skip',
@@ -523,19 +421,24 @@ function describeApiError(err: unknown): string {
   const parts: string[] = [];
   if (err.message) parts.push(err.message);
   // AI SDK APICallError surfaces the URL it tried to hit.
-  const url = (err as { url?: unknown }).url;
-  if (typeof url === 'string' && url.length > 0) parts.push(`url=${url}`);
+  if (isObjectWithProp(err, 'url') && typeof err.url === 'string' && err.url.length > 0) {
+    parts.push(`url=${err.url}`);
+  }
   // Status code from APICallError.
-  const status = (err as { statusCode?: unknown }).statusCode;
-  if (typeof status === 'number') parts.push(`status=${status}`);
+  if (isObjectWithProp(err, 'statusCode') && typeof err.statusCode === 'number') {
+    parts.push(`status=${err.statusCode}`);
+  }
   // Underlying cause (e.g., fetch's TypeError with the system error code).
-  const cause = (err as { cause?: unknown }).cause;
-  if (cause instanceof Error && cause.message) {
-    parts.push(`cause=${cause.message}`);
-    const code = (cause as { code?: unknown }).code;
-    if (typeof code === 'string') parts.push(`code=${code}`);
-  } else if (typeof cause === 'string') {
-    parts.push(`cause=${cause}`);
+  if (isObjectWithProp(err, 'cause')) {
+    const cause = err.cause;
+    if (cause instanceof Error && cause.message) {
+      parts.push(`cause=${cause.message}`);
+      if (isObjectWithProp(cause, 'code') && typeof cause.code === 'string') {
+        parts.push(`code=${cause.code}`);
+      }
+    } else if (typeof cause === 'string') {
+      parts.push(`cause=${cause}`);
+    }
   }
   return parts.join(' | ');
 }
@@ -548,127 +451,4 @@ const PROVIDER_LABELS: Record<ProviderId, string> = {
 
 function formatProviderLabel(provider: ProviderId): string {
   return PROVIDER_LABELS[provider];
-}
-
-/**
- * Validates the OAuth refresh flow by exchanging the stored refresh token
- * for new credentials. Anthropic rotates refresh tokens, so the new
- * credentials MUST be persisted — otherwise the next refresh attempt
- * (whether by doctor or by the running agent) fails because the local
- * refresh token has been invalidated server-side.
- *
- * Calls the token endpoint directly (rather than via refreshOAuthToken)
- * so failures surface the HTTP status code — a generic "refresh failed"
- * isn't actionable. Used only under --check-api.
- */
-export async function checkOAuthRefresh(): Promise<CheckResult> {
-  const found = loadOAuthFromAnySource();
-  if (!found) {
-    return {
-      name: 'OAuth refresh',
-      status: 'skip',
-      message: 'no OAuth credentials in file or Keychain',
-    };
-  }
-  try {
-    const start = Date.now();
-    const result = await probeOAuthRefresh(found.credentials.refreshToken);
-    const elapsed = formatElapsed(Date.now() - start);
-    if (result.kind === 'http-error') {
-      return {
-        name: 'OAuth refresh',
-        status: 'fail',
-        message: `refresh rejected (HTTP ${result.status}, ${elapsed})`,
-        hint:
-          result.status === 400 || result.status === 401
-            ? 'Refresh token has been invalidated (likely consumed by an earlier refresh). Run `claude login` to issue a new one.'
-            : 'Run `claude login` to obtain a new refresh token.',
-      };
-    }
-    if (result.kind === 'parse-error') {
-      return {
-        name: 'OAuth refresh',
-        status: 'fail',
-        message: `refresh response unparseable (${elapsed})`,
-        hint: result.detail,
-      };
-    }
-    persistRefreshedOAuth(found.source, result.credentials);
-    const sourceLabel = found.source.kind === 'keychain' ? 'Keychain' : 'file';
-    return { name: 'OAuth refresh', status: 'ok', message: `valid (${elapsed}, ${sourceLabel})` };
-  } catch (err) {
-    const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
-    return {
-      name: 'OAuth refresh',
-      status: 'fail',
-      message: (err instanceof Error ? err.message : String(err)) + cause,
-    };
-  }
-}
-
-type OAuthSource = { kind: 'file' } | { kind: 'keychain'; serviceName: string };
-
-/**
- * Loads OAuth credentials from the credentials file or, on macOS, the
- * Keychain. Returns the credentials together with the source so callers
- * can write rotated tokens back to the same place.
- */
-function loadOAuthFromAnySource(): { credentials: OAuthCredentials; source: OAuthSource } | null {
-  const fileCreds = loadOAuthCredentials();
-  if (fileCreds) {
-    return { credentials: fileCreds, source: { kind: 'file' } };
-  }
-  const kc = extractFromKeychainWithService();
-  if (kc) {
-    return { credentials: kc.credentials, source: { kind: 'keychain', serviceName: kc.serviceName } };
-  }
-  return null;
-}
-
-function persistRefreshedOAuth(source: OAuthSource, credentials: OAuthCredentials): void {
-  if (source.kind === 'file') {
-    saveOAuthCredentials(credentials);
-  } else {
-    writeToKeychain(credentials, source.serviceName);
-  }
-}
-
-type RefreshProbeResult =
-  | { kind: 'ok'; credentials: OAuthCredentials }
-  | { kind: 'http-error'; status: number }
-  | { kind: 'parse-error'; detail: string };
-
-async function probeOAuthRefresh(refreshToken: string): Promise<RefreshProbeResult> {
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: OAUTH_CLIENT_ID,
-  });
-  const response = await fetch(OAUTH_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) {
-    return { kind: 'http-error', status: response.status };
-  }
-  const data = (await response.json()) as Record<string, unknown>;
-  const accessToken = data.access_token;
-  const expiresIn = data.expires_in;
-  if (typeof accessToken !== 'string' || accessToken.length === 0) {
-    return { kind: 'parse-error', detail: 'response missing access_token' };
-  }
-  if (typeof expiresIn !== 'number' || !Number.isFinite(expiresIn) || expiresIn <= 0) {
-    return { kind: 'parse-error', detail: 'response missing or invalid expires_in' };
-  }
-  const newRefresh = data.refresh_token;
-  return {
-    kind: 'ok',
-    credentials: {
-      accessToken,
-      refreshToken: typeof newRefresh === 'string' && newRefresh.length > 0 ? newRefresh : refreshToken,
-      expiresAt: Date.now() + expiresIn * 1000,
-    },
-  };
 }

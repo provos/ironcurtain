@@ -13,6 +13,29 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 
+// Module mocks for the OAuth-refresh and API-round-trip unit tests below.
+// `vi.fn(actual.fn)` keeps default behavior intact so the integration-style
+// tests in `describe('runDoctorCommand', ...)` still hit the real impls;
+// individual unit tests override with `mockResolvedValueOnce` / `mockReturnValueOnce`.
+vi.mock('../src/docker/oauth-credentials.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/docker/oauth-credentials.js')>();
+  return {
+    ...actual,
+    detectAuthMethod: vi.fn(actual.detectAuthMethod),
+    refreshOAuthToken: vi.fn(actual.refreshOAuthToken),
+    saveOAuthCredentials: vi.fn(actual.saveOAuthCredentials),
+    writeToKeychain: vi.fn(actual.writeToKeychain),
+  };
+});
+vi.mock('ai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ai')>();
+  return { ...actual, generateText: vi.fn(actual.generateText) };
+});
+vi.mock('../src/config/model-provider.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config/model-provider.js')>();
+  return { ...actual, createLanguageModel: vi.fn(actual.createLanguageModel) };
+});
+
 import {
   checkAnnotationDrift,
   checkConstitutionDrift,
@@ -25,6 +48,9 @@ import {
 } from '../src/doctor/checks.js';
 import type { ProbeResult } from '../src/doctor/mcp-liveness.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../src/config/types.js';
+import { detectAuthMethod, refreshOAuthToken, saveOAuthCredentials } from '../src/docker/oauth-credentials.js';
+import { generateText } from 'ai';
+import { createLanguageModel } from '../src/config/model-provider.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -392,6 +418,7 @@ describe('runDoctorCommand', () => {
   const savedHome = process.env.IRONCURTAIN_HOME;
   const savedColor = process.env.FORCE_COLOR;
   const savedAllowed = process.env.ALLOWED_DIRECTORY;
+  const savedChalkLevel = chalk.level;
 
   beforeEach(() => {
     tmp = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-int-'));
@@ -411,6 +438,7 @@ describe('runDoctorCommand', () => {
     else process.env.FORCE_COLOR = savedColor;
     if (savedAllowed === undefined) delete process.env.ALLOWED_DIRECTORY;
     else process.env.ALLOWED_DIRECTORY = savedAllowed;
+    chalk.level = savedChalkLevel;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -423,26 +451,23 @@ describe('runDoctorCommand', () => {
   });
 
   it('prints all sections and a summary footer', async () => {
-    // Stub mcp-servers.json indirectly: loadConfig() reads from
-    // src/config/mcp-servers.json which exists in the repo. The default
-    // config will produce real MCP probes; we don't actually spawn them
-    // because we mock checkMcpServerLiveness via vi.mock below.
-    vi.resetModules();
-    vi.doMock('../src/doctor/mcp-liveness.js', () => ({
-      probeServer: async (): Promise<ProbeResult> => ({
+    // loadConfig() reads from src/config/mcp-servers.json which exists
+    // in the repo. We pass a probe stub through DoctorDeps to avoid
+    // actually spawning the configured MCP server processes.
+    const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
+    const probeStub = vi.fn(
+      async (): Promise<ProbeResult> => ({
         status: 'ok',
         toolCount: 1,
         elapsedMs: 10,
       }),
-    }));
-    const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
-    const { output } = await captureOutput(() => runDoctorCommand([]));
+    );
+    const { output } = await captureOutput(() => runDoctorCommand([], { probeMcpServer: probeStub }));
     expect(output).toContain('Environment');
     expect(output).toContain('Configuration');
     expect(output).toContain('Credentials');
     expect(output).toContain('MCP servers');
     expect(output).toMatch(/Summary: \d+ ok, \d+ warn, \d+ fail/);
-    vi.doUnmock('../src/doctor/mcp-liveness.js');
   });
 
   it('rejects unknown flags by printing an error', async () => {
@@ -450,6 +475,149 @@ describe('runDoctorCommand', () => {
     const { output, exitCode } = await captureOutput(() => runDoctorCommand(['--bogus']));
     expect(output).toMatch(/--bogus/i);
     expect(exitCode).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit: checkOAuthRefresh
+// ---------------------------------------------------------------------------
+
+describe('checkOAuthRefresh', () => {
+  const baseConfig = buildConfig();
+  const oauthAuth = {
+    kind: 'oauth' as const,
+    source: 'file' as const,
+    credentials: { accessToken: 'old', refreshToken: 'rt-old', expiresAt: Date.now() + 60_000 },
+  };
+  const freshCreds = { accessToken: 'new', refreshToken: 'rt-new', expiresAt: Date.now() + 3_600_000 };
+
+  it('skips when no OAuth credentials are present', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'none' });
+    const { checkOAuthRefresh } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkOAuthRefresh(baseConfig);
+    expect(r.status).toBe('skip');
+    expect(r.message).toMatch(/no OAuth credentials/);
+  });
+
+  it('returns ok and persists rotated credentials on successful refresh', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce(oauthAuth);
+    vi.mocked(refreshOAuthToken).mockResolvedValueOnce({ kind: 'ok', credentials: freshCreds });
+    vi.mocked(saveOAuthCredentials).mockReturnValueOnce(undefined);
+    const { checkOAuthRefresh } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkOAuthRefresh(baseConfig);
+    expect(r.status).toBe('ok');
+    expect(r.message).toMatch(/valid \(.*, file\)/);
+    expect(saveOAuthCredentials).toHaveBeenCalledWith(freshCreds);
+  });
+
+  it('reports HTTP rejection with the status code and a re-login hint', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce(oauthAuth);
+    vi.mocked(refreshOAuthToken).mockResolvedValueOnce({ kind: 'http-error', status: 401 });
+    const { checkOAuthRefresh } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkOAuthRefresh(baseConfig);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/HTTP 401/);
+    expect(r.hint).toMatch(/Refresh token has been invalidated/);
+  });
+
+  it('reports network errors with the underlying message', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce(oauthAuth);
+    vi.mocked(refreshOAuthToken).mockResolvedValueOnce({ kind: 'network-error', message: 'ECONNRESET' });
+    const { checkOAuthRefresh } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkOAuthRefresh(baseConfig);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/network error/);
+    expect(r.hint).toBe('ECONNRESET');
+  });
+
+  it('reports parse errors with the detail', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce(oauthAuth);
+    vi.mocked(refreshOAuthToken).mockResolvedValueOnce({ kind: 'parse-error', detail: 'missing access_token' });
+    const { checkOAuthRefresh } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkOAuthRefresh(baseConfig);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/unparseable/);
+    expect(r.hint).toBe('missing access_token');
+  });
+
+  it('reports persistence failure separately so the user knows credentials are now invalid', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce(oauthAuth);
+    vi.mocked(refreshOAuthToken).mockResolvedValueOnce({ kind: 'ok', credentials: freshCreds });
+    vi.mocked(saveOAuthCredentials).mockImplementationOnce(() => {
+      throw new Error('EACCES: write denied');
+    });
+    const { checkOAuthRefresh } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkOAuthRefresh(baseConfig);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/refresh succeeded but persistence failed/);
+    expect(r.message).toMatch(/EACCES/);
+    expect(r.hint).toMatch(/Run `claude login`/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit: checkAgentApiRoundtrip
+// ---------------------------------------------------------------------------
+
+describe('checkAgentApiRoundtrip', () => {
+  const baseConfig = buildConfig();
+  const fakeModel = {} as never;
+
+  function configWithApiKey(provider: 'anthropic' | 'openai' | 'google', key: string) {
+    return buildConfig({
+      agentModelId: `${provider}:test-model`,
+      userConfig: { ...baseConfig.userConfig, [`${provider}ApiKey`]: key },
+    });
+  }
+
+  it('skips with provider-aware message when no API key is set and provider is non-Anthropic', async () => {
+    // For non-Anthropic providers the OAuth fallback branch is short-circuited,
+    // so detectAuthMethod is never called — no need to mock it here.
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    const r = await checkAgentApiRoundtrip(buildConfig({ agentModelId: 'openai:gpt-4' }));
+    expect(r.name).toBe('OpenAI API round-trip');
+    expect(r.status).toBe('skip');
+    expect(r.message).toMatch(/no OpenAI API key/);
+  });
+
+  it('skips with OAuth-aware message when Anthropic provider has OAuth but no API key', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce({
+      kind: 'oauth',
+      source: 'file',
+      credentials: { accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 60_000 },
+    });
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    const r = await checkAgentApiRoundtrip(baseConfig);
+    expect(r.name).toBe('Anthropic API round-trip');
+    expect(r.status).toBe('skip');
+    expect(r.message).toMatch(/OAuth-only setup/);
+  });
+
+  it('reports ok with elapsed time on a successful round-trip', async () => {
+    vi.mocked(createLanguageModel).mockResolvedValueOnce(fakeModel);
+    vi.mocked(generateText).mockResolvedValueOnce({} as never);
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    const r = await checkAgentApiRoundtrip(configWithApiKey('anthropic', 'sk-test'));
+    expect(r.status).toBe('ok');
+    expect(r.message).toMatch(/responded in/);
+  });
+
+  it('extracts url, status, cause, and code from AI SDK errors via describeApiError', async () => {
+    vi.mocked(createLanguageModel).mockResolvedValueOnce(fakeModel);
+    const sdkError = Object.assign(new Error('Cannot connect to API'), {
+      url: 'https://api.anthropic.com/v1/messages',
+      statusCode: 500,
+      cause: Object.assign(new Error('fetch failed'), { code: 'ECONNREFUSED' }),
+    });
+    vi.mocked(generateText).mockRejectedValueOnce(sdkError);
+    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
+    const r = await checkAgentApiRoundtrip(configWithApiKey('anthropic', 'sk-test'));
+    expect(r.status).toBe('fail');
+    expect(r.message).toContain('Cannot connect to API');
+    expect(r.message).toContain('url=https://api.anthropic.com/v1/messages');
+    expect(r.message).toContain('status=500');
+    expect(r.message).toContain('cause=fetch failed');
+    expect(r.message).toContain('code=ECONNREFUSED');
   });
 });
 
