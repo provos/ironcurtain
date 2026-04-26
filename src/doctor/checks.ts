@@ -14,6 +14,7 @@ import {
   loadOAuthCredentials,
   isTokenExpired,
   refreshOAuthToken,
+  saveOAuthCredentials,
   extractFromKeychain,
   extractFromKeychainWithService,
   type AuthMethod,
@@ -473,6 +474,13 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
   const name = `${label} API round-trip`;
   const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
   if (apiKey.length === 0) {
+    if (provider === 'anthropic' && loadOAuthCredentials() !== null) {
+      return {
+        name,
+        status: 'skip',
+        message: 'OAuth-only setup — covered by OAuth refresh check below',
+      };
+    }
     return {
       name,
       status: 'skip',
@@ -512,8 +520,11 @@ function formatProviderLabel(provider: ProviderId): string {
 }
 
 /**
- * Validates the OAuth refresh token without persisting the new
- * credentials. Used only under --check-api.
+ * Validates the OAuth refresh flow by exchanging the stored refresh token
+ * for new credentials. Anthropic rotates refresh tokens, so the new
+ * credentials MUST be persisted — otherwise the next refresh attempt
+ * (whether by doctor or by the running agent) fails because the local
+ * refresh token has been invalidated server-side. Used only under --check-api.
  */
 export async function checkOAuthRefresh(): Promise<CheckResult> {
   const creds = loadOAuthCredentials();
@@ -536,7 +547,7 @@ export async function checkOAuthRefresh(): Promise<CheckResult> {
         hint: 'Run `claude login` to obtain a new refresh token.',
       };
     }
-    // Intentionally do NOT call saveOAuthCredentials — diagnostics-only.
+    saveOAuthCredentials(refreshed);
     return { name: 'OAuth refresh', status: 'ok', message: `valid (${elapsed})` };
   } catch (err) {
     return {
