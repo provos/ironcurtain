@@ -122,6 +122,15 @@ const DECISION_SEVERITY: Record<PolicyDecisionStatus, number> = {
 };
 
 /**
+ * Marker rule name for the structural sandbox-containment allow. Not a
+ * compiled rule — placeholder used when paths are auto-discharged because
+ * they sit inside `allowedDirectory`. Compiled-rule attribution is
+ * preferred when a real rule produces an equal-severity result, so this
+ * string is checked at tie-break time.
+ */
+const STRUCTURAL_SANDBOX_ALLOW = 'structural-sandbox-allow';
+
+/**
  * Collects all distinct non-"none" roles from a tool annotation's arguments.
  * Returns an empty array if the tool has no role-bearing arguments.
  */
@@ -606,7 +615,7 @@ export class PolicyEngine {
     if (allRoles.length > 0 && rolesToEvaluate.length === 0) {
       return {
         decision: 'allow',
-        rule: 'structural-sandbox-allow',
+        rule: STRUCTURAL_SANDBOX_ALLOW,
         reason: 'All path roles resolved by sandbox containment',
       };
     }
@@ -735,7 +744,7 @@ export class PolicyEngine {
       if (dischargedAny) {
         mostRestrictive = {
           decision: 'allow',
-          rule: 'structural-sandbox-allow',
+          rule: STRUCTURAL_SANDBOX_ALLOW,
           reason: `Path(s) within the sandbox directory: ${sandboxDir}`,
         };
       }
@@ -779,8 +788,20 @@ export class PolicyEngine {
       for (const p of matched) remainingPaths.delete(p);
 
       const result = ruleToResult(rule);
-      if (!mostRestrictive || DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
+      if (!mostRestrictive) {
         mostRestrictive = result;
+      } else {
+        const prevSeverity = DECISION_SEVERITY[mostRestrictive.decision];
+        const newSeverity = DECISION_SEVERITY[result.decision];
+        // Strictly more restrictive always wins. On a severity tie, prefer a
+        // compiled rule over the structural sandbox placeholder so audit
+        // attribution names the rule that actually authorized this path.
+        if (
+          newSeverity > prevSeverity ||
+          (newSeverity === prevSeverity && mostRestrictive.rule === STRUCTURAL_SANDBOX_ALLOW)
+        ) {
+          mostRestrictive = result;
+        }
       }
     }
 

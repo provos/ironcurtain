@@ -1433,10 +1433,12 @@ export class PipelineRunner {
       if (state.verificationResult.pass) break;
       if (ruleBlamedFailures.length === 0) {
         if (corrections.length > 0) {
+          const correctionNote = `\n\n[pipeline-runner: cleared ${corrections.length} scenario expectation(s) via judge attribution; no rule-blamed failures remained.]`;
           state.verificationResult = {
             ...state.verificationResult,
             pass: true,
             failedScenarios: [],
+            summary: `${state.verificationResult.summary}${correctionNote}`,
           };
         }
         break;

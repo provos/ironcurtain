@@ -22,6 +22,7 @@ import type {
   CompiledRule,
   RepairContext,
   ListDefinition,
+  RoleCondition,
   TestScenario,
   RulePatchOp,
   RulePatch,
@@ -183,9 +184,10 @@ function formatRoleSpec(spec: ArgumentRoleSpec): string {
   return `${defaultPart}; ${whenPart}  (conditional)`;
 }
 
-function formatCondition(cond: { arg: string; equals?: unknown; in?: readonly unknown[] }): string {
+function formatCondition(cond: RoleCondition): string {
   if (cond.equals !== undefined) return `${cond.arg}=${JSON.stringify(cond.equals)}`;
   if (cond.in !== undefined) return `${cond.arg}∈${JSON.stringify(cond.in)}`;
+  if (cond.is !== undefined) return `${cond.arg} is ${cond.is}`;
   return `${cond.arg}=?`;
 }
 
