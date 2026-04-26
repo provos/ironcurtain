@@ -18,7 +18,12 @@ import {
   extractFromKeychainWithService,
   type AuthMethod,
 } from '../docker/oauth-credentials.js';
-import { resolveApiKeyForProvider, createLanguageModel } from '../config/model-provider.js';
+import {
+  resolveApiKeyForProvider,
+  createLanguageModel,
+  parseModelId,
+  type ProviderId,
+} from '../config/model-provider.js';
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
 import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
@@ -86,6 +91,12 @@ export async function checkSandbox(): Promise<CheckResult> {
   };
 }
 
+/**
+ * Reports Docker daemon status. Returns `warn` (not `fail`) on unavailability
+ * because the builtin agent runs without Docker — doctor doesn't know whether
+ * the user intends to run Docker mode, so it surfaces the issue without
+ * forcing a non-zero exit.
+ */
 export async function checkDocker(
   probe: () => Promise<DockerAvailability> = checkDockerAvailable,
 ): Promise<CheckResult> {
@@ -199,7 +210,7 @@ export function checkConstitutionDrift(
     currentHash = computeConstitutionHash(config.constitutionPath);
   } catch (err) {
     return {
-      name: 'Constitution',
+      name: 'Compiled policy',
       status: 'fail',
       message: err instanceof Error ? err.message : String(err),
       hint: 'Verify that constitution.md exists at the configured location.',
@@ -452,17 +463,20 @@ function formatElapsed(ms: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Runs a 1-token generateText call against the configured Anthropic
- * agent model. Surfaces network/auth failures that won't show up until
- * the agent actually starts.
+ * Runs a 1-token generateText call against the configured agent model,
+ * checking the API key for that model's provider (which may not be
+ * Anthropic — IronCurtain supports OpenAI and Google too).
  */
-export async function checkAnthropicApi(config: IronCurtainConfig): Promise<CheckResult> {
-  const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
+export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise<CheckResult> {
+  const { provider } = parseModelId(config.agentModelId);
+  const label = formatProviderLabel(provider);
+  const name = `${label} API round-trip`;
+  const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
   if (apiKey.length === 0) {
     return {
-      name: 'Anthropic API round-trip',
+      name,
       status: 'skip',
-      message: 'no API key — round-trip uses API key auth only',
+      message: `no ${label} API key — round-trip uses API key auth only`,
     };
   }
   try {
@@ -476,15 +490,25 @@ export async function checkAnthropicApi(config: IronCurtainConfig): Promise<Chec
       maxOutputTokens: 1,
     });
     const elapsed = formatElapsed(Date.now() - start);
-    return { name: 'Anthropic API round-trip', status: 'ok', message: `responded in ${elapsed}` };
+    return { name, status: 'ok', message: `responded in ${elapsed}` };
   } catch (err) {
     return {
-      name: 'Anthropic API round-trip',
+      name,
       status: 'fail',
       message: err instanceof Error ? err.message : String(err),
-      hint: 'Verify ANTHROPIC_API_KEY is valid and the configured agentModelId exists.',
+      hint: `Verify the ${label} API key is valid and the configured agentModelId exists.`,
     };
   }
+}
+
+const PROVIDER_LABELS: Record<ProviderId, string> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  google: 'Google',
+};
+
+function formatProviderLabel(provider: ProviderId): string {
+  return PROVIDER_LABELS[provider];
 }
 
 /**

@@ -13,8 +13,8 @@
 import { parseArgs } from 'node:util';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
 import {
+  checkAgentApiRoundtrip,
   checkAnnotationDrift,
-  checkAnthropicApi,
   checkAnthropicCredentials,
   checkConfigLoad,
   checkConstitutionDrift,
@@ -150,7 +150,7 @@ export async function runDoctorCommand(argv: string[]): Promise<void> {
   // Optional API round-trip.
   if (args.checkApi) {
     printSection('API round-trip');
-    const apiResult = await checkAnthropicApi(config);
+    const apiResult = await checkAgentApiRoundtrip(config);
     printCheck(apiResult);
     collected.push(apiResult);
 
