@@ -27,7 +27,7 @@ const DOCKER_UNAVAILABLE_REASON = 'Docker not available';
  */
 export class PreflightError extends Error {
   constructor(message: string) {
-    super(message);
+    super(`${message}\n\nRun \`ironcurtain doctor\` for a full diagnostic.`);
     this.name = 'PreflightError';
   }
 }
