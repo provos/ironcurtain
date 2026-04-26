@@ -19,9 +19,14 @@ const STATUS_GLYPH: Record<CheckResult['status'], string> = {
   skip: chalk.dim('↷'), // ↷
 };
 
-/** Pads `text` with spaces on the right to reach at least `width` characters. */
+/**
+ * Pads `text` with spaces on the right to reach at least `width` characters,
+ * always with at least one trailing space so columns don't collide when the
+ * text is already at or above the width.
+ */
 function padRight(text: string, width: number): string {
-  return text.length >= width ? text : text + ' '.repeat(width - text.length);
+  const target = Math.max(width, text.length + 1);
+  return text + ' '.repeat(target - text.length);
 }
 
 /**

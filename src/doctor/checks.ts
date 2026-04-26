@@ -13,11 +13,13 @@ import {
   detectAuthMethod,
   loadOAuthCredentials,
   isTokenExpired,
-  refreshOAuthToken,
   saveOAuthCredentials,
   extractFromKeychain,
   extractFromKeychainWithService,
+  OAUTH_CLIENT_ID,
+  OAUTH_TOKEN_URL,
   type AuthMethod,
+  type OAuthCredentials,
 } from '../docker/oauth-credentials.js';
 import {
   resolveApiKeyForProvider,
@@ -503,10 +505,38 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
     return {
       name,
       status: 'fail',
-      message: err instanceof Error ? err.message : String(err),
+      message: describeApiError(err),
       hint: `Verify the ${label} API key is valid and the configured agentModelId exists.`,
     };
   }
+}
+
+/**
+ * Renders an AI SDK error with as much diagnostic info as we can extract.
+ * The SDK's APICallError frequently has an empty .message but a useful
+ * .url and .cause (the underlying fetch error). Surface all of them so
+ * "Cannot connect to API:" doesn't lose the actual reason.
+ */
+function describeApiError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts: string[] = [];
+  if (err.message) parts.push(err.message);
+  // AI SDK APICallError surfaces the URL it tried to hit.
+  const url = (err as { url?: unknown }).url;
+  if (typeof url === 'string' && url.length > 0) parts.push(`url=${url}`);
+  // Status code from APICallError.
+  const status = (err as { statusCode?: unknown }).statusCode;
+  if (typeof status === 'number') parts.push(`status=${status}`);
+  // Underlying cause (e.g., fetch's TypeError with the system error code).
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error && cause.message) {
+    parts.push(`cause=${cause.message}`);
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === 'string') parts.push(`code=${code}`);
+  } else if (typeof cause === 'string') {
+    parts.push(`cause=${cause}`);
+  }
+  return parts.join(' | ');
 }
 
 const PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -524,7 +554,11 @@ function formatProviderLabel(provider: ProviderId): string {
  * for new credentials. Anthropic rotates refresh tokens, so the new
  * credentials MUST be persisted — otherwise the next refresh attempt
  * (whether by doctor or by the running agent) fails because the local
- * refresh token has been invalidated server-side. Used only under --check-api.
+ * refresh token has been invalidated server-side.
+ *
+ * Calls the token endpoint directly (rather than via refreshOAuthToken)
+ * so failures surface the HTTP status code — a generic "refresh failed"
+ * isn't actionable. Used only under --check-api.
  */
 export async function checkOAuthRefresh(): Promise<CheckResult> {
   const creds = loadOAuthCredentials();
@@ -537,23 +571,75 @@ export async function checkOAuthRefresh(): Promise<CheckResult> {
   }
   try {
     const start = Date.now();
-    const refreshed = await refreshOAuthToken(creds.refreshToken);
+    const result = await probeOAuthRefresh(creds.refreshToken);
     const elapsed = formatElapsed(Date.now() - start);
-    if (!refreshed) {
+    if (result.kind === 'http-error') {
       return {
         name: 'OAuth refresh',
         status: 'fail',
-        message: `refresh failed (${elapsed})`,
-        hint: 'Run `claude login` to obtain a new refresh token.',
+        message: `refresh rejected (HTTP ${result.status}, ${elapsed})`,
+        hint:
+          result.status === 400 || result.status === 401
+            ? 'Refresh token has been invalidated (likely consumed by an earlier refresh). Run `claude login` to issue a new one.'
+            : 'Run `claude login` to obtain a new refresh token.',
       };
     }
-    saveOAuthCredentials(refreshed);
+    if (result.kind === 'parse-error') {
+      return {
+        name: 'OAuth refresh',
+        status: 'fail',
+        message: `refresh response unparseable (${elapsed})`,
+        hint: result.detail,
+      };
+    }
+    saveOAuthCredentials(result.credentials);
     return { name: 'OAuth refresh', status: 'ok', message: `valid (${elapsed})` };
   } catch (err) {
+    const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
     return {
       name: 'OAuth refresh',
       status: 'fail',
-      message: err instanceof Error ? err.message : String(err),
+      message: (err instanceof Error ? err.message : String(err)) + cause,
     };
   }
+}
+
+type RefreshProbeResult =
+  | { kind: 'ok'; credentials: OAuthCredentials }
+  | { kind: 'http-error'; status: number }
+  | { kind: 'parse-error'; detail: string };
+
+async function probeOAuthRefresh(refreshToken: string): Promise<RefreshProbeResult> {
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: OAUTH_CLIENT_ID,
+  });
+  const response = await fetch(OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    return { kind: 'http-error', status: response.status };
+  }
+  const data = (await response.json()) as Record<string, unknown>;
+  const accessToken = data.access_token;
+  const expiresIn = data.expires_in;
+  if (typeof accessToken !== 'string' || accessToken.length === 0) {
+    return { kind: 'parse-error', detail: 'response missing access_token' };
+  }
+  if (typeof expiresIn !== 'number' || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+    return { kind: 'parse-error', detail: 'response missing or invalid expires_in' };
+  }
+  const newRefresh = data.refresh_token;
+  return {
+    kind: 'ok',
+    credentials: {
+      accessToken,
+      refreshToken: typeof newRefresh === 'string' && newRefresh.length > 0 ? newRefresh : refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+    },
+  };
 }
