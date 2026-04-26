@@ -12,17 +12,9 @@ import { promisify } from 'node:util';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
-import {
-  detectAuthMethod,
-  loadOAuthCredentials,
-  extractFromKeychain,
-  refreshOAuthToken,
-  saveOAuthCredentials,
-  extractFromKeychainWithService,
-  writeToKeychain,
-  type CredentialSources,
-} from '../docker/oauth-credentials.js';
+import { detectAuthMethod, preflightCredentialSources, type CredentialSources } from '../docker/oauth-credentials.js';
 import { resolveApiKeyForProvider } from '../config/model-provider.js';
+import { isObjectWithProp } from '../utils/is-plain-object.js';
 
 const execFile = promisify(execFileCb);
 
@@ -35,7 +27,7 @@ const DOCKER_UNAVAILABLE_REASON = 'Docker not available';
  */
 export class PreflightError extends Error {
   constructor(message: string) {
-    super(message);
+    super(`${message}\n\nRun \`ironcurtain doctor\` for a full diagnostic.`);
     this.name = 'PreflightError';
   }
 }
@@ -89,24 +81,6 @@ export async function checkDockerAvailable(): Promise<DockerAvailability> {
   }
 }
 
-/** Type-narrowing helper for inspecting unknown error shapes. */
-function isObjectWithProp<K extends string>(value: unknown, key: K): value is Record<K, unknown> {
-  return typeof value === 'object' && value !== null && key in value;
-}
-
-/**
- * Credential sources for preflight detection including Keychain lookup (~19ms)
- * and token refresh so that expired credentials are refreshed at startup.
- */
-const preflightSources: CredentialSources = {
-  loadFromFile: loadOAuthCredentials,
-  loadFromKeychain: extractFromKeychain,
-  refreshToken: refreshOAuthToken,
-  saveToFile: saveOAuthCredentials,
-  loadFromKeychainWithService: extractFromKeychainWithService,
-  writeToKeychain,
-};
-
 /**
  * Checks whether credentials (OAuth or API key) are available for the given agent.
  * Returns the auth kind if available, or null if no credentials found.
@@ -126,8 +100,8 @@ async function detectCredentials(
   }
 
   // Default path: Anthropic OAuth + API key detection (Claude Code and others).
-  // Uses preflightSources, which may refresh expired tokens and update credential storage.
-  const auth = await detectAuthMethod(config, sources ?? preflightSources);
+  // Uses preflightCredentialSources, which may refresh expired tokens and update credential storage.
+  const auth = await detectAuthMethod(config, sources ?? preflightCredentialSources);
   if (auth.kind === 'none') return null;
   return auth.kind === 'oauth' ? 'oauth' : 'apikey';
 }
@@ -206,7 +180,7 @@ async function resolveAutoDetect(
   const [dockerStatus, credKind, authMethod] = await Promise.all([
     isDockerAvailable(),
     detectCredentials(defaultAgent, config, credentialSources),
-    detectAuthMethod(config, credentialSources ?? preflightSources),
+    detectAuthMethod(config, credentialSources ?? preflightCredentialSources),
   ]);
 
   if (!dockerStatus.available) {

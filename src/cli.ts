@@ -36,6 +36,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'config', description: 'Edit configuration interactively' },
     { name: 'workflow', description: 'Run multi-agent workflows (start, resume, inspect)' },
     { name: 'observe', description: 'Watch live LLM token output for running sessions' },
+    { name: 'doctor', description: 'Diagnose installation, credentials, and MCP server health' },
     { name: 'help', description: 'Show this help message' },
   ],
   options: [
@@ -102,8 +103,9 @@ if (requiresSandbox.includes(subcommand)) {
     // file. Writing directly to stderr keeps fatal errors visible on the terminal.
     process.stderr.write(`\n${chalk.bold(chalk.red('Fatal Error:'))} ${result.message}\n`);
     if (result.details) {
-      process.stderr.write(chalk.dim(result.details) + '\n\n');
+      process.stderr.write(chalk.dim(result.details) + '\n');
     }
+    process.stderr.write(chalk.dim('Run `ironcurtain doctor` for a full diagnostic.\n\n'));
     process.exit(1);
   }
 }
@@ -197,6 +199,11 @@ switch (subcommand) {
   case 'observe': {
     const { runObserveCommand } = await import('./observe/observe-command.js');
     await runObserveCommand(process.argv.slice(3));
+    break;
+  }
+  case 'doctor': {
+    const { runDoctorCommand } = await import('./doctor/doctor-command.js');
+    await runDoctorCommand(process.argv.slice(3));
     break;
   }
   case 'setup-signal': {

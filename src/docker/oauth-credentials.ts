@@ -229,12 +229,27 @@ const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 
 /**
+ * Discriminated result of a refresh attempt.
+ *
+ * Doctor needs the failure mode (HTTP status vs network error vs malformed
+ * response) so it can render an actionable hint. Production callers only
+ * care about ok-vs-not, so they map non-`ok` to null via `refreshResultToCreds`.
+ */
+export type RefreshResult =
+  | { kind: 'ok'; credentials: OAuthCredentials }
+  | { kind: 'http-error'; status: number }
+  | { kind: 'parse-error'; detail: string }
+  | { kind: 'network-error'; message: string };
+
+/**
  * Refreshes an OAuth access token using a refresh token grant.
  *
- * Returns new credentials on success, or null on failure (expired refresh
- * token, network error, etc.).
+ * Returns a discriminated result so callers can distinguish HTTP failures
+ * (refresh token invalidated) from network failures (transient) from
+ * malformed responses (server bug). Production callers that only need
+ * pass/fail should use `refreshResultToCreds` to flatten to OAuthCredentials | null.
  */
-export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCredentials | null> {
+export async function refreshOAuthToken(refreshToken: string): Promise<RefreshResult> {
   const REFRESH_TIMEOUT_MS = 30_000;
   try {
     const body = new URLSearchParams({
@@ -252,33 +267,49 @@ export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCred
 
     if (!response.ok) {
       logger.warn(`OAuth token refresh failed: HTTP ${response.status}`);
-      return null;
+      return { kind: 'http-error', status: response.status };
     }
 
     const data = (await response.json()) as Record<string, unknown>;
     return parseTokenResponse(data, refreshToken);
   } catch (err) {
-    logger.warn(`OAuth token refresh error: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn(`OAuth token refresh error: ${message}`);
+    return { kind: 'network-error', message };
   }
 }
 
 /**
+ * Flattens a RefreshResult into the legacy `OAuthCredentials | null` shape
+ * for callers that don't need the failure detail (token-manager, preflight).
+ */
+export function refreshResultToCreds(result: RefreshResult): OAuthCredentials | null {
+  return result.kind === 'ok' ? result.credentials : null;
+}
+
+/**
  * Validates and extracts credentials from an OAuth token endpoint response.
- * Returns null if access_token or expires_in are missing/invalid.
+ * Returns parse-error if access_token or expires_in are missing/invalid.
  * Preserves the original refresh token when the response omits refresh_token
  * (not all providers rotate refresh tokens on every grant).
  */
-function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken: string): OAuthCredentials | null {
+function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken: string): RefreshResult {
   const { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn } = data;
 
-  if (!isNonEmptyString(accessToken)) return null;
-  if (!isPositiveFiniteNumber(expiresIn)) return null;
+  if (!isNonEmptyString(accessToken)) {
+    return { kind: 'parse-error', detail: 'response missing access_token' };
+  }
+  if (!isPositiveFiniteNumber(expiresIn)) {
+    return { kind: 'parse-error', detail: 'response missing or invalid expires_in' };
+  }
 
   return {
-    accessToken,
-    refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
-    expiresAt: Date.now() + expiresIn * 1000,
+    kind: 'ok',
+    credentials: {
+      accessToken,
+      refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+    },
   };
 }
 
@@ -336,10 +367,39 @@ export interface CredentialSources {
 const defaultSources: CredentialSources = {
   loadFromFile: loadOAuthCredentials,
   loadFromKeychain: extractFromKeychain,
-  refreshToken: refreshOAuthToken,
+  refreshToken: async (rt) => refreshResultToCreds(await refreshOAuthToken(rt)),
   saveToFile: saveOAuthCredentials,
   loadFromKeychainWithService: extractFromKeychainWithService,
   writeToKeychain,
+};
+
+/**
+ * Pre-built CredentialSources for active credential detection at startup.
+ * Includes Keychain lookup (~19ms on macOS) and proactive token refresh,
+ * so an expired token is rotated before the first MCP call.
+ *
+ * Shared between session/preflight.ts and doctor's OAuth checks so both
+ * code paths exercise the same detection behavior.
+ */
+export const preflightCredentialSources: CredentialSources = {
+  loadFromFile: loadOAuthCredentials,
+  loadFromKeychain: extractFromKeychain,
+  refreshToken: async (rt) => refreshResultToCreds(await refreshOAuthToken(rt)),
+  saveToFile: saveOAuthCredentials,
+  loadFromKeychainWithService: extractFromKeychainWithService,
+  writeToKeychain,
+};
+
+/**
+ * Pre-built CredentialSources for read-only detection (used by `ironcurtain doctor`).
+ * Omits refresh/save so passive diagnostics never mutate credential storage.
+ * The user can still validate refresh under `--check-api`, which makes its
+ * own write decisions based on the detected auth source.
+ */
+export const readOnlyCredentialSources: CredentialSources = {
+  loadFromFile: loadOAuthCredentials,
+  loadFromKeychain: extractFromKeychain,
+  loadFromKeychainWithService: extractFromKeychainWithService,
 };
 
 /**
