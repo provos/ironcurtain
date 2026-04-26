@@ -122,6 +122,15 @@ const DECISION_SEVERITY: Record<PolicyDecisionStatus, number> = {
 };
 
 /**
+ * Marker rule name for the structural sandbox-containment allow. Not a
+ * compiled rule — placeholder used when paths are auto-discharged because
+ * they sit inside `allowedDirectory`. Compiled-rule attribution is
+ * preferred when a real rule produces an equal-severity result, so this
+ * string is checked at tie-break time.
+ */
+const STRUCTURAL_SANDBOX_ALLOW = 'structural-sandbox-allow';
+
+/**
  * Collects all distinct non-"none" roles from a tool annotation's arguments.
  * Returns an empty array if the tool has no role-bearing arguments.
  */
@@ -501,41 +510,18 @@ export class PolicyEngine {
     const sandboxResolvedRoles = new Set<ArgumentRole>();
     const resolvedSandboxPaths = resolvedPaths;
 
-    // Extract URL args once for use in both sandbox containment (fast-path guard) and untrusted domain gate
+    // URL args feed both sandbox containment (untrusted domain gate below) and per-rule URL evaluation.
     const urlArgs = annotation ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles()) : [];
-
-    // Determine if the tool has any non-sandbox-safe path roles
-    const toolHasUnsafePathRoles = annotation
-      ? pathRoles.some(
-          (role) =>
-            !SANDBOX_SAFE_PATH_ROLES.has(role) &&
-            Object.values(annotation.args).some((argRoles) => argRoles.includes(role)),
-        )
-      : false;
 
     if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
       const sandboxDir = this.allowedDirectory;
       const isFilesystem = request.serverName === 'filesystem';
       const isGit = request.serverName === 'git';
-      const allWithinSandbox = resolvedSandboxPaths.every((rp) => isWithinDirectory(rp, sandboxDir));
 
-      // Fast path: all paths within sandbox, all roles sandbox-safe, no URL roles
-      // → auto-allow without compiled rule evaluation.
-      // Applies only to the filesystem server. Git operations can have
-      // non-filesystem side effects (e.g., network, credentials), so they must
-      // always pass through compiled-rule evaluation.
-      if (isFilesystem && allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
-        return finalDecision({
-          decision: 'allow',
-          rule: 'structural-sandbox-allow',
-          reason: `All paths are within the sandbox directory: ${sandboxDir}`,
-        });
-      }
-
-      // Partial sandbox resolution: check each path role independently.
-      // A role is "sandbox-resolved" if every path for that role is within the
-      // sandbox, removing it from compiled-rule evaluation. Remaining roles
-      // (e.g., git-remote-url) still run through compiled rules.
+      // Per-role sandbox resolution: a role is "sandbox-resolved" if every
+      // path for that role is within the sandbox, removing it from compiled
+      // rule evaluation. Remaining roles (e.g., git-remote-url) still run
+      // through compiled rules.
       //
       // Applied to filesystem and git. For git tools with URL roles
       // (e.g., git_clone with write-path + git-remote-url), the path role is
@@ -629,7 +615,7 @@ export class PolicyEngine {
     if (allRoles.length > 0 && rolesToEvaluate.length === 0) {
       return {
         decision: 'allow',
-        rule: 'structural-sandbox-allow',
+        rule: STRUCTURAL_SANDBOX_ALLOW,
         reason: 'All path roles resolved by sandbox containment',
       };
     }
@@ -694,41 +680,75 @@ export class PolicyEngine {
     annotation: ToolAnnotation,
     evaluatingRole: ArgumentRole,
   ): EvaluationResult {
-    // Per-element evaluation: when a role has multiple paths, each path
-    // is independently discharged by the first matching rule.
+    // Per-element evaluation handles single-path and multi-path uniformly.
+    // Each extracted path is independently discharged by the first matching
+    // rule; the most restrictive decision wins; undischarged paths default-deny.
     const rolePaths = extractAnnotatedPaths(request.arguments, annotation, [evaluatingRole]);
-    if (rolePaths.length > 1) {
-      return this.evaluateRulesForMultiPaths(request, annotation, evaluatingRole, rolePaths);
-    }
-
-    for (const rule of this.compiledPolicy.rules) {
-      if (hasRoleConditions(rule) && !ruleRelevantToRole(rule, evaluatingRole)) {
-        continue;
-      }
-      if (this.ruleMatches(rule, request, annotation, evaluatingRole)) {
-        return ruleToResult(rule);
-      }
-    }
-
-    return DEFAULT_DENY_RESULT;
+    return this.evaluateRulesForRolePaths(request, annotation, evaluatingRole, rolePaths);
   }
 
   /**
-   * Per-element path evaluation for roles with multiple paths.
+   * Per-element path evaluation for a role.
    *
-   * Each path is independently "discharged" by the first rule whose
-   * paths.within contains it. Rules without path conditions match all
+   * Each extracted path is independently "discharged" by the first rule
+   * whose conditions match it. Rules without path conditions match all
    * remaining paths. The most restrictive decision across all discharged
    * paths wins (deny > escalate > allow). Undischarged paths default-deny.
+   *
+   * Sandbox containment is applied structurally per-path: for the filesystem
+   * server, paths inside the sandbox are auto-discharged with an implicit
+   * allow before consulting compiled rules. This keeps the "do NOT emit
+   * sandbox `paths.within` rules" compiler invariant intact whether the
+   * tool is single-path or multi-path; in the multi-path case it also
+   * handles the mixed-directory call (e.g. `read_multiple_files` spanning
+   * sandbox + Downloads) that the single-path fast path could not cover.
+   *
+   * For roles with no extracted paths, falls through to a single linear
+   * scan that returns the first matching rule (paths.within is irrelevant
+   * when there's nothing to discharge).
    */
-  private evaluateRulesForMultiPaths(
+  private evaluateRulesForRolePaths(
     request: ToolCallRequest,
     annotation: ToolAnnotation,
     role: ArgumentRole,
     paths: string[],
   ): EvaluationResult {
+    // No paths to discharge: linear scan covers role-agnostic and domain/list
+    // rules (first match wins).
+    if (paths.length === 0) {
+      for (const rule of this.compiledPolicy.rules) {
+        if (hasRoleConditions(rule) && !ruleRelevantToRole(rule, role)) continue;
+        if (this.ruleMatches(rule, request, annotation, role)) return ruleToResult(rule);
+      }
+      return DEFAULT_DENY_RESULT;
+    }
+
     const remainingPaths = new Set(paths);
     let mostRestrictive: EvaluationResult | undefined;
+
+    // Sandbox containment is structural, not rule-based — the compiler is
+    // forbidden from emitting `paths.within: <sandbox>` rules — so we
+    // discharge each sandbox-resident path here before consulting compiled
+    // rules. Required for mixed-directory calls (e.g. read_multiple_files
+    // spanning sandbox + Downloads) where no single rule could match the
+    // whole array.
+    if (this.allowedDirectory && request.serverName === 'filesystem' && SANDBOX_SAFE_PATH_ROLES.has(role)) {
+      const sandboxDir = this.allowedDirectory;
+      let dischargedAny = false;
+      for (const p of remainingPaths) {
+        if (isWithinDirectory(p, sandboxDir)) {
+          remainingPaths.delete(p);
+          dischargedAny = true;
+        }
+      }
+      if (dischargedAny) {
+        mostRestrictive = {
+          decision: 'allow',
+          rule: STRUCTURAL_SANDBOX_ALLOW,
+          reason: `Path(s) within the sandbox directory: ${sandboxDir}`,
+        };
+      }
+    }
 
     for (const rule of this.compiledPolicy.rules) {
       if (remainingPaths.size === 0) break;
@@ -736,8 +756,16 @@ export class PolicyEngine {
       // Skip rules not relevant to this role
       if (hasRoleConditions(rule) && !ruleRelevantToRole(rule, role)) continue;
 
-      // Skip rules whose non-path conditions don't match
+      // Non-path conditions (server, tool, roles) must hold uniformly
       if (!this.ruleMatchesNonPathConditions(rule, request, annotation)) continue;
+
+      // Domain and list conditions apply uniformly across all paths. Check
+      // them once via ruleMatches with the path condition stripped — paths
+      // are then discharged per-element below.
+      if (rule.if.domains !== undefined || rule.if.lists !== undefined) {
+        const ruleWithoutPaths: CompiledRule = { ...rule, if: { ...rule.if, paths: undefined } };
+        if (!this.ruleMatches(ruleWithoutPaths, request, annotation, role)) continue;
+      }
 
       const cond = rule.if;
       let matched: string[];
@@ -760,8 +788,20 @@ export class PolicyEngine {
       for (const p of matched) remainingPaths.delete(p);
 
       const result = ruleToResult(rule);
-      if (!mostRestrictive || DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
+      if (!mostRestrictive) {
         mostRestrictive = result;
+      } else {
+        const prevSeverity = DECISION_SEVERITY[mostRestrictive.decision];
+        const newSeverity = DECISION_SEVERITY[result.decision];
+        // Strictly more restrictive always wins. On a severity tie, prefer a
+        // compiled rule over the structural sandbox placeholder so audit
+        // attribution names the rule that actually authorized this path.
+        if (
+          newSeverity > prevSeverity ||
+          (newSeverity === prevSeverity && mostRestrictive.rule === STRUCTURAL_SANDBOX_ALLOW)
+        ) {
+          mostRestrictive = result;
+        }
       }
     }
 

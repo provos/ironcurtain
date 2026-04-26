@@ -24,28 +24,28 @@ import type {
   ListDefinition,
   RepairContext,
   ResolvedList,
-  ToolAnnotation,
-  ToolAnnotationsFile,
+  StoredToolAnnotation,
+  StoredToolAnnotationsFile,
 } from '../src/pipeline/types.js';
 
 // ---------------------------------------------------------------------------
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const sampleAnnotations: ToolAnnotation[] = [
+const sampleAnnotations: StoredToolAnnotation[] = [
   {
     toolName: 'fetch',
     serverName: 'fetch',
     comment: 'Fetches a URL via HTTP',
-
     args: { url: ['fetch-url'] },
+    inputSchema: {},
   },
   {
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads a file',
-
     args: { path: ['read-path'] },
+    inputSchema: {},
   },
 ];
 
@@ -122,11 +122,12 @@ function createPromptCapturingModel(response: unknown): {
   return { model, getPrompt: () => capturedPrompt, getSystemPrompt: () => capturedSystem };
 }
 
-const fetchAnnotation: ToolAnnotation = {
+const fetchAnnotation: StoredToolAnnotation = {
   toolName: 'fetch',
   serverName: 'fetch',
   comment: 'Fetches URL',
   args: { url: ['fetch-url'] },
+  inputSchema: {},
 };
 
 // Reusable list definitions for tests
@@ -490,7 +491,7 @@ describe('Dynamic Lists Backward Compatibility', () => {
       inputHash: '',
       rules: [plainReadRule],
     };
-    const annotations: ToolAnnotationsFile = {
+    const annotations: StoredToolAnnotationsFile = {
       generatedAt: '',
       servers: {
         filesystem: { inputHash: '', tools: [sampleAnnotations[1]] },
@@ -518,8 +519,8 @@ describe('Dynamic Lists Backward Compatibility', () => {
 // Shared fixtures for Phase 2 tests
 // ---------------------------------------------------------------------------
 
-function makeToolAnnotationsFile(tools: ToolAnnotation[]): ToolAnnotationsFile {
-  const servers: ToolAnnotationsFile['servers'] = {};
+function makeToolAnnotationsFile(tools: StoredToolAnnotation[]): StoredToolAnnotationsFile {
+  const servers: StoredToolAnnotationsFile['servers'] = {};
   for (const tool of tools) {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: building map, key may not exist yet
     if (!servers[tool.serverName]) {
@@ -1030,12 +1031,12 @@ describe('ListCondition Evaluation', () => {
       then: 'allow',
       reason: 'Contact',
     };
-    const readAnnotation: ToolAnnotation = {
+    const readAnnotation: StoredToolAnnotation = {
       toolName: 'read_file',
       serverName: 'filesystem',
       comment: 'Reads file',
-
       args: { path: ['read-path'] },
+      inputSchema: {},
     };
     const policy = makePolicyFile([rule]);
     const annotations = makeToolAnnotationsFile([readAnnotation]);
@@ -1098,13 +1099,13 @@ describe('ListCondition Evaluation', () => {
 describe('Per-Role Evaluation with Lists', () => {
   it('lists condition makes a rule role-specific (not role-agnostic)', () => {
     // A rule with only lists condition should be treated as role-specific
-    const emailSendAnnotation: ToolAnnotation = {
+    const emailSendAnnotation: StoredToolAnnotation = {
       toolName: 'send_email',
       serverName: 'email',
       comment: 'Sends email',
-
       // Tool has both a read-path arg (for attachment) and a fetch-url arg (for recipient)
       args: { recipient: ['fetch-url'], attachment: ['read-path'] },
+      inputSchema: {},
     };
     const rule: CompiledRule = {
       name: 'allow-contacts',

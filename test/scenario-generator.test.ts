@@ -10,29 +10,23 @@ import {
 import { ConstitutionCompilerSession } from '../src/pipeline/constitution-compiler.js';
 import { parseJsonWithSchema } from '../src/pipeline/generate-with-repair.js';
 import { detectDefaultRoleFallback, detectAllDefaultRoleFallbacks } from '../src/pipeline/policy-verifier.js';
-import type {
-  ConditionalRoles,
-  StoredToolAnnotation,
-  ToolAnnotation,
-  TestScenario,
-  RepairContext,
-} from '../src/pipeline/types.js';
+import type { ConditionalRoles, StoredToolAnnotation, TestScenario, RepairContext } from '../src/pipeline/types.js';
 import { z } from 'zod';
 
-const sampleAnnotations: ToolAnnotation[] = [
+const sampleAnnotations: StoredToolAnnotation[] = [
   {
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads the complete contents of a file from disk',
-
     args: { path: ['read-path'] },
+    inputSchema: {},
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Creates or overwrites a file with new content',
-
     args: { path: ['write-path'] },
+    inputSchema: {},
   },
 ];
 
@@ -288,14 +282,15 @@ function createCallTrackingMockModel(responses: unknown[]) {
 }
 
 /** Generates N unique annotations across serverA and serverB. */
-function generateAnnotations(count: number): ToolAnnotation[] {
-  const annotations: ToolAnnotation[] = [];
+function generateAnnotations(count: number): StoredToolAnnotation[] {
+  const annotations: StoredToolAnnotation[] = [];
   for (let i = 0; i < count; i++) {
     annotations.push({
       toolName: `tool_${i}`,
       serverName: i % 2 === 0 ? 'serverA' : 'serverB',
       comment: `Tool ${i} description`,
       args: { path: ['read-path'] },
+      inputSchema: {},
     });
   }
   return annotations;
@@ -1086,8 +1081,8 @@ describe('formatConditionalRoles', () => {
 // buildGeneratorSystemPrompt with stored annotations tests
 // ---------------------------------------------------------------------------
 
-describe('buildGeneratorSystemPrompt with stored annotations', () => {
-  const storedAnnotations: StoredToolAnnotation[] = [
+describe('buildGeneratorSystemPrompt annotation rendering', () => {
+  const conditionalAnnotations: StoredToolAnnotation[] = [
     {
       toolName: 'git_branch',
       serverName: 'git',
@@ -1110,11 +1105,12 @@ describe('buildGeneratorSystemPrompt with stored annotations', () => {
     },
   ];
 
-  const resolvedAnnotations: ToolAnnotation[] = [
+  const staticAnnotations: StoredToolAnnotation[] = [
     {
       toolName: 'git_branch',
       serverName: 'git',
       comment: 'Manages branches',
+      inputSchema: {},
       args: {
         path: ['read-path', 'write-history', 'delete-history'],
         operation: ['none'],
@@ -1123,22 +1119,15 @@ describe('buildGeneratorSystemPrompt with stored annotations', () => {
     },
   ];
 
-  it('includes conditional role details when stored annotations provided', () => {
-    const prompt = buildGeneratorSystemPrompt(
-      'Test constitution',
-      resolvedAnnotations,
-      '/tmp/sandbox',
-      undefined,
-      undefined,
-      storedAnnotations,
-    );
+  it('renders conditional role specs with default + per-when clauses', () => {
+    const prompt = buildGeneratorSystemPrompt('Test constitution', conditionalAnnotations, '/tmp/sandbox');
     expect(prompt).toContain('default=[read-path, write-history, delete-history]');
     expect(prompt).toContain('operation in ["list","show-current"]');
     expect(prompt).toContain('operation="delete"');
   });
 
-  it('falls back to simple format without stored annotations', () => {
-    const prompt = buildGeneratorSystemPrompt('Test constitution', resolvedAnnotations, '/tmp/sandbox');
+  it('renders static role arrays without default= prefix', () => {
+    const prompt = buildGeneratorSystemPrompt('Test constitution', staticAnnotations, '/tmp/sandbox');
     expect(prompt).toContain('path: [read-path, write-history, delete-history]');
     expect(prompt).not.toContain('default=');
   });

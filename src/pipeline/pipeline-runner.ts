@@ -380,7 +380,7 @@ function buildPolicyArtifact(
  */
 function buildTaskCompilerSystemPrompt(
   taskDescription: string,
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
   protectedPaths: string[],
   allowedDirectory: string,
   serverScope: string,
@@ -971,14 +971,14 @@ export class PipelineRunner {
       unit.constitutionKind === 'task-policy'
         ? buildTaskCompilerSystemPrompt(
             unit.constitutionText,
-            unit.annotations,
+            unit.storedAnnotations,
             unit.protectedPaths,
             unit.allowedDirectory,
             unit.serverName,
           )
         : buildCompilerSystemPrompt(
             unit.constitutionText,
-            unit.annotations,
+            unit.storedAnnotations,
             { protectedPaths: unit.protectedPaths, allowedDirectory: unit.allowedDirectory },
             unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
             { serverScope: unit.serverName },
@@ -997,11 +997,10 @@ export class PipelineRunner {
       const cachedDynamicLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
       const cachedScenarioPrompt = buildGeneratorSystemPrompt(
         unit.constitutionText,
-        unit.annotations,
+        unit.storedAnnotations,
         unit.allowedDirectory,
         cachedPermittedDirs,
         cachedDynamicLists,
-        unit.storedAnnotations,
       );
       const cachedScenarioHash = computeScenariosHash(cachedScenarioPrompt, unit.handwrittenScenarios);
 
@@ -1076,17 +1075,16 @@ export class PipelineRunner {
 
     const scenarioPrompt = buildGeneratorSystemPrompt(
       unit.constitutionText,
-      unit.annotations,
+      unit.storedAnnotations,
       unit.allowedDirectory,
       permittedDirectories,
       dynamicLists,
-      unit.storedAnnotations,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, unit.handwrittenScenarios);
 
     const scenarioResult = await this.generateTestScenarios(
       unit.constitutionText,
-      unit.annotations,
+      unit.storedAnnotations,
       unit.allowedDirectory,
       unit.handwrittenScenarios,
       scenarioHash,
@@ -1094,7 +1092,6 @@ export class PipelineRunner {
       `  ${unit.serverName}`,
       permittedDirectories,
       dynamicLists,
-      unit.storedAnnotations,
       model,
       reporter,
     );
@@ -1339,13 +1336,12 @@ export class PipelineRunner {
       const replacementScenarios = await repairScenarios(
         discardedForRepair,
         unit.constitutionText,
-        unit.annotations,
+        unit.storedAnnotations,
         unit.allowedDirectory,
         model,
         permittedDirectories,
         dynamicLists,
         (msg) => reporter.warn(`  ${chalk.dim(msg)}`),
-        unit.storedAnnotations,
       );
       if (replacementScenarios.length > 0) {
         const { valid: validReplacements } = filterAndLogStructuralConflicts(
@@ -1396,9 +1392,14 @@ export class PipelineRunner {
     serverOutputDir: string,
     writeServerPolicy: () => void,
   ): Promise<void> {
-    const MAX_REPAIRS = 2;
+    const MAX_REPAIRS = 3;
 
-    for (let attempt = 1; attempt <= MAX_REPAIRS; attempt++) {
+    // Each iteration consumes the just-completed verification (initial verify
+    // on attempt 0, prior repair-verify on attempts 1..MAX_REPAIRS), exits early
+    // if the result is clean, otherwise repairs and re-verifies. Consuming at
+    // the top of the loop ensures the final repair-verify's corrections are
+    // applied — no post-loop catch-up needed.
+    for (let attempt = 0; attempt <= MAX_REPAIRS; attempt++) {
       const lastRound = state.verificationResult.rounds[state.verificationResult.rounds.length - 1] as
         | (typeof state.verificationResult.rounds)[number]
         | undefined;
@@ -1419,6 +1420,34 @@ export class PipelineRunner {
         reporter.warn(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
       }
 
+      const attributionByDescription = new Map(attributedFailures.map((a) => [a.scenarioDescription, a]));
+      const ruleBlamedFailures = state.verificationResult.failedScenarios.filter((f) => {
+        const attr = attributionByDescription.get(f.scenario.description);
+        if (!attr || attr.blame.kind === 'rule' || attr.blame.kind === 'both') return true;
+        return handwrittenWarnings.some((w) => w.includes(f.scenario.description));
+      });
+
+      // Clean exit: rules are correct (already passing, or only scenario-blame
+      // failures that we just corrected). Synthesize a passing result when
+      // corrections resolved the remaining failures.
+      if (state.verificationResult.pass) break;
+      if (ruleBlamedFailures.length === 0) {
+        if (corrections.length > 0) {
+          const correctionNote = `\n\n[pipeline-runner: cleared ${corrections.length} scenario expectation(s) via judge attribution; no rule-blamed failures remained.]`;
+          state.verificationResult = {
+            ...state.verificationResult,
+            pass: true,
+            failedScenarios: [],
+            summary: `${state.verificationResult.summary}${correctionNote}`,
+          };
+        }
+        break;
+      }
+
+      // Out of repair budget — exit with the current (failing) result.
+      if (attempt === MAX_REPAIRS) break;
+
+      const repairAttempt = attempt + 1;
       const { valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(
         filterEngine,
         scenarioResult.scenarios,
@@ -1427,72 +1456,57 @@ export class PipelineRunner {
         reporter,
       );
 
-      const allRuleBlamedFailures = state.verificationResult.failedScenarios.filter((f) => {
-        const attr = attributedFailures.find((a) => a.scenarioDescription === f.scenario.description);
-        if (!attr || attr.blame.kind === 'rule' || attr.blame.kind === 'both') return true;
-        return handwrittenWarnings.some((w) => w.includes(f.scenario.description));
-      });
+      const repairContext: RepairContext = {
+        failedScenarios: ruleBlamedFailures,
+        judgeAnalysis,
+        attemptNumber: repairAttempt,
+        existingListDefinitions: state.listDefinitions.length > 0 ? state.listDefinitions : undefined,
+        handwrittenScenarios: unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
+      };
 
-      if (allRuleBlamedFailures.length > 0) {
-        const repairContext: RepairContext = {
-          failedScenarios: allRuleBlamedFailures,
-          judgeAnalysis,
-          attemptNumber: attempt,
-          existingListDefinitions: state.listDefinitions.length > 0 ? state.listDefinitions : undefined,
-          handwrittenScenarios: unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
-        };
+      logContext.stepName = `repair-compile-${unit.serverName}-${repairAttempt}`;
+      reporter.update('repair-compile', `attempt ${repairAttempt}/${MAX_REPAIRS}`);
+      const repairCompileStart = Date.now();
+      const repairResult = await this.compilePolicyRulesWithPointFix(
+        state.rules,
+        unit.storedAnnotations,
+        unit.protectedPaths,
+        inputHash,
+        repairContext,
+        compilerSystem,
+        state.compilerSession,
+        state.listDefinitions,
+        model,
+        (msg) => reporter.update('repair-compile', msg),
+        reporter,
+      );
+      const repairCompileElapsed = (Date.now() - repairCompileStart) / 1000;
+      reporter.complete(
+        'repair-compile',
+        `  ${unit.serverName} repair ${repairAttempt}/${MAX_REPAIRS}: ${repairResult.rules.length} rules (${repairCompileElapsed.toFixed(1)}s)`,
+        repairCompileElapsed,
+      );
+      state.rules = repairResult.rules;
+      state.listDefinitions = repairResult.listDefinitions;
+      state.compilerSession = repairResult.session;
 
-        logContext.stepName = `repair-compile-${unit.serverName}-${attempt}`;
-        reporter.update('repair-compile', `attempt ${attempt}/${MAX_REPAIRS}`);
-        const repairCompileStart = Date.now();
-        const repairResult = await this.compilePolicyRulesWithPointFix(
-          state.rules,
-          unit.annotations,
-          unit.protectedPaths,
-          inputHash,
-          repairContext,
-          compilerSystem,
-          state.compilerSession,
+      validateServerScoping(unit.serverName, state.rules);
+
+      if (state.listDefinitions.length > 0) {
+        state.dynamicLists = await this.resolveServerLists(
           state.listDefinitions,
+          serverOutputDir,
+          config,
+          `  ${unit.serverName}`,
           model,
-          (msg) => reporter.update('repair-compile', msg),
+          logContext,
           reporter,
         );
-        const repairCompileElapsed = (Date.now() - repairCompileStart) / 1000;
-        reporter.complete(
-          'repair-compile',
-          `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: ${repairResult.rules.length} rules (${repairCompileElapsed.toFixed(1)}s)`,
-          repairCompileElapsed,
-        );
-        state.rules = repairResult.rules;
-        state.listDefinitions = repairResult.listDefinitions;
-        state.compilerSession = repairResult.session;
-
-        // Re-validate server scoping after repair
-        validateServerScoping(unit.serverName, state.rules);
-
-        // Re-resolve dynamic lists if repair changed list definitions
-        if (state.listDefinitions.length > 0) {
-          state.dynamicLists = await this.resolveServerLists(
-            state.listDefinitions,
-            serverOutputDir,
-            config,
-            `  ${unit.serverName}`,
-            model,
-            logContext,
-            reporter,
-          );
-        }
-
-        state.serverPolicyFile = buildPolicyArtifact(constitutionHash, state.rules, state.listDefinitions, inputHash);
-
-        // Persist repaired rules immediately
-        writeServerPolicy();
-      } else {
-        reporter.warn(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
       }
 
-      // Build verifier from current state (may have been updated by repair above)
+      state.serverPolicyFile = buildPolicyArtifact(constitutionHash, state.rules, state.listDefinitions, inputHash);
+      writeServerPolicy();
+
       const verifierSystem = this.cacheStrategy.wrapSystemPrompt(
         buildJudgeSystemPrompt(
           unit.constitutionText,
@@ -1512,9 +1526,9 @@ export class PipelineRunner {
         storedAnnotations: unit.storedAnnotations,
       });
 
-      logContext.stepName = `repair-verify-${unit.serverName}-${attempt}`;
+      logContext.stepName = `repair-verify-${unit.serverName}-${repairAttempt}`;
       const scenariosForRepairVerify = [...currentFilteredScenarios, ...state.accumulatedProbes];
-      reporter.update('repair-verify', `attempt ${attempt}/${MAX_REPAIRS}`);
+      reporter.update('repair-verify', `attempt ${repairAttempt}/${MAX_REPAIRS}`);
       const repairVerifyStart = Date.now();
       const repairVerifyResult = await verifyPolicy(
         unit.constitutionText,
@@ -1533,7 +1547,7 @@ export class PipelineRunner {
         unit.storedAnnotations,
       );
       const repairVerifyElapsed = (Date.now() - repairVerifyStart) / 1000;
-      const repairVerifyText = `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: Verifying`;
+      const repairVerifyText = `  ${unit.serverName} repair ${repairAttempt}/${MAX_REPAIRS}: Verifying`;
       reporter.complete(
         'repair-verify',
         repairVerifyResult.pass
@@ -1556,11 +1570,7 @@ export class PipelineRunner {
       );
       state.accumulatedProbes.push(...validRepairProbes);
 
-      state.repairAttempts = attempt;
-
-      if (state.verificationResult.pass) {
-        break;
-      }
+      state.repairAttempts = repairAttempt;
     }
   }
 
@@ -1586,7 +1596,7 @@ export class PipelineRunner {
     const session = new ConstitutionCompilerSession({
       system,
       model,
-      annotations: unit.annotations,
+      annotations: unit.storedAnnotations,
       schemaOptions: { requireServer: true },
     });
 
@@ -1614,7 +1624,7 @@ export class PipelineRunner {
   // -----------------------------------------------------------------------
 
   private async compilePolicyRulesWithRepair(
-    annotations: ToolAnnotation[],
+    annotations: StoredToolAnnotation[],
     protectedPaths: string[],
     baseInputHash: string,
     repairContext: RepairContext,
@@ -1663,7 +1673,7 @@ export class PipelineRunner {
    */
   private async compilePolicyRulesWithPointFix(
     existingRules: CompiledRule[],
-    annotations: ToolAnnotation[],
+    annotations: StoredToolAnnotation[],
     protectedPaths: string[],
     baseInputHash: string,
     repairContext: RepairContext,
@@ -1760,7 +1770,7 @@ export class PipelineRunner {
 
   private async generateTestScenarios(
     constitutionText: string,
-    annotations: ToolAnnotation[],
+    annotations: StoredToolAnnotation[],
     allowedDirectory: string,
     handwrittenScenarios: TestScenario[],
     inputHash: string,
@@ -1768,7 +1778,6 @@ export class PipelineRunner {
     stepLabel: string,
     permittedDirectories: string[] | undefined,
     dynamicLists: DynamicListsFile | undefined,
-    storedAnnotations: StoredToolAnnotation[],
     model: LanguageModel,
     reporter: ServerProgressReporter,
   ): Promise<{
@@ -1794,7 +1803,6 @@ export class PipelineRunner {
       (msg: string) => reporter.update('scenarios', msg),
       dynamicLists,
       (prompt: string) => this.cacheStrategy.wrapSystemPrompt(prompt),
-      storedAnnotations,
     );
     const elapsed = (Date.now() - start) / 1000;
     const generatedCount = scenarios.length - handwrittenScenarios.length;
