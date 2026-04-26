@@ -241,7 +241,7 @@ export function checkAnnotationDrift(
  *   - `-e <VAR>` arguments (Docker convention used by mcp-servers.json)
  *   - keys of `config.env`
  * For each declared env var, the check passes if the value is set in
- * process.env or in serverCredentials[serverName].
+ * process.env, inline in serverConfig.env, or in serverCredentials[serverName].
  */
 export function checkServerCredentials(
   serverName: string,
@@ -253,9 +253,12 @@ export function checkServerCredentials(
     return { name: serverName, status: 'ok', message: 'no credentials required' };
   }
   const provided = config.userConfig.serverCredentials[serverName] ?? {};
+  const inline = serverConfig.env ?? {};
   const missing = required.filter((name) => {
     const fromEnv = process.env[name];
     if (typeof fromEnv === 'string' && fromEnv.length > 0) return false;
+    const fromInline = inline[name];
+    if (typeof fromInline === 'string' && fromInline.length > 0) return false;
     const fromCfg = provided[name];
     if (typeof fromCfg === 'string' && fromCfg.length > 0) return false;
     return true;

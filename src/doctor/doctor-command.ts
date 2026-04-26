@@ -23,6 +23,7 @@ import {
   checkPolicyArtifacts,
   checkSandbox,
   checkServerCredentials,
+  collectDeclaredEnvVars,
   type CheckResult,
 } from './checks.js';
 import { checkAnthropicCredentials, checkOAuthRefresh } from './oauth-checks.js';
@@ -140,10 +141,11 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
   collected.push(anthropicResult);
 
   for (const [serverName, serverConfig] of Object.entries(config.mcpServers)) {
+    // Skip servers with no declared credential env vars — they'd otherwise
+    // produce one "no credentials required" line per server, drowning out
+    // the servers that actually need attention.
+    if (collectDeclaredEnvVars(serverConfig).length === 0) continue;
     const r = checkServerCredentials(serverName, serverConfig, config);
-    // Only show servers that need credentials — the "no credentials required"
-    // result would clutter the output with one line per server.
-    if (r.message === 'no credentials required') continue;
     printCheck(r);
     collected.push(r);
   }

@@ -263,6 +263,13 @@ describe('checkServerCredentials', () => {
     expect(checkServerCredentials('svc', server, cfg).status).toBe('ok');
   });
 
+  it('passes when env var is set inline in serverConfig.env', () => {
+    delete process.env.MY_TOKEN;
+    const server = buildServerConfig({ args: [], env: { MY_TOKEN: 'inline-value' } });
+    const cfg = buildConfig({ mcpServers: { svc: server } });
+    expect(checkServerCredentials('svc', server, cfg).status).toBe('ok');
+  });
+
   it('warns when credentials are missing', () => {
     delete process.env.MY_TOKEN;
     const server = buildServerConfig({ args: ['-e', 'MY_TOKEN'] });
