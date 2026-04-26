@@ -63,7 +63,7 @@
         "serverName": "filesystem",
         "toolName": "read_file",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads/invoice.pdf"
+          "path": "~/Downloads/invoice.pdf"
         }
       },
       "expectedDecision": "allow",
@@ -76,7 +76,7 @@
         "serverName": "filesystem",
         "toolName": "write_file",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads/output.txt",
+          "path": "~/Downloads/output.txt",
           "content": "Hello, world!"
         }
       },
@@ -90,7 +90,7 @@
         "serverName": "filesystem",
         "toolName": "move_file",
         "arguments": {
-          "source": "/mnt/c/Users/provo/Downloads/old_file.zip",
+          "source": "~/Downloads/old_file.zip",
           "destination": "/home/provos/.ironcurtain/sandbox/old_file.zip"
         }
       },
@@ -269,7 +269,7 @@
         "serverName": "filesystem",
         "toolName": "search_files",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "pattern": "*.pdf"
         }
       },
@@ -372,8 +372,8 @@
         "serverName": "filesystem",
         "toolName": "move_file",
         "arguments": {
-          "source": "/mnt/c/Users/provo/Downloads/oldfile.zip",
-          "destination": "/mnt/c/Users/provo/Downloads/archive/oldfile.zip"
+          "source": "~/Downloads/oldfile.zip",
+          "destination": "~/Downloads/archive/oldfile.zip"
         }
       },
       "expectedDecision": "escalate",
@@ -413,7 +413,7 @@
         "serverName": "filesystem",
         "toolName": "get_file_info",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads/report.pdf"
+          "path": "~/Downloads/report.pdf"
         }
       },
       "expectedDecision": "allow",
@@ -426,7 +426,7 @@
         "serverName": "filesystem",
         "toolName": "move_file",
         "arguments": {
-          "source": "/mnt/c/Users/provo/Downloads/file.zip",
+          "source": "~/Downloads/file.zip",
           "destination": "/home/provos/Desktop/file.zip"
         }
       },
@@ -935,7 +935,7 @@
         "serverName": "git",
         "toolName": "git_set_working_dir",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "validateGitRepo": true
         }
       },
@@ -1118,7 +1118,7 @@
           "path": "/home/provos/.ironcurtain/sandbox",
           "mode": "move",
           "worktreePath": "/home/provos/.ironcurtain/sandbox/old-wt",
-          "newPath": "/mnt/c/Users/provo/Downloads/new-wt"
+          "newPath": "~/Downloads/new-wt"
         }
       },
       "expectedDecision": "deny",
@@ -1174,7 +1174,7 @@
         "serverName": "git",
         "toolName": "git_tag",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "list"
         }
       },
@@ -1188,7 +1188,7 @@
         "serverName": "git",
         "toolName": "git_tag",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "create",
           "tagName": "download-tag",
           "commit": "HEAD"
@@ -1354,7 +1354,7 @@
         "serverName": "git",
         "toolName": "git_tag",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "list"
         }
       },
@@ -1368,7 +1368,7 @@
         "serverName": "git",
         "toolName": "git_tag",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "delete",
           "tagName": "old-tag"
         }
@@ -1410,7 +1410,7 @@
         "serverName": "git",
         "toolName": "git_stash",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "drop",
           "stashRef": "stash@{0}"
         }
@@ -1425,7 +1425,7 @@
         "serverName": "git",
         "toolName": "git_reset",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "hard",
           "confirmed": true
         }
@@ -1440,7 +1440,7 @@
         "serverName": "git",
         "toolName": "git_remote",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "remove",
           "name": "origin"
         }
@@ -1455,7 +1455,7 @@
         "serverName": "git",
         "toolName": "git_branch",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "operation": "delete",
           "name": "old-branch"
         }
@@ -1470,7 +1470,7 @@
         "serverName": "git",
         "toolName": "git_commit",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "message": "test commit"
         }
       },
@@ -1484,9 +1484,9 @@
         "serverName": "git",
         "toolName": "git_worktree",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "add",
-          "worktreePath": "/mnt/c/Users/provo/Downloads/worktree-branch",
+          "worktreePath": "~/Downloads/worktree-branch",
           "branch": "feature"
         }
       },
@@ -1500,9 +1500,9 @@
         "serverName": "git",
         "toolName": "git_worktree",
         "arguments": {
-          "path": "/mnt/c/Users/provo/Downloads",
+          "path": "~/Downloads",
           "mode": "remove",
-          "worktreePath": "/mnt/c/Users/provo/Downloads/worktree-branch"
+          "worktreePath": "~/Downloads/worktree-branch"
         }
       },
       "expectedDecision": "allow",

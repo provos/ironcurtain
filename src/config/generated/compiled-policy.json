@@ -94,7 +94,7 @@
           "roles": [
             "read-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -115,7 +115,7 @@
           "roles": [
             "write-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -136,7 +136,7 @@
           "roles": [
             "delete-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -157,7 +157,7 @@
           "roles": [
             "read-path"
           ],
-          "within": "/home/provos/Documents"
+          "within": "~/Documents"
         }
       },
       "then": "allow",
@@ -269,7 +269,7 @@
             "read-path",
             "write-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -290,7 +290,7 @@
           "roles": [
             "write-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -317,7 +317,7 @@
           "roles": [
             "read-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -339,7 +339,7 @@
             "read-path",
             "write-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -361,7 +361,7 @@
             "read-path",
             "write-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -384,7 +384,7 @@
             "write-history",
             "delete-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -407,7 +407,7 @@
             "write-history",
             "write-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -429,7 +429,7 @@
             "read-path",
             "write-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -451,7 +451,7 @@
             "read-path",
             "write-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -473,7 +473,7 @@
             "read-path",
             "write-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -495,7 +495,7 @@
             "read-path",
             "write-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -518,7 +518,7 @@
             "write-history",
             "delete-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -541,7 +541,7 @@
             "write-history",
             "delete-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -564,7 +564,7 @@
             "write-history",
             "delete-history"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -586,7 +586,7 @@
             "read-path",
             "delete-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",
@@ -607,7 +607,7 @@
           "roles": [
             "read-path"
           ],
-          "within": "/mnt/c/Users/provo/Downloads"
+          "within": "~/Downloads"
         }
       },
       "then": "allow",

@@ -264,7 +264,7 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
 
 CRITICAL RULES:
 1. Do NOT generate rules for protected path checking, unknown tool denial, or sandbox containment -- those are handled by structural invariants in the engine.
-2. Use CONCRETE ABSOLUTE paths (e.g., "/home/user/Downloads"), not abstract labels.
+2. Use CONCRETE paths, not abstract labels. Prefer tilde-prefixed home-relative paths (e.g., "~/Downloads", "~/Documents") for any location under the user's home directory; the engine expands "~" at evaluation time. Use absolute paths only for system locations outside any home directory (e.g., "/etc", "/var/log", "/usr/share"). Never invent platform-specific absolute home paths (e.g., "/home/<user>/Downloads", "/Users/<user>/Downloads", "/mnt/c/Users/<user>/Downloads") — those are non-portable and the LLM can guess the wrong one.
 3. "Outside a directory" semantics: use rule ordering. A rule with "within" matches the inside case; the next rule without "paths" catches everything else as a fallthrough.
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
 5. Order matters: more specific rules before more general ones.
@@ -919,9 +919,12 @@ export function validateCompiledRules(
         }
       }
 
-      // Validate within is an absolute path
-      if (!rule.if.paths.within.startsWith('/')) {
-        errors.push(`Rule "${rule.name}": paths.within must be an absolute path, got "${rule.if.paths.within}"`);
+      // Validate within is an absolute path or tilde-prefixed home-relative path
+      const within = rule.if.paths.within;
+      if (!within.startsWith('/') && !within.startsWith('~/') && within !== '~') {
+        errors.push(
+          `Rule "${rule.name}": paths.within must be an absolute path or tilde-prefixed home path, got "${within}"`,
+        );
       }
     }
 
