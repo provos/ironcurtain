@@ -27,6 +27,11 @@
  *     `-k` makes the curl call independent of whether the IronCurtain CA is
  *     present in the container's trust store.
  *
+ * Linux-only by design: the bridge being asserted here is part of the Linux
+ * UDS transport (`useTcpTransport()` is false). macOS PTY mode reaches MITM
+ * via `host.docker.internal:<mitmPort>` through a socat sidecar — that path
+ * has no in-container 18080 bridge and would need its own end-to-end test.
+ *
  * Always-on when Docker, the prebuilt `ironcurtain-claude-code:latest` image,
  * AND the host CA used to build that image are all present. The CA is sourced
  * from the active `IRONCURTAIN_HOME` (captured before the test overrides it)
@@ -45,6 +50,7 @@ import { promisify } from 'node:util';
 
 import { runPtySession, type PtyAttachFn } from '../src/docker/pty-session.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
+import { useTcpTransport } from '../src/docker/platform.js';
 import { isDockerAvailable, isDockerImageAvailable } from './helpers/docker-available.js';
 import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
 
@@ -81,7 +87,13 @@ function findHostCaDir(): string | null {
 }
 
 const hostCaDir = findHostCaDir();
-const dockerReady = isDockerAvailable() && isDockerImageAvailable(IMAGE) && hostCaDir !== null;
+// Linux-only: the in-container UDS→TCP bridge being asserted here is part
+// of the Linux UDS transport. On macOS (`useTcpTransport()` returns true),
+// the container reaches MITM via `host.docker.internal:<mitmPort>` through
+// a socat sidecar instead — `127.0.0.1:18080` and `mitm-proxy.sock` simply
+// don't exist there. macOS PTY mode would need its own end-to-end test
+// asserting the sidecar forward.
+const dockerReady = !useTcpTransport() && isDockerAvailable() && isDockerImageAvailable(IMAGE) && hostCaDir !== null;
 
 /** Local upstream responder: 200s every request and counts hits per path. */
 function startUpstreamResponder(): Promise<{ server: Server; port: number; received: IncomingMessage[] }> {
