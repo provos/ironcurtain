@@ -140,14 +140,13 @@ describe('workflows-helpers', () => {
   });
 
   describe('isResumablePhase', () => {
-    it('allows waiting_human and interrupted', () => {
-      expect(isResumablePhase('waiting_human')).toBe(true);
-      expect(isResumablePhase('interrupted')).toBe(true);
-    });
-    it('rejects terminal phases', () => {
-      for (const p of ['completed', 'failed', 'aborted'] as PastRunPhase[]) {
-        expect(isResumablePhase(p)).toBe(false);
+    it('allows every non-completed phase (mirrors engine isCheckpointResumable)', () => {
+      for (const p of ['waiting_human', 'interrupted', 'aborted', 'failed'] as PastRunPhase[]) {
+        expect(isResumablePhase(p)).toBe(true);
       }
+    });
+    it('rejects only completed', () => {
+      expect(isResumablePhase('completed')).toBe(false);
     });
   });
 

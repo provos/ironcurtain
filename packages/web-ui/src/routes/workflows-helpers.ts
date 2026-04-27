@@ -135,8 +135,19 @@ export function truncate(text: string, max = 80): string {
   return text.slice(0, max) + '…';
 }
 
-/** Phases that allow a Resume action from the Past-runs table. */
-const RESUMABLE_PHASES = new Set<PastRunPhase>([PHASE.WAITING_HUMAN, PHASE.INTERRUPTED]);
+/**
+ * Phases that allow a Resume action from the Past-runs table.
+ *
+ * Mirrors the engine's `isCheckpointResumable` (`src/workflow/checkpoint.ts`):
+ * any past-run phase except `'completed'` carries a checkpoint that
+ * `WorkflowOrchestrator.resume()` will accept. `'aborted'` is included
+ * because both the quota-exhaustion and transient-failure paths
+ * deliberately stamp `phase: 'aborted'` to keep the run resumable;
+ * `'failed'` is included because the engine permits resume of error
+ * targets so the user can pick the run back up after fixing the
+ * underlying cause.
+ */
+const RESUMABLE_PHASES = new Set<PastRunPhase>([PHASE.WAITING_HUMAN, PHASE.INTERRUPTED, PHASE.ABORTED, PHASE.FAILED]);
 
 export function isResumablePhase(phase: PastRunPhase): boolean {
   return RESUMABLE_PHASES.has(phase);
