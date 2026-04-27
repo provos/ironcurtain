@@ -79,13 +79,9 @@ export interface QuotaExhaustedEntry extends BaseEntry {
 }
 
 /**
- * Emitted when the adapter detected a transient upstream failure (a
- * degenerate response envelope with no usable content — e.g. a sustained
- * upstream stall) and the orchestrator halted the run instead of
- * retrying. `kind` is the discriminator from
- * `AgentResponse.transientFailure` (today only `'degenerate_response'`);
- * `rawMessage` preserves the original envelope/stdout for humans
- * inspecting the log.
+ * Emitted when the orchestrator halted the run on
+ * `AgentResponse.transientFailure`. `rawMessage` preserves the original
+ * envelope/stdout for humans inspecting the log.
  */
 export interface TransientFailureEntry extends BaseEntry {
   readonly type: 'transient_failure';

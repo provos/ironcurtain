@@ -71,20 +71,12 @@ export function isWorkflowQuotaExhaustedError(err: unknown): err is WorkflowQuot
 
 /**
  * Thrown when the agent adapter reports a transient upstream failure
- * (a degenerate response envelope with no usable content — e.g. a
- * sustained upstream stall) for a state's turn. Sibling of
+ * (see `AgentResponse.transientFailure`). Sibling of
  * `WorkflowQuotaExhaustedError`: both signal terminal-but-resumable
- * conditions where retrying is hopeless.
- *
- * Consumers MUST NOT remove the on-disk checkpoint and MUST surface the
- * run as resumable — `workflow resume <id>` re-enters the failing agent
- * state once the upstream is healthy. The orchestrator forces
- * `phase: 'aborted'` when this fires so `isCheckpointResumable` returns
- * true regardless of which terminal `findErrorTarget` resolved to.
- *
- * `kind` is the discriminator from `AgentResponse.transientFailure`
- * (today only `'degenerate_response'`); `rawMessage` is the original
- * envelope/stdout, preserved for diagnostics.
+ * conditions. Consumers MUST NOT remove the on-disk checkpoint; the
+ * orchestrator forces `phase: 'aborted'` so `isCheckpointResumable`
+ * returns true regardless of which terminal `findErrorTarget` resolved
+ * to.
  */
 export interface WorkflowTransientFailureOptions {
   readonly stateId: string;

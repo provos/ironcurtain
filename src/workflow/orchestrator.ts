@@ -439,22 +439,15 @@ interface WorkflowInstance {
    */
   quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
   /**
-   * Stamped when an agent turn reports a transient upstream failure
-   * (a degenerate response envelope with no usable content — e.g. a
-   * sustained upstream stall). Sibling of `quotaExhausted`: drives the
-   * same checkpoint-preserving abort path so `workflow resume` can
-   * re-enter once the upstream is healthy. Survives only in-process;
-   * the checkpoint itself does not record it.
+   * Sibling of `quotaExhausted`: drives the same checkpoint-preserving
+   * abort path. Survives only in-process; the checkpoint does not
+   * record it.
    *
-   * Resume-correctness depends on a prior state-transition checkpoint
-   * existing for `handleWorkflowComplete` to preserve: the orchestrator
-   * only checkpoints on actual state changes, not on entry to the
-   * `initial:` state. A transient failure on the initial agent state
-   * therefore lands in the terminal-snapshot checkpoint (no usable
-   * `existing.machineState` to preserve), and resume re-enters the
-   * terminal instead of the failing state. Same limitation applies to
-   * `quotaExhausted`. Closing it would require a checkpoint-on-start
-   * change that is out of scope for this signal.
+   * Initial-state caveat: the orchestrator only checkpoints on actual
+   * state transitions, so a transient failure on the `initial:` state
+   * has no prior checkpoint to preserve and resume will re-enter the
+   * terminal rather than the failing state. Applies to `quotaExhausted`
+   * too; closing requires a checkpoint-on-start change.
    */
   transientFailure?: { readonly kind: 'degenerate_response'; readonly rawMessage: string };
 }
@@ -2012,16 +2005,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       // `findErrorTarget` resolved to. Without this, a workflow whose
       // only terminal is `done` would land on `done` and
       // `handleWorkflowComplete` would mark the run `completed`, breaking
-      // resume. The truncated rawMessage excerpt makes the abort reason
-      // self-explanatory in CLI / web UI surfaces without dumping the
-      // full envelope.
+      // resume.
       const excerpt = instance.transientFailure.rawMessage.slice(0, 200);
       instance.finalStatus = {
         phase: 'aborted',
         reason:
           `Upstream stall: agent returned no content (kind=${instance.transientFailure.kind}; ` +
-          `resumable — run "workflow resume <id>" once upstream is healthy)` +
-          (excerpt ? `\n${excerpt}` : ''),
+          `resumable — run "workflow resume <id>" once upstream is healthy)\n${excerpt}`,
       };
     } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {
