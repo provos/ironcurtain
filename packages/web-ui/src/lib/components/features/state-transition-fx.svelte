@@ -37,11 +37,8 @@
   import type { TransitionFxFrame, TransitionTriggerLike } from '$lib/transition-fx.js';
 
   interface Props {
-    /** The director hands this canvas back into its tick loop. */
-    oncanvas?: (el: HTMLCanvasElement | null) => void;
     /** The theater pipes the director's tick-end FX frame through this prop
-     *  callback. Null = idle. We expose a ref-based setter via oncanvas so the
-     *  theater has a direct handle for imperative draws if it prefers. */
+     *  callback. Null = idle. */
     frame?: TransitionFxFrame | null;
     /** Currently-active trigger, or null. Drives DOM-side effects (edge
      *  brightening, arrival badge). The theater forwards from the director's
@@ -52,7 +49,7 @@
     graphRoot?: HTMLElement | null;
   }
 
-  const { frame = null, active = null, graphRoot = null, oncanvas }: Props = $props();
+  const { frame = null, active = null, graphRoot = null }: Props = $props();
 
   let canvasEl: HTMLCanvasElement | undefined = $state();
   let hostEl: HTMLDivElement | undefined = $state();
@@ -64,9 +61,7 @@
   let scanlineTimer: number | null = null;
 
   onMount(() => {
-    oncanvas?.(canvasEl ?? null);
     return () => {
-      oncanvas?.(null);
       clearActiveEdge();
       clearActiveNode();
     };
@@ -270,9 +265,9 @@
     // The cycle total after absorb is SCANLINE_MS=200; we give 400ms for the
     // fade tail because the tail's CSS transition is set to 400ms.
     if (scanlineTimer !== null) clearTimeout(scanlineTimer);
-    scanlineTimer = setTimeout(() => {
+    scanlineTimer = window.setTimeout(() => {
       clearActiveNode();
-    }, 400) as unknown as number;
+    }, 400);
   }
 
   function clearActiveNode(): void {

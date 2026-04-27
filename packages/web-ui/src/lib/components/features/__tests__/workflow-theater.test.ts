@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from '@testing-library/svelte';
 import WorkflowTheater from '../workflow-theater.svelte';
 import type { StateGraphDto } from '$lib/types.js';
+import { makeAgentTrigger } from '$lib/__test_helpers__/agent-trigger.js';
 
 // ---------------------------------------------------------------------------
 // jsdom shims
@@ -281,7 +282,7 @@ describe('WorkflowTheater', () => {
       await flushMicrotasks();
       await rerender(
         makeProps({
-          agentEvent: { id: 1, kind: 'completed', stateId: 'a', peerStateId: 'b', notes: 'handoff' },
+          agentEvent: makeAgentTrigger(),
         }),
       );
       await flushMicrotasks();
@@ -304,13 +305,7 @@ describe('WorkflowTheater', () => {
       await flushMicrotasks();
       await rerender(
         makeProps({
-          agentEvent: {
-            id: 1,
-            kind: 'completed',
-            stateId: 'a',
-            peerStateId: 'b',
-            notes: 'handoff notes',
-          },
+          agentEvent: makeAgentTrigger({ notes: 'handoff notes' }),
         }),
       );
       await flushMicrotasks();

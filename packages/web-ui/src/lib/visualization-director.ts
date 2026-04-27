@@ -114,13 +114,9 @@ export interface VisualizationDirector {
    * events so the rain adapts mid-session.
    */
   setReducedMotion(flag: boolean): void;
-  /** Push a token stream event through the scorer -> engine pipeline. */
-  handleStreamEvent(event: TokenStreamEvent): void;
   /** Kick the transition-FX subsystem. Dropped with a warn-once if a cycle
    *  is already active. */
   triggerTransition(evt: TransitionTriggerLike, nowMs?: number): void;
-  /** Read the FX subsystem's current frame. Null when idle. */
-  getTransitionFxFrame(): TransitionFxFrame | null;
   /** The FX subsystem's current trigger (active cycle), or null. The theater
    *  uses this to locate edge DOM nodes for the dormant->active brightening. */
   getActiveTransition(): TransitionTriggerLike | null;
@@ -351,9 +347,7 @@ export function createVisualizationDirector(deps: DirectorDeps): VisualizationDi
       // engine impl can't take the director down.
       safeStep('set-reduced-motion', () => engine.setReducedMotion(flag));
     },
-    handleStreamEvent: handleStreamEventImpl,
     triggerTransition,
-    getTransitionFxFrame: () => transitionFx.getFrame(),
     getActiveTransition: () => transitionFx.getActive(),
     get running(): boolean {
       return rafHandle !== null && !disposed;

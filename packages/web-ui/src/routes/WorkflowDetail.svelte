@@ -91,20 +91,19 @@
   let lastKnownState: string | null = null;
 
   function handleAgentEvent(evt: WorkflowAgentEvent): void {
-    const id = ++agentEventCounter;
+    // Only `started` drives the FX cycle. At the moment a `completed` event
+    // fires, the matching `state_entered` has not yet landed, so
+    // `summary.currentState` still equals `evt.stateId`. The graph guards
+    // `fromId === toId` (state-machine-graph.svelte:144), which would make
+    // any synthesized `completed` trigger a no-op. The next `started` event
+    // carries the real handoff peer, so we let it drive the visualization.
     if (evt.kind === 'started') {
+      const id = ++agentEventCounter;
       // peer = where we just came from; fall back to the event's own state
       // so the graph's id lookup always resolves (peerStateId missing
       // would cause the trigger to silently no-op).
       const peer = lastKnownState && lastKnownState !== evt.stateId ? lastKnownState : evt.stateId;
       agentEvent = { id, kind: 'started', stateId: evt.stateId, peerStateId: peer };
-    } else {
-      // `completed` hands off to the next state. We don't know the peer yet
-      // (the subsequent `state_entered` will tell us) but the graph
-      // component uses the peer as the arrival target, so we fall back to
-      // the current state; the next `started` event will correct it.
-      const peer = summary.currentState && summary.currentState !== evt.stateId ? summary.currentState : evt.stateId;
-      agentEvent = { id, kind: 'completed', stateId: evt.stateId, peerStateId: peer, notes: evt.notes };
     }
     lastKnownState = evt.stateId;
   }

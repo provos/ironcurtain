@@ -328,7 +328,6 @@ export type WorkflowLifecycleEvent =
       readonly kind: 'agent_session_ended';
       readonly workflowId: WorkflowId;
       readonly state: string;
-      readonly persona: string;
       readonly sessionId: SessionId;
     };
 
@@ -1902,7 +1901,6 @@ export class WorkflowOrchestrator implements WorkflowController {
         kind: 'agent_session_ended',
         workflowId,
         state: stateId,
-        persona: stateConfig.persona,
         sessionId: endedSessionId,
       });
     }

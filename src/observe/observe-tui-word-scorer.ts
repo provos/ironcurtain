@@ -6,6 +6,12 @@
  * history as the corpus. Produces top-scoring words for rain panel
  * word drops, with throttle/dedup to avoid repetition.
  *
+ * KEEP IN SYNC WITH packages/web-ui/src/lib/word-scorer.ts. See the
+ * header of that file for the full rationale on why the two scorers
+ * are kept as parallel copies (separate build pipelines, divergent
+ * accumulator shapes) and the list of shared bits that must stay
+ * byte-for-byte equivalent across both files.
+ *
  * Depends on observe-tui-types.ts only. No external dependencies.
  */
 

@@ -4,6 +4,7 @@ import { createTokenStreamStore } from '$lib/token-stream-store.svelte.js';
 import { createStreamRainEngine, type StreamRainEngine } from '$lib/matrix-rain/stream-engine.js';
 import type { LayoutPlan } from '$lib/matrix-rain/types.js';
 import type { SvgPoint } from '$lib/project-svg-to-grid.js';
+import type { TransitionFxFrame } from '$lib/transition-fx.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -326,10 +327,12 @@ describe('VisualizationDirector — transition-fx', () => {
 
   it('advances fx state per tick and returns to idle after the cycle', () => {
     const harness = makeRafHarness();
+    const frames: Array<TransitionFxFrame | null> = [];
     const d = createVisualizationDirector({
       ...makeDeps(),
       requestAnimationFrame: harness.raf,
       cancelAnimationFrame: harness.caf,
+      onTransitionFxFrame: (f) => frames.push(f),
     });
     d.start();
     d.triggerTransition(
@@ -344,13 +347,15 @@ describe('VisualizationDirector — transition-fx', () => {
     );
     // Each flush advances nowMs by 16. We need ~62 ticks to pass 1000ms.
     for (let i = 0; i < 75; i++) harness.flush();
-    expect(d.getTransitionFxFrame()).toBeNull();
+    // After the cycle ends, the most recent frame published via the callback
+    // must be null so consumers (the theater) can unmount their FX overlay.
+    expect(frames[frames.length - 1]).toBeNull();
     expect(d.getActiveTransition()).toBeNull();
   });
 
   it('invokes onTransitionFxFrame with live frames during the cycle', () => {
     const harness = makeRafHarness();
-    const frames: Array<ReturnType<ReturnType<typeof createVisualizationDirector>['getTransitionFxFrame']>> = [];
+    const frames: Array<TransitionFxFrame | null> = [];
     const d = createVisualizationDirector({
       ...makeDeps(),
       requestAnimationFrame: harness.raf,

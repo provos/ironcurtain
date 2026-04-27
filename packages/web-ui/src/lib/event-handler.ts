@@ -166,11 +166,9 @@ export type WebEvent =
   | {
       // Fires in the orchestrator's `finally` so success, failure, and abort
       // paths all clean up the bridge mapping. Mirror of the daemon contract
-      // in src/web-ui/web-event-bus.ts; `persona` is emitted for symmetry
-      // with `agent_started` so consumers can correlate end-of-session
-      // events without looking back at the matching start event.
+      // in src/web-ui/web-event-bus.ts.
       event: 'workflow.agent_session_ended';
-      payload: { workflowId: string; stateId: string; persona: string; sessionId: string };
+      payload: { workflowId: string; stateId: string; sessionId: string };
     }
   | { event: 'workflow.completed'; payload: { workflowId: string } }
   | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
@@ -244,7 +242,7 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'workflow.agent_session_ended':
       return {
         event,
-        payload: data as { workflowId: string; stateId: string; persona: string; sessionId: string },
+        payload: data as { workflowId: string; stateId: string; sessionId: string },
       };
     case 'workflow.completed':
       return { event, payload: data as { workflowId: string } };

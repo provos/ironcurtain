@@ -19,6 +19,7 @@
 import type { RainRng } from '../src/lib/matrix-rain/engine.js';
 import { createSeededRng } from '../src/lib/matrix-rain/engine.js';
 import type { TokenStreamEvent as FrontendTokenStreamEvent } from '../src/lib/types.js';
+import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -333,11 +334,7 @@ export function createScenarioRunner(
             const sid = activeSessions.get(key);
             if (sid !== undefined) {
               activeSessions.delete(key);
-              emit('workflow.agent_session_ended', {
-                workflowId: p.workflowId,
-                stateId,
-                sessionId: sid,
-              });
+              emit('workflow.agent_session_ended', makeAgentSessionEndedPayload(p.workflowId, stateId, sid));
             }
           }
         }

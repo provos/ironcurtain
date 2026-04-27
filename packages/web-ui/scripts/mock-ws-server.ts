@@ -25,6 +25,7 @@ import {
   type Scenario,
   type ScenarioRunner,
 } from './scenario-runner.js';
+import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the daemon protocol without importing from src/)
@@ -1407,12 +1408,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
               confidence: '0.87',
               notes: 'drafted a 4-step implementation plan covering data model, API, UI, and tests',
             });
-            broadcast('workflow.agent_session_ended', {
-              workflowId: newId,
-              stateId: 'plan',
-              persona: 'planner',
-              sessionId: planSessionId,
-            });
+            broadcast('workflow.agent_session_ended', makeAgentSessionEndedPayload(newId, 'plan', planSessionId));
             wf.currentState = 'plan_review';
             wf.phase = 'waiting_human';
             const gateId = `${newId}-plan_review`;
@@ -1552,12 +1548,10 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 notes: completionNotes,
               });
               if (nextSessionId !== null) {
-                broadcast('workflow.agent_session_ended', {
-                  workflowId: resolveWfId,
-                  stateId: nextState,
-                  persona: nextPersona,
-                  sessionId: nextSessionId,
-                });
+                broadcast(
+                  'workflow.agent_session_ended',
+                  makeAgentSessionEndedPayload(resolveWfId, nextState, nextSessionId),
+                );
               }
               if (followupState) {
                 wf.currentState = followupState;

@@ -3,6 +3,7 @@ import { render } from '@testing-library/svelte';
 import StateMachineGraph from './state-machine-graph.svelte';
 import type { AgentTransitionTrigger } from './state-machine-graph.svelte';
 import type { StateGraphDto, StateNodeDto, TransitionEdgeDto } from '$lib/types.js';
+import { makeAgentTrigger } from '$lib/__test_helpers__/agent-trigger.js';
 
 // ---------------------------------------------------------------------------
 // jsdom is missing ResizeObserver -- stub it globally.
@@ -286,7 +287,7 @@ describe('StateMachineGraph', () => {
       const { ontransition, rerender } = renderWithTrigger(null);
       await rerender(
         makeProps({
-          agentEvent: { id: 1, kind: 'completed', stateId: 'a', peerStateId: 'b', notes: 'handed off' },
+          agentEvent: makeAgentTrigger({ notes: 'handed off' }),
           ontransition,
         }),
       );
@@ -304,7 +305,7 @@ describe('StateMachineGraph', () => {
       const { ontransition, rerender } = renderWithTrigger(null);
       await rerender(
         makeProps({
-          agentEvent: { id: 1, kind: 'started', stateId: 'b', peerStateId: 'a' },
+          agentEvent: makeAgentTrigger({ kind: 'started', stateId: 'b', peerStateId: 'a', notes: undefined }),
           ontransition,
         }),
       );
@@ -318,12 +319,7 @@ describe('StateMachineGraph', () => {
 
     it('deduplicates repeat triggers with the same id', async () => {
       const ontransition = vi.fn();
-      const trigger: AgentTransitionTrigger = {
-        id: 42,
-        kind: 'completed',
-        stateId: 'a',
-        peerStateId: 'b',
-      };
+      const trigger: AgentTransitionTrigger = makeAgentTrigger({ id: 42, notes: undefined });
       const { rerender } = render(StateMachineGraph, {
         props: makeProps({ agentEvent: trigger, ontransition }),
       });
@@ -343,7 +339,7 @@ describe('StateMachineGraph', () => {
       const ontransition = vi.fn();
       render(StateMachineGraph, {
         props: makeProps({
-          agentEvent: { id: 'a1', kind: 'completed', stateId: 'a', peerStateId: 'b', notes: longNotes },
+          agentEvent: makeAgentTrigger({ id: 'a1', notes: longNotes }),
           ontransition,
         }),
       });
@@ -356,7 +352,7 @@ describe('StateMachineGraph', () => {
       const ontransition = vi.fn();
       render(StateMachineGraph, {
         props: makeProps({
-          agentEvent: { id: 1, kind: 'completed', stateId: 'a', peerStateId: 'ghost' },
+          agentEvent: makeAgentTrigger({ peerStateId: 'ghost', notes: undefined }),
           ontransition,
         }),
       });

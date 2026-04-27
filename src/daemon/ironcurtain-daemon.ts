@@ -20,7 +20,7 @@ import { loadConfig } from '../config/index.js';
 import { loadUserConfig, type ResolvedUserConfig } from '../config/user-config.js';
 import { getJobWorkspaceDir, getJobGeneratedDir, getJobDir, getWebUiStatePath } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
-import type { SessionMode, SessionId, EscalationRequest } from '../session/types.js';
+import { parseSessionId, type SessionMode, type SessionId, type EscalationRequest } from '../session/types.js';
 import { SessionManager, type SessionSource } from '../session/session-manager.js';
 import { HeadlessTransport } from '../cron/headless-transport.js';
 import { shouldAutoSaveMemory } from '../memory/auto-save.js';
@@ -766,8 +766,8 @@ export class IronCurtainDaemon {
         // the `AgentConversationId`, so every `agent_started` event
         // carries a distinct SessionId and reserving a fresh label is
         // always correct.
-        const { sessionId } = payload as { sessionId: string };
-        const sid = sessionId as SessionId;
+        const sid = parseSessionId((payload as { sessionId?: unknown }).sessionId);
+        if (sid === undefined) return;
         const label = this.sessionManager.reserveLabel();
         this.workflowAgentLabels.set(sid, label);
         bridge.registerSession(label, sid);
@@ -776,8 +776,8 @@ export class IronCurtainDaemon {
         // tears it down unconditionally (fires in the orchestrator's
         // finally block so success, failure, and abort paths all
         // converge here).
-        const { sessionId } = payload as { sessionId: string };
-        const sid = sessionId as SessionId;
+        const sid = parseSessionId((payload as { sessionId?: unknown }).sessionId);
+        if (sid === undefined) return;
         const label = this.workflowAgentLabels.get(sid);
         if (label !== undefined) {
           this.workflowAgentLabels.delete(sid);

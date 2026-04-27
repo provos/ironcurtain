@@ -6,11 +6,36 @@
  * history as the corpus. Produces top-scoring words for rain panel
  * word drops, with throttle/dedup to avoid repetition.
  *
- * Browser-side port of src/observe/observe-tui-word-scorer.ts. The
- * signal layer (TF-IDF math, token accumulation, stop-word filtering)
- * is verbatim. TokenStreamEvent is imported from the canonical frontend
- * mirror in types.ts; WordDropSource comes from the rain types module
- * so the scorer shares a vocabulary with the stream engine.
+ * KEEP IN SYNC WITH src/observe/observe-tui-word-scorer.ts.
+ *
+ * This file is a deliberate near-verbatim port of the TUI scorer. The
+ * two consumers (Node TUI and browser web-ui) live in different package
+ * boundaries with separate build pipelines (the web-ui has its own
+ * tsconfig.json + Vite build that does not include `src/`), and the
+ * stateful surface diverges (TUI keystroke handler vs. Svelte component
+ * lifecycle). A shared module would force one of:
+ *   - a new workspace package just for the shared bits (heavyweight),
+ *   - widening web-ui's tsconfig include to reach into `src/` and
+ *     teaching Vite + svelte-check + vitest to resolve it (intrusive), or
+ *   - publishing the shared bits separately (overkill for two callers).
+ *
+ * The duplicated surface that matters for behavior parity is:
+ *   - ENGLISH_STOP_WORDS / CODE_STOP_WORDS (must stay equal)
+ *   - extractWordsFromText() (must stay byte-for-byte equivalent)
+ *   - extractWordsFromCode() and the regex constants it uses
+ *   - The TF-IDF math in computeTf() / scoreDocument()
+ * The TF-IDF accumulators around them differ by design: each consumer
+ * owns its own state shape suited to its host (keystroke buffer vs.
+ * Svelte state). Diverging the math is a regression; diverging the
+ * accumulators is fine.
+ *
+ * If you change one of the listed shared bits, change the other file
+ * in the same commit and add a test that exercises the new behavior on
+ * both sides.
+ *
+ * TokenStreamEvent is imported from the canonical frontend mirror in
+ * types.ts; WordDropSource comes from the rain types module so the
+ * scorer shares a vocabulary with the stream engine.
  */
 
 import type { TokenStreamEvent } from './types.js';

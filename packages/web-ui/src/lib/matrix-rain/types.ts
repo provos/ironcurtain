@@ -176,11 +176,9 @@ export interface DropTrailSnapshot {
 
 /**
  * Drop color tier — maps 1:1 to a palette slot in the renderer.
- * `head` is brightest, `far` is dimmest. `word-hold` is a stream-engine-only
- * variant tagging cells belonging to held word drops so the stream renderer
- * can tint them per their source kind; the login engine never emits it.
+ * `head` is brightest, `far` is dimmest.
  */
-export type DropColorKind = 'head' | 'near' | 'far' | 'word-hold';
+export type DropColorKind = 'head' | 'near' | 'far';
 
 // ---------------------------------------------------------------------------
 // RNG

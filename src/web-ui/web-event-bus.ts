@@ -85,7 +85,6 @@ export interface WebEventMap {
   'workflow.agent_session_ended': {
     workflowId: string;
     stateId: string;
-    persona: string;
     sessionId: string;
   };
 
