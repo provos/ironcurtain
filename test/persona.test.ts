@@ -326,10 +326,6 @@ describe('filterMcpServersByPolicy', () => {
   });
 
   it('drops filesystem when the policy does not reference it', () => {
-    // Unlike applyServerAllowlist, this filter has no hardcoded
-    // filesystem exception — every realistic constitution emits at
-    // least one filesystem rule, so the policy-derived set already
-    // contains it. This test pins that behavior down.
     const filtered = filterMcpServersByPolicy(mockServers, new Set(['github']));
     expect(Object.keys(filtered)).toEqual(['github']);
   });
@@ -345,9 +341,6 @@ describe('filterMcpServersByPolicy', () => {
   });
 
   it('ignores required-set entries that are not in mcpServers', () => {
-    // An over-broad required set (e.g., a server name dropped from
-    // mcp-servers.json after policy compilation) just yields nothing
-    // for that name; the filter does not synthesize entries.
     const filtered = filterMcpServersByPolicy(mockServers, new Set(['github', 'nonexistent']));
     expect(Object.keys(filtered)).toEqual(['github']);
   });

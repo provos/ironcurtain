@@ -269,9 +269,6 @@ describe('extractRequiredServers', () => {
   });
 
   it('returns an empty set when no rules carry an if.server entry', () => {
-    // Rules without `if.server` are ignored: the compiler enforces that
-    // every emitted rule names a server, so this just guards the helper
-    // against malformed inputs.
     const policy = makePolicyFile([
       {
         name: 'unscoped',

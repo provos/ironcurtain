@@ -155,11 +155,8 @@ function createTestPersonaOnDisk(
     ...(opts.servers ? { servers: opts.servers } : {}),
   };
   writeFileSync(resolve(personaDir, 'persona.json'), JSON.stringify(definition));
-  // The session's policy-derived MCP filter walks `rule.if.server`, so the
-  // synthesized compiled policy must reference every server the test config
-  // supplies — otherwise the filter drops them all before the test runs.
-  // Tests can override via opts.policyServers when they want to exercise a
-  // different policy-server set (e.g., a single-server policy).
+  // Synthesized policy must reference every server in test config, else the
+  // policy-derived filter drops them all before the test runs.
   const policyServers = opts.policyServers ?? ['filesystem', 'github', 'gmail'];
   writeFileSync(
     resolve(generatedDir, 'compiled-policy.json'),

@@ -562,16 +562,9 @@ export function buildSessionConfig(
     sessionConfig.mcpServers = applyServerAllowlist(sessionConfig.mcpServers, serverAllowlist);
   }
 
-  // Drop servers the active compiled policy never references. Default-deny
-  // already rejects calls to unreferenced servers, so spawning their proxy
-  // subprocesses just costs startup time and file descriptors. The memory
-  // server is injected below; the policy filter never includes it because
-  // memory annotations live outside the rule set.
-  const policyDirForFilter = sessionConfig.generatedDir;
-  const annotationsDirForFilter = sessionConfig.toolAnnotationsDir ?? sessionConfig.generatedDir;
   const { compiledPolicy: policyForFilter } = loadGeneratedPolicy({
-    policyDir: policyDirForFilter,
-    toolAnnotationsDir: annotationsDirForFilter,
+    policyDir: sessionConfig.generatedDir,
+    toolAnnotationsDir: sessionConfig.toolAnnotationsDir ?? sessionConfig.generatedDir,
     fallbackDir: getPackageGeneratedDir(),
   });
   sessionConfig.mcpServers = filterMcpServersByPolicy(

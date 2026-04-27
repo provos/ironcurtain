@@ -1,5 +1,6 @@
 import { dirname } from 'node:path';
 import type { CompiledPolicyFile } from '../pipeline/types.js';
+import { RESERVED_SERVER_NAMES } from '../docker/proxy-tools.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 
 /**
@@ -57,17 +58,9 @@ export function extractPolicyRoots(compiledPolicy: CompiledPolicyFile, allowedDi
 }
 
 /**
- * Extracts the set of MCP server names referenced by the compiled policy.
- *
- * The compiler enforces (via `validateServerScoping` in
- * `src/pipeline/pipeline-runner.ts`) that every rule carries
- * `if.server: [serverName]`. Under default-deny, any tool call to a
- * server with no policy rule is rejected, so the runtime never needs
- * to spawn proxy subprocesses for unreferenced servers.
- *
- * The reserved `proxy` virtual server (registered in-process by the
- * sandbox in Docker Agent Mode) is never spawned from `mcp-servers.json`
- * and is excluded here unconditionally.
+ * Extracts the set of MCP server names referenced by the compiled
+ * policy. Reserved virtual servers (registered in-process, not spawned
+ * from `mcp-servers.json`) are excluded.
  */
 export function extractRequiredServers(policy: CompiledPolicyFile): Set<string> {
   const servers = new Set<string>();
@@ -77,7 +70,9 @@ export function extractRequiredServers(policy: CompiledPolicyFile): Set<string> 
       servers.add(serverName);
     }
   }
-  servers.delete('proxy');
+  for (const reserved of RESERVED_SERVER_NAMES) {
+    servers.delete(reserved);
+  }
   return servers;
 }
 

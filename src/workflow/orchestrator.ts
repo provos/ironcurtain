@@ -203,15 +203,7 @@ export interface CreateWorkflowInfrastructureInput {
    * See `docs/designs/workflow-session-identity.md` §2.5.
    */
   readonly scope: string;
-  /**
-   * Union of MCP server names required across every agent state that
-   * shares this scope. Computed by the orchestrator from the compiled
-   * policy of each state's persona; threaded here so the factory can
-   * filter `config.mcpServers` to the union before constructing the
-   * Docker infrastructure. Servers outside this set never get a proxy
-   * subprocess, since default-deny would reject every call to them
-   * anyway.
-   */
+  /** Union of MCP server names required across every agent state in this scope. */
   readonly requiredServers: ReadonlySet<string>;
 }
 
@@ -404,13 +396,7 @@ interface WorkflowInstance {
    * `loadConfig()` on every state transition.
    */
   readonly policyDirByPersona: Map<string, string>;
-  /**
-   * Memoized union of MCP server names required across every agent state
-   * sharing a `containerScope`. Computed once on first
-   * `ensureBundleForScope` call for the scope and threaded into the
-   * factory so the bundle only spawns proxy subprocesses for servers
-   * that at least one state's policy actually references.
-   */
+  /** Memoized per-scope union of required server names. */
   readonly requiredServersByScope: Map<string, ReadonlySet<string>>;
   /**
    * Last persona loaded into each bundle's coordinator, keyed by
@@ -541,22 +527,9 @@ export class WorkflowOrchestrator implements WorkflowController {
    * bundle and throw without updating the map.
    */
   /**
-   * Computes (and memoizes) the union of MCP server names required across
-   * every agent state in the workflow that shares `scope`. The result is
-   * threaded into `CreateWorkflowInfrastructureInput.requiredServers` so
-   * the factory can filter `config.mcpServers` to that union before
-   * constructing the bundle.
-   *
-   * Walks `definition.states` once, picking out `AgentStateDefinition`
-   * entries whose `containerScope ?? DEFAULT_CONTAINER_SCOPE` matches the
-   * target scope, resolves each persona's policy directory, loads the
-   * compiled policy, and unions `extractRequiredServers` across them.
-   *
-   * Personas whose compiled policy cannot be read (for example, the
-   * persona has not been compiled yet) cause `cyclePolicy` to throw at
-   * state entry; here we let the same error surface so the workflow
-   * fails fast at `ensureBundleForScope` time rather than spawning a
-   * bundle for an inconsistent server set.
+   * Computes and memoizes the union of MCP server names required by every
+   * agent state in `scope`. Threaded into the workflow infrastructure
+   * factory so the bundle only spawns proxies the policies reference.
    */
   private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
     const cached = instance.requiredServersByScope.get(scope);
@@ -840,9 +813,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       // to the default `./audit.jsonl` against process.cwd().
       config.allowedDirectory = input.workspacePath;
       config.auditLogPath = getBundleAuditLogPath(input.workflowId, input.bundleId);
-      // Drop MCP servers no compiled policy in this scope ever references.
-      // Default-deny rejects calls to absent servers, so spawning their
-      // proxy subprocesses just costs startup time and file descriptors.
       config.mcpServers = filterMcpServersByPolicy(config.mcpServers, input.requiredServers);
       applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
       return createDockerInfrastructure(
