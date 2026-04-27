@@ -295,14 +295,23 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
      * a 429 under Goose will therefore take the generic abort path
      * instead of pausing cleanly.
      *
-     * Closing this gap requires either (a) adopting a Goose structured
+     * The same gap applies to `AgentResponse.transientFailure`: detecting
+     * an upstream stall (degenerate response with no assistant content)
+     * relies on the JSON envelope's `usage.output_tokens` and
+     * `stop_reason` fields, which Goose does not surface. A workflow run
+     * that hits a sustained upstream stall under Goose will therefore
+     * take the generic abort path instead of marking the run as
+     * transient-resumable.
+     *
+     * Closing these gaps requires either (a) adopting a Goose structured
      * output mode when one becomes available, or (b) a fragile stderr
      * regex against known provider messages ("Usage limit reached",
      * "429", "rate_limit_exceeded"); (b) is deliberately not attempted
      * without broader testing across providers. See the Claude Code
      * adapter (`adapters/claude-code.ts`) for the target contract and
-     * `AgentResponse.quotaExhausted` in `../agent-adapter.ts` for the
-     * interface-level requirement on adapters.
+     * `AgentResponse.quotaExhausted` / `AgentResponse.transientFailure`
+     * in `../agent-adapter.ts` for the interface-level requirement on
+     * adapters.
      */
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       const clean = stripAnsi(stdout);

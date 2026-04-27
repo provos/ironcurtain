@@ -428,6 +428,7 @@ function makeStored(args: Record<string, ArgumentRoleSpec>): StoredToolAnnotatio
     serverName: 'test',
     comment: 'Test tool',
     args,
+    inputSchema: {},
   };
 }
 

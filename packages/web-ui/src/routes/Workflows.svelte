@@ -558,7 +558,7 @@
                           disabled
                           aria-disabled="true"
                           data-testid={`resume-${row.workflowId}`}
-                          title="Workflow is not resumable in its current phase -- use Investigate"
+                          title="Workflow has already completed — use Investigate to inspect"
                         >
                           Resume
                         </Button>

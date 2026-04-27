@@ -178,9 +178,22 @@ CRITICAL: If a compiled escalate rule matches an operation (even outside the san
    - **"rule"**: The compiled rule is wrong and needs to be fixed. The scenario expectation correctly reflects the constitution.
    - **"scenario"**: The scenario expectation is wrong. The compiled rule is correct per the constitution. Provide the corrected expectedDecision and reasoning.
    - **"both"**: The rule needs adjustment AND the scenario expectation is wrong. Provide the corrected expectedDecision and reasoning.
-2. Identify suspicious patterns (e.g., a broad "allow" rule shadowing a narrow
-   "escalate" rule, or an "escalate" rule catching operations that should be
-   default-denied because the constitution prohibits them).
+2. Identify suspicious patterns. Examples (not exhaustive):
+   - A broad "allow" rule shadowing a narrow "escalate" rule.
+   - An "escalate" rule catching operations that should be default-denied because
+     the constitution prohibits them.
+   - **Region coverage gap**: a tool has compiled rules that cover some inputs
+     (e.g., paths within directory X, or URLs matching pattern Y) but no rule
+     covers the complementary inputs (paths outside X, or URLs not matching Y).
+     The uncovered region falls through to default-deny. This may be intended
+     (constitution is silent or prohibits the complementary region) or unintended
+     (constitution requires allow/escalate for that region). Re-read the
+     constitution clause that authorized the existing rule to determine which.
+     Do NOT assume any specific decision is correct -- consult the constitution.
+   - **Name/decision mismatch**: a rule whose name encodes a decision (e.g.
+     "escalate-X", "allow-X", "deny-X") whose \`then:\` field is a different
+     decision. Either the name is wrong or the decision is wrong; flag both
+     possibilities so the compiler can pick the one that matches its intent.
 3. Identify missing coverage -- scenarios the constitution implies that were not tested.
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.

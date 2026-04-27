@@ -8,7 +8,13 @@
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { loadConfig, applyAllowedDirectoryToMcpArgs } from '../config/index.js';
+import {
+  loadConfig,
+  applyAllowedDirectoryToMcpArgs,
+  loadGeneratedPolicy,
+  getPackageGeneratedDir,
+} from '../config/index.js';
+import { extractRequiredServers } from '../trusted-process/policy-roots.js';
 import {
   getSessionDir,
   getSessionSandboxDir,
@@ -23,7 +29,7 @@ import {
 import { validatePolicyDir as sharedValidatePolicyDir } from '../config/validate-policy-dir.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
-import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
+import { resolvePersona, applyServerAllowlist, filterMcpServersByPolicy } from '../persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
 import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
@@ -563,6 +569,16 @@ export function buildSessionConfig(
   if (serverAllowlist) {
     sessionConfig.mcpServers = applyServerAllowlist(sessionConfig.mcpServers, serverAllowlist);
   }
+
+  const { compiledPolicy: policyForFilter } = loadGeneratedPolicy({
+    policyDir: sessionConfig.generatedDir,
+    toolAnnotationsDir: sessionConfig.toolAnnotationsDir ?? sessionConfig.generatedDir,
+    fallbackDir: getPackageGeneratedDir(),
+  });
+  sessionConfig.mcpServers = filterMcpServersByPolicy(
+    sessionConfig.mcpServers,
+    extractRequiredServers(policyForFilter),
+  );
 
   // Inject the memory MCP server for persona and cron job sessions only.
   // Default (ad-hoc) sessions are stateless and don't benefit from memory.

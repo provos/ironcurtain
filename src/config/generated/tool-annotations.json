@@ -444,10 +444,11 @@
           "comment": "Stages specified files or all changes in the repository for the next commit.",
           "args": {
             "path": [
-              "read-path"
+              "read-path",
+              "write-history"
             ],
             "files": [
-              "read-path"
+              "none"
             ],
             "update": [
               "none"
@@ -506,7 +507,7 @@
               "read-path"
             ],
             "file": [
-              "read-path"
+              "none"
             ],
             "startLine": [
               "none"
@@ -791,7 +792,8 @@
           "args": {
             "path": [
               "read-path",
-              "write-history"
+              "write-history",
+              "write-path"
             ],
             "target": [
               "branch-name"
@@ -803,7 +805,7 @@
               "none"
             ],
             "paths": [
-              "read-path"
+              "none"
             ],
             "track": [
               "none"
@@ -1144,7 +1146,7 @@
               "none"
             ],
             "filesToStage": [
-              "read-path"
+              "none"
             ],
             "forceUnsignedOnFailure": [
               "none"
@@ -1238,7 +1240,7 @@
               "none"
             ],
             "paths": [
-              "read-path"
+              "none"
             ],
             "staged": [
               "none"
@@ -1318,7 +1320,8 @@
           "comment": "Downloads objects and refs from a remote repository without merging them into the local branch.",
           "args": {
             "path": [
-              "read-path"
+              "read-path",
+              "write-history"
             ],
             "remote": [
               "git-remote-url"
@@ -1434,7 +1437,7 @@
               "branch-name"
             ],
             "filePath": [
-              "read-path"
+              "none"
             ],
             "oneline": [
               "none"
@@ -1934,39 +1937,9 @@
             "name": [
               "none"
             ],
-            "url": {
-              "default": [
-                "git-remote-url"
-              ],
-              "when": [
-                {
-                  "condition": {
-                    "arg": "mode",
-                    "in": [
-                      "list",
-                      "get-url"
-                    ]
-                  },
-                  "roles": [
-                    "none"
-                  ]
-                },
-                {
-                  "condition": {
-                    "arg": "mode",
-                    "in": [
-                      "add",
-                      "rename",
-                      "set-url",
-                      "remove"
-                    ]
-                  },
-                  "roles": [
-                    "git-remote-url"
-                  ]
-                }
-              ]
-            },
+            "url": [
+              "none"
+            ],
             "newName": [
               "none"
             ],
@@ -2039,7 +2012,7 @@
               "none"
             ],
             "paths": [
-              "read-path"
+              "none"
             ],
             "confirmed": [
               "none"
@@ -2091,9 +2064,23 @@
           "toolName": "git_set_working_dir",
           "comment": "Sets the session-level default working directory for all subsequent git operations.",
           "args": {
-            "path": [
-              "read-path"
-            ],
+            "path": {
+              "default": [
+                "read-path"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "initializeIfNotPresent",
+                    "equals": true
+                  },
+                  "roles": [
+                    "read-path",
+                    "write-path"
+                  ]
+                }
+              ]
+            },
             "validateGitRepo": [
               "none"
             ],
@@ -2152,7 +2139,7 @@
               "none"
             ],
             "filePath": [
-              "read-path"
+              "none"
             ]
           },
           "serverName": "git",

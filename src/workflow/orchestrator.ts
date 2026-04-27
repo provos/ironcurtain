@@ -40,9 +40,11 @@ import {
   getInvocationDir,
 } from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
-import { loadConfig } from '../config/index.js';
+import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
+import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
+import { extractRequiredServers } from '../trusted-process/policy-roots.js';
 import { createPersonaName } from '../persona/types.js';
 import type {
   AgentConversationId,
@@ -77,7 +79,13 @@ import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
 import { discoverWorkflowRuns } from './workflow-discovery.js';
 import { isCheckpointResumable } from './checkpoint.js';
-import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
+import {
+  AgentInvocationError,
+  WorkflowQuotaExhaustedError,
+  WorkflowTransientFailureError,
+  isWorkflowQuotaExhaustedError,
+  isWorkflowTransientFailureError,
+} from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -204,6 +212,8 @@ export interface CreateWorkflowInfrastructureInput {
    * See `docs/designs/workflow-session-identity.md` §2.5.
    */
   readonly scope: string;
+  /** Union of MCP server names required across every agent state in this scope. */
+  readonly requiredServers: ReadonlySet<string>;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -440,6 +450,15 @@ interface WorkflowInstance {
    */
   readonly currentPersonaByBundle: Map<string, string>;
   /**
+   * Required-server snapshot taken at bundle mint, keyed by `BundleId`.
+   * `cyclePolicy` checks each newly loaded persona's required servers
+   * against this set so a mid-workflow persona recompile that adds a
+   * server fails fast with a clear error instead of producing cryptic
+   * "tool unavailable" runtime failures (no relay was spawned for the
+   * new server).
+   */
+  readonly mintedServersByBundle: Map<string, ReadonlySet<string>>;
+  /**
    * Set once `destroyWorkflowInfrastructure` begins teardown. An
    * `ensureBundleForScope` call that suspended at `await factory(...)`
    * must observe this flag before publishing into `bundlesByScope` —
@@ -457,6 +476,18 @@ interface WorkflowInstance {
    * Survives only in-process; the checkpoint itself does not record it.
    */
   quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
+  /**
+   * Sibling of `quotaExhausted`: drives the same checkpoint-preserving
+   * abort path. Survives only in-process; the checkpoint does not
+   * record it.
+   *
+   * Initial-state caveat: the orchestrator only checkpoints on actual
+   * state transitions, so a transient failure on the `initial:` state
+   * has no prior checkpoint to preserve and resume will re-enter the
+   * terminal rather than the failing state. Applies to `quotaExhausted`
+   * too; closing requires a checkpoint-on-start change.
+   */
+  transientFailure?: { readonly kind: 'degenerate_response'; readonly rawMessage: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +612,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // also guards the root the coordinator's `ctrl.sock` binds into.
     ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
 
+    const requiredServers = this.getRequiredServersForScope(instance, scope);
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
     const infra = await factory({
       workflowId: instance.id,
@@ -589,6 +621,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       controlSocketPath,
       workspacePath: instance.workspacePath,
       scope,
+      requiredServers,
     });
 
     // Abort may have landed while `factory()` was suspended. Publishing
@@ -641,7 +674,45 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     instance.bundlesByScope.set(scope, infra);
+    instance.mintedServersByBundle.set(bundleId, requiredServers);
     return infra;
+  }
+
+  /**
+   * Returns the cached policyDir for `persona`, canonicalizing on first
+   * lookup so required-server derivation and the coordinator's
+   * `loadPolicy` RPC operate on the same realpath-resolved file (any
+   * symlink under the persona dir is collapsed once, here, instead of
+   * re-resolved by every reader).
+   */
+  private getPolicyDir(instance: WorkflowInstance, persona: string): string {
+    const cached = instance.policyDirByPersona.get(persona);
+    if (cached !== undefined) return cached;
+    const dir = validatePolicyDir(resolvePersonaPolicyDir(persona));
+    instance.policyDirByPersona.set(persona, dir);
+    return dir;
+  }
+
+  /**
+   * Computes the union of MCP server names required by every agent state
+   * sharing `scope`. Threaded into the workflow infrastructure factory so
+   * the bundle only spawns proxies the policies actually reference.
+   */
+  private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
+    const union = new Set<string>();
+    const seenPersonas = new Set<string>();
+    for (const stateConfig of Object.values(instance.definition.states)) {
+      if (stateConfig.type !== 'agent') continue;
+      const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
+      if (stateScope !== scope) continue;
+      if (seenPersonas.has(stateConfig.persona)) continue;
+      seenPersonas.add(stateConfig.persona);
+      const { compiledPolicy } = loadPersonaPolicyArtifacts(this.getPolicyDir(instance, stateConfig.persona));
+      for (const server of extractRequiredServers(compiledPolicy)) {
+        union.add(server);
+      }
+    }
+    return union;
   }
 
   /**
@@ -667,10 +738,25 @@ export class WorkflowOrchestrator implements WorkflowController {
     // engine rebuild.
     if (instance.currentPersonaByBundle.get(bundle.bundleId) === persona) return;
 
-    let policyDir = instance.policyDirByPersona.get(persona);
-    if (policyDir === undefined) {
-      policyDir = resolvePersonaPolicyDir(persona);
-      instance.policyDirByPersona.set(persona, policyDir);
+    const policyDir = this.getPolicyDir(instance, persona);
+
+    // Guard against mid-workflow recompiles that add a server: the bundle
+    // was minted with a fixed required-server set, so a new policy that
+    // expands the set would have the coordinator allow tools no relay was
+    // spawned for. Fail fast with a clear error instead.
+    const minted = instance.mintedServersByBundle.get(bundle.bundleId);
+    if (minted) {
+      const { compiledPolicy } = loadPersonaPolicyArtifacts(policyDir);
+      const newServers = extractRequiredServers(compiledPolicy);
+      const added: string[] = [];
+      for (const s of newServers) if (!minted.has(s)) added.push(s);
+      if (added.length > 0) {
+        throw new Error(
+          `Persona "${persona}" requires server(s) [${added.join(', ')}] that were not spawned for this scope ` +
+            `(bundle minted with [${[...minted].sort().join(', ')}]). ` +
+            `A persona recompile that expands the server set requires restarting the workflow.`,
+        );
+      }
     }
     // Target this bundle's coordinator. Under bifurcated workflows every
     // bundle has its own socket, so the bundle argument fully determines
@@ -785,6 +871,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   > {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
+    const { filterMcpServersByPolicy } = await import('../persona/resolve.js');
 
     return async (input) => {
       const config = loadConfig();
@@ -813,6 +900,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // to the default `./audit.jsonl` against process.cwd().
       config.allowedDirectory = input.workspacePath;
       config.auditLogPath = getBundleAuditLogPath(input.workflowId, input.bundleId);
+      config.mcpServers = filterMcpServersByPolicy(config.mcpServers, input.requiredServers);
       applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
       return createDockerInfrastructure(
         config,
@@ -954,6 +1042,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         sessionIds: new Set(),
       },
       currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
       aborted: false,
     };
 
@@ -1032,6 +1121,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         sessionIds: new Set(),
       },
       currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
       aborted: false,
     };
 
@@ -1658,17 +1748,19 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
 
       // Uniform agent-turn entrypoint: every prompt and reprompt must flow
-      // through here so the quota-exhaustion short-circuit applies to ALL
-      // of them. Retrying or reprompting a turn whose adapter reported
-      // quota exhaustion would only burn more of the already-exhausted
-      // budget — instead we log a `quota_exhausted` event once and throw
+      // through here so the quota-exhaustion / transient-failure
+      // short-circuits apply to ALL of them. Retrying or reprompting a turn
+      // whose adapter reported either signal would only burn more of the
+      // already-exhausted budget (quota) or hammer a stalled upstream
+      // (transient) — instead we log the structured event once and throw
       // a dedicated error so higher layers can distinguish "paused by
-      // provider" from "aborted by bug" (today both abort; M4 turns this
-      // into a `paused` terminal phase without touching here).
+      // provider" / "stalled upstream" from "aborted by bug" (today all
+      // three abort; M4 turns these into a `paused` terminal phase without
+      // touching here).
       //
       // Sessions without `sendMessageDetailed` (e.g., built-in in-process
       // sessions) degrade cleanly to `sendMessage`, which cannot produce
-      // a quota signal — the short-circuit simply never fires for them.
+      // either signal — the short-circuits simply never fire for them.
       const sendAgentTurn = async (msg: string): Promise<AgentTurnResult> => {
         const result = session.sendMessageDetailed
           ? await session.sendMessageDetailed(msg)
@@ -1690,6 +1782,26 @@ export class WorkflowOrchestrator implements WorkflowController {
           // to be a normal terminal (e.g. `done`).
           instance.quotaExhausted = { resetAt, rawMessage };
           throw new WorkflowQuotaExhaustedError({ stateId, resetAt, rawMessage });
+        }
+        if (result.transientFailure) {
+          const { kind, rawMessage } = result.transientFailure;
+          // Same shape as the quota branch — append a structured log
+          // entry, stamp the instance, throw a dedicated error — but
+          // deliberately skip `logReceived`. Quota envelopes carry the
+          // provider's actual rate-limit message in `result.text`, which
+          // is worth recording as the agent's turn. Transient envelopes
+          // carry only the agent's preamble with no real assistant
+          // content, so logging it as `agent_received` would falsely
+          // imply the agent produced a turn.
+          messageLog.append({
+            ...this.logBase(instance),
+            type: 'transient_failure',
+            role: stateConfig.persona,
+            kind,
+            rawMessage,
+          });
+          instance.transientFailure = { kind, rawMessage };
+          throw new WorkflowTransientFailureError({ stateId, kind, rawMessage });
         }
         return result;
       };
@@ -1868,13 +1980,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         totalTokens: instance.tokens.outputTokens,
       };
     } catch (err) {
-      // Quota exhaustion already produced its own structured
-      // `quota_exhausted` log entry inside `sendAgentTurn`; appending a
-      // generic `error` entry here would double-log the same event and
-      // make `workflow inspect` surface both a yellow quota line and a
-      // red error line for the same failure. Suppress the generic entry
-      // when the cause is a `WorkflowQuotaExhaustedError`.
-      if (!isWorkflowQuotaExhaustedError(err)) {
+      // Quota exhaustion / transient upstream failure already produced
+      // their own structured log entries inside `sendAgentTurn`;
+      // appending a generic `error` entry here would double-log the same
+      // event and make `workflow inspect` surface a duplicate red error
+      // line alongside the structured signal. Suppress the generic entry
+      // when the cause is a `WorkflowQuotaExhaustedError` or
+      // `WorkflowTransientFailureError`.
+      if (!isWorkflowQuotaExhaustedError(err) && !isWorkflowTransientFailureError(err)) {
         instance.messageLog.append({
           ...this.logBase(instance),
           type: 'error',
@@ -1889,10 +2002,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       await session.close().catch((closeErr: unknown) => {
         writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
       });
-      // Order: close session (drains in-flight LLM stream) → clear MITM
-      // routing → drop from accumulator filter → emit agent_session_ended.
-      // Clearing the MITM id before the bridge teardown means any stray
-      // late event cannot push under an about-to-be-unregistered label.
+      // session.close() drains in-flight streams that captured the
+      // agent's session id at attach time; they keep posting under it
+      // until they finish, regardless of setTokenSessionId(undefined).
+      // The clear here only governs future attachments.
       bundle?.setTokenSessionId(undefined);
       instance.tokens.sessionIds.delete(endedSessionId);
       // Pairs 1:1 with agent_started; emitted unconditionally in finally
@@ -2025,6 +2138,20 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.finalStatus = {
         phase: 'aborted',
         reason: `Upstream quota exhausted${resetHint}`,
+      };
+    } else if (instance.transientFailure) {
+      // Mirror the quota branch: a transient upstream failure must force
+      // an abort-preserving terminal regardless of which state
+      // `findErrorTarget` resolved to. Without this, a workflow whose
+      // only terminal is `done` would land on `done` and
+      // `handleWorkflowComplete` would mark the run `completed`, breaking
+      // resume.
+      const excerpt = instance.transientFailure.rawMessage.slice(0, 200);
+      instance.finalStatus = {
+        phase: 'aborted',
+        reason:
+          `Upstream stall: agent returned no content (kind=${instance.transientFailure.kind}; ` +
+          `resumable — run "ironcurtain workflow resume <baseDir>" once upstream is healthy)\n${excerpt}`,
       };
     } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {

@@ -6,39 +6,44 @@ import {
   buildRepairInstructions,
   type CompilerConfig,
 } from '../src/pipeline/constitution-compiler.js';
-import type { ToolAnnotation, CompiledRule, ExecutionResult, RepairContext } from '../src/pipeline/types.js';
+import type { StoredToolAnnotation, CompiledRule, ExecutionResult, RepairContext } from '../src/pipeline/types.js';
 import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
 
-const sampleAnnotations: ToolAnnotation[] = [
+const sampleAnnotations: StoredToolAnnotation[] = [
   {
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads the complete contents of a file from disk',
     args: { path: ['read-path'] },
+    inputSchema: {},
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Creates or overwrites a file with new content',
     args: { path: ['write-path'] },
+    inputSchema: {},
   },
   {
     toolName: 'delete_file',
     serverName: 'filesystem',
     comment: 'Permanently deletes a file from disk',
     args: { path: ['delete-path'] },
+    inputSchema: {},
   },
   {
     toolName: 'move_file',
     serverName: 'filesystem',
     comment: 'Moves a file from source to destination, deleting the source',
     args: { source: ['read-path', 'delete-path'], destination: ['write-path'] },
+    inputSchema: {},
   },
   {
     toolName: 'list_allowed_directories',
     serverName: 'filesystem',
     comment: 'Lists directories the server is allowed to access',
     args: {},
+    inputSchema: {},
   },
 ];
 

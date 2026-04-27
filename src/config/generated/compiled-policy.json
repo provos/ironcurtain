@@ -1,270 +1,31 @@
 {
-  "generatedAt": "2026-02-28T01:50:08.635Z",
-  "constitutionHash": "8e2f1144f44b0f864e70b161e6abf898bf7ac7540e2aeb6df11abbbbfcb9c34c",
-  "inputHash": "97a4159c0149574f357fdac5b8046d3ea51006a4e8a3c5f1a3cf0ab3afdcd6e6",
+  "generatedAt": "2026-04-26T21:38:47.257Z",
+  "constitutionHash": "bbf15ed2068f7fba533653b20c0a3d81dd11c9d292fdcbea4780506c29397d26",
+  "inputHash": "109fe1f6b130d1e85d7669fd4ea6733cd99ac0ca0f2547d53e808a51555b5705",
   "rules": [
     {
-      "name": "allow-downloads-read",
-      "description": "Allow reading files within the Downloads folder.",
-      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
-      "if": {
-        "paths": {
-          "roles": [
-            "read-path"
-          ],
-          "within": "/mnt/c/Users/provo/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "Policy explicitly permits reading in the Downloads folder."
-    },
-    {
-      "name": "allow-downloads-write",
-      "description": "Allow writing files within the Downloads folder.",
-      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
-      "if": {
-        "paths": {
-          "roles": [
-            "write-path"
-          ],
-          "within": "/mnt/c/Users/provo/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "Policy explicitly permits writing in the Downloads folder."
-    },
-    {
-      "name": "allow-downloads-delete",
-      "description": "Allow deleting files within the Downloads folder.",
-      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
-      "if": {
-        "paths": {
-          "roles": [
-            "delete-path"
-          ],
-          "within": "/mnt/c/Users/provo/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "Policy explicitly permits deletion in the Downloads folder."
-    },
-    {
-      "name": "allow-documents-read",
-      "description": "Allow reading documents in the Users document folder.",
-      "principle": "The agent is allowed to read documents in the Users document folder.",
-      "if": {
-        "paths": {
-          "roles": [
-            "read-path"
-          ],
-          "within": "/home/provos/Documents"
-        }
-      },
-      "then": "allow",
-      "reason": "Policy explicitly permits reading in the Documents folder."
-    },
-    {
-      "name": "escalate-documents-write",
-      "description": "Escalate write operations targeting the Documents folder since only reads are permitted there.",
-      "principle": "Least privilege: The agent may only access resources explicitly permitted by policy.",
-      "if": {
-        "paths": {
-          "roles": [
-            "write-path"
-          ],
-          "within": "/home/provos/Documents"
-        }
-      },
-      "then": "escalate",
-      "reason": "Only reads are explicitly permitted in the Documents folder; writes require human approval."
-    },
-    {
-      "name": "escalate-move-with-delete-outside-sandbox",
-      "description": "Escalate move operations whose source (delete-path) is outside the Downloads folder, since deletes outside permitted areas require human oversight.",
-      "principle": "No destruction: Delete operations outside the sandbox are never permitted unless explicitly granted.",
-      "if": {
-        "roles": [
-          "delete-path"
-        ],
-        "server": [
-          "filesystem"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Any delete-path argument outside the sandbox or Downloads folder requires human approval before proceeding."
-    },
-    {
-      "name": "escalate-filesystem-write-outside-permitted",
-      "description": "Escalate filesystem writes outside explicitly permitted directories.",
-      "principle": "Least privilege: The agent may only access resources explicitly permitted by policy.",
-      "if": {
-        "roles": [
-          "write-path"
-        ],
-        "server": [
-          "filesystem"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Writes outside the sandbox, Downloads, or Documents require human approval."
-    },
-    {
-      "name": "allow-git-local-read",
-      "description": "Allow local git read operations (log, status, diff, show, blame, etc.) within any path.",
-      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
-      "if": {
-        "tool": [
-          "git_status",
-          "git_log",
-          "git_diff",
-          "git_show",
-          "git_blame",
-          "git_reflog",
-          "git_changelog_analyze",
-          "git_wrapup_instructions",
-          "git_clear_working_dir"
-        ]
-      },
-      "then": "allow",
-      "reason": "Read-only git operations are explicitly permitted as local operations."
-    },
-    {
-      "name": "allow-git-set-working-dir",
-      "description": "Allow setting the git working directory.",
-      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
-      "if": {
-        "tool": [
-          "git_set_working_dir"
-        ]
-      },
-      "then": "allow",
-      "reason": "Setting the working directory is a local read operation with no side effects outside the sandbox."
-    },
-    {
-      "name": "allow-git-local-write-history",
-      "description": "Allow local git write-history operations (commit, merge, rebase, reset, checkout, cherry-pick, stash, tag, branch, add, init, worktree) within the sandbox.",
-      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
-      "if": {
-        "tool": [
-          "git_add",
-          "git_commit",
-          "git_merge",
-          "git_rebase",
-          "git_reset",
-          "git_checkout",
-          "git_cherry_pick",
-          "git_stash",
-          "git_tag",
-          "git_branch",
-          "git_init",
-          "git_worktree",
-          "git_remote"
-        ]
-      },
-      "then": "allow",
-      "reason": "Local git write operations are explicitly permitted within the sandbox."
-    },
-    {
-      "name": "allow-git-clean-within-sandbox",
-      "description": "Allow git clean operations (removing untracked files) within the sandbox.",
-      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
-      "if": {
-        "tool": [
-          "git_clean"
-        ]
-      },
-      "then": "allow",
-      "reason": "Git clean is a local operation permitted within the sandbox; sandbox containment invariant ensures it stays within bounds."
-    },
-    {
-      "name": "escalate-write-history-outside-sandbox",
-      "description": "Escalate git history-modifying operations when the repository path is outside the sandbox.",
-      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
-      "if": {
-        "roles": [
-          "write-history"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Git operations that modify history outside the sandbox require human approval."
-    },
-    {
-      "name": "escalate-delete-history-outside-sandbox",
-      "description": "Escalate git ref-deletion operations when the repository path is outside the sandbox.",
-      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
-      "if": {
-        "roles": [
-          "delete-history"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Git operations that delete refs outside the sandbox require human approval."
-    },
-    {
-      "name": "escalate-git-push",
-      "description": "Escalate git push operations as they interact with remote repositories.",
-      "principle": "The agent must ask for human approval for all other git operations.",
-      "if": {
-        "tool": [
-          "git_push"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Git push is a remote operation that requires explicit human approval."
-    },
-    {
-      "name": "escalate-git-pull",
-      "description": "Escalate git pull operations as they interact with remote repositories.",
-      "principle": "The agent must ask for human approval for all other git operations.",
-      "if": {
-        "tool": [
-          "git_pull"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Git pull is a remote operation that requires explicit human approval."
-    },
-    {
-      "name": "escalate-git-fetch",
-      "description": "Escalate git fetch operations as they interact with remote repositories.",
-      "principle": "The agent must ask for human approval for all other git operations.",
-      "if": {
-        "tool": [
-          "git_fetch"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Git fetch is a remote operation that requires explicit human approval."
-    },
-    {
-      "name": "escalate-git-clone",
-      "description": "Escalate git clone operations as they interact with remote repositories.",
-      "principle": "The agent must ask for human approval for all other git operations.",
-      "if": {
-        "tool": [
-          "git_clone"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Git clone is a remote operation that requires explicit human approval."
-    },
-    {
       "name": "allow-web-search",
-      "description": "Allow web search operations.",
+      "description": "Allow web searches via the web_search tool.",
       "principle": "The agent may perform web searches to find information.",
       "if": {
+        "server": [
+          "fetch"
+        ],
         "tool": [
           "web_search"
         ]
       },
       "then": "allow",
-      "reason": "Web searches are explicitly permitted by policy."
+      "reason": "Constitution explicitly permits the agent to perform web searches."
     },
     {
       "name": "allow-fetch-news-sites",
-      "description": "Allow fetching content from popular news sites.",
+      "description": "Allow fetching web content from popular news sites.",
       "principle": "The agent may fetch web content from popular news sites.",
       "if": {
+        "server": [
+          "fetch"
+        ],
         "tool": [
           "http_fetch"
         ],
@@ -278,13 +39,16 @@
         }
       },
       "then": "allow",
-      "reason": "Fetching from popular news sites is explicitly permitted."
+      "reason": "Constitution explicitly permits fetching content from popular news sites."
     },
     {
       "name": "allow-fetch-development-sites",
-      "description": "Allow fetching content from popular development sites.",
+      "description": "Allow fetching web content from popular development sites.",
       "principle": "The agent may fetch web content from popular development sites.",
       "if": {
+        "server": [
+          "fetch"
+        ],
         "tool": [
           "http_fetch"
         ],
@@ -298,25 +62,625 @@
         }
       },
       "then": "allow",
-      "reason": "Fetching from popular development sites is explicitly permitted."
+      "reason": "Constitution explicitly permits fetching content from popular development sites."
     },
     {
       "name": "escalate-fetch-other-urls",
-      "description": "Escalate HTTP fetch requests to domains not on the approved lists.",
-      "principle": "Least privilege: The agent may only access resources explicitly permitted by policy.",
+      "description": "Escalate HTTP fetch requests to URLs not explicitly permitted.",
+      "principle": "Human oversight: Operations outside explicitly permitted domains require human approval.",
       "if": {
+        "server": [
+          "fetch"
+        ],
         "tool": [
           "http_fetch"
         ]
       },
       "then": "escalate",
-      "reason": "Fetching from non-approved domains requires human approval."
+      "reason": "Fetching from domains not explicitly permitted requires human approval per least-privilege principle."
     },
     {
-      "name": "allow-github-read",
-      "description": "Allow read-only GitHub operations without human approval.",
+      "name": "allow-read-downloads",
+      "description": "Allow reading files in the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Policy explicitly permits reading in the Downloads folder."
+    },
+    {
+      "name": "allow-write-downloads",
+      "description": "Allow writing files in the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "write-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "write-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Policy explicitly permits writing in the Downloads folder."
+    },
+    {
+      "name": "allow-delete-downloads",
+      "description": "Allow delete operations (including move source) within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "delete-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "delete-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Policy explicitly permits deleting in the Downloads folder."
+    },
+    {
+      "name": "allow-read-documents",
+      "description": "Allow reading files in the user's Documents folder.",
+      "principle": "The agent is allowed to read documents in the Users document folder.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "~/Documents"
+        }
+      },
+      "then": "allow",
+      "reason": "Policy explicitly permits reading the user's Documents folder."
+    },
+    {
+      "name": "allow-list-allowed-directories",
+      "description": "Allow listing the permitted directories (no path argument, always safe).",
+      "principle": "Least privilege: agent may access resources explicitly permitted.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
+        "tool": [
+          "list_allowed_directories"
+        ]
+      },
+      "then": "allow",
+      "reason": "Listing allowed directories is a safe metadata-only operation."
+    },
+    {
+      "name": "escalate-move-with-delete-outside-permitted",
+      "description": "Escalate move operations whose source (delete-path) is outside permitted areas.",
+      "principle": "No destruction: delete operations outside the sandbox are never permitted unless explicitly approved.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
+        "tool": [
+          "move_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Move carries a delete-path role; any move not fully covered by sandbox/Downloads structural rules requires human approval."
+    },
+    {
+      "name": "escalate-write-outside-permitted",
+      "description": "Escalate writes to paths outside the sandbox and Downloads folder.",
+      "principle": "Human oversight: operations outside the sandbox require explicit human approval.",
+      "if": {
+        "roles": [
+          "write-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Writes outside structurally-allowed areas (sandbox, Downloads) require human approval."
+    },
+    {
+      "name": "escalate-read-outside-permitted",
+      "description": "Escalate read operations targeting paths outside the sandbox, Downloads, and Documents folders.",
+      "principle": "Least privilege: agent may only access resources explicitly permitted.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Reads outside explicitly permitted folders require human judgment rather than outright denial."
+    },
+    {
+      "name": "allow-git-wrapup-instructions",
+      "description": "Allow fetching git wrap-up instructions as they have no path or remote roles.",
+      "principle": "Least privilege: returning workflow instructions is a safe read-only operation with no resource access.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_wrapup_instructions"
+        ]
+      },
+      "then": "allow",
+      "reason": "git_wrapup_instructions has no path or network roles and is always safe to execute."
+    },
+    {
+      "name": "allow-git-clear-working-dir",
+      "description": "Allow clearing the session working directory setting as it has no path or remote roles.",
+      "principle": "Least privilege: clearing a session setting is a safe local administrative operation.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_clear_working_dir"
+        ]
+      },
+      "then": "allow",
+      "reason": "Clearing the working directory session setting carries no path or remote access and is always safe."
+    },
+    {
+      "name": "allow-git-set-working-dir-downloads",
+      "description": "Allow setting the git working directory to a path within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_set_working_dir"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Setting the working directory to Downloads is permitted since the agent has full read/write access there."
+    },
+    {
+      "name": "allow-git-init-in-downloads",
+      "description": "Allow initializing a new git repository within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_init"
+        ],
+        "paths": {
+          "roles": [
+            "write-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Creating a new git repo within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-read-ops-in-downloads",
+      "description": "Allow read-only git operations on repositories within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_blame",
+          "git_diff",
+          "git_log",
+          "git_reflog",
+          "git_show",
+          "git_status",
+          "git_changelog_analyze"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Read-only git tools on paths within Downloads are explicitly permitted."
+    },
+    {
+      "name": "allow-git-add-in-downloads",
+      "description": "Allow git add within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_add"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Staging files within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-commit-in-downloads",
+      "description": "Allow git commit within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_commit"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Committing within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-branch-in-downloads",
+      "description": "Allow git branch operations within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_branch"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history",
+            "delete-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "All branch operations (list, create, rename, delete) within Downloads are permitted."
+    },
+    {
+      "name": "allow-git-checkout-in-downloads",
+      "description": "Allow git checkout within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_checkout"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history",
+            "write-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Checkout operations within Downloads are permitted since the agent has full access there."
+    },
+    {
+      "name": "allow-git-cherry-pick-in-downloads",
+      "description": "Allow git cherry-pick within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_cherry_pick"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Cherry-pick within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-merge-in-downloads",
+      "description": "Allow git merge within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_merge"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Merge within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-rebase-in-downloads",
+      "description": "Allow git rebase within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_rebase"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Rebase within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-reset-in-downloads",
+      "description": "Allow git reset within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_reset"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Reset within Downloads is permitted since the agent has full write access there."
+    },
+    {
+      "name": "allow-git-stash-in-downloads",
+      "description": "Allow all git stash operations within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_stash"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history",
+            "delete-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "All stash modes including drop/clear are permitted within Downloads since the agent has full read/write/delete access."
+    },
+    {
+      "name": "allow-git-tag-in-downloads",
+      "description": "Allow all git tag operations within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_tag"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history",
+            "delete-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "All tag operations including deletion are permitted within Downloads since the agent has full access there."
+    },
+    {
+      "name": "allow-git-remote-in-downloads",
+      "description": "Allow all git remote management operations within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_remote"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-history",
+            "delete-history"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Local remote config operations (list, add, remove, rename, set-url) within Downloads are permitted."
+    },
+    {
+      "name": "allow-git-clean-in-downloads",
+      "description": "Allow git clean operations within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_clean"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "delete-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Clean operations including file deletion are permitted within Downloads since the agent has full access there."
+    },
+    {
+      "name": "allow-git-worktree-list-in-downloads",
+      "description": "Allow listing git worktrees for a repository within the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_worktree"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "~/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Listing worktrees (read-only, mode=list) within Downloads is permitted; other worktree modes with write/delete roles fall through to deny."
+    },
+    {
+      "name": "escalate-git-push",
+      "description": "Require human approval for all git push operations.",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_push"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Push is a remote network operation and always requires human approval per policy."
+    },
+    {
+      "name": "escalate-git-pull",
+      "description": "Require human approval for all git pull operations.",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_pull"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Pull is a remote network operation and always requires human approval per policy."
+    },
+    {
+      "name": "escalate-git-fetch",
+      "description": "Require human approval for all git fetch operations.",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_fetch"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Fetch is a remote network operation and always requires human approval per policy."
+    },
+    {
+      "name": "escalate-git-clone",
+      "description": "Require human approval for all git clone operations.",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_clone"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Clone is a remote network operation and always requires human approval per policy."
+    },
+    {
+      "name": "github-read-operations-allow",
+      "description": "Allow all read-only GitHub operations (listing, searching, reading issues, PRs, repositories, code, comments, reviews).",
       "principle": "The agent may freely list, search, and read GitHub resources without human approval.",
       "if": {
+        "server": [
+          "github"
+        ],
         "tool": [
           "get_commit",
           "get_file_contents",
@@ -344,13 +708,16 @@
         ]
       },
       "then": "allow",
-      "reason": "Read-only GitHub operations are explicitly permitted without human approval."
+      "reason": "These are purely read-only GitHub operations explicitly permitted without approval by the user policy."
     },
     {
-      "name": "escalate-github-write",
-      "description": "Escalate GitHub mutation operations that create, update, close, or delete resources.",
+      "name": "github-write-operations-escalate",
+      "description": "Require human approval for all GitHub write, update, create, close, or delete operations.",
       "principle": "Creating, updating, closing, or deleting GitHub resources requires human approval.",
       "if": {
+        "server": [
+          "github"
+        ],
         "tool": [
           "add_comment_to_pending_review",
           "add_issue_comment",
@@ -373,7 +740,7 @@
         ]
       },
       "then": "escalate",
-      "reason": "GitHub write/mutation operations require explicit human approval per policy."
+      "reason": "These operations create, modify, or delete GitHub resources and require explicit human approval per user policy."
     }
   ],
   "listDefinitions": [
@@ -381,14 +748,14 @@
       "name": "popular-news-sites",
       "type": "domains",
       "principle": "The agent may fetch web content from popular news sites.",
-      "generationPrompt": "List the domains of approximately 50 popular and widely-recognized news websites, including major international outlets, national newspapers, wire services, and digital-native news organizations (e.g., bbc.com, nytimes.com, reuters.com, theguardian.com, apnews.com, cnn.com, washingtonpost.com, etc.).",
+      "generationPrompt": "List the domains of approximately 30 popular and well-known news websites (e.g., major national newspapers, international news agencies, and widely-read online news outlets).",
       "requiresMcp": false
     },
     {
       "name": "popular-development-sites",
       "type": "domains",
       "principle": "The agent may fetch web content from popular development sites.",
-      "generationPrompt": "List the domains of approximately 50 popular software development websites and resources, including documentation hosts, package registries, developer communities, code hosting platforms, and technical reference sites (e.g., github.com, stackoverflow.com, developer.mozilla.org, docs.python.org, npmjs.com, pypi.org, rust-lang.org, golang.org, docs.microsoft.com, kubernetes.io, etc.).",
+      "generationPrompt": "List the domains of approximately 30 popular software development and programming reference websites (e.g., documentation hosts, package registries, developer forums, code hosting platforms, and technical reference sites).",
       "requiresMcp": false
     }
   ]

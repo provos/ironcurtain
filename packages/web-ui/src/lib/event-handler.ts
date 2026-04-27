@@ -170,6 +170,12 @@ export type WebEvent =
       event: 'workflow.agent_session_ended';
       payload: { workflowId: string; stateId: string; sessionId: string };
     }
+  | {
+      // Fires in the orchestrator's `finally` so success, failure, and abort
+      // paths all clean up the bridge mapping. Mirror of the daemon contract.
+      event: 'workflow.agent_session_ended';
+      payload: { workflowId: string; stateId: string; sessionId: string };
+    }
   | { event: 'workflow.completed'; payload: { workflowId: string } }
   | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
   | { event: 'workflow.gate_raised'; payload: { workflowId: string; gate: HumanGateRequestDto } }
