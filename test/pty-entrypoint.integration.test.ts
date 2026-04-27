@@ -130,6 +130,14 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
   const observations: BridgeObservations = {};
 
   beforeAll(async () => {
+    // Capture env var originals FIRST, before any I/O that could throw.
+    // If we captured these later, a partial-setup failure would leave
+    // `original*` as undefined and afterAll would `delete` env vars the
+    // runner had set, instead of restoring them.
+    originalHome = process.env.IRONCURTAIN_HOME;
+    originalAuth = process.env.IRONCURTAIN_DOCKER_AUTH;
+    originalAnthropicBaseUrl = process.env.ANTHROPIC_BASE_URL;
+
     // Sandbox all IronCurtain on-disk state into a tempdir.
     homeDir = mkdtempSync(join(tmpdir(), 'ironcurtain-pty-test-'));
     workspaceDir = join(homeDir, 'workspace');
@@ -140,9 +148,6 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
     // port is known when we override `ANTHROPIC_BASE_URL`.
     upstream = await startUpstreamResponder();
 
-    originalHome = process.env.IRONCURTAIN_HOME;
-    originalAuth = process.env.IRONCURTAIN_DOCKER_AUTH;
-    originalAnthropicBaseUrl = process.env.ANTHROPIC_BASE_URL;
     process.env.IRONCURTAIN_HOME = homeDir;
     // Force API-key auth so detectAuthMethod doesn't read host OAuth state.
     process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey';
