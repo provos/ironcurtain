@@ -569,6 +569,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
         const bundle = {
           __stub: true,
           workflowId: input.workflowId,
+          bundleId: input.bundleId,
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
@@ -648,6 +649,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
         return {
           __stub: true,
           workflowId: input.workflowId,
+          bundleId: input.bundleId,
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
@@ -737,7 +739,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
       const defPath = writeDefinitionFile(tmpDir, twoAgentDef);
 
       const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-        makeStubInfrastructure(input.workflowId),
+        makeStubInfrastructure(input.workflowId, input.bundleId),
       );
       const destroyInfra = vi.fn(async () => {});
 
@@ -798,7 +800,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
