@@ -2,7 +2,7 @@
  * Integration test: PTY container entrypoint UDS→TCP bridge, driven through
  * the real `runPtySession` code path.
  *
- * This is the regression guard for two failure modes:
+ * Regression guard for two failure modes:
  *
  *  1. **Mount source mismatch** — `pty-session.ts` builds a `mounts` array
  *     for `docker.create` whose `/run/ironcurtain` source must equal the
@@ -15,19 +15,32 @@
  *  2. **Entrypoint bridge contract** — `entrypoint-claude-code.sh` must start
  *     `socat TCP-LISTEN:18080 ↔ UNIX-CONNECT:mitm-proxy.sock` so claude
  *     (HTTPS_PROXY=http://127.0.0.1:18080) can reach the host MITM. The test
- *     asserts the bridge is live and a CONNECT through it succeeds.
+ *     issues a `curl -k` from inside the container to a Claude Code endpoint
+ *     and verifies a local upstream responder received the forwarded request.
  *
- * Always-on when Docker and `ironcurtain-claude-code:latest` are present.
- * `IRONCURTAIN_HOME` is pointed at a tempdir so the run leaves no state on
- * the user's machine.
+ * Hermetic by construction:
+ *
+ *   - `IRONCURTAIN_HOME` is redirected to a tempdir; on cleanup the tempdir
+ *     is removed entirely. No state lands under `~/.ironcurtain/`.
+ *   - `ANTHROPIC_BASE_URL` is overridden to a local HTTP responder bound to
+ *     127.0.0.1, so MITM's upstream forward never contacts api.anthropic.com.
+ *     `-k` makes the curl call independent of whether the IronCurtain CA is
+ *     present in the container's trust store.
+ *
+ * Always-on when Docker, the prebuilt `ironcurtain-claude-code:latest` image,
+ * AND the host CA used to build that image are all present. The CA is sourced
+ * from the active `IRONCURTAIN_HOME` (captured before the test overrides it)
+ * — using a non-matching CA would force a multi-minute image rebuild, so we
+ * skip rather than rebuild.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { cpSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { execFile as execFileCb } from 'node:child_process';
+import { createServer as createHttpServer, type IncomingMessage, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { promisify } from 'node:util';
 
 import { runPtySession, type PtyAttachFn } from '../src/docker/pty-session.js';
@@ -52,13 +65,47 @@ async function dockerExec(
   }
 }
 
-const dockerReady = isDockerAvailable() && isDockerImageAvailable(IMAGE);
+/**
+ * Locates the CA directory the running `ironcurtain-claude-code:latest` image
+ * was likely built from. Honors `IRONCURTAIN_HOME` if set (matching the
+ * production resolution in `src/config/paths.ts:getIronCurtainHome`), otherwise
+ * defaults to `~/.ironcurtain`. Returns null if no CA is present.
+ *
+ * Read this BEFORE the test overrides `IRONCURTAIN_HOME` so we point at the
+ * developer's real CA, not the temp sandbox.
+ */
+function findHostCaDir(): string | null {
+  const home = process.env.IRONCURTAIN_HOME ?? join(homedir(), '.ironcurtain');
+  const ca = join(home, 'ca');
+  return existsSync(ca) ? ca : null;
+}
+
+const hostCaDir = findHostCaDir();
+const dockerReady = isDockerAvailable() && isDockerImageAvailable(IMAGE) && hostCaDir !== null;
+
+/** Local upstream responder: 200s every request and counts hits per path. */
+function startUpstreamResponder(): Promise<{ server: Server; port: number; received: IncomingMessage[] }> {
+  const received: IncomingMessage[] = [];
+  return new Promise((resolveStart, rejectStart) => {
+    const server = createHttpServer((req, res) => {
+      received.push(req);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+    server.on('error', rejectStart);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as AddressInfo;
+      resolveStart({ server, port: addr.port, received });
+    });
+  });
+}
 
 interface BridgeObservations {
   containerId?: string;
   socketTestExitCode?: number;
   bridgeProcs?: string;
-  curlStderr?: string;
+  curlExitCode?: number;
+  curlHttpCode?: string;
 }
 
 describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via runPtySession)', () => {
@@ -66,29 +113,32 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
   let workspaceDir: string;
   let originalHome: string | undefined;
   let originalAuth: string | undefined;
+  let originalAnthropicBaseUrl: string | undefined;
+  let upstream: { server: Server; port: number; received: IncomingMessage[] } | undefined;
   const observations: BridgeObservations = {};
 
   beforeAll(async () => {
-    // Sandbox all IronCurtain on-disk state into a tempdir so the test
-    // leaves no debris in ~/.ironcurtain/.
+    // Sandbox all IronCurtain on-disk state into a tempdir.
     homeDir = mkdtempSync(join(tmpdir(), 'ironcurtain-pty-test-'));
     workspaceDir = join(homeDir, 'workspace');
     mkdirSync(workspaceDir, { recursive: true });
 
+    // Local responder stands in for api.anthropic.com so MITM's upstream
+    // forward never leaves the host. Started before env vars are set so the
+    // port is known when we override `ANTHROPIC_BASE_URL`.
+    upstream = await startUpstreamResponder();
+
     originalHome = process.env.IRONCURTAIN_HOME;
     originalAuth = process.env.IRONCURTAIN_DOCKER_AUTH;
+    originalAnthropicBaseUrl = process.env.ANTHROPIC_BASE_URL;
     process.env.IRONCURTAIN_HOME = homeDir;
     // Force API-key auth so detectAuthMethod doesn't read host OAuth state.
     process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey';
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${upstream.port}`;
 
-    // Reuse the host's CA so the image content-hash matches the prebuilt
-    // `ironcurtain-claude-code:latest`. A fresh CA would force an image
-    // rebuild on every run (multi-minute), which is unacceptable for a
-    // routine integration test.
-    const hostCaDir = join(homedir(), '.ironcurtain', 'ca');
-    if (existsSync(hostCaDir)) {
-      cpSync(hostCaDir, join(homeDir, 'ca'), { recursive: true });
-    }
+    // Reuse the host CA so the image content-hash matches the prebuilt image.
+    // hostCaDir is non-null here because we gated `dockerReady` on it.
+    cpSync(hostCaDir as string, join(homeDir, 'ca'), { recursive: true });
 
     const generatedDir = join(homeDir, 'generated');
     mkdirSync(generatedDir, { recursive: true });
@@ -99,8 +149,8 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
       auditLogPath: join(homeDir, 'audit.jsonl'),
       allowedDirectory: workspaceDir,
       // Empty mcpServers — the policy fixture references some, but
-      // `extractRequiredServers` only spawns servers actually used by the
-      // active rules; with no client tool calls, none start up.
+      // `extractRequiredServers` only spawns servers used by active rules;
+      // with no tool calls, none start up.
       mcpServers: {},
       protectedPaths: [],
       generatedDir,
@@ -140,7 +190,7 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
       },
     } as unknown as IronCurtainConfig;
 
-    // The attach stub runs INSIDE runPtySession after the container is up.
+    // The attach stub runs inside runPtySession after the container is up.
     // It collects observations against the live container and returns 0 so
     // the production cleanup path runs normally.
     const attach: PtyAttachFn = async ({ containerId }) => {
@@ -152,19 +202,27 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
       const procs = await dockerExec(containerId, 'sh', '-c', 'pgrep -af "TCP-LISTEN:18080" || true');
       observations.bridgeProcs = procs.stdout;
 
+      // GET /api/claude_code/settings is in the Anthropic provider allowlist.
+      // `-k` skips client-side cert verification (the IronCurtain CA in the
+      // image trust store is irrelevant either way), so the TLS handshake
+      // with MITM completes and the request is forwarded to the local
+      // upstream responder via the ANTHROPIC_BASE_URL override.
       const curl = await dockerExec(
         containerId,
         'curl',
-        '-sv',
+        '-ksS',
         '--max-time',
         '10',
         '--proxy',
         'http://127.0.0.1:18080',
         '-o',
         '/dev/null',
-        'https://api.anthropic.com/v1/messages',
+        '-w',
+        '%{http_code}',
+        'https://api.anthropic.com/api/claude_code/settings',
       );
-      observations.curlStderr = curl.stderr;
+      observations.curlExitCode = curl.exitCode;
+      observations.curlHttpCode = curl.stdout.trim();
 
       return 0;
     };
@@ -177,11 +235,14 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
     });
   }, 90_000);
 
-  afterAll(() => {
+  afterAll(async () => {
     if (originalHome === undefined) delete process.env.IRONCURTAIN_HOME;
     else process.env.IRONCURTAIN_HOME = originalHome;
     if (originalAuth === undefined) delete process.env.IRONCURTAIN_DOCKER_AUTH;
     else process.env.IRONCURTAIN_DOCKER_AUTH = originalAuth;
+    if (originalAnthropicBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+    else process.env.ANTHROPIC_BASE_URL = originalAnthropicBaseUrl;
+    if (upstream) await new Promise<void>((r) => upstream!.server.close(() => r()));
     if (homeDir) rmSync(homeDir, { recursive: true, force: true });
   });
 
@@ -199,10 +260,15 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
     expect(observations.bridgeProcs ?? '').toContain('UNIX-CONNECT:/run/ironcurtain/mitm-proxy.sock');
   });
 
-  it('container can reach the host MITM via http://127.0.0.1:18080', () => {
-    // CONNECT to api.anthropic.com:443 is on the proxy's host allowlist.
-    // TLS handshake fails (curl doesn't trust the IronCurtain CA) but the
-    // CONNECT itself completing proves the bridge is alive end-to-end.
-    expect(observations.curlStderr ?? '').toContain('CONNECT tunnel established');
+  it('a request through the bridge reaches the host MITM and is forwarded to the upstream', () => {
+    // curl getting HTTP 200 proves the full chain end-to-end:
+    // container curl → bridge socat (port 18080) → host MITM (UDS) →
+    // upstream forward (ANTHROPIC_BASE_URL → local responder). curl reads
+    // the response from its own connection, so a 200 here can only come
+    // from our test responder. (Claude Code's own startup probes also hit
+    // the responder concurrently — those are not what we're asserting on.)
+    expect(observations.curlExitCode).toBe(0);
+    expect(observations.curlHttpCode).toBe('200');
+    expect(upstream?.received.length).toBeGreaterThanOrEqual(1);
   });
 });
