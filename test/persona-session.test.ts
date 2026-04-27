@@ -139,7 +139,10 @@ function createMockGenerateResult(text = 'mock response') {
  * Creates a persona directory structure on disk with a compiled policy.
  * Returns the expected policyDir (generated/) path.
  */
-function createTestPersonaOnDisk(name: string, opts: { servers?: string[]; description?: string } = {}): string {
+function createTestPersonaOnDisk(
+  name: string,
+  opts: { servers?: string[]; description?: string; policyServers?: string[] } = {},
+): string {
   const personaDir = resolve(TEST_HOME, 'personas', name);
   const generatedDir = resolve(personaDir, 'generated');
   mkdirSync(generatedDir, { recursive: true });
@@ -152,7 +155,22 @@ function createTestPersonaOnDisk(name: string, opts: { servers?: string[]; descr
     ...(opts.servers ? { servers: opts.servers } : {}),
   };
   writeFileSync(resolve(personaDir, 'persona.json'), JSON.stringify(definition));
-  writeFileSync(resolve(generatedDir, 'compiled-policy.json'), '{}');
+  // Synthesized policy must reference every server in test config, else the
+  // policy-derived filter drops them all before the test runs.
+  const policyServers = opts.policyServers ?? ['filesystem', 'github', 'gmail'];
+  writeFileSync(
+    resolve(generatedDir, 'compiled-policy.json'),
+    JSON.stringify({
+      rules: policyServers.map((server) => ({
+        name: `test-${server}`,
+        description: 'test',
+        principle: 'test',
+        if: { server: [server] },
+        then: 'allow',
+        reason: 'test',
+      })),
+    }),
+  );
 
   return generatedDir;
 }

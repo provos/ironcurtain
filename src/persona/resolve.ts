@@ -161,3 +161,21 @@ export function applyServerAllowlist(
   }
   return filtered;
 }
+
+/**
+ * Filters MCP servers to only those referenced by the compiled policy.
+ * Trusts the policy completely -- no hardcoded exceptions; the memory
+ * server is injected by `buildSessionConfig` after this filter runs.
+ */
+export function filterMcpServersByPolicy(
+  mcpServers: Record<string, MCPServerConfig>,
+  requiredServers: ReadonlySet<string>,
+): Record<string, MCPServerConfig> {
+  const filtered: Record<string, MCPServerConfig> = {};
+  for (const [name, config] of Object.entries(mcpServers)) {
+    if (requiredServers.has(name)) {
+      filtered[name] = config;
+    }
+  }
+  return filtered;
+}

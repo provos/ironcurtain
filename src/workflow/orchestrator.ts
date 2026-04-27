@@ -40,8 +40,10 @@ import {
   getInvocationDir,
 } from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
-import { loadConfig } from '../config/index.js';
+import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
+import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
+import { extractRequiredServers } from '../trusted-process/policy-roots.js';
 import { createPersonaName } from '../persona/types.js';
 import type {
   AgentConversationId,
@@ -202,6 +204,8 @@ export interface CreateWorkflowInfrastructureInput {
    * See `docs/designs/workflow-session-identity.md` §2.5.
    */
   readonly scope: string;
+  /** Union of MCP server names required across every agent state in this scope. */
+  readonly requiredServers: ReadonlySet<string>;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -402,6 +406,15 @@ interface WorkflowInstance {
    */
   readonly currentPersonaByBundle: Map<string, string>;
   /**
+   * Required-server snapshot taken at bundle mint, keyed by `BundleId`.
+   * `cyclePolicy` checks each newly loaded persona's required servers
+   * against this set so a mid-workflow persona recompile that adds a
+   * server fails fast with a clear error instead of producing cryptic
+   * "tool unavailable" runtime failures (no relay was spawned for the
+   * new server).
+   */
+  readonly mintedServersByBundle: Map<string, ReadonlySet<string>>;
+  /**
    * Set once `destroyWorkflowInfrastructure` begins teardown. An
    * `ensureBundleForScope` call that suspended at `await factory(...)`
    * must observe this flag before publishing into `bundlesByScope` —
@@ -543,6 +556,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // also guards the root the coordinator's `ctrl.sock` binds into.
     ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
 
+    const requiredServers = this.getRequiredServersForScope(instance, scope);
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
     const infra = await factory({
       workflowId: instance.id,
@@ -551,6 +565,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       controlSocketPath,
       workspacePath: instance.workspacePath,
       scope,
+      requiredServers,
     });
 
     // Abort may have landed while `factory()` was suspended. Publishing
@@ -603,7 +618,45 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     instance.bundlesByScope.set(scope, infra);
+    instance.mintedServersByBundle.set(bundleId, requiredServers);
     return infra;
+  }
+
+  /**
+   * Returns the cached policyDir for `persona`, canonicalizing on first
+   * lookup so required-server derivation and the coordinator's
+   * `loadPolicy` RPC operate on the same realpath-resolved file (any
+   * symlink under the persona dir is collapsed once, here, instead of
+   * re-resolved by every reader).
+   */
+  private getPolicyDir(instance: WorkflowInstance, persona: string): string {
+    const cached = instance.policyDirByPersona.get(persona);
+    if (cached !== undefined) return cached;
+    const dir = validatePolicyDir(resolvePersonaPolicyDir(persona));
+    instance.policyDirByPersona.set(persona, dir);
+    return dir;
+  }
+
+  /**
+   * Computes the union of MCP server names required by every agent state
+   * sharing `scope`. Threaded into the workflow infrastructure factory so
+   * the bundle only spawns proxies the policies actually reference.
+   */
+  private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
+    const union = new Set<string>();
+    const seenPersonas = new Set<string>();
+    for (const stateConfig of Object.values(instance.definition.states)) {
+      if (stateConfig.type !== 'agent') continue;
+      const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
+      if (stateScope !== scope) continue;
+      if (seenPersonas.has(stateConfig.persona)) continue;
+      seenPersonas.add(stateConfig.persona);
+      const { compiledPolicy } = loadPersonaPolicyArtifacts(this.getPolicyDir(instance, stateConfig.persona));
+      for (const server of extractRequiredServers(compiledPolicy)) {
+        union.add(server);
+      }
+    }
+    return union;
   }
 
   /**
@@ -629,10 +682,25 @@ export class WorkflowOrchestrator implements WorkflowController {
     // engine rebuild.
     if (instance.currentPersonaByBundle.get(bundle.bundleId) === persona) return;
 
-    let policyDir = instance.policyDirByPersona.get(persona);
-    if (policyDir === undefined) {
-      policyDir = resolvePersonaPolicyDir(persona);
-      instance.policyDirByPersona.set(persona, policyDir);
+    const policyDir = this.getPolicyDir(instance, persona);
+
+    // Guard against mid-workflow recompiles that add a server: the bundle
+    // was minted with a fixed required-server set, so a new policy that
+    // expands the set would have the coordinator allow tools no relay was
+    // spawned for. Fail fast with a clear error instead.
+    const minted = instance.mintedServersByBundle.get(bundle.bundleId);
+    if (minted) {
+      const { compiledPolicy } = loadPersonaPolicyArtifacts(policyDir);
+      const newServers = extractRequiredServers(compiledPolicy);
+      const added: string[] = [];
+      for (const s of newServers) if (!minted.has(s)) added.push(s);
+      if (added.length > 0) {
+        throw new Error(
+          `Persona "${persona}" requires server(s) [${added.join(', ')}] that were not spawned for this scope ` +
+            `(bundle minted with [${[...minted].sort().join(', ')}]). ` +
+            `A persona recompile that expands the server set requires restarting the workflow.`,
+        );
+      }
     }
     // Target this bundle's coordinator. Under bifurcated workflows every
     // bundle has its own socket, so the bundle argument fully determines
@@ -747,6 +815,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   > {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
+    const { filterMcpServersByPolicy } = await import('../persona/resolve.js');
 
     return async (input) => {
       const config = loadConfig();
@@ -775,6 +844,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // to the default `./audit.jsonl` against process.cwd().
       config.allowedDirectory = input.workspacePath;
       config.auditLogPath = getBundleAuditLogPath(input.workflowId, input.bundleId);
+      config.mcpServers = filterMcpServersByPolicy(config.mcpServers, input.requiredServers);
       applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
       return createDockerInfrastructure(
         config,
@@ -862,6 +932,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
       aborted: false,
     };
 
@@ -932,6 +1003,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
       aborted: false,
     };
 

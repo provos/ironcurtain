@@ -1,5 +1,6 @@
 import { dirname } from 'node:path';
 import type { CompiledPolicyFile } from '../pipeline/types.js';
+import { RESERVED_SERVER_NAMES } from '../docker/proxy-tools.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 
 /**
@@ -54,6 +55,25 @@ export function extractPolicyRoots(compiledPolicy: CompiledPolicyFile, allowedDi
   }
 
   return roots;
+}
+
+/**
+ * Extracts the set of MCP server names referenced by the compiled
+ * policy. Reserved virtual servers (registered in-process, not spawned
+ * from `mcp-servers.json`) are excluded.
+ */
+export function extractRequiredServers(policy: CompiledPolicyFile): Set<string> {
+  const servers = new Set<string>();
+  for (const rule of policy.rules) {
+    if (!rule.if.server) continue;
+    for (const serverName of rule.if.server) {
+      servers.add(serverName);
+    }
+  }
+  for (const reserved of RESERVED_SERVER_NAMES) {
+    servers.delete(reserved);
+  }
+  return servers;
 }
 
 /**
