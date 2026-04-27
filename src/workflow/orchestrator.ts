@@ -1955,10 +1955,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       await session.close().catch((closeErr: unknown) => {
         writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
       });
-      // Order: close session (drains in-flight LLM stream) → clear MITM
-      // routing → drop from accumulator filter → emit agent_session_ended.
-      // Clearing the MITM id before the bridge teardown means any stray
-      // late event cannot push under an about-to-be-unregistered label.
+      // session.close() drains in-flight streams that captured the
+      // agent's session id at attach time; they keep posting under it
+      // until they finish, regardless of setTokenSessionId(undefined).
+      // The clear here only governs future attachments.
       bundle?.setTokenSessionId(undefined);
       instance.tokens.sessionIds.delete(endedSessionId);
       // Pairs 1:1 with agent_started; emitted unconditionally in finally

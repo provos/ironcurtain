@@ -369,12 +369,12 @@ export async function prepareDockerInfrastructure(
     packageValidation = { validator, auditLogPath: packageAuditLogPath };
   }
 
-  // MITM proxy uses its `sessionId` option as a token-stream routing key
-  // (see MitmProxyOptions.sessionId). The routing key must match what
-  // token-stream subscribers use; today bundleId is the right value in
-  // both single-session and workflow modes. The cast bridges the brand
-  // gap: the bus signature is typed as SessionId, but the actual value
-  // here is a BundleId acting as a bundle-scoped routing token.
+  // Initial token-stream routing id. Single-session mode: bundleId is
+  // the session id, so the bridge subscribes under the same key.
+  // Workflow shared-container mode: the orchestrator overrides this
+  // per-agent via setTokenSessionId() around each executeAgentState,
+  // so the bundleId default is only an initial placeholder. Double-cast
+  // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
   const routingId = bundleId as unknown as SessionId;
   const mitmProxy = useTcp
     ? createMitmProxy({
