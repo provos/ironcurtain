@@ -375,9 +375,9 @@ describe('Claude Code Adapter', () => {
   });
 
   it('does not flag transientFailure when result field is absent', () => {
-    // parseClaudeCodeJson gates on 'result' in parsed before running
-    // the detector; this lock-in test confirms a malformed envelope
-    // missing `result` falls through to the raw-stdout fallback.
+    // The detector gates on `typeof parsed.result === 'string'` so a
+    // malformed envelope missing `result` does NOT match — applies to
+    // both exit=0 and exit!=0 paths.
     const envelope = JSON.stringify({
       type: 'result',
       usage: { input_tokens: 100, output_tokens: 0 },
@@ -387,6 +387,29 @@ describe('Claude Code Adapter', () => {
     expect(response.transientFailure).toBeUndefined();
     // Falls through to raw-stdout text.
     expect(response.text).toBe(envelope);
+  });
+
+  it('does not flag transientFailure on non-zero exit when result field is absent or non-string', () => {
+    // Locks in cross-path consistency: the exit!=0 branch must apply
+    // the same `typeof parsed.result === 'string'` gate as the exit=0
+    // branch, otherwise a drifted envelope without `result` could
+    // false-positive to the resumable-abort path.
+    const noResult = JSON.stringify({
+      type: 'result',
+      usage: { input_tokens: 100, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const noResultResponse = claudeCodeAdapter.extractResponse(1, noResult);
+    expect(noResultResponse.transientFailure).toBeUndefined();
+
+    const nonStringResult = JSON.stringify({
+      type: 'result',
+      result: { nested: 'object' },
+      usage: { input_tokens: 100, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const nonStringResponse = claudeCodeAdapter.extractResponse(1, nonStringResult);
+    expect(nonStringResponse.transientFailure).toBeUndefined();
   });
 
   it('returns conversation state config for session resume', () => {

@@ -359,13 +359,16 @@ function extractClaudeCodeQuotaSignal(
  *
  * False positives here are much worse than missed detections — they would
  * route a healthy completion to the resumable-abort path. Hence the
- * `type === 'result'` gate, the strict AND on both signals (so legitimate
- * empty completions with `stop_reason === 'end_turn'` and partial streams
- * with `output_tokens > 0` do not match), and the defensive `usage`
+ * `type === 'result'` + `typeof result === 'string'` envelope gates (a
+ * real Claude Code result envelope always carries both), the strict AND
+ * on the two stall signals (so legitimate empty completions with
+ * `stop_reason === 'end_turn'` and partial streams with
+ * `output_tokens > 0` do not match), and the defensive `usage`
  * narrowing (CLI version drift / schema change yields undefined).
  */
 function detectTransientFailure(parsed: Record<string, unknown>, stdout: string): { rawMessage: string } | undefined {
   if (parsed.type !== 'result') return undefined;
+  if (typeof parsed.result !== 'string') return undefined;
   const usage = parsed.usage;
   if (!usage || typeof usage !== 'object') return undefined;
   const outputTokens = (usage as Record<string, unknown>).output_tokens;
