@@ -644,6 +644,46 @@ describe('synthesizePhaseFromMessageLog', () => {
     expect(synthesizePhaseFromMessageLog(entries, def)).toBe('completed');
   });
 
+  it('returns "aborted" when last state is non-terminal and a transient_failure follows', () => {
+    // Mirrors the quota_exhausted case for the new transient-failure
+    // signal: a checkpoint-less past run that aborted via the transient
+    // path must classify as `'aborted'` (not `'interrupted'`) so the
+    // past-runs UI labels it correctly.
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+      {
+        type: 'transient_failure',
+        ts: '2026-04-23T10:05:00.000Z',
+        workflowId,
+        state: 'plan',
+        role: 'planner',
+        kind: 'degenerate_response',
+        rawMessage: '{"usage":{"output_tokens":0},"stop_reason":null}',
+      },
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('aborted');
+  });
+
   it('prefers "aborted" over "failed" when both quota_exhausted and error follow the last transition', () => {
     const def = defWithStates({
       start: {
@@ -1416,6 +1456,53 @@ describe('workflows.listResumable', () => {
     expect(byId.get(idDone)?.phase).toBe('completed');
     expect(byId.get(idAbort)?.phase).toBe('aborted');
     expect(byId.get(idGate)?.phase).toBe('waiting_human');
+  });
+
+  it('surfaces a transient-aborted run as phase "aborted" in listResumable (resume-eligibility)', async () => {
+    // The orchestrator forces `finalStatus.phase = 'aborted'` when the
+    // adapter reports `transientFailure`, even when the workflow's only
+    // terminal is `done`. listResumable must surface that as 'aborted'
+    // (via computePastRunPhase short-circuiting on finalStatus.phase) so
+    // the past-runs UI shows a Resume affordance for the row.
+    const id = 'wf-transient-aborted' as WorkflowId;
+    const def = makeDefinition({
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'finished' },
+      },
+    });
+    // Checkpoint preserves the failing agent state's machineState (the
+    // orchestrator does NOT overwrite it on transient abort) and
+    // stamps finalStatus.phase = 'aborted'.
+    const cp = makeCheckpoint({
+      machineState: 'plan',
+      timestamp: '2026-04-23T15:00:00.000Z',
+      finalStatus: { phase: 'aborted', reason: 'Upstream stall: agent returned no content' },
+    });
+    seedRunDirectory(baseDir, id, { definition: def, checkpoint: cp });
+
+    const ctx = createContext({
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
+      loadPastRun: () => makeLoad({ checkpoint: cp, definition: def }),
+    });
+
+    const dtos = (await workflowDispatch(ctx, 'workflows.listResumable', {})) as PastRunDto[];
+
+    expect(dtos).toHaveLength(1);
+    expect(dtos[0].workflowId).toBe(id);
+    expect(dtos[0].phase).toBe('aborted');
+    // The failing agent state is preserved, so resume can re-enter it.
+    expect(dtos[0].currentState).toBe('plan');
   });
 
   it('leaves durationMs undefined for every row (checkpoint schema gap)', async () => {

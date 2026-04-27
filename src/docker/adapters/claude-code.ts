@@ -339,6 +339,36 @@ function extractClaudeCodeQuotaSignal(stdout: string): AgentResponse['quotaExhau
 }
 
 /**
+ * Detects the degenerate "upstream stall" envelope: exit=0, JSON parses,
+ * `result` non-empty (typically the agent's preamble), but
+ * `usage.output_tokens === 0` AND `stop_reason === null` (or undefined).
+ * Matches the captured envelopes from a sustained LiteLLM/Z.AI outage
+ * where the stream hung server-side and no assistant message was
+ * generated.
+ *
+ * Predicate is strict (AND of both signals) so legitimate empty
+ * completions — `stop_reason === 'end_turn'` with `output_tokens === 0`
+ * — and partial streams — `output_tokens > 0` with `stop_reason === null`
+ * — do NOT match. Reads defensively: if `usage` is absent or wrongly
+ * typed (CLI version drift), returns undefined and lets the caller
+ * treat the response as healthy. False positives here would route a
+ * normal completion to the resumable-abort path, which is much worse
+ * than a missed detection.
+ */
+function detectClaudeCodeTransientFailure(
+  parsed: Record<string, unknown>,
+  stdout: string,
+): { rawMessage: string } | undefined {
+  const usage = parsed.usage;
+  if (!usage || typeof usage !== 'object') return undefined;
+  const outputTokens = (usage as Record<string, unknown>).output_tokens;
+  if (typeof outputTokens !== 'number' || outputTokens !== 0) return undefined;
+  const stopReason = parsed.stop_reason;
+  if (stopReason !== null && stopReason !== undefined) return undefined;
+  return { rawMessage: stdout.trim() };
+}
+
+/**
  * Parses Claude Code's `--output-format json` response.
  * Falls back to raw stdout when the output is not valid JSON.
  */
@@ -348,10 +378,13 @@ function parseClaudeCodeJson(stdout: string): AgentResponse {
     if (parsed && typeof parsed === 'object' && 'result' in parsed) {
       const obj = parsed as Record<string, unknown>;
       const text = typeof obj.result === 'string' ? obj.result : stdout.trim();
-      if (typeof obj.total_cost_usd === 'number') {
-        return { text, costUsd: obj.total_cost_usd };
+      const transient = detectClaudeCodeTransientFailure(obj, stdout);
+      const base: AgentResponse =
+        typeof obj.total_cost_usd === 'number' ? { text, costUsd: obj.total_cost_usd } : { text };
+      if (transient) {
+        return { ...base, transientFailure: { kind: 'degenerate_response', rawMessage: transient.rawMessage } };
       }
-      return { text };
+      return base;
     }
   } catch {
     // JSON parse failed -- fall through to raw text

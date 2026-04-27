@@ -248,6 +248,96 @@ describe('Claude Code Adapter', () => {
     expect(response.quotaExhausted).toBeUndefined();
   });
 
+  it('surfaces transientFailure when usage.output_tokens=0 AND stop_reason=null (degenerate stall envelope)', () => {
+    // Mirrors the captured envelope from a sustained LiteLLM/Z.AI outage:
+    // CLI exits 0, JSON parses, `result` non-empty (preamble), but the
+    // stream hung server-side and produced no assistant content.
+    const envelope = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      result: 'I will analyze the workspace next.',
+      usage: { input_tokens: 1234, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeDefined();
+    expect(response.transientFailure!.kind).toBe('degenerate_response');
+    expect(response.transientFailure!.rawMessage).toContain('output_tokens');
+    // text retains the preamble so the message log has something to show.
+    expect(response.text).toBe('I will analyze the workspace next.');
+    // Transient failure must NOT route through the hardFailure or
+    // quotaExhausted paths.
+    expect(response.hardFailure).toBeUndefined();
+    expect(response.quotaExhausted).toBeUndefined();
+  });
+
+  it('does not flag transientFailure on a healthy completion (stop_reason=end_turn, output_tokens>0)', () => {
+    const envelope = JSON.stringify({
+      type: 'result',
+      result: 'Task completed',
+      usage: { input_tokens: 100, output_tokens: 50 },
+      stop_reason: 'end_turn',
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+    expect(response.text).toBe('Task completed');
+  });
+
+  it('does not flag transientFailure on a legitimate empty completion (output_tokens=0 AND stop_reason=end_turn)', () => {
+    // Boundary case documenting predicate strictness: a legitimate empty
+    // completion sets stop_reason='end_turn', so it must NOT match.
+    const envelope = JSON.stringify({
+      type: 'result',
+      result: '',
+      usage: { input_tokens: 100, output_tokens: 0 },
+      stop_reason: 'end_turn',
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+  });
+
+  it('does not flag transientFailure on a partial-stream shape (output_tokens>0 AND stop_reason=null)', () => {
+    // Boundary case: partial-stream detection is Phase 2 (out of scope
+    // here). Confirms the predicate is strict (AND of both signals).
+    const envelope = JSON.stringify({
+      type: 'result',
+      result: 'partial output',
+      usage: { input_tokens: 100, output_tokens: 5 },
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+  });
+
+  it('does not flag transientFailure when usage is absent (defensive: CLI version drift)', () => {
+    const envelope = JSON.stringify({
+      type: 'result',
+      result: 'something',
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+  });
+
+  it('does not flag transientFailure when usage is wrongly typed (defensive)', () => {
+    const envelope = JSON.stringify({
+      type: 'result',
+      result: 'something',
+      usage: 'not an object',
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+  });
+
+  it('hard-failure (exit=143, empty stdout) sets hardFailure=true and not transientFailure', () => {
+    // Mutual-exclusion regression guard: a kill-on-exit failure must NOT
+    // be misclassified as a degenerate-response transient failure.
+    const response = claudeCodeAdapter.extractResponse(143, '');
+    expect(response.hardFailure).toBe(true);
+    expect(response.transientFailure).toBeUndefined();
+  });
+
   it('returns conversation state config for session resume', () => {
     const config = claudeCodeAdapter.getConversationStateConfig!();
     expect(config.hostDirName).toBe('claude-state');

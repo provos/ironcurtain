@@ -237,6 +237,33 @@ describe('DockerAgentSession retry path', () => {
     expect(flagValue(calls[1], '--session-id')).toBeUndefined();
   });
 
+  it('forwards transientFailure from a degenerate response envelope (exit=0, output_tokens=0, stop_reason=null)', async () => {
+    // Plumbing-level coverage at the session seam: the adapter detects
+    // the stall envelope, the session must surface it through
+    // sendMessageDetailed unchanged so the orchestrator can short-circuit
+    // on it.
+    const degenerateEnvelope = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      result: 'preamble only',
+      usage: { input_tokens: 1234, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const { exec } = scriptedExec([{ exitCode: 0, stdout: degenerateEnvelope, stderr: '' }]);
+    const deps = buildDeps(tempDir, exec);
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const result = await session.sendMessageDetailed('do the thing');
+
+    expect(result.transientFailure).toBeDefined();
+    expect(result.transientFailure!.kind).toBe('degenerate_response');
+    expect(result.transientFailure!.rawMessage).toContain('output_tokens');
+    expect(result.hardFailure).toBe(false);
+    expect(result.quotaExhausted).toBeUndefined();
+    expect(result.text).toBe('preamble only');
+  });
+
   it('sendMessage delegates to sendMessageDetailed and returns just the text', async () => {
     const { exec } = scriptedExec([{ exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' }]);
     const deps = buildDeps(tempDir, exec);

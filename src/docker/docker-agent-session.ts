@@ -315,6 +315,7 @@ export class DockerAgentSession implements Session {
         text: response.text,
         hardFailure: response.hardFailure ?? false,
         quotaExhausted: response.quotaExhausted,
+        transientFailure: response.transientFailure,
       };
     } finally {
       // Restore to 'ready' on both success and exception so a failed

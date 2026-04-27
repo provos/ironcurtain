@@ -77,7 +77,13 @@ import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
 import { discoverWorkflowRuns } from './workflow-discovery.js';
 import { isCheckpointResumable } from './checkpoint.js';
-import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
+import {
+  AgentInvocationError,
+  WorkflowQuotaExhaustedError,
+  WorkflowTransientFailureError,
+  isWorkflowQuotaExhaustedError,
+  isWorkflowTransientFailureError,
+} from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -432,6 +438,15 @@ interface WorkflowInstance {
    * Survives only in-process; the checkpoint itself does not record it.
    */
   quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
+  /**
+   * Stamped when an agent turn reports a transient upstream failure
+   * (a degenerate response envelope with no usable content — e.g. a
+   * sustained upstream stall). Sibling of `quotaExhausted`: drives the
+   * same checkpoint-preserving abort path so `workflow resume` can
+   * re-enter once the upstream is healthy. Survives only in-process;
+   * the checkpoint itself does not record it.
+   */
+  transientFailure?: { readonly kind: 'degenerate_response'; readonly rawMessage: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -1624,17 +1639,19 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
 
       // Uniform agent-turn entrypoint: every prompt and reprompt must flow
-      // through here so the quota-exhaustion short-circuit applies to ALL
-      // of them. Retrying or reprompting a turn whose adapter reported
-      // quota exhaustion would only burn more of the already-exhausted
-      // budget — instead we log a `quota_exhausted` event once and throw
+      // through here so the quota-exhaustion / transient-failure
+      // short-circuits apply to ALL of them. Retrying or reprompting a turn
+      // whose adapter reported either signal would only burn more of the
+      // already-exhausted budget (quota) or hammer a stalled upstream
+      // (transient) — instead we log the structured event once and throw
       // a dedicated error so higher layers can distinguish "paused by
-      // provider" from "aborted by bug" (today both abort; M4 turns this
-      // into a `paused` terminal phase without touching here).
+      // provider" / "stalled upstream" from "aborted by bug" (today all
+      // three abort; M4 turns these into a `paused` terminal phase without
+      // touching here).
       //
       // Sessions without `sendMessageDetailed` (e.g., built-in in-process
       // sessions) degrade cleanly to `sendMessage`, which cannot produce
-      // a quota signal — the short-circuit simply never fires for them.
+      // either signal — the short-circuits simply never fire for them.
       const sendAgentTurn = async (msg: string): Promise<AgentTurnResult> => {
         const result = session.sendMessageDetailed
           ? await session.sendMessageDetailed(msg)
@@ -1656,6 +1673,23 @@ export class WorkflowOrchestrator implements WorkflowController {
           // to be a normal terminal (e.g. `done`).
           instance.quotaExhausted = { resetAt, rawMessage };
           throw new WorkflowQuotaExhaustedError({ stateId, resetAt, rawMessage });
+        }
+        if (result.transientFailure) {
+          const { kind, rawMessage } = result.transientFailure;
+          // Mirror the quota path's structure: append a structured
+          // `transient_failure` log entry, stamp the instance, throw a
+          // dedicated error. Do NOT call logReceived here — the
+          // structured entry is sufficient and a parallel agent_received
+          // entry would clutter `workflow inspect`.
+          messageLog.append({
+            ...this.logBase(instance),
+            type: 'transient_failure',
+            role: stateConfig.persona,
+            kind,
+            rawMessage,
+          });
+          instance.transientFailure = { kind, rawMessage };
+          throw new WorkflowTransientFailureError({ stateId, kind, rawMessage });
         }
         return result;
       };
@@ -1815,13 +1849,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         responseText,
       };
     } catch (err) {
-      // Quota exhaustion already produced its own structured
-      // `quota_exhausted` log entry inside `sendAgentTurn`; appending a
-      // generic `error` entry here would double-log the same event and
-      // make `workflow inspect` surface both a yellow quota line and a
-      // red error line for the same failure. Suppress the generic entry
-      // when the cause is a `WorkflowQuotaExhaustedError`.
-      if (!isWorkflowQuotaExhaustedError(err)) {
+      // Quota exhaustion / transient upstream failure already produced
+      // their own structured log entries inside `sendAgentTurn`;
+      // appending a generic `error` entry here would double-log the same
+      // event and make `workflow inspect` surface a duplicate red error
+      // line alongside the structured signal. Suppress the generic entry
+      // when the cause is a `WorkflowQuotaExhaustedError` or
+      // `WorkflowTransientFailureError`.
+      if (!isWorkflowQuotaExhaustedError(err) && !isWorkflowTransientFailureError(err)) {
         instance.messageLog.append({
           ...this.logBase(instance),
           type: 'error',
@@ -1957,6 +1992,23 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.finalStatus = {
         phase: 'aborted',
         reason: `Upstream quota exhausted${resetHint}`,
+      };
+    } else if (instance.transientFailure) {
+      // Mirror the quota branch: a transient upstream failure must force
+      // an abort-preserving terminal regardless of which state
+      // `findErrorTarget` resolved to. Without this, a workflow whose
+      // only terminal is `done` would land on `done` and
+      // `handleWorkflowComplete` would mark the run `completed`, breaking
+      // resume. The truncated rawMessage excerpt makes the abort reason
+      // self-explanatory in CLI / web UI surfaces without dumping the
+      // full envelope.
+      const excerpt = instance.transientFailure.rawMessage.slice(0, 200);
+      instance.finalStatus = {
+        phase: 'aborted',
+        reason:
+          `Upstream stall: agent returned no content (kind=${instance.transientFailure.kind}; ` +
+          `resumable — run "workflow resume <id>" once upstream is healthy)` +
+          (excerpt ? `\n${excerpt}` : ''),
       };
     } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {

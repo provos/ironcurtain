@@ -480,6 +480,22 @@ export interface AgentTurnResult {
     readonly resetAt?: Date;
     readonly rawMessage: string;
   };
+  /**
+   * Set when the adapter detected a transient upstream failure (a
+   * degenerate response envelope with no usable content — e.g. a
+   * sustained upstream stall surfaced as `usage.output_tokens === 0`
+   * AND `stop_reason === null`). Workflow callers MUST treat this as
+   * terminal-but-resumable: halt the run, preserve the checkpoint, and
+   * surface it as `phase: 'aborted'` so `workflow resume` can re-enter
+   * once the upstream is healthy. The orchestrator does NOT retry on
+   * this signal — an in-loop reprompt against a stalled upstream is
+   * hopeless. See `AgentResponse.transientFailure` in
+   * `src/docker/agent-adapter.ts` for the adapter-side contract.
+   */
+  readonly transientFailure?: {
+    readonly kind: 'degenerate_response';
+    readonly rawMessage: string;
+  };
 }
 
 export interface Session {
