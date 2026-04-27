@@ -68,3 +68,36 @@ export class WorkflowQuotaExhaustedError extends Error {
 export function isWorkflowQuotaExhaustedError(err: unknown): err is WorkflowQuotaExhaustedError {
   return err instanceof WorkflowQuotaExhaustedError;
 }
+
+/**
+ * Thrown when the agent adapter reports a transient upstream failure
+ * (see `AgentResponse.transientFailure`). Sibling of
+ * `WorkflowQuotaExhaustedError`: both signal terminal-but-resumable
+ * conditions. Consumers MUST NOT remove the on-disk checkpoint; the
+ * orchestrator forces `phase: 'aborted'` so `isCheckpointResumable`
+ * returns true regardless of which terminal `findErrorTarget` resolved
+ * to.
+ */
+export interface WorkflowTransientFailureOptions {
+  readonly stateId: string;
+  readonly kind: 'degenerate_response';
+  readonly rawMessage: string;
+}
+
+export class WorkflowTransientFailureError extends Error {
+  readonly stateId: string;
+  readonly kind: 'degenerate_response';
+  readonly rawMessage: string;
+
+  constructor(options: WorkflowTransientFailureOptions) {
+    super(`Agent turn aborted: upstream stall (kind=${options.kind})`);
+    this.name = 'WorkflowTransientFailureError';
+    this.stateId = options.stateId;
+    this.kind = options.kind;
+    this.rawMessage = options.rawMessage;
+  }
+}
+
+export function isWorkflowTransientFailureError(err: unknown): err is WorkflowTransientFailureError {
+  return err instanceof WorkflowTransientFailureError;
+}

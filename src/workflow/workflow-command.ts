@@ -552,6 +552,11 @@ function runInspect(args: string[]): void {
               `${prefix} ${YELLOW}[quota/${entry.role}]${RESET} resets=${entry.resetAt ?? 'unknown'} — ${truncate(entry.rawMessage, 80)}`,
             );
             break;
+          case 'transient_failure':
+            writeStdout(
+              `${prefix} ${YELLOW}[transient/${entry.role}]${RESET} kind=${entry.kind} — ${truncate(entry.rawMessage, 80)}`,
+            );
+            break;
           case 'state_transition': {
             const toDesc = stateDescriptions?.get(entry.event);
             const toLabel = toDesc ? `${entry.event} ${DIM}\u2014 "${toDesc}"${RESET}` : entry.event;

@@ -78,6 +78,18 @@ export interface QuotaExhaustedEntry extends BaseEntry {
   readonly rawMessage: string;
 }
 
+/**
+ * Emitted when the orchestrator halted the run on
+ * `AgentResponse.transientFailure`. `rawMessage` preserves the original
+ * envelope/stdout for humans inspecting the log.
+ */
+export interface TransientFailureEntry extends BaseEntry {
+  readonly type: 'transient_failure';
+  readonly role: string;
+  readonly kind: 'degenerate_response';
+  readonly rawMessage: string;
+}
+
 /** Discriminated union of all log entry types. */
 export type MessageLogEntry =
   | AgentSentEntry
@@ -87,7 +99,8 @@ export type MessageLogEntry =
   | GateResolvedEntry
   | ErrorEntry
   | StateTransitionEntry
-  | QuotaExhaustedEntry;
+  | QuotaExhaustedEntry
+  | TransientFailureEntry;
 
 // ---------------------------------------------------------------------------
 // MessageLog

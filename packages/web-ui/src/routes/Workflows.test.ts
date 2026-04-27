@@ -206,25 +206,28 @@ describe('Workflows route', () => {
       expect(screen.getByText('failed-row')).toBeTruthy();
     });
 
-    it('Resume button is disabled for terminal phases and enabled for waiting_human/interrupted', async () => {
+    it('Resume button is disabled only for completed runs; every other phase is resumable (matches engine isCheckpointResumable)', async () => {
       mockListResumable.mockResolvedValue([
         makePastRun({ workflowId: 'p-done', phase: 'completed' }),
         makePastRun({ workflowId: 'p-wait', phase: 'waiting_human' }),
         makePastRun({ workflowId: 'p-int', phase: 'interrupted' }),
         makePastRun({ workflowId: 'p-fail', phase: 'failed' }),
+        makePastRun({ workflowId: 'p-abort', phase: 'aborted' }),
       ]);
       render(Workflows);
       await screen.findByTestId('resume-p-done');
 
       const resumeDone = screen.getByTestId('resume-p-done') as HTMLButtonElement;
       const resumeFail = screen.getByTestId('resume-p-fail') as HTMLButtonElement;
+      const resumeAbort = screen.getByTestId('resume-p-abort') as HTMLButtonElement;
       const resumeWait = screen.getByTestId('resume-p-wait') as HTMLButtonElement;
       const resumeInt = screen.getByTestId('resume-p-int') as HTMLButtonElement;
 
       expect(resumeDone.disabled).toBe(true);
       expect(resumeDone.getAttribute('aria-disabled')).toBe('true');
-      expect(resumeFail.disabled).toBe(true);
 
+      expect(resumeFail.disabled).toBe(false);
+      expect(resumeAbort.disabled).toBe(false);
       expect(resumeWait.disabled).toBe(false);
       expect(resumeInt.disabled).toBe(false);
     });
