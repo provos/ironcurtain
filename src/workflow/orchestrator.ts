@@ -2011,7 +2011,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         phase: 'aborted',
         reason:
           `Upstream stall: agent returned no content (kind=${instance.transientFailure.kind}; ` +
-          `resumable — run "workflow resume <id>" once upstream is healthy)\n${excerpt}`,
+          `resumable — run "ironcurtain workflow resume <baseDir>" once upstream is healthy)\n${excerpt}`,
       };
     } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {
