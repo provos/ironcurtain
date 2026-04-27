@@ -86,8 +86,14 @@ export interface EscalationResolutionResult {
  *
  * Invariants:
  * - Labels are monotonically increasing integers starting at 1.
- * - At most one session exists per label.
+ * - At most one registered session exists per label.
  * - currentLabel is always either null or a valid label in the map.
+ *
+ * Label space is shared with workflow-owned agent sessions via
+ * `reserveLabel()` — those labels are live at the TokenStreamBridge
+ * but have no entry in this manager's `sessions` map. Code that
+ * iterates `sessions` or calls `end(label)` will silently skip them;
+ * their lifecycle is owned by the workflow orchestrator.
  */
 export class SessionManager {
   private sessions = new Map<number, ManagedSession>();
@@ -102,6 +108,17 @@ export class SessionManager {
    * sessions do not steal Signal focus.
    */
   currentLabel: number | null = null;
+
+  /**
+   * Reserves a fresh label without registering a session. Exists so
+   * that non-managed sessions (workflow-owned agent sessions, which
+   * run without a Transport) can share the same label space as
+   * managed sessions. A single label authority avoids collisions in
+   * the TokenStreamBridge, which keys per-session state by label.
+   */
+  reserveLabel(): number {
+    return this.nextLabel++;
+  }
 
   /**
    * Registers a new session and returns its assigned label.

@@ -19,6 +19,17 @@ export function createSessionId(): SessionId {
 }
 
 /**
+ * Coerce an unknown WS-boundary value into a SessionId, or return undefined
+ * if it is not a string. Use at the JSON-RPC / WebSocket boundary so the
+ * `as SessionId` brand-injection happens at one typed seam instead of
+ * scattered across call sites.
+ */
+export function parseSessionId(value: unknown): SessionId | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value as SessionId;
+}
+
+/**
  * Unique key for a Docker infrastructure bundle: one container + its
  * MITM proxy, Code Mode proxy, CA, fake keys, and sockets tree. A
  * single-session CLI run has one `BundleId` (equal to the session's

@@ -624,5 +624,99 @@ describe('TokenStreamBridge', () => {
       expect(payload.events).toHaveLength(1);
       expect(payload.events[0].kind).toBe('text_delta');
     });
+
+    /**
+     * Workflow agent sessions are created by WorkflowOrchestrator, not
+     * via `sessions.create`, so they never emit `session.created`. Before
+     * the fix, token events for these sessions were silently dropped at
+     * `TokenStreamBridge.addGlobalClient` (sessionToLabel lookup returned
+     * undefined). The fix wires workflow lifecycle events (`agent_started`
+     * / `agent_session_ended`) through the daemon to `bridge.registerSession`
+     * / `bridge.closeSession`.
+     *
+     * This test simulates that wiring at the bridge boundary:
+     *   1. Simulate the global observer (`observe --all`) subscribing.
+     *   2. Simulate the daemon's workflow.agent_started handler registering
+     *      the session.
+     *   3. Verify events published by the MITM reach the observer.
+     *   4. Simulate agent_session_ended -> closeSession.
+     *   5. Verify post-teardown events are dropped (no cross-agent bleed).
+     */
+    it('workflow-agent lifecycle routes events then tears down on session end', () => {
+      const bridge = new TokenStreamBridge(sender);
+      const observeClient = mockWs();
+      const sid = sessionId('workflow-agent-session-1');
+      const label = 101; // would come from SessionManager.reserveLabel()
+
+      // Observer subscribes before the workflow session starts (the
+      // viz pre-subscribes on page load).
+      bridge.addGlobalClient(observeClient);
+
+      // Daemon's `workflow.agent_started` handler: register the mapping.
+      bridge.registerSession(label, sid);
+
+      // MITM publishes token events during session.sendMessage().
+      getTokenStreamBus().push(sid, textDelta('agent thinking'));
+      getTokenStreamBus().push(sid, textDelta('more tokens'));
+      vi.advanceTimersByTime(50);
+
+      expect(sender.calls).toHaveLength(1);
+      const firstPayload = sender.calls[0].payload as { label: number; events: TokenStreamEvent[] };
+      expect(firstPayload.label).toBe(label);
+      expect(firstPayload.events).toHaveLength(2);
+
+      // Daemon's `workflow.agent_session_ended` handler: tear down the
+      // mapping. Fires unconditionally in the orchestrator's finally
+      // block (symmetric with registration).
+      bridge.closeSession(label);
+
+      // Post-teardown pushes must not reach the observer -- no label
+      // resolvable, no events delivered.
+      sender.calls.length = 0;
+      getTokenStreamBus().push(sid, textDelta('stale event after teardown'));
+      vi.advanceTimersByTime(50);
+      expect(sender.calls).toHaveLength(0);
+    });
+
+    /**
+     * Rapid state transitions: agent A ends, agent B starts with a
+     * fresh session ID. The bridge must not leak A's label/mapping into
+     * B's subscription, and B's events must route with B's own label.
+     */
+    it('handles rapid session churn without stale mappings', () => {
+      const bridge = new TokenStreamBridge(sender);
+      const observeClient = mockWs();
+      const sidA = sessionId('workflow-agent-A');
+      const sidB = sessionId('workflow-agent-B');
+      const labelA = 201;
+      const labelB = 202;
+
+      bridge.addGlobalClient(observeClient);
+
+      // Agent A runs.
+      bridge.registerSession(labelA, sidA);
+      getTokenStreamBus().push(sidA, textDelta('A-event'));
+      vi.advanceTimersByTime(50);
+      expect(sender.calls).toHaveLength(1);
+      expect((sender.calls[0].payload as { label: number }).label).toBe(labelA);
+
+      // A ends, B starts with a fresh ID and label.
+      bridge.closeSession(labelA);
+      bridge.registerSession(labelB, sidB);
+
+      sender.calls.length = 0;
+      getTokenStreamBus().push(sidB, textDelta('B-event'));
+      // A replayed stale event (e.g. in-flight MITM buffer) must not reach
+      // the observer under B's label.
+      getTokenStreamBus().push(sidA, textDelta('A-stale'));
+      vi.advanceTimersByTime(50);
+
+      // Only the B event is delivered; A's stale event has no label.
+      expect(sender.calls).toHaveLength(1);
+      const payload = sender.calls[0].payload as { label: number; events: TokenStreamEvent[] };
+      expect(payload.label).toBe(labelB);
+      expect(payload.events).toHaveLength(1);
+      expect((payload.events[0] as { text?: string }).text).toBe('B-event');
+    });
   });
 });

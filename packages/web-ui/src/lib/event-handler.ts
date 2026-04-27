@@ -144,10 +144,24 @@ export type WebEvent =
       event: 'workflow.state_entered';
       payload: { workflowId: string; state: string; previousState?: string };
     }
-  | { event: 'workflow.agent_started'; payload: { workflowId: string; stateId: string; persona: string } }
+  | {
+      event: 'workflow.agent_started';
+      // `sessionId` is the daemon's bridge-registration key and is always
+      // emitted by the orchestrator (see src/workflow/orchestrator.ts
+      // `emitLifecycleEvent({ kind: 'agent_started', ... })`). Frontend
+      // consumers may not read it today, but the field is required on the
+      // wire so future per-session attribution doesn't require a type churn.
+      payload: { workflowId: string; stateId: string; persona: string; sessionId: string };
+    }
   | {
       event: 'workflow.agent_completed';
       payload: { workflowId: string; stateId: string; verdict?: string; confidence?: string };
+    }
+  | {
+      // Fires in the orchestrator's `finally` so success, failure, and abort
+      // paths all clean up the bridge mapping. Mirror of the daemon contract.
+      event: 'workflow.agent_session_ended';
+      payload: { workflowId: string; stateId: string; sessionId: string };
     }
   | { event: 'workflow.completed'; payload: { workflowId: string } }
   | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
@@ -200,12 +214,17 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'workflow.agent_started':
       return {
         event,
-        payload: data as { workflowId: string; stateId: string; persona: string },
+        payload: data as { workflowId: string; stateId: string; persona: string; sessionId: string },
       };
     case 'workflow.agent_completed':
       return {
         event,
         payload: data as { workflowId: string; stateId: string; verdict?: string; confidence?: string },
+      };
+    case 'workflow.agent_session_ended':
+      return {
+        event,
+        payload: data as { workflowId: string; stateId: string; sessionId: string },
       };
     case 'workflow.completed':
       return { event, payload: data as { workflowId: string } };
@@ -376,6 +395,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     }
 
     case 'workflow.agent_started':
+    case 'workflow.agent_session_ended':
       // Informational; no state mutation needed.
       return true;
 

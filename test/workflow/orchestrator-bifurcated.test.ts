@@ -54,6 +54,7 @@ function makeStubInfrastructure(
     workflowId,
     bundleId,
     scope,
+    setTokenSessionId: () => {},
   } as unknown as DockerInfrastructure & { readonly __scope: string };
 }
 

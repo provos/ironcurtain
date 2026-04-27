@@ -42,6 +42,7 @@ import {
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
 import { validatePolicyDir } from '../config/validate-policy-dir.js';
+import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
 import { extractRequiredServers } from '../trusted-process/policy-roots.js';
 import { createPersonaName } from '../persona/types.js';
@@ -50,6 +51,7 @@ import type {
   AgentTurnResult,
   BundleId,
   Session,
+  SessionId,
   SessionOptions,
   SessionMode,
 } from '../session/types.js';
@@ -306,6 +308,13 @@ export type WorkflowLifecycleEvent =
       readonly workflowId: WorkflowId;
       readonly state: string;
       readonly persona: string;
+      /**
+       * Session ID of the agent session. Consumers (e.g. the daemon's
+       * token-stream bridge wiring) use this to register the session
+       * so token events produced by this agent are routable to
+       * `observe --all` subscribers.
+       */
+      readonly sessionId: SessionId;
     }
   | {
       readonly kind: 'agent_completed';
@@ -313,6 +322,22 @@ export type WorkflowLifecycleEvent =
       readonly state: string;
       readonly persona: string;
       readonly verdict: string;
+    }
+  /**
+   * Emitted unconditionally in the `executeAgentState` finally block --
+   * both on success (after `agent_completed`) and on failure (when the
+   * agent state threw or the verdict retry failed). Pairs 1:1 with
+   * `agent_started` and signals that the session has been closed.
+   *
+   * Consumers that registered per-agent resources (e.g. token-stream
+   * bridge entries) must clean up in response to this event so no
+   * state leaks across rapid state transitions.
+   */
+  | {
+      readonly kind: 'agent_session_ended';
+      readonly workflowId: WorkflowId;
+      readonly state: string;
+      readonly sessionId: SessionId;
     };
 
 /** Extended workflow detail for the web UI. */
@@ -438,6 +463,18 @@ interface WorkflowInstance {
    * Survives only in-process; the checkpoint itself does not record it.
    */
   quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
+  /**
+   * Three coordinated pieces of token-stream accounting state, grouped
+   * so lifecycle (setup/teardown) operates on one value. `outputTokens`
+   * accumulates `message_end.outputTokens` for any event whose session
+   * id is in `sessionIds`. `unsubscribe` is set at `setupTokenSubscription`
+   * and cleared on teardown; presence indicates "subscribed."
+   */
+  tokens: {
+    outputTokens: number;
+    readonly sessionIds: Set<SessionId>;
+    unsubscribe?: () => void;
+  };
   /**
    * Sibling of `quotaExhausted`: drives the same checkpoint-preserving
    * abort path. Survives only in-process; the checkpoint does not
@@ -887,6 +924,56 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   // -----------------------------------------------------------------------
+  // Token-stream accumulation (workflow-scoped totalTokens counter)
+  // -----------------------------------------------------------------------
+  //
+  // The token-stream bus is global (see `getTokenStreamBus()` in
+  // `src/docker/token-stream-bus.ts`), so the orchestrator subscribes with
+  // `subscribeAll()` and filters inside the listener by the workflow's own
+  // session-ID set. Per-workflow rather than per-agent: `ctx.totalTokens`
+  // is a workflow-level cumulative sum, so one long-lived subscription is
+  // cheaper (one bus listener, one unsubscribe on completion) than
+  // subscribing and unsubscribing on every `agent_started` /
+  // `agent_session_ended` pair.
+
+  /**
+   * Subscribes the workflow to the global token-stream bus. Accumulates
+   * `message_end.outputTokens` into `instance.tokens.outputTokens` for any
+   * event whose session ID is in `instance.tokens.sessionIds`. The set is managed
+   * by `executeAgentState` (added before `agent_started`, removed in the
+   * `finally` block after `agent_session_ended`).
+   *
+   * Installed synchronously so the subscription is live before any agent
+   * state runs — no window where bus events go unobserved.
+   */
+  private setupTokenSubscription(instance: WorkflowInstance): void {
+    // Defensive: re-entry by resume-after-crash should not double-subscribe.
+    if (instance.tokens.unsubscribe) return;
+    instance.tokens.unsubscribe = getTokenStreamBus().subscribeAll((sessionId, event) => {
+      if (event.kind !== 'message_end') return;
+      if (!instance.tokens.sessionIds.has(sessionId)) return;
+      instance.tokens.outputTokens += event.outputTokens;
+    });
+  }
+
+  /**
+   * Tears down the token-stream bus subscription. Idempotent: safe to
+   * call from both normal completion and abort paths.
+   */
+  private teardownTokenSubscription(instance: WorkflowInstance): void {
+    if (instance.tokens.unsubscribe) {
+      try {
+        instance.tokens.unsubscribe();
+      } catch {
+        // Unsubscribe is best-effort; errors here should never prevent
+        // workflow teardown from completing.
+      }
+      instance.tokens.unsubscribe = undefined;
+    }
+    instance.tokens.sessionIds.clear();
+  }
+
+  // -----------------------------------------------------------------------
   // WorkflowController implementation
   // -----------------------------------------------------------------------
 
@@ -952,6 +1039,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentPersonaByBundle: new Map(),
       mintedServersByBundle: new Map(),
       aborted: false,
+      tokens: {
+        outputTokens: 0,
+        sessionIds: new Set(),
+      },
     };
 
     // Under `sharedContainer: true`, bundles are minted lazily by
@@ -963,6 +1054,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // before any Docker resource is touched.
 
     this.workflows.set(workflowId, instance);
+    this.setupTokenSubscription(instance);
     this.emitLifecycleEvent({ kind: 'started', workflowId, name: definition.name, taskDescription });
     this.subscribeToActor(instance);
     actor.start();
@@ -1023,6 +1115,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentPersonaByBundle: new Map(),
       mintedServersByBundle: new Map(),
       aborted: false,
+      tokens: {
+        // Resume picks up the checkpointed totalTokens as the accumulator's
+        // starting point so post-resume message_end events keep adding to
+        // the running total instead of resetting it.
+        outputTokens: checkpoint.context.totalTokens,
+        sessionIds: new Set(),
+      },
     };
 
     // Resume does NOT reclaim the original containers — any
@@ -1039,6 +1138,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     this.workflows.set(workflowId, instance);
+    this.setupTokenSubscription(instance);
     this.emitLifecycleEvent({
       kind: 'started',
       workflowId,
@@ -1238,6 +1338,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       phase: 'aborted',
       reason: 'Workflow aborted by user',
     };
+
+    // Release the token-stream bus subscription before the async infra
+    // teardown so no late events land against a finalized workflow.
+    this.teardownTokenSubscription(instance);
 
     // Tear down workflow-scoped Docker infrastructure after all sessions
     // are closed. Error-tolerant (see destroyWorkflowInfrastructure).
@@ -1707,11 +1811,20 @@ export class WorkflowOrchestrator implements WorkflowController {
         message: command,
       });
 
+      // Shared-container mode: the MITM is long-lived across agents. Flip
+      // its routing id so this agent's events land under its own session id
+      // (matching what the bridge registers below). Optional-chain because
+      // builtin/per-state-container workflows have no shared `infra`.
+      const agentSessionId = session.getInfo().id;
+      bundle?.setTokenSessionId(agentSessionId);
+      instance.tokens.sessionIds.add(agentSessionId);
+
       this.emitLifecycleEvent({
         kind: 'agent_started',
         workflowId,
         state: stateId,
         persona: stateConfig.persona,
+        sessionId: agentSessionId,
       });
 
       // Two-phase retry: (1) hard-failure retries re-send the ORIGINAL
@@ -1853,6 +1966,12 @@ export class WorkflowOrchestrator implements WorkflowController {
         artifacts,
         outputHash,
         responseText,
+        // Snapshot the workflow's cumulative output-token count AT THE
+        // END of this agent's turn. The XState assign action uses this
+        // value to update ctx.totalTokens; it reflects every `message_end`
+        // the bus subscriber has seen so far, including all earlier
+        // agents in the workflow.
+        totalTokens: instance.tokens.outputTokens,
       };
     } catch (err) {
       // Quota exhaustion / transient upstream failure already produced
@@ -1873,8 +1992,23 @@ export class WorkflowOrchestrator implements WorkflowController {
       throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
       instance.activeSessions.delete(session);
+      const endedSessionId = session.getInfo().id;
       await session.close().catch((closeErr: unknown) => {
         writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
+      });
+      // session.close() drains in-flight streams that captured the
+      // agent's session id at attach time; they keep posting under it
+      // until they finish, regardless of setTokenSessionId(undefined).
+      // The clear here only governs future attachments.
+      bundle?.setTokenSessionId(undefined);
+      instance.tokens.sessionIds.delete(endedSessionId);
+      // Pairs 1:1 with agent_started; emitted unconditionally in finally
+      // so success, failure, and abort paths all clean up the bridge.
+      this.emitLifecycleEvent({
+        kind: 'agent_session_ended',
+        workflowId,
+        state: stateId,
+        sessionId: endedSessionId,
       });
     }
   }
@@ -2055,6 +2189,11 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
     instance.tab.close();
+
+    // Release the token-stream bus subscription. Done eagerly (before the
+    // async destroyWorkflowInfrastructure) because it's a synchronous
+    // callback — idempotent if already cleared by abort().
+    this.teardownTokenSubscription(instance);
 
     // Tear down workflow-scoped Docker infrastructure. Runs asynchronously
     // because the actor subscription is sync; destroyWorkflowInfrastructure

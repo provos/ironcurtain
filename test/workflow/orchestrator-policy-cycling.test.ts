@@ -46,6 +46,7 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     __stub: true,
     workflowId,
     bundleId,
+    setTokenSessionId: () => {},
   } as unknown as DockerInfrastructure;
 }
 

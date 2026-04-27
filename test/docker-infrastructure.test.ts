@@ -59,6 +59,12 @@ describe('DockerInfrastructure interface', () => {
       mitmProxy: {
         start: async () => ({ socketPath: '/tmp/mitm.sock' }),
         stop: async () => {},
+        hosts: {
+          addHost: () => true,
+          removeHost: () => true,
+          listHosts: () => ({ providers: [], dynamic: [] }),
+        },
+        setTokenSessionId: () => {},
       },
       docker: {
         preflight: async () => {},
@@ -105,6 +111,7 @@ describe('DockerInfrastructure interface', () => {
       authKind: 'apikey',
       containerId: 'container-id',
       containerName: 'ironcurtain-test-session',
+      setTokenSessionId: () => {},
     };
 
     // Verify key fields are accessible at runtime
@@ -286,6 +293,12 @@ const makeMockMitmProxy = (): MitmProxy => ({
     return { socketPath: '/tmp/test-mitm-proxy.sock' };
   },
   async stop() {},
+  hosts: {
+    addHost: () => true,
+    removeHost: () => true,
+    listHosts: () => ({ providers: [], dynamic: [] }),
+  },
+  setTokenSessionId: () => {},
 });
 
 /** Minimal config accepted by createSessionContainers. */
@@ -359,6 +372,7 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     socketsDir,
     mitmAddr,
     authKind: 'apikey',
+    setTokenSessionId: () => {},
   };
 }
 

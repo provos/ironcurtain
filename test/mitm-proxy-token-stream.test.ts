@@ -220,7 +220,7 @@ describe('MitmProxy token stream integration', () => {
         socketPath,
         ca,
         providers: [],
-        sessionId: 'test-session',
+        sessionId: 'test-session' as SessionId,
       }),
     ).not.toThrow();
   });
@@ -260,7 +260,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId: sessionId as string,
+        sessionId,
       });
       await proxy.start();
 
@@ -317,7 +317,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId: sessionId as string,
+        sessionId,
       });
       await proxy.start();
 
@@ -437,7 +437,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId: sessionId as string,
+        sessionId,
       });
       await proxy.start();
 
@@ -499,7 +499,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId: sessionId as string,
+        sessionId,
       });
       await proxy.start();
 
@@ -521,6 +521,178 @@ describe('MitmProxy token stream integration', () => {
       for (const entry of globalEvents) {
         expect(entry.sessionId).toBe(sessionId);
       }
+    } finally {
+      upstream.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MitmProxy.setTokenSessionId: dynamic per-agent rerouting
+// ---------------------------------------------------------------------------
+//
+// The MITM proxy is long-lived in shared-container workflow mode: a single
+// instance services back-to-back agent sessions with distinct session IDs.
+// `setTokenSessionId` lets the orchestrator flip the routing target per
+// agent. These tests cover the four lifecycle transitions the workflow
+// orchestrator drives:
+//   - proxy built with no initial sessionId → no routing
+//   - set to sid-a → events route under sid-a
+//   - set to sid-b → events route under sid-b (not sid-a)
+//   - set to undefined → no routing (events dropped, not routed under
+//     a sentinel value)
+
+describe('MitmProxy.setTokenSessionId dynamic routing', () => {
+  let proxy: MitmProxy | undefined;
+  let tempDir: string;
+  let ca: CertificateAuthority;
+  let socketPath: string;
+
+  beforeEach(() => {
+    resetTokenStreamBus();
+    tempDir = mkdtempSync(join(tmpdir(), 'mitm-dynamic-session-test-'));
+    ca = loadOrCreateCA(join(tempDir, 'ca'));
+    socketPath = join(tempDir, 'mitm-proxy.sock');
+  });
+
+  afterEach(async () => {
+    if (proxy) {
+      await proxy.stop();
+      proxy = undefined;
+    }
+    if (tempDir && existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  /** Build an Anthropic-like provider pointing at a local HTTP server. */
+  function makeTestProvider(upstreamPort: number): {
+    config: ProviderConfig;
+    fakeKey: string;
+    realKey: string;
+  } {
+    return {
+      config: {
+        host: 'api.anthropic.com',
+        displayName: 'Anthropic (test)',
+        allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+        keyInjection: { type: 'header', headerName: 'x-api-key' },
+        fakeKeyPrefix: 'sk-ant-test-',
+        upstreamTarget: {
+          hostname: '127.0.0.1',
+          port: upstreamPort,
+          pathPrefix: '',
+          useTls: false,
+        },
+      },
+      fakeKey: 'sk-ant-test-fake-key',
+      realKey: 'sk-ant-test-real-key',
+    };
+  }
+
+  /**
+   * Sends one POST /v1/messages with an SSE response body. Returns after
+   * the response has fully drained so extraction-side events are settled.
+   */
+  async function drivePOST(upstreamPort: number, provider: ReturnType<typeof makeTestProvider>): Promise<void> {
+    const { socket } = await sendConnect(socketPath, 'api.anthropic.com', 443);
+    expect(socket).not.toBeNull();
+    await makeHttpsRequest(socket!, ca, 'api.anthropic.com', {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: {
+        'x-api-key': provider.fakeKey,
+        'content-type': 'application/json',
+      },
+      body: '{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}',
+    });
+    // Give SSE passthrough a moment to flush the final event.
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  it('routes events under the current sessionId and reroutes when it changes', async () => {
+    const ssePayload = [
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"X"}}',
+      '',
+    ].join('\n');
+    const { server: upstream, port: upstreamPort } = await createSseUpstream(ssePayload);
+
+    try {
+      // Subscribe globally so we can observe which sessionId each event
+      // is routed under across the lifecycle.
+      const routedUnder: SessionId[] = [];
+      getTokenStreamBus().subscribeAll((sid, event) => {
+        if (event.kind === 'text_delta') routedUnder.push(sid);
+      });
+
+      const provider = makeTestProvider(upstreamPort);
+      // Build the proxy WITHOUT an initial sessionId to prove the routing
+      // is driven purely by setTokenSessionId.
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [provider],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      // (1) No session set -> no events routed.
+      await drivePOST(upstreamPort, provider);
+      expect(routedUnder).toEqual([]);
+
+      // (2) Set sid-a -> events route under sid-a.
+      proxy.setTokenSessionId('sid-a' as SessionId);
+      await drivePOST(upstreamPort, provider);
+      expect(routedUnder).toEqual(['sid-a']);
+
+      // (3) Set sid-b -> subsequent events route under sid-b, NOT sid-a.
+      proxy.setTokenSessionId('sid-b' as SessionId);
+      await drivePOST(upstreamPort, provider);
+      expect(routedUnder).toEqual(['sid-a', 'sid-b']);
+
+      // (4) Set undefined -> no further events routed.
+      proxy.setTokenSessionId(undefined);
+      await drivePOST(upstreamPort, provider);
+      expect(routedUnder).toEqual(['sid-a', 'sid-b']);
+    } finally {
+      upstream.close();
+    }
+  });
+
+  it('respects a constructor-supplied sessionId as the initial value', async () => {
+    const ssePayload = [
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Y"}}',
+      '',
+    ].join('\n');
+    const { server: upstream, port: upstreamPort } = await createSseUpstream(ssePayload);
+
+    try {
+      const initial: SessionId[] = [];
+      getTokenStreamBus().subscribeAll((sid, event) => {
+        if (event.kind === 'text_delta') initial.push(sid);
+      });
+
+      const provider = makeTestProvider(upstreamPort);
+      // Construct with sessionId — should function as the initial value
+      // of the mutable slot (backward compat with the old one-shot API).
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [provider],
+        dnsLookup: localhostDnsLookup,
+        sessionId: 'initial-sid',
+      });
+      await proxy.start();
+
+      await drivePOST(upstreamPort, provider);
+      expect(initial).toEqual(['initial-sid']);
+
+      // Clearing works from the constructor-supplied initial state too.
+      proxy.setTokenSessionId(undefined);
+      await drivePOST(upstreamPort, provider);
+      expect(initial).toEqual(['initial-sid']);
     } finally {
       upstream.close();
     }

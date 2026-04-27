@@ -87,6 +87,21 @@ export interface MitmProxy {
   stop(): Promise<void>;
   /** Runtime control for the dynamic host allowlist. */
   readonly hosts: DynamicHostController;
+  /**
+   * Set (or clear) the session ID that token-stream events extracted from
+   * LLM API responses are routed under.
+   *
+   * The MITM proxy is long-lived in shared-container workflow mode, where
+   * multiple per-state agent sessions share a single proxy instance. Token
+   * events for the active agent must be labeled with that agent's session
+   * ID, not with any static workflow-wide ID. Callers flip this value
+   * around each agent run: set to the session's ID before the agent runs,
+   * reset to `undefined` when the session ends.
+   *
+   * When the current session ID is `undefined`, extraction sites skip the
+   * `bus.push()` entirely — no events are emitted under a sentinel value.
+   */
+  setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
 }
 
 export interface MitmProxyOptions {
@@ -133,12 +148,17 @@ export interface MitmProxyOptions {
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
   /**
-   * Session ID for token stream routing. When provided, the proxy taps
-   * SSE/JSON responses from LLM API endpoints and pushes parsed token
-   * events into the module-scoped singleton bus (see `getTokenStreamBus`).
-   * When absent, extractor installation is skipped entirely.
+   * Initial session ID for token stream routing. When provided, token
+   * events extracted from LLM API endpoints are published into the
+   * module-scoped singleton bus (see `getTokenStreamBus`) under this ID.
+   *
+   * The value is mutable at runtime via `MitmProxy.setTokenSessionId()`:
+   * long-lived proxies (shared-container workflows) flip this around each
+   * agent so the active agent's session ID is used. When no session ID
+   * is set (initial value `undefined` AND no subsequent `setTokenSessionId`
+   * call), extraction sites skip publishing entirely.
    */
-  readonly sessionId?: string;
+  readonly sessionId?: import('../session/types.js').SessionId;
 }
 
 export interface ProviderKeyMapping {
@@ -472,11 +492,14 @@ export function extractFromJsonResponse(body: Buffer, sessionId: import('../sess
 }
 
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
-  // Token stream extractor installation is gated on `sessionId` alone.
-  // When present, the module-scoped singleton bus is fetched lazily at
-  // each extractor-install point (see below) so `resetTokenStreamBus()`
-  // between tests is honored.
-  const tokenSessionId = options.sessionId;
+  // Token stream extractor installation is gated on `tokenSessionId`.
+  // This is a mutable per-proxy value that callers flip around each
+  // active agent (see `setTokenSessionId` on the returned handle). When
+  // `undefined`, all extractor-install sites skip `bus.push()` entirely
+  // — no sentinel value is published. The module-scoped singleton bus is
+  // fetched lazily at each push site so `resetTokenStreamBus()` between
+  // tests is honored.
+  let tokenSessionId: import('../session/types.js').SessionId | undefined = options.sessionId;
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -769,26 +792,23 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           clientRes.socket?.setNoDelay(true);
 
           const contentType = upstreamRes.headers['content-type'] ?? '';
-          if (tokenSessionId && contentType.includes('text/event-stream')) {
+          // Pin this response's events to the id active when it started,
+          // so an orchestrator mid-flight flip can't split one stream.
+          const sidAtAttach = tokenSessionId;
+          if (sidAtAttach && contentType.includes('text/event-stream')) {
             const tokenBus = getTokenStreamBus();
-            const sid = tokenSessionId as import('../session/types.js').SessionId;
             const sseProvider = resolveSseProvider(targetHost);
             const extractor = new SseExtractorTransform(sseProvider, (event) => {
-              tokenBus.push(sid, event);
+              tokenBus.push(sidAtAttach, event);
             });
             upstreamRes.pipe(extractor).pipe(clientRes);
-          } else if (
-            tokenSessionId &&
-            isLlmMessagesEndpoint(path as string) &&
-            contentType.includes('application/json')
-          ) {
+          } else if (sidAtAttach && isLlmMessagesEndpoint(path as string) && contentType.includes('application/json')) {
             // Non-streaming JSON response: buffer for extraction while piping to client.
             // The passthrough stream always forwards the full response to the client.
             // Capture is bounded at MAX_JSON_RESPONSE_CAPTURE_BYTES: once exceeded,
             // we stop accumulating chunks (and skip extraction at end-of-stream),
             // but the passthrough listener stays attached so the stream completes
             // normally and the client still sees every byte.
-            const sid = tokenSessionId as import('../session/types.js').SessionId;
             const passthrough = new PassThrough();
             const capture = createBoundedJsonResponseCapture();
             passthrough.on('data', (chunk: Buffer) => capture.onData(chunk));
@@ -796,7 +816,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
               capture.onEnd((body) => {
                 if (body === null) return; // overflowed -- skip extraction
                 try {
-                  extractFromJsonResponse(body, sid);
+                  extractFromJsonResponse(body, sidAtAttach);
                 } catch {
                   // Extraction errors must never affect the forwarding path
                 }
@@ -894,11 +914,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         let finalBody = rawBody;
 
         // Extract tool_result events from the request body for token stream observation.
-        // Done before rewriting so we see the original messages array.
-        if (tokenSessionId && isLlmMessagesEndpoint(path as string)) {
+        // Snapshot here (before rewrite) so a concurrent setTokenSessionId
+        // flip can't split this request's events across two ids.
+        const sidForToolResults = tokenSessionId;
+        if (sidForToolResults && isLlmMessagesEndpoint(path as string)) {
           try {
             const bodyParsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
-            extractToolResults(bodyParsed, tokenSessionId as import('../session/types.js').SessionId);
+            extractToolResults(bodyParsed, sidForToolResults);
           } catch {
             // Parse failure is fine -- the rewriter below will also attempt to parse
           }
@@ -1562,6 +1584,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
   return {
     hosts: hostController,
+
+    setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void {
+      tokenSessionId = id;
+    },
 
     async start() {
       // Pre-warm cert cache for all configured providers and registries

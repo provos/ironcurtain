@@ -18,6 +18,7 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
+import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the daemon protocol without importing from src/)
@@ -1261,7 +1262,13 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         name: newWf.name,
         taskDescription: String(params.taskDescription ?? ''),
       });
-      broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
+      const planSessionId = `${newId}-plan-${Date.now()}`;
+      broadcast('workflow.agent_started', {
+        workflowId: newId,
+        stateId: 'plan',
+        persona: 'planner',
+        sessionId: planSessionId,
+      });
       broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
 
       trackTimer(
@@ -1275,6 +1282,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
               verdict: 'success',
               confidence: '0.87',
             });
+            broadcast('workflow.agent_session_ended', makeAgentSessionEndedPayload(newId, 'plan', planSessionId));
             wf.currentState = 'plan_review';
             wf.phase = 'waiting_human';
             const gateId = `${newId}-plan_review`;
@@ -1355,10 +1363,13 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         const nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
         resolveWf.phase = 'running';
         resolveWf.currentState = nextState;
+        const nextPersona = nextState === 'plan' ? 'planner' : 'coder';
+        const nextSessionId = `${resolveWfId}-${nextState}-${Date.now()}`;
         broadcast('workflow.agent_started', {
           workflowId: resolveWfId,
           stateId: nextState,
-          persona: nextState === 'plan' ? 'planner' : 'coder',
+          persona: nextPersona,
+          sessionId: nextSessionId,
         });
         broadcast('workflow.state_entered', { workflowId: resolveWfId, state: nextState });
 
@@ -1373,6 +1384,10 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 verdict: 'success',
                 confidence: '0.79',
               });
+              broadcast(
+                'workflow.agent_session_ended',
+                makeAgentSessionEndedPayload(resolveWfId, nextState, nextSessionId),
+              );
               if (nextState === 'implement') {
                 wf.currentState = 'review';
                 broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'review' });

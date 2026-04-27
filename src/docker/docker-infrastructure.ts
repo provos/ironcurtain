@@ -26,7 +26,7 @@ import { createHash } from 'node:crypto';
 import { quote } from 'shell-quote';
 import type { IronCurtainConfig } from '../config/types.js';
 import { getBundleRuntimeRoot } from '../config/paths.js';
-import { getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
+import { getBundleShortId, type BundleId, type SessionId, type SessionMode } from '../session/types.js';
 import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
 import { CONTAINER_WORKSPACE_DIR, type AgentAdapter, type ConversationStateConfig } from './agent-adapter.js';
 import type { DockerProxy } from './code-mode-proxy.js';
@@ -164,6 +164,17 @@ export interface PreContainerInfrastructure {
   readonly conversationStateDir?: string;
   /** Conversation state config from the adapter, if resume is supported. */
   readonly conversationStateConfig?: ConversationStateConfig;
+  /**
+   * Routes token-stream events from the MITM proxy's LLM API tap under the
+   * given session ID, or disables routing when `undefined`.
+   *
+   * Required because a single long-lived infrastructure bundle (shared
+   * across workflow agent states) must label extracted events with the
+   * *active* per-state session ID rather than a static ID baked in at
+   * construction time. Callers flip this around each agent run; thin
+   * wrapper over `MitmProxy.setTokenSessionId()`.
+   */
+  setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
 }
 
 /**
@@ -358,11 +369,13 @@ export async function prepareDockerInfrastructure(
     packageValidation = { validator, auditLogPath: packageAuditLogPath };
   }
 
-  // MITM proxy uses its `sessionId` option as a token-stream routing key
-  // (see MitmProxyOptions.sessionId). The routing key must match what
-  // token-stream subscribers use; today bundleId is the right value in
-  // both single-session and workflow modes. Name kept inside MitmProxy for
-  // historical reasons; the value is a bundle-scoped routing token.
+  // Initial token-stream routing id. Single-session mode: bundleId is
+  // the session id, so the bridge subscribes under the same key.
+  // Workflow shared-container mode: the orchestrator overrides this
+  // per-agent via setTokenSessionId() around each executeAgentState,
+  // so the bundleId default is only an initial placeholder. Double-cast
+  // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
+  const routingId = bundleId as unknown as SessionId;
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,
@@ -371,7 +384,7 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlPort: 0,
-        sessionId: bundleId,
+        sessionId: routingId,
       })
     : createMitmProxy({
         socketPath: getBundleMitmProxySocketPath(bundleId),
@@ -380,7 +393,7 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlSocketPath: getBundleMitmControlSocketPath(bundleId),
-        sessionId: bundleId,
+        sessionId: routingId,
       });
 
   const docker = createDockerManager();
@@ -473,6 +486,9 @@ export async function prepareDockerInfrastructure(
       authKind,
       conversationStateDir,
       conversationStateConfig,
+      setTokenSessionId: (id) => {
+        mitmProxy.setTokenSessionId(id);
+      },
     };
   } catch (error) {
     // Best-effort cleanup of proxies started above
