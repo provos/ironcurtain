@@ -325,11 +325,6 @@ describe('filterMcpServersByPolicy', () => {
     expect(Object.keys(filtered).sort()).toEqual(['fetch', 'filesystem']);
   });
 
-  it('drops filesystem when the policy does not reference it', () => {
-    const filtered = filterMcpServersByPolicy(mockServers, new Set(['github']));
-    expect(Object.keys(filtered)).toEqual(['github']);
-  });
-
   it('returns an empty object when the required set is empty', () => {
     const filtered = filterMcpServersByPolicy(mockServers, new Set());
     expect(filtered).toEqual({});

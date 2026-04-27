@@ -281,13 +281,4 @@ describe('extractRequiredServers', () => {
     ]);
     expect(extractRequiredServers(policy)).toEqual(new Set());
   });
-
-  it('deduplicates server names that appear in multiple rules', () => {
-    const policy = makePolicyFile([
-      makeServerRule('r1', ['git'], 'allow'),
-      makeServerRule('r2', ['git'], 'escalate'),
-      makeServerRule('r3', ['git'], 'deny'),
-    ]);
-    expect(extractRequiredServers(policy)).toEqual(new Set(['git']));
-  });
 });

@@ -396,8 +396,6 @@ interface WorkflowInstance {
    * `loadConfig()` on every state transition.
    */
   readonly policyDirByPersona: Map<string, string>;
-  /** Memoized per-scope union of required server names. */
-  readonly requiredServersByScope: Map<string, ReadonlySet<string>>;
   /**
    * Last persona loaded into each bundle's coordinator, keyed by
    * `BundleId`. `cyclePolicy` consults this and skips the `loadPolicy`
@@ -526,36 +524,6 @@ export class WorkflowOrchestrator implements WorkflowController {
    * `await` points; on observed abort we tear down the just-built
    * bundle and throw without updating the map.
    */
-  /**
-   * Computes and memoizes the union of MCP server names required by every
-   * agent state in `scope`. Threaded into the workflow infrastructure
-   * factory so the bundle only spawns proxies the policies reference.
-   */
-  private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
-    const cached = instance.requiredServersByScope.get(scope);
-    if (cached) return cached;
-
-    const union = new Set<string>();
-    for (const stateConfig of Object.values(instance.definition.states)) {
-      if (stateConfig.type !== 'agent') continue;
-      const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
-      if (stateScope !== scope) continue;
-
-      let policyDir = instance.policyDirByPersona.get(stateConfig.persona);
-      if (policyDir === undefined) {
-        policyDir = resolvePersonaPolicyDir(stateConfig.persona);
-        instance.policyDirByPersona.set(stateConfig.persona, policyDir);
-      }
-      const { compiledPolicy } = loadPersonaPolicyArtifacts(policyDir);
-      for (const server of extractRequiredServers(compiledPolicy)) {
-        union.add(server);
-      }
-    }
-
-    instance.requiredServersByScope.set(scope, union);
-    return union;
-  }
-
   private async ensureBundleForScope(instance: WorkflowInstance, scope: string): Promise<DockerInfrastructure> {
     if (instance.aborted) {
       throw new Error(`Workflow ${instance.id} is aborting; cannot mint bundle for scope "${scope}"`);
@@ -644,6 +612,38 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   /**
+   * Returns the cached policyDir for `persona`, resolving and caching on
+   * first lookup. Shared by `cyclePolicy` and `getRequiredServersForScope`
+   * so each persona's `persona.json` is read at most once per workflow.
+   */
+  private getPolicyDir(instance: WorkflowInstance, persona: string): string {
+    const cached = instance.policyDirByPersona.get(persona);
+    if (cached !== undefined) return cached;
+    const dir = resolvePersonaPolicyDir(persona);
+    instance.policyDirByPersona.set(persona, dir);
+    return dir;
+  }
+
+  /**
+   * Computes the union of MCP server names required by every agent state
+   * sharing `scope`. Threaded into the workflow infrastructure factory so
+   * the bundle only spawns proxies the policies actually reference.
+   */
+  private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
+    const union = new Set<string>();
+    for (const stateConfig of Object.values(instance.definition.states)) {
+      if (stateConfig.type !== 'agent') continue;
+      const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
+      if (stateScope !== scope) continue;
+      const { compiledPolicy } = loadPersonaPolicyArtifacts(this.getPolicyDir(instance, stateConfig.persona));
+      for (const server of extractRequiredServers(compiledPolicy)) {
+        union.add(server);
+      }
+    }
+    return union;
+  }
+
+  /**
    * Reloads the coordinator's policy for the given persona on the given
    * bundle. Called once per agent state invocation (including re-entries)
    * in shared-container mode. The coordinator stamps `persona` onto every
@@ -666,11 +666,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // engine rebuild.
     if (instance.currentPersonaByBundle.get(bundle.bundleId) === persona) return;
 
-    let policyDir = instance.policyDirByPersona.get(persona);
-    if (policyDir === undefined) {
-      policyDir = resolvePersonaPolicyDir(persona);
-      instance.policyDirByPersona.set(persona, policyDir);
-    }
+    const policyDir = this.getPolicyDir(instance, persona);
     // Target this bundle's coordinator. Under bifurcated workflows every
     // bundle has its own socket, so the bundle argument fully determines
     // the route.
@@ -901,7 +897,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       currentPersonaByBundle: new Map(),
-      requiredServersByScope: new Map(),
       aborted: false,
     };
 
@@ -972,7 +967,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       currentPersonaByBundle: new Map(),
-      requiredServersByScope: new Map(),
       aborted: false,
     };
 
