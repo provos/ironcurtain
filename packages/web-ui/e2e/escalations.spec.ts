@@ -121,7 +121,9 @@ test.describe('Escalations', () => {
 
     // The nav item for Escalations should show a badge count
     // Wait for the escalation event to propagate
-    await expect(page.locator('nav').locator('button', { hasText: 'Escalations' }).locator('.font-mono')).toBeVisible({
+    await expect(
+      page.getByTestId('sidebar-nav').locator('button', { hasText: 'Escalations' }).locator('.font-mono'),
+    ).toBeVisible({
       timeout: 10_000,
     });
   });
@@ -159,7 +161,9 @@ test.describe('Escalation Modal', () => {
     await expect(modal).not.toBeVisible({ timeout: 3_000 });
 
     // Sidebar badge should still show the count
-    await expect(page.locator('nav').locator('button', { hasText: 'Escalations' }).locator('.font-mono')).toBeVisible();
+    await expect(
+      page.getByTestId('sidebar-nav').locator('button', { hasText: 'Escalations' }).locator('.font-mono'),
+    ).toBeVisible();
   });
 
   test('approving in modal removes the escalation', async ({ page }) => {
@@ -213,7 +217,7 @@ test.describe('Escalation Modal', () => {
 
     // Sidebar badge should be gone
     await expect(
-      page.locator('nav').locator('button', { hasText: 'Escalations' }).locator('.font-mono'),
+      page.getByTestId('sidebar-nav').locator('button', { hasText: 'Escalations' }).locator('.font-mono'),
     ).not.toBeVisible();
   });
 

@@ -13,34 +13,39 @@ test.describe('Theme switching', () => {
   });
 
   test('opens the theme picker from the sidebar', async ({ page }) => {
-    // The theme picker trigger shows "Theme: Iron" in the sidebar
-    await page.getByText('Theme:', { exact: false }).click();
+    // The mobile drawer also renders a ThemePicker bound to the same
+    // showThemePicker state, so its menu items appear in the DOM too.
+    // Scope to the desktop sidebar to avoid strict-mode violations.
+    const sidebar = page.getByTestId('sidebar-nav');
+    await sidebar.getByText('Theme:', { exact: false }).click();
 
-    // Theme options should appear
-    await expect(page.getByText('Daylight')).toBeVisible();
-    await expect(page.getByText('Midnight')).toBeVisible();
+    // Theme options should appear in the desktop sidebar's dropdown
+    await expect(sidebar.getByText('Daylight')).toBeVisible();
+    await expect(sidebar.getByText('Midnight')).toBeVisible();
   });
 
   test('switching to Daylight changes the data-theme attribute', async ({ page }) => {
-    await page.getByText('Theme:', { exact: false }).click();
-    await page.getByText('Daylight').click();
+    const sidebar = page.getByTestId('sidebar-nav');
+    await sidebar.getByText('Theme:', { exact: false }).click();
+    await sidebar.getByText('Daylight').click();
 
     const theme = await page.locator('html').getAttribute('data-theme');
     expect(theme).toBe('daylight');
   });
 
   test('switching to Midnight changes the data-theme attribute', async ({ page }) => {
-    await page.getByText('Theme:', { exact: false }).click();
-    await page.getByText('Midnight').click();
+    const sidebar = page.getByTestId('sidebar-nav');
+    await sidebar.getByText('Theme:', { exact: false }).click();
+    await sidebar.getByText('Midnight').click();
 
     const theme = await page.locator('html').getAttribute('data-theme');
     expect(theme).toBe('midnight');
   });
 
   test('theme persists via localStorage', async ({ page }) => {
-    // Switch to midnight
-    await page.getByText('Theme:', { exact: false }).click();
-    await page.getByText('Midnight').click();
+    const sidebar = page.getByTestId('sidebar-nav');
+    await sidebar.getByText('Theme:', { exact: false }).click();
+    await sidebar.getByText('Midnight').click();
 
     // Verify localStorage was updated
     const storedTheme = await page.evaluate(() => localStorage.getItem('ic-theme'));

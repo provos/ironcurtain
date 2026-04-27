@@ -347,7 +347,7 @@
     </div>
 
     <!-- Desktop sidebar: hidden below md. -->
-    <nav class="hidden md:flex w-56 bg-sidebar border-r border-border flex-col shrink-0">
+    <nav data-testid="sidebar-nav" class="hidden md:flex w-56 bg-sidebar border-r border-border flex-col shrink-0">
       {@render navContents()}
     </nav>
 

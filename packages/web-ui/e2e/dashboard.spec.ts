@@ -27,6 +27,10 @@ test.describe('Dashboard', () => {
   });
 
   test('shows connection indicator as Live', async ({ page }) => {
-    await expect(page.getByTestId('connection-status').getByText('Live')).toBeVisible({ timeout: 5_000 });
+    // Both the desktop sidebar and the offscreen mobile drawer render a
+    // connection-status indicator, so scope to the desktop sidebar.
+    await expect(page.getByTestId('sidebar-nav').getByTestId('connection-status').getByText('Live')).toBeVisible({
+      timeout: 5_000,
+    });
   });
 });

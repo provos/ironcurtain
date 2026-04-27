@@ -22,7 +22,7 @@ test.describe('Auth gate', () => {
 
     // The sidebar nav only renders once past the auth gate; it must
     // never appear for a rejected token.
-    await expect(page.locator('nav')).not.toBeVisible();
+    await expect(page.getByTestId('sidebar-nav')).not.toBeVisible();
 
     // And the bad token must be purged from sessionStorage so a
     // subsequent page load doesn't re-offer it.
@@ -41,7 +41,7 @@ test.describe('Auth gate', () => {
     await page.getByRole('button', { name: 'Connect' }).click();
 
     // Auth gate drops and we land in the app.
-    await expect(page.locator('nav')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('sidebar-nav')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId('auth-error')).not.toBeVisible();
   });
 });
