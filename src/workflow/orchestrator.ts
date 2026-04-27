@@ -41,6 +41,7 @@ import {
 } from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
+import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
 import { extractRequiredServers } from '../trusted-process/policy-roots.js';
 import { createPersonaName } from '../persona/types.js';
@@ -405,6 +406,15 @@ interface WorkflowInstance {
    */
   readonly currentPersonaByBundle: Map<string, string>;
   /**
+   * Required-server snapshot taken at bundle mint, keyed by `BundleId`.
+   * `cyclePolicy` checks each newly loaded persona's required servers
+   * against this set so a mid-workflow persona recompile that adds a
+   * server fails fast with a clear error instead of producing cryptic
+   * "tool unavailable" runtime failures (no relay was spawned for the
+   * new server).
+   */
+  readonly mintedServersByBundle: Map<string, ReadonlySet<string>>;
+  /**
    * Set once `destroyWorkflowInfrastructure` begins teardown. An
    * `ensureBundleForScope` call that suspended at `await factory(...)`
    * must observe this flag before publishing into `bundlesByScope` —
@@ -608,18 +618,21 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     instance.bundlesByScope.set(scope, infra);
+    instance.mintedServersByBundle.set(bundleId, requiredServers);
     return infra;
   }
 
   /**
-   * Returns the cached policyDir for `persona`, resolving and caching on
-   * first lookup. Shared by `cyclePolicy` and `getRequiredServersForScope`
-   * so each persona's `persona.json` is read at most once per workflow.
+   * Returns the cached policyDir for `persona`, canonicalizing on first
+   * lookup so required-server derivation and the coordinator's
+   * `loadPolicy` RPC operate on the same realpath-resolved file (any
+   * symlink under the persona dir is collapsed once, here, instead of
+   * re-resolved by every reader).
    */
   private getPolicyDir(instance: WorkflowInstance, persona: string): string {
     const cached = instance.policyDirByPersona.get(persona);
     if (cached !== undefined) return cached;
-    const dir = resolvePersonaPolicyDir(persona);
+    const dir = validatePolicyDir(resolvePersonaPolicyDir(persona));
     instance.policyDirByPersona.set(persona, dir);
     return dir;
   }
@@ -631,10 +644,13 @@ export class WorkflowOrchestrator implements WorkflowController {
    */
   private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
     const union = new Set<string>();
+    const seenPersonas = new Set<string>();
     for (const stateConfig of Object.values(instance.definition.states)) {
       if (stateConfig.type !== 'agent') continue;
       const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
       if (stateScope !== scope) continue;
+      if (seenPersonas.has(stateConfig.persona)) continue;
+      seenPersonas.add(stateConfig.persona);
       const { compiledPolicy } = loadPersonaPolicyArtifacts(this.getPolicyDir(instance, stateConfig.persona));
       for (const server of extractRequiredServers(compiledPolicy)) {
         union.add(server);
@@ -667,6 +683,25 @@ export class WorkflowOrchestrator implements WorkflowController {
     if (instance.currentPersonaByBundle.get(bundle.bundleId) === persona) return;
 
     const policyDir = this.getPolicyDir(instance, persona);
+
+    // Guard against mid-workflow recompiles that add a server: the bundle
+    // was minted with a fixed required-server set, so a new policy that
+    // expands the set would have the coordinator allow tools no relay was
+    // spawned for. Fail fast with a clear error instead.
+    const minted = instance.mintedServersByBundle.get(bundle.bundleId);
+    if (minted) {
+      const { compiledPolicy } = loadPersonaPolicyArtifacts(policyDir);
+      const newServers = extractRequiredServers(compiledPolicy);
+      const added: string[] = [];
+      for (const s of newServers) if (!minted.has(s)) added.push(s);
+      if (added.length > 0) {
+        throw new Error(
+          `Persona "${persona}" requires server(s) [${added.join(', ')}] that were not spawned for this scope ` +
+            `(bundle minted with [${[...minted].sort().join(', ')}]). ` +
+            `A persona recompile that expands the server set requires restarting the workflow.`,
+        );
+      }
+    }
     // Target this bundle's coordinator. Under bifurcated workflows every
     // bundle has its own socket, so the bundle argument fully determines
     // the route.
@@ -897,6 +932,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
       aborted: false,
     };
 
@@ -967,6 +1003,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
       aborted: false,
     };
 
