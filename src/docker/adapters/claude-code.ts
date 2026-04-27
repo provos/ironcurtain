@@ -246,13 +246,23 @@ exit $STATUS
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       if (exitCode !== 0) {
         // Before falling back to the generic "exited non-zero" wrapper,
-        // look inside Claude Code's JSON envelope for a structured
-        // quota-exhaustion signal. Claude Code exits non-zero on 429
-        // but still prints its result envelope on stdout — we would
-        // otherwise throw that signal away.
+        // look inside Claude Code's JSON envelope for structured signals.
+        // The CLI exits non-zero on 429 (quota) and may also exit non-zero
+        // on the upstream-stall envelope (`type: 'result'`,
+        // `output_tokens=0`, `stop_reason=null`); both signals must
+        // survive the non-zero exit.
         const quotaExhausted = extractClaudeCodeQuotaSignal(stdout);
         if (quotaExhausted) {
           return { text: quotaExhausted.rawMessage, quotaExhausted };
+        }
+        const transientFailure = extractTransientSignalFromStdout(stdout);
+        if (transientFailure) {
+          // Treat as resumable-abort, NOT hardFailure: the orchestrator's
+          // hard-retry rotation cannot recover a stalled upstream.
+          return {
+            text: transientFailure.text,
+            transientFailure: { kind: 'degenerate_response', rawMessage: transientFailure.rawMessage },
+          };
         }
         // Zero output on non-zero exit indicates the claude process was
         // killed (SIGTERM) or crashed before producing any assistant text —
@@ -339,26 +349,29 @@ function extractClaudeCodeQuotaSignal(stdout: string): AgentResponse['quotaExhau
 }
 
 /**
- * Detects the degenerate "upstream stall" envelope: exit=0, JSON parses,
- * `result` non-empty (typically the agent's preamble), but
- * `usage.output_tokens === 0` AND `stop_reason === null` (or undefined).
- * Matches the captured envelopes from a sustained LiteLLM/Z.AI outage
- * where the stream hung server-side and no assistant message was
- * generated.
+ * Detects the degenerate "upstream stall" envelope: a Claude Code result
+ * envelope (`type: 'result'`) where JSON parses and `result` is non-empty
+ * (typically the agent's preamble), but `usage.output_tokens === 0` AND
+ * `stop_reason === null` (or undefined). Matches the captured envelopes
+ * from a sustained LiteLLM/Z.AI outage where the stream hung server-side
+ * and no assistant message was generated.
  *
- * Predicate is strict (AND of both signals) so legitimate empty
- * completions — `stop_reason === 'end_turn'` with `output_tokens === 0`
- * — and partial streams — `output_tokens > 0` with `stop_reason === null`
- * — do NOT match. Reads defensively: if `usage` is absent or wrongly
- * typed (CLI version drift), returns undefined and lets the caller
- * treat the response as healthy. False positives here would route a
- * normal completion to the resumable-abort path, which is much worse
- * than a missed detection.
+ * Three layers of defensiveness, all in service of "false positives are
+ * much worse than missed detections" — flagging a healthy completion as
+ * transient would route it to the resumable-abort path:
+ *
+ *  - `type` gate: only Claude Code's result envelopes match. An
+ *    arbitrary object that happens to carry a `result` key plus the two
+ *    field names will not be flagged.
+ *  - AND-of-both-signals: legitimate empty completions
+ *    (`stop_reason === 'end_turn'` with `output_tokens === 0`) and
+ *    partial streams (`output_tokens > 0` with `stop_reason === null`)
+ *    do NOT match.
+ *  - Type-narrowing on `usage`: absent or wrongly-typed `usage` (CLI
+ *    version drift, schema change) yields undefined.
  */
-function detectClaudeCodeTransientFailure(
-  parsed: Record<string, unknown>,
-  stdout: string,
-): { rawMessage: string } | undefined {
+function detectTransientFailure(parsed: Record<string, unknown>, stdout: string): { rawMessage: string } | undefined {
+  if (parsed.type !== 'result') return undefined;
   const usage = parsed.usage;
   if (!usage || typeof usage !== 'object') return undefined;
   const outputTokens = (usage as Record<string, unknown>).output_tokens;
@@ -366,6 +379,28 @@ function detectClaudeCodeTransientFailure(
   const stopReason = parsed.stop_reason;
   if (stopReason !== null && stopReason !== undefined) return undefined;
   return { rawMessage: stdout.trim() };
+}
+
+/**
+ * JSON-parses stdout and runs the transient-stall detector. Used by the
+ * `exit !== 0` path of `extractResponse`, where `parseClaudeCodeJson`
+ * doesn't run. Returns the matched signal plus the envelope's `result`
+ * preamble for surfacing as the turn's `text`. Undefined on parse
+ * failure or when the predicate does not match.
+ */
+function extractTransientSignalFromStdout(stdout: string): { text: string; rawMessage: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const obj = parsed as Record<string, unknown>;
+  const transient = detectTransientFailure(obj, stdout);
+  if (!transient) return undefined;
+  const text = typeof obj.result === 'string' ? obj.result : stdout.trim();
+  return { text, rawMessage: transient.rawMessage };
 }
 
 /**
@@ -378,7 +413,7 @@ function parseClaudeCodeJson(stdout: string): AgentResponse {
     if (parsed && typeof parsed === 'object' && 'result' in parsed) {
       const obj = parsed as Record<string, unknown>;
       const text = typeof obj.result === 'string' ? obj.result : stdout.trim();
-      const transient = detectClaudeCodeTransientFailure(obj, stdout);
+      const transient = detectTransientFailure(obj, stdout);
       const base: AgentResponse =
         typeof obj.total_cost_usd === 'number' ? { text, costUsd: obj.total_cost_usd } : { text };
       if (transient) {

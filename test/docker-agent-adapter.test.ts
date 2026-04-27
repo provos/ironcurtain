@@ -338,6 +338,57 @@ describe('Claude Code Adapter', () => {
     expect(response.transientFailure).toBeUndefined();
   });
 
+  it('surfaces transientFailure even when CLI exits non-zero on the degenerate envelope', () => {
+    // The degenerate envelope can arrive with a non-zero exit code (e.g.
+    // the CLI surfacing a 5xx after the stream begins). The detector
+    // must run in BOTH the exit=0 and exit!=0 paths so the structured
+    // signal isn't lost to the generic hard-failure path.
+    const envelope = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      result: 'preamble',
+      usage: { input_tokens: 100, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.transientFailure).toBeDefined();
+    expect(response.transientFailure!.kind).toBe('degenerate_response');
+    expect(response.text).toBe('preamble');
+    // Must NOT route through hardFailure: the orchestrator's hard-retry
+    // rotation cannot recover a stalled upstream.
+    expect(response.hardFailure).toBeUndefined();
+    expect(response.quotaExhausted).toBeUndefined();
+  });
+
+  it('does not flag transientFailure when JSON envelope lacks type=result (predicate strictness)', () => {
+    // An arbitrary object that happens to carry `result` plus the two
+    // signal fields must NOT be flagged. Locks the `type === 'result'`
+    // gate against future changes.
+    const envelope = JSON.stringify({
+      type: 'something_else',
+      result: 'preamble',
+      usage: { input_tokens: 100, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+  });
+
+  it('does not flag transientFailure when result field is absent', () => {
+    // parseClaudeCodeJson gates on 'result' in parsed before running
+    // the detector; this lock-in test confirms a malformed envelope
+    // missing `result` falls through to the raw-stdout fallback.
+    const envelope = JSON.stringify({
+      type: 'result',
+      usage: { input_tokens: 100, output_tokens: 0 },
+      stop_reason: null,
+    });
+    const response = claudeCodeAdapter.extractResponse(0, envelope);
+    expect(response.transientFailure).toBeUndefined();
+    // Falls through to raw-stdout text.
+    expect(response.text).toBe(envelope);
+  });
+
   it('returns conversation state config for session resume', () => {
     const config = claudeCodeAdapter.getConversationStateConfig!();
     expect(config.hostDirName).toBe('claude-state');

@@ -322,6 +322,12 @@ describe('WorkflowOrchestrator transient-failure short-circuit', () => {
     expect(transientEntries).toHaveLength(0);
   });
 
+  it.todo(
+    'resume re-enters the failing state after a transient failure on the initial agent state ' +
+      '(blocked: orchestrator does not checkpoint on initial-state entry, so the abort-time checkpoint ' +
+      'falls back to the terminal snapshot — same gap exists for quotaExhausted)',
+  );
+
   it('halts when transientFailure surfaces on the missing-status-block reprompt', async () => {
     // The four `sendAgentTurn` call sites share the same closure, so
     // coverage of two sites (initial + missing-status-block reprompt)

@@ -726,6 +726,52 @@ describe('synthesizePhaseFromMessageLog', () => {
     expect(synthesizePhaseFromMessageLog(entries, def)).toBe('aborted');
   });
 
+  it('prefers "aborted" over "failed" when both transient_failure and error follow the last transition', () => {
+    // Symmetric to the quota_exhausted + error precedence test above:
+    // the new transient_failure signal must also outrank a generic
+    // error entry in phase synthesis.
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+      {
+        type: 'error',
+        ts: '2026-04-23T10:05:00.000Z',
+        workflowId,
+        state: 'plan',
+        error: 'agent crashed',
+      },
+      {
+        type: 'transient_failure',
+        ts: '2026-04-23T10:06:00.000Z',
+        workflowId,
+        state: 'plan',
+        role: 'planner',
+        kind: 'degenerate_response',
+        rawMessage: '{"usage":{"output_tokens":0},"stop_reason":null}',
+      },
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('aborted');
+  });
+
   it('ignores events that occurred BEFORE the last transition', () => {
     // quota_exhausted at ts=09:00 predates the transition at ts=10:00; ignored.
     const def = defWithStates({

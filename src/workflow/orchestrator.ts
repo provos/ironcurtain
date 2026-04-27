@@ -445,6 +445,16 @@ interface WorkflowInstance {
    * same checkpoint-preserving abort path so `workflow resume` can
    * re-enter once the upstream is healthy. Survives only in-process;
    * the checkpoint itself does not record it.
+   *
+   * Resume-correctness depends on a prior state-transition checkpoint
+   * existing for `handleWorkflowComplete` to preserve: the orchestrator
+   * only checkpoints on actual state changes, not on entry to the
+   * `initial:` state. A transient failure on the initial agent state
+   * therefore lands in the terminal-snapshot checkpoint (no usable
+   * `existing.machineState` to preserve), and resume re-enters the
+   * terminal instead of the failing state. Same limitation applies to
+   * `quotaExhausted`. Closing it would require a checkpoint-on-start
+   * change that is out of scope for this signal.
    */
   transientFailure?: { readonly kind: 'degenerate_response'; readonly rawMessage: string };
 }
@@ -1676,11 +1686,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         }
         if (result.transientFailure) {
           const { kind, rawMessage } = result.transientFailure;
-          // Mirror the quota path's structure: append a structured
-          // `transient_failure` log entry, stamp the instance, throw a
-          // dedicated error. Do NOT call logReceived here — the
-          // structured entry is sufficient and a parallel agent_received
-          // entry would clutter `workflow inspect`.
+          // Same shape as the quota branch — append a structured log
+          // entry, stamp the instance, throw a dedicated error — but
+          // deliberately skip `logReceived`. Quota envelopes carry the
+          // provider's actual rate-limit message in `result.text`, which
+          // is worth recording as the agent's turn. Transient envelopes
+          // carry only the agent's preamble with no real assistant
+          // content, so logging it as `agent_received` would falsely
+          // imply the agent produced a turn.
           messageLog.append({
             ...this.logBase(instance),
             type: 'transient_failure',
