@@ -1,15 +1,21 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken, navigateTo, resetMockServer } from './helpers.js';
+import {
+  approveSeededGate,
+  connectWithToken,
+  navigateTo,
+  navigateToWorkflowsList,
+  resetMockServer,
+} from './helpers.js';
 
 test.describe('Workflow Dashboard', () => {
   test.beforeEach(async ({ page, request }) => {
     await resetMockServer(request);
     await connectWithToken(page);
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
   });
 
   test('shows the workflow list with active workflows', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toBeVisible();
 
     // The mock server seeds two workflows: design-and-code (running) and code-review (waiting_human)
     // Use table cell locators to avoid matching dropdown options that also contain these names
@@ -40,7 +46,10 @@ test.describe('Start Workflow', () => {
   test.beforeEach(async ({ page, request }) => {
     await resetMockServer(request);
     await connectWithToken(page);
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
+    // Clear the seeded gate so the auto-select effect doesn't redirect to
+    // code-review when the new workflow's gate fires later in the test.
+    await approveSeededGate(page);
   });
 
   test('starts a new workflow via the form', async ({ page }) => {
@@ -93,7 +102,7 @@ test.describe('Workflow Detail View', () => {
   test.beforeEach(async ({ page, request }) => {
     await resetMockServer(request);
     await connectWithToken(page);
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
   });
 
   test('clicking a workflow row opens the detail view', async ({ page }) => {
@@ -153,7 +162,7 @@ test.describe('Workflow Detail View', () => {
     await page.getByRole('button', { name: /Back/ }).click();
 
     // Should see the workflow list heading again
-    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toBeVisible();
   });
 });
 
@@ -161,7 +170,7 @@ test.describe('Gate Review Panel', () => {
   test.beforeEach(async ({ page, request }) => {
     await resetMockServer(request);
     await connectWithToken(page);
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
   });
 
   test('gate review panel appears for waiting workflow', async ({ page }) => {
@@ -320,7 +329,7 @@ test.describe('Gate Count Badge', () => {
     // but pendingGates only gets populated when a workflow detail is loaded (via
     // workflows.get) or a gate_raised event is broadcast. Navigate to Workflows and
     // open the code-review detail to seed the gate into appState.pendingGates.
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
     await page.locator('tr', { hasText: 'code-review' }).click();
     await expect(page.getByText('Review Required')).toBeVisible({ timeout: 5_000 });
 
@@ -329,13 +338,13 @@ test.describe('Gate Count Badge', () => {
     await navigateTo(page, 'Dashboard');
 
     // The Workflows nav button should show a badge with the gate count
-    const workflowsNav = page.locator('nav').locator('button', { hasText: 'Workflows' });
+    const workflowsNav = page.getByTestId('sidebar-nav').locator('button', { hasText: 'Workflows' });
     await expect(workflowsNav.locator('.font-mono')).toBeVisible({ timeout: 5_000 });
   });
 
   test('gate badge disappears after resolving all gates', async ({ page }) => {
     // Navigate to workflows and open the waiting workflow
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
     await page.locator('tr', { hasText: 'code-review' }).click();
 
     // Wait for gate panel
@@ -351,7 +360,7 @@ test.describe('Gate Count Badge', () => {
     await page.getByRole('button', { name: /Back/ }).click();
 
     // The badge should no longer be visible in the nav
-    const workflowsNav = page.locator('nav').locator('button', { hasText: 'Workflows' });
+    const workflowsNav = page.getByTestId('sidebar-nav').locator('button', { hasText: 'Workflows' });
     await expect(workflowsNav.locator('.font-mono')).not.toBeVisible({ timeout: 5_000 });
   });
 });
@@ -360,7 +369,7 @@ test.describe('Workflow List Actions', () => {
   test.beforeEach(async ({ page, request }) => {
     await resetMockServer(request);
     await connectWithToken(page);
-    await navigateTo(page, 'Workflows');
+    await navigateToWorkflowsList(page);
   });
 
   test('abort button in workflow list triggers confirmation and aborts', async ({ page }) => {
@@ -373,8 +382,9 @@ test.describe('Workflow List Actions', () => {
     page.on('dialog', (dialog) => dialog.accept());
     await abortButton.click();
 
-    // After abort, the workflow should change phase.
-    // Both the phase badge and currentState cell show "aborted"; use first() to avoid strict mode error.
-    await expect(runningRow.getByText('aborted').first()).toBeVisible({ timeout: 5_000 });
+    // After abort, the workflow's phase becomes 'failed' (per the front-end's
+    // workflow.failed handler), so it is filtered out of the Active workflows
+    // table. The Abort button on this row should disappear.
+    await expect(abortButton).not.toBeVisible({ timeout: 5_000 });
   });
 });

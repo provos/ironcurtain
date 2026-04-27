@@ -15,7 +15,10 @@ export async function connectWithToken(page: Page): Promise<void> {
   await page.goto('/?token=mock-dev-token');
   // The sidebar nav appears only after the auth gate is passed and
   // the WS connection is established (appState.connected becomes true).
-  await expect(page.locator('nav')).toBeVisible({ timeout: 10_000 });
+  // Target the desktop sidebar by test id; the mobile drawer also
+  // renders a <nav> in the DOM (offscreen) so a bare 'nav' selector
+  // would hit a strict-mode violation.
+  await expect(page.getByTestId('sidebar-nav')).toBeVisible({ timeout: 10_000 });
 }
 
 /**
@@ -25,7 +28,56 @@ export async function navigateTo(
   page: Page,
   view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs' | 'Workflows',
 ): Promise<void> {
-  await page.locator('nav').getByRole('button', { name: view }).click();
+  await page.getByTestId('sidebar-nav').getByRole('button', { name: view }).click();
+}
+
+/**
+ * Navigate to the Workflows list view, dismissing any auto-opened detail view.
+ *
+ * The mock server seeds a workflow in `waiting_human` phase, and on connect
+ * the store fetches its gate and populates `pendingGates`. The Workflows.svelte
+ * auto-select effect then opens the detail view of that workflow. Tests that
+ * need the list view must wait for the auto-select to settle, then dismiss the
+ * detail view.
+ */
+export async function navigateToWorkflowsList(page: Page): Promise<void> {
+  // Wait for the gate fetch to complete before navigating so the auto-select
+  // effect has fired by the time we land on the Workflows view. The gate badge
+  // on the sidebar's Workflows nav item is the visible signal that
+  // pendingGates is populated.
+  const workflowsNavBadge = page
+    .getByTestId('sidebar-nav')
+    .locator('button', { hasText: 'Workflows' })
+    .locator('.font-mono');
+  await expect(workflowsNavBadge).toBeVisible({ timeout: 10_000 });
+
+  await navigateTo(page, 'Workflows');
+
+  // Auto-select may now be opening the detail view; click Back if so.
+  const heading = page.getByRole('heading', { name: 'Workflows', exact: true });
+  const backButton = page.getByRole('button', { name: /Back/ });
+  await expect(heading.or(backButton).first()).toBeVisible({ timeout: 10_000 });
+  if (await backButton.isVisible().catch(() => false)) {
+    await backButton.click();
+  }
+  await expect(heading).toBeVisible({ timeout: 5_000 });
+}
+
+/**
+ * Clear the seeded code-review gate so subsequent actions (e.g., starting a
+ * new workflow that raises a gate) won't trigger the auto-select effect
+ * navigating away to the seeded workflow's detail view.
+ *
+ * Assumes we are on the Workflows list view with code-review present.
+ */
+export async function approveSeededGate(page: Page): Promise<void> {
+  await page.locator('tr', { hasText: 'code-review' }).click();
+  await expect(page.getByText('Review Required')).toBeVisible({ timeout: 5_000 });
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Review Required')).not.toBeVisible({ timeout: 5_000 });
+  // Return to the list view; the gate badge should be gone.
+  await page.getByRole('button', { name: /Back/ }).click();
+  await expect(page.getByRole('heading', { name: 'Workflows', exact: true })).toBeVisible({ timeout: 5_000 });
 }
 
 /**
