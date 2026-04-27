@@ -41,7 +41,8 @@ import {
 // Workflow definition whose ONLY terminal is `done` — no `aborted`/`failed`
 // terminal. This is the critical shape: without the
 // `instance.transientFailure` stamp, `handleWorkflowComplete` would mark
-// the run `phase: 'completed'` and remove the checkpoint, breaking
+// the run `phase: 'completed'`, leaving a terminal checkpoint that
+// `isCheckpointResumable` treats as non-resumable and thus breaking
 // resume.
 const simpleAgentDef: WorkflowDefinition = {
   name: 'simple-agent-transient',
