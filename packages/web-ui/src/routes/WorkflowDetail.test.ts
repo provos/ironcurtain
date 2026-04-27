@@ -30,6 +30,9 @@ const {
   mockGetWorkflowFileTree,
   mockGetWorkflowFileContent,
   mockGetWorkflowArtifacts,
+  mockSubscribeAllTokenStreams,
+  mockUnsubscribeAllTokenStreams,
+  mockSubscribeWorkflowAgentEvents,
   mockGetWorkflowMessageLog,
   mockAppState,
 } = vi.hoisted(() => ({
@@ -38,10 +41,14 @@ const {
   mockGetWorkflowFileTree: vi.fn(),
   mockGetWorkflowFileContent: vi.fn(),
   mockGetWorkflowArtifacts: vi.fn(),
+  mockSubscribeAllTokenStreams: vi.fn().mockResolvedValue({ subscribed: true }),
+  mockUnsubscribeAllTokenStreams: vi.fn().mockResolvedValue({ unsubscribed: true }),
+  mockSubscribeWorkflowAgentEvents: vi.fn<(workflowId: string, handler: unknown) => () => void>(() => () => undefined),
   mockGetWorkflowMessageLog:
     vi.fn<(id: string, opts?: { before?: string; limit?: number }) => Promise<MessageLogResponseDto>>(),
   mockAppState: {
     pendingGates: new Map<string, HumanGateRequestDto>(),
+    connected: true,
   },
 }));
 
@@ -54,9 +61,39 @@ vi.mock('$lib/stores.svelte.js', () => ({
   getWorkflowFileTree: (...args: unknown[]) => mockGetWorkflowFileTree(...args),
   getWorkflowFileContent: (...args: unknown[]) => mockGetWorkflowFileContent(...args),
   getWorkflowArtifacts: (...args: unknown[]) => mockGetWorkflowArtifacts(...args),
+  subscribeAllTokenStreams: () => mockSubscribeAllTokenStreams(),
+  unsubscribeAllTokenStreams: () => mockUnsubscribeAllTokenStreams(),
+  subscribeWorkflowAgentEvents: (workflowId: string, handler: unknown) =>
+    mockSubscribeWorkflowAgentEvents(workflowId, handler),
   getWorkflowMessageLog: (...args: unknown[]) =>
     mockGetWorkflowMessageLog(...(args as [string, { before?: string; limit?: number } | undefined])),
 }));
+
+// The theater mounts canvas + rAF + a stream subscription. jsdom doesn't
+// provide those out of the box; shim them so the theater mounts cleanly
+// when the toggle flips. Mirrors the shims in workflow-theater.test.ts.
+vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+  return setTimeout(() => cb(performance.now()), 16) as unknown as number;
+});
+vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+  clearTimeout(id as unknown as ReturnType<typeof setTimeout>);
+});
+HTMLCanvasElement.prototype.getContext = vi.fn(
+  () =>
+    ({
+      setTransform: vi.fn(),
+      fillRect: vi.fn(),
+      fillText: vi.fn(),
+      clearRect: vi.fn(),
+      drawImage: vi.fn(),
+      measureText: vi.fn().mockReturnValue({ width: 0 }),
+      globalAlpha: 1,
+      fillStyle: '#000',
+      font: '',
+      textBaseline: 'top',
+      textAlign: 'left',
+    }) as unknown as CanvasRenderingContext2D,
+) as unknown as typeof HTMLCanvasElement.prototype.getContext;
 
 vi.mock('$lib/utils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('$lib/utils.js')>();
@@ -175,6 +212,12 @@ describe('WorkflowDetail', () => {
     // WorkspaceBrowser's FileTree calls fetchFileTree on mount
     mockGetWorkflowFileTree.mockResolvedValue({ entries: [] });
     mockGetWorkflowFileContent.mockResolvedValue({ content: '' });
+    // Most tests in this file validate classic-mode UI (metrics cards,
+    // workspace toggle, transition history, gate panel). Theater mode also
+    // surfaces some of the same metrics in its HUD, which makes getByText
+    // ambiguous. Pin classic as the per-test default — the viz-mode describe
+    // block below clears it so its own default-mode assertions work.
+    localStorage.setItem('ic-workflow-viz-mode', 'classic');
     // Default to an empty message log; tests that exercise the timeline
     // override per-call.
     mockGetWorkflowMessageLog.mockResolvedValue({ entries: [], hasMore: false });
@@ -691,6 +734,98 @@ describe('WorkflowDetail', () => {
 
     await vi.waitFor(() => {
       expect(mockGetWorkflowDetail).toHaveBeenCalledWith('custom-wf-99');
+    });
+  });
+
+  // ── Viz-mode toggle (Chunk 10) ─────────────────────────────────
+
+  describe('viz mode toggle', () => {
+    beforeEach(() => {
+      // Each test starts from a clean localStorage so the persisted
+      // preference doesn't bleed between cases.
+      localStorage.removeItem('ic-workflow-viz-mode');
+    });
+
+    it('renders in theater mode by default (no persisted preference)', async () => {
+      const { queryByTestId, queryByText } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(queryByTestId('workflow-theater-frame')).not.toBeNull();
+      });
+
+      expect(queryByText('State Machine')).toBeNull();
+    });
+
+    it('shows a toggle button labelled "Classic" when in theater mode', async () => {
+      const { getByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      expect(getByTestId('viz-mode-toggle').textContent?.trim()).toBe('Classic');
+    });
+
+    it('switches to classic mode when the toggle is clicked', async () => {
+      const { getByTestId, queryByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+
+      await vi.waitFor(() => {
+        expect(queryByText('State Machine')).toBeTruthy();
+      });
+
+      // Theater frame should be gone
+      expect(queryByTestId('workflow-theater-frame')).toBeNull();
+      // Button label flips to "Viz" so the viewer knows how to go back
+      expect(getByTestId('viz-mode-toggle').textContent?.trim()).toBe('Viz');
+    });
+
+    it('switches back to theater mode on second click', async () => {
+      const { getByTestId, queryByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+      await vi.waitFor(() => {
+        expect(queryByText('State Machine')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+      await vi.waitFor(() => {
+        expect(queryByTestId('workflow-theater-frame')).not.toBeNull();
+      });
+      expect(queryByText('State Machine')).toBeNull();
+    });
+
+    it('persists the classic preference to localStorage', async () => {
+      const { getByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+
+      expect(localStorage.getItem('ic-workflow-viz-mode')).toBe('classic');
+    });
+
+    it('reads the persisted preference on mount (classic)', async () => {
+      localStorage.setItem('ic-workflow-viz-mode', 'classic');
+
+      const { getByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByText('State Machine')).toBeTruthy();
+      });
+
+      expect(queryByTestId('workflow-theater-frame')).toBeNull();
     });
   });
 

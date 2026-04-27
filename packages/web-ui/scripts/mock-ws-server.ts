@@ -14,10 +14,17 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createServer } from 'http';
 import { resolve, dirname } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
+import {
+  createScenarioRunner,
+  loadCorpusFromText,
+  validateScenario,
+  type Scenario,
+  type ScenarioRunner,
+} from './scenario-runner.js';
 import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 
 // ---------------------------------------------------------------------------
@@ -139,6 +146,120 @@ const replayPlan: ReplayPlan | null = replayConfig
   ? loadReplayPlan(replayConfig.jsonlPath, replayConfig.definitionPath)
   : null;
 let replayController: ReplayController | null = null;
+
+// ---------------------------------------------------------------------------
+// Scenario mode CLI parsing
+// ---------------------------------------------------------------------------
+
+interface ScenarioServerConfig {
+  readonly defaultScenarioName: string;
+}
+
+function parseScenarioArgs(): ScenarioServerConfig {
+  const { values } = parseArgs({
+    options: {
+      scenario: { type: 'string', default: 'default' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+  const name = typeof values.scenario === 'string' && values.scenario.length > 0 ? values.scenario : 'default';
+  return { defaultScenarioName: name };
+}
+
+const scenarioConfig = parseScenarioArgs();
+
+/**
+ * Load scenarios + corpus eagerly so malformed JSON surfaces at server start,
+ * not on first client connection. A missing requested scenario falls back to
+ * `default` with a logged warning; a missing `default` is a hard error.
+ */
+const SCENARIOS_DIR = resolve(__scriptDir, 'scenarios');
+const FIXTURES_DIR = resolve(__scriptDir, 'fixtures');
+const scenarioCache = new Map<string, Scenario>();
+
+function loadScenarioByName(name: string): Scenario | null {
+  if (scenarioCache.has(name)) return scenarioCache.get(name)!;
+  const path = resolve(SCENARIOS_DIR, `${name}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    const scenario = validateScenario(raw);
+    scenarioCache.set(name, scenario);
+    return scenario;
+  } catch (err) {
+    console.warn(`  Failed to load scenario "${name}": ${(err as Error).message}`);
+    return null;
+  }
+}
+
+function loadCorpusByName(name: string): ReturnType<typeof loadCorpusFromText> {
+  const path = resolve(FIXTURES_DIR, `mock-stream-corpus.txt`);
+  // The scenario's `corpus` field is currently decorative; we ship a single
+  // corpus file. Kept as an explicit parameter to future-proof multi-corpus.
+  void name;
+  return loadCorpusFromText(readFileSync(path, 'utf-8'));
+}
+
+const corpusSingleton = loadCorpusByName('default');
+
+// Per-client scenario runners. Started on `sessions.subscribeAllTokenStreams`
+// so E2E tests (which never subscribe) see the existing canned behavior.
+const clientRunners = new WeakMap<WebSocket, ScenarioRunner>();
+
+interface ClientScenarioOptions {
+  readonly scenarioName: string;
+  readonly speedMultiplier: number;
+  readonly loop: boolean;
+}
+
+const clientScenarioOptions = new WeakMap<WebSocket, ClientScenarioOptions>();
+
+function parseScenarioQueryParams(url: URL): ClientScenarioOptions {
+  const rawName = url.searchParams.get('scenario');
+  const rawSpeed = url.searchParams.get('speed');
+  const rawLoop = url.searchParams.get('loop');
+  const scenarioName = rawName && rawName.length > 0 ? rawName : scenarioConfig.defaultScenarioName;
+  const speedMultiplier = rawSpeed ? Math.max(0.01, parseFloat(rawSpeed)) || 1 : 1;
+  const loop = rawLoop === 'true' || rawLoop === '1';
+  return { scenarioName, speedMultiplier, loop };
+}
+
+function startScenarioRunnerForClient(ws: WebSocket): void {
+  // Idempotent: a client that subscribes twice keeps its existing runner.
+  if (clientRunners.has(ws)) return;
+
+  const opts = clientScenarioOptions.get(ws) ?? {
+    scenarioName: scenarioConfig.defaultScenarioName,
+    speedMultiplier: 1,
+    loop: false,
+  };
+
+  let scenario = loadScenarioByName(opts.scenarioName);
+  if (!scenario && opts.scenarioName !== 'default') {
+    console.warn(`  Scenario "${opts.scenarioName}" not found; falling back to "default"`);
+    scenario = loadScenarioByName('default');
+  }
+  if (!scenario) {
+    console.error('  No default scenario available; synthetic events disabled for this client');
+    return;
+  }
+
+  const runner = createScenarioRunner(scenario, corpusSingleton, {
+    speedMultiplier: opts.speedMultiplier,
+    loop: opts.loop,
+  });
+  runner.start((event, payload) => emit(ws, event, payload));
+  clientRunners.set(ws, runner);
+}
+
+function stopScenarioRunnerForClient(ws: WebSocket): void {
+  const runner = clientRunners.get(ws);
+  if (runner) {
+    runner.stop();
+    clientRunners.delete(ws);
+  }
+}
 
 let nextLabel = 1;
 let eventSeq = 0;
@@ -472,7 +593,10 @@ const CANNED_WORKFLOWS: MockWorkflow[] = [
     workflowId: 'wf-mock-002',
     name: 'code-review',
     phase: 'waiting_human',
-    currentState: 'plan_review',
+    // Must match a node id in CODE_REVIEW_GRAPH (`analyze`, `report_review`,
+    // `completed`); using a design-and-code state here left the mock workflow
+    // with no active node highlight and was the forcing function for Fix #2.
+    currentState: 'report_review',
     startedAt: new Date(Date.now() - 300_000).toISOString(),
   },
 ];
@@ -505,15 +629,16 @@ function initWorkflows(): void {
   for (const wf of structuredClone(CANNED_WORKFLOWS)) {
     workflows.set(wf.workflowId, wf);
   }
-  // Add a gate for the waiting workflow
-  const gateId = 'wf-mock-002-plan_review';
+  // Add a gate for the waiting workflow. stateName matches the CODE_REVIEW_GRAPH
+  // human_gate node so the graph's active-node highlight resolves correctly.
+  const gateId = 'wf-mock-002-report_review';
   workflowGates.set(gateId, {
     gateId,
     workflowId: 'wf-mock-002',
-    stateName: 'plan_review',
-    acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'],
-    presentedArtifacts: ['plan'],
-    summary: 'Waiting for human review at plan_review',
+    stateName: 'report_review',
+    acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+    presentedArtifacts: ['report'],
+    summary: 'Waiting for human review at report_review',
   });
 }
 initWorkflows();
@@ -1281,6 +1406,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
               stateId: 'plan',
               verdict: 'success',
               confidence: '0.87',
+              notes: 'drafted a 4-step implementation plan covering data model, API, UI, and tests',
             });
             broadcast('workflow.agent_session_ended', makeAgentSessionEndedPayload(newId, 'plan', planSessionId));
             wf.currentState = 'plan_review';
@@ -1360,18 +1486,54 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         resolveWf.currentState = 'aborted';
         broadcast('workflow.failed', { workflowId: resolveWfId, error: 'Workflow aborted by user' });
       } else {
-        const nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
+        // Graph-aware next-state lookup so both wf-mock-001 (design-and-code)
+        // and wf-mock-002 (code-review) transition into valid node ids.
+        // Prior behaviour hardcoded `plan`/`implement`, which broke the
+        // code-review graph's active-node highlight after a gate resolve.
+        const isDesign = resolveWf.name.includes('design');
+        let nextState: string;
+        let nextPersona: string;
+        let followupState: string | null = null;
+        let completionNotes = '';
+        if (isDesign) {
+          nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
+          nextPersona = nextState === 'plan' ? 'planner' : 'coder';
+          completionNotes =
+            nextState === 'plan'
+              ? 'revised plan incorporating reviewer feedback on error handling'
+              : 'implemented all modules with full test coverage';
+          if (nextState === 'implement') {
+            followupState = 'review';
+          }
+        } else {
+          // code-review: APPROVE → completed terminal; FORCE_REVISION → re-run analyze.
+          nextState = resolveEvent === 'FORCE_REVISION' ? 'analyze' : 'completed';
+          nextPersona = 'reviewer';
+          completionNotes =
+            nextState === 'analyze'
+              ? 're-analyzed the codebase incorporating reviewer feedback'
+              : 'code review completed successfully';
+        }
         resolveWf.phase = 'running';
         resolveWf.currentState = nextState;
-        const nextPersona = nextState === 'plan' ? 'planner' : 'coder';
-        const nextSessionId = `${resolveWfId}-${nextState}-${Date.now()}`;
-        broadcast('workflow.agent_started', {
-          workflowId: resolveWfId,
-          stateId: nextState,
-          persona: nextPersona,
-          sessionId: nextSessionId,
-        });
+        // Terminal nodes (e.g. `completed`) emit state_entered but no agent_started,
+        // since no persona runs in a terminal.
+        const nextSessionId =
+          nextState !== 'completed' && nextState !== 'aborted' ? `${resolveWfId}-${nextState}-${Date.now()}` : null;
+        if (nextSessionId !== null) {
+          broadcast('workflow.agent_started', {
+            workflowId: resolveWfId,
+            stateId: nextState,
+            persona: nextPersona,
+            sessionId: nextSessionId,
+          });
+        }
         broadcast('workflow.state_entered', { workflowId: resolveWfId, state: nextState });
+
+        if (nextState === 'completed') {
+          resolveWf.phase = 'completed';
+          return undefined;
+        }
 
         trackTimer(
           resolveWfId,
@@ -1383,14 +1545,17 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 stateId: nextState,
                 verdict: 'success',
                 confidence: '0.79',
+                notes: completionNotes,
               });
-              broadcast(
-                'workflow.agent_session_ended',
-                makeAgentSessionEndedPayload(resolveWfId, nextState, nextSessionId),
-              );
-              if (nextState === 'implement') {
-                wf.currentState = 'review';
-                broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'review' });
+              if (nextSessionId !== null) {
+                broadcast(
+                  'workflow.agent_session_ended',
+                  makeAgentSessionEndedPayload(resolveWfId, nextState, nextSessionId),
+                );
+              }
+              if (followupState) {
+                wf.currentState = followupState;
+                broadcast('workflow.state_entered', { workflowId: resolveWfId, state: followupState });
               }
             }
           }, 3000),
@@ -1459,6 +1624,18 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       if (!art) return errorResult('ARTIFACT_NOT_FOUND', `Artifact "${artName}" not found`);
       return art;
     }
+
+    case 'sessions.subscribeAllTokenStreams': {
+      // Start this client's scenario runner on first subscribe. Unsubscribed
+      // clients -- notably E2E tests that never subscribe -- see no scenario
+      // events and continue to use the canned workflow emissions.
+      startScenarioRunnerForClient(ws);
+      return { subscribed: true };
+    }
+
+    case 'sessions.unsubscribeAllTokenStreams':
+      stopScenarioRunnerForClient(ws);
+      return { unsubscribed: true };
 
     case '__reset': {
       resetState();
@@ -1531,6 +1708,9 @@ wsHttpServer.on('upgrade', (req, socket, head) => {
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
+    // Stash the parsed scenario opts before the 'connection' handler fires
+    // so an early subscribe from the client sees the correct configuration.
+    clientScenarioOptions.set(ws, parseScenarioQueryParams(url));
     wss.emit('connection', ws, req);
   });
 });
@@ -1571,6 +1751,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    stopScenarioRunnerForClient(ws);
     clients.delete(ws);
     console.log(`  Client disconnected (${clients.size} total)`);
   });
@@ -1606,7 +1787,8 @@ const httpServer = createServer((req, res) => {
 });
 httpServer.listen(RESET_PORT);
 
-// Periodic status broadcast
+// Periodic status broadcast. Cadence matches the real daemon
+// (src/web-ui/web-ui-server.ts:153) so the mock stays protocol-faithful.
 setInterval(() => {
   broadcast('daemon.status', buildStatusDto());
 }, 10_000);
@@ -1621,14 +1803,24 @@ if (replayConfig && replayPlan) {
     http://localhost:5173/?token=${MOCK_TOKEN}
 `);
 } else {
+  const scenarioLoaded = loadScenarioByName(scenarioConfig.defaultScenarioName);
+  const scenarioLabel = scenarioLoaded
+    ? `"${scenarioConfig.defaultScenarioName}" (${scenarioLoaded.description})`
+    : `"${scenarioConfig.defaultScenarioName}" (NOT FOUND -- falling back to "default" per-client)`;
   console.log(`
   Mock WebSocket server listening on ws://127.0.0.1:${PORT}
+  Default scenario: ${scenarioLabel}
 
   Open the web UI with this URL:
     http://localhost:5173/?token=${MOCK_TOKEN}
 
+  Override per client with query params:
+    ?scenario=rapid-transitions
+    ?scenario=long-state&speed=4
+    ?scenario=default&loop=true
+
   Two-terminal workflow:
-    Terminal 1: cd packages/web-ui && npm run mock-server
+    Terminal 1: cd packages/web-ui && npm run mock-server [-- --scenario <name>]
     Terminal 2: cd packages/web-ui && npm run dev
 `);
 }

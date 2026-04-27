@@ -179,6 +179,7 @@ function makeFrame(overrides: Partial<FrameState> = {}): FrameState {
     globalAlpha: 0.55,
     lockedCells: [],
     drops: [],
+    wordDrops: [],
     ...overrides,
   };
 }

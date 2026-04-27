@@ -8,6 +8,10 @@
     getWorkflowFileTree,
     getWorkflowFileContent,
     getWorkflowArtifacts,
+    subscribeAllTokenStreams,
+    unsubscribeAllTokenStreams,
+    subscribeWorkflowAgentEvents,
+    type WorkflowAgentEvent,
     getWorkflowMessageLog,
   } from '$lib/stores.svelte.js';
   import { RpcError } from '$lib/ws-client.js';
@@ -18,6 +22,7 @@
   import { Alert } from '$lib/components/ui/alert/index.js';
   import { Spinner } from '$lib/components/ui/spinner/index.js';
   import StateMachineGraph from '$lib/components/features/state-machine-graph.svelte';
+  import WorkflowTheater, { type AgentTransitionTrigger } from '$lib/components/features/workflow-theater.svelte';
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
   import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
   import MessageLogTimeline from '$lib/components/features/message-log-timeline.svelte';
@@ -47,6 +52,69 @@
   let resolveError = $state('');
   let workspaceExpanded = $state(false);
   let expandedMessages = $state(new Set<number>());
+
+  // ── Viz mode ──────────────────────────────────────────────────────
+  // Persist across reloads so a developer working on the theater doesn't
+  // have to flip the toggle every time. Storage is per-origin; the key is
+  // shared across workflows intentionally — the viewer's preference is
+  // about *how they want to look at workflows*, not about any one workflow.
+  // Default is theater so first-time viewers land in the richer view;
+  // flipping to classic is one click and the choice sticks.
+  const VIZ_MODE_STORAGE_KEY = 'ic-workflow-viz-mode';
+  type VizMode = 'classic' | 'theater';
+
+  function readVizModePreference(): VizMode {
+    if (typeof localStorage === 'undefined') return 'theater';
+    const raw = localStorage.getItem(VIZ_MODE_STORAGE_KEY);
+    return raw === 'classic' ? 'classic' : 'theater';
+  }
+
+  let vizMode = $state<VizMode>(readVizModePreference());
+
+  function toggleVizMode(): void {
+    vizMode = vizMode === 'theater' ? 'classic' : 'theater';
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(VIZ_MODE_STORAGE_KEY, vizMode);
+    }
+  }
+
+  // Monotonic counter used to disambiguate successive triggers — see
+  // state-machine-graph.svelte's id-based dedup. Each agent event becomes
+  // a new `AgentTransitionTrigger` object with a fresh id.
+  let agentEventCounter = 0;
+  let agentEvent = $state<AgentTransitionTrigger | null>(null);
+
+  // Previous active state, used to fill `peerStateId` for `started` triggers
+  // (which need to know where the handoff came from; the event payload itself
+  // doesn't carry that info). Captured from `detail.currentState` snapshots
+  // since the currentState prop updates slightly lag the WS agent event.
+  let lastKnownState: string | null = null;
+
+  function handleAgentEvent(evt: WorkflowAgentEvent): void {
+    // Only `started` drives the FX cycle. At the moment a `completed` event
+    // fires, the matching `state_entered` has not yet landed, so
+    // `summary.currentState` still equals `evt.stateId`. The graph guards
+    // `fromId === toId` (state-machine-graph.svelte:144), which would make
+    // any synthesized `completed` trigger a no-op. The next `started` event
+    // carries the real handoff peer, so we let it drive the visualization.
+    if (evt.kind === 'started') {
+      const id = ++agentEventCounter;
+      // peer = where we just came from; fall back to the event's own state
+      // so the graph's id lookup always resolves (peerStateId missing
+      // would cause the trigger to silently no-op).
+      const peer = lastKnownState && lastKnownState !== evt.stateId ? lastKnownState : evt.stateId;
+      agentEvent = { id, kind: 'started', stateId: evt.stateId, peerStateId: peer };
+    }
+    lastKnownState = evt.stateId;
+  }
+
+  // Subscribe to agent events only while the theater is mounted — no point
+  // paying for the event-filter closure when the classic view is up.
+  $effect(() => {
+    if (vizMode !== 'theater') return;
+    const unsub = subscribeWorkflowAgentEvents(workflowId, handleAgentEvent);
+    return () => unsub();
+  });
 
   // Message-log section state. The list is collapsed initially and only
   // fetched once expanded (lazy load — D5 cursor pagination).
@@ -184,6 +252,21 @@
 
   const visitCounts = $derived(detail?.context?.visitCounts ?? {});
 
+  // Theater consumes a ReadonlyMap rather than Record<string, number>.
+  const visitCountsMap = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const [k, v] of Object.entries(visitCounts)) m.set(k, v);
+    return m;
+  });
+
+  // Connection status for the HUD. The store exposes a boolean; the HUD
+  // understands a three-state label but v1 only distinguishes connected /
+  // disconnected — "reconnecting" will land once the ws-client exposes the
+  // transient state signal (currently internal).
+  const hudConnectionStatus = $derived<'connected' | 'reconnecting' | 'disconnected'>(
+    appState.connected ? 'connected' : 'disconnected',
+  );
+
   const gateStateDescription = $derived(
     gate && detail?.stateGraph ? detail.stateGraph.states.find((s) => s.id === gate.stateName)?.description : undefined,
   );
@@ -217,6 +300,18 @@
     <span class="text-sm text-muted-foreground ml-auto">
       State: <span class="font-mono">{summary.currentState}</span>
     </span>
+    <!-- Viz-mode toggle — text button rather than icon so the control
+         auto-describes what it does. localStorage under ic-workflow-viz-mode
+         persists the preference per-origin. -->
+    <Button
+      variant="outline"
+      size="sm"
+      onclick={toggleVizMode}
+      aria-pressed={vizMode === 'theater'}
+      data-testid="viz-mode-toggle"
+    >
+      {vizMode === 'theater' ? 'Classic' : 'Viz'}
+    </Button>
   </div>
 
   {#if resolveError}
@@ -271,20 +366,49 @@
       </Card>
     {/if}
 
-    <Card>
-      <CardHeader>
-        <CardTitle>State Machine</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <StateMachineGraph
+    {#if vizMode === 'theater'}
+      <!-- Theater viz mode. The theater is its own full-bleed
+           frame — we give it a fixed aspect-friendly height so it sits inside
+           the scrollable route container without hijacking the whole viewport.
+           The classic state machine card stays intact under the toggle so
+           switching back is one click. -->
+      <div class="workflow-theater-frame" data-testid="workflow-theater-frame">
+        <WorkflowTheater
+          {workflowId}
           graph={detail.stateGraph}
           currentState={summary.currentState}
           {completedStates}
           {failedState}
-          {visitCounts}
+          visitCounts={visitCountsMap}
+          {agentEvent}
+          workflowName={summary.name}
+          currentRound={detail.context?.round}
+          totalRounds={detail.context?.maxRounds}
+          connectionStatus={hudConnectionStatus}
+          onSubscribe={async () => {
+            await subscribeAllTokenStreams();
+          }}
+          onUnsubscribe={async () => {
+            await unsubscribeAllTokenStreams();
+          }}
         />
-      </CardContent>
-    </Card>
+      </div>
+    {:else}
+      <Card>
+        <CardHeader>
+          <CardTitle>State Machine</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <StateMachineGraph
+            graph={detail.stateGraph}
+            currentState={summary.currentState}
+            {completedStates}
+            {failedState}
+            {visitCounts}
+          />
+        </CardContent>
+      </Card>
+    {/if}
 
     {#if detail.context}
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -439,3 +563,19 @@
     </Card>
   {/if}
 </div>
+
+<style>
+  /* Theater frame — clamp the theater's height inside the scrolling route
+     layout. The theater itself is position:relative + full-width/height so
+     this frame is what actually establishes the box. 60vh mirrors the
+     classic StateMachineGraph's max-height, so switching modes doesn't
+     make the surrounding cards jump. */
+  .workflow-theater-frame {
+    position: relative;
+    height: 60vh;
+    min-height: 320px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+  }
+</style>

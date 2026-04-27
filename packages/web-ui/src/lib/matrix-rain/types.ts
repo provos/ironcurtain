@@ -7,6 +7,8 @@
  * for the full design.
  */
 
+import type { WordDropSnapshot, WordDropSource } from './word-drop-types.js';
+
 // ---------------------------------------------------------------------------
 // Phase
 // ---------------------------------------------------------------------------
@@ -83,8 +85,9 @@ export interface LockedCellCoord {
 /**
  * Plain-data snapshot of what to draw this frame. Produced by `engine.getFrame()`
  * and consumed by the renderer. All arrays are `ReadonlyArray` references to
- * internal engine buffers that the engine may mutate on the next tick — the
- * renderer MUST read-only and MUST NOT retain references across frames.
+ * internal engine buffers that the engine may mutate on the next `step()` or
+ * `getFrame()` call — the renderer MUST read-only and MUST NOT retain
+ * references across frames.
  */
 export interface FrameState {
   readonly phase: RainPhase;
@@ -104,7 +107,20 @@ export interface FrameState {
    * free-falling population.
    */
   readonly drops: ReadonlyArray<DropSnapshot>;
+  /**
+   * Held TF-IDF word drops pinned at fixed grid cells. The login engine
+   * always returns a shared frozen empty array (`EMPTY_WORD_DROPS`) — only
+   * the stream engine ever populates this.
+   */
+  readonly wordDrops: ReadonlyArray<WordDropSnapshot>;
 }
+
+/**
+ * Frozen empty word-drop array. Shared by engines that never emit word drops
+ * (the login engine) so every `FrameState` can satisfy the contract without a
+ * per-frame allocation. Consumers MUST treat it as read-only.
+ */
+export const EMPTY_WORD_DROPS: ReadonlyArray<WordDropSnapshot> = Object.freeze([]);
 
 /**
  * A locked wordmark cell in the current frame.
@@ -138,6 +154,15 @@ export interface DropSnapshot {
    * `colorKind` / `row` above.
    */
   readonly trail: ReadonlyArray<DropTrailSnapshot>;
+  /**
+   * Optional source tint. Set by the stream engine when a word drop dissolves
+   * into falling shards so the shards inherit the word's color. The login
+   * engine never sets this; when absent the renderer falls back to the
+   * head/near/far phosphor palette. Kept as the semantic `WordDropSource`
+   * rather than a raw hex so the renderer stays the single owner of concrete
+   * colors.
+   */
+  readonly tint?: WordDropSource;
 }
 
 export interface DropTrailSnapshot {
@@ -145,6 +170,8 @@ export interface DropTrailSnapshot {
   readonly row: number;
   readonly char: string;
   readonly colorKind: DropColorKind;
+  /** Same semantics as `DropSnapshot.tint` — see above. */
+  readonly tint?: WordDropSource;
 }
 
 /**

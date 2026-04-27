@@ -13,12 +13,14 @@ import type {
   OutputLine,
   JobListDto,
   PendingEscalation,
+  TokenStreamEvent,
   WorkflowSummaryDto,
   HumanGateRequestDto,
   LatestVerdictDto,
   LiveWorkflowPhase,
 } from './types.js';
 import { PHASE } from './types.js';
+import { tokenStreamStore } from './token-stream-store-singleton.js';
 
 // ---------------------------------------------------------------------------
 // Eviction policy (D7 from the workflow-display plan)
@@ -129,6 +131,7 @@ export type WebEvent =
   | { event: 'session.tool_call'; payload: { label: number; toolName: string; preview: string } }
   | { event: 'session.output'; payload: { label: number; text: string; turnNumber: number } }
   | { event: 'session.budget_update'; payload: { label: number; budget: BudgetSummaryDto } }
+  | { event: 'session.token_stream'; payload: { label: number; events: ReadonlyArray<TokenStreamEvent> } }
   | { event: 'escalation.created'; payload: EscalationDto }
   | { event: 'escalation.resolved'; payload: { escalationId: string; decision: string } }
   | { event: 'escalation.expired'; payload: { escalationId: string; sessionLabel: number } }
@@ -155,7 +158,17 @@ export type WebEvent =
     }
   | {
       event: 'workflow.agent_completed';
-      payload: { workflowId: string; stateId: string; verdict?: string; confidence?: string };
+      // `notes` is required because the workflow visualization's payload-handoff
+      // tile renders it on every transition. Mirror the daemon contract in
+      // src/web-ui/web-event-bus.ts.
+      payload: { workflowId: string; stateId: string; verdict?: string; confidence?: string; notes: string };
+    }
+  | {
+      // Fires in the orchestrator's `finally` so success, failure, and abort
+      // paths all clean up the bridge mapping. Mirror of the daemon contract
+      // in src/web-ui/web-event-bus.ts.
+      event: 'workflow.agent_session_ended';
+      payload: { workflowId: string; stateId: string; sessionId: string };
     }
   | {
       // Fires in the orchestrator's `finally` so success, failure, and abort
@@ -190,6 +203,11 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
       return { event, payload: data as { label: number; text: string; turnNumber: number } };
     case 'session.budget_update':
       return { event, payload: data as { label: number; budget: BudgetSummaryDto } };
+    case 'session.token_stream':
+      return {
+        event,
+        payload: data as { label: number; events: ReadonlyArray<TokenStreamEvent> },
+      };
     case 'escalation.created':
       return { event, payload: data as unknown as EscalationDto };
     case 'escalation.resolved':
@@ -219,7 +237,13 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'workflow.agent_completed':
       return {
         event,
-        payload: data as { workflowId: string; stateId: string; verdict?: string; confidence?: string },
+        payload: data as {
+          workflowId: string;
+          stateId: string;
+          verdict?: string;
+          confidence?: string;
+          notes: string;
+        },
       };
     case 'workflow.agent_session_ended':
       return {
@@ -321,6 +345,16 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       if (session) {
         state.sessions = new Map(state.sessions).set(label, { ...session, budget });
       }
+      return true;
+    }
+
+    case 'session.token_stream': {
+      // Deliberately bypasses AppStateLike — the theater consumes this
+      // stream imperatively via the singleton (see §B.1). Running 20+
+      // events/50ms through Svelte's reactive graph would dominate the
+      // frame budget.
+      const { label, events } = parsed.payload;
+      tokenStreamStore.publish(label, events);
       return true;
     }
 

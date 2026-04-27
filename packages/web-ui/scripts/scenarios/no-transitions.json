@@ -1,0 +1,30 @@
+{
+  "description": "5 minutes in a single state, steady 40 tok/s, zero transitions. AC1 check: view must look alive with no handoffs.",
+  "tokenProfile": {
+    "corpus": "default",
+    "baseTokenRate": 40,
+    "burstiness": 0.0,
+    "toolCallRatePerMin": 2
+  },
+  "timeline": [
+    {
+      "at": 0,
+      "event": "workflow.started",
+      "payload": {
+        "workflowId": "wf-scenario-no-transitions",
+        "name": "vuln-discovery",
+        "taskDescription": "Long-running analysis with no handoffs for three minutes"
+      }
+    },
+    {
+      "at": 0,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-no-transitions", "state": "analyze" }
+    },
+    {
+      "at": 0,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-no-transitions", "stateId": "analyze", "persona": "analyst" }
+    }
+  ]
+}

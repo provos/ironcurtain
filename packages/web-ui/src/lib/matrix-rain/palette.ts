@@ -23,6 +23,22 @@ export const COLOR_FAR = '#007800';
 export const COLOR_LOCKED = '#00C800';
 
 // ---------------------------------------------------------------------------
+// Word-drop tints (stream engine's per-source color coding)
+// ---------------------------------------------------------------------------
+// text_delta uses COLOR_NEAR (saturated phosphor green) above — ambient
+// narration blends with the rain. The three non-green tints below pop out so
+// the viewer reads them as distinct semantic signals.
+
+/** tool_use — distinct cyan so tool calls read as separate from prose. */
+export const COLOR_WORD_TOOL = '#00E5FF';
+
+/** message_start — amber accent for model-identity blips. */
+export const COLOR_WORD_MODEL = '#FFB84D';
+
+/** error — crimson, for agent-reported failures. */
+export const COLOR_WORD_ERROR = '#FF4D4D';
+
+// ---------------------------------------------------------------------------
 // Alpha values (frame-level multipliers)
 // ---------------------------------------------------------------------------
 

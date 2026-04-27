@@ -322,6 +322,7 @@ export type WorkflowLifecycleEvent =
       readonly state: string;
       readonly persona: string;
       readonly verdict: string;
+      readonly notes: string;
     }
   /**
    * Emitted unconditionally in the `executeAgentState` finally block --
@@ -429,6 +430,18 @@ interface WorkflowInstance {
    */
   readonly policyDirByPersona: Map<string, string>;
   /**
+   * Three coordinated pieces of token-stream accounting state, grouped
+   * so lifecycle (setup/teardown) operates on one value. `outputTokens`
+   * accumulates `message_end.outputTokens` for any event whose session
+   * id is in `sessionIds`. `unsubscribe` is set at `setupTokenSubscription`
+   * and cleared on teardown; presence indicates "subscribed."
+   */
+  tokens: {
+    outputTokens: number;
+    readonly sessionIds: Set<SessionId>;
+    unsubscribe?: () => void;
+  };
+  /**
    * Last persona loaded into each bundle's coordinator, keyed by
    * `BundleId`. `cyclePolicy` consults this and skips the `loadPolicy`
    * RPC when a re-entry would install the same persona that is already
@@ -463,18 +476,6 @@ interface WorkflowInstance {
    * Survives only in-process; the checkpoint itself does not record it.
    */
   quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
-  /**
-   * Three coordinated pieces of token-stream accounting state, grouped
-   * so lifecycle (setup/teardown) operates on one value. `outputTokens`
-   * accumulates `message_end.outputTokens` for any event whose session
-   * id is in `sessionIds`. `unsubscribe` is set at `setupTokenSubscription`
-   * and cleared on teardown; presence indicates "subscribed."
-   */
-  tokens: {
-    outputTokens: number;
-    readonly sessionIds: Set<SessionId>;
-    unsubscribe?: () => void;
-  };
   /**
    * Sibling of `quotaExhausted`: drives the same checkpoint-preserving
    * abort path. Survives only in-process; the checkpoint does not
@@ -1036,13 +1037,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       messageLog,
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
-      currentPersonaByBundle: new Map(),
-      mintedServersByBundle: new Map(),
-      aborted: false,
       tokens: {
         outputTokens: 0,
         sessionIds: new Set(),
       },
+      currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
+      aborted: false,
     };
 
     // Under `sharedContainer: true`, bundles are minted lazily by
@@ -1112,9 +1113,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       messageLog,
       bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
-      currentPersonaByBundle: new Map(),
-      mintedServersByBundle: new Map(),
-      aborted: false,
       tokens: {
         // Resume picks up the checkpointed totalTokens as the accumulator's
         // starting point so post-resume message_end events keep adding to
@@ -1122,6 +1120,9 @@ export class WorkflowOrchestrator implements WorkflowController {
         outputTokens: checkpoint.context.totalTokens,
         sessionIds: new Set(),
       },
+      currentPersonaByBundle: new Map(),
+      mintedServersByBundle: new Map(),
+      aborted: false,
     };
 
     // Resume does NOT reclaim the original containers — any
@@ -1731,6 +1732,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           verdict: output?.verdict ?? null,
           // eslint-disable-next-line @typescript-eslint/no-deprecated -- logged for diagnostics
           confidence: output?.confidence ?? null,
+          notes: output?.notes ?? null,
         });
       };
 
@@ -1814,7 +1816,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // Shared-container mode: the MITM is long-lived across agents. Flip
       // its routing id so this agent's events land under its own session id
       // (matching what the bridge registers below). Optional-chain because
-      // builtin/per-state-container workflows have no shared `infra`.
+      // builtin/per-state-container workflows have no shared bundle.
       const agentSessionId = session.getInfo().id;
       bundle?.setTokenSessionId(agentSessionId);
       instance.tokens.sessionIds.add(agentSessionId);
@@ -1958,6 +1960,10 @@ export class WorkflowOrchestrator implements WorkflowController {
         state: stateId,
         persona: stateConfig.persona,
         verdict: agentOutput.verdict,
+        // YAML parser returns null when the agent omits notes; default to empty
+        // string at the source so downstream consumers can trust the field is
+        // always present (per web-ui visualization design §F.2).
+        notes: agentOutput.notes ?? '',
       });
 
       return {

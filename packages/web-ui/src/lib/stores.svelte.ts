@@ -315,8 +315,26 @@ function buildDaemonUrl(path: string, opts: { ws: boolean }): string {
   return `${protocol}//${window.location.host}${path}`;
 }
 
+/**
+ * Forward scenario-control query params from the browser URL onto the WS URL so
+ * the mock server's per-client scenario runner sees them (see
+ * packages/web-ui/scripts/mock-ws-server.ts → parseScenarioQueryParams).
+ *
+ * Production daemon ignores unknown WS query params, so this is a no-op there.
+ * Kept narrow (three named keys) to avoid leaking arbitrary browser state into
+ * the upgrade request.
+ */
 function buildWsUrl(): string {
-  return buildDaemonUrl('/ws', { ws: true });
+  const base = buildDaemonUrl('/ws', { ws: true });
+  if (typeof window === 'undefined') return base;
+  const browserParams = new URLSearchParams(window.location.search);
+  const forward = new URLSearchParams();
+  for (const key of ['scenario', 'speed', 'loop'] as const) {
+    const v = browserParams.get(key);
+    if (v !== null) forward.set(key, v);
+  }
+  const q = forward.toString();
+  return q ? `${base}?${q}` : base;
 }
 
 /**
@@ -386,6 +404,54 @@ export async function loadSessionHistory(label: number): Promise<ConversationTur
 
 export async function loadSessionBudget(label: number): Promise<BudgetSummaryDto> {
   return getWsClient().request<BudgetSummaryDto>('sessions.budget', { label });
+}
+
+/**
+ * Subscribe to the global token stream firehose. The daemon fans out
+ * every session's `session.token_stream` events to this connection.
+ * Per §B.2 we use the global form (not per-session) because a workflow
+ * spawns multiple sessions sequentially and we don't want to
+ * resubscribe on every state transition.
+ */
+export async function subscribeAllTokenStreams(): Promise<{ subscribed: boolean }> {
+  return getWsClient().request<{ subscribed: boolean }>('sessions.subscribeAllTokenStreams', {});
+}
+
+export async function unsubscribeAllTokenStreams(): Promise<{ unsubscribed: boolean }> {
+  return getWsClient().request<{ unsubscribed: boolean }>('sessions.unsubscribeAllTokenStreams', {});
+}
+
+/**
+ * Subscribe to workflow.agent_started / workflow.agent_completed events
+ * scoped to a single workflowId. The handler is called once per matching
+ * event with a `{ kind, stateId, notes? }` shape — enough for the theater
+ * to build an `AgentTransitionTrigger`. Returns an unsubscribe function.
+ *
+ * Centralized here (not inlined in the route) to keep route code from
+ * importing `getWsClient()` directly — see packages/web-ui/CLAUDE.md:
+ * "Route views MUST NOT import getWsClient directly".
+ */
+export type WorkflowAgentEvent =
+  | { readonly kind: 'started'; readonly stateId: string }
+  | { readonly kind: 'completed'; readonly stateId: string; readonly notes: string };
+
+export function subscribeWorkflowAgentEvents(
+  workflowId: string,
+  handler: (event: WorkflowAgentEvent) => void,
+): () => void {
+  const client = getWsClient();
+  return client.onEvent((event, payload) => {
+    if (event !== 'workflow.agent_started' && event !== 'workflow.agent_completed') return;
+    const data = payload as { workflowId?: string };
+    if (data.workflowId !== workflowId) return;
+    if (event === 'workflow.agent_started') {
+      const p = payload as { stateId: string };
+      handler({ kind: 'started', stateId: p.stateId });
+    } else {
+      const p = payload as { stateId: string; notes?: string };
+      handler({ kind: 'completed', stateId: p.stateId, notes: p.notes ?? '' });
+    }
+  });
 }
 
 // ── Job RPC actions ──────────────────────────────────────────────────

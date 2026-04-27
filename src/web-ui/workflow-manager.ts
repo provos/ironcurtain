@@ -375,6 +375,7 @@ export class WorkflowManager {
           workflowId: event.workflowId,
           stateId: event.state,
           verdict: event.verdict,
+          notes: event.notes,
         });
         break;
       case 'agent_session_ended':
