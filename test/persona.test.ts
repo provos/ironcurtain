@@ -26,6 +26,7 @@ import {
   personaExists,
   resolvePersona,
   applyServerAllowlist,
+  filterMcpServersByPolicy,
 } from '../src/persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../src/persona/persona-prompt.js';
 import { buildConstitutionGeneratorSystemPrompt } from '../src/cron/constitution-generator.js';
@@ -66,7 +67,7 @@ function createTestPersona(
   writeFileSync(resolve(personaDir, 'persona.json'), JSON.stringify(definition));
 
   if (opts.compiled !== false) {
-    writeFileSync(resolve(generatedDir, 'compiled-policy.json'), '{}');
+    writeFileSync(resolve(generatedDir, 'compiled-policy.json'), JSON.stringify({ rules: [] }));
   }
 }
 
@@ -304,6 +305,51 @@ describe('applyServerAllowlist', () => {
     const filtered = applyServerAllowlist(mockServers, ['github', 'nonexistent']);
     // nonexistent is not in mockServers, so it's silently dropped (with a warning)
     expect(Object.keys(filtered).sort()).toEqual(['filesystem', 'github']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Policy-derived filtering (resolve.ts)
+// ---------------------------------------------------------------------------
+
+describe('filterMcpServersByPolicy', () => {
+  const mockServers: Record<string, MCPServerConfig> = {
+    filesystem: { command: 'node', args: ['fs.js'] },
+    github: { command: 'node', args: ['gh.js'] },
+    gmail: { command: 'node', args: ['gmail.js'] },
+    fetch: { command: 'node', args: ['fetch.js'] },
+  };
+
+  it('keeps only servers present in the required set', () => {
+    const filtered = filterMcpServersByPolicy(mockServers, new Set(['filesystem', 'fetch']));
+    expect(Object.keys(filtered).sort()).toEqual(['fetch', 'filesystem']);
+  });
+
+  it('drops filesystem when the policy does not reference it', () => {
+    // Unlike applyServerAllowlist, this filter has no hardcoded
+    // filesystem exception — every realistic constitution emits at
+    // least one filesystem rule, so the policy-derived set already
+    // contains it. This test pins that behavior down.
+    const filtered = filterMcpServersByPolicy(mockServers, new Set(['github']));
+    expect(Object.keys(filtered)).toEqual(['github']);
+  });
+
+  it('returns an empty object when the required set is empty', () => {
+    const filtered = filterMcpServersByPolicy(mockServers, new Set());
+    expect(filtered).toEqual({});
+  });
+
+  it('preserves server config object identity', () => {
+    const filtered = filterMcpServersByPolicy(mockServers, new Set(['github']));
+    expect(filtered['github']).toBe(mockServers['github']);
+  });
+
+  it('ignores required-set entries that are not in mcpServers', () => {
+    // An over-broad required set (e.g., a server name dropped from
+    // mcp-servers.json after policy compilation) just yields nothing
+    // for that name; the filter does not synthesize entries.
+    const filtered = filterMcpServersByPolicy(mockServers, new Set(['github', 'nonexistent']));
+    expect(Object.keys(filtered)).toEqual(['github']);
   });
 });
 

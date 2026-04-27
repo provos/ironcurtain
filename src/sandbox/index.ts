@@ -660,6 +660,15 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<CoordinatorB
  * advertises. Passing the same set to every subprocess ensures the
  * policy-derived roots are visible through the relay before any
  * escalation-time expansion.
+ *
+ * `config.mcpServers` is expected to be pre-filtered to the set of
+ * servers the active compiled policy actually references. The standalone
+ * session path applies that filter in `buildSessionConfig` via
+ * `filterMcpServersByPolicy`; the workflow infrastructure factory does
+ * the same with the per-scope union. Servers absent from the map are
+ * never started — default-deny would reject every call to them anyway,
+ * so spawning their subprocesses would just cost startup time and file
+ * descriptors.
  */
 async function connectBackendSubprocesses(
   coordinator: ToolCallCoordinator,

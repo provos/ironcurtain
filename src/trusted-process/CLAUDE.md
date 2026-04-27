@@ -26,7 +26,7 @@ The annotation map stores `StoredToolAnnotation` (may contain conditional role s
 **Supporting modules:**
 
 - `policy-types.ts` - `EvaluationResult` type with `escalatedRoles` for whitelist candidate extraction.
-- `policy-roots.ts` - `extractPolicyRoots()` derives MCP Roots from `allow`/`escalate` rules with `paths.within` conditions.
+- `policy-roots.ts` - `extractPolicyRoots()` derives MCP Roots from `allow`/`escalate` rules with `paths.within` conditions. `extractRequiredServers()` derives the set of MCP server names referenced by the compiled policy; the standalone session path and the workflow infrastructure factory both use it to skip spawning proxy subprocesses for unreferenced servers (default-deny would reject every call to them anyway).
 - `domain-utils.ts` - domain matching (`domainMatchesAllowlist`, `isIpAddress`), URL normalization, git remote resolution. Shared by the engine and dynamic list type registry.
 - `path-utils.ts` - annotation-driven path normalization via `prepareToolArgs()`, producing separate `argsForTransport` and `argsForPolicy`.
 

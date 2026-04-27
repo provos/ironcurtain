@@ -57,6 +57,31 @@ export function extractPolicyRoots(compiledPolicy: CompiledPolicyFile, allowedDi
 }
 
 /**
+ * Extracts the set of MCP server names referenced by the compiled policy.
+ *
+ * The compiler enforces (via `validateServerScoping` in
+ * `src/pipeline/pipeline-runner.ts`) that every rule carries
+ * `if.server: [serverName]`. Under default-deny, any tool call to a
+ * server with no policy rule is rejected, so the runtime never needs
+ * to spawn proxy subprocesses for unreferenced servers.
+ *
+ * The reserved `proxy` virtual server (registered in-process by the
+ * sandbox in Docker Agent Mode) is never spawned from `mcp-servers.json`
+ * and is excluded here unconditionally.
+ */
+export function extractRequiredServers(policy: CompiledPolicyFile): Set<string> {
+  const servers = new Set<string>();
+  for (const rule of policy.rules) {
+    if (!rule.if.server) continue;
+    for (const serverName of rule.if.server) {
+      servers.add(serverName);
+    }
+  }
+  servers.delete('proxy');
+  return servers;
+}
+
+/**
  * Converts PolicyRoot entries to MCP Root objects with `file://` URIs.
  */
 export function toMcpRoots(policyRoots: PolicyRoot[]): Array<{ uri: string; name: string }> {

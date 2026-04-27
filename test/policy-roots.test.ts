@@ -2,7 +2,12 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { resolve, join } from 'node:path';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { extractPolicyRoots, toMcpRoots, directoryForPath } from '../src/trusted-process/policy-roots.js';
+import {
+  extractPolicyRoots,
+  extractRequiredServers,
+  toMcpRoots,
+  directoryForPath,
+} from '../src/trusted-process/policy-roots.js';
 import type { CompiledPolicyFile, CompiledRule } from '../src/pipeline/types.js';
 
 // Real temp directories so tests work on macOS (where /tmp → /private/tmp)
@@ -225,5 +230,67 @@ describe('directoryForPath', () => {
 
   it('resolves symlinks before extracting directory', () => {
     expect(directoryForPath(linkedFile)).toBe(sandboxDir);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractRequiredServers
+// ---------------------------------------------------------------------------
+
+function makeServerRule(name: string, server: string[], decision: 'allow' | 'deny' | 'escalate'): CompiledRule {
+  return {
+    name,
+    description: 'test',
+    principle: 'test',
+    if: { server },
+    then: decision,
+    reason: 'test',
+  };
+}
+
+describe('extractRequiredServers', () => {
+  it('returns the union of every rule.if.server entry', () => {
+    const policy = makePolicyFile([
+      makeServerRule('r1', ['filesystem'], 'allow'),
+      makeServerRule('r2', ['git'], 'escalate'),
+      makeServerRule('r3', ['filesystem', 'fetch'], 'allow'),
+    ]);
+    expect(extractRequiredServers(policy)).toEqual(new Set(['filesystem', 'git', 'fetch']));
+  });
+
+  it('excludes the virtual proxy server even when rules reference it', () => {
+    const policy = makePolicyFile([
+      makeServerRule('r1', ['filesystem'], 'allow'),
+      makeServerRule('r2', ['proxy'], 'allow'),
+    ]);
+    const servers = extractRequiredServers(policy);
+    expect(servers.has('proxy')).toBe(false);
+    expect(servers.has('filesystem')).toBe(true);
+  });
+
+  it('returns an empty set when no rules carry an if.server entry', () => {
+    // Rules without `if.server` are ignored: the compiler enforces that
+    // every emitted rule names a server, so this just guards the helper
+    // against malformed inputs.
+    const policy = makePolicyFile([
+      {
+        name: 'unscoped',
+        description: 'test',
+        principle: 'test',
+        if: {},
+        then: 'allow',
+        reason: 'test',
+      },
+    ]);
+    expect(extractRequiredServers(policy)).toEqual(new Set());
+  });
+
+  it('deduplicates server names that appear in multiple rules', () => {
+    const policy = makePolicyFile([
+      makeServerRule('r1', ['git'], 'allow'),
+      makeServerRule('r2', ['git'], 'escalate'),
+      makeServerRule('r3', ['git'], 'deny'),
+    ]);
+    expect(extractRequiredServers(policy)).toEqual(new Set(['git']));
   });
 });

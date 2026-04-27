@@ -139,7 +139,10 @@ function createMockGenerateResult(text = 'mock response') {
  * Creates a persona directory structure on disk with a compiled policy.
  * Returns the expected policyDir (generated/) path.
  */
-function createTestPersonaOnDisk(name: string, opts: { servers?: string[]; description?: string } = {}): string {
+function createTestPersonaOnDisk(
+  name: string,
+  opts: { servers?: string[]; description?: string; policyServers?: string[] } = {},
+): string {
   const personaDir = resolve(TEST_HOME, 'personas', name);
   const generatedDir = resolve(personaDir, 'generated');
   mkdirSync(generatedDir, { recursive: true });
@@ -152,7 +155,25 @@ function createTestPersonaOnDisk(name: string, opts: { servers?: string[]; descr
     ...(opts.servers ? { servers: opts.servers } : {}),
   };
   writeFileSync(resolve(personaDir, 'persona.json'), JSON.stringify(definition));
-  writeFileSync(resolve(generatedDir, 'compiled-policy.json'), '{}');
+  // The session's policy-derived MCP filter walks `rule.if.server`, so the
+  // synthesized compiled policy must reference every server the test config
+  // supplies — otherwise the filter drops them all before the test runs.
+  // Tests can override via opts.policyServers when they want to exercise a
+  // different policy-server set (e.g., a single-server policy).
+  const policyServers = opts.policyServers ?? ['filesystem', 'github', 'gmail'];
+  writeFileSync(
+    resolve(generatedDir, 'compiled-policy.json'),
+    JSON.stringify({
+      rules: policyServers.map((server) => ({
+        name: `test-${server}`,
+        description: 'test',
+        principle: 'test',
+        if: { server: [server] },
+        then: 'allow',
+        reason: 'test',
+      })),
+    }),
+  );
 
   return generatedDir;
 }

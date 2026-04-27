@@ -13,7 +13,18 @@ import { createPersonaName, type PersonaDefinition, type PersonaName } from './t
 import type { MCPServerConfig } from '../config/types.js';
 import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 
-/** Servers always included in persona sessions regardless of allowlist. */
+/**
+ * Servers always included in persona sessions regardless of the persona's
+ * own `servers` allowlist. The memory server is injected per-session in
+ * `buildSessionConfig` after this filter runs, so it's listed here purely
+ * to suppress the "unknown server" warning when a persona names it.
+ *
+ * `filesystem` stays for backwards compatibility with personas authored
+ * before the policy-derived filter became the runtime source of truth;
+ * the agent sandbox needs filesystem access to function. The new
+ * `filterMcpServersByPolicy` helper does NOT preserve filesystem -- it
+ * trusts the compiled policy completely.
+ */
 const ALWAYS_INCLUDED_SERVERS = new Set(['filesystem', MEMORY_SERVER_NAME]);
 
 // ---------------------------------------------------------------------------
@@ -156,6 +167,37 @@ export function applyServerAllowlist(
   const filtered: Record<string, MCPServerConfig> = {};
   for (const [name, config] of Object.entries(mcpServers)) {
     if (allowlist.includes(name) || ALWAYS_INCLUDED_SERVERS.has(name)) {
+      filtered[name] = config;
+    }
+  }
+  return filtered;
+}
+
+/**
+ * Filters MCP servers to only those referenced by the compiled policy.
+ *
+ * Under default-deny, any tool call to a server with no policy rule is
+ * rejected, so spawning a proxy subprocess for that server costs startup
+ * time and file descriptors with no payoff. The set of "required" servers
+ * is derived from `extractRequiredServers(compiledPolicy)`.
+ *
+ * Unlike `applyServerAllowlist`, this filter does NOT preserve
+ * `filesystem` as a hardcoded exception: every realistic constitution
+ * emits at least one filesystem rule, so the policy-derived set already
+ * contains it. The memory server is injected per-session AFTER this
+ * filter runs in `buildSessionConfig`, so it likewise needs no special
+ * treatment here.
+ *
+ * The set is the source of truth -- this function preserves entries
+ * whose names appear in `requiredServers` and drops everything else.
+ */
+export function filterMcpServersByPolicy(
+  mcpServers: Record<string, MCPServerConfig>,
+  requiredServers: ReadonlySet<string>,
+): Record<string, MCPServerConfig> {
+  const filtered: Record<string, MCPServerConfig> = {};
+  for (const [name, config] of Object.entries(mcpServers)) {
+    if (requiredServers.has(name)) {
       filtered[name] = config;
     }
   }
