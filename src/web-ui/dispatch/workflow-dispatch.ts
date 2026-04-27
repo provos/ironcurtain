@@ -489,7 +489,7 @@ export function computePastRunPhase(
  * Per D6: the destination state of the last `state_transition` lives in the
  * `event` field (orchestrator.handleTransition writes it there). For non-terminal,
  * non-gate destinations, post-transition `quota_exhausted` → 'aborted',
- * `error` → 'failed', neither → 'interrupted'.
+ * `transient_failure` → 'aborted', `error` → 'failed', none → 'interrupted'.
  */
 export function synthesizePhaseFromMessageLog(
   entries: readonly MessageLogEntry[],
@@ -499,18 +499,21 @@ export function synthesizePhaseFromMessageLog(
   // When a newer transition arrives, the post-transition accumulators reset.
   let lastTransition: StateTransitionEntry | undefined;
   let sawQuotaExhausted = false;
+  let sawTransientFailure = false;
   let sawError = false;
   for (const entry of entries) {
     if (entry.type === 'state_transition') {
       if (lastTransition === undefined || entry.ts > lastTransition.ts) {
         lastTransition = entry;
         sawQuotaExhausted = false;
+        sawTransientFailure = false;
         sawError = false;
       }
       continue;
     }
     if (lastTransition === undefined || entry.ts <= lastTransition.ts) continue;
     if (entry.type === 'quota_exhausted') sawQuotaExhausted = true;
+    else if (entry.type === 'transient_failure') sawTransientFailure = true;
     else if (entry.type === 'error') sawError = true;
   }
   if (lastTransition === undefined) return 'interrupted';
@@ -518,6 +521,7 @@ export function synthesizePhaseFromMessageLog(
   if (stateDef?.type === 'terminal') return phaseFromTerminalStateName(lastTransition.event);
   if (stateDef?.type === 'human_gate') return 'waiting_human';
   if (sawQuotaExhausted) return 'aborted';
+  if (sawTransientFailure) return 'aborted';
   if (sawError) return 'failed';
   return 'interrupted';
 }

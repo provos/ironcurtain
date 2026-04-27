@@ -491,6 +491,16 @@ export interface AgentTurnResult {
     readonly resetAt?: Date;
     readonly rawMessage: string;
   };
+  /**
+   * Mirrors `AgentResponse.transientFailure` in
+   * `src/docker/agent-adapter.ts`. See that field's JSDoc for the
+   * canonical contract; in short: terminal-but-resumable, no retry,
+   * checkpoint preserved.
+   */
+  readonly transientFailure?: {
+    readonly kind: 'degenerate_response';
+    readonly rawMessage: string;
+  };
 }
 
 export interface Session {

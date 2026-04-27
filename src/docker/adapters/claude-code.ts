@@ -245,14 +245,24 @@ exit $STATUS
 
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       if (exitCode !== 0) {
-        // Before falling back to the generic "exited non-zero" wrapper,
-        // look inside Claude Code's JSON envelope for a structured
-        // quota-exhaustion signal. Claude Code exits non-zero on 429
-        // but still prints its result envelope on stdout — we would
-        // otherwise throw that signal away.
-        const quotaExhausted = extractClaudeCodeQuotaSignal(stdout);
+        // The CLI exits non-zero on 429 (quota) and on the upstream-stall
+        // envelope (`type: 'result'`, `output_tokens=0`,
+        // `stop_reason=null`); both signals must survive the non-zero
+        // exit. Parse stdout once and dispatch to both detectors.
+        const parsed = tryParseJsonObject(stdout);
+        const quotaExhausted = parsed ? extractClaudeCodeQuotaSignal(parsed, stdout) : undefined;
         if (quotaExhausted) {
           return { text: quotaExhausted.rawMessage, quotaExhausted };
+        }
+        const transient = parsed ? detectTransientFailure(parsed, stdout) : undefined;
+        if (transient) {
+          // Treat as resumable-abort, NOT hardFailure: the orchestrator's
+          // hard-retry rotation cannot recover a stalled upstream.
+          const text = typeof parsed?.result === 'string' ? parsed.result : stdout.trim();
+          return {
+            text,
+            transientFailure: { kind: 'degenerate_response', rawMessage: transient.rawMessage },
+          };
         }
         // Zero output on non-zero exit indicates the claude process was
         // killed (SIGTERM) or crashed before producing any assistant text —
@@ -302,19 +312,8 @@ exit $STATUS
  */
 const QUOTA_RESET_REGEX = /Your limit will reset at (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/;
 
-/**
- * Extracts a quota-exhaustion signal from Claude Code's JSON error
- * envelope. Returns undefined when the envelope is missing, malformed,
- * or carries a different error class. When present, `rawMessage` is
- * always set (from the envelope's `result` string or a stringified
- * fallback) and `resetAt` is populated only when the human-readable
- * reset timestamp can be parsed.
- *
- * Contract: this helper populates `AgentResponse.quotaExhausted`,
- * which the workflow orchestrator treats as a terminal "pause and
- * resume later" signal — do not fold unrelated errors into this path.
- */
-function extractClaudeCodeQuotaSignal(stdout: string): AgentResponse['quotaExhausted'] | undefined {
+/** JSON.parse with defensive narrowing to a Record. Returns undefined on parse error or non-object. */
+function tryParseJsonObject(stdout: string): Record<string, unknown> | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -322,10 +321,26 @@ function extractClaudeCodeQuotaSignal(stdout: string): AgentResponse['quotaExhau
     return undefined;
   }
   if (!parsed || typeof parsed !== 'object') return undefined;
-  const obj = parsed as Record<string, unknown>;
-  if (obj.api_error_status !== 429) return undefined;
+  return parsed as Record<string, unknown>;
+}
 
-  const resultText = typeof obj.result === 'string' ? obj.result : undefined;
+/**
+ * Extracts a quota-exhaustion signal from a parsed Claude Code envelope.
+ * Returns undefined when the envelope carries a different error class.
+ * `resetAt` is populated only when the human-readable reset timestamp
+ * can be parsed.
+ *
+ * Contract: this helper populates `AgentResponse.quotaExhausted`, which
+ * the workflow orchestrator treats as a terminal "pause and resume
+ * later" signal — do not fold unrelated errors into this path.
+ */
+function extractClaudeCodeQuotaSignal(
+  parsed: Record<string, unknown>,
+  stdout: string,
+): AgentResponse['quotaExhausted'] | undefined {
+  if (parsed.api_error_status !== 429) return undefined;
+
+  const resultText = typeof parsed.result === 'string' ? parsed.result : undefined;
   const rawMessage = resultText ?? stdout.trim();
   const match = resultText ? QUOTA_RESET_REGEX.exec(resultText) : null;
   if (match) {
@@ -339,22 +354,45 @@ function extractClaudeCodeQuotaSignal(stdout: string): AgentResponse['quotaExhau
 }
 
 /**
+ * Detects the degenerate "upstream stall" envelope: a Claude Code result
+ * envelope where `usage.output_tokens === 0` AND `stop_reason === null/undefined`.
+ *
+ * False positives here are much worse than missed detections — they would
+ * route a healthy completion to the resumable-abort path. Hence the
+ * `type === 'result'` + `typeof result === 'string'` envelope gates (a
+ * real Claude Code result envelope always carries both), the strict AND
+ * on the two stall signals (so legitimate empty completions with
+ * `stop_reason === 'end_turn'` and partial streams with
+ * `output_tokens > 0` do not match), and the defensive `usage`
+ * narrowing (CLI version drift / schema change yields undefined).
+ */
+function detectTransientFailure(parsed: Record<string, unknown>, stdout: string): { rawMessage: string } | undefined {
+  if (parsed.type !== 'result') return undefined;
+  if (typeof parsed.result !== 'string') return undefined;
+  const usage = parsed.usage;
+  if (!usage || typeof usage !== 'object') return undefined;
+  const outputTokens = (usage as Record<string, unknown>).output_tokens;
+  if (typeof outputTokens !== 'number' || outputTokens !== 0) return undefined;
+  const stopReason = parsed.stop_reason;
+  if (stopReason !== null && stopReason !== undefined) return undefined;
+  return { rawMessage: stdout.trim() };
+}
+
+/**
  * Parses Claude Code's `--output-format json` response.
  * Falls back to raw stdout when the output is not valid JSON.
  */
 function parseClaudeCodeJson(stdout: string): AgentResponse {
-  try {
-    const parsed: unknown = JSON.parse(stdout);
-    if (parsed && typeof parsed === 'object' && 'result' in parsed) {
-      const obj = parsed as Record<string, unknown>;
-      const text = typeof obj.result === 'string' ? obj.result : stdout.trim();
-      if (typeof obj.total_cost_usd === 'number') {
-        return { text, costUsd: obj.total_cost_usd };
-      }
-      return { text };
+  const parsed = tryParseJsonObject(stdout);
+  if (parsed && 'result' in parsed) {
+    const text = typeof parsed.result === 'string' ? parsed.result : stdout.trim();
+    const transient = detectTransientFailure(parsed, stdout);
+    const base: AgentResponse =
+      typeof parsed.total_cost_usd === 'number' ? { text, costUsd: parsed.total_cost_usd } : { text };
+    if (transient) {
+      return { ...base, transientFailure: { kind: 'degenerate_response', rawMessage: transient.rawMessage } };
     }
-  } catch {
-    // JSON parse failed -- fall through to raw text
+    return base;
   }
   return { text: stdout.trim() };
 }

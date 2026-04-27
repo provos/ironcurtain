@@ -60,6 +60,32 @@ export interface AgentResponse {
     readonly resetAt?: Date;
     readonly rawMessage: string;
   };
+  /**
+   * Set when the adapter detected a transient upstream failure that
+   * produced a syntactically-valid envelope with no usable content —
+   * for instance, a sustained LiteLLM/Z.AI stall surfaced by Claude Code
+   * as `usage.output_tokens === 0` AND `stop_reason === null` while
+   * `result` contains only the agent's preamble. The CLI exits 0 and
+   * its JSON parses, but no assistant message was generated.
+   *
+   * Shaped as a discriminated union (`kind`) so future detected shapes
+   * (`'connection_reset'`, `'5xx_passthrough'`, etc.) can extend without
+   * a breaking change. Mirrors the contract of `quotaExhausted`: the
+   * orchestrator MUST treat this as terminal-but-resumable, MUST NOT
+   * retry the turn (the in-loop reprompt against a stalled upstream is
+   * hopeless), and MUST preserve the checkpoint so `workflow resume`
+   * can re-enter the failing state once the upstream is healthy.
+   *
+   * `rawMessage` is the original envelope/stdout, preserved for
+   * diagnostics. Adapters that cannot produce this signal must leave
+   * the field undefined; falling through to the generic abort path is
+   * acceptable when the CLI offers no machine-readable transient
+   * signal.
+   */
+  readonly transientFailure?: {
+    readonly kind: 'degenerate_response';
+    readonly rawMessage: string;
+  };
 }
 
 /**
