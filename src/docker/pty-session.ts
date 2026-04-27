@@ -45,6 +45,26 @@ export interface PtySessionOptions {
   readonly resumeSessionId?: string;
   /** Persona name. Used to build CLAUDE.md and system prompt augmentation. */
   readonly persona?: string;
+  /**
+   * Override for the PTY attach step. Defaults to the production `attachPty`
+   * which proxies the user's terminal into the container PTY socket.
+   * Tests inject a stub that performs assertions against the live container
+   * (via `docker exec`) and returns an exit code without taking over stdio.
+   */
+  readonly attach?: PtyAttachFn;
+}
+
+export type PtyAttachFn = (options: PtyProxyOptions) => Promise<number>;
+
+/** UDS path (Linux) or { host, port } (macOS). */
+export type PtyTarget = string | { readonly host: string; readonly port: number };
+
+export interface PtyProxyOptions {
+  readonly target: PtyTarget;
+  /** Docker container ID (for SIGWINCH forwarding). */
+  readonly containerId: string;
+  /** Abort signal for graceful shutdown (e.g., SIGTERM). */
+  readonly signal?: AbortSignal;
 }
 
 /** Maximum time to wait for the PTY socket to appear (ms). */
@@ -181,9 +201,6 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const sessionConfig = { ...dirConfig.config, isPtySession: true };
   const { sandboxDir, escalationDir, systemPromptAugmentation } = dirConfig;
 
-  const socketsDir = resolve(sessionDir, 'sockets');
-  mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
-
   logger.info(`PTY session ${effectiveSessionId} ${isResume ? 'resuming' : 'starting'}`);
 
   const initSpinner = ora({
@@ -261,6 +278,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       adapter,
       fakeKeys,
       orientationDir,
+      socketsDir,
       systemPrompt: baseSystemPrompt,
       image,
       mitmAddr,
@@ -518,8 +536,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     initSpinner.succeed(chalk.dim('PTY session ready'));
     process.stderr.write('\n');
 
-    // Attach terminal via Node.js PTY proxy
-    const exitCode = await attachPty({
+    // Attach terminal via Node.js PTY proxy. Tests inject a stub via
+    // `options.attach` to drive assertions against the live container.
+    const attachFn = options.attach ?? attachPty;
+    const exitCode = await attachFn({
       target: ptyTarget,
       containerId,
       signal: shutdownController.signal,
@@ -613,23 +633,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
 // --- PTY proxy ---
 
-/** UDS path (Linux) or { host, port } (macOS). */
-type PtyTarget = string | { host: string; port: number };
-
 /** Creates a net.Socket connection to the PTY target (UDS or TCP). */
 function connectToTarget(target: PtyTarget): ReturnType<typeof createConnection> {
   if (typeof target === 'string') {
     return createConnection({ path: target });
   }
   return createConnection({ host: target.host, port: target.port });
-}
-
-interface PtyProxyOptions {
-  readonly target: PtyTarget;
-  /** Docker container ID (for SIGWINCH forwarding). */
-  readonly containerId: string;
-  /** Abort signal for graceful shutdown (e.g., SIGTERM). */
-  readonly signal?: AbortSignal;
 }
 
 /**
