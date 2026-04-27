@@ -54,12 +54,12 @@ export interface WebEventMap {
     stateId: string;
     persona: string;
     /**
-     * Session ID of the agent session. The daemon's bridge wiring
+     * Session ID of the agent session. The daemon always emits this;
+     * the WS broadcast path delivers it to frontend clients, which
+     * type it as required (see `event-handler.ts`'s `WebEvent` union).
+     * Its primary consumer today is the daemon's bridge wiring, which
      * registers this mapping so token events produced by the
-     * workflow-owned session reach `observe --all` subscribers. Also
-     * reaches frontend clients via the WS broadcast path — frontend
-     * types currently omit it so it's silently dropped at parse time;
-     * harmless until a future consumer wants per-session attribution.
+     * workflow-owned session reach `observe --all` subscribers.
      */
     sessionId: string;
   };
@@ -73,7 +73,6 @@ export interface WebEventMap {
   'workflow.agent_session_ended': {
     workflowId: string;
     stateId: string;
-    persona: string;
     sessionId: string;
   };
 

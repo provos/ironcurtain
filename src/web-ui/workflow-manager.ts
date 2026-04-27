@@ -381,7 +381,6 @@ export class WorkflowManager {
         this.eventBus.emit('workflow.agent_session_ended', {
           workflowId: event.workflowId,
           stateId: event.state,
-          persona: event.persona,
           sessionId: event.sessionId,
         });
         break;

@@ -331,7 +331,6 @@ export type WorkflowLifecycleEvent =
       readonly kind: 'agent_session_ended';
       readonly workflowId: WorkflowId;
       readonly state: string;
-      readonly persona: string;
       readonly sessionId: SessionId;
     };
 
@@ -918,9 +917,6 @@ export class WorkflowOrchestrator implements WorkflowController {
   // cheaper (one bus listener, one unsubscribe on completion) than
   // subscribing and unsubscribing on every `agent_started` /
   // `agent_session_ended` pair.
-  //
-  // Dynamic import so the workflow module can stay usable in pure-Code-Mode
-  // contexts where the docker bundle isn't pulled in.
 
   /**
    * Subscribes the workflow to the global token-stream bus. Accumulates
@@ -1971,7 +1967,6 @@ export class WorkflowOrchestrator implements WorkflowController {
         kind: 'agent_session_ended',
         workflowId,
         state: stateId,
-        persona: stateConfig.persona,
         sessionId: endedSessionId,
       });
     }

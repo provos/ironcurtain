@@ -18,6 +18,7 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
 import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
+import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the daemon protocol without importing from src/)
@@ -1281,11 +1282,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
               verdict: 'success',
               confidence: '0.87',
             });
-            broadcast('workflow.agent_session_ended', {
-              workflowId: newId,
-              stateId: 'plan',
-              sessionId: planSessionId,
-            });
+            broadcast('workflow.agent_session_ended', makeAgentSessionEndedPayload(newId, 'plan', planSessionId));
             wf.currentState = 'plan_review';
             wf.phase = 'waiting_human';
             const gateId = `${newId}-plan_review`;
@@ -1387,11 +1384,10 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 verdict: 'success',
                 confidence: '0.79',
               });
-              broadcast('workflow.agent_session_ended', {
-                workflowId: resolveWfId,
-                stateId: nextState,
-                sessionId: nextSessionId,
-              });
+              broadcast(
+                'workflow.agent_session_ended',
+                makeAgentSessionEndedPayload(resolveWfId, nextState, nextSessionId),
+              );
               if (nextState === 'implement') {
                 wf.currentState = 'review';
                 broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'review' });

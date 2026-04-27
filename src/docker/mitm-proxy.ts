@@ -158,7 +158,7 @@ export interface MitmProxyOptions {
    * is set (initial value `undefined` AND no subsequent `setTokenSessionId`
    * call), extraction sites skip publishing entirely.
    */
-  readonly sessionId?: string;
+  readonly sessionId?: import('../session/types.js').SessionId;
 }
 
 export interface ProviderKeyMapping {
@@ -499,9 +499,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // — no sentinel value is published. The module-scoped singleton bus is
   // fetched lazily at each push site so `resetTokenStreamBus()` between
   // tests is honored.
-  let tokenSessionId: import('../session/types.js').SessionId | undefined = options.sessionId as
-    | import('../session/types.js').SessionId
-    | undefined;
+  let tokenSessionId: import('../session/types.js').SessionId | undefined = options.sessionId;
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
