@@ -36,8 +36,6 @@ import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-an
 import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-prompt.js';
 import { isMemoryEnabledFor } from '../memory/memory-policy.js';
 import type { PersonaDefinition } from '../persona/types.js';
-import { createPersonaName } from '../persona/types.js';
-import { loadPersona } from '../persona/resolve.js';
 import { createJobId } from '../cron/types.js';
 import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
@@ -300,19 +298,9 @@ async function createDockerSession(
       builtInfra = true;
     }
 
-    // Pre-resolve persona/job definitions so the memory gate sees the
-    // same scope as buildSessionConfig did above. Both loaders are sync
-    // (loadPersona throws if missing; loadJob returns undefined).
-    const personaDef = options.persona ? loadPersona(createPersonaName(options.persona)) : undefined;
-    const jobDef = options.jobId ? loadJob(createJobId(options.jobId)) : undefined;
-    const memoryEnabled = isMemoryEnabledFor({
-      persona: personaDef,
-      job: jobDef,
-      userConfig: config.userConfig,
-    });
     const claudeMdContent = buildDockerClaudeMd({
       personaName: options.persona,
-      memoryEnabled,
+      memoryEnabled: sessionConfig.memoryEnabled,
     });
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
@@ -391,6 +379,8 @@ export interface SessionDirConfig {
   auditLogPath: string;
   /** Resolved system prompt augmentation (may include persona augmentation). */
   systemPromptAugmentation?: string;
+  /** Memory MCP gate decision derived from persona/job/userConfig. */
+  memoryEnabled: boolean;
 }
 
 /**
@@ -454,8 +444,7 @@ export function buildSessionConfig(
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
   const { resumeSessionId, disableAutoApprove } = opts;
   let serverAllowlist: readonly string[] | undefined;
-  // Hoisted so the loaded persona definition is in scope at the
-  // memory-gate site below (outside the `if (opts.persona)` branch).
+  // Captured for the memory gate below, which runs outside the persona branch.
   let personaDef: PersonaDefinition | undefined = undefined;
 
   // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
@@ -606,9 +595,10 @@ export function buildSessionConfig(
   // Inject the memory MCP server for persona and cron job sessions only.
   // Default (ad-hoc) sessions are stateless and don't benefit from memory.
   // Persona was loaded above and captured into `personaDef`; load job
-  // lazily by id (most CLI sessions have no job).
+  // lazily by id (most CLI sessions have no job). Skip the disk read
+  // entirely when the global kill switch would short-circuit anyway.
   const memoryConfig = config.userConfig.memory;
-  const job = opts.jobId ? loadJob(createJobId(opts.jobId)) : undefined;
+  const job = memoryConfig.enabled && opts.jobId ? loadJob(createJobId(opts.jobId)) : undefined;
   const memoryEnabled = isMemoryEnabledFor({
     persona: personaDef,
     job,
@@ -670,6 +660,7 @@ export function buildSessionConfig(
     escalationDir,
     auditLogPath,
     systemPromptAugmentation,
+    memoryEnabled,
   };
 }
 

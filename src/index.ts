@@ -18,9 +18,7 @@ import { CliTransport } from './session/cli-transport.js';
 import { createStandaloneSession } from './session/index.js';
 import { resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
-import { shouldAutoSaveMemory } from './memory/auto-save.js';
-import { loadPersona } from './persona/resolve.js';
-import { createPersonaName } from './persona/types.js';
+import { shouldAutoSaveMemoryByName } from './memory/auto-save.js';
 import type { AgentId } from './docker/agent-adapter.js';
 
 const startSpec: CommandSpec = {
@@ -167,14 +165,10 @@ export async function main(args?: string[]): Promise<void> {
     process.exit(0);
   }
 
-  // Pre-resolve the persona definition (if any) so the auto-save gate
-  // sees the same scope as the session itself. CLI flow has no jobId.
-  const cliPersonaDef = personaName ? loadPersona(createPersonaName(personaName)) : undefined;
-
   // Create the transport first so we can wire its callbacks into the session.
   const transport = new CliTransport({
     initialMessage: task || undefined,
-    autoSaveMemory: shouldAutoSaveMemory(config, { persona: cliPersonaDef }),
+    autoSaveMemory: shouldAutoSaveMemoryByName(config, { personaName }),
     dockerMode: mode.kind === 'docker',
   });
 

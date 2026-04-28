@@ -11,6 +11,10 @@ import type { PersonaDefinition } from '../persona/types.js';
 import type { JobDefinition } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import { isMemoryEnabledFor } from './memory-policy.js';
+import { loadPersona } from '../persona/resolve.js';
+import { createPersonaName } from '../persona/types.js';
+import { loadJob } from '../cron/job-store.js';
+import { createJobId } from '../cron/types.js';
 import * as logger from '../logger.js';
 
 export interface AutoSaveOptions {
@@ -38,6 +42,37 @@ export function shouldAutoSaveMemory(
 ): boolean {
   if (!isMemoryEnabledFor({ ...scope, userConfig: config.userConfig })) return false;
   return config.userConfig.memory.autoSave;
+}
+
+/**
+ * Same as `shouldAutoSaveMemory`, but accepts raw persona/job names and
+ * loads the definitions internally. Fail-closed: if either load throws,
+ * returns false rather than propagating. Useful for callers that hold
+ * the names from session options but never need the loaded defs for
+ * anything else.
+ */
+export function shouldAutoSaveMemoryByName(
+  config: IronCurtainConfig,
+  scope: { personaName?: string; jobId?: string } = {},
+): boolean {
+  if (!config.userConfig.memory.enabled) return false;
+  let persona: PersonaDefinition | undefined;
+  if (scope.personaName) {
+    try {
+      persona = loadPersona(createPersonaName(scope.personaName));
+    } catch {
+      return false;
+    }
+  }
+  let job: JobDefinition | undefined;
+  if (scope.jobId) {
+    try {
+      job = loadJob(createJobId(scope.jobId));
+    } catch {
+      return false;
+    }
+  }
+  return shouldAutoSaveMemory(config, { persona, job });
 }
 
 function truncate(text: string, maxLen: number): string {
