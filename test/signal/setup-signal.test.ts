@@ -25,10 +25,8 @@ vi.mock('@clack/prompts', () => ({
   },
 }));
 
-vi.mock('node:child_process', () => ({
-  exec: vi.fn((_cmd: string, _opts: unknown, cb: (err: Error | null) => void) => {
-    cb(null);
-  }),
+vi.mock('../../src/session/preflight.js', () => ({
+  checkDockerAvailable: vi.fn().mockResolvedValue({ available: true }),
 }));
 
 vi.mock('node:crypto', async () => {
