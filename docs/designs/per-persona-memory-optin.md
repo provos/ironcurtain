@@ -1,7 +1,6 @@
 # Per-Persona / Per-Job Memory Opt-In
 
-Status: design, not yet implemented
-Owner: TBD
+Status: implemented (PR #215)
 Last updated: 2026-04-28
 
 ## Revision history
@@ -37,12 +36,12 @@ call `memory.context` and `memory.store`, while the memory MCP server
 was not actually spawned for that workflow's scope. Tracing the four
 call sites:
 
-| # | Site | Adds scope check `(persona OR jobId)`? |
-|---|------|----------------------------------------|
-| 1 | `src/session/index.ts:467-468` — `buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled)` | No (only entered when `opts.persona` is set, which is implicit) |
-| 2 | `src/session/index.ts:583-608` — bolts `MEMORY_SERVER_NAME` into `sessionConfig.mcpServers`; for non-persona cron jobs also injects the memory system prompt | Yes |
-| 3 | `src/session/index.ts:297-300` — `buildDockerClaudeMd({ memoryEnabled })` writes memory protocol guidance to Docker `~/.claude/CLAUDE.md` | No |
-| 4 | `src/docker/pty-session.ts:255-258` — same `buildDockerClaudeMd` call from PTY session path | No |
+| #   | Site                                                                                                                                                         | Adds scope check `(persona OR jobId)`?                          |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| 1   | `src/session/index.ts:467-468` — `buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled)`                                                     | No (only entered when `opts.persona` is set, which is implicit) |
+| 2   | `src/session/index.ts:583-608` — bolts `MEMORY_SERVER_NAME` into `sessionConfig.mcpServers`; for non-persona cron jobs also injects the memory system prompt | Yes                                                             |
+| 3   | `src/session/index.ts:297-300` — `buildDockerClaudeMd({ memoryEnabled })` writes memory protocol guidance to Docker `~/.claude/CLAUDE.md`                    | No                                                              |
+| 4   | `src/docker/pty-session.ts:255-258` — same `buildDockerClaudeMd` call from PTY session path                                                                  | No                                                              |
 
 Sites 3 and 4 (and structurally site 1 — see §1.3) write memory prompts
 based on the global flag alone. For ad-hoc / global-policy / non-persona
@@ -61,7 +60,7 @@ in `extractRequiredServers`'s output.
 
 In standalone session mode, `buildSessionConfig` (`src/session/index.ts:578-608`)
 applies `filterMcpServersByPolicy` (which uses `extractRequiredServers`) and
-then bolts `MEMORY_SERVER_NAME` into `sessionConfig.mcpServers` *after* the
+then bolts `MEMORY_SERVER_NAME` into `sessionConfig.mcpServers` _after_ the
 filter — so memory survives.
 
 In workflow shared-container mode, the orchestrator computes the union
@@ -172,6 +171,7 @@ intentionally identical.
 ### 3.3 JSON-on-disk shape
 
 Nested object, not flat boolean. Justification:
+
 - Mirrors `userConfig.memory` (already nested) — single mental model.
 - Reserves room for namespace override, per-entity LLM API key, and
   enable/disable per surface (e.g., disable auto-save for one persona
@@ -254,7 +254,7 @@ export function isMemoryEnabledFor(inputs: MemoryGateInputs): boolean {
 
 ### 4.2 Loader-friendly variant for the orchestrator
 
-The orchestrator only has persona *names* in scope at relay-derivation
+The orchestrator only has persona _names_ in scope at relay-derivation
 time, not loaded definitions. To avoid scattering `loadPersona` calls,
 expose a thin loader-aware wrapper. **It must live on the `persona/`
 side of the boundary** — placing it next to `isMemoryEnabledFor` in
@@ -279,10 +279,7 @@ import { createPersonaName, type PersonaDefinition } from './types.js';
  * Lives in `src/persona/` (not `src/memory/`) to avoid a
  * `memory/ → persona/ → memory/` import cycle.
  */
-export function isMemoryEnabledForPersonaName(
-  name: string,
-  userConfig: ResolvedUserConfig,
-): boolean {
+export function isMemoryEnabledForPersonaName(name: string, userConfig: ResolvedUserConfig): boolean {
   if (userConfig.memory.enabled === false) return false;
   let persona: PersonaDefinition;
   try {
@@ -316,12 +313,14 @@ editing.
 ### Site A — `src/session/index.ts:467-468` (persona system prompt)
 
 **Old:**
+
 ```ts
 const memoryEnabled = config.userConfig.memory.enabled;
 const personaAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
 ```
 
 **New:**
+
 ```ts
 const memoryEnabled = isMemoryEnabledFor({
   persona: resolved.persona,
@@ -337,22 +336,24 @@ to today.
 
 ### Site B — `src/session/index.ts:583-608` (bolt-on + cron-job prompt)
 
-`resolved` is currently scoped *inside* the `if (opts.persona)` block
+`resolved` is currently scoped _inside_ the `if (opts.persona)` block
 at `session/index.ts:454` (verified). Site B (lines 583-608) runs
 outside that block, so the persona definition is unreachable from the
 new code unless we hoist it. The hoist must be made explicit:
 
 **Hoist (near the top of the function, before line 454):**
+
 ```ts
 // Hoist so the persona definition is in scope for site B (memory gate).
 let personaDef: PersonaDefinition | undefined = undefined;
 ```
 
 **Modified site at line 454 (assign into the hoisted binding):**
+
 ```ts
 if (opts.persona) {
   const resolved = resolvePersona(opts.persona);
-  personaDef = resolved.persona;          // NEW: capture for site B
+  personaDef = resolved.persona; // NEW: capture for site B
   if (policyDir) {
     logger.warn('Both persona and policyDir specified; using persona.');
   }
@@ -374,6 +375,7 @@ if (opts.persona) {
 ```
 
 **Old (lines 583-608):**
+
 ```ts
 const memoryConfig = config.userConfig.memory;
 if (memoryConfig.enabled && (opts.persona || opts.jobId)) {
@@ -388,11 +390,12 @@ if (memoryConfig.enabled && (opts.persona || opts.jobId)) {
 ```
 
 **New (lines 583-608):**
+
 ```ts
 // Resolve per-scope memory enablement. Persona was loaded above and
 // captured into `personaDef`; load job lazily by id (most CLI sessions
 // have no job).
-const job = opts.jobId ? loadJob(createJobId(opts.jobId)) ?? undefined : undefined;
+const job = opts.jobId ? (loadJob(createJobId(opts.jobId)) ?? undefined) : undefined;
 const memoryEnabled = isMemoryEnabledFor({
   persona: personaDef,
   job,
@@ -411,6 +414,7 @@ if (memoryEnabled) {
 ```
 
 Notes:
+
 - The hoist is the recommended shape — it has zero behavior change for
   the persona branch and lets site B read the loaded definition without
   reloading from disk.
@@ -436,12 +440,8 @@ Recommendation: **option 2.** Add a tiny pre-resolve step:
 
 ```ts
 // In createDockerSession, before buildDockerClaudeMd:
-const personaDef = options.persona
-  ? loadPersona(createPersonaName(options.persona))
-  : undefined;
-const jobDef = options.jobId
-  ? loadJob(createJobId(options.jobId)) ?? undefined
-  : undefined;
+const personaDef = options.persona ? loadPersona(createPersonaName(options.persona)) : undefined;
+const jobDef = options.jobId ? (loadJob(createJobId(options.jobId)) ?? undefined) : undefined;
 const memoryEnabled = isMemoryEnabledFor({
   persona: personaDef,
   job: jobDef,
@@ -454,7 +454,7 @@ const claudeMdContent = buildDockerClaudeMd({
 });
 ```
 
-`buildSessionConfig` is called *after* this, but we cannot easily pass
+`buildSessionConfig` is called _after_ this, but we cannot easily pass
 the resolved boolean through (it would mean threading a new arg
 through `SessionOptions`). Instead, the helper is cheap (no I/O once
 the persona/job def is in hand), so call it again inside
@@ -475,6 +475,7 @@ Apply the same pattern: load `personaDef` / `jobDef`, call
 ### Site E — `src/memory/auto-save.ts:27-29` (auto-save guard)
 
 **Old:**
+
 ```ts
 export function shouldAutoSaveMemory(config: IronCurtainConfig): boolean {
   return config.userConfig.memory.enabled && config.userConfig.memory.autoSave;
@@ -482,6 +483,7 @@ export function shouldAutoSaveMemory(config: IronCurtainConfig): boolean {
 ```
 
 **New:**
+
 ```ts
 export function shouldAutoSaveMemory(
   config: IronCurtainConfig,
@@ -495,13 +497,13 @@ export function shouldAutoSaveMemory(
 Callers must pass scope. The five known callers are (verified at
 design time):
 
-| # | File:line | Caller scope and update strategy |
-|---|-----------|---------------------------------|
-| 1 | `src/index.ts:171` | CLI standalone path. Has `personaName: string \| undefined` in scope. Load with `loadPersona(createPersonaName(personaName))` if defined; pass `{ persona }`. No job in this path. |
-| 2 | `src/daemon/ironcurtain-daemon.ts:499` | Cron-job session start. Has `job: JobDefinition` already loaded above (line ~487 builds `patchedConfig` from `job`). Pass `{ job }` directly. |
-| 3 | `src/signal/signal-bot-daemon.ts:495` | Signal bot session start. Has `persona: string \| undefined` in scope; load with `loadPersona(createPersonaName(persona))` if defined. No job in this path. |
-| 4 | `src/web-ui/dispatch/session-dispatch.ts:134` | Web UI session start. Has `persona: string \| undefined`; same pattern as the Signal callsite. |
-| 5 | `src/web-ui/__tests__/json-rpc-dispatch.test.ts:51` | Test mock (`vi.fn().mockReturnValue(false)`). Update the mock to accept the new second argument; the existing `mockReturnValue(false)` works regardless of args. |
+| #   | File:line                                           | Caller scope and update strategy                                                                                                                                                   |
+| --- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `src/index.ts:171`                                  | CLI standalone path. Has `personaName: string \| undefined` in scope. Load with `loadPersona(createPersonaName(personaName))` if defined; pass `{ persona }`. No job in this path. |
+| 2   | `src/daemon/ironcurtain-daemon.ts:499`              | Cron-job session start. Has `job: JobDefinition` already loaded above (line ~487 builds `patchedConfig` from `job`). Pass `{ job }` directly.                                      |
+| 3   | `src/signal/signal-bot-daemon.ts:495`               | Signal bot session start. Has `persona: string \| undefined` in scope; load with `loadPersona(createPersonaName(persona))` if defined. No job in this path.                        |
+| 4   | `src/web-ui/dispatch/session-dispatch.ts:134`       | Web UI session start. Has `persona: string \| undefined`; same pattern as the Signal callsite.                                                                                     |
+| 5   | `src/web-ui/__tests__/json-rpc-dispatch.test.ts:51` | Test mock (`vi.fn().mockReturnValue(false)`). Update the mock to accept the new second argument; the existing `mockReturnValue(false)` works regardless of args.                   |
 
 For sessions that have outlived their `SessionOptions` and only have a
 `SessionMetadata` snapshot (`src/session/session-metadata.ts`), reload
@@ -513,6 +515,7 @@ options are still in scope.
 ### Site F — `src/workflow/orchestrator.ts:700-715` (relay derivation)
 
 **Old:**
+
 ```ts
 private getRequiredServersForScope(instance, scope) {
   const union = new Set<string>();
@@ -522,6 +525,7 @@ private getRequiredServersForScope(instance, scope) {
 ```
 
 **New:**
+
 ```ts
 // Import the loader-aware wrapper from persona/, NOT memory/, to avoid
 // an import cycle (see §4.2).
@@ -596,12 +600,12 @@ already stores `deps`); no separate field on the class is required.
 
 **Production callers that construct `WorkflowOrchestrator` (4 sites; verified by grep):**
 
-| # | File:line | Notes |
-|---|-----------|-------|
-| 1 | `src/workflow/workflow-command.ts:252` | CLI `workflow start`. Currently builds a `WorkflowOrchestratorDeps` literal at lines 243-250 with no config access. Add `import { loadConfig } from '../config/index.js'` (or `loadUserConfig` from `../config/user-config.js`) and call it once before building deps; pass `userConfig: config.userConfig` (or the resolved value directly). |
-| 2 | `src/workflow/workflow-command.ts:355` | CLI `workflow resume`. Same pattern as above (deps literal at 346-353). |
-| 3 | `src/web-ui/workflow-manager.ts:319` | Web UI workflow manager. Deps literal at lines ~301-317; same pattern. The web-ui daemon already loads config elsewhere; thread it into `WorkflowManager` via constructor or load it directly here. |
-| 4 | `examples/workflow-real-spike.ts:165` | Example / smoke-test script. Deps literal at lines 156-163; same pattern. Low-risk to update. |
+| #   | File:line                              | Notes                                                                                                                                                                                                                                                                                                                                         |
+| --- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `src/workflow/workflow-command.ts:252` | CLI `workflow start`. Currently builds a `WorkflowOrchestratorDeps` literal at lines 243-250 with no config access. Add `import { loadConfig } from '../config/index.js'` (or `loadUserConfig` from `../config/user-config.js`) and call it once before building deps; pass `userConfig: config.userConfig` (or the resolved value directly). |
+| 2   | `src/workflow/workflow-command.ts:355` | CLI `workflow resume`. Same pattern as above (deps literal at 346-353).                                                                                                                                                                                                                                                                       |
+| 3   | `src/web-ui/workflow-manager.ts:319`   | Web UI workflow manager. Deps literal at lines ~301-317; same pattern. The web-ui daemon already loads config elsewhere; thread it into `WorkflowManager` via constructor or load it directly here.                                                                                                                                           |
+| 4   | `examples/workflow-real-spike.ts:165`  | Example / smoke-test script. Deps literal at lines 156-163; same pattern. Low-risk to update.                                                                                                                                                                                                                                                 |
 
 **Test fixtures (1 fixture, 14 test files):**
 
@@ -634,7 +638,7 @@ export function createDeps(
     dismissGate: vi.fn(),
     baseDir: tmpDir,
     checkpointStore: createCheckpointStore(tmpDir),
-    userConfig: makeTestUserConfig(),     // NEW: default to memory-on
+    userConfig: makeTestUserConfig(), // NEW: default to memory-on
     startWorkflowControlServer: async () => {},
     loadPolicyRpc: async () => {},
     ...overrides,
@@ -642,9 +646,8 @@ export function createDeps(
 }
 ```
 
-Two test files construct `WorkflowOrchestrator` *without* going through
-`createDeps` (verified by grep): `model-selection.test.ts` (lines 208,
-594) and `orchestrator-shared-container.test.ts` (line 173). These
+Two test files construct `WorkflowOrchestrator` _without_ going through
+`createDeps` (verified by grep): `model-selection.test.ts` (lines 208, 594) and `orchestrator-shared-container.test.ts` (line 173). These
 build deps inline and will need a one-line edit each. Everything else
 flows through `createDeps`.
 
@@ -664,9 +667,10 @@ escape handling.
 
 File: `src/persona/persona-command.ts`, function `runCreate` starts
 near line 158. Existing prompt order (after `parseArgs`):
+
 1. Description (line ~187)
 2. Server allowlist (line ~210)
-3. *(persona dir created, persona.json written, line ~242)*
+3. _(persona dir created, persona.json written, line ~242)_
 4. Constitution authoring (line ~250)
 
 **Insert new step between (2) and (3)**, before persona.json is
@@ -686,6 +690,7 @@ if (p.isCancel(enableMemory)) {
 ```
 
 Then in the existing `personaDef` literal:
+
 ```ts
 const personaDef: PersonaDefinition = {
   name,
@@ -697,6 +702,7 @@ const personaDef: PersonaDefinition = {
 ```
 
 File-write behavior:
+
 - User accepts default (`enableMemory === true`) → no `memory` field
   written. Future readers default to "on", surviving config-format
   upgrades unchanged.
@@ -726,7 +732,7 @@ const editAction = await p.select({
     { value: 'customize' as const, label: 'Customize constitution interactively (LLM-assisted)' },
     { value: 'editor' as const, label: 'Edit constitution in $EDITOR' },
     { value: 'generate' as const, label: 'Generate new constitution from description' },
-    { value: 'memory' as const, label: 'Toggle persistent memory' },  // NEW
+    { value: 'memory' as const, label: 'Toggle persistent memory' }, // NEW
   ],
 });
 ```
@@ -781,6 +787,7 @@ the summary note (lines 134-149) and the `select` menu (lines 152-172)
 need an entry:
 
 Summary note line additions:
+
 ```ts
 const memoryStr = job.memory?.enabled === false ? 'off' : 'on (default)';
 note(
@@ -788,7 +795,7 @@ note(
     `ID:        ${job.id}`,
     // ... existing lines ...
     `Notify:    ${notifyStr}`,
-    `Memory:    ${memoryStr}`,           // NEW
+    `Memory:    ${memoryStr}`, // NEW
     ``,
     // ...
   ].join('\n'),
@@ -797,6 +804,7 @@ note(
 ```
 
 Select-menu line:
+
 ```ts
 { value: 'memory', label: `Edit memory          ${memoryStr}` },  // NEW, near 'notify'
 ```
@@ -827,8 +835,7 @@ job object with the `memory` key either present or absent, never
 
 ### 6.4 `ironcurtain config` (kill-switch surface)
 
-File: `src/config/config-command.ts`, function `handleMemory` at line
-350. Today the Memory submenu only exposes `autoSave`. **Add the
+File: `src/config/config-command.ts`, function `handleMemory` at line 350. Today the Memory submenu only exposes `autoSave`. **Add the
 global `enabled` field above it** so the kill switch is discoverable:
 
 ```ts
@@ -851,6 +858,7 @@ const field = await p.select({
 ```
 
 Add a case:
+
 ```ts
 if (field === 'enabled') {
   const currentEnabled = pending.memory?.enabled ?? resolved.memory.enabled;
@@ -866,6 +874,7 @@ if (field === 'enabled') {
 ```
 
 Update `memoryHint` (line 865) to surface both fields:
+
 ```ts
 function memoryHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const enabled = pending.memory?.enabled ?? resolved.memory.enabled;
@@ -887,6 +896,7 @@ persona/job creation. Mention the kill switch only in the
 "Customization" note (line 231) so users discover it via `ironcurtain config`.
 
 Suggested note tweak:
+
 ```
 '  ironcurtain config             — change models, resource limits, memory, etc.\n'
 ```
@@ -911,7 +921,7 @@ fields.
 
 The only behavior change for default-shape configs is the **closing of
 the workflow shared-container relay-spawning gap** (§1.2). Previously
-in shared-container mode, `memory.enabled: true` did *not* actually
+in shared-container mode, `memory.enabled: true` did _not_ actually
 spawn the relay; now it will. Calling this out in release notes is
 recommended because workflow runs on shared containers will start
 seeing memory tools where they didn't before.
@@ -927,6 +937,7 @@ user-config) is already lenient about unknown / missing fields.
 becomes `new Set(['filesystem'])`.
 
 Rationale:
+
 - Memory is now an explicit per-persona opt-in, not a structural
   always-on. Keeping it in this set bypasses the user's stated choice
   and re-introduces the leak symptoms.
@@ -938,7 +949,7 @@ Rationale:
   same `sessionConfig.mcpServers` map after the allowlist filter. The
   control flow becomes: allowlist filters → policy filter → bolt-on.
 - `verifyMemoryServerConfig` (referenced by tests at `memory-integration.test.ts:111`)
-  asserts only the *shape* of the memory server config when present,
+  asserts only the _shape_ of the memory server config when present,
   so it is unaffected.
 
 The test `applyServerAllowlist always includes memory` at
@@ -1036,13 +1047,13 @@ new prompt step using `@clack/prompts` mocks. Assert that:
 
 ## 10. Doc updates
 
-| File | What to update |
-|------|----------------|
-| `CLAUDE.md` (top level) | Add a brief note in "Configuration" or "Onboarding a New MCP Server" section pointing at the memory opt-in: "Memory is enabled per-persona / per-job; toggle during creation or via `ironcurtain persona edit` / `daemon edit-job`. Global kill switch is `ironcurtain config → Memory → Enabled`." |
-| `src/trusted-process/CLAUDE.md` | No change required — trusted process does not gate memory. |
-| `docs/designs/memory-mcp-server.md` (if exists) | Add a "Per-persona / per-job opt-in (2026)" section linking to this doc. |
-| `docs/designs/per-persona-memory-optin.md` | This document. |
-| Release notes | Call out the workflow-shared-container behavior change (§7): default-shape configs in shared-container mode will start spawning the memory relay where they previously did not. |
+| File                                            | What to update                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE.md` (top level)                         | Add a brief note in "Configuration" or "Onboarding a New MCP Server" section pointing at the memory opt-in: "Memory is enabled per-persona / per-job; toggle during creation or via `ironcurtain persona edit` / `daemon edit-job`. Global kill switch is `ironcurtain config → Memory → Enabled`." |
+| `src/trusted-process/CLAUDE.md`                 | No change required — trusted process does not gate memory.                                                                                                                                                                                                                                          |
+| `docs/designs/memory-mcp-server.md` (if exists) | Add a "Per-persona / per-job opt-in (2026)" section linking to this doc.                                                                                                                                                                                                                            |
+| `docs/designs/per-persona-memory-optin.md`      | This document.                                                                                                                                                                                                                                                                                      |
+| Release notes                                   | Call out the workflow-shared-container behavior change (§7): default-shape configs in shared-container mode will start spawning the memory relay where they previously did not.                                                                                                                     |
 
 `grep -rn "memory.enabled" docs/` to find any other prose references
 that need updating.
@@ -1051,7 +1062,7 @@ that need updating.
 
 1. **Should `auto-save` be inferred from the per-persona memory flag?**
    Today `userConfig.memory.autoSave` is global. A persona that opts
-   *out* of memory cannot meaningfully auto-save. The helper change in
+   _out_ of memory cannot meaningfully auto-save. The helper change in
    §5 (Site E) handles this correctly (no save when memory is off),
    but the user might want `personaDef.memory.autoSave?: boolean` for
    per-persona auto-save toggling. **Defer to follow-up** unless the

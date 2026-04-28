@@ -15,7 +15,7 @@ import type { Session, SessionInfo, ConversationTurn } from '../src/session/type
 import type { PersonaDefinition, PersonaName } from '../src/persona/types.js';
 import { BudgetExhaustedError } from '../src/session/errors.js';
 
-/** Minimal persona scope for the auto-save gate (memory always enabled when this is passed). */
+/** Minimal persona scope for the auto-save gate (persona present => eligible for memory when not opted out). */
 function makePersonaScope(): { persona: PersonaDefinition } {
   return {
     persona: {

@@ -45,6 +45,10 @@ export interface AutoSaveScope {
  * memory itself is off in that scope.
  */
 export function shouldAutoSaveMemory(config: IronCurtainConfig, scope: AutoSaveScope = {}): boolean {
+  // Short-circuit on the cheap config flags before any disk I/O.
+  if (!config.userConfig.memory.enabled) return false;
+  if (!config.userConfig.memory.autoSave) return false;
+
   let persona: PersonaDefinition | undefined;
   if (typeof scope.persona === 'string') {
     try {
@@ -67,8 +71,7 @@ export function shouldAutoSaveMemory(config: IronCurtainConfig, scope: AutoSaveS
     job = scope.job;
   }
 
-  if (!isMemoryEnabledFor({ persona, job, userConfig: config.userConfig })) return false;
-  return config.userConfig.memory.autoSave;
+  return isMemoryEnabledFor({ persona, job, userConfig: config.userConfig });
 }
 
 function truncate(text: string, maxLen: number): string {

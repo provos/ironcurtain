@@ -455,8 +455,12 @@ export function buildSessionConfig(
     );
   }
 
-  // Resolve persona early -- derives policyDir, workspace, server filter,
-  // and system prompt augmentation from the persona definition.
+  // Resolve persona early -- derives policyDir, workspace, and server
+  // filter from the persona definition. The persona system prompt
+  // augmentation is deferred until after the memory gate is computed
+  // with the full (persona + job) scope, so the augmentation and the
+  // server bolt-on cannot disagree when both opts.persona and opts.jobId
+  // are set.
   if (opts.persona) {
     const resolved = resolvePersona(opts.persona);
     personaDef = resolved.persona;
@@ -471,17 +475,27 @@ export function buildSessionConfig(
       workspacePath = resolved.workspacePath;
     }
 
-    // Build persona system prompt augmentation (includes MCP memory prompt when enabled).
-    const memoryEnabled = isMemoryEnabledFor({
-      persona: resolved.persona,
-      userConfig: config.userConfig,
-    });
-    const personaAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
+    logger.info(`Persona "${opts.persona}" resolved: policyDir=${policyDir}`);
+  }
+
+  // Single gate computation with the full scope. Reused for the persona
+  // augmentation, the cron-job memory prompt, and the server bolt-on so
+  // the prompt cannot mention memory while the relay is gated off (or
+  // vice versa). Skip the loadJob disk read when the global kill switch
+  // would short-circuit anyway.
+  const memoryConfig = config.userConfig.memory;
+  const jobDef = memoryConfig.enabled && opts.jobId ? loadJob(createJobId(opts.jobId)) : undefined;
+  const memoryEnabled = isMemoryEnabledFor({
+    persona: personaDef,
+    job: jobDef,
+    userConfig: config.userConfig,
+  });
+
+  if (personaDef) {
+    const personaAugmentation = buildPersonaSystemPromptAugmentation(personaDef, memoryEnabled);
     systemPromptAugmentation = systemPromptAugmentation
       ? `${personaAugmentation}\n\n${systemPromptAugmentation}`
       : personaAugmentation;
-
-    logger.info(`Persona "${opts.persona}" resolved: policyDir=${policyDir}`);
   }
 
   if (policyDir) {
@@ -593,16 +607,8 @@ export function buildSessionConfig(
 
   // Inject the memory MCP server for persona and cron job sessions only.
   // Default (ad-hoc) sessions are stateless and don't benefit from memory.
-  // Persona was loaded above and captured into `personaDef`; load job
-  // lazily by id (most CLI sessions have no job). Skip the disk read
-  // entirely when the global kill switch would short-circuit anyway.
-  const memoryConfig = config.userConfig.memory;
-  const job = memoryConfig.enabled && opts.jobId ? loadJob(createJobId(opts.jobId)) : undefined;
-  const memoryEnabled = isMemoryEnabledFor({
-    persona: personaDef,
-    job,
-    userConfig: config.userConfig,
-  });
+  // The gate decision was made once above; reuse it here so the prompt
+  // and the relay cannot diverge.
   if (memoryEnabled) {
     const dbPath = resolveMemoryDbPath({
       persona: opts.persona,
