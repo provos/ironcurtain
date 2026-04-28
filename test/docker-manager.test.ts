@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createDockerManager, buildCreateArgs, type ExecFileFn } from '../src/docker/docker-manager.js';
 import type { DockerContainerConfig } from '../src/docker/types.js';
 
@@ -203,24 +203,45 @@ describe('DockerManager', () => {
   describe('preflight', () => {
     it('succeeds when Docker is available and image exists', async () => {
       mock.setResponse('');
-      const manager = createDockerManager(mock.mockExec);
+      const probe = vi.fn().mockResolvedValue({ available: true });
+      const manager = createDockerManager(mock.mockExec, probe);
 
       await expect(manager.preflight('test-image:latest')).resolves.toBeUndefined();
-      expect(mock.calls).toHaveLength(2);
-      expect(mock.calls[0].args).toEqual(['info']);
-      expect(mock.calls[1].args).toEqual(['image', 'inspect', 'test-image:latest']);
+      // Daemon reachability flows through the canonical probe; only the image
+      // inspect call lands on `mock.mockExec`.
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(mock.calls).toHaveLength(1);
+      expect(mock.calls[0].args).toEqual(['image', 'inspect', 'test-image:latest']);
     });
 
     it('throws when Docker daemon is not available', async () => {
-      mock.setError(1, '', 'Cannot connect to the Docker daemon');
-      const manager = createDockerManager(mock.mockExec);
+      const probe = vi.fn().mockResolvedValue({
+        available: false,
+        reason: 'Docker not available',
+        detailedMessage: 'Cannot connect to the Docker daemon.\nIs the Docker service running?',
+      });
+      const manager = createDockerManager(mock.mockExec, probe);
 
       await expect(manager.preflight('test-image:latest')).rejects.toThrow('Docker is not available');
+      // Image inspect is skipped when the daemon is unreachable.
+      expect(mock.calls).toHaveLength(0);
+    });
+
+    it('surfaces the detailed message when Docker is unavailable', async () => {
+      const probe = vi.fn().mockResolvedValue({
+        available: false,
+        reason: 'Docker not available',
+        detailedMessage: 'Permission denied while connecting to the Docker daemon socket.',
+      });
+      const manager = createDockerManager(mock.mockExec, probe);
+
+      await expect(manager.preflight('test-image:latest')).rejects.toThrow(/Permission denied/);
     });
 
     it('throws when image is not found', async () => {
-      mock.setSequence([{ stdout: '' }, { error: true, code: 1, stderr: 'No such image' }]);
-      const manager = createDockerManager(mock.mockExec);
+      mock.setError(1, '', 'No such image');
+      const probe = vi.fn().mockResolvedValue({ available: true });
+      const manager = createDockerManager(mock.mockExec, probe);
 
       await expect(manager.preflight('missing-image:latest')).rejects.toThrow('Docker image not found');
     });

@@ -12,10 +12,8 @@
  */
 
 import { randomInt } from 'node:crypto';
-import { exec as execCb } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { promisify } from 'node:util';
 import * as p from '@clack/prompts';
 import { createDockerManager } from '../docker/docker-manager.js';
 import { saveUserConfig, loadUserConfig } from '../config/user-config.js';
@@ -25,9 +23,7 @@ import {
   type SignalContainerConfig,
 } from './signal-container.js';
 import { SIGNAL_DEFAULTS, resolveSignalConfig, getSignalDataDir } from './signal-config.js';
-import type { DockerManager } from '../docker/types.js';
-
-const execAsync = promisify(execCb);
+import { checkDockerAvailable } from '../session/preflight.js';
 
 // ---- Cancel handling ------------------------------------------------
 
@@ -54,28 +50,25 @@ export function validatePhoneNumber(value: string | undefined): string | undefin
 
 // ---- Docker validation ----------------------------------------------
 
-async function validateDocker(docker: DockerManager): Promise<void> {
+// We deliberately skip docker.preflight() here: that also requires the
+// signal-cli image to exist, but in this wizard we pull/build it ourselves
+// afterwards. We only need to confirm the daemon is reachable.
+async function validateDocker(): Promise<void> {
   const spinner = p.spinner();
   spinner.start('Checking Docker...');
 
-  try {
-    await docker.preflight(SIGNAL_DEFAULTS.image);
+  const status = await checkDockerAvailable();
+  if (status.available) {
     spinner.stop('Docker is available');
-  } catch {
-    // preflight checks both docker info and image -- we only need docker info here
-    try {
-      // Check if Docker daemon is reachable at all
-      await execAsync('docker info', { timeout: 10_000 });
-      spinner.stop('Docker is available');
-    } catch {
-      spinner.stop('Docker is not available');
-      p.log.error(
-        'Docker is not available. Start Docker and try again.\n\n' +
-          'Install Docker: https://docs.docker.com/get-docker/',
-      );
-      process.exit(1);
-    }
+    return;
   }
+
+  spinner.stop('Docker is not available');
+  p.log.error(
+    `Docker is not available. Start Docker and try again.\n\n${status.detailedMessage}\n\n` +
+      'Install Docker: https://docs.docker.com/get-docker/',
+  );
+  process.exit(1);
 }
 
 // ---- Container setup ------------------------------------------------
@@ -464,8 +457,8 @@ export async function runSignalSetup(options?: { reTrust?: boolean }): Promise<v
   }
 
   // Step 1: Docker check
+  await validateDocker();
   const docker = createDockerManager();
-  await validateDocker(docker);
 
   // Step 2: Pull image and start container
   const containerConfig = resolveContainerConfig();

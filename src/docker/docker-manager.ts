@@ -10,6 +10,8 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { DockerContainerConfig, DockerExecResult, DockerManager } from './types.js';
 import * as logger from '../logger.js';
+import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
+import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 
 /** Async exec function signature matching promisified execFile. */
 export type ExecFileFn = (
@@ -116,15 +118,17 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
   return args;
 }
 
-export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
+export function createDockerManager(
+  execFileFn?: ExecFileFn,
+  dockerAvailabilityProbe: () => Promise<DockerAvailability> = checkDockerAvailable,
+): DockerManager {
   const exec = execFileFn ?? defaultExecFile;
 
   return {
     async preflight(image: string): Promise<void> {
-      try {
-        await exec('docker', ['info'], { timeout: 10_000 });
-      } catch {
-        throw new Error('Docker is not available. Ensure Docker daemon is running.');
+      const status = await dockerAvailabilityProbe();
+      if (!status.available) {
+        throw new Error(`Docker is not available. ${status.detailedMessage}`);
       }
 
       try {
@@ -154,14 +158,14 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
         return { exitCode: 0, stdout, stderr };
       } catch (err: unknown) {
         if (isExecError(err)) {
-          if (isTimeoutError(err)) {
+          if (isExecTimeout(err)) {
             logger.warn(
               `[docker-manager] exec timed out after ${timeout}ms (killed=${String(err.killed)}, ` +
                 `signal=${err.signal ?? 'none'}): docker exec ${nameOrId} ${command[0] ?? ''}`,
             );
           }
           return {
-            exitCode: err.code ?? 1,
+            exitCode: typeof err.code === 'number' ? err.code : 1,
             stdout: err.stdout,
             stderr: err.stderr,
           };
@@ -375,20 +379,4 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       return true;
     },
   };
-}
-
-interface ExecError {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  killed?: boolean;
-  signal?: string;
-}
-
-function isExecError(err: unknown): err is ExecError {
-  return typeof err === 'object' && err !== null && 'stdout' in err;
-}
-
-function isTimeoutError(err: ExecError): boolean {
-  return err.killed === true && err.signal === 'SIGTERM';
 }
