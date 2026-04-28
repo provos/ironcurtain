@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/provos-ironcurtain-badge.png)](https://mseep.ai/app/provos-ironcurtain)
+
 # IronCurtain
 
 [![CI](https://github.com/provos/ironcurtain/actions/workflows/ci.yml/badge.svg)](https://github.com/provos/ironcurtain/actions/workflows/ci.yml)
