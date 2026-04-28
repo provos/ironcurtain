@@ -711,7 +711,6 @@ export class WorkflowOrchestrator implements WorkflowController {
   private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
     const union = new Set<string>();
     const seenPersonas = new Set<string>();
-    let anyPersonaWantsMemory = false;
     for (const stateConfig of Object.values(instance.definition.states)) {
       if (stateConfig.type !== 'agent') continue;
       const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
@@ -722,13 +721,12 @@ export class WorkflowOrchestrator implements WorkflowController {
       for (const server of extractRequiredServers(compiledPolicy)) {
         union.add(server);
       }
-      // Memory is bolt-on (not in compiled policy). Mint the relay if
-      // ANY persona in this scope opts in.
+      // Memory is bolt-on (not in compiled policy). `Set.add` is
+      // idempotent, so adding here per-persona preserves any-wants-it.
       if (isMemoryEnabledForPersonaName(stateConfig.persona, this.deps.userConfig)) {
-        anyPersonaWantsMemory = true;
+        union.add(MEMORY_SERVER_NAME);
       }
     }
-    if (anyPersonaWantsMemory) union.add(MEMORY_SERVER_NAME);
     return union;
   }
 

@@ -444,7 +444,6 @@ export function buildSessionConfig(
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
   const { resumeSessionId, disableAutoApprove } = opts;
   let serverAllowlist: readonly string[] | undefined;
-  // Captured for the memory gate below, which runs outside the persona branch.
   let personaDef: PersonaDefinition | undefined = undefined;
 
   // Borrow mode is gated on `workflowInfrastructure`. The per-state dir

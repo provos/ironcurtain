@@ -22,7 +22,7 @@ import { resolveSignalConfig, type ResolvedSignalConfig } from './signal-config.
 import type { SessionMode } from '../session/types.js';
 import type { SignalContainerManager } from './signal-container.js';
 import { SessionManager, type ManagedSession } from '../session/session-manager.js';
-import { shouldAutoSaveMemoryByName } from '../memory/auto-save.js';
+import { shouldAutoSaveMemory } from '../memory/auto-save.js';
 import { SignalSessionTransport } from './signal-transport.js';
 import { markdownToSignal } from './markdown-to-signal.js';
 import {
@@ -492,7 +492,7 @@ export class SignalBotDaemon {
 
     const transport = new SignalSessionTransport({
       daemon: this,
-      autoSaveMemory: shouldAutoSaveMemoryByName(config, { personaName: persona }),
+      autoSaveMemory: shouldAutoSaveMemory(config, { persona }),
       dockerMode: this.mode.kind === 'docker',
     });
 

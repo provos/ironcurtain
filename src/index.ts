@@ -18,7 +18,7 @@ import { CliTransport } from './session/cli-transport.js';
 import { createStandaloneSession } from './session/index.js';
 import { resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
-import { shouldAutoSaveMemoryByName } from './memory/auto-save.js';
+import { shouldAutoSaveMemory } from './memory/auto-save.js';
 import type { AgentId } from './docker/agent-adapter.js';
 
 const startSpec: CommandSpec = {
@@ -168,7 +168,7 @@ export async function main(args?: string[]): Promise<void> {
   // Create the transport first so we can wire its callbacks into the session.
   const transport = new CliTransport({
     initialMessage: task || undefined,
-    autoSaveMemory: shouldAutoSaveMemoryByName(config, { personaName }),
+    autoSaveMemory: shouldAutoSaveMemory(config, { persona: personaName }),
     dockerMode: mode.kind === 'docker',
   });
 

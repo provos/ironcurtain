@@ -26,53 +26,49 @@ export interface AutoSaveOptions {
 const MAX_SUMMARY_CHARS = 2000;
 const MAX_TURNS_TO_SUMMARIZE = 50;
 
+export interface AutoSaveScope {
+  /** Loaded definition or raw persona name (loaded fail-closed). */
+  readonly persona?: PersonaDefinition | string;
+  /** Loaded definition or raw job id (loaded fail-closed). */
+  readonly job?: JobDefinition | string;
+}
+
 /**
  * Checks whether auto-save is enabled for this session's scope. Combines
  * the per-persona / per-job memory gate (`isMemoryEnabledFor`) with the
  * user-config `autoSave` flag. Returns false unless both signals agree.
  *
- * Callers must thread the loaded persona / job definition (whichever
- * applies) so the gate can short-circuit on per-scope opt-outs. Default
- * sessions (no persona, no job) always return false because memory
- * itself is off in that scope.
+ * Accepts either loaded `PersonaDefinition` / `JobDefinition` objects or
+ * raw names; raw names are resolved fail-closed so a missing or
+ * malformed file produces a definitive "off" rather than an exception.
+ * Default sessions (no persona, no job) always return false because
+ * memory itself is off in that scope.
  */
-export function shouldAutoSaveMemory(
-  config: IronCurtainConfig,
-  scope: { persona?: PersonaDefinition; job?: JobDefinition } = {},
-): boolean {
-  if (!isMemoryEnabledFor({ ...scope, userConfig: config.userConfig })) return false;
-  return config.userConfig.memory.autoSave;
-}
-
-/**
- * Same as `shouldAutoSaveMemory`, but accepts raw persona/job names and
- * loads the definitions internally. Fail-closed: if either load throws,
- * returns false rather than propagating. Useful for callers that hold
- * the names from session options but never need the loaded defs for
- * anything else.
- */
-export function shouldAutoSaveMemoryByName(
-  config: IronCurtainConfig,
-  scope: { personaName?: string; jobId?: string } = {},
-): boolean {
-  if (!config.userConfig.memory.enabled) return false;
+export function shouldAutoSaveMemory(config: IronCurtainConfig, scope: AutoSaveScope = {}): boolean {
   let persona: PersonaDefinition | undefined;
-  if (scope.personaName) {
+  if (typeof scope.persona === 'string') {
     try {
-      persona = loadPersona(createPersonaName(scope.personaName));
+      persona = loadPersona(createPersonaName(scope.persona));
     } catch {
       return false;
     }
+  } else {
+    persona = scope.persona;
   }
+
   let job: JobDefinition | undefined;
-  if (scope.jobId) {
+  if (typeof scope.job === 'string') {
     try {
-      job = loadJob(createJobId(scope.jobId));
+      job = loadJob(createJobId(scope.job));
     } catch {
       return false;
     }
+  } else {
+    job = scope.job;
   }
-  return shouldAutoSaveMemory(config, { persona, job });
+
+  if (!isMemoryEnabledFor({ persona, job, userConfig: config.userConfig })) return false;
+  return config.userConfig.memory.autoSave;
 }
 
 function truncate(text: string, maxLen: number): string {
