@@ -227,6 +227,16 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     }
   }
 
+  // 3. Memory opt-in (between Server allowlist and persona.json write)
+  const enableMemory = await p.confirm({
+    message: 'Enable persistent memory for this persona?',
+    initialValue: true,
+  });
+  if (p.isCancel(enableMemory)) {
+    p.cancel('Cancelled.');
+    process.exit(0);
+  }
+
   // Create the persona directory structure
   mkdirSync(personaDir, { recursive: true });
   mkdirSync(getPersonaGeneratedDir(name), { recursive: true });
@@ -239,10 +249,11 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     description,
     createdAt: new Date().toISOString(),
     ...(servers ? { servers } : {}),
+    ...(!enableMemory ? { memory: { enabled: false } } : {}),
   };
   writeFileSync(getPersonaDefinitionPath(name), JSON.stringify(personaDef, null, 2) + '\n', 'utf-8');
 
-  // 3. Constitution authoring
+  // 4. Constitution authoring
   let constitution: string | undefined;
   const constitutionPath = getPersonaConstitutionPath(name);
   const noGenerate = createValues['no-generate'] as boolean | undefined;
@@ -263,7 +274,7 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     }
   }
 
-  // 4. Fallback: open $EDITOR
+  // 5. Fallback: open $EDITOR
   if (!constitution) {
     p.log.step('Opening editor for constitution...');
     const instructions =
@@ -280,7 +291,7 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     return;
   }
 
-  // 5. Write constitution and compile
+  // 6. Write constitution and compile
   writeFileSync(constitutionPath, constitution + '\n', 'utf-8');
 
   const compiled = await compileWithSpinner(name, p);
@@ -365,16 +376,42 @@ async function runEdit(nameStr: string): Promise<void> {
   p.intro(`Edit persona "${name}"`);
 
   const editAction = await p.select({
-    message: 'How would you like to edit the constitution?',
+    message: 'How would you like to edit the persona?',
     options: [
-      { value: 'customize' as const, label: 'Customize interactively (LLM-assisted)' },
-      { value: 'editor' as const, label: 'Edit in $EDITOR' },
+      { value: 'customize' as const, label: 'Customize constitution interactively (LLM-assisted)' },
+      { value: 'editor' as const, label: 'Edit constitution in $EDITOR' },
       { value: 'generate' as const, label: 'Generate new constitution from description' },
+      { value: 'memory' as const, label: 'Toggle persistent memory' },
     ],
   });
 
   if (p.isCancel(editAction)) {
     p.cancel('Cancelled.');
+    return;
+  }
+
+  if (editAction === 'memory') {
+    const currentEnabled = persona.memory?.enabled ?? true;
+    const newEnabled = await p.confirm({
+      message: 'Enable persistent memory for this persona?',
+      initialValue: currentEnabled,
+    });
+    if (p.isCancel(newEnabled)) {
+      p.cancel('Cancelled.');
+      return;
+    }
+    if (newEnabled === currentEnabled) {
+      p.outro('No change.');
+      return;
+    }
+    // Destructure-omit `memory` so we can either re-attach it (off case)
+    // or drop it entirely (on case). Required when exactOptionalPropertyTypes
+    // is on; harmless when off.
+    const { memory: _omit, ...rest } = persona;
+    void _omit;
+    const updated: PersonaDefinition = !newEnabled ? { ...rest, memory: { enabled: false } } : rest;
+    writeFileSync(getPersonaDefinitionPath(name), JSON.stringify(updated, null, 2) + '\n', 'utf-8');
+    p.outro(`Memory ${newEnabled ? 'enabled' : 'disabled'} for persona "${name}".`);
     return;
   }
 

@@ -7,7 +7,14 @@
 
 import type { Session, ConversationTurn } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
+import type { PersonaDefinition } from '../persona/types.js';
+import type { JobDefinition } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
+import { isMemoryEnabledFor } from './memory-policy.js';
+import { loadPersona } from '../persona/resolve.js';
+import { createPersonaName } from '../persona/types.js';
+import { loadJob } from '../cron/job-store.js';
+import { createJobId } from '../cron/types.js';
 import * as logger from '../logger.js';
 
 export interface AutoSaveOptions {
@@ -19,13 +26,52 @@ export interface AutoSaveOptions {
 const MAX_SUMMARY_CHARS = 2000;
 const MAX_TURNS_TO_SUMMARIZE = 50;
 
+export interface AutoSaveScope {
+  /** Loaded definition or raw persona name (loaded fail-closed). */
+  readonly persona?: PersonaDefinition | string;
+  /** Loaded definition or raw job id (loaded fail-closed). */
+  readonly job?: JobDefinition | string;
+}
+
 /**
- * Checks whether auto-save is enabled in user config. Callers must also
- * verify the session has memory context (persona or jobId) since the
- * memory server is injected inside createSession(), not in the base config.
+ * Checks whether auto-save is enabled for this session's scope. Combines
+ * the per-persona / per-job memory gate (`isMemoryEnabledFor`) with the
+ * user-config `autoSave` flag. Returns false unless both signals agree.
+ *
+ * Accepts either loaded `PersonaDefinition` / `JobDefinition` objects or
+ * raw names; raw names are resolved fail-closed so a missing or
+ * malformed file produces a definitive "off" rather than an exception.
+ * Default sessions (no persona, no job) always return false because
+ * memory itself is off in that scope.
  */
-export function shouldAutoSaveMemory(config: IronCurtainConfig): boolean {
-  return config.userConfig.memory.enabled && config.userConfig.memory.autoSave;
+export function shouldAutoSaveMemory(config: IronCurtainConfig, scope: AutoSaveScope = {}): boolean {
+  // Short-circuit on the cheap config flags before any disk I/O.
+  if (!config.userConfig.memory.enabled) return false;
+  if (!config.userConfig.memory.autoSave) return false;
+
+  let persona: PersonaDefinition | undefined;
+  if (typeof scope.persona === 'string') {
+    try {
+      persona = loadPersona(createPersonaName(scope.persona));
+    } catch {
+      return false;
+    }
+  } else {
+    persona = scope.persona;
+  }
+
+  let job: JobDefinition | undefined;
+  if (typeof scope.job === 'string') {
+    try {
+      job = loadJob(createJobId(scope.job));
+    } catch {
+      return false;
+    }
+  } else {
+    job = scope.job;
+  }
+
+  return isMemoryEnabledFor({ persona, job, userConfig: config.userConfig });
 }
 
 function truncate(text: string, maxLen: number): string {

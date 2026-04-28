@@ -11,10 +11,9 @@ import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
 import { createPersonaName, type PersonaDefinition, type PersonaName } from './types.js';
 import type { MCPServerConfig } from '../config/types.js';
-import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 
 /** Servers always included in persona sessions regardless of allowlist. */
-const ALWAYS_INCLUDED_SERVERS = new Set(['filesystem', MEMORY_SERVER_NAME]);
+const ALWAYS_INCLUDED_SERVERS = new Set(['filesystem']);
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -138,6 +137,11 @@ export function resolvePersona(nameRaw: string): ResolvedPersona {
  * The "filesystem" server is always included even if omitted from
  * the allowlist -- this is a hardcoded safety invariant since the
  * agent sandbox requires filesystem access to function.
+ *
+ * The memory server is NOT in the always-included set; it is opt-in
+ * per persona/job and injected by `buildSessionConfig` after this
+ * filter runs (gated by `isMemoryEnabledFor`). See
+ * docs/designs/per-persona-memory-optin.md.
  */
 export function applyServerAllowlist(
   mcpServers: Record<string, MCPServerConfig>,

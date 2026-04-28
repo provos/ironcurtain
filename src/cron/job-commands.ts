@@ -129,6 +129,8 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
     );
     const notifyStr = notifyParts.length ? notifyParts.join(', ') : 'none';
 
+    const memoryStr = job.memory?.enabled === false ? 'off' : 'on (default)';
+
     const scheduleDesc = describeCronExpression(job.schedule);
 
     note(
@@ -138,6 +140,7 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
         `Schedule:  ${job.schedule}  (${scheduleDesc})`,
         `Git repo:  ${gitRepoDisplay}`,
         `Notify:    ${notifyStr}`,
+        `Memory:    ${memoryStr}`,
         ``,
         `Task description:`,
         fieldPreview(job.taskDescription, descIsEmpty),
@@ -168,6 +171,7 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
           label: `Customize constitution interactively${constIsEmpty ? '  (set constitution first)' : ''}`,
         },
         { value: 'notify', label: `Edit notify           ${notifyStr}` },
+        { value: 'memory', label: `Edit memory          ${memoryStr}` },
       ],
     });
     if (isCancel(action)) {
@@ -339,6 +343,23 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
           process.exit(0);
         }
         job = { ...job, notifyOnEscalation: esc, notifyOnCompletion: comp };
+        break;
+      }
+      case 'memory': {
+        const currentEnabled = job.memory?.enabled !== false;
+        const enabled = await confirm({
+          message: 'Enable persistent memory for this job?',
+          initialValue: currentEnabled,
+        });
+        if (isCancel(enabled)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        // Destructure-omit `memory` so we can either re-attach it (off case)
+        // or drop it entirely (on case). Avoids `memory: undefined` in spread.
+        const { memory: _omit, ...rest } = job;
+        void _omit;
+        job = !enabled ? { ...rest, memory: { enabled: false } } : rest;
         break;
       }
     }

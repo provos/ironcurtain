@@ -254,7 +254,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
   const claudeMdContent = buildDockerClaudeMd({
     personaName: options.persona,
-    memoryEnabled: options.config.userConfig.memory.enabled,
+    memoryEnabled: dirConfig.memoryEnabled,
   });
 
   try {

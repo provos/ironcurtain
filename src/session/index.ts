@@ -34,6 +34,10 @@ import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
 import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-prompt.js';
+import { isMemoryEnabledFor } from '../memory/memory-policy.js';
+import type { PersonaDefinition } from '../persona/types.js';
+import { createJobId } from '../cron/types.js';
+import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
@@ -296,7 +300,7 @@ async function createDockerSession(
 
     const claudeMdContent = buildDockerClaudeMd({
       personaName: options.persona,
-      memoryEnabled: config.userConfig.memory.enabled,
+      memoryEnabled: sessionConfig.memoryEnabled,
     });
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
@@ -375,6 +379,8 @@ export interface SessionDirConfig {
   auditLogPath: string;
   /** Resolved system prompt augmentation (may include persona augmentation). */
   systemPromptAugmentation?: string;
+  /** Memory MCP gate decision derived from persona/job/userConfig. */
+  memoryEnabled: boolean;
 }
 
 /**
@@ -438,6 +444,7 @@ export function buildSessionConfig(
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
   const { resumeSessionId, disableAutoApprove } = opts;
   let serverAllowlist: readonly string[] | undefined;
+  let personaDef: PersonaDefinition | undefined = undefined;
 
   // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
   // is only meaningful alongside the bundle; passing it alone is a bug.
@@ -448,10 +455,15 @@ export function buildSessionConfig(
     );
   }
 
-  // Resolve persona early -- derives policyDir, workspace, server filter,
-  // and system prompt augmentation from the persona definition.
+  // Resolve persona early -- derives policyDir, workspace, and server
+  // filter from the persona definition. The persona system prompt
+  // augmentation is deferred until after the memory gate is computed
+  // with the full (persona + job) scope, so the augmentation and the
+  // server bolt-on cannot disagree when both opts.persona and opts.jobId
+  // are set.
   if (opts.persona) {
     const resolved = resolvePersona(opts.persona);
+    personaDef = resolved.persona;
     if (policyDir) {
       logger.warn('Both persona and policyDir specified; using persona.');
     }
@@ -463,14 +475,27 @@ export function buildSessionConfig(
       workspacePath = resolved.workspacePath;
     }
 
-    // Build persona system prompt augmentation (includes MCP memory prompt when enabled).
-    const memoryEnabled = config.userConfig.memory.enabled;
-    const personaAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
+    logger.info(`Persona "${opts.persona}" resolved: policyDir=${policyDir}`);
+  }
+
+  // Single gate computation with the full scope. Reused for the persona
+  // augmentation, the cron-job memory prompt, and the server bolt-on so
+  // the prompt cannot mention memory while the relay is gated off (or
+  // vice versa). Skip the loadJob disk read when the global kill switch
+  // would short-circuit anyway.
+  const memoryConfig = config.userConfig.memory;
+  const jobDef = memoryConfig.enabled && opts.jobId ? loadJob(createJobId(opts.jobId)) : undefined;
+  const memoryEnabled = isMemoryEnabledFor({
+    persona: personaDef,
+    job: jobDef,
+    userConfig: config.userConfig,
+  });
+
+  if (personaDef) {
+    const personaAugmentation = buildPersonaSystemPromptAugmentation(personaDef, memoryEnabled);
     systemPromptAugmentation = systemPromptAugmentation
       ? `${personaAugmentation}\n\n${systemPromptAugmentation}`
       : personaAugmentation;
-
-    logger.info(`Persona "${opts.persona}" resolved: policyDir=${policyDir}`);
   }
 
   if (policyDir) {
@@ -582,8 +607,9 @@ export function buildSessionConfig(
 
   // Inject the memory MCP server for persona and cron job sessions only.
   // Default (ad-hoc) sessions are stateless and don't benefit from memory.
-  const memoryConfig = config.userConfig.memory;
-  if (memoryConfig.enabled && (opts.persona || opts.jobId)) {
+  // The gate decision was made once above; reuse it here so the prompt
+  // and the relay cannot diverge.
+  if (memoryEnabled) {
     const dbPath = resolveMemoryDbPath({
       persona: opts.persona,
       jobId: opts.jobId,
@@ -639,6 +665,7 @@ export function buildSessionConfig(
     escalationDir,
     auditLogPath,
     systemPromptAugmentation,
+    memoryEnabled,
   };
 }
 

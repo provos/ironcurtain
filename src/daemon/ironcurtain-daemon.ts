@@ -493,10 +493,11 @@ export class IronCurtainDaemon {
       workspacePath: workspace,
     });
 
-    // Create the headless transport
+    // Create the headless transport. The job is already loaded; pass
+    // it to the auto-save gate so per-job memory opt-out is honored.
     const transport = new HeadlessTransport({
       taskMessage: job.taskDescription,
-      autoSaveMemory: shouldAutoSaveMemory(patchedConfig),
+      autoSaveMemory: shouldAutoSaveMemory(patchedConfig, { job }),
       dockerMode: this.mode.kind === 'docker',
     });
 

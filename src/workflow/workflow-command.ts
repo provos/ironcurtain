@@ -12,6 +12,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { getIronCurtainHome } from '../config/paths.js';
+import { loadConfig } from '../config/index.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
@@ -239,6 +240,7 @@ async function runStart(args: string[]): Promise<void> {
   const checkpointStore = new FileCheckpointStore(baseDir);
   const gateHandler = createGateHandler();
   const sessionFactory = createWorkflowSessionFactory(modelOverride);
+  const config = loadConfig();
 
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
@@ -247,6 +249,7 @@ async function runStart(args: string[]): Promise<void> {
     dismissGate: gateHandler.dismissGate,
     baseDir,
     checkpointStore,
+    userConfig: config.userConfig,
   };
 
   const orchestrator = new WorkflowOrchestrator(deps);
@@ -343,6 +346,7 @@ async function runResume(args: string[]): Promise<void> {
 
   printResumeInfo(baseDir, selected.workflowId, selected.checkpoint);
 
+  const config = loadConfig();
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
     createWorkflowTab: (label: string): WorkflowTabHandle => createConsoleTab(label),
@@ -350,6 +354,7 @@ async function runResume(args: string[]): Promise<void> {
     dismissGate: gateHandler.dismissGate,
     baseDir,
     checkpointStore,
+    userConfig: config.userConfig,
   };
 
   const orchestrator = new WorkflowOrchestrator(deps);

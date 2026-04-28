@@ -131,7 +131,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
   const transport = new WebSessionTransport({
     eventBus: ctx.eventBus,
     sessionManager: ctx.sessionManager,
-    autoSaveMemory: shouldAutoSaveMemory(config) && !!persona,
+    autoSaveMemory: shouldAutoSaveMemory(config, { persona }),
     dockerMode: ctx.mode.kind === 'docker',
   });
 

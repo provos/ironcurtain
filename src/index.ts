@@ -168,7 +168,7 @@ export async function main(args?: string[]): Promise<void> {
   // Create the transport first so we can wire its callbacks into the session.
   const transport = new CliTransport({
     initialMessage: task || undefined,
-    autoSaveMemory: shouldAutoSaveMemory(config) && !!personaName,
+    autoSaveMemory: shouldAutoSaveMemory(config, { persona: personaName }),
     dockerMode: mode.kind === 'docker',
   });
 

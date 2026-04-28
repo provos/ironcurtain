@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionOptions } from '../../src/session/types.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
@@ -12,6 +12,7 @@ import {
   createArtifactAwareSession,
   writeDefinitionFile,
   createDeps,
+  makeTestUserConfig,
   waitForCompletion,
   stubPersonasForTest,
 } from './test-helpers.js';
@@ -823,5 +824,289 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const detail = orchestrator.getDetail(workflowId);
     expect(detail).toBeDefined();
     expect(detail!.context.totalTokens).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Memory opt-in (per-persona): getRequiredServersForScope must respect
+  // each persona's `memory.enabled` field and the global kill switch.
+  // See docs/designs/per-persona-memory-optin.md §5 site F and §9.4.
+  // -------------------------------------------------------------------------
+
+  describe('memory opt-in', () => {
+    /**
+     * Writes a persona.json (with optional memory config) and a minimal
+     * compiled-policy.json inside the home stubbed by `stubPersonasForTest`.
+     * The orchestrator's `getRequiredServersForScope` calls
+     * `loadPersonaPolicyArtifacts` and `loadPersona`; both need real files
+     * on disk under `IRONCURTAIN_HOME/personas/<name>/`.
+     */
+    function seedPersonaWithMemory(name: string, memory: { enabled: boolean } | undefined): void {
+      const home = process.env.IRONCURTAIN_HOME;
+      if (!home) throw new Error('IRONCURTAIN_HOME not set; call stubPersonasForTest first');
+      const personaDir = resolve(home, 'personas', name);
+      mkdirSync(personaDir, { recursive: true });
+      const personaJson: Record<string, unknown> = { name, description: 'memory-gate test' };
+      if (memory !== undefined) personaJson.memory = memory;
+      writeFileSync(resolve(personaDir, 'persona.json'), JSON.stringify(personaJson));
+      const generated = resolve(personaDir, 'generated');
+      mkdirSync(generated, { recursive: true });
+      writeFileSync(resolve(generated, 'compiled-policy.json'), JSON.stringify({ rules: [] }));
+    }
+
+    /** Builds a single-state Docker workflow assigning the given persona. */
+    function buildSinglePersonaDef(persona: string): WorkflowDefinition {
+      return {
+        name: `memory-gate-${persona}`,
+        description: 'Single-persona shared-container workflow',
+        initial: 'work',
+        settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+        states: {
+          work: {
+            type: 'agent',
+            description: 'Does work',
+            persona,
+            prompt: 'You are a worker.',
+            inputs: [],
+            outputs: ['result'],
+            transitions: [{ to: 'done' }],
+          },
+          done: { type: 'terminal', description: 'Done' },
+        },
+      };
+    }
+
+    it('omits memory when the only persona in scope opts out', async () => {
+      const def = buildSinglePersonaDef('opted-out');
+      const stubCleanup = stubPersonasForTest(tmpDir, def);
+      try {
+        seedPersonaWithMemory('opted-out', { enabled: false });
+        const defPath = writeDefinitionFile(tmpDir, def);
+
+        const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+          makeStubInfrastructure(input.workflowId, input.bundleId),
+        );
+        const sessionFactory = vi.fn(async () =>
+          createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['result'] }], tmpDir),
+        );
+
+        const orchestrator = new WorkflowOrchestrator(
+          createDeps(tmpDir, {
+            createSession: sessionFactory,
+            createWorkflowInfrastructure: createInfra,
+            destroyWorkflowInfrastructure: vi.fn(async () => {}),
+          }),
+        );
+        activeOrchestrator = orchestrator;
+
+        const workflowId = await orchestrator.start(defPath, 'task');
+        await waitForCompletion(orchestrator, workflowId);
+
+        expect(createInfra).toHaveBeenCalledTimes(1);
+        const requiredServers = createInfra.mock.calls[0][0].requiredServers;
+        expect([...requiredServers]).not.toContain('memory');
+      } finally {
+        stubCleanup();
+      }
+    });
+
+    it('includes memory when the persona has no memory field (default-on)', async () => {
+      const def = buildSinglePersonaDef('default-persona');
+      const stubCleanup = stubPersonasForTest(tmpDir, def);
+      try {
+        seedPersonaWithMemory('default-persona', undefined);
+        const defPath = writeDefinitionFile(tmpDir, def);
+
+        const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+          makeStubInfrastructure(input.workflowId, input.bundleId),
+        );
+        const sessionFactory = vi.fn(async () =>
+          createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['result'] }], tmpDir),
+        );
+
+        const orchestrator = new WorkflowOrchestrator(
+          createDeps(tmpDir, {
+            createSession: sessionFactory,
+            createWorkflowInfrastructure: createInfra,
+            destroyWorkflowInfrastructure: vi.fn(async () => {}),
+          }),
+        );
+        activeOrchestrator = orchestrator;
+
+        const workflowId = await orchestrator.start(defPath, 'task');
+        await waitForCompletion(orchestrator, workflowId);
+
+        expect(createInfra).toHaveBeenCalledTimes(1);
+        const requiredServers = createInfra.mock.calls[0][0].requiredServers;
+        expect([...requiredServers]).toContain('memory');
+      } finally {
+        stubCleanup();
+      }
+    });
+
+    it('includes memory when at least one persona in scope opts in (any-persona-wants-it)', async () => {
+      const def: WorkflowDefinition = {
+        name: 'memory-gate-mixed',
+        description: 'Two personas in the same scope, one opting out',
+        initial: 'first',
+        settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+        states: {
+          first: {
+            type: 'agent',
+            description: 'First (opted-out)',
+            persona: 'mixed-out',
+            prompt: 'You are first.',
+            inputs: [],
+            outputs: ['a'],
+            transitions: [{ to: 'second' }],
+          },
+          second: {
+            type: 'agent',
+            description: 'Second (default)',
+            persona: 'mixed-default',
+            prompt: 'You are second.',
+            inputs: ['a'],
+            outputs: ['b'],
+            transitions: [{ to: 'done' }],
+          },
+          done: { type: 'terminal', description: 'Done' },
+        },
+      };
+      const stubCleanup = stubPersonasForTest(tmpDir, def);
+      try {
+        seedPersonaWithMemory('mixed-out', { enabled: false });
+        seedPersonaWithMemory('mixed-default', undefined);
+        const defPath = writeDefinitionFile(tmpDir, def);
+
+        const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+          makeStubInfrastructure(input.workflowId, input.bundleId),
+        );
+        let sessionCounter = 0;
+        const sessionFactory = vi.fn(async () => {
+          sessionCounter++;
+          const artifact = sessionCounter === 1 ? 'a' : 'b';
+          return createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: [artifact] }], tmpDir);
+        });
+
+        const orchestrator = new WorkflowOrchestrator(
+          createDeps(tmpDir, {
+            createSession: sessionFactory,
+            createWorkflowInfrastructure: createInfra,
+            destroyWorkflowInfrastructure: vi.fn(async () => {}),
+          }),
+        );
+        activeOrchestrator = orchestrator;
+
+        const workflowId = await orchestrator.start(defPath, 'task');
+        await waitForCompletion(orchestrator, workflowId);
+
+        expect(createInfra).toHaveBeenCalledTimes(1);
+        const requiredServers = createInfra.mock.calls[0][0].requiredServers;
+        expect([...requiredServers]).toContain('memory');
+      } finally {
+        stubCleanup();
+      }
+    });
+
+    it('omits memory when every persona in scope opts out', async () => {
+      const def: WorkflowDefinition = {
+        name: 'memory-gate-all-out',
+        description: 'Two personas in the same scope, both opting out',
+        initial: 'first',
+        settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+        states: {
+          first: {
+            type: 'agent',
+            description: 'First (opted-out)',
+            persona: 'all-out-1',
+            prompt: 'You are first.',
+            inputs: [],
+            outputs: ['a'],
+            transitions: [{ to: 'second' }],
+          },
+          second: {
+            type: 'agent',
+            description: 'Second (opted-out)',
+            persona: 'all-out-2',
+            prompt: 'You are second.',
+            inputs: ['a'],
+            outputs: ['b'],
+            transitions: [{ to: 'done' }],
+          },
+          done: { type: 'terminal', description: 'Done' },
+        },
+      };
+      const stubCleanup = stubPersonasForTest(tmpDir, def);
+      try {
+        seedPersonaWithMemory('all-out-1', { enabled: false });
+        seedPersonaWithMemory('all-out-2', { enabled: false });
+        const defPath = writeDefinitionFile(tmpDir, def);
+
+        const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+          makeStubInfrastructure(input.workflowId, input.bundleId),
+        );
+        let sessionCounter = 0;
+        const sessionFactory = vi.fn(async () => {
+          sessionCounter++;
+          const artifact = sessionCounter === 1 ? 'a' : 'b';
+          return createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: [artifact] }], tmpDir);
+        });
+
+        const orchestrator = new WorkflowOrchestrator(
+          createDeps(tmpDir, {
+            createSession: sessionFactory,
+            createWorkflowInfrastructure: createInfra,
+            destroyWorkflowInfrastructure: vi.fn(async () => {}),
+          }),
+        );
+        activeOrchestrator = orchestrator;
+
+        const workflowId = await orchestrator.start(defPath, 'task');
+        await waitForCompletion(orchestrator, workflowId);
+
+        expect(createInfra).toHaveBeenCalledTimes(1);
+        const requiredServers = createInfra.mock.calls[0][0].requiredServers;
+        expect([...requiredServers]).not.toContain('memory');
+      } finally {
+        stubCleanup();
+      }
+    });
+
+    it('omits memory when the global kill switch is off, regardless of persona state', async () => {
+      const def = buildSinglePersonaDef('kill-switch-default');
+      const stubCleanup = stubPersonasForTest(tmpDir, def);
+      try {
+        seedPersonaWithMemory('kill-switch-default', undefined);
+        const defPath = writeDefinitionFile(tmpDir, def);
+
+        const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+          makeStubInfrastructure(input.workflowId, input.bundleId),
+        );
+        const sessionFactory = vi.fn(async () =>
+          createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['result'] }], tmpDir),
+        );
+
+        const killSwitchUserConfig = makeTestUserConfig({
+          memory: { enabled: false, autoSave: true, llmBaseUrl: undefined, llmApiKey: undefined },
+        });
+        const orchestrator = new WorkflowOrchestrator(
+          createDeps(tmpDir, {
+            createSession: sessionFactory,
+            createWorkflowInfrastructure: createInfra,
+            destroyWorkflowInfrastructure: vi.fn(async () => {}),
+            userConfig: killSwitchUserConfig,
+          }),
+        );
+        activeOrchestrator = orchestrator;
+
+        const workflowId = await orchestrator.start(defPath, 'task');
+        await waitForCompletion(orchestrator, workflowId);
+
+        expect(createInfra).toHaveBeenCalledTimes(1);
+        const requiredServers = createInfra.mock.calls[0][0].requiredServers;
+        expect([...requiredServers]).not.toContain('memory');
+      } finally {
+        stubCleanup();
+      }
+    });
   });
 });

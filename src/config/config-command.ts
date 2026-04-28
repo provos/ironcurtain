@@ -350,11 +350,17 @@ async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig)
 async function handleMemory(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
+    const currentEnabled = pending.memory?.enabled ?? resolved.memory.enabled;
     const currentAutoSave = pending.memory?.autoSave ?? resolved.memory.autoSave;
 
     const field = await p.select({
       message: 'Memory',
       options: [
+        {
+          value: 'enabled',
+          label: 'Enabled (kill switch — affects all personas/jobs)',
+          hint: currentEnabled ? 'on' : 'off',
+        },
         {
           value: 'autoSave',
           label: 'Auto-save session summary to memory',
@@ -365,7 +371,16 @@ async function handleMemory(resolved: ResolvedUserConfig, pending: UserConfig): 
     });
     if (isCancelled(field) || field === 'back') return;
 
-    if (field === 'autoSave') {
+    if (field === 'enabled') {
+      const enabled = await p.confirm({
+        message: 'Enable memory globally? (turning this off disables memory for all personas and jobs)',
+        initialValue: currentEnabled,
+      });
+      if (isCancelled(enabled)) continue;
+      if (enabled !== currentEnabled) {
+        pending.memory = { ...pending.memory, enabled: enabled as boolean };
+      }
+    } else if (field === 'autoSave') {
       const enabled = await p.confirm({
         message: 'Auto-save a session summary to memory when sessions end?',
         initialValue: currentAutoSave,
@@ -863,8 +878,10 @@ function serverCredentialsHint(resolved: ResolvedUserConfig, pending: UserConfig
 }
 
 function memoryHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const enabled = pending.memory?.enabled ?? resolved.memory.enabled;
   const autoSave = pending.memory?.autoSave ?? resolved.memory.autoSave;
-  return `auto-save: ${autoSave ? 'on' : 'off'}`;
+  if (!enabled) return 'off (kill switch)';
+  return `on, auto-save: ${autoSave ? 'on' : 'off'}`;
 }
 
 function dockerAgentHint(resolved: ResolvedUserConfig, pending: UserConfig): string {

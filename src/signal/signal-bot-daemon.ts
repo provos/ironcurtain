@@ -492,7 +492,7 @@ export class SignalBotDaemon {
 
     const transport = new SignalSessionTransport({
       daemon: this,
-      autoSaveMemory: shouldAutoSaveMemory(config) && !!persona,
+      autoSaveMemory: shouldAutoSaveMemory(config, { persona }),
       dockerMode: this.mode.kind === 'docker',
     });
 

@@ -27,6 +27,7 @@ import {
   type WorkflowTabHandle,
 } from '../../src/workflow/orchestrator.js';
 import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
+import type { ResolvedUserConfig } from '../../src/config/user-config.js';
 
 // ---------------------------------------------------------------------------
 // MockSession
@@ -250,6 +251,61 @@ export function createCheckpointStore(tmpDir: string): FileCheckpointStore {
   return new FileCheckpointStore(resolve(tmpDir, '..', `${baseName}-ckpt`));
 }
 
+/**
+ * Minimal `ResolvedUserConfig` for orchestrator tests. Defaults memory ON
+ * (matches the runtime default) so existing tests' behavior is preserved.
+ * Tests that exercise memory-gate semantics override `memory.enabled` via
+ * the `createDeps` overrides argument.
+ */
+export function makeTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): ResolvedUserConfig {
+  return {
+    agentModelId: 'anthropic:claude-sonnet-4-6',
+    policyModelId: 'anthropic:claude-sonnet-4-6',
+    prefilterModelId: 'anthropic:claude-haiku-4-5',
+    anthropicApiKey: 'test-anthropic-key',
+    googleApiKey: '',
+    openaiApiKey: '',
+    anthropicBaseUrl: '',
+    openaiBaseUrl: '',
+    googleBaseUrl: '',
+    escalationTimeoutSeconds: 300,
+    resourceBudget: {
+      maxTotalTokens: 1_000_000,
+      maxSteps: 200,
+      maxSessionSeconds: 1800,
+      maxEstimatedCostUsd: 5.0,
+      warnThresholdPercent: 80,
+    },
+    autoCompact: {
+      enabled: true,
+      thresholdTokens: 160_000,
+      keepRecentMessages: 10,
+      summaryModelId: 'anthropic:claude-haiku-4-5',
+    },
+    autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
+    auditRedaction: { enabled: false },
+    memory: {
+      enabled: true,
+      autoSave: true,
+      llmBaseUrl: undefined,
+      llmApiKey: undefined,
+    },
+    webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
+    serverCredentials: {},
+    signal: null,
+    gooseProvider: 'anthropic',
+    gooseModel: 'claude-sonnet-4-20250514',
+    preferredDockerAgent: 'claude-code',
+    packageInstall: {
+      enabled: true,
+      quarantineDays: 2,
+      allowedPackages: [],
+      deniedPackages: [],
+    },
+    ...overrides,
+  };
+}
+
 export function createDeps(
   tmpDir: string,
   overrides: Partial<WorkflowOrchestratorDeps> = {},
@@ -261,6 +317,7 @@ export function createDeps(
     dismissGate: vi.fn(),
     baseDir: tmpDir,
     checkpointStore: createCheckpointStore(tmpDir),
+    userConfig: makeTestUserConfig(),
     // Default no-op control-plane stubs so shared-container tests that
     // don't assert on these calls can omit them. Tests that do assert
     // (see orchestrator-policy-cycling.test.ts) override with `vi.fn(...)`.

@@ -23,6 +23,7 @@ import { loadDefinition } from '../workflow/definition-loader.js';
 import type { WebEventBus } from './web-event-bus.js';
 import { type HumanGateRequestDto, toHumanGateRequestDto } from './web-ui-types.js';
 import { getIronCurtainHome } from '../config/paths.js';
+import { loadConfig } from '../config/index.js';
 import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from '../workflow/types.js';
 
 // ---------------------------------------------------------------------------
@@ -298,6 +299,7 @@ export class WorkflowManager {
     const checkpointStore = new FileCheckpointStore(baseDir);
     this._checkpointStore = checkpointStore;
     const sessionFactory = createWorkflowSessionFactory();
+    const config = loadConfig();
 
     const deps: WorkflowOrchestratorDeps = {
       createSession: sessionFactory,
@@ -314,6 +316,7 @@ export class WorkflowManager {
       },
       baseDir,
       checkpointStore,
+      userConfig: config.userConfig,
     };
 
     const orchestrator = new WorkflowOrchestrator(deps);

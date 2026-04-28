@@ -12,7 +12,19 @@ import { describe, it, expect, vi } from 'vitest';
 import { saveSessionMemory, shouldAutoSaveMemory } from '../src/memory/auto-save.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { Session, SessionInfo, ConversationTurn } from '../src/session/types.js';
+import type { PersonaDefinition, PersonaName } from '../src/persona/types.js';
 import { BudgetExhaustedError } from '../src/session/errors.js';
+
+/** Minimal persona scope for the auto-save gate (persona present => eligible for memory when not opted out). */
+function makePersonaScope(): { persona: PersonaDefinition } {
+  return {
+    persona: {
+      name: 'test-persona' as PersonaName,
+      description: 'test',
+      createdAt: '2026-04-27T00:00:00.000Z',
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -84,19 +96,31 @@ function stubSession(
 // ---------------------------------------------------------------------------
 
 describe('shouldAutoSaveMemory', () => {
-  it('returns true when memory enabled and autoSave true', () => {
+  it('returns true when memory enabled, autoSave true, and a persona scope is provided', () => {
     const config = makeConfig({ memoryEnabled: true, autoSave: true });
-    expect(shouldAutoSaveMemory(config)).toBe(true);
+    expect(shouldAutoSaveMemory(config, makePersonaScope())).toBe(true);
   });
 
-  it('returns false when memory is disabled', () => {
+  it('returns false when memory is disabled (kill switch)', () => {
     const config = makeConfig({ memoryEnabled: false, autoSave: true });
-    expect(shouldAutoSaveMemory(config)).toBe(false);
+    expect(shouldAutoSaveMemory(config, makePersonaScope())).toBe(false);
   });
 
   it('returns false when autoSave is explicitly false', () => {
     const config = makeConfig({ memoryEnabled: true, autoSave: false });
+    expect(shouldAutoSaveMemory(config, makePersonaScope())).toBe(false);
+  });
+
+  it('returns false for default sessions (no persona, no job)', () => {
+    const config = makeConfig({ memoryEnabled: true, autoSave: true });
     expect(shouldAutoSaveMemory(config)).toBe(false);
+  });
+
+  it('returns false when persona opts out via memory.enabled = false', () => {
+    const config = makeConfig({ memoryEnabled: true, autoSave: true });
+    const scope = makePersonaScope();
+    const personaOptOut: PersonaDefinition = { ...scope.persona, memory: { enabled: false } };
+    expect(shouldAutoSaveMemory(config, { persona: personaOptOut })).toBe(false);
   });
 });
 
