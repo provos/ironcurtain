@@ -23,6 +23,8 @@ import type { SessionMode } from '../session/types.js';
 import type { SignalContainerManager } from './signal-container.js';
 import { SessionManager, type ManagedSession } from '../session/session-manager.js';
 import { shouldAutoSaveMemory } from '../memory/auto-save.js';
+import { loadPersona } from '../persona/resolve.js';
+import { createPersonaName } from '../persona/types.js';
 import { SignalSessionTransport } from './signal-transport.js';
 import { markdownToSignal } from './markdown-to-signal.js';
 import {
@@ -490,9 +492,14 @@ export class SignalBotDaemon {
 
     const config = loadConfig();
 
+    // Pre-resolve the persona definition (if any) so the auto-save gate
+    // sees the same scope as the session itself. Signal sessions don't
+    // carry a jobId — they're always interactive, persona-or-default.
+    const personaDef = persona ? loadPersona(createPersonaName(persona)) : undefined;
+
     const transport = new SignalSessionTransport({
       daemon: this,
-      autoSaveMemory: shouldAutoSaveMemory(config) && !!persona,
+      autoSaveMemory: shouldAutoSaveMemory(config, { persona: personaDef }),
       dockerMode: this.mode.kind === 'docker',
     });
 

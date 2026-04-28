@@ -26,6 +26,17 @@ export function createPersonaName(raw: string): PersonaName {
   return raw as PersonaName;
 }
 
+/** Per-persona memory configuration. */
+export interface PersonaMemoryConfig {
+  /**
+   * Whether the memory MCP server is mounted into sessions for this
+   * persona. Defaults to true when this whole block is absent.
+   * The global kill switch (`userConfig.memory.enabled`) ANDs with this:
+   * if the global is off, memory is off regardless of this field.
+   */
+  readonly enabled: boolean;
+}
+
 /**
  * Persisted persona definition. Stored as JSON at
  * ~/.ironcurtain/personas/{name}/persona.json.
@@ -47,4 +58,11 @@ export interface PersonaDefinition {
    * The "filesystem" server is always included regardless.
    */
   readonly servers?: readonly string[];
+
+  /**
+   * Optional memory configuration. Absent = use defaults (memory on,
+   * subject to the global kill switch). Present = explicit per-persona
+   * choice, persisted across upgrades.
+   */
+  readonly memory?: PersonaMemoryConfig;
 }

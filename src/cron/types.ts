@@ -23,6 +23,17 @@ export function createJobId(raw: string): JobId {
   return raw as JobId;
 }
 
+/** Per-job memory configuration. Same shape as PersonaMemoryConfig. */
+export interface JobMemoryConfig {
+  /**
+   * Whether the memory MCP server is mounted into sessions for this
+   * job. Defaults to true when this whole block is absent. The global
+   * kill switch (`userConfig.memory.enabled`) ANDs with this: if the
+   * global is off, memory is off regardless of this field.
+   */
+  readonly enabled: boolean;
+}
+
 /**
  * Persisted job definition. Stored as JSON at
  * ~/.ironcurtain/jobs/{jobId}/job.json.
@@ -95,6 +106,13 @@ export interface JobDefinition {
 
   /** Whether this job is active. Disabled jobs are not scheduled. */
   readonly enabled: boolean;
+
+  /**
+   * Optional memory configuration. Absent = use defaults (memory on,
+   * subject to the global kill switch). Present = explicit per-job
+   * choice, persisted across upgrades.
+   */
+  readonly memory?: JobMemoryConfig;
 }
 
 /**

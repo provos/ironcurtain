@@ -7,7 +7,10 @@
 
 import type { Session, ConversationTurn } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
+import type { PersonaDefinition } from '../persona/types.js';
+import type { JobDefinition } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
+import { isMemoryEnabledFor } from './memory-policy.js';
 import * as logger from '../logger.js';
 
 export interface AutoSaveOptions {
@@ -20,12 +23,21 @@ const MAX_SUMMARY_CHARS = 2000;
 const MAX_TURNS_TO_SUMMARIZE = 50;
 
 /**
- * Checks whether auto-save is enabled in user config. Callers must also
- * verify the session has memory context (persona or jobId) since the
- * memory server is injected inside createSession(), not in the base config.
+ * Checks whether auto-save is enabled for this session's scope. Combines
+ * the per-persona / per-job memory gate (`isMemoryEnabledFor`) with the
+ * user-config `autoSave` flag. Returns false unless both signals agree.
+ *
+ * Callers must thread the loaded persona / job definition (whichever
+ * applies) so the gate can short-circuit on per-scope opt-outs. Default
+ * sessions (no persona, no job) always return false because memory
+ * itself is off in that scope.
  */
-export function shouldAutoSaveMemory(config: IronCurtainConfig): boolean {
-  return config.userConfig.memory.enabled && config.userConfig.memory.autoSave;
+export function shouldAutoSaveMemory(
+  config: IronCurtainConfig,
+  scope: { persona?: PersonaDefinition; job?: JobDefinition } = {},
+): boolean {
+  if (!isMemoryEnabledFor({ ...scope, userConfig: config.userConfig })) return false;
+  return config.userConfig.memory.autoSave;
 }
 
 function truncate(text: string, maxLen: number): string {

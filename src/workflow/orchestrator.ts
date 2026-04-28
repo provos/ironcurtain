@@ -42,10 +42,13 @@ import {
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
 import { validatePolicyDir } from '../config/validate-policy-dir.js';
+import type { ResolvedUserConfig } from '../config/user-config.js';
 import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
+import { isMemoryEnabledForPersonaName } from '../persona/memory-gate.js';
 import { extractRequiredServers } from '../trusted-process/policy-roots.js';
 import { createPersonaName } from '../persona/types.js';
+import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 import type {
   AgentConversationId,
   AgentTurnResult,
@@ -250,6 +253,14 @@ export interface WorkflowOrchestratorDeps {
 
   /** Persistent checkpoint store for workflow resume. */
   readonly checkpointStore: CheckpointStore;
+
+  /**
+   * Resolved user config. Consulted by `getRequiredServersForScope` to
+   * decide whether to mint the memory relay for a shared-container
+   * bundle (memory is opt-in per persona; see
+   * docs/designs/per-persona-memory-optin.md).
+   */
+  readonly userConfig: ResolvedUserConfig;
 
   /**
    * Factory for creating a workflow-scoped Docker infrastructure bundle.
@@ -700,6 +711,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   private getRequiredServersForScope(instance: WorkflowInstance, scope: string): ReadonlySet<string> {
     const union = new Set<string>();
     const seenPersonas = new Set<string>();
+    let anyPersonaWantsMemory = false;
     for (const stateConfig of Object.values(instance.definition.states)) {
       if (stateConfig.type !== 'agent') continue;
       const stateScope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
@@ -710,7 +722,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       for (const server of extractRequiredServers(compiledPolicy)) {
         union.add(server);
       }
+      // Memory is bolt-on (not in compiled policy). Mint the relay if
+      // ANY persona in this scope opts in.
+      if (isMemoryEnabledForPersonaName(stateConfig.persona, this.deps.userConfig)) {
+        anyPersonaWantsMemory = true;
+      }
     }
+    if (anyPersonaWantsMemory) union.add(MEMORY_SERVER_NAME);
     return union;
   }
 

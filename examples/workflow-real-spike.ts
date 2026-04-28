@@ -21,6 +21,7 @@ import { createInterface } from 'node:readline/promises';
 import type { WorkflowId, WorkflowCheckpoint } from '../src/workflow/types.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps } from '../src/workflow/orchestrator.js';
 import { FileCheckpointStore } from '../src/workflow/checkpoint.js';
+import { loadConfig } from '../src/config/index.js';
 import { discoverWorkflowRuns } from '../src/workflow/workflow-discovery.js';
 import {
   createWorkflowSessionFactory,
@@ -153,6 +154,7 @@ async function main(): Promise<void> {
 
     const gateHandler = createGateHandler();
 
+    const config = loadConfig();
     const deps: WorkflowOrchestratorDeps = {
       createSession: createWorkflowSessionFactory(HAIKU_MODEL_ID),
       createWorkflowTab: (label: string, _workflowId: WorkflowId) => createConsoleTab(label),
@@ -160,6 +162,7 @@ async function main(): Promise<void> {
       dismissGate: gateHandler.dismissGate,
       baseDir,
       checkpointStore,
+      userConfig: config.userConfig,
     };
 
     orchestrator = new WorkflowOrchestrator(deps);

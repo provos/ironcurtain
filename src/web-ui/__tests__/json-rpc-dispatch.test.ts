@@ -47,6 +47,8 @@ vi.mock('../../config/index.js', () => ({
 vi.mock('../../session/index.js', () => ({
   createSession: vi.fn().mockResolvedValue({}),
 }));
+// shouldAutoSaveMemory now takes (config, scope?) but the mock returns
+// the same value regardless of arguments — no signature update needed.
 vi.mock('../../memory/auto-save.js', () => ({
   shouldAutoSaveMemory: vi.fn().mockReturnValue(false),
 }));

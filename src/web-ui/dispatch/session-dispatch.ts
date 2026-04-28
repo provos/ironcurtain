@@ -21,6 +21,8 @@ import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
+import { loadPersona } from '../../persona/resolve.js';
+import { createPersonaName } from '../../persona/types.js';
 import { BudgetExhaustedError } from '../../session/errors.js';
 import { getTokenStreamBus } from '../../docker/token-stream-bus.js';
 import * as logger from '../../logger.js';
@@ -128,10 +130,14 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
   }
 
   const config = loadConfig();
+  // Pre-resolve the persona definition (if any) so the auto-save gate
+  // sees the same scope as the session itself. Web sessions don't carry
+  // a jobId — they're always interactive, persona-or-default.
+  const personaDef = persona ? loadPersona(createPersonaName(persona)) : undefined;
   const transport = new WebSessionTransport({
     eventBus: ctx.eventBus,
     sessionManager: ctx.sessionManager,
-    autoSaveMemory: shouldAutoSaveMemory(config) && !!persona,
+    autoSaveMemory: shouldAutoSaveMemory(config, { persona: personaDef }),
     dockerMode: ctx.mode.kind === 'docker',
   });
 

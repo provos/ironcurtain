@@ -34,6 +34,12 @@ import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
 import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-prompt.js';
+import { isMemoryEnabledFor } from '../memory/memory-policy.js';
+import type { PersonaDefinition } from '../persona/types.js';
+import { createPersonaName } from '../persona/types.js';
+import { loadPersona } from '../persona/resolve.js';
+import { createJobId } from '../cron/types.js';
+import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
@@ -294,9 +300,19 @@ async function createDockerSession(
       builtInfra = true;
     }
 
+    // Pre-resolve persona/job definitions so the memory gate sees the
+    // same scope as buildSessionConfig did above. Both loaders are sync
+    // (loadPersona throws if missing; loadJob returns undefined).
+    const personaDef = options.persona ? loadPersona(createPersonaName(options.persona)) : undefined;
+    const jobDef = options.jobId ? loadJob(createJobId(options.jobId)) : undefined;
+    const memoryEnabled = isMemoryEnabledFor({
+      persona: personaDef,
+      job: jobDef,
+      userConfig: config.userConfig,
+    });
     const claudeMdContent = buildDockerClaudeMd({
       personaName: options.persona,
-      memoryEnabled: config.userConfig.memory.enabled,
+      memoryEnabled,
     });
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
@@ -438,6 +454,9 @@ export function buildSessionConfig(
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
   const { resumeSessionId, disableAutoApprove } = opts;
   let serverAllowlist: readonly string[] | undefined;
+  // Hoisted so the loaded persona definition is in scope at the
+  // memory-gate site below (outside the `if (opts.persona)` branch).
+  let personaDef: PersonaDefinition | undefined = undefined;
 
   // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
   // is only meaningful alongside the bundle; passing it alone is a bug.
@@ -452,6 +471,7 @@ export function buildSessionConfig(
   // and system prompt augmentation from the persona definition.
   if (opts.persona) {
     const resolved = resolvePersona(opts.persona);
+    personaDef = resolved.persona;
     if (policyDir) {
       logger.warn('Both persona and policyDir specified; using persona.');
     }
@@ -464,7 +484,10 @@ export function buildSessionConfig(
     }
 
     // Build persona system prompt augmentation (includes MCP memory prompt when enabled).
-    const memoryEnabled = config.userConfig.memory.enabled;
+    const memoryEnabled = isMemoryEnabledFor({
+      persona: resolved.persona,
+      userConfig: config.userConfig,
+    });
     const personaAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
     systemPromptAugmentation = systemPromptAugmentation
       ? `${personaAugmentation}\n\n${systemPromptAugmentation}`
@@ -582,8 +605,16 @@ export function buildSessionConfig(
 
   // Inject the memory MCP server for persona and cron job sessions only.
   // Default (ad-hoc) sessions are stateless and don't benefit from memory.
+  // Persona was loaded above and captured into `personaDef`; load job
+  // lazily by id (most CLI sessions have no job).
   const memoryConfig = config.userConfig.memory;
-  if (memoryConfig.enabled && (opts.persona || opts.jobId)) {
+  const job = opts.jobId ? loadJob(createJobId(opts.jobId)) : undefined;
+  const memoryEnabled = isMemoryEnabledFor({
+    persona: personaDef,
+    job,
+    userConfig: config.userConfig,
+  });
+  if (memoryEnabled) {
     const dbPath = resolveMemoryDbPath({
       persona: opts.persona,
       jobId: opts.jobId,

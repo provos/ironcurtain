@@ -33,6 +33,9 @@ import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { getSessionDir, getPtyRegistryDir } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
+import { isMemoryEnabledFor } from '../memory/memory-policy.js';
+import { loadPersona } from '../persona/resolve.js';
+import { createPersonaName } from '../persona/types.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 
@@ -252,9 +255,17 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let conversationStateDirForSnapshot: string | undefined;
   let userExited = false;
 
+  // Pre-resolve persona definition so the memory gate sees the same
+  // scope the trusted process will operate under. PTY sessions don't
+  // carry a jobId — they're always interactive.
+  const personaDef = options.persona ? loadPersona(createPersonaName(options.persona)) : undefined;
+  const memoryEnabled = isMemoryEnabledFor({
+    persona: personaDef,
+    userConfig: options.config.userConfig,
+  });
   const claudeMdContent = buildDockerClaudeMd({
     personaName: options.persona,
-    memoryEnabled: options.config.userConfig.memory.enabled,
+    memoryEnabled,
   });
 
   try {

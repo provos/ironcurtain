@@ -3,6 +3,7 @@
 **Status:** Implemented (migration from `memory.md` complete; `memory.md` is fully deprecated and no longer created)
 **Date:** 2026-03-11
 **Supersedes:** `memory-mcp-server.md` (original design using `@modelcontextprotocol/server-memory`)
+**See also:** `per-persona-memory-optin.md` for the per-persona / per-job opt-in gate that controls whether the memory MCP server is mounted for a given session.
 
 ## 1. Problem Statement
 

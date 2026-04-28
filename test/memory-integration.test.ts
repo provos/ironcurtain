@@ -152,21 +152,25 @@ describe('verifyMemoryServerConfig', () => {
   });
 });
 
-describe('applyServerAllowlist always includes memory', () => {
+describe('applyServerAllowlist always includes filesystem', () => {
   const servers: Record<string, MCPServerConfig> = {
     filesystem: { command: 'node', args: ['/tmp'] },
     memory: { command: 'node', args: ['mem.js'] },
     github: { command: 'docker', args: ['run'] },
   };
 
-  it('includes memory even when allowlist does not mention it', () => {
+  it('includes filesystem even when allowlist does not mention it', () => {
     const filtered = applyServerAllowlist(servers, ['github']);
     expect(filtered).toHaveProperty('filesystem');
-    expect(filtered).toHaveProperty('memory');
     expect(filtered).toHaveProperty('github');
   });
 
-  it('does not warn about memory being unknown', () => {
+  it('does NOT include memory when allowlist omits it (memory is opt-in via the bolt-on)', () => {
+    const filtered = applyServerAllowlist(servers, ['github']);
+    expect(filtered).not.toHaveProperty('memory');
+  });
+
+  it('includes memory only when explicitly listed in the allowlist', () => {
     const filtered = applyServerAllowlist(servers, ['memory']);
     expect(filtered).toHaveProperty('memory');
   });
