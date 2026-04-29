@@ -1,9 +1,18 @@
 /**
- * WorkflowManager -- owns WorkflowOrchestrator instances for the web UI.
+ * WorkflowManager -- owns WorkflowOrchestrator instances for the web UI
+ * and the CLI inspect path.
  *
  * Analogous to SessionManager: the daemon creates one WorkflowManager
  * at startup and passes it into the dispatch context. Lifecycle events
- * from the orchestrator are forwarded to the WebEventBus.
+ * from the orchestrator are forwarded to the supplied event bus, which
+ * the WebUiServer subscribes to.
+ *
+ * Layered under `src/workflow/` (rather than `src/web-ui/`) so that
+ * non-web consumers (CLI, signal bot daemon) can reuse it without
+ * pulling in the web UI module. The event bus parameter is typed
+ * against the generic {@link TypedEventBus} fixed to {@link WebEventMap}
+ * so existing callers can keep passing `WebEventBus` instances; the
+ * `WebEventMap` is a type-only import and adds no runtime coupling.
  */
 
 import { mkdirSync, copyFileSync, existsSync } from 'node:fs';
@@ -15,16 +24,22 @@ import {
   type WorkflowTabHandle,
   type WorkflowLifecycleEvent,
   type WorkflowController,
-} from '../workflow/orchestrator.js';
-import { FileCheckpointStore } from '../workflow/checkpoint.js';
-import { createWorkflowSessionFactory } from '../workflow/cli-support.js';
-import { findLatestResumableCheckpoint } from '../workflow/checkpoint-selection.js';
-import { loadDefinition } from '../workflow/definition-loader.js';
-import type { WebEventBus } from './web-event-bus.js';
-import { type HumanGateRequestDto, toHumanGateRequestDto } from './web-ui-types.js';
+} from './orchestrator.js';
+import { FileCheckpointStore } from './checkpoint.js';
+import { createWorkflowSessionFactory } from './cli-support.js';
+import { findLatestResumableCheckpoint } from './checkpoint-selection.js';
+import { loadDefinition } from './definition-loader.js';
+import type { TypedEventBus } from '../event-bus/typed-event-bus.js';
+import type { WebEventMap } from '../web-ui/web-event-bus.js';
 import { getIronCurtainHome } from '../config/paths.js';
 import { loadConfig } from '../config/index.js';
-import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from '../workflow/types.js';
+import {
+  type HumanGateRequestDto,
+  toHumanGateRequestDto,
+  type WorkflowId,
+  type WorkflowCheckpoint,
+  type WorkflowDefinition,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // loadPastRun result types
@@ -79,7 +94,7 @@ function describeError(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 export interface WorkflowManagerOptions {
-  readonly eventBus: WebEventBus;
+  readonly eventBus: TypedEventBus<WebEventMap>;
   /**
    * Optional override for the base directory under which workflow runs are
    * stored. Defaults to `{getIronCurtainHome()}/workflow-runs`. The CLI
@@ -95,7 +110,7 @@ export interface WorkflowManagerOptions {
 
 export class WorkflowManager {
   private orchestrator: WorkflowOrchestrator | null = null;
-  private readonly eventBus: WebEventBus;
+  private readonly eventBus: TypedEventBus<WebEventMap>;
   private readonly baseDirOverride: string | undefined;
 
   constructor(options: WorkflowManagerOptions) {
@@ -332,7 +347,7 @@ export class WorkflowManager {
     };
   }
 
-  /** Maps WorkflowLifecycleEvent to WebEventBus events. */
+  /** Maps WorkflowLifecycleEvent to web event bus events. */
   private forwardLifecycleEvent(event: WorkflowLifecycleEvent): void {
     switch (event.kind) {
       case 'started':

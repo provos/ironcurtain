@@ -452,6 +452,32 @@ export interface HumanGateRequest {
   readonly summary: string;
 }
 
+/**
+ * JSON-serializable view of HumanGateRequest. The domain type's
+ * `presentedArtifacts` is a `ReadonlyMap` which doesn't JSON-encode;
+ * the DTO replaces it with the artifact names as a plain array.
+ */
+export interface HumanGateRequestDto {
+  readonly gateId: string;
+  readonly workflowId: string;
+  readonly stateName: string;
+  readonly acceptedEvents: readonly string[];
+  /** Artifact names only (not content). */
+  readonly presentedArtifacts: readonly string[];
+  readonly summary: string;
+}
+
+export function toHumanGateRequestDto(gate: HumanGateRequest): HumanGateRequestDto {
+  return {
+    gateId: gate.gateId,
+    workflowId: gate.workflowId,
+    stateName: gate.stateName,
+    acceptedEvents: gate.acceptedEvents,
+    presentedArtifacts: Array.from(gate.presentedArtifacts.keys()),
+    summary: gate.summary,
+  };
+}
+
 export interface HumanGateEvent {
   readonly type: HumanGateEventType;
   readonly prompt?: string;

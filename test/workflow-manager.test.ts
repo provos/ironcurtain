@@ -32,7 +32,7 @@ vi.mock('../src/workflow/cli-support.js', async (importOriginal) => {
   };
 });
 
-import { WorkflowManager } from '../src/web-ui/workflow-manager.js';
+import { WorkflowManager } from '../src/workflow/workflow-manager.js';
 import { WebEventBus } from '../src/web-ui/web-event-bus.js';
 import type { WorkflowId, WorkflowCheckpoint, WorkflowContext, WorkflowDefinition } from '../src/workflow/types.js';
 

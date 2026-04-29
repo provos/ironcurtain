@@ -719,7 +719,7 @@ export class IronCurtainDaemon {
 
   private async startWebUiServer(): Promise<void> {
     const { WebUiServer } = await import('../web-ui/web-ui-server.js');
-    const { WorkflowManager } = await import('../web-ui/workflow-manager.js');
+    const { WorkflowManager } = await import('../workflow/workflow-manager.js');
     const { TokenStreamBridge } = await import('../web-ui/token-stream-bridge.js');
 
     if (!this.controlRequestHandler) {

@@ -6,7 +6,7 @@ import type { SessionSource } from '../session/session-manager.js';
 import type { SessionStatus, DiagnosticEvent, ConversationTurn } from '../session/types.js';
 import type { JobDefinition, RunRecord } from '../cron/types.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
-import type { HumanGateRequest, WorkflowId } from '../workflow/types.js';
+import type { WorkflowId, HumanGateRequestDto } from '../workflow/types.js';
 import type { MessageLogEntry } from '../workflow/message-log.js';
 
 // Re-export MessageLogEntry so frontends can import it from the wire-types
@@ -268,34 +268,6 @@ export interface TransitionRecordDto {
   readonly durationMs: number;
   /** Summary of the agent output that produced this transition. */
   readonly agentMessage?: string;
-}
-
-export interface HumanGateRequestDto {
-  readonly gateId: string;
-  readonly workflowId: string;
-  readonly stateName: string;
-  readonly acceptedEvents: readonly string[];
-  /** Artifact names only (not content). */
-  readonly presentedArtifacts: readonly string[];
-  readonly summary: string;
-}
-
-/**
- * Converts a domain HumanGateRequest to the JSON-serializable DTO.
- *
- * HumanGateRequest.presentedArtifacts is a ReadonlyMap<string, string>
- * which does not serialize to JSON. This converter extracts the keys
- * as a plain array.
- */
-export function toHumanGateRequestDto(gate: HumanGateRequest): HumanGateRequestDto {
-  return {
-    gateId: gate.gateId,
-    workflowId: gate.workflowId,
-    stateName: gate.stateName,
-    acceptedEvents: gate.acceptedEvents,
-    presentedArtifacts: Array.from(gate.presentedArtifacts.keys()),
-    summary: gate.summary,
-  };
 }
 
 export interface WorkflowContextDto {

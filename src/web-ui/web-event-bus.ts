@@ -1,21 +1,19 @@
 /**
- * Typed pub/sub event bus for web UI events.
+ * Web UI event map and typed bus.
  *
- * Decouples event producers (daemon internals, transports) from
- * WebSocket consumers. The WebUiServer subscribes and broadcasts
- * to all connected clients.
+ * The transport-neutral pub/sub mechanics live in
+ * {@link ../event-bus/typed-event-bus.js | TypedEventBus}; this file owns
+ * the web-flavored event map and the `WebEventBus` alias used by the
+ * daemon, transports, and dispatch layer. The WebUiServer subscribes and
+ * broadcasts to all connected WebSocket clients.
  */
 
-import type {
-  SessionDto,
-  BudgetSummaryDto,
-  DaemonStatusDto,
-  EscalationDto,
-  HumanGateRequestDto,
-} from './web-ui-types.js';
+import type { SessionDto, BudgetSummaryDto, DaemonStatusDto, EscalationDto } from './web-ui-types.js';
+import type { HumanGateRequestDto } from '../workflow/types.js';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { RunRecord } from '../cron/types.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
+import { TypedEventBus, type EventHandler } from '../event-bus/typed-event-bus.js';
 
 /**
  * Typed event map. Each key maps to a specific payload type.
@@ -81,25 +79,12 @@ export interface WebEventMap {
 }
 
 export type WebEventName = keyof WebEventMap;
-export type WebEventHandler = <K extends WebEventName>(event: K, payload: WebEventMap[K]) => void;
+export type WebEventHandler = EventHandler<WebEventMap>;
 
 /**
- * Typed pub/sub bus for web UI events.
- * Producers call emit(); the WebUiServer subscribes and broadcasts to WS clients.
+ * Typed pub/sub bus for web UI events. Thin alias over the generic
+ * {@link TypedEventBus} that fixes the event map to {@link WebEventMap}.
+ * Producers call `emit()`; the WebUiServer subscribes and broadcasts to
+ * WS clients.
  */
-export class WebEventBus {
-  private handlers = new Set<WebEventHandler>();
-
-  subscribe(handler: WebEventHandler): () => void {
-    this.handlers.add(handler);
-    return () => {
-      this.handlers.delete(handler);
-    };
-  }
-
-  emit<K extends WebEventName>(event: K, payload: WebEventMap[K]): void {
-    for (const handler of this.handlers) {
-      handler(event, payload);
-    }
-  }
-}
+export class WebEventBus extends TypedEventBus<WebEventMap> {}

@@ -17,8 +17,9 @@ import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
 import { discoverWorkflowRuns } from './workflow-discovery.js';
-import { WorkflowManager } from '../web-ui/workflow-manager.js';
-import { WebEventBus } from '../web-ui/web-event-bus.js';
+import { WorkflowManager } from './workflow-manager.js';
+import { TypedEventBus } from '../event-bus/typed-event-bus.js';
+import type { WebEventMap } from '../web-ui/web-event-bus.js';
 import { countBySeverity, lintWorkflow, type Diagnostic } from './lint.js';
 import { defaultLintContext, runPreflight, type LintMode } from './lint-integration.js';
 import { loadDefinition } from './definition-loader.js';
@@ -429,10 +430,13 @@ function runInspect(args: string[]): void {
   // WorkflowManager owns the canonical "load a past run" logic. We point it at
   // the user-supplied baseDir via `baseDirOverride` so the same loader works
   // for both the daemon's home directory and arbitrary `inspect` targets.
-  // The CLI never starts workflows through this manager, so the EventBus is
+  // The CLI never starts workflows through this manager, so the event bus is
   // a no-op sink and the orchestrator created lazily inside the manager is
   // never used to spawn sessions.
-  const manager = new WorkflowManager({ eventBus: new WebEventBus(), baseDirOverride: baseDir });
+  const manager = new WorkflowManager({
+    eventBus: new TypedEventBus<WebEventMap>(),
+    baseDirOverride: baseDir,
+  });
 
   for (const run of runs) {
     const workflowId = run.workflowId;
