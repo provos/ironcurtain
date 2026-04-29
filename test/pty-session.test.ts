@@ -361,40 +361,62 @@ describe('waitForPtyReady', () => {
     }
   });
 
-  it('resolves immediately when the UDS socket file already exists', async () => {
-    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
-    const sockPath = join(tempDir, 'pty.sock');
-    // existsSync is what waitForPtyReady checks; a regular file is sufficient.
-    writeFileSync(sockPath, '');
-
-    const start = Date.now();
-    await waitForPtyReady(sockPath);
-    expect(Date.now() - start).toBeLessThan(500);
-  });
-
-  it('does not open a connection (would have triggered a fork on socat ,fork)', async () => {
-    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
-
-    // Spin up a UDS server that counts connection attempts. If
-    // waitForPtyReady opens a connection, the counter goes up.
-    const sockPath = join(tempDir, 'pty-counted.sock');
-    let connectAttempts = 0;
-
+  /**
+   * Spawns a real UDS listener that counts connection attempts. The
+   * connection counter lets tests assert that `waitForPtyReady` never
+   * opens a connection — the spawn-prevention property the fix relies on.
+   */
+  async function startCountingUdsListener(sockPath: string): Promise<{
+    connectAttempts: () => number;
+    close: () => Promise<void>;
+  }> {
     const { createServer } = await import('node:net');
+    let count = 0;
     const server = createServer((socket) => {
-      connectAttempts += 1;
+      count += 1;
       socket.destroy();
     });
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(sockPath, () => resolve());
     });
+    return {
+      connectAttempts: () => count,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  it('resolves immediately when a UDS socket already exists at the path', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'pty.sock');
+    const listener = await startCountingUdsListener(sockPath);
 
     try {
+      const start = Date.now();
       await waitForPtyReady(sockPath);
-      expect(connectAttempts).toBe(0);
+      expect(Date.now() - start).toBeLessThan(500);
+      // Spawn-prevention property: the readiness check did not connect.
+      expect(listener.connectAttempts()).toBe(0);
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await listener.close();
+    }
+  });
+
+  it('rejects a regular file at the socket path (would otherwise mask a stale leftover)', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'not-a-socket');
+    writeFileSync(sockPath, '');
+
+    vi.useFakeTimers();
+    try {
+      const promise = waitForPtyReady(sockPath);
+      const settled = promise.catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await settled;
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(/did not become ready/);
+    } finally {
+      vi.useRealTimers();
     }
   });
 

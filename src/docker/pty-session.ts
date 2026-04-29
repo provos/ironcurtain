@@ -15,7 +15,7 @@
 
 import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -901,14 +901,18 @@ async function verifyInitialPtySize(
  * Waits for the PTY socket file to appear (Linux UDS only). macOS TCP
  * skips this probe because the container's socat does not use `fork`.
  *
- * We poll for socket-file existence rather than opening a connection.
- * socat's `UNIX-LISTEN` creates the file at `bind()`, so existence is a
- * sufficient readiness signal — and avoids the connection-then-disconnect
+ * We poll for a UDS *inode* rather than opening a connection. socat's
+ * `UNIX-LISTEN` creates the socket file at `bind()`, so file existence
+ * is a sufficient readiness signal — and avoids the connect-and-close
  * that would trigger socat's `,fork` semantics, spawning a doomed child
- * process before the real `attachPty` connection arrives. That doomed
- * child can race the real one for shared per-agent state (e.g. Goose's
- * SQLite session DB at `~/.local/share/goose/sessions/sessions.db`),
- * producing "table schema_version already exists" migration errors.
+ * before the real `attachPty` connection arrives. That doomed child can
+ * race the real one for shared per-agent state (e.g. Goose's SQLite
+ * session DB at `~/.local/share/goose/sessions/sessions.db`), producing
+ * "table schema_version already exists" migration errors.
+ *
+ * We require the inode to be a socket — a stale regular file or
+ * directory at the path is not "ready", since the Linux/UDS attach path
+ * does not retry on connect failure.
  */
 export async function waitForPtyReady(target: PtyTarget): Promise<void> {
   if (typeof target !== 'string') {
@@ -919,11 +923,26 @@ export async function waitForPtyReady(target: PtyTarget): Promise<void> {
 
   const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (existsSync(target)) return;
+    if (isSocketPath(target)) return;
     await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
   }
 
   throw new Error(`PTY socket did not become ready within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
+}
+
+/**
+ * Returns true when `path` exists and is a UNIX domain socket. ENOENT is
+ * treated as "not ready yet"; other lstat errors propagate, since they
+ * indicate a setup problem (permissions, missing parent directory) that
+ * silent polling would only mask.
+ */
+function isSocketPath(path: string): boolean {
+  try {
+    return lstatSync(path).isSocket();
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
 }
 
 // --- Port allocation ---
