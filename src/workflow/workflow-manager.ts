@@ -31,10 +31,15 @@ import { findLatestResumableCheckpoint } from './checkpoint-selection.js';
 import { loadDefinition } from './definition-loader.js';
 import type { TypedEventBus } from '../event-bus/typed-event-bus.js';
 import type { WebEventMap } from '../web-ui/web-event-bus.js';
-import { type HumanGateRequestDto, toHumanGateRequestDto } from '../web-ui/web-ui-types.js';
 import { getIronCurtainHome } from '../config/paths.js';
 import { loadConfig } from '../config/index.js';
-import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from './types.js';
+import {
+  type HumanGateRequestDto,
+  toHumanGateRequestDto,
+  type WorkflowId,
+  type WorkflowCheckpoint,
+  type WorkflowDefinition,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // loadPastRun result types

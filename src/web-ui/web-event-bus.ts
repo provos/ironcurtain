@@ -8,13 +8,8 @@
  * broadcasts to all connected WebSocket clients.
  */
 
-import type {
-  SessionDto,
-  BudgetSummaryDto,
-  DaemonStatusDto,
-  EscalationDto,
-  HumanGateRequestDto,
-} from './web-ui-types.js';
+import type { SessionDto, BudgetSummaryDto, DaemonStatusDto, EscalationDto } from './web-ui-types.js';
+import type { HumanGateRequestDto } from '../workflow/types.js';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { RunRecord } from '../cron/types.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
