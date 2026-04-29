@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stageSkillsToBundle, createCachedStager } from '../src/skills/staging.js';
@@ -105,6 +105,29 @@ describe('stageSkillsToBundle', () => {
     stageSkillsToBundle([{ name: 'a', source: 'user', sourceDir: skillA, description: 'a' }], dest);
     expect(existsSync(resolve(dest, 'a'))).toBe(true);
     expect(existsSync(resolve(dest, 'b'))).toBe(false);
+  });
+
+  it('preserves the parent directory inode across re-stages (Docker bind-mount safety)', () => {
+    // Workflow bundles bind-mount the staging dir into a long-lived
+    // container. Linux bind mounts pin the source's inode at mount time,
+    // so removing and recreating the parent leaves the container's mount
+    // pointing at the freed inode. This test documents the invariant
+    // that future implementations of stageSkillsToBundle must preserve.
+    const sourceParent = resolve(tempDir, 'sources');
+    const a = writeSourceSkill(sourceParent, 'a');
+    const b = writeSourceSkill(sourceParent, 'b');
+
+    const dest = resolve(tempDir, 'staged');
+    stageSkillsToBundle([{ name: 'a', source: 'user', sourceDir: a, description: '' }], dest);
+    const inode1 = statSync(dest).ino;
+
+    stageSkillsToBundle([{ name: 'b', source: 'user', sourceDir: b, description: '' }], dest);
+    const inode2 = statSync(dest).ino;
+    expect(inode2).toBe(inode1);
+
+    stageSkillsToBundle([], dest);
+    const inode3 = statSync(dest).ino;
+    expect(inode3).toBe(inode1);
   });
 
   it('rejects skill names that traverse out of the staging dir', () => {

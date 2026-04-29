@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ResolvedSkill } from './types.js';
 
@@ -11,14 +11,26 @@ function computeSignature(skills: readonly ResolvedSkill[]): string {
 }
 
 /**
- * Wipes `destDir` and copies each resolved skill into
- * `<destDir>/<skill.name>/`. Skill names that resolve outside `destDir`
- * (`..` or absolute paths) are rejected.
+ * Replaces the contents of `destDir` with the resolved set: each skill
+ * is copied to `<destDir>/<skill.name>/`. Skill names that resolve
+ * outside `destDir` (`..` or absolute paths) are rejected.
+ *
+ * Wipes children individually rather than the parent itself. Workflow
+ * bundles bind-mount this directory into a long-lived container; on
+ * Linux a bind mount pins the source's inode at mount time, so removing
+ * and recreating the parent dir leaves the container's mount pointing
+ * at the freed (now-empty) inode. Per-child cleanup keeps the parent
+ * inode stable across re-stages.
  */
 export function stageSkillsToBundle(skills: readonly ResolvedSkill[], destDir: string): void {
   const normalizedDestDir = resolve(destDir);
-  rmSync(normalizedDestDir, { recursive: true, force: true });
-  mkdirSync(normalizedDestDir, { recursive: true });
+  if (existsSync(normalizedDestDir)) {
+    for (const entry of readdirSync(normalizedDestDir)) {
+      rmSync(resolve(normalizedDestDir, entry), { recursive: true, force: true });
+    }
+  } else {
+    mkdirSync(normalizedDestDir, { recursive: true });
+  }
 
   for (const skill of skills) {
     const target = resolve(normalizedDestDir, skill.name);

@@ -1,5 +1,8 @@
 # IronCurtain Clean Implementer Memory
 
+## Bug surface notes
+- [Docker bind mount staleness](docker-bind-mount-staleness.md) — `stageSkillsToBundle`'s rmSync+mkdirSync breaks Docker bind mounts on Linux (state-A snapshots fine, B/C see empty mount).
+
 ## Project Architecture
 - **Pipeline types**: `src/pipeline/types.ts` -- shared types for all pipeline modules
 - **PolicyEngine**: `src/trusted-process/policy-engine.ts` -- two-phase: structural invariants + compiled rules
