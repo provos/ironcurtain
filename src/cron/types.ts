@@ -5,7 +5,7 @@
  * and CLI commands.
  */
 
-import { SLUG_PATTERN, validateSlug } from '../types/slug.js';
+import { validateSlug } from '../types/slug.js';
 
 /**
  * Stable, user-chosen identifier for a cron job.
@@ -13,9 +13,6 @@ import { SLUG_PATTERN, validateSlug } from '../types/slug.js';
  * Branded to prevent mixing with other string identifiers.
  */
 export type JobId = string & { readonly __brand: 'JobId' };
-
-/** Regex for valid job IDs: 1-63 chars, lowercase alphanumeric, hyphens, or underscores. */
-export const JOB_ID_PATTERN: RegExp = SLUG_PATTERN;
 
 /** Validates and creates a JobId from a user-provided string. */
 export function createJobId(raw: string): JobId {

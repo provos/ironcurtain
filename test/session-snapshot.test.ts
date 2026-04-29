@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionSnapshot } from '../src/docker/pty-types.js';
-import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
+import { SESSION_STATE_FILENAME } from '../src/config/paths.js';
 import { validateResumeSession, loadSessionSnapshot } from '../src/docker/pty-session.js';
 
 /**

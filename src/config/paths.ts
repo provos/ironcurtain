@@ -3,8 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_STATE_FILENAME } from '../docker/pty-types.js';
 import type { BundleId } from '../session/types.js';
+import { JOB_ID_PATTERN } from '../types/slug.js';
 
 /**
  * Short slug length used in file/directory names that must fit under
@@ -72,6 +72,7 @@ function assertPathSafeSlug(kind: string, value: string): void {
  */
 export const SESSION_LOG_FILENAME = 'session.log';
 export const SESSION_METADATA_FILENAME = 'session-metadata.json';
+export const SESSION_STATE_FILENAME = 'session-state.json';
 
 /**
  * Validates a workflow state slug of the form `{stateId}.{visitCount}`
@@ -404,8 +405,6 @@ export function getWebUiStatePath(): string {
 export function getJobsDir(): string {
   return resolve(getIronCurtainHome(), 'jobs');
 }
-
-import { JOB_ID_PATTERN } from '../cron/types.js';
 
 /**
  * Validates that a job ID contains only safe characters.

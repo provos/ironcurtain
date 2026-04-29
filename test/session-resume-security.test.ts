@@ -11,12 +11,11 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionSnapshot } from '../src/docker/pty-types.js';
-import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
 import { validateResumeSession } from '../src/docker/pty-session.js';
 import { prepareConversationStateDir } from '../src/docker/docker-infrastructure.js';
 import type { ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import { scanResumableSessions } from '../src/mux/session-scanner.js';
-import { getSessionDir } from '../src/config/paths.js';
+import { getSessionDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
 
 function makeSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
   return {

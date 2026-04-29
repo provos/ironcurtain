@@ -9,8 +9,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { getSessionsDir, getSessionSandboxDir } from '../config/paths.js';
-import { SESSION_STATE_FILENAME } from '../docker/pty-types.js';
+import { getSessionsDir, getSessionSandboxDir, SESSION_STATE_FILENAME } from '../config/paths.js';
 import type { SessionSnapshot } from '../docker/pty-types.js';
 
 export type { SessionSnapshot } from '../docker/pty-types.js';

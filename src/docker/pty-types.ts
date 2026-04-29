@@ -43,9 +43,6 @@ export interface SessionSnapshot {
   readonly resumable: boolean;
 }
 
-/** Well-known filename for session state snapshots. */
-export const SESSION_STATE_FILENAME = 'session-state.json';
-
 /** Well-known directory for PTY session registration files. */
 export const PTY_REGISTRY_DIR_NAME = 'pty-registry';
 

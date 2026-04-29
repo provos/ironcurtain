@@ -287,10 +287,3 @@ export async function handleVirtualProxyTool(
       throw new Error(`Unknown virtual proxy tool: ${toolName}`);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Reserved server names
-// ---------------------------------------------------------------------------
-
-/** Server names reserved for internal use that cannot be used in mcp-servers.json. */
-export const RESERVED_SERVER_NAMES = new Set(['proxy']);

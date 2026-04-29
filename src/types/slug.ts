@@ -5,6 +5,9 @@
  */
 export const SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
+/** Regex for valid job IDs: 1-63 chars, lowercase alphanumeric, hyphens, or underscores. */
+export const JOB_ID_PATTERN: RegExp = SLUG_PATTERN;
+
 export function validateSlug(raw: string, label: string): void {
   if (!SLUG_PATTERN.test(raw)) {
     throw new Error(
