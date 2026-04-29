@@ -135,15 +135,8 @@ export async function checkDockerAvailable(execFileFn: ProbeExecFileFn = execFil
   };
 }
 
-/**
- * Result of credential detection for a given agent. `anthropicOAuthOnly`
- * is only meaningful for goose: it records whether Anthropic OAuth
- * credentials are present (and would have helped a claude-code session)
- * so the goose error message can tell a tester that OAuth is unusable
- * with goose. Combining it into a single struct lets us probe
- * `detectAuthMethod` once and share the result across the credential
- * decision and the error-message construction.
- */
+/** `anthropicOAuthOnly` is only meaningful for goose: it lets the goose
+ *  error message tell a tester that present OAuth credentials are unusable. */
 interface CredentialState {
   credKind: 'oauth' | 'apikey' | null;
   anthropicOAuthOnly: boolean;
@@ -340,8 +333,7 @@ async function resolveDefaultMode(
   const { preferredMode, preferredDockerAgent } = config.userConfig;
 
   if (preferredMode === 'builtin') {
-    // Order matters: fail before the Docker probe on the builtin path. Lock-in
-    // at test/preflight.test.ts "Builtin path must not probe Docker".
+    // Fail before the Docker probe — fast feedback for missing keys.
     const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
     if (apiKey.length === 0) {
       throw new PreflightError(builtinNeedsApiKeyMessage());

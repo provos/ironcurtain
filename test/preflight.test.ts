@@ -269,26 +269,24 @@ describe('resolveSessionMode', () => {
         expect(isDockerAvailable).not.toHaveBeenCalled();
       });
 
-      it('throws when only OAuth is configured (no ANTHROPIC_API_KEY)', async () => {
+      it('throws without probing OAuth or Docker when no ANTHROPIC_API_KEY is set', async () => {
+        // Two cases that both hit the same `apiKey.length === 0` check before
+        // any auth or Docker probe. Spied sources prove the shortcut.
+        const dockerSpy = vi.fn(dockerAvailable);
+        const loadFromFile = vi.fn(() => null);
+        const loadFromKeychain = vi.fn(() => null);
+
         const promise = resolveSessionMode({
           config: createTestConfig({ anthropicApiKey: '', preferredMode: 'builtin' }),
-          isDockerAvailable: dockerAvailable,
-          credentialSources: oauthOnlySources,
+          isDockerAvailable: dockerSpy,
+          credentialSources: { loadFromFile, loadFromKeychain },
         });
 
         await expect(promise).rejects.toThrow(PreflightError);
         await expect(promise).rejects.toThrow(/no ANTHROPIC_API_KEY/);
-      });
-
-      it('throws when nothing is configured (same message as OAuth-only)', async () => {
-        const promise = resolveSessionMode({
-          config: createTestConfig({ anthropicApiKey: '', preferredMode: 'builtin' }),
-          isDockerAvailable: dockerAvailable,
-          credentialSources: noOAuthSources,
-        });
-
-        await expect(promise).rejects.toThrow(PreflightError);
-        await expect(promise).rejects.toThrow(/no ANTHROPIC_API_KEY/);
+        expect(dockerSpy).not.toHaveBeenCalled();
+        expect(loadFromFile).not.toHaveBeenCalled();
+        expect(loadFromKeychain).not.toHaveBeenCalled();
       });
     });
 
@@ -306,11 +304,8 @@ describe('resolveSessionMode', () => {
       });
 
       it('--agent builtin succeeds even with preferredMode = builtin and no API key', async () => {
-        // Lock-in: resolveExplicit('builtin', ...) intentionally does NOT
-        // check the API key. The agent loop fails later on the actual API
-        // call. If a future "symmetry" refactor tightens this path, it
-        // should have to delete this test on purpose — see the design's
-        // out-of-scope notes.
+        // resolveExplicit('builtin', ...) intentionally does not check the API
+        // key — the agent loop fails later on the actual API call.
         const dockerSpy = vi.fn().mockResolvedValue({ available: true });
         const result = await resolveSessionMode({
           config: createTestConfig({ anthropicApiKey: '', preferredMode: 'builtin' }),
@@ -321,9 +316,6 @@ describe('resolveSessionMode', () => {
 
         expect(result.mode).toEqual({ kind: 'builtin' });
         expect(result.reason).toBe('Explicit --agent builtin');
-        // Explicit-builtin path skips the Docker probe — only resolveExplicit
-        // produces this combination; the bare `mode === 'builtin'` assertion
-        // alone would also pass the prior auto-detect code.
         expect(dockerSpy).not.toHaveBeenCalled();
       });
 

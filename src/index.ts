@@ -122,7 +122,6 @@ export async function main(args?: string[]): Promise<void> {
     requestedAgent: agentName ? (agentName as AgentId) : undefined,
   });
 
-  // Skip when --agent was explicit -- the user already knows what they asked for.
   if (!agentName) {
     process.stderr.write(chalk.dim(`${formatModeLine(preflight)}\n`));
   }

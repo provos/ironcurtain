@@ -539,10 +539,7 @@ describe('runDoctorCommand', () => {
   });
 
   it('prints a Preferred mode line in the Configuration section', async () => {
-    // The new checkPreferredMode wiring should surface its result to
-    // stdout under the Configuration heading. We don't assert pass/fail
-    // here because Docker availability varies by test environment; we
-    // only assert the line is present and labeled correctly.
+    // Docker availability varies by env; only assert the line is labeled.
     const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
     const probeStub = vi.fn(async (): Promise<ProbeResult> => ({ status: 'ok', toolCount: 1, elapsedMs: 10 }));
     const { output } = await captureOutput(() => runDoctorCommand([], { probeMcpServer: probeStub }));
