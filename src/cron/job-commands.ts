@@ -592,7 +592,7 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
   const { resolveSessionMode, formatModeLine } = await import('../session/preflight.js');
   const { loadConfig } = await import('../config/index.js');
   const preflight = await resolveSessionMode({ config: loadConfig() });
-  console.error(formatModeLine(preflight));
+  process.stderr.write(`${formatModeLine(preflight)}\n`);
   const { IronCurtainDaemon } = await import('../daemon/ironcurtain-daemon.js');
   const daemon = new IronCurtainDaemon({ mode: preflight.mode, noSignal: true });
   const record = await daemon.runJobNow(job.id);

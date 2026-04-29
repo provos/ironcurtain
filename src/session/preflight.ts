@@ -303,11 +303,10 @@ async function resolveExplicit(
     };
   }
 
-  const [dockerStatus, credState] = await Promise.all([
-    isDockerAvailable(),
-    detectCredentialState(agent, config, credentialSources),
-  ]);
-
+  // Probe Docker first; credential detection can refresh OAuth tokens
+  // (rotating the refresh token) and we don't want that side effect on a
+  // failure path.
+  const dockerStatus = await isDockerAvailable();
   if (!dockerStatus.available) {
     throw new PreflightError(
       `--agent ${agent} requires Docker, but it is not available:\n\n${dockerStatus.detailedMessage}\n\n` +
@@ -315,6 +314,7 @@ async function resolveExplicit(
     );
   }
 
+  const credState = await detectCredentialState(agent, config, credentialSources);
   if (credState.credKind === null) {
     throw new PreflightError(credentialErrorMessageForExplicit(agent, config, credState.anthropicOAuthOnly));
   }
@@ -342,15 +342,16 @@ async function resolveDefaultMode(
   }
 
   const agent = preferredDockerAgent as AgentId;
-  const [dockerStatus, credState] = await Promise.all([
-    isDockerAvailable(),
-    detectCredentialState(agent, config, credentialSources),
-  ]);
 
+  // Probe Docker first; credential detection can refresh OAuth tokens
+  // (rotating the refresh token) and we don't want that side effect on a
+  // failure path.
+  const dockerStatus = await isDockerAvailable();
   if (!dockerStatus.available) {
     throw new PreflightError(dockerUnavailableMessage(dockerStatus.detailedMessage));
   }
 
+  const credState = await detectCredentialState(agent, config, credentialSources);
   if (credState.credKind === null) {
     throw new PreflightError(credentialErrorMessageForPreferredMode(agent, config, credState.anthropicOAuthOnly));
   }

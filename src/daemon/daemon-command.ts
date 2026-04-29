@@ -116,7 +116,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     requestedAgent: values.agent ? (values.agent as AgentId) : undefined,
   });
   const mode = preflight.mode;
-  console.error(formatModeLine(preflight));
+  process.stderr.write(`${formatModeLine(preflight)}\n`);
 
   if (!subcommand) {
     // Start the daemon
