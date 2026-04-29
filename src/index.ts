@@ -122,9 +122,13 @@ export async function main(args?: string[]): Promise<void> {
     requestedAgent: agentName ? (agentName as AgentId) : undefined,
   });
 
-  // Log auto-selection reason (skip for explicit --agent)
+  // Log the resolved mode (skip when --agent was explicit -- the user
+  // already knows what they asked for). Docker mode prints the agent and
+  // auth kind from the resolver's reason field; builtin mode is a single
+  // word with no parenthetical.
   if (!agentName) {
-    process.stderr.write(chalk.dim(`Mode: ${preflight.mode.kind} (${preflight.reason})\n`));
+    const line = preflight.mode.kind === 'docker' ? `Mode: docker / ${preflight.reason}` : 'Mode: builtin';
+    process.stderr.write(chalk.dim(`${line}\n`));
   }
 
   const mode = preflight.mode;

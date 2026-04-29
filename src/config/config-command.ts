@@ -21,11 +21,13 @@ import {
   WEB_SEARCH_PROVIDER_URLS,
   GOOSE_PROVIDERS,
   DOCKER_AGENTS,
+  SESSION_MODES,
   type UserConfig,
   type ResolvedUserConfig,
   type WebSearchProvider,
   type GooseProvider,
   type DockerAgent,
+  type SessionModeKind,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
 import type { MCPServerConfig } from './types.js';
@@ -108,6 +110,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     'gooseProvider',
     'gooseModel',
     'preferredDockerAgent',
+    'preferredMode',
   ] as const;
   for (const key of topLevelKeys) {
     if (key in pending && pending[key] !== undefined && pending[key] !== resolved[key]) {
@@ -714,6 +717,59 @@ async function handleServerCredentials(resolved: ResolvedUserConfig, pending: Us
   }
 }
 
+// ─── Session Mode ─────────────────────────────────────────────
+
+/** Human-readable labels for session modes. */
+const SESSION_MODE_LABELS: Readonly<Record<SessionModeKind, string>> = {
+  docker: 'Docker (recommended)',
+  builtin: 'Builtin (V8 sandbox)',
+};
+
+/** Short labels used in hints (no parenthetical). */
+const SESSION_MODE_SHORT_LABELS: Readonly<Record<SessionModeKind, string>> = {
+  docker: 'Docker',
+  builtin: 'Builtin',
+};
+
+async function handleSessionMode(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentMode = pending.preferredMode ?? resolved.preferredMode;
+
+    const field = await p.select({
+      message: 'Session Mode',
+      options: [
+        {
+          value: 'preferredMode',
+          label: 'Preferred mode',
+          hint: SESSION_MODE_LABELS[currentMode],
+        },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'preferredMode') {
+      const modeOptions = SESSION_MODES.map((mode) => ({
+        value: mode,
+        label: SESSION_MODE_LABELS[mode],
+        hint: mode === currentMode ? '(current)' : undefined,
+      }));
+
+      const selected = await p.select({
+        message: 'Select preferred session mode:',
+        options: modeOptions,
+        initialValue: currentMode,
+      });
+      if (isCancelled(selected)) continue;
+      const mode = selected as SessionModeKind;
+      if (mode !== currentMode) {
+        pending.preferredMode = mode;
+      }
+    }
+  }
+}
+
 // ─── Docker Agent Settings ────────────────────────────────────
 
 /** Human-readable labels for Goose providers. */
@@ -888,6 +944,10 @@ function dockerAgentHint(resolved: ResolvedUserConfig, pending: UserConfig): str
   return DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
 }
 
+function sessionModeHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  return SESSION_MODE_SHORT_LABELS[pending.preferredMode ?? resolved.preferredMode];
+}
+
 function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const diffs = computeDiff(resolved, pending);
   if (diffs.length === 0) return 'no changes';
@@ -931,6 +991,7 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'websearch', label: `Web Search (${webSearchHint(resolved, pending)})` },
         { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
         { value: 'memory', label: `Memory (${memoryHint(resolved, pending)})` },
+        { value: 'sessionMode', label: `Session Mode (${sessionModeHint(resolved, pending)})` },
         { value: 'dockerAgent', label: `Docker Agent (${dockerAgentHint(resolved, pending)})` },
         { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
         { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
@@ -962,6 +1023,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'memory':
         await handleMemory(resolved, pending);
+        break;
+      case 'sessionMode':
+        await handleSessionMode(resolved, pending);
         break;
       case 'dockerAgent':
         await handleDockerAgent(resolved, pending);

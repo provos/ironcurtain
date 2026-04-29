@@ -740,6 +740,61 @@ describe('saveUserConfig', () => {
   }
 });
 
+describe('preferredMode field', () => {
+  let testHome: string;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    testHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-prefmode-'));
+    for (const key of ENV_VARS_TO_ISOLATE) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    process.env.IRONCURTAIN_HOME = testHome;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_VARS_TO_ISOLATE) {
+      if (savedEnv[key] !== undefined) {
+        process.env[key] = savedEnv[key];
+      } else {
+        delete process.env[key];
+      }
+    }
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  function writeConfigFile(config: Record<string, unknown>): void {
+    mkdirSync(testHome, { recursive: true });
+    writeFileSync(resolve(testHome, 'config.json'), JSON.stringify(config, null, 2));
+  }
+
+  it('defaults to "docker" when not set', () => {
+    const config = loadUserConfig();
+    expect(config.preferredMode).toBe('docker');
+  });
+
+  it('accepts "docker"', () => {
+    writeConfigFile({ preferredMode: 'docker' });
+    expect(loadUserConfig().preferredMode).toBe('docker');
+  });
+
+  it('accepts "builtin"', () => {
+    writeConfigFile({ preferredMode: 'builtin' });
+    expect(loadUserConfig().preferredMode).toBe('builtin');
+  });
+
+  it('rejects "auto" with a clear schema error', () => {
+    writeConfigFile({ preferredMode: 'auto' });
+    expect(() => loadUserConfig()).toThrow(/preferredMode/);
+  });
+
+  it('rejects unrelated string values', () => {
+    writeConfigFile({ preferredMode: 'pty' });
+    expect(() => loadUserConfig()).toThrow(/preferredMode/);
+  });
+});
+
 describe('validateModelId', () => {
   it('returns undefined for valid model IDs', () => {
     expect(validateModelId('anthropic:claude-sonnet-4-6')).toBeUndefined();
