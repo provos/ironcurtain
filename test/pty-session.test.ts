@@ -339,3 +339,92 @@ describe('PTY resize via socat', () => {
     }
   });
 });
+
+// --- waitForPtyReady regression tests ---
+//
+// Regression: a connect-based probe against a `socat ...,fork` listener spawns
+// a doomed child for the probe itself, before the real attach connects. That
+// pre-spawned child can race the real attach for shared per-agent state (e.g.
+// Goose's SQLite session DB), producing migration errors. The fix is to poll
+// the socket FILE rather than open a CONNECTION.
+
+describe('waitForPtyReady', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'pty-readiness-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves immediately when the UDS socket file already exists', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'pty.sock');
+    // existsSync is what waitForPtyReady checks; a regular file is sufficient.
+    writeFileSync(sockPath, '');
+
+    const start = Date.now();
+    await waitForPtyReady(sockPath);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it('does not open a connection (would have triggered a fork on socat ,fork)', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+
+    // Spin up a UDS server that counts connection attempts. If
+    // waitForPtyReady opens a connection, the counter goes up.
+    const sockPath = join(tempDir, 'pty-counted.sock');
+    let connectAttempts = 0;
+
+    const { createServer } = await import('node:net');
+    const server = createServer((socket) => {
+      connectAttempts += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+
+    try {
+      await waitForPtyReady(sockPath);
+      expect(connectAttempts).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('throws when the UDS socket never appears within the deadline', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'never-appears.sock');
+
+    // The default deadline is 30s; this test sets a shorter wall-clock budget
+    // by leaning on vi.useFakeTimers and advancing past the deadline.
+    vi.useFakeTimers();
+    try {
+      const promise = waitForPtyReady(sockPath);
+      // Attach a catch to avoid unhandled rejection warnings while we tick.
+      const settled = promise.catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await settled;
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(/did not become ready/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is a no-op for TCP targets (macOS path delegates to attachPty retry)', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    // Pass an unreachable TCP target. If waitForPtyReady tried to connect or
+    // poll for file existence, it would either error or spin until timeout.
+    // Instead it returns immediately as a defensive no-op.
+    const start = Date.now();
+    await waitForPtyReady({ host: '127.0.0.1', port: 1 });
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+});

@@ -898,45 +898,32 @@ async function verifyInitialPtySize(
 // --- Readiness polling ---
 
 /**
- * Waits for the PTY socket/port to become connectable.
+ * Waits for the PTY socket file to appear (Linux UDS only). macOS TCP
+ * skips this probe because the container's socat does not use `fork`.
+ *
+ * We poll for socket-file existence rather than opening a connection.
+ * socat's `UNIX-LISTEN` creates the file at `bind()`, so existence is a
+ * sufficient readiness signal — and avoids the connection-then-disconnect
+ * that would trigger socat's `,fork` semantics, spawning a doomed child
+ * process before the real `attachPty` connection arrives. That doomed
+ * child can race the real one for shared per-agent state (e.g. Goose's
+ * SQLite session DB at `~/.local/share/goose/sessions/sessions.db`),
+ * producing "table schema_version already exists" migration errors.
  */
-async function waitForPtyReady(target: PtyTarget): Promise<void> {
+export async function waitForPtyReady(target: PtyTarget): Promise<void> {
+  if (typeof target !== 'string') {
+    // macOS TCP path is guarded out at the call site (pty-session.ts ~534);
+    // this branch exists only as a defensive no-op so the helper stays total.
+    return;
+  }
+
   const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
-
   while (Date.now() < deadline) {
-    const connected = await tryConnect(target);
-    if (connected) return;
-
+    if (existsSync(target)) return;
     await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
   }
 
   throw new Error(`PTY socket did not become ready within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
-}
-
-/**
- * Tries to connect to a UDS target. Returns true if the connection succeeds.
- * Used only for Linux readiness polling (macOS TCP skips the readiness probe).
- */
-function tryConnect(target: PtyTarget): Promise<boolean> {
-  return new Promise((resolve) => {
-    const conn = connectToTarget(target);
-
-    const timer = setTimeout(() => {
-      conn.destroy();
-      resolve(false);
-    }, 1000);
-
-    conn.on('connect', () => {
-      clearTimeout(timer);
-      conn.destroy();
-      resolve(true);
-    });
-
-    conn.on('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
 }
 
 // --- Port allocation ---
