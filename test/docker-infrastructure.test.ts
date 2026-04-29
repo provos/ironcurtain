@@ -418,6 +418,59 @@ describe('createSessionContainers', () => {
     expect(mounts.some((m) => m.source === core.auditLogPath)).toBe(false);
   });
 
+  // --- Test (skills mount) ---
+  it('mounts the staged skills directory read-only when core.skillsDir is set', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+    const skillsDir = join(tempDir, 'session', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const coreWithSkills: PreContainerInfrastructure = { ...core, skillsDir };
+
+    await createSessionContainers(coreWithSkills, makeMockConfig());
+
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+
+    // The mount target is the cross-vendor common path; both Claude Code
+    // and Goose discover SKILL.md under this prefix in the container.
+    const skillsMount = mounts.find((m) => m.target === '/home/codespace/.agents/skills');
+    expect(skillsMount).toBeDefined();
+    expect(skillsMount!.source).toBe(skillsDir);
+    expect(skillsMount!.readonly).toBe(true);
+  });
+
+  it('omits the skills mount entirely when core.skillsDir is undefined', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+
+    await createSessionContainers(core, makeMockConfig());
+
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+    expect(mounts.some((m) => m.target === '/home/codespace/.agents/skills')).toBe(false);
+  });
+
+  it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {
+    // Workflow-mode bundles always create the skills dir at container
+    // start so per-state persona transitions can re-stage into it later
+    // (the bind mount is established once and cannot be added post-hoc).
+    // An empty initial dir must still produce a mount.
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+    const skillsDir = join(tempDir, 'session', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    // No skill subdirs written — dir is empty.
+    const coreWithEmpty: PreContainerInfrastructure = { ...core, skillsDir };
+
+    await createSessionContainers(coreWithEmpty, makeMockConfig());
+
+    const mounts = createCalls[0].mounts;
+    const skillsMount = mounts.find((m) => m.target === '/home/codespace/.agents/skills');
+    expect(skillsMount).toBeDefined();
+    expect(skillsMount!.source).toBe(skillsDir);
+    expect(skillsMount!.readonly).toBe(true);
+  });
+
   // --- Test B (error-path critical) ---
   // This is the test that would have caught Fix 1's bug: the pre-fix catch
   // passed containerId:null to cleanupContainers, so a failed connectivity

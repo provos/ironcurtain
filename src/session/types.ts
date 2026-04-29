@@ -417,6 +417,15 @@ export interface SessionOptions {
   readonly stateSlug?: string;
 
   /**
+   * Workflow-bundled skills directory: `<workflow-pkg>/skills/`.
+   * When set, skills here are layered into the session's resolved skill
+   * set (see `src/skills/discovery.ts` for the layering order). Ignored
+   * in borrow mode — the workflow bundle has already mounted its merged
+   * skill set, so per-state resolution would just stomp on it.
+   */
+  readonly workflowSkillsDir?: string;
+
+  /**
    * The agent-CLI conversation id. Used as `--session-id` on first turn
    * or `--resume` on subsequent turns. Required for Docker sessions
    * (the factory will not mint on behalf of callers); ignored for builtin

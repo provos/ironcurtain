@@ -1,0 +1,315 @@
+/**
+ * Tests for borrow-mode skill re-staging in `buildSessionConfig`.
+ *
+ * Workflow shared-container mode reuses one Docker container across
+ * multiple agent states. The `/home/codespace/.agents/skills` bind
+ * mount is established once at container start, but different states
+ * may use different personas — and therefore different skill sets.
+ *
+ * The orchestrator handles this by calling `buildSessionConfig` for
+ * each state with a borrow-mode `workflowInfrastructure`. That branch
+ * re-resolves user + persona + workflow skills and re-stages them into
+ * the bundle's `skillsDir`. Because the bind mount is live, the
+ * container picks up the new contents without remounting.
+ *
+ * These tests verify the re-staging happens, in lockstep with the
+ * resolved set, and that single-session/standalone mode is unaffected.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import * as loggerModule from '../src/logger.js';
+import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
+
+import { buildSessionConfig } from '../src/session/index.js';
+import { createSessionId, type BundleId } from '../src/session/types.js';
+import type { IronCurtainConfig } from '../src/config/types.js';
+import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
+
+const TEST_HOME = `${REAL_TMP}/ironcurtain-skills-borrow-test-${process.pid}`;
+
+function createTestConfig(): IronCurtainConfig {
+  return {
+    auditLogPath: './audit.jsonl',
+    allowedDirectory: TEST_SANDBOX_DIR,
+    mcpServers: { filesystem: { command: 'echo', args: ['test'] } },
+    protectedPaths: [],
+    generatedDir: resolve(TEST_HOME, 'generated'),
+    constitutionPath: `${REAL_TMP}/skills-borrow-test-constitution.md`,
+    agentModelId: 'anthropic:claude-sonnet-4-6',
+    escalationTimeoutSeconds: 300,
+    userConfig: {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      anthropicApiKey: 'test-api-key',
+      googleApiKey: '',
+      openaiApiKey: '',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: {
+        maxTotalTokens: 1_000_000,
+        maxSteps: 200,
+        maxSessionSeconds: 1800,
+        maxEstimatedCostUsd: 5.0,
+        warnThresholdPercent: 80,
+      },
+      autoCompact: {
+        enabled: false,
+        thresholdTokens: 80_000,
+        keepRecentMessages: 10,
+        summaryModelId: 'anthropic:claude-haiku-4-5',
+      },
+      autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
+      auditRedaction: { enabled: true },
+      memory: { enabled: false, autoSave: false, llmBaseUrl: undefined, llmApiKey: undefined },
+    },
+  } as unknown as IronCurtainConfig;
+}
+
+/** Writes a minimal compiled-policy.json so `loadGeneratedPolicy` succeeds. */
+function writeMinimalPolicy(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    resolve(dir, 'compiled-policy.json'),
+    JSON.stringify({
+      rules: [
+        {
+          name: 'allow-fs',
+          description: 'test',
+          principle: 'test',
+          if: { server: ['filesystem'] },
+          then: 'allow',
+          reason: 'test',
+        },
+      ],
+    }),
+  );
+}
+
+/** Writes a SKILL.md package under <root>/<dirName>/. */
+function writeSkill(root: string, dirName: string, frontmatter: { name: string; description: string }): void {
+  const skillDir = resolve(root, dirName);
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(
+    resolve(skillDir, 'SKILL.md'),
+    `---\nname: ${frontmatter.name}\ndescription: "${frontmatter.description}"\n---\nbody\n`,
+  );
+}
+
+/** Persona-on-disk helper (no memory opt-out). */
+function createTestPersona(name: string): void {
+  const personaDir = resolve(TEST_HOME, 'personas', name);
+  const generatedDir = resolve(personaDir, 'generated');
+  mkdirSync(generatedDir, { recursive: true });
+  mkdirSync(resolve(personaDir, 'workspace'), { recursive: true });
+  writeFileSync(
+    resolve(personaDir, 'persona.json'),
+    JSON.stringify({ name, description: `Test persona ${name}`, createdAt: '2026-04-27T00:00:00.000Z' }),
+  );
+  writeMinimalPolicy(generatedDir);
+}
+
+/**
+ * Builds a fake `DockerInfrastructure` shaped well enough for borrow
+ * mode in `buildSessionConfig`. Only the fields read by that path
+ * matter (`skillsDir`, `bundleDir`, `escalationDir`, `auditLogPath`).
+ */
+function makeFakeBundle(skillsDir: string, bundleDir: string): DockerInfrastructure {
+  return {
+    bundleId: 'fake-bundle-id' as BundleId,
+    bundleDir,
+    workspaceDir: resolve(bundleDir, 'workspace'),
+    escalationDir: resolve(bundleDir, 'escalations'),
+    auditLogPath: resolve(bundleDir, 'audit.jsonl'),
+    skillsDir,
+    setTokenSessionId: () => {},
+    // Remaining fields are typed as required, but borrow-mode
+    // `buildSessionConfig` never reads them. Cast through `unknown` so
+    // TypeScript accepts the partial shape.
+  } as unknown as DockerInfrastructure;
+}
+
+beforeEach(() => {
+  process.env['IRONCURTAIN_HOME'] = TEST_HOME;
+  mkdirSync(resolve(TEST_HOME, 'generated'), { recursive: true });
+  writeMinimalPolicy(resolve(TEST_HOME, 'generated'));
+});
+
+afterEach(() => {
+  loggerModule.teardown();
+  delete process.env['IRONCURTAIN_HOME'];
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
+
+describe('buildSessionConfig — borrow-mode skill re-staging', () => {
+  it('re-stages the resolved set into the bundle skillsDir', () => {
+    // User-global skill is always layered in.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    // Workflow-bundled skill: the orchestrator passes the dir in opts.
+    const workflowPkg = resolve(TEST_HOME, 'workflow-pkg');
+    const workflowSkills = resolve(workflowPkg, 'skills');
+    writeSkill(workflowSkills, 'wf-tool', { name: 'wf-tool', description: 'w' });
+
+    // Bundle exists with the bind-mount target already created.
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      workflowInfrastructure: bundle,
+      workflowSkillsDir: workflowSkills,
+    });
+
+    // The merged set was staged into the bundle's skillsDir.
+    expect(existsSync(resolve(skillsDir, 'global-tool', 'SKILL.md'))).toBe(true);
+    expect(existsSync(resolve(skillsDir, 'wf-tool', 'SKILL.md'))).toBe(true);
+  });
+
+  it('layers persona skills on top of user/workflow on state transition', () => {
+    // User layer.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    // Persona layer (this is the part the bundle-creation pass cannot
+    // see — it appears only when the state runs under a persona).
+    createTestPersona('reviewer');
+    const personaSkills = resolve(TEST_HOME, 'personas', 'reviewer', 'skills');
+    writeSkill(personaSkills, 'review-tool', { name: 'review-tool', description: 'p' });
+
+    // Workflow layer.
+    const workflowSkills = resolve(TEST_HOME, 'workflow-pkg', 'skills');
+    writeSkill(workflowSkills, 'wf-tool', { name: 'wf-tool', description: 'w' });
+
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      persona: 'reviewer',
+      workflowInfrastructure: bundle,
+      workflowSkillsDir: workflowSkills,
+    });
+
+    // All three layers visible after re-staging.
+    const staged = readdirSync(skillsDir).sort();
+    expect(staged).toEqual(['global-tool', 'review-tool', 'wf-tool']);
+  });
+
+  it('wipes stale entries when re-staged for a state with a smaller skill set', () => {
+    // Pre-stage a leftover skill from a previous state's re-stage.
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(resolve(skillsDir, 'leftover-from-prior-state'), { recursive: true });
+    writeFileSync(resolve(skillsDir, 'leftover-from-prior-state', 'SKILL.md'), '---\nname: x\ndescription: y\n---\n');
+
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      workflowInfrastructure: bundle,
+      // No workflow skills, no persona — only the user-global layer.
+    });
+
+    // Leftover gone, only the new resolved set remains.
+    expect(readdirSync(skillsDir).sort()).toEqual(['global-tool']);
+  });
+
+  it('returns sessionSkills=[] in borrow mode (staging happens as a side effect)', () => {
+    // Borrow-mode callers never plumb resolvedSkills back through to
+    // docker-infrastructure (the bundle already exists). The contract
+    // is that `SessionDirConfig.resolvedSkills` is empty in borrow mode
+    // — the staging side-effect is the visible behavior instead.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    const result = buildSessionConfig(config, sessionId, sessionId, {
+      workflowInfrastructure: bundle,
+    });
+    expect(result.resolvedSkills).toEqual([]);
+  });
+
+  it('skips re-staging when the bundle has no skillsDir', () => {
+    // A bundle without skillsDir means the mount was never established
+    // (standalone bundle reused via some hypothetical caller); we must
+    // not silently create a host directory the container cannot see.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    mkdirSync(bundleDir, { recursive: true });
+    const bundle = {
+      ...makeFakeBundle('UNUSED', bundleDir),
+      skillsDir: undefined,
+    } as unknown as DockerInfrastructure;
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      workflowInfrastructure: bundle,
+    });
+
+    // No skills dir was created at the bundle.
+    expect(existsSync(resolve(bundleDir, 'skills'))).toBe(false);
+  });
+
+  it('returns the resolved set in standalone mode (no side-effect staging)', () => {
+    // Standalone path: the resolved set rides through SessionDirConfig
+    // and gets staged later by docker-infrastructure on initial bundle
+    // creation. `buildSessionConfig` itself does no staging here.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    const result = buildSessionConfig(config, sessionId, sessionId, {});
+    const names = result.resolvedSkills?.map((s) => s.name) ?? [];
+    expect(names).toContain('global-tool');
+  });
+});
+
+describe('readFileSync sanity check on staged files', () => {
+  it('preserves frontmatter content under bundle skillsDir', () => {
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'detail', { name: 'detail', description: 'preserved' });
+
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      workflowInfrastructure: bundle,
+    });
+
+    const staged = readFileSync(resolve(skillsDir, 'detail', 'SKILL.md'), 'utf-8');
+    expect(staged).toContain('name: detail');
+    expect(staged).toContain('description: "preserved"');
+  });
+});

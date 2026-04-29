@@ -38,6 +38,8 @@ import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from '
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { errorMessage } from '../utils/error-message.js';
+import { stageSkillsToBundle } from '../skills/staging.js';
+import type { ResolvedSkill } from '../skills/types.js';
 import * as logger from '../logger.js';
 
 /**
@@ -165,6 +167,22 @@ export interface PreContainerInfrastructure {
   /** Conversation state config from the adapter, if resume is supported. */
   readonly conversationStateConfig?: ConversationStateConfig;
   /**
+   * Host-side staged skills directory, bind-mounted read-only into the
+   * container at `CONTAINER_SKILLS_DIR`.
+   *
+   * In workflow mode this is always set: the staging dir (and bind
+   * mount) is created at container start even when the initial skill
+   * set is empty, so per-state persona skills layered in later (via
+   * `buildSessionConfig` borrow-mode re-staging) become visible without
+   * remounting the container. The bind mount is live; rewriting the
+   * host directory updates the container's view in place.
+   *
+   * In standalone mode this is set only when the resolved skill set
+   * was non-empty at session start (skills are static for the session's
+   * lifetime — no persona switching).
+   */
+  readonly skillsDir?: string;
+  /**
    * Routes token-stream events from the MITM proxy's LLM API tap under the
    * given session ID, or disables routing when `undefined`.
    *
@@ -207,6 +225,13 @@ const CONTAINER_NAME_PREFIX = 'ironcurtain-';
 const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
 /**
+ * Container path where the merged skill set is bind-mounted read-only.
+ * Matches the cross-vendor common path used by Claude Code, Goose, and
+ * Codex for SKILL.md discovery (see docs/designs/skills-capability.md).
+ */
+const CONTAINER_SKILLS_DIR = '/home/codespace/.agents/skills';
+
+/**
  * Prepares the shared (non-container) parts of Docker session infrastructure.
  *
  * Sets up proxies (Code Mode + MITM), CA, fake keys, orientation files, and
@@ -231,6 +256,7 @@ export async function prepareDockerInfrastructure(
   bundleId: BundleId,
   workflowId?: WorkflowId,
   scope?: string,
+  resolvedSkills?: readonly ResolvedSkill[],
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -463,6 +489,30 @@ export async function prepareDockerInfrastructure(
       ? prepareConversationStateDir(bundleDir, conversationStateConfig)
       : undefined;
 
+    // Stage merged skill set under the bundle. In workflow mode the
+    // staging dir is ALWAYS created (even if `resolvedSkills` is empty)
+    // because a single bundle is reused across states with different
+    // personas: the bind mount can only be established at container
+    // start, but persona transitions later in the run may add skills
+    // that must be visible to the agent. The bind mount is live, so
+    // re-staging the host directory at state-transition time updates
+    // the container's view in place (see `buildSessionConfig` borrow
+    // mode in `src/session/index.ts`).
+    //
+    // In standalone mode, persona is fixed for the session's lifetime,
+    // so the skill set is static and we skip the mount entirely when
+    // empty to avoid an empty cosmetic bind mount.
+    const isWorkflowBundle = workflowId !== undefined;
+    const initialSkills = resolvedSkills ?? [];
+    let skillsDir: string | undefined;
+    if (initialSkills.length > 0 || isWorkflowBundle) {
+      skillsDir = resolve(bundleDir, 'skills');
+      stageSkillsToBundle(initialSkills, skillsDir);
+      if (initialSkills.length > 0) {
+        logger.info(`Staged ${initialSkills.length} skill(s) to ${skillsDir}`);
+      }
+    }
+
     return {
       bundleId,
       workflowId,
@@ -486,6 +536,7 @@ export async function prepareDockerInfrastructure(
       authKind,
       conversationStateDir,
       conversationStateConfig,
+      skillsDir,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
       },
@@ -516,6 +567,7 @@ export async function createDockerInfrastructure(
   bundleId: BundleId,
   workflowId?: WorkflowId,
   scope?: string,
+  resolvedSkills?: readonly ResolvedSkill[],
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -526,6 +578,7 @@ export async function createDockerInfrastructure(
     bundleId,
     workflowId,
     scope,
+    resolvedSkills,
   );
 
   try {
@@ -783,6 +836,17 @@ export async function createSessionContainers(
         source: core.conversationStateDir,
         target: core.conversationStateConfig.containerMountPath,
         readonly: false,
+      });
+    }
+
+    // Mount the merged skill set read-only at the cross-vendor common
+    // path. Only present when the bundle was built with a non-empty
+    // resolved skill set (see prepareDockerInfrastructure).
+    if (core.skillsDir) {
+      mounts.push({
+        source: core.skillsDir,
+        target: CONTAINER_SKILLS_DIR,
+        readonly: true,
       });
     }
 

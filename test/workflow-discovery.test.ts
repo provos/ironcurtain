@@ -11,6 +11,7 @@ import {
   resolveWorkflowPath,
   getBundledWorkflowsDir,
   parseDefinitionFile,
+  getWorkflowPackageDir,
 } from '../src/workflow/discovery.js';
 
 // ---------------------------------------------------------------------------
@@ -23,16 +24,20 @@ function createTempDir(): string {
   return mkdtempSync(resolve(tmpdir(), 'ironcurtain-wf-test-'));
 }
 
-function writeWorkflowJson(dir: string, name: string, description: string): string {
-  mkdirSync(dir, { recursive: true });
-  const filePath = resolve(dir, `${name}.json`);
-  writeFileSync(filePath, JSON.stringify({ name, description, initial: 'start', states: {} }));
-  return filePath;
-}
-
-function writeWorkflowYaml(dir: string, name: string, description: string, ext = '.yaml'): string {
-  mkdirSync(dir, { recursive: true });
-  const filePath = resolve(dir, `${name}${ext}`);
+/**
+ * Writes a workflow package directory `<rootDir>/<name>/workflow.<ext>`
+ * with a minimal valid manifest. Returns the absolute path to the
+ * manifest file.
+ */
+function writeWorkflowPackage(
+  rootDir: string,
+  name: string,
+  description: string,
+  ext: 'yaml' | 'yml' = 'yaml',
+): string {
+  const packageDir = resolve(rootDir, name);
+  mkdirSync(packageDir, { recursive: true });
+  const filePath = resolve(packageDir, `workflow.${ext}`);
   const content = `name: ${name}\ndescription: "${description}"\ninitial: start\nstates: {}\n`;
   writeFileSync(filePath, content);
   return filePath;
@@ -73,29 +78,33 @@ describe('getBundledWorkflowsDir', () => {
 });
 
 // ---------------------------------------------------------------------------
+// getWorkflowPackageDir
+// ---------------------------------------------------------------------------
+
+describe('getWorkflowPackageDir', () => {
+  it('returns the directory containing the manifest', () => {
+    const userDir = resolve(tempDir, 'workflows');
+    const filePath = writeWorkflowPackage(userDir, 'pkg-test', 'Test');
+    expect(getWorkflowPackageDir(filePath)).toBe(resolve(userDir, 'pkg-test'));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // parseDefinitionFile
 // ---------------------------------------------------------------------------
 
 describe('parseDefinitionFile', () => {
-  it('parses a JSON file', () => {
-    const dir = resolve(tempDir, 'parse-test');
-    const filePath = writeWorkflowJson(dir, 'test', 'A JSON workflow');
-    const result = parseDefinitionFile(filePath) as Record<string, unknown>;
-    expect(result.name).toBe('test');
-    expect(result.description).toBe('A JSON workflow');
-  });
-
   it('parses a .yaml file', () => {
-    const dir = resolve(tempDir, 'parse-test');
-    const filePath = writeWorkflowYaml(dir, 'test', 'A YAML workflow', '.yaml');
+    const userDir = resolve(tempDir, 'workflows');
+    const filePath = writeWorkflowPackage(userDir, 'test', 'A YAML workflow', 'yaml');
     const result = parseDefinitionFile(filePath) as Record<string, unknown>;
     expect(result.name).toBe('test');
     expect(result.description).toBe('A YAML workflow');
   });
 
   it('parses a .yml file', () => {
-    const dir = resolve(tempDir, 'parse-test');
-    const filePath = writeWorkflowYaml(dir, 'test', 'A YML workflow', '.yml');
+    const userDir = resolve(tempDir, 'workflows');
+    const filePath = writeWorkflowPackage(userDir, 'test', 'A YML workflow', 'yml');
     const result = parseDefinitionFile(filePath) as Record<string, unknown>;
     expect(result.name).toBe('test');
     expect(result.description).toBe('A YML workflow');
@@ -135,16 +144,29 @@ states:
     expect(states.start.prompt).toContain('Line three.');
   });
 
-  it('throws for invalid JSON', () => {
+  it('throws for invalid YAML', () => {
     const dir = resolve(tempDir, 'parse-test');
     mkdirSync(dir, { recursive: true });
-    const filePath = resolve(dir, 'bad.json');
-    writeFileSync(filePath, '{ invalid json');
+    const filePath = resolve(dir, 'bad.yaml');
+    writeFileSync(filePath, '\t- broken: : :');
     expect(() => parseDefinitionFile(filePath)).toThrow();
   });
 
   it('throws for non-existent file', () => {
     expect(() => parseDefinitionFile('/tmp/no-such-file.yaml')).toThrow();
+  });
+
+  it('parses internal JSON serialization (used by resume)', () => {
+    // parseDefinitionFile keeps a JSON branch so the workflow-resume
+    // path can re-load `<runDir>/definition.json` written at start
+    // time. User-facing manifests are YAML-only — that's enforced by
+    // the discovery layer, not here.
+    const dir = resolve(tempDir, 'parse-test');
+    mkdirSync(dir, { recursive: true });
+    const filePath = resolve(dir, 'definition.json');
+    writeFileSync(filePath, JSON.stringify({ name: 'resumed', description: '', initial: 'start', states: {} }));
+    const result = parseDefinitionFile(filePath) as Record<string, unknown>;
+    expect(result.name).toBe('resumed');
   });
 });
 
@@ -164,7 +186,7 @@ describe('discoverWorkflows', () => {
 
   it('finds user workflows when directory exists', () => {
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'my-custom', 'A custom workflow');
+    writeWorkflowPackage(userDir, 'my-custom', 'A custom workflow');
 
     withTempHome(() => {
       const entries = discoverWorkflows();
@@ -177,7 +199,7 @@ describe('discoverWorkflows', () => {
 
   it('user workflows override bundled on name collision', () => {
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'design-and-code', 'User override');
+    writeWorkflowPackage(userDir, 'design-and-code', 'User override');
 
     withTempHome(() => {
       const entries = discoverWorkflows();
@@ -189,8 +211,8 @@ describe('discoverWorkflows', () => {
 
   it('returns entries sorted alphabetically', () => {
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'zebra-flow', 'Z');
-    writeWorkflowJson(userDir, 'alpha-flow', 'A');
+    writeWorkflowPackage(userDir, 'zebra-flow', 'Z');
+    writeWorkflowPackage(userDir, 'alpha-flow', 'A');
 
     withTempHome(() => {
       const entries = discoverWorkflows();
@@ -200,11 +222,11 @@ describe('discoverWorkflows', () => {
     });
   });
 
-  it('skips non-workflow files', () => {
+  it('skips directories without a manifest', () => {
     const userDir = resolve(tempDir, 'workflows');
-    mkdirSync(userDir, { recursive: true });
-    writeFileSync(resolve(userDir, 'readme.md'), '# Not a workflow');
-    writeWorkflowJson(userDir, 'valid', 'Valid workflow');
+    mkdirSync(resolve(userDir, 'nope'), { recursive: true });
+    writeFileSync(resolve(userDir, 'nope', 'README.md'), '# not a manifest');
+    writeWorkflowPackage(userDir, 'valid', 'Valid workflow');
 
     withTempHome(() => {
       const entries = discoverWorkflows();
@@ -214,57 +236,51 @@ describe('discoverWorkflows', () => {
     });
   });
 
-  it('discovers YAML workflow files', () => {
+  it('skips loose files at the workflows root', () => {
+    // Loose files (the legacy single-file form) should no longer be
+    // picked up — the directory-only convention requires a package dir.
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowYaml(userDir, 'yaml-flow', 'A YAML workflow');
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(resolve(userDir, 'orphan.yaml'), 'name: orphan\ninitial: start\nstates: {}\n');
 
     withTempHome(() => {
       const entries = discoverWorkflows();
-      const yamlEntry = entries.find((e) => e.name === 'yaml-flow');
-      expect(yamlEntry).toBeDefined();
-      expect(yamlEntry?.source).toBe('user');
-      expect(yamlEntry?.description).toBe('A YAML workflow');
-      expect(yamlEntry?.path).toMatch(/\.yaml$/);
+      const userEntries = entries.filter((e) => e.source === 'user');
+      expect(userEntries).toHaveLength(0);
     });
   });
 
-  it('discovers .yml workflow files', () => {
+  it('discovers .yml manifests in package directories', () => {
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowYaml(userDir, 'yml-flow', 'A YML workflow', '.yml');
+    writeWorkflowPackage(userDir, 'yml-flow', 'A YML workflow', 'yml');
 
     withTempHome(() => {
       const entries = discoverWorkflows();
       const ymlEntry = entries.find((e) => e.name === 'yml-flow');
       expect(ymlEntry).toBeDefined();
       expect(ymlEntry?.description).toBe('A YML workflow');
+      expect(ymlEntry?.path).toMatch(/workflow\.yml$/);
     });
   });
 
-  it('YAML takes precedence over JSON when same name exists', () => {
+  it('prefers workflow.yaml over workflow.yml when both exist', () => {
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'dual-format', 'JSON version');
-    writeWorkflowYaml(userDir, 'dual-format', 'YAML version');
+    const packageDir = resolve(userDir, 'dual');
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(
+      resolve(packageDir, 'workflow.yaml'),
+      'name: dual\ndescription: "yaml form"\ninitial: start\nstates: {}\n',
+    );
+    writeFileSync(
+      resolve(packageDir, 'workflow.yml'),
+      'name: dual\ndescription: "yml form"\ninitial: start\nstates: {}\n',
+    );
 
     withTempHome(() => {
       const entries = discoverWorkflows();
-      const entry = entries.find((e) => e.name === 'dual-format');
-      expect(entry).toBeDefined();
-      expect(entry?.description).toBe('YAML version');
-      expect(entry?.path).toMatch(/\.yaml$/);
-    });
-  });
-
-  it('discovers mixed format workflows', () => {
-    const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'json-only', 'JSON workflow');
-    writeWorkflowYaml(userDir, 'yaml-only', 'YAML workflow');
-
-    withTempHome(() => {
-      const entries = discoverWorkflows();
-      const jsonEntry = entries.find((e) => e.name === 'json-only');
-      const yamlEntry = entries.find((e) => e.name === 'yaml-only');
-      expect(jsonEntry).toBeDefined();
-      expect(yamlEntry).toBeDefined();
+      const entry = entries.find((e) => e.name === 'dual');
+      expect(entry?.path).toMatch(/workflow\.yaml$/);
+      expect(entry?.description).toBe('yaml form');
     });
   });
 });
@@ -274,17 +290,9 @@ describe('discoverWorkflows', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveWorkflowPath', () => {
-  it('resolves an explicit JSON file path', () => {
-    const userDir = resolve(tempDir, 'workflows');
-    const filePath = writeWorkflowJson(userDir, 'test-wf', 'Test');
-
-    const result = resolveWorkflowPath(filePath);
-    expect(result).toBe(filePath);
-  });
-
   it('resolves an explicit YAML file path', () => {
     const userDir = resolve(tempDir, 'workflows');
-    const filePath = writeWorkflowYaml(userDir, 'test-wf', 'Test', '.yaml');
+    const filePath = writeWorkflowPackage(userDir, 'test-wf', 'Test', 'yaml');
 
     const result = resolveWorkflowPath(filePath);
     expect(result).toBe(filePath);
@@ -292,7 +300,7 @@ describe('resolveWorkflowPath', () => {
 
   it('resolves an explicit .yml file path', () => {
     const userDir = resolve(tempDir, 'workflows');
-    const filePath = writeWorkflowYaml(userDir, 'test-wf', 'Test', '.yml');
+    const filePath = writeWorkflowPackage(userDir, 'test-wf', 'Test', 'yml');
 
     const result = resolveWorkflowPath(filePath);
     expect(result).toBe(filePath);
@@ -301,41 +309,23 @@ describe('resolveWorkflowPath', () => {
   it('resolves a workflow by name from bundled directory', () => {
     const result = resolveWorkflowPath('design-and-code');
     expect(result).toBeDefined();
-    expect(result).toMatch(/design-and-code\.yaml$/);
+    expect(result).toMatch(/design-and-code[\\/]workflow\.yaml$/);
   });
 
   it('prefers user directory over bundled for name resolution', () => {
     const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'design-and-code', 'User version');
+    writeWorkflowPackage(userDir, 'design-and-code', 'User version');
 
     withTempHome(() => {
       const result = resolveWorkflowPath('design-and-code');
-      // User dir is checked first across all extensions before bundled dir
       expect(result).toBeDefined();
-      expect(result).toMatch(/\.json$/);
       expect(result).toContain(tempDir);
-    });
-  });
-
-  it('prefers YAML over JSON in same directory for name resolution', () => {
-    const userDir = resolve(tempDir, 'workflows');
-    writeWorkflowJson(userDir, 'my-flow', 'JSON version');
-    writeWorkflowYaml(userDir, 'my-flow', 'YAML version');
-
-    withTempHome(() => {
-      const result = resolveWorkflowPath('my-flow');
-      expect(result).toBeDefined();
-      expect(result).toMatch(/\.yaml$/);
+      expect(result).toMatch(/workflow\.yaml$/);
     });
   });
 
   it('returns undefined for non-existent workflow name', () => {
     const result = resolveWorkflowPath('does-not-exist');
-    expect(result).toBeUndefined();
-  });
-
-  it('returns undefined for non-existent file path', () => {
-    const result = resolveWorkflowPath('/tmp/no-such-file.json');
     expect(result).toBeUndefined();
   });
 

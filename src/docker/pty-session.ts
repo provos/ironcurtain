@@ -270,6 +270,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       sandboxDir,
       escalationDir,
       bundleId,
+      undefined,
+      undefined,
+      dirConfig.resolvedSkills,
     );
     // PTY sessions are standalone: pin the MITM proxy's token-stream
     // routing ID to this session's ID for the session's lifetime.

@@ -508,7 +508,10 @@ describe('WF008 — visit-cap transition ordering', () => {
     // workflows lint clean" regression so that the intent of this check
     // is discoverable by greppers.
     const raw = parseYaml(
-      readFileSync(resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'vuln-discovery.yaml'), 'utf-8'),
+      readFileSync(
+        resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'vuln-discovery', 'workflow.yaml'),
+        'utf-8',
+      ),
       { maxAliasCount: 0 },
     );
     const def = validateDefinition(raw);
@@ -532,9 +535,9 @@ describe('bundled workflows lint clean', () => {
   // GLOBAL_PERSONA throughout, so WF007 must skip via the alias, not the stub.
   const bundledCtx: LintContext = { personaExists: () => false };
 
-  for (const name of ['vuln-discovery.yaml', 'design-and-code.yaml']) {
+  for (const name of ['vuln-discovery', 'design-and-code']) {
     it(`${name}: zero errors`, () => {
-      const raw = parseYaml(readFileSync(resolve(workflowsDir, name), 'utf-8'), {
+      const raw = parseYaml(readFileSync(resolve(workflowsDir, name, 'workflow.yaml'), 'utf-8'), {
         maxAliasCount: 0,
       });
       const def = validateDefinition(raw);

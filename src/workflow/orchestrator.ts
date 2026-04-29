@@ -79,7 +79,9 @@ import {
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
-import { parseDefinitionFile } from './discovery.js';
+import { parseDefinitionFile, getWorkflowPackageDir } from './discovery.js';
+import { resolveSkillsForSession } from '../skills/discovery.js';
+import type { ResolvedSkill } from '../skills/types.js';
 import { discoverWorkflowRuns } from './workflow-discovery.js';
 import { isCheckpointResumable } from './checkpoint.js';
 import {
@@ -217,6 +219,18 @@ export interface CreateWorkflowInfrastructureInput {
   readonly scope: string;
   /** Union of MCP server names required across every agent state in this scope. */
   readonly requiredServers: ReadonlySet<string>;
+  /**
+   * Initial skill set staged at bundle creation: user-global + workflow
+   * package skills. Persona skills are NOT included here — they are
+   * layered in per-state by `buildSessionConfig` (borrow mode), which
+   * re-stages into the bundle's skillsDir on every state transition.
+   *
+   * In workflow mode the bundle's skillsDir is always created (and the
+   * read-only bind mount established) regardless of whether this initial
+   * set is empty, so per-state persona skills can appear later via
+   * host-side re-staging without remounting the container.
+   */
+  readonly resolvedSkills?: readonly ResolvedSkill[];
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -623,6 +637,17 @@ export class WorkflowOrchestrator implements WorkflowController {
     ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
 
     const requiredServers = this.getRequiredServersForScope(instance, scope);
+    // Resolve the INITIAL skill set staged at bundle creation: user-global
+    // skills + the workflow package's skills (no persona). Persona skills
+    // are added per-state by `buildSessionConfig` (borrow mode), which
+    // re-stages into the bundle's skillsDir on every state transition —
+    // the bind mount is live, so the container picks up the change
+    // without remounting. The workflow factory always creates the
+    // skillsDir under workflow mode (see prepareDockerInfrastructure)
+    // so the mount exists from container start regardless of whether
+    // any layer has skills initially.
+    const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
+    const resolvedSkills = resolveSkillsForSession({ workflowSkillsDir });
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
     const infra = await factory({
       workflowId: instance.id,
@@ -632,6 +657,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       workspacePath: instance.workspacePath,
       scope,
       requiredServers,
+      resolvedSkills,
     });
 
     // Abort may have landed while `factory()` was suspended. Publishing
@@ -929,6 +955,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         // emitted by `createSessionContainers()` via `buildBundleLabels`.
         input.workflowId,
         input.scope,
+        input.resolvedSkills,
       );
     };
   }
@@ -1696,6 +1723,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       mkdirSync(workflowStateDir, { recursive: true });
     }
 
+    // Workflow-bundled skills live in the workflow package's skills/
+    // dir and are layered into every state's resolved skill set
+    // (alongside user-global and per-state persona skills). Pass it on
+    // every session so re-staging in borrow mode (driven by
+    // `buildSessionConfig`) sees the workflow layer too.
+    const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
+
     let session: Session;
     try {
       session = await this.deps.createSession({
@@ -1704,6 +1738,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         agentConversationId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
+        workflowSkillsDir,
         ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
         ...(settings.maxSessionSeconds != null
           ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
