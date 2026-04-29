@@ -17,7 +17,7 @@
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname, basename, join } from 'node:path';
-import { normalizeUrl, normalizeGitUrl } from '../trusted-process/domain-utils.js';
+import { normalizeUrl, normalizeGitUrl } from './url-normalize.js';
 
 // ---------------------------------------------------------------------------
 // Types

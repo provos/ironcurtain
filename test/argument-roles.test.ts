@@ -21,11 +21,10 @@ import {
   getUrlRoles,
 } from '../src/types/argument-roles.js';
 import type { ArgumentRole } from '../src/types/argument-roles.js';
+import { normalizeUrl, normalizeGitUrl } from '../src/types/url-normalize.js';
 import {
-  normalizeUrl,
   extractDomain,
   extractDomainForRole,
-  normalizeGitUrl,
   extractGitDomain,
   resolveGitRemote,
 } from '../src/trusted-process/domain-utils.js';
