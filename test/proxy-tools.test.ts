@@ -10,10 +10,10 @@ import {
   proxyToolDefinitions,
   handleVirtualProxyTool,
   createControlApiClient,
-  RESERVED_SERVER_NAMES,
   type ControlApiClient,
   type DomainListing,
 } from '../src/docker/proxy-tools.js';
+import { RESERVED_SERVER_NAMES } from '../src/types/reserved-servers.js';
 import { createMitmProxy, type MitmProxy, type DynamicHostController } from '../src/docker/mitm-proxy.js';
 import { loadOrCreateCA, type CertificateAuthority } from '../src/docker/ca.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';

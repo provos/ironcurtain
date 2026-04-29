@@ -8,9 +8,8 @@ import {
   shortenHomePath,
   getWorkspaceLabel,
 } from '../src/mux/session-scanner.js';
-import { getSessionSandboxDir } from '../src/config/paths.js';
+import { getSessionSandboxDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
 import type { SessionSnapshot } from '../src/mux/session-scanner.js';
-import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
 
 describe('session-scanner', () => {
   const testDir = resolve('/tmp', `ironcurtain-scanner-test-${process.pid}`);

@@ -13,7 +13,7 @@ import {
 } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig, type ResolvedWebSearchConfig } from './user-config.js';
-import { RESERVED_SERVER_NAMES } from '../docker/proxy-tools.js';
+import { RESERVED_SERVER_NAMES } from '../types/reserved-servers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

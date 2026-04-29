@@ -1,6 +1,6 @@
 import { dirname } from 'node:path';
 import type { CompiledPolicyFile } from '../pipeline/types.js';
-import { RESERVED_SERVER_NAMES } from '../docker/proxy-tools.js';
+import { RESERVED_SERVER_NAMES } from '../types/reserved-servers.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 
 /**
