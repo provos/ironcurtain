@@ -1,8 +1,5 @@
-/** Compact server listing for the system prompt. */
-export interface ServerListing {
-  name: string;
-  description: string;
-}
+import type { ServerListing } from '../types/server-listing.js';
+export type { ServerListing };
 
 /**
  * Builds the system prompt for the agent. Uses progressive tool disclosure:

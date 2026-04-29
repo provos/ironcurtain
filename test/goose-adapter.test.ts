@@ -7,7 +7,7 @@ import {
   getProviderConfig,
 } from '../src/docker/adapters/goose.js';
 import { CONTAINER_WORKSPACE_DIR, type OrientationContext } from '../src/docker/agent-adapter.js';
-import type { ServerListing } from '../src/session/prompts.js';
+import type { ServerListing } from '../src/types/server-listing.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { ResolvedUserConfig } from '../src/config/user-config.js';
 
