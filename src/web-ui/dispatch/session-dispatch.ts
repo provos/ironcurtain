@@ -21,7 +21,7 @@ import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
-import { BudgetExhaustedError } from '../../session/errors.js';
+import { BudgetExhaustedError } from '../../types/errors.js';
 import { getTokenStreamBus } from '../../docker/token-stream-bus.js';
 import * as logger from '../../logger.js';
 

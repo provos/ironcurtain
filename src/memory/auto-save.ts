@@ -9,7 +9,7 @@ import type { Session, ConversationTurn } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { PersonaDefinition } from '../persona/types.js';
 import type { JobDefinition } from '../cron/types.js';
-import { BudgetExhaustedError } from '../session/errors.js';
+import { BudgetExhaustedError } from '../types/errors.js';
 import { isMemoryEnabledFor } from './memory-policy.js';
 import { loadPersona } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';

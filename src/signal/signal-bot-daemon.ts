@@ -36,7 +36,7 @@ import {
   type JobListEntry,
   type SessionListEntry,
 } from './format.js';
-import { BudgetExhaustedError } from '../session/errors.js';
+import { BudgetExhaustedError } from '../types/errors.js';
 import * as logger from '../logger.js';
 
 /** How often to proactively verify the recipient's identity key (ms). */

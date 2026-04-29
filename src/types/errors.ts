@@ -1,6 +1,12 @@
 /**
- * Base class for session-related errors. Uses a discriminant
- * `code` field for programmatic handling without instanceof checks.
+ * Session error class hierarchy. Lives in `src/types/` rather than
+ * `src/session/` so that domain modules (e.g., `memory/auto-save.ts`)
+ * can catch session-thrown errors without importing back into the
+ * composition layer. Errors are throw-from-anywhere / catch-anywhere
+ * by nature, so the leaf position is the natural home.
+ *
+ * Uses a discriminant `code` field for programmatic handling without
+ * instanceof checks.
  */
 export class SessionError extends Error {
   constructor(

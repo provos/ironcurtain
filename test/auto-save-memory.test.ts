@@ -13,7 +13,7 @@ import { saveSessionMemory, shouldAutoSaveMemory } from '../src/memory/auto-save
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { Session, SessionInfo, ConversationTurn } from '../src/session/types.js';
 import type { PersonaDefinition, PersonaName } from '../src/persona/types.js';
-import { BudgetExhaustedError } from '../src/session/errors.js';
+import { BudgetExhaustedError } from '../src/types/errors.js';
 
 /** Minimal persona scope for the auto-save gate (persona present => eligible for memory when not opted out). */
 function makePersonaScope(): { persona: PersonaDefinition } {
