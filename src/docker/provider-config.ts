@@ -235,7 +235,10 @@ export const anthropicProvider: ProviderConfig = {
     { method: 'GET', path: '/api/claude_code_penguin_mode' },
     // Telemetry
     { method: 'POST', path: '/api/event_logging/batch' },
+    { method: 'POST', path: '/api/event_logging/v2/batch' },
     { method: 'POST', path: '/api/eval/*' },
+    // MCP marketplace
+    { method: 'GET', path: '/mcp-registry/v0/servers' },
   ],
   keyInjection: { type: 'header', headerName: 'x-api-key' },
   fakeKeyPrefix: 'sk-ant-api03-ironcurtain-',
