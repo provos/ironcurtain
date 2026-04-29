@@ -25,5 +25,9 @@ export function getListMatcher(type: ListType): (value: string, pattern: string)
       return (v, p) => v.toLowerCase() === p.toLowerCase();
     case 'identifiers':
       return (v, p) => v === p;
+    default: {
+      const _exhaustive: never = type;
+      throw new Error(`Unknown list type: ${String(_exhaustive)}`);
+    }
   }
 }
