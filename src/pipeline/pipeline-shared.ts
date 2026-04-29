@@ -27,7 +27,7 @@ import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
 import type { CompiledRule, ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
 import { resolveRealPath, resolveStoredAnnotationsFile } from '../types/argument-roles.js';
-import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
+import { createLlmLoggingMiddleware, type LlmLogContext } from '../observability/llm-logger.js';
 import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

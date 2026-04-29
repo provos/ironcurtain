@@ -35,7 +35,7 @@ import {
 } from './ironcurtain-protocol.js';
 import * as logger from '../logger.js';
 import { wrapLanguageModel } from 'ai';
-import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
+import { createLlmLoggingMiddleware } from '../observability/llm-logger.js';
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 
 // Workaround: UTCP creates MCP SDK Client instances without setting a per-request

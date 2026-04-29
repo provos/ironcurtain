@@ -22,7 +22,7 @@ import {
 } from 'ai';
 import { z } from 'zod';
 import { createLanguageModel } from '../config/model-provider.js';
-import { createLlmLoggingMiddleware, type LlmLogContext } from '../pipeline/llm-logger.js';
+import { createLlmLoggingMiddleware, type LlmLogContext } from '../observability/llm-logger.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import type { Sandbox } from '../sandbox/index.js';
