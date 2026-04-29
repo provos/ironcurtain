@@ -18,6 +18,16 @@ const noOAuthSources: CredentialSources = {
   loadFromKeychain: () => null,
 };
 
+/** OAuth credentials present (file), no API key — covers the OAuth-only paths. */
+const oauthOnlySources: CredentialSources = {
+  loadFromFile: () => ({
+    accessToken: 'sk-ant-oat01-test',
+    refreshToken: 'sk-ant-ort01-test',
+    expiresAt: Date.now() + 3_600_000,
+  }),
+  loadFromKeychain: () => null,
+};
+
 function createTestConfig(
   overrides: { anthropicApiKey?: string; preferredMode?: 'docker' | 'builtin' } = {},
 ): IronCurtainConfig {
@@ -133,20 +143,11 @@ describe('resolveSessionMode', () => {
     });
 
     it('succeeds with OAuth credentials and no API key', async () => {
-      const oauthSources: CredentialSources = {
-        loadFromFile: () => ({
-          accessToken: 'sk-ant-oat01-test',
-          refreshToken: 'sk-ant-ort01-test',
-          expiresAt: Date.now() + 3_600_000,
-        }),
-        loadFromKeychain: () => null,
-      };
-
       const result = await resolveSessionMode({
         config: createTestConfig({ anthropicApiKey: '' }),
         requestedAgent: 'claude-code' as AgentId,
         isDockerAvailable: dockerAvailable,
-        credentialSources: oauthSources,
+        credentialSources: oauthOnlySources,
       });
 
       expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'oauth' });
@@ -154,15 +155,6 @@ describe('resolveSessionMode', () => {
     });
 
     it('--agent goose surfaces the OAuth-not-usable-with-goose addendum on OAuth-only', async () => {
-      const oauthOnlySources: CredentialSources = {
-        loadFromFile: () => ({
-          accessToken: 'sk-ant-oat01-test',
-          refreshToken: 'sk-ant-ort01-test',
-          expiresAt: Date.now() + 3_600_000,
-        }),
-        loadFromKeychain: () => null,
-      };
-
       const config = createTestConfig({ anthropicApiKey: '' });
       config.userConfig.preferredDockerAgent = 'goose';
       config.userConfig.gooseProvider = 'anthropic';
@@ -179,15 +171,6 @@ describe('resolveSessionMode', () => {
   });
 
   describe('default mode (no --agent)', () => {
-    const oauthOnlySources: CredentialSources = {
-      loadFromFile: () => ({
-        accessToken: 'sk-ant-oat01-test',
-        refreshToken: 'sk-ant-ort01-test',
-        expiresAt: Date.now() + 3_600_000,
-      }),
-      loadFromKeychain: () => null,
-    };
-
     describe('preferredMode = docker', () => {
       it('selects Docker (claude-code, API key) when both Docker and API key are available', async () => {
         const result = await resolveSessionMode({
@@ -328,14 +311,20 @@ describe('resolveSessionMode', () => {
         // call. If a future "symmetry" refactor tightens this path, it
         // should have to delete this test on purpose — see the design's
         // out-of-scope notes.
+        const dockerSpy = vi.fn().mockResolvedValue({ available: true });
         const result = await resolveSessionMode({
           config: createTestConfig({ anthropicApiKey: '', preferredMode: 'builtin' }),
           requestedAgent: 'builtin' as AgentId,
-          isDockerAvailable: dockerAvailable,
+          isDockerAvailable: dockerSpy,
           credentialSources: noOAuthSources,
         });
 
         expect(result.mode).toEqual({ kind: 'builtin' });
+        expect(result.reason).toBe('Explicit --agent builtin');
+        // Explicit-builtin path skips the Docker probe — only resolveExplicit
+        // produces this combination; the bare `mode === 'builtin'` assertion
+        // alone would also pass the prior auto-detect code.
+        expect(dockerSpy).not.toHaveBeenCalled();
       });
 
       it('--agent claude-code with Docker unavailable throws the explicit-mode message', async () => {

@@ -109,14 +109,14 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
   const subcommand = positionals[0];
 
   // Resolve session mode (same as `start` command)
-  const { resolveSessionMode } = await import('../session/preflight.js');
+  const { resolveSessionMode, formatModeLine } = await import('../session/preflight.js');
   const { loadConfig } = await import('../config/index.js');
   const preflight = await resolveSessionMode({
     config: loadConfig(),
     requestedAgent: values.agent ? (values.agent as AgentId) : undefined,
   });
   const mode = preflight.mode;
-  console.error(`Mode: ${mode.kind} (${preflight.reason})`);
+  console.error(formatModeLine(preflight));
 
   if (!subcommand) {
     // Start the daemon

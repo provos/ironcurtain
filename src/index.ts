@@ -16,7 +16,7 @@ import { checkHelp, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createStandaloneSession } from './session/index.js';
-import { resolveSessionMode } from './session/preflight.js';
+import { formatModeLine, resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
 import { shouldAutoSaveMemory } from './memory/auto-save.js';
 import type { AgentId } from './docker/agent-adapter.js';
@@ -122,13 +122,9 @@ export async function main(args?: string[]): Promise<void> {
     requestedAgent: agentName ? (agentName as AgentId) : undefined,
   });
 
-  // Log the resolved mode (skip when --agent was explicit -- the user
-  // already knows what they asked for). Docker mode prints the agent and
-  // auth kind from the resolver's reason field; builtin mode is a single
-  // word with no parenthetical.
+  // Skip when --agent was explicit -- the user already knows what they asked for.
   if (!agentName) {
-    const line = preflight.mode.kind === 'docker' ? `Mode: docker / ${preflight.reason}` : 'Mode: builtin';
-    process.stderr.write(chalk.dim(`${line}\n`));
+    process.stderr.write(chalk.dim(`${formatModeLine(preflight)}\n`));
   }
 
   const mode = preflight.mode;

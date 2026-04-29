@@ -136,47 +136,68 @@ export async function checkDockerAvailable(execFileFn: ProbeExecFileFn = execFil
 }
 
 /**
- * Checks whether credentials (OAuth or API key) are available for the given agent.
- * Returns the auth kind if available, or null if no credentials found.
- *
- * Includes macOS Keychain lookup and token refresh for expired credentials.
+ * Result of credential detection for a given agent. `anthropicOAuthOnly`
+ * is only meaningful for goose: it records whether Anthropic OAuth
+ * credentials are present (and would have helped a claude-code session)
+ * so the goose error message can tell a tester that OAuth is unusable
+ * with goose. Combining it into a single struct lets us probe
+ * `detectAuthMethod` once and share the result across the credential
+ * decision and the error-message construction.
  */
-async function detectCredentials(
+interface CredentialState {
+  credKind: 'oauth' | 'apikey' | null;
+  anthropicOAuthOnly: boolean;
+}
+
+async function detectCredentialState(
   agentId: AgentId,
   config: IronCurtainConfig,
   sources?: CredentialSources,
-): Promise<'oauth' | 'apikey' | null> {
-  // Goose uses provider-specific API keys, not Anthropic OAuth.
+): Promise<CredentialState> {
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
     const key = resolveApiKeyForProvider(provider, config.userConfig);
-    return key ? 'apikey' : null;
+    if (key) return { credKind: 'apikey', anthropicOAuthOnly: false };
+
+    const auth = await detectAuthMethod(config, sources ?? preflightCredentialSources);
+    return {
+      credKind: null,
+      anthropicOAuthOnly:
+        auth.kind === 'oauth' && resolveApiKeyForProvider('anthropic', config.userConfig).length === 0,
+    };
   }
 
-  // Default path: Anthropic OAuth + API key detection (Claude Code and others).
-  // Uses preflightCredentialSources, which may refresh expired tokens and update credential storage.
   const auth = await detectAuthMethod(config, sources ?? preflightCredentialSources);
-  if (auth.kind === 'none') return null;
-  return auth.kind === 'oauth' ? 'oauth' : 'apikey';
+  if (auth.kind === 'none') return { credKind: null, anthropicOAuthOnly: false };
+  return { credKind: auth.kind === 'oauth' ? 'oauth' : 'apikey', anthropicOAuthOnly: false };
 }
 
 /**
- * Returns true when Anthropic OAuth credentials are present (file or
- * Keychain) but no `ANTHROPIC_API_KEY` is configured. Used to surface a
- * goose-specific addendum: a tester who just ran `claude login` deserves
- * to know that OAuth is unusable with goose.
+ * Renders the "switch to <other mode>" remediation footer shared by every
+ * preflight error message. Centralized so the wording can't drift between
+ * the docker-unavailable, builtin-needs-key, and credential-missing paths.
  */
-async function hasAnthropicOAuthOnly(config: IronCurtainConfig, sources?: CredentialSources): Promise<boolean> {
-  const auth = await detectAuthMethod(config, sources ?? preflightCredentialSources);
-  if (auth.kind !== 'oauth') return false;
-  return resolveApiKeyForProvider('anthropic', config.userConfig).length === 0;
+function formatModeRemediation(targetMode: 'docker' | 'builtin'): string[] {
+  if (targetMode === 'builtin') {
+    return [
+      'To run this session in builtin mode, pass:',
+      '  --agent builtin',
+      '',
+      'To make builtin the default permanently, run:',
+      '  ironcurtain config',
+      'and set Session Mode > Preferred mode to "builtin".',
+    ];
+  }
+  return [
+    'To run this session in Docker mode, pass:',
+    '  --agent claude-code',
+    '',
+    'To make Docker the default permanently, run:',
+    '  ironcurtain config',
+    'and set Session Mode > Preferred mode to "docker".',
+  ];
 }
 
-/**
- * Returns the error message for missing credentials when `--agent` is
- * explicit. Wording leads with `--agent ${agentId} requires...` since the
- * user typed that flag.
- */
 function credentialErrorMessageForExplicit(agentId: AgentId, config: IronCurtainConfig, oauthOnly: boolean): string {
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
@@ -192,21 +213,16 @@ function credentialErrorMessageForExplicit(agentId: AgentId, config: IronCurtain
   return `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`;
 }
 
-/**
- * Returns the error message for missing credentials when the session mode
- * was selected via `preferredMode`. Wording leads with `preferredMode is
- * "docker"...` so the user understands the cause and can change either the
- * one-shot (`--agent builtin`) or the permanent default (`ironcurtain config`).
- */
 function credentialErrorMessageForPreferredMode(
   agentId: AgentId,
   config: IronCurtainConfig,
   oauthOnly: boolean,
 ): string {
-  const lines: string[] = [];
-  lines.push('Cannot start IronCurtain.');
-  lines.push(`preferredMode is "docker" but no credentials are configured for "${agentId}".`);
-  lines.push('');
+  const lines: string[] = [
+    'Cannot start IronCurtain.',
+    `preferredMode is "docker" but no credentials are configured for "${agentId}".`,
+    '',
+  ];
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
     lines.push(
@@ -220,24 +236,14 @@ function credentialErrorMessageForPreferredMode(
     }
   } else {
     lines.push(
-      `Authentication is required for "${agentId}". ` + 'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
+      `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`,
     );
   }
   lines.push('');
-  lines.push('To run this session in builtin mode, pass:');
-  lines.push('  --agent builtin');
-  lines.push('');
-  lines.push('To make builtin the default permanently, run:');
-  lines.push('  ironcurtain config');
-  lines.push('and set Session Mode > Preferred mode to "builtin".');
+  lines.push(...formatModeRemediation('builtin'));
   return lines.join('\n');
 }
 
-/**
- * Error message for `preferredMode === 'docker'` but the Docker daemon
- * cannot be reached. Includes the underlying probe diagnostic plus both
- * the one-shot and permanent escapes.
- */
 function dockerUnavailableMessage(detailedMessage: string): string {
   return [
     'Cannot start IronCurtain.',
@@ -245,35 +251,31 @@ function dockerUnavailableMessage(detailedMessage: string): string {
     '',
     detailedMessage,
     '',
-    'To run this session in builtin mode, pass:',
-    '  --agent builtin',
-    '',
-    'To make builtin the default permanently, run:',
-    '  ironcurtain config',
-    'and set Session Mode > Preferred mode to "builtin".',
+    ...formatModeRemediation('builtin'),
   ].join('\n');
 }
 
-/**
- * Error message for `preferredMode === 'builtin'` but no Anthropic API key
- * is configured. Builtin mode talks to Anthropic directly and Claude OAuth
- * tokens are not usable on that path.
- */
 function builtinNeedsApiKeyMessage(): string {
   return [
     'Cannot start IronCurtain.',
     'preferredMode is "builtin" but no ANTHROPIC_API_KEY is configured.',
     'Builtin mode talks to Anthropic directly using an API key — Claude OAuth credentials are not usable in builtin mode.',
     '',
-    'To run this session in Docker mode, pass:',
-    '  --agent claude-code',
-    '',
-    'To make Docker the default permanently, run:',
-    '  ironcurtain config',
-    'and set Session Mode > Preferred mode to "docker".',
+    ...formatModeRemediation('docker'),
     '',
     'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
   ].join('\n');
+}
+
+/**
+ * Renders the user-facing `Mode: ...` banner shown at session startup.
+ * Single source of truth so `ironcurtain start`, the daemon, and cron
+ * jobs all print identically. Docker mode includes the agent + auth
+ * kind via `reason`; builtin has no parenthetical.
+ */
+export function formatModeLine(preflight: PreflightResult): string {
+  if (preflight.mode.kind === 'builtin') return 'Mode: builtin';
+  return `Mode: docker / ${preflight.reason}`;
 }
 
 /**
@@ -308,7 +310,11 @@ async function resolveExplicit(
     };
   }
 
-  const dockerStatus = await isDockerAvailable();
+  const [dockerStatus, credState] = await Promise.all([
+    isDockerAvailable(),
+    detectCredentialState(agent, config, credentialSources),
+  ]);
+
   if (!dockerStatus.available) {
     throw new PreflightError(
       `--agent ${agent} requires Docker, but it is not available:\n\n${dockerStatus.detailedMessage}\n\n` +
@@ -316,15 +322,13 @@ async function resolveExplicit(
     );
   }
 
-  const credKind = await detectCredentials(agent, config, credentialSources);
-  if (credKind === null) {
-    const oauthOnly = agent === 'goose' && (await hasAnthropicOAuthOnly(config, credentialSources));
-    throw new PreflightError(credentialErrorMessageForExplicit(agent, config, oauthOnly));
+  if (credState.credKind === null) {
+    throw new PreflightError(credentialErrorMessageForExplicit(agent, config, credState.anthropicOAuthOnly));
   }
 
   return {
-    mode: { kind: 'docker', agent, authKind: credKind },
-    reason: `Explicit --agent selection (${credKind === 'oauth' ? 'OAuth' : 'API key'})`,
+    mode: { kind: 'docker', agent, authKind: credState.credKind },
+    reason: `Explicit --agent selection (${credState.credKind === 'oauth' ? 'OAuth' : 'API key'})`,
   };
 }
 
@@ -336,7 +340,8 @@ async function resolveDefaultMode(
   const { preferredMode, preferredDockerAgent } = config.userConfig;
 
   if (preferredMode === 'builtin') {
-    // Fail before any Docker probe so the user gets fast feedback.
+    // Order matters: fail before the Docker probe on the builtin path. Lock-in
+    // at test/preflight.test.ts "Builtin path must not probe Docker".
     const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
     if (apiKey.length === 0) {
       throw new PreflightError(builtinNeedsApiKeyMessage());
@@ -344,21 +349,22 @@ async function resolveDefaultMode(
     return { mode: { kind: 'builtin' }, reason: 'preferredMode = builtin' };
   }
 
-  // preferredMode === 'docker' — the default branch.
   const agent = preferredDockerAgent as AgentId;
-  const dockerStatus = await isDockerAvailable();
+  const [dockerStatus, credState] = await Promise.all([
+    isDockerAvailable(),
+    detectCredentialState(agent, config, credentialSources),
+  ]);
+
   if (!dockerStatus.available) {
     throw new PreflightError(dockerUnavailableMessage(dockerStatus.detailedMessage));
   }
 
-  const credKind = await detectCredentials(agent, config, credentialSources);
-  if (credKind === null) {
-    const oauthOnly = preferredDockerAgent === 'goose' && (await hasAnthropicOAuthOnly(config, credentialSources));
-    throw new PreflightError(credentialErrorMessageForPreferredMode(agent, config, oauthOnly));
+  if (credState.credKind === null) {
+    throw new PreflightError(credentialErrorMessageForPreferredMode(agent, config, credState.anthropicOAuthOnly));
   }
 
   return {
-    mode: { kind: 'docker', agent, authKind: credKind },
-    reason: `${preferredDockerAgent} (${credKind === 'oauth' ? 'OAuth' : 'API key'})`,
+    mode: { kind: 'docker', agent, authKind: credState.credKind },
+    reason: `${preferredDockerAgent} (${credState.credKind === 'oauth' ? 'OAuth' : 'API key'})`,
   };
 }
