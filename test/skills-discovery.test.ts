@@ -209,7 +209,9 @@ describe('resolveSkillsForSession', () => {
     });
   });
 
-  it('returns layers in user → persona → workflow order with last-wins', () => {
+  it('skips persona layer in workflow mode (workflowSkillsDir set)', () => {
+    // Persona-as-skill-source is intentionally inert in workflow mode.
+    // User + workflow still compose with last-wins; persona is dropped.
     const userSkills = resolve(tempDir, 'skills');
     writeSkill(userSkills, 'a', { name: 'a', description: 'user-a' });
     writeSkill(userSkills, 'shared', { name: 'shared', description: 'user-shared' });
@@ -217,9 +219,6 @@ describe('resolveSkillsForSession', () => {
     const personaDir = resolve(tempDir, 'personas', 'reviewer', 'skills');
     writeSkill(personaDir, 'b', { name: 'b', description: 'persona-b' });
     writeSkill(personaDir, 'shared', { name: 'shared', description: 'persona-shared' });
-    // Persona dir requires a definition file alongside skills/ for
-    // createPersonaName(); the persona resolver only reads the dir, but
-    // we need the persona slug to be valid.
     writeFileSync(resolve(tempDir, 'personas', 'reviewer', 'persona.json'), JSON.stringify({ name: 'reviewer' }));
 
     const workflowSkills = resolve(tempDir, 'wf-skills');
@@ -233,13 +232,69 @@ describe('resolveSkillsForSession', () => {
       });
 
       const byName = new Map(result.map((r) => [r.name, r]));
-      // Distinct entries from each layer survive
       expect(byName.get('a')?.source).toBe('user');
-      expect(byName.get('b')?.source).toBe('persona');
+      expect(byName.has('b')).toBe(false);
       expect(byName.get('c')?.source).toBe('workflow');
-      // Last-wins: workflow beats persona beats user on `shared`
+      // Workflow beats user on `shared`; persona's entry never participates.
       expect(byName.get('shared')?.source).toBe('workflow');
       expect(byName.get('shared')?.description).toBe('wf-shared');
+    });
+  });
+
+  it('layers user → persona with last-wins when workflowSkillsDir is unset', () => {
+    // Standalone (non-workflow) sessions: persona-as-mode-of-user still
+    // composes on top of user-global.
+    const userSkills = resolve(tempDir, 'skills');
+    writeSkill(userSkills, 'a', { name: 'a', description: 'user-a' });
+    writeSkill(userSkills, 'shared', { name: 'shared', description: 'user-shared' });
+
+    const personaDir = resolve(tempDir, 'personas', 'reviewer', 'skills');
+    writeSkill(personaDir, 'b', { name: 'b', description: 'persona-b' });
+    writeSkill(personaDir, 'shared', { name: 'shared', description: 'persona-shared' });
+    writeFileSync(resolve(tempDir, 'personas', 'reviewer', 'persona.json'), JSON.stringify({ name: 'reviewer' }));
+
+    withTempHome(() => {
+      const result = resolveSkillsForSession({ personaName: 'reviewer' });
+
+      const byName = new Map(result.map((r) => [r.name, r]));
+      expect(byName.get('a')?.source).toBe('user');
+      expect(byName.get('b')?.source).toBe('persona');
+      expect(byName.get('shared')?.source).toBe('persona');
+      expect(byName.get('shared')?.description).toBe('persona-shared');
+    });
+  });
+
+  it('filters workflow layer through workflowSkillFilter', () => {
+    const userSkills = resolve(tempDir, 'skills');
+    writeSkill(userSkills, 'u-keep', { name: 'u-keep', description: 'u' });
+
+    const workflowSkills = resolve(tempDir, 'wf-skills');
+    writeSkill(workflowSkills, 'wf-keep', { name: 'wf-keep', description: 'k' });
+    writeSkill(workflowSkills, 'wf-drop', { name: 'wf-drop', description: 'd' });
+
+    withTempHome(() => {
+      const result = resolveSkillsForSession({
+        workflowSkillsDir: workflowSkills,
+        workflowSkillFilter: new Set(['wf-keep']),
+      });
+      const names = result.map((r) => r.name).sort();
+      expect(names).toEqual(['u-keep', 'wf-keep']);
+    });
+  });
+
+  it('treats undefined and empty filter differently (empty drops every workflow skill)', () => {
+    const workflowSkills = resolve(tempDir, 'wf-skills');
+    writeSkill(workflowSkills, 'wf-only', { name: 'wf-only', description: 'w' });
+
+    withTempHome(() => {
+      const all = resolveSkillsForSession({ workflowSkillsDir: workflowSkills });
+      expect(all.map((r) => r.name)).toEqual(['wf-only']);
+
+      const filtered = resolveSkillsForSession({
+        workflowSkillsDir: workflowSkills,
+        workflowSkillFilter: new Set<string>(),
+      });
+      expect(filtered).toEqual([]);
     });
   });
 });

@@ -168,18 +168,17 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     expect(existsSync(resolve(skillsDir, 'wf-tool', 'SKILL.md'))).toBe(true);
   });
 
-  it('layers persona skills on top of user/workflow on state transition', () => {
-    // User layer.
+  it('skips persona skills in workflow mode (workflowSkillsDir set)', () => {
+    // Persona-as-skill-source is intentionally inert in workflow mode —
+    // persona-as-mode-of-user does not fit a machine-driven workflow.
+    // User and workflow layers still apply.
     const userSkillsRoot = resolve(TEST_HOME, 'skills');
     writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
 
-    // Persona layer (this is the part the bundle-creation pass cannot
-    // see — it appears only when the state runs under a persona).
     createTestPersona('reviewer');
     const personaSkills = resolve(TEST_HOME, 'personas', 'reviewer', 'skills');
     writeSkill(personaSkills, 'review-tool', { name: 'review-tool', description: 'p' });
 
-    // Workflow layer.
     const workflowSkills = resolve(TEST_HOME, 'workflow-pkg', 'skills');
     writeSkill(workflowSkills, 'wf-tool', { name: 'wf-tool', description: 'w' });
 
@@ -197,9 +196,64 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
       workflowSkillsDir: workflowSkills,
     });
 
-    // All three layers visible after re-staging.
+    // review-tool is absent — persona layer is suppressed in workflow mode.
     const staged = readdirSync(skillsDir).sort();
-    expect(staged).toEqual(['global-tool', 'review-tool', 'wf-tool']);
+    expect(staged).toEqual(['global-tool', 'wf-tool']);
+  });
+
+  it('layers persona skills on top of user when not in workflow mode', () => {
+    // Standalone (non-workflow) borrow: persona skills still apply.
+    // workflowSkillsDir is unset, so the workflow-mode opt-out does not
+    // engage and the persona layer participates as before.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    createTestPersona('reviewer');
+    const personaSkills = resolve(TEST_HOME, 'personas', 'reviewer', 'skills');
+    writeSkill(personaSkills, 'review-tool', { name: 'review-tool', description: 'p' });
+
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      persona: 'reviewer',
+      workflowInfrastructure: bundle,
+    });
+
+    const staged = readdirSync(skillsDir).sort();
+    expect(staged).toEqual(['global-tool', 'review-tool']);
+  });
+
+  it('filters workflow skills to the per-state allowlist', () => {
+    // workflowSkillFilter is the per-state `skills:` set, plumbed by the
+    // orchestrator. User-global skills are unaffected.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    const workflowSkills = resolve(TEST_HOME, 'workflow-pkg', 'skills');
+    writeSkill(workflowSkills, 'wf-keep', { name: 'wf-keep', description: 'k' });
+    writeSkill(workflowSkills, 'wf-drop', { name: 'wf-drop', description: 'd' });
+
+    const bundleDir = resolve(TEST_HOME, 'bundle');
+    const skillsDir = resolve(bundleDir, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const bundle = makeFakeBundle(skillsDir, bundleDir);
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    buildSessionConfig(config, sessionId, sessionId, {
+      workflowInfrastructure: bundle,
+      workflowSkillsDir: workflowSkills,
+      workflowSkillFilter: new Set(['wf-keep']),
+    });
+
+    expect(readdirSync(skillsDir).sort()).toEqual(['global-tool', 'wf-keep']);
   });
 
   it('wipes stale entries when re-staged for a state with a smaller skill set', () => {

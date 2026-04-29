@@ -190,6 +190,15 @@ export interface AgentStateDefinition {
    * See `docs/designs/workflow-session-identity.md` §2.4.
    */
   readonly containerScope?: string;
+  /**
+   * Per-state filter on workflow-package skills (`<workflow-pkg>/skills/`).
+   * When omitted (default), the state receives every workflow-package
+   * skill. When set, only the named entries from the workflow package
+   * are layered in — referenced names that do not exist as
+   * `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at workflow
+   * load. User-global skills always apply regardless of this field.
+   */
+  readonly skills?: readonly string[];
 }
 
 export interface HumanGateStateDefinition {

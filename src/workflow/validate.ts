@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import type {
   WorkflowDefinition,
@@ -60,6 +62,7 @@ const agentStateSchema = z.object({
   model: looseModelId.optional(),
   maxVisits: z.number().int().positive().optional(),
   containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
+  skills: z.array(z.string()).optional(),
 });
 
 const humanGateStateSchema = z.object({
@@ -495,6 +498,37 @@ function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * Verifies that every `skills[]` entry on an agent state refers to a
+ * SKILL.md package that actually exists under `<packageDir>/skills/`.
+ * Called after structural validation by callers that know the workflow
+ * file's on-disk location (orchestrator start/resume; the loader path
+ * has the path but the lint surface does not, so it skips this check).
+ *
+ * @throws {WorkflowValidationError} when any entry resolves to a missing manifest
+ */
+export function validateWorkflowSkillReferences(definition: WorkflowDefinition, packageDir: string): void {
+  const issues: string[] = [];
+  const skillsRoot = resolve(packageDir, 'skills');
+
+  for (const [stateId, state] of Object.entries(definition.states)) {
+    if (state.type !== 'agent' || state.skills === undefined) continue;
+    for (const name of state.skills) {
+      const manifest = resolve(skillsRoot, name, 'SKILL.md');
+      if (!existsSync(manifest)) {
+        issues.push(
+          `State "${stateId}" references skill "${name}" but no manifest exists at ${manifest}. ` +
+            `Each entry in \`skills:\` must correspond to <workflow-pkg>/skills/<name>/SKILL.md.`,
+        );
+      }
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new WorkflowValidationError(issues);
+  }
+}
 
 /**
  * Validates a parsed object as a WorkflowDefinition.

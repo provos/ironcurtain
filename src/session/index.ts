@@ -451,6 +451,7 @@ export function buildSessionConfig(
     | 'stateSlug'
     | 'agentConversationId'
     | 'workflowSkillsDir'
+    | 'workflowSkillFilter'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
@@ -677,6 +678,7 @@ export function buildSessionConfig(
   const resolvedSkills = resolveSkillsForSession({
     ...(opts.persona ? { personaName: opts.persona } : {}),
     ...(opts.workflowSkillsDir ? { workflowSkillsDir: opts.workflowSkillsDir } : {}),
+    ...(opts.workflowSkillFilter ? { workflowSkillFilter: opts.workflowSkillFilter } : {}),
   });
   if (borrowInfra) {
     borrowInfra.restageSkills(resolvedSkills);

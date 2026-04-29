@@ -78,7 +78,7 @@ import {
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
-import { validateDefinition } from './validate.js';
+import { validateDefinition, validateWorkflowSkillReferences } from './validate.js';
 import { parseDefinitionFile, getWorkflowPackageDir } from './discovery.js';
 import { resolveSkillsForSession } from '../skills/discovery.js';
 import type { ResolvedSkill } from '../skills/types.js';
@@ -1014,6 +1014,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
     this.validatePersonas(definition);
+    validateWorkflowSkillReferences(definition, getWorkflowPackageDir(definitionPath));
     const workflowId = createWorkflowId();
 
     const resolvedWorkspace = workspacePath ?? resolve(this.deps.baseDir, workflowId, 'workspace');
@@ -1709,6 +1710,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
+    const workflowSkillFilter = stateConfig.skills ? new Set<string>(stateConfig.skills) : undefined;
 
     let session: Session;
     try {
@@ -1719,6 +1721,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
         workflowSkillsDir,
+        ...(workflowSkillFilter ? { workflowSkillFilter } : {}),
         ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
         ...(settings.maxSessionSeconds != null
           ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }

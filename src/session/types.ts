@@ -426,6 +426,14 @@ export interface SessionOptions {
   readonly workflowSkillsDir?: string;
 
   /**
+   * When set, restricts the workflow layer to skills whose `name` is in
+   * this set. Built from the agent state's optional `skills:` field;
+   * left undefined when the state should receive every workflow-package
+   * skill. User-global skills are always included regardless.
+   */
+  readonly workflowSkillFilter?: ReadonlySet<string>;
+
+  /**
    * The agent-CLI conversation id. Used as `--session-id` on first turn
    * or `--resume` on subsequent turns. Required for Docker sessions
    * (the factory will not mint on behalf of callers); ignored for builtin

@@ -84,19 +84,41 @@ export function discoverSkills(skillsRoot: string, source: SkillSource): Resolve
 export interface ResolveSkillsOptions {
   readonly personaName?: string;
   readonly workflowSkillsDir?: string;
+  /**
+   * When set, only workflow-package skills whose `name` is in this set
+   * are layered in. User-global and persona layers are unaffected. Used
+   * by per-state `skills:` filtering in workflow definitions.
+   *
+   * Distinguishes two cases at the resolver level: undefined means "no
+   * filter, take everything"; an empty set means "exclude all
+   * workflow-package skills". Both are valid; the orchestrator builds
+   * the set from `AgentStateDefinition.skills` and only passes it when
+   * that field is present.
+   */
+  readonly workflowSkillFilter?: ReadonlySet<string>;
 }
 
 /**
  * Composes user → persona → workflow with last-wins on `name` collision.
- * `personaName === 'global'` is the workflow-definition sentinel for
- * "no persona" and skips the persona layer; an invalid slug is also
- * skipped (the orchestrator validates persona existence independently).
+ *
+ * Persona layer is skipped in two cases: `personaName === 'global'` (the
+ * workflow-definition sentinel for "no persona"), and whenever
+ * `workflowSkillsDir` is set — workflow sessions opt out of persona-as-
+ * skill-source entirely, since persona-as-mode-of-user does not fit a
+ * machine-driven workflow context. An invalid slug is also skipped (the
+ * orchestrator validates persona existence independently).
+ *
+ * `workflowSkillFilter`, when provided, restricts the workflow layer to
+ * entries whose `name` is in the set; an undefined filter means take
+ * every workflow-package skill.
  */
 export function resolveSkillsForSession(opts: ResolveSkillsOptions): ResolvedSkill[] {
   const userSkills = discoverSkills(getUserSkillsDir(), 'user');
 
+  // Workflow mode: persona-as-skill-source is intentionally inert.
+  const inWorkflow = opts.workflowSkillsDir !== undefined;
   let personaSkills: ResolvedSkill[] = [];
-  if (opts.personaName !== undefined && opts.personaName !== 'global') {
+  if (!inWorkflow && opts.personaName !== undefined && opts.personaName !== 'global') {
     try {
       const branded = createPersonaName(opts.personaName);
       personaSkills = discoverSkills(getPersonaSkillsDir(branded), 'persona');
@@ -105,7 +127,11 @@ export function resolveSkillsForSession(opts: ResolveSkillsOptions): ResolvedSki
     }
   }
 
-  const workflowSkills = opts.workflowSkillsDir ? discoverSkills(opts.workflowSkillsDir, 'workflow') : [];
+  let workflowSkills = opts.workflowSkillsDir ? discoverSkills(opts.workflowSkillsDir, 'workflow') : [];
+  const filter = opts.workflowSkillFilter;
+  if (filter !== undefined) {
+    workflowSkills = workflowSkills.filter((s) => filter.has(s.name));
+  }
 
   const merged = new Map<string, ResolvedSkill>();
   for (const skill of userSkills) merged.set(skill.name, skill);
