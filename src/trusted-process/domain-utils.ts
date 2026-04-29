@@ -4,9 +4,13 @@
  * Domain matching (domainMatchesAllowlist, isIpAddress) shared by the
  * PolicyEngine and the list type registry (dynamic-list-types.ts).
  *
- * URL normalization and domain extraction (normalizeUrl, extractDomain,
- * normalizeGitUrl, extractGitDomain, resolveGitRemote) used by the
+ * Domain extraction (extractDomain, extractGitDomain) and git remote
+ * resolution (resolveGitRemote, resolveDefaultGitRemote) used by the
  * policy engine's domain check pipeline and the auto-approver.
+ *
+ * URL canonicalizers (normalizeUrl, normalizeGitUrl) live in
+ * `../types/url-normalize.js` so the ArgumentRole registry can use them
+ * without forming a runtime cycle through this module.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -57,19 +61,8 @@ export function domainMatchesAllowlist(domain: string, allowedDomains: readonly 
 }
 
 // ---------------------------------------------------------------------------
-// URL normalization and domain extraction
+// Domain extraction
 // ---------------------------------------------------------------------------
-
-/** Normalizes an HTTP(S) URL to a canonical form. Returns value as-is on parse failure. */
-export function normalizeUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.pathname === '/') url.pathname = '';
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return value;
-  }
-}
 
 /** Extracts the hostname from an HTTP(S) URL. Returns value as-is on parse failure. */
 export function extractDomain(value: string): string {
@@ -78,14 +71,6 @@ export function extractDomain(value: string): string {
   } catch {
     return value;
   }
-}
-
-/** Normalizes a git URL (HTTP or SSH format). SSH URLs are returned as-is. */
-export function normalizeGitUrl(value: string): string {
-  // SSH format: git@host:path -- no further normalization needed
-  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):/);
-  if (sshMatch && !value.includes('://')) return value;
-  return normalizeUrl(value);
 }
 
 /**
