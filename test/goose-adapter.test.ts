@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  createGooseAdapter,
-  escapeHeredoc,
-  extractFinalResponse,
-  stripAnsi,
-  getProviderConfig,
-} from '../src/docker/adapters/goose.js';
+import { createGooseAdapter, escapeHeredoc, stripAnsi, getProviderConfig } from '../src/docker/adapters/goose.js';
 import { CONTAINER_WORKSPACE_DIR, type OrientationContext } from '../src/docker/agent-adapter.js';
 import type { ServerListing } from '../src/types/server-listing.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
@@ -169,7 +163,7 @@ describe('GooseAdapter.generateOrientationFiles', () => {
 describe('GooseAdapter.buildCommand', () => {
   const adapter = createGooseAdapter();
 
-  it('returns a shell command with goose run --no-session', () => {
+  it('returns a shell command with goose run --no-session --quiet', () => {
     const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed', {
       sessionId: 'test-session',
       firstTurn: true,
@@ -178,7 +172,7 @@ describe('GooseAdapter.buildCommand', () => {
     expect(cmd).toHaveLength(3);
     expect(cmd[0]).toBe('/bin/sh');
     expect(cmd[1]).toBe('-c');
-    expect(cmd[2]).toContain('goose run --no-session');
+    expect(cmd[2]).toContain('goose run --no-session --quiet');
   });
 
   it('includes -i flag for instructions file', () => {
@@ -446,6 +440,31 @@ describe('GooseAdapter.extractResponse', () => {
     const response = adapter.extractResponse(0, 'output');
     expect(response.costUsd).toBeUndefined();
   });
+
+  it('preserves multi-paragraph output (regression: heuristic used to drop everything but the last block)', () => {
+    // Faithful shape of a real assistant turn: headers, bullets, blank
+    // separators, and a trailing question. The previous "last contiguous
+    // block" heuristic collapsed this to just the question.
+    const stdout = [
+      'I have several things stored about you:',
+      '',
+      'Upcoming & Important:',
+      '    * GitHub Documentary filming — April 22, 2026',
+      '    * Ryan Lowther (FBM) — follow up to close out the engagement',
+      '',
+      'People & Projects:',
+      '    * George Ogawa — 7th-dan Kendo teacher',
+      '',
+      'Is there anything you would like to update?',
+      '',
+    ].join('\n');
+
+    const response = adapter.extractResponse(0, stdout);
+    expect(response.text).toContain('I have several things stored about you:');
+    expect(response.text).toContain('Upcoming & Important:');
+    expect(response.text).toContain('George Ogawa');
+    expect(response.text).toContain('Is there anything you would like to update?');
+  });
 });
 
 // ─── buildPtyCommand ─────────────────────────────────────────
@@ -526,46 +545,6 @@ describe('stripAnsi', () => {
 
   it('strips multiple escape sequences', () => {
     expect(stripAnsi('\x1b[1m\x1b[32mbold green\x1b[0m normal')).toBe('bold green normal');
-  });
-});
-
-// ─── Helper: extractFinalResponse ───────────────────────────
-
-describe('extractFinalResponse', () => {
-  it('extracts last block of text', () => {
-    const output = ['Tool: read_file', 'Result: file contents', '', 'The file contains 42 lines.'].join('\n');
-
-    expect(extractFinalResponse(output)).toBe('The file contains 42 lines.');
-  });
-
-  it('handles multi-line final block', () => {
-    const output = ['Tool output here', '', 'First line of response.', 'Second line of response.'].join('\n');
-
-    expect(extractFinalResponse(output)).toBe('First line of response.\nSecond line of response.');
-  });
-
-  it('returns full output when no blank line separator', () => {
-    const output = 'Single line output';
-    expect(extractFinalResponse(output)).toBe('Single line output');
-  });
-
-  it('returns empty string for empty input', () => {
-    expect(extractFinalResponse('')).toBe('');
-  });
-
-  it('returns full output when only whitespace lines exist', () => {
-    const output = '  \n  \nSome text\n  ';
-    expect(extractFinalResponse(output)).toBe('Some text');
-  });
-
-  it('works on pre-stripped input (caller is responsible for ANSI stripping)', () => {
-    const output = stripAnsi('\x1b[32mTool output\x1b[0m\n\nFinal answer');
-    expect(extractFinalResponse(output)).toBe('Final answer');
-  });
-
-  it('handles trailing blank lines', () => {
-    const output = 'Tool trace\n\nThe result is 7.\n\n\n';
-    expect(extractFinalResponse(output)).toBe('The result is 7.');
   });
 });
 

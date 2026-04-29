@@ -64,38 +64,6 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]/g, '');
 }
 
-/**
- * Extracts the final response from Goose's plain-text output.
- *
- * TODO: This heuristic needs validation against real Goose output from
- * Prototype 1 (Section 12 of the design doc). The current implementation
- * extracts the last contiguous block of non-empty lines, which is a
- * reasonable starting point based on similar CLI agent output patterns.
- *
- * The parser should be refined once actual Goose headless output samples
- * are captured. If the heuristic proves unreliable, the fallback is to
- * return the full ANSI-stripped output (noisy but functional).
- */
-export function extractFinalResponse(raw: string): string {
-  const lines = raw.split('\n');
-
-  // Walk backwards from the end, collecting lines until we hit
-  // a blank line preceded by content (end of final block).
-  const result: string[] = [];
-  let foundContent = false;
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].trim() === '') {
-      if (foundContent) break;
-      continue;
-    }
-    foundContent = true;
-    result.unshift(lines[i]);
-  }
-
-  return result.length > 0 ? result.join('\n') : raw.trim();
-}
-
 // ─── Heredoc Escaping ────────────────────────────────────────
 
 /**
@@ -236,7 +204,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         `PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md) && ` +
           `trap 'rm -f "$PROMPT_FILE"' EXIT && ` +
           `cat > "$PROMPT_FILE" << '${delimiter}'\n${instructions}\n${delimiter}\n` +
-          `goose run --no-session -i "$PROMPT_FILE"`,
+          `goose run --no-session --quiet -i "$PROMPT_FILE"`,
       ];
     },
 
@@ -320,8 +288,10 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         return { text: `Goose exited with code ${exitCode}.\n\nOutput:\n${clean.trim()}` };
       }
 
-      const text = extractFinalResponse(clean);
-      return { text };
+      // `goose run --quiet` suppresses the ASCII banner, "session closed"
+      // footer, and progress indicators, so the entire stdout is the model
+      // response — no heuristic slicing required.
+      return { text: clean.trim() };
     },
 
     buildPtyCommand(
