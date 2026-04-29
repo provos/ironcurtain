@@ -14,62 +14,62 @@ $EDITOR ~/.ironcurtain/config.json
 
 ## Models
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `agentModelId` | string | `anthropic:claude-sonnet-4-6` | LLM for the agent. Format: `provider:model-name` or bare model name. |
-| `policyModelId` | string | `anthropic:claude-sonnet-4-6` | LLM for policy compilation. |
+| Field           | Type   | Default                       | Description                                                          |
+| --------------- | ------ | ----------------------------- | -------------------------------------------------------------------- |
+| `agentModelId`  | string | `anthropic:claude-sonnet-4-6` | LLM for the agent. Format: `provider:model-name` or bare model name. |
+| `policyModelId` | string | `anthropic:claude-sonnet-4-6` | LLM for policy compilation.                                          |
 
 Supported providers: `anthropic`, `google`, `openai`.
 
 ## Security
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `escalationTimeoutSeconds` | integer | `300` | Seconds to wait for human approval on escalated tool calls. Range: 30–600. |
-| `autoApprove.enabled` | boolean | `false` | Let an LLM auto-approve escalated tool calls instead of waiting for a human. |
-| `autoApprove.modelId` | string | `anthropic:claude-haiku-4-5` | Model used for auto-approval decisions. |
+| Field                      | Type    | Default                      | Description                                                                  |
+| -------------------------- | ------- | ---------------------------- | ---------------------------------------------------------------------------- |
+| `escalationTimeoutSeconds` | integer | `300`                        | Seconds to wait for human approval on escalated tool calls. Range: 30–600.   |
+| `autoApprove.enabled`      | boolean | `false`                      | Let an LLM auto-approve escalated tool calls instead of waiting for a human. |
+| `autoApprove.modelId`      | string  | `anthropic:claude-haiku-4-5` | Model used for auto-approval decisions.                                      |
 
 ## Resource Limits
 
 All budget fields are nullable — set to `null` to disable the limit.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `resourceBudget.maxTotalTokens` | integer \| null | `1000000` | Maximum tokens (input + output) per session. |
-| `resourceBudget.maxSteps` | integer \| null | `200` | Maximum agent steps per session. |
-| `resourceBudget.maxSessionSeconds` | number \| null | `1800` | Wall-clock timeout in seconds. |
-| `resourceBudget.maxEstimatedCostUsd` | number \| null | `5.0` | Estimated cost cap in USD. |
-| `resourceBudget.warnThresholdPercent` | integer | `80` | Emit a warning when this percentage of any limit is consumed. Range: 1–99. |
+| Field                                 | Type            | Default   | Description                                                                |
+| ------------------------------------- | --------------- | --------- | -------------------------------------------------------------------------- |
+| `resourceBudget.maxTotalTokens`       | integer \| null | `1000000` | Maximum tokens (input + output) per session.                               |
+| `resourceBudget.maxSteps`             | integer \| null | `200`     | Maximum agent steps per session.                                           |
+| `resourceBudget.maxSessionSeconds`    | number \| null  | `1800`    | Wall-clock timeout in seconds.                                             |
+| `resourceBudget.maxEstimatedCostUsd`  | number \| null  | `5.0`     | Estimated cost cap in USD.                                                 |
+| `resourceBudget.warnThresholdPercent` | integer         | `80`      | Emit a warning when this percentage of any limit is consumed. Range: 1–99. |
 
 ## Auto-Compact
 
 Controls automatic context compaction when the conversation approaches token limits.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `autoCompact.enabled` | boolean | `true` | Enable automatic compaction. |
-| `autoCompact.thresholdTokens` | integer | `160000` | Token count at which compaction triggers. |
-| `autoCompact.keepRecentMessages` | integer | `10` | Number of recent messages preserved during compaction. |
-| `autoCompact.summaryModelId` | string | `anthropic:claude-haiku-4-5` | Model used to generate the summary. |
+| Field                            | Type    | Default                      | Description                                            |
+| -------------------------------- | ------- | ---------------------------- | ------------------------------------------------------ |
+| `autoCompact.enabled`            | boolean | `true`                       | Enable automatic compaction.                           |
+| `autoCompact.thresholdTokens`    | integer | `160000`                     | Token count at which compaction triggers.              |
+| `autoCompact.keepRecentMessages` | integer | `10`                         | Number of recent messages preserved during compaction. |
+| `autoCompact.summaryModelId`     | string  | `anthropic:claude-haiku-4-5` | Model used to generate the summary.                    |
 
 ## Audit Redaction
 
 Controls automatic redaction of sensitive data in audit log entries.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auditRedaction.enabled` | boolean | `true` | Redact credit cards, SSNs, and API keys in `audit.jsonl` entries before writing to disk. |
+| Field                    | Type    | Default | Description                                                                              |
+| ------------------------ | ------- | ------- | ---------------------------------------------------------------------------------------- |
+| `auditRedaction.enabled` | boolean | `true`  | Redact credit cards, SSNs, and API keys in `audit.jsonl` entries before writing to disk. |
 
 ## Web Search
 
 Configure a web search provider so the agent can search the web via the `web_search` tool.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `webSearch.provider` | string | *(none)* | Active provider: `brave`, `tavily`, or `serpapi`. |
-| `webSearch.brave.apiKey` | string | — | Brave Search API key. |
-| `webSearch.tavily.apiKey` | string | — | Tavily API key. |
-| `webSearch.serpapi.apiKey` | string | — | SerpAPI key. |
+| Field                      | Type   | Default  | Description                                       |
+| -------------------------- | ------ | -------- | ------------------------------------------------- |
+| `webSearch.provider`       | string | _(none)_ | Active provider: `brave`, `tavily`, or `serpapi`. |
+| `webSearch.brave.apiKey`   | string | —        | Brave Search API key.                             |
+| `webSearch.tavily.apiKey`  | string | —        | Tavily API key.                                   |
+| `webSearch.serpapi.apiKey` | string | —        | SerpAPI key.                                      |
 
 ### Getting API Keys
 
@@ -96,11 +96,11 @@ Keys must match server names in `mcp-servers.json`. A warning is emitted for unm
 
 API keys can be set via environment variables (preferred) or in the config file. Environment variables take precedence.
 
-| Env Var | Config Field | Description |
-|---------|-------------|-------------|
-| `ANTHROPIC_API_KEY` | `anthropicApiKey` | Anthropic API key |
-| `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey` | Google AI API key |
-| `OPENAI_API_KEY` | `openaiApiKey` | OpenAI API key |
+| Env Var                        | Config Field      | Description       |
+| ------------------------------ | ----------------- | ----------------- |
+| `ANTHROPIC_API_KEY`            | `anthropicApiKey` | Anthropic API key |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`    | Google AI API key |
+| `OPENAI_API_KEY`               | `openaiApiKey`    | OpenAI API key    |
 
 In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
 
@@ -108,13 +108,17 @@ In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.cred
 
 Controls the persistent memory server, automatically enabled for persona and cron job sessions. When an Anthropic API key is available, the memory server uses it for LLM-based summarization, duplicate detection, and compaction via Anthropic's OpenAI-compatible endpoint. Without an LLM key, the server works but uses extractive fallbacks.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `memory.enabled` | boolean | `true` | Enable the memory MCP server for persona/cron sessions. |
-| `memory.llmBaseUrl` | string | *(Anthropic endpoint)* | OpenAI-compatible API endpoint for memory LLM operations. |
-| `memory.llmApiKey` | string | *(falls back to Anthropic key)* | API key for the memory LLM endpoint. |
+| Field               | Type    | Default                         | Description                                               |
+| ------------------- | ------- | ------------------------------- | --------------------------------------------------------- |
+| `memory.enabled`    | boolean | `true`                          | Enable the memory MCP server for persona/cron sessions.   |
+| `memory.llmBaseUrl` | string  | _(Anthropic endpoint)_          | OpenAI-compatible API endpoint for memory LLM operations. |
+| `memory.llmApiKey`  | string  | _(falls back to Anthropic key)_ | API key for the memory LLM endpoint.                      |
 
 The memory server can also be configured via environment variables (`MEMORY_DB_PATH`, `MEMORY_NAMESPACE`, `MEMORY_LLM_*`). See the [memory-mcp-server README](packages/memory-mcp-server/README.md) for standalone usage.
+
+## Skills
+
+User-global SKILL.md packages live under `~/.ironcurtain/skills/<name>/` and are bind-mounted read-only into every Docker agent session at `/home/codespace/.agents/skills/`. There's nothing to configure in `config.json` — drop a directory containing a `SKILL.md` file (with `name` and `description` frontmatter) and any supporting files, and it's automatically picked up on next session start. See [WORKFLOWS.md](WORKFLOWS.md#skills) for the layering rules and the workflow-bundled skills variant.
 
 ## Multi-Provider Support
 
@@ -145,7 +149,7 @@ The config file is created with `0600` (owner-only read/write) permissions. A wa
     "maxTotalTokens": 1000000,
     "maxSteps": 200,
     "maxSessionSeconds": 1800,
-    "maxEstimatedCostUsd": 5.00,
+    "maxEstimatedCostUsd": 5.0,
     "warnThresholdPercent": 80
   },
   "autoCompact": {
