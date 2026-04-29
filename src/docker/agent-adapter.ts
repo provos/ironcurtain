@@ -8,7 +8,7 @@
 
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ProviderConfig } from './provider-config.js';
-import type { ServerListing } from '../session/prompts.js';
+import type { ServerListing } from '../types/server-listing.js';
 import type { AuthMethod } from './oauth-credentials.js';
 
 /**

@@ -15,7 +15,7 @@ import {
   type OrientationContext,
 } from './agent-adapter.js';
 import type { IronCurtainConfig } from '../config/types.js';
-import type { ServerListing } from '../session/prompts.js';
+import type { ServerListing } from '../types/server-listing.js';
 
 /**
  * Extracts allowed domains from MCP server configurations.
