@@ -42,7 +42,7 @@ import {
   resolveDefaultGitRemote,
   extractDomainForRole,
 } from './domain-utils.js';
-import { getListMatcher } from '../pipeline/dynamic-list-types.js';
+import { getListMatcher } from './list-matcher.js';
 
 /**
  * Extracts string values from arguments based on annotation roles.

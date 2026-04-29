@@ -4,11 +4,12 @@
  * Each type determines:
  * - How values are validated during resolution
  * - What format guidance is appended to the generation prompt
- * - How values are matched against tool call arguments at evaluation time
+ *
+ * Runtime value/pattern matching lives in `src/trusted-process/list-matcher.ts`
+ * so the policy engine does not depend on the offline pipeline layer.
  */
 
 import type { ListType } from './types.js';
-import { domainMatchesAllowlist } from '../trusted-process/domain-utils.js';
 
 export interface ListTypeDef {
   readonly description: string;
@@ -78,18 +79,3 @@ export const LIST_TYPE_REGISTRY: ReadonlyMap<ListType, ListTypeDef> = new Map<Li
     },
   ],
 ]);
-
-/**
- * Returns a matcher function for the given list type.
- * The matcher checks whether a value matches a pattern from the allowed list.
- */
-export function getListMatcher(type: ListType): (value: string, pattern: string) => boolean {
-  switch (type) {
-    case 'domains':
-      return (v, p) => domainMatchesAllowlist(v, [p]);
-    case 'emails':
-      return (v, p) => v.toLowerCase() === p.toLowerCase();
-    case 'identifiers':
-      return (v, p) => v === p;
-  }
-}

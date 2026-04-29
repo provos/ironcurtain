@@ -12,7 +12,8 @@ import {
   validateCompiledRules,
   type CompilerConfig,
 } from '../src/pipeline/constitution-compiler.js';
-import { LIST_TYPE_REGISTRY, getListMatcher } from '../src/pipeline/dynamic-list-types.js';
+import { LIST_TYPE_REGISTRY } from '../src/pipeline/dynamic-list-types.js';
+import { getListMatcher } from '../src/trusted-process/list-matcher.js';
 import { resolveList, resolveAllLists, type ListResolverConfig } from '../src/pipeline/list-resolver.js';
 import { buildGeneratorSystemPrompt, formatDynamicListsSection } from '../src/pipeline/scenario-generator.js';
 import { buildJudgeSystemPrompt } from '../src/pipeline/policy-verifier.js';
