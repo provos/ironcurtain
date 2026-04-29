@@ -30,7 +30,7 @@ import { loadAllJobs, loadJob, saveJob, deleteJob, saveRunRecord, loadRecentRuns
 import { compileTaskPolicy } from '../cron/compile-task-policy.js';
 import type { JobDefinition, JobId, RunRecord, RunOutcome } from '../cron/types.js';
 import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
-import { BudgetExhaustedError } from '../session/errors.js';
+import { BudgetExhaustedError } from '../types/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
 import { getDaemonLogPath } from '../config/paths.js';

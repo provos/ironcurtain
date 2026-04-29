@@ -47,7 +47,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import type { DockerInfrastructure } from './docker-infrastructure.js';
 import { destroyDockerInfrastructure } from './docker-infrastructure.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
-import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
+import { SessionNotReadyError, SessionClosedError } from '../types/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import * as logger from '../logger.js';

@@ -38,7 +38,7 @@ describe('policyDir containment validation', () => {
     }));
 
     const { createSession } = await import('../src/session/index.js');
-    const { SessionError } = await import('../src/session/errors.js');
+    const { SessionError } = await import('../src/types/errors.js');
     const { loadConfig } = await import('../src/config/index.js');
 
     const config = loadConfig();

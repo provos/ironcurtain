@@ -39,7 +39,7 @@ import type { PersonaDefinition } from '../persona/types.js';
 import { createJobId } from '../cron/types.js';
 import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
-import { SessionError } from './errors.js';
+import { SessionError } from '../types/errors.js';
 import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
 import { createAgentConversationId, createSessionId } from './types.js';
 import type {
@@ -683,6 +683,6 @@ export type {
   BudgetStatus,
 } from './types.js';
 export type { Transport } from './transport.js';
-export { SessionError, SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
+export { SessionError, SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from '../types/errors.js';
 export { resolveSessionMode, PreflightError } from './preflight.js';
 export type { PreflightResult, PreflightOptions } from './preflight.js';

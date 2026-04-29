@@ -26,7 +26,7 @@ import { createLlmLoggingMiddleware, type LlmLogContext } from '../observability
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import type { Sandbox } from '../sandbox/index.js';
-import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
+import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from '../types/errors.js';
 import { MessageCompactor } from './message-compactor.js';
 import { createCacheStrategy, type PromptCacheStrategy } from './prompt-cache.js';
 import { buildSystemPrompt, type ServerListing } from './prompts.js';
