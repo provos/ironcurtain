@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { createGooseAdapter, escapeHeredoc, stripAnsi, getProviderConfig } from '../src/docker/adapters/goose.js';
+import {
+  createGooseAdapter,
+  escapeHeredoc,
+  extractAssistantText,
+  stripAnsi,
+  getProviderConfig,
+} from '../src/docker/adapters/goose.js';
 import { CONTAINER_WORKSPACE_DIR, type OrientationContext } from '../src/docker/agent-adapter.js';
 import type { ServerListing } from '../src/types/server-listing.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
@@ -163,7 +169,7 @@ describe('GooseAdapter.generateOrientationFiles', () => {
 describe('GooseAdapter.buildCommand', () => {
   const adapter = createGooseAdapter();
 
-  it('returns a shell command with goose run --no-session --quiet', () => {
+  it('returns a shell command with goose run --no-session --quiet --output-format json', () => {
     const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed', {
       sessionId: 'test-session',
       firstTurn: true,
@@ -172,7 +178,7 @@ describe('GooseAdapter.buildCommand', () => {
     expect(cmd).toHaveLength(3);
     expect(cmd[0]).toBe('/bin/sh');
     expect(cmd[1]).toBe('-c');
-    expect(cmd[2]).toContain('goose run --no-session --quiet');
+    expect(cmd[2]).toContain('goose run --no-session --quiet --output-format json');
   });
 
   it('includes -i flag for instructions file', () => {
@@ -441,11 +447,36 @@ describe('GooseAdapter.extractResponse', () => {
     expect(response.costUsd).toBeUndefined();
   });
 
-  it('preserves multi-paragraph output (regression: heuristic used to drop everything but the last block)', () => {
-    // Faithful shape of a real assistant turn: headers, bullets, blank
-    // separators, and a trailing question. The previous "last contiguous
-    // block" heuristic collapsed this to just the question.
-    const stdout = [
+  it('falls back to raw stripped output when stdout is not the JSON envelope', () => {
+    // Defensive path: if Goose ever changes its envelope shape, we degrade
+    // to "noisy but functional" rather than dropping content.
+    const response = adapter.extractResponse(0, 'just plain text\n');
+    expect(response.text).toBe('just plain text');
+  });
+});
+
+// ─── Helper: extractAssistantText (Goose JSON envelope parser) ───────
+
+describe('extractAssistantText', () => {
+  /** Builds a minimally-shaped Goose JSON envelope. */
+  function envelope(messages: unknown[]): string {
+    return JSON.stringify({ messages });
+  }
+
+  it('returns the assistant text from a single assistant message', () => {
+    const stdout = envelope([
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Hi there.' }] },
+    ]);
+    expect(extractAssistantText(stdout)).toBe('Hi there.');
+  });
+
+  it('preserves a multi-paragraph response (memory-dump regression)', () => {
+    // The user-reported bug: a memory dump with headers, bullets, and a
+    // trailing question used to collapse to just the question. With JSON
+    // mode every paragraph survives because we read structured text, not
+    // line-block heuristics.
+    const body = [
       'I have several things stored about you:',
       '',
       'Upcoming & Important:',
@@ -456,14 +487,67 @@ describe('GooseAdapter.extractResponse', () => {
       '    * George Ogawa — 7th-dan Kendo teacher',
       '',
       'Is there anything you would like to update?',
-      '',
     ].join('\n');
+    const stdout = envelope([{ role: 'assistant', content: [{ type: 'text', text: body }] }]);
 
-    const response = adapter.extractResponse(0, stdout);
-    expect(response.text).toContain('I have several things stored about you:');
-    expect(response.text).toContain('Upcoming & Important:');
-    expect(response.text).toContain('George Ogawa');
-    expect(response.text).toContain('Is there anything you would like to update?');
+    const out = extractAssistantText(stdout);
+    expect(out).toContain('I have several things stored about you:');
+    expect(out).toContain('Upcoming & Important:');
+    expect(out).toContain('George Ogawa');
+    expect(out).toContain('Is there anything you would like to update?');
+  });
+
+  it('concatenates assistant text across multiple turns separated by tool calls', () => {
+    // Real shape when the model narrates, calls a tool, then narrates more.
+    // Tool-use entries and tool-result messages must drop out cleanly.
+    const stdout = envelope([
+      { role: 'user', content: [{ type: 'text', text: 'what do you remember?' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: "I'll check my persistent memory first." },
+          { type: 'tool_use', name: 'memory_context', arguments: {} },
+        ],
+      },
+      { role: 'tool', content: [{ type: 'tool_result', text: '<memory data>' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: "Here's a summary of what I remember." }],
+      },
+    ]);
+
+    const out = extractAssistantText(stdout);
+    expect(out).toBe("I'll check my persistent memory first.\n\nHere's a summary of what I remember.");
+    expect(out).not.toContain('memory_context');
+    expect(out).not.toContain('tool_result');
+  });
+
+  it('returns null on malformed JSON so caller can fall back to raw text', () => {
+    expect(extractAssistantText('not json')).toBeNull();
+    expect(extractAssistantText('')).toBeNull();
+    expect(extractAssistantText('{')).toBeNull();
+  });
+
+  it('returns null when the envelope is missing a messages array', () => {
+    expect(extractAssistantText(JSON.stringify({}))).toBeNull();
+    expect(extractAssistantText(JSON.stringify({ messages: 'not-an-array' }))).toBeNull();
+  });
+
+  it('returns null when there is no assistant text (e.g. only tool_use entries)', () => {
+    const stdout = envelope([
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', name: 'memory_context', arguments: {} }] },
+    ]);
+    expect(extractAssistantText(stdout)).toBeNull();
+  });
+
+  it('skips assistant messages that are missing or have non-array content', () => {
+    const stdout = envelope([
+      { role: 'assistant' }, // no content key at all
+      { role: 'assistant', content: 'string-not-array' },
+      { role: 'assistant', content: [{ type: 'text', text: 'survivor' }] },
+    ]);
+    expect(extractAssistantText(stdout)).toBe('survivor');
   });
 });
 

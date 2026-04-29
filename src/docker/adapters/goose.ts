@@ -64,6 +64,48 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]/g, '');
 }
 
+/**
+ * Parses Goose's `--output-format json` envelope and returns the
+ * concatenated text of all assistant messages. Returns null if the
+ * envelope is missing, malformed, or has no assistant text — the caller
+ * falls back to the raw stripped output in that case.
+ *
+ * Goose emits one assistant message per agent invocation, so a turn
+ * with intermediate tool calls produces multiple assistant messages
+ * separated by tool-call/tool-result entries. Concatenating their text
+ * preserves the model's narrative without surfacing the tool chrome.
+ */
+export function extractAssistantText(stdout: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const messages = (parsed as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return null;
+
+  const segments: string[] = [];
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const msg = m as { role?: unknown; content?: unknown };
+    if (msg.role !== 'assistant') continue;
+    if (!Array.isArray(msg.content)) continue;
+    for (const c of msg.content) {
+      if (!c || typeof c !== 'object') continue;
+      const item = c as { type?: unknown; text?: unknown };
+      if (item.type === 'text' && typeof item.text === 'string') {
+        segments.push(item.text);
+      }
+    }
+  }
+
+  if (segments.length === 0) return null;
+  return segments.join('\n\n').trim();
+}
+
 // ─── Heredoc Escaping ────────────────────────────────────────
 
 /**
@@ -204,7 +246,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         `PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md) && ` +
           `trap 'rm -f "$PROMPT_FILE"' EXIT && ` +
           `cat > "$PROMPT_FILE" << '${delimiter}'\n${instructions}\n${delimiter}\n` +
-          `goose run --no-session --quiet -i "$PROMPT_FILE"`,
+          `goose run --no-session --quiet --output-format json -i "$PROMPT_FILE"`,
       ];
     },
 
@@ -256,27 +298,21 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
     /**
      * NOTE: this adapter does NOT currently populate
-     * `AgentResponse.quotaExhausted`. Goose runs without a JSON output
-     * mode (see the module header above), so on quota exhaustion its
-     * stdout is unstructured provider text with no machine-readable
-     * `api_error_status` field to key off of. A workflow run that hits
-     * a 429 under Goose will therefore take the generic abort path
-     * instead of pausing cleanly.
+     * `AgentResponse.quotaExhausted` or `AgentResponse.transientFailure`.
+     * Goose's `--output-format json` envelope wraps provider errors as
+     * plain assistant text (e.g. "Ran into this error: Authentication
+     * error: ... 401 ...") with no structured `api_error_status` field
+     * or `usage.output_tokens` / `stop_reason` to key off of. A workflow
+     * run that hits a 429 or a sustained upstream stall under Goose
+     * therefore takes the generic abort path instead of pausing cleanly
+     * or marking the run as transient-resumable.
      *
-     * The same gap applies to `AgentResponse.transientFailure`: detecting
-     * an upstream stall (degenerate response with no assistant content)
-     * relies on the JSON envelope's `usage.output_tokens` and
-     * `stop_reason` fields, which Goose does not surface. A workflow run
-     * that hits a sustained upstream stall under Goose will therefore
-     * take the generic abort path instead of marking the run as
-     * transient-resumable.
-     *
-     * Closing these gaps requires either (a) adopting a Goose structured
-     * output mode when one becomes available, or (b) a fragile stderr
-     * regex against known provider messages ("Usage limit reached",
-     * "429", "rate_limit_exceeded"); (b) is deliberately not attempted
-     * without broader testing across providers. See the Claude Code
-     * adapter (`adapters/claude-code.ts`) for the target contract and
+     * Closing these gaps requires either (a) Goose surfacing structured
+     * error envelopes upstream, or (b) a fragile regex against known
+     * provider messages ("Usage limit reached", "429",
+     * "rate_limit_exceeded"); (b) is deliberately not attempted without
+     * broader testing across providers. See the Claude Code adapter
+     * (`adapters/claude-code.ts`) for the target contract and
      * `AgentResponse.quotaExhausted` / `AgentResponse.transientFailure`
      * in `../agent-adapter.ts` for the interface-level requirement on
      * adapters.
@@ -288,10 +324,13 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         return { text: `Goose exited with code ${exitCode}.\n\nOutput:\n${clean.trim()}` };
       }
 
-      // `goose run --quiet` suppresses the ASCII banner, "session closed"
-      // footer, and progress indicators, so the entire stdout is the model
-      // response — no heuristic slicing required.
-      return { text: clean.trim() };
+      // `goose run --output-format json` returns a structured envelope
+      // listing every turn message with typed content. We pick the
+      // assistant text — tool_use entries, user echoes, and the CLI
+      // chrome are dropped without heuristic guesswork. Fall back to the
+      // raw stripped output if the schema ever drifts so we degrade to
+      // "noisy but functional" rather than dropping content.
+      return { text: extractAssistantText(clean) ?? clean.trim() };
     },
 
     buildPtyCommand(
