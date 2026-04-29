@@ -54,7 +54,7 @@ import {
 import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
 import { buildGeneratorSystemPrompt, generateScenarios, repairScenarios } from './scenario-generator.js';
 import { prefilterServers } from './server-prefilter.js';
-import type { LlmLogContext } from './llm-logger.js';
+import type { LlmLogContext } from '../observability/llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
 import { connectViaProxy, type ProxyConnection } from './proxy-mcp-connections.js';
 import type {

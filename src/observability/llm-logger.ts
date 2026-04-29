@@ -1,10 +1,15 @@
 /**
- * LLM Interaction Logger -- AI SDK middleware that captures all LLM
- * prompts and responses during the policy compilation pipeline.
+ * LLM Interaction Logger -- AI SDK middleware that captures LLM
+ * prompts and responses to a JSONL file.
+ *
+ * Used by any AI SDK call site that wants to record LLM interactions:
+ * the offline policy compilation pipeline (per-phase, full-prompt logging)
+ * as well as runtime call sites such as the sandbox and the agent session
+ * (long-running conversations, delta logging).
  *
  * Uses `wrapLanguageModel()` with a custom middleware that intercepts
  * every `doGenerate` call. The caller sets `context.stepName` before
- * each pipeline phase so logs are labeled without changing module APIs.
+ * each phase so logs are labeled without changing module APIs.
  *
  * Writes a single JSONL file with one entry per LLM call.
  */

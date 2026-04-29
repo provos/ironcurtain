@@ -4,7 +4,7 @@ import { wrapLanguageModel, generateText, Output } from 'ai';
 import { z } from 'zod';
 import { readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createLlmLoggingMiddleware, type LlmLogContext, type LlmLogEntry } from '../src/pipeline/llm-logger.js';
+import { createLlmLoggingMiddleware, type LlmLogContext, type LlmLogEntry } from '../src/observability/llm-logger.js';
 
 const TEST_DIR = resolve('/tmp', `llm-logger-test-${process.pid}`);
 const LOG_PATH = resolve(TEST_DIR, 'test-interactions.jsonl');
