@@ -27,7 +27,7 @@ import {
   MethodNotFoundError,
   toHumanGateRequestDto,
 } from '../web-ui-types.js';
-import type { PastRunLoadSuccess, WorkflowManager } from '../workflow-manager.js';
+import type { PastRunLoadSuccess, WorkflowManager } from '../../workflow/workflow-manager.js';
 import type { WorkflowId, WorkflowStatus, WorkflowCheckpoint, WorkflowDefinition } from '../../workflow/types.js';
 import type { WorkflowDetail } from '../../workflow/orchestrator.js';
 import { MessageLog, type MessageLogEntry, type StateTransitionEntry } from '../../workflow/message-log.js';

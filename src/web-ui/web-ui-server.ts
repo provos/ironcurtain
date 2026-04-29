@@ -21,7 +21,7 @@ import type { TokenStreamBridge } from './token-stream-bridge.js';
 import { WebEventBus } from './web-event-bus.js';
 import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from './web-ui-types.js';
 import { dispatch, buildStatusDto, type WorkflowDispatchContext } from './json-rpc-dispatch.js';
-import type { WorkflowManager } from './workflow-manager.js';
+import type { WorkflowManager } from '../workflow/workflow-manager.js';
 import { wsDataToString } from './ws-utils.js';
 import * as logger from '../logger.js';
 

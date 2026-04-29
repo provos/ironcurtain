@@ -37,7 +37,7 @@ import type {
   WorkflowDefinition,
 } from '../src/workflow/types.js';
 import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
-import type { PastRunLoadSuccess, WorkflowManager, PastRunLoadResult } from '../src/web-ui/workflow-manager.js';
+import type { PastRunLoadSuccess, WorkflowManager, PastRunLoadResult } from '../src/workflow/workflow-manager.js';
 import type { FileCheckpointStore } from '../src/workflow/checkpoint.js';
 
 // ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ import type { Diagnostic } from '../src/workflow/lint.js';
 import type { WorkflowController } from '../src/workflow/orchestrator.js';
 import type { WorkflowId } from '../src/workflow/types.js';
 import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
-import type { WorkflowManager } from '../src/web-ui/workflow-manager.js';
+import type { WorkflowManager } from '../src/workflow/workflow-manager.js';
 import type { FileCheckpointStore } from '../src/workflow/checkpoint.js';
 
 // ---------------------------------------------------------------------------
