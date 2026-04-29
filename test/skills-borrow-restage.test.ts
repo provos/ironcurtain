@@ -26,6 +26,8 @@ import { buildSessionConfig } from '../src/session/index.js';
 import { createSessionId, type BundleId } from '../src/session/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
+import { stageSkillsToBundle } from '../src/skills/staging.js';
+import type { ResolvedSkill } from '../src/skills/types.js';
 
 const TEST_HOME = `${REAL_TMP}/ironcurtain-skills-borrow-test-${process.pid}`;
 
@@ -109,12 +111,7 @@ function createTestPersona(name: string): void {
   writeMinimalPolicy(generatedDir);
 }
 
-/**
- * Builds a fake `DockerInfrastructure` shaped well enough for borrow
- * mode in `buildSessionConfig`. Only the fields read by that path
- * matter (`skillsDir`, `bundleDir`, `escalationDir`, `auditLogPath`).
- */
-function makeFakeBundle(skillsDir: string, bundleDir: string): DockerInfrastructure {
+function makeFakeBundle(skillsDir: string | undefined, bundleDir: string): DockerInfrastructure {
   return {
     bundleId: 'fake-bundle-id' as BundleId,
     bundleDir,
@@ -123,9 +120,9 @@ function makeFakeBundle(skillsDir: string, bundleDir: string): DockerInfrastruct
     auditLogPath: resolve(bundleDir, 'audit.jsonl'),
     skillsDir,
     setTokenSessionId: () => {},
-    // Remaining fields are typed as required, but borrow-mode
-    // `buildSessionConfig` never reads them. Cast through `unknown` so
-    // TypeScript accepts the partial shape.
+    restageSkills: (skills: readonly ResolvedSkill[]) => {
+      if (skillsDir) stageSkillsToBundle(skills, skillsDir);
+    },
   } as unknown as DockerInfrastructure;
 }
 
@@ -259,10 +256,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
 
     const bundleDir = resolve(TEST_HOME, 'bundle');
     mkdirSync(bundleDir, { recursive: true });
-    const bundle = {
-      ...makeFakeBundle('UNUSED', bundleDir),
-      skillsDir: undefined,
-    } as unknown as DockerInfrastructure;
+    const bundle = makeFakeBundle(undefined, bundleDir);
 
     const config = createTestConfig();
     const sessionId = createSessionId();

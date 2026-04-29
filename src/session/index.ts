@@ -31,7 +31,6 @@ import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { resolvePersona, applyServerAllowlist, filterMcpServersByPolicy } from '../persona/resolve.js';
 import { resolveSkillsForSession } from '../skills/discovery.js';
-import { stageSkillsToBundle } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
@@ -388,10 +387,9 @@ export interface SessionDirConfig {
   /** Memory MCP gate decision derived from persona/job/userConfig. */
   memoryEnabled: boolean;
   /**
-   * Skills resolved for this session (user-global → persona → workflow,
-   * last-wins on collision). Empty when no skills are present at any
-   * layer. Skipped entirely in borrow mode — the workflow bundle has
-   * already mounted its workflow-scoped set.
+   * Skills resolved via user → persona → workflow last-wins. Always
+   * `[]` in borrow mode — staging happened in-place via
+   * `borrowInfra.restageSkills`, so callers shouldn't re-stage.
    */
   resolvedSkills?: readonly ResolvedSkill[];
 }
@@ -672,32 +670,17 @@ export function buildSessionConfig(
     }
   }
 
-  // Resolve the skill set this session should mount. The same resolver
-  // runs in both modes; the difference is what we do with the result:
-  //
-  // - Standalone: pass the resolved set through to docker-infrastructure,
-  //   which stages it under the bundle and creates the bind mount once
-  //   for the session's lifetime.
-  // - Borrow (workflow): the bind mount was already established at
-  //   bundle creation. Workflow bundles are shared across states with
-  //   potentially different personas, so the staged set must be
-  //   refreshed for THIS state's persona. The bind mount is live, so
-  //   wipe-and-rebuild on the host side is reflected in the container
-  //   without remounting. The factory does NOT pass `resolvedSkills`
-  //   forward in borrow mode (the bundle already exists), so we return
-  //   `[]` here to keep the contract clear: borrow-mode skill staging
-  //   happens as a side effect, not a returned value.
+  // Borrow-mode: re-stage the bundle in-place so per-state persona skills
+  // become visible without remounting. Standalone mode returns the set
+  // through SessionDirConfig for the docker factory to stage at bundle
+  // creation.
   const resolvedSkills = resolveSkillsForSession({
     ...(opts.persona ? { personaName: opts.persona } : {}),
     ...(opts.workflowSkillsDir ? { workflowSkillsDir: opts.workflowSkillsDir } : {}),
   });
-  if (borrowInfra && borrowInfra.skillsDir) {
-    stageSkillsToBundle(resolvedSkills, borrowInfra.skillsDir);
-    logger.info(
-      `Re-staged ${resolvedSkills.length} skill(s) for state${opts.stateSlug ? ` "${opts.stateSlug}"` : ''} into ${borrowInfra.skillsDir}`,
-    );
+  if (borrowInfra) {
+    borrowInfra.restageSkills(resolvedSkills);
   }
-  const sessionSkills: readonly ResolvedSkill[] = borrowInfra ? [] : resolvedSkills;
 
   return {
     config: sessionConfig,
@@ -707,7 +690,7 @@ export function buildSessionConfig(
     auditLogPath,
     systemPromptAugmentation,
     memoryEnabled,
-    resolvedSkills: sessionSkills,
+    resolvedSkills: borrowInfra ? [] : resolvedSkills,
   };
 }
 

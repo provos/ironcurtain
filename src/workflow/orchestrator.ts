@@ -220,15 +220,8 @@ export interface CreateWorkflowInfrastructureInput {
   /** Union of MCP server names required across every agent state in this scope. */
   readonly requiredServers: ReadonlySet<string>;
   /**
-   * Initial skill set staged at bundle creation: user-global + workflow
-   * package skills. Persona skills are NOT included here — they are
-   * layered in per-state by `buildSessionConfig` (borrow mode), which
-   * re-stages into the bundle's skillsDir on every state transition.
-   *
-   * In workflow mode the bundle's skillsDir is always created (and the
-   * read-only bind mount established) regardless of whether this initial
-   * set is empty, so per-state persona skills can appear later via
-   * host-side re-staging without remounting the container.
+   * Initial skills staged at bundle creation (user + workflow only).
+   * Persona skills are layered in per-state via `bundle.restageSkills`.
    */
   readonly resolvedSkills?: readonly ResolvedSkill[];
 }
@@ -637,15 +630,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
 
     const requiredServers = this.getRequiredServersForScope(instance, scope);
-    // Resolve the INITIAL skill set staged at bundle creation: user-global
-    // skills + the workflow package's skills (no persona). Persona skills
-    // are added per-state by `buildSessionConfig` (borrow mode), which
-    // re-stages into the bundle's skillsDir on every state transition —
-    // the bind mount is live, so the container picks up the change
-    // without remounting. The workflow factory always creates the
-    // skillsDir under workflow mode (see prepareDockerInfrastructure)
-    // so the mount exists from container start regardless of whether
-    // any layer has skills initially.
+    // Persona-less initial set; per-state restaging fills in persona skills later.
     const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
     const resolvedSkills = resolveSkillsForSession({ workflowSkillsDir });
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
@@ -1723,11 +1708,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       mkdirSync(workflowStateDir, { recursive: true });
     }
 
-    // Workflow-bundled skills live in the workflow package's skills/
-    // dir and are layered into every state's resolved skill set
-    // (alongside user-global and per-state persona skills). Pass it on
-    // every session so re-staging in borrow mode (driven by
-    // `buildSessionConfig`) sees the workflow layer too.
     const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
 
     let session: Session;

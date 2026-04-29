@@ -1,16 +1,3 @@
-/**
- * Skill discovery and layered resolution.
- *
- * Scans a skills root for `<name>/SKILL.md` files, parses YAML
- * frontmatter, and merges across the three layers (user-global,
- * persona, workflow) with last-wins semantics.
- *
- * Path conventions:
- *   user-global: ~/.ironcurtain/skills/<name>/
- *   persona:     ~/.ironcurtain/personas/<persona>/skills/<name>/
- *   workflow:    <workflow-pkg>/skills/<name>/
- */
-
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
@@ -19,31 +6,16 @@ import { getPersonaSkillsDir } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';
 import type { ResolvedSkill, SkillFrontmatter, SkillSource } from './types.js';
 
-/**
- * Frontmatter delimiter used by the SKILL.md format. We accept the
- * standard `---` fences with optional trailing whitespace; everything
- * outside the first `---`...`---` block is the markdown body and not
- * relevant here.
- */
+/** Standard SKILL.md fence: `---\n…\n---\n`. Body after the second fence is ignored here. */
 const FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
 
-/**
- * Parses the YAML frontmatter from a SKILL.md body. Returns `undefined`
- * when the file has no fenced frontmatter, when the YAML fails to parse,
- * when the parsed value is not an object, or when `name`/`description`
- * are missing or non-string. We swallow errors silently rather than
- * throwing because a malformed skill should not break the rest of the
- * skill set; downstream callers see only the well-formed entries.
- */
 function parseFrontmatter(content: string): SkillFrontmatter | undefined {
   const match = FRONTMATTER_RE.exec(content);
   if (!match) return undefined;
 
   let parsed: unknown;
   try {
-    // maxAliasCount: 0 mirrors the alias-bomb hardening in
-    // src/workflow/discovery.ts:50 — skills are admin-supplied content
-    // but the same defense is cheap and uniform across the project.
+    // maxAliasCount: 0 hardens against YAML alias-bomb DoS.
     parsed = YAML.parse(match[1], { maxAliasCount: 0 });
   } catch {
     return undefined;
@@ -60,14 +32,9 @@ function parseFrontmatter(content: string): SkillFrontmatter | undefined {
 }
 
 /**
- * Scans a skills root directory for valid skills and returns them tagged
- * with `source`. Each entry must be a subdirectory containing a
- * `SKILL.md` with parseable frontmatter; subdirectories without a
- * SKILL.md, with an unparseable SKILL.md, or with frontmatter missing
- * the required `name`/`description` fields are skipped silently.
- *
- * Returns `[]` for missing roots so callers can compose layers without
- * pre-checking each layer's existence.
+ * Returns one entry per `<skillsRoot>/<dir>/SKILL.md` with valid
+ * frontmatter. Malformed or missing manifests are skipped silently so
+ * one bad skill doesn't break the rest of the layer.
  */
 export function discoverSkills(skillsRoot: string, source: SkillSource): ResolvedSkill[] {
   if (!existsSync(skillsRoot)) return [];
@@ -114,30 +81,16 @@ export function discoverSkills(skillsRoot: string, source: SkillSource): Resolve
   return out;
 }
 
-/**
- * Inputs for `resolveSkillsForSession`. All fields are optional; the
- * resolver returns whichever layers are present.
- */
 export interface ResolveSkillsOptions {
-  /** Persona slug. When set, the persona's skills/ subdir is layered in. */
   readonly personaName?: string;
-  /** Absolute path to the workflow package's skills dir, when present. */
   readonly workflowSkillsDir?: string;
 }
 
 /**
- * Composes the three skill layers into a single deduplicated list,
- * applying last-wins semantics on `name` collisions. The order
- * (user → persona → workflow) is intentional: workflow-bundled skills
- * are the most specific, persona skills override user defaults for that
- * persona, and user-global skills are the broadest fallback.
- *
- * Persona resolution is deliberately tolerant: an invalid persona name
- * produces an empty persona layer rather than throwing, mirroring
- * `personaExists()` in `persona/resolve.ts`. The persona layer is also
- * skipped when `personaName === 'global'` — that sentinel string is
- * used by workflow definitions to mean "no persona" (see
- * `vuln-discovery.yaml` `persona: global`).
+ * Composes user → persona → workflow with last-wins on `name` collision.
+ * `personaName === 'global'` is the workflow-definition sentinel for
+ * "no persona" and skips the persona layer; an invalid slug is also
+ * skipped (the orchestrator validates persona existence independently).
  */
 export function resolveSkillsForSession(opts: ResolveSkillsOptions): ResolvedSkill[] {
   const userSkills = discoverSkills(getUserSkillsDir(), 'user');
@@ -148,9 +101,7 @@ export function resolveSkillsForSession(opts: ResolveSkillsOptions): ResolvedSki
       const branded = createPersonaName(opts.personaName);
       personaSkills = discoverSkills(getPersonaSkillsDir(branded), 'persona');
     } catch {
-      // Invalid persona slug: silently skip. The orchestrator
-      // independently validates persona existence; a bad name here is
-      // not a fatal error for skill resolution.
+      /* invalid slug; skip persona layer */
     }
   }
 

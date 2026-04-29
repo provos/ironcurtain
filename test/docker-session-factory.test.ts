@@ -179,6 +179,7 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     sidecarContainerId: undefined,
     internalNetwork: undefined,
     setTokenSessionId: () => {},
+    restageSkills: () => {},
   };
 }
 

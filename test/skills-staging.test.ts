@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { stageSkillsToBundle } from '../src/skills/staging.js';
+import { stageSkillsToBundle, createCachedStager } from '../src/skills/staging.js';
 import type { ResolvedSkill } from '../src/skills/types.js';
 
 let tempDir: string;
@@ -131,5 +131,62 @@ describe('stageSkillsToBundle', () => {
     };
     const dest = resolve(tempDir, 'staged');
     expect(() => stageSkillsToBundle([skill], dest)).toThrow(/escapes staging directory/);
+  });
+});
+
+describe('createCachedStager', () => {
+  it('skips re-staging when the resolved set is unchanged', () => {
+    const sourceParent = resolve(tempDir, 'sources');
+    const skillSrc = writeSourceSkill(sourceParent, 's');
+    const set: ResolvedSkill[] = [{ name: 's', source: 'user', sourceDir: skillSrc, description: 'd' }];
+
+    const dest = resolve(tempDir, 'staged');
+    const stage = createCachedStager(dest);
+    expect(stage(set)).toBe(true);
+    expect(existsSync(resolve(dest, 's'))).toBe(true);
+
+    // External tampering: a deletion between calls should NOT be repaired
+    // because the resolved-set signature is identical. This documents the
+    // contract — the cache trusts that the staged dir has not been
+    // mutated externally.
+    rmSync(resolve(dest, 's'), { recursive: true, force: true });
+    expect(stage(set)).toBe(false);
+    expect(existsSync(resolve(dest, 's'))).toBe(false);
+  });
+
+  it('re-stages when the resolved set changes', () => {
+    const sourceParent = resolve(tempDir, 'sources');
+    const a = writeSourceSkill(sourceParent, 'a');
+    const b = writeSourceSkill(sourceParent, 'b');
+
+    const dest = resolve(tempDir, 'staged');
+    const stage = createCachedStager(dest);
+
+    expect(stage([{ name: 'a', source: 'user', sourceDir: a, description: '' }])).toBe(true);
+    expect(stage([{ name: 'b', source: 'user', sourceDir: b, description: '' }])).toBe(true);
+    expect(existsSync(resolve(dest, 'a'))).toBe(false);
+    expect(existsSync(resolve(dest, 'b'))).toBe(true);
+  });
+
+  it('treats reordered identical sets as unchanged', () => {
+    const sourceParent = resolve(tempDir, 'sources');
+    const a = writeSourceSkill(sourceParent, 'a');
+    const b = writeSourceSkill(sourceParent, 'b');
+
+    const dest = resolve(tempDir, 'staged');
+    const stage = createCachedStager(dest);
+
+    expect(
+      stage([
+        { name: 'a', source: 'user', sourceDir: a, description: '' },
+        { name: 'b', source: 'user', sourceDir: b, description: '' },
+      ]),
+    ).toBe(true);
+    expect(
+      stage([
+        { name: 'b', source: 'user', sourceDir: b, description: '' },
+        { name: 'a', source: 'user', sourceDir: a, description: '' },
+      ]),
+    ).toBe(false);
   });
 });

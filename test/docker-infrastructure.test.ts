@@ -14,6 +14,7 @@ import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
+import { CONTAINER_SKILLS_DIR } from '../src/skills/types.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
 const TEST_BUNDLE_ID = 'test-session-id' as BundleId;
@@ -112,6 +113,7 @@ describe('DockerInfrastructure interface', () => {
       containerId: 'container-id',
       containerName: 'ironcurtain-test-session',
       setTokenSessionId: () => {},
+      restageSkills: () => {},
     };
 
     // Verify key fields are accessible at runtime
@@ -373,6 +375,7 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     mitmAddr,
     authKind: 'apikey',
     setTokenSessionId: () => {},
+    restageSkills: () => {},
   };
 }
 
@@ -433,7 +436,7 @@ describe('createSessionContainers', () => {
 
     // The mount target is the cross-vendor common path; both Claude Code
     // and Goose discover SKILL.md under this prefix in the container.
-    const skillsMount = mounts.find((m) => m.target === '/home/codespace/.agents/skills');
+    const skillsMount = mounts.find((m) => m.target === CONTAINER_SKILLS_DIR);
     expect(skillsMount).toBeDefined();
     expect(skillsMount!.source).toBe(skillsDir);
     expect(skillsMount!.readonly).toBe(true);
@@ -447,7 +450,7 @@ describe('createSessionContainers', () => {
 
     expect(createCalls).toHaveLength(1);
     const mounts = createCalls[0].mounts;
-    expect(mounts.some((m) => m.target === '/home/codespace/.agents/skills')).toBe(false);
+    expect(mounts.some((m) => m.target === CONTAINER_SKILLS_DIR)).toBe(false);
   });
 
   it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {
@@ -465,7 +468,7 @@ describe('createSessionContainers', () => {
     await createSessionContainers(coreWithEmpty, makeMockConfig());
 
     const mounts = createCalls[0].mounts;
-    const skillsMount = mounts.find((m) => m.target === '/home/codespace/.agents/skills');
+    const skillsMount = mounts.find((m) => m.target === CONTAINER_SKILLS_DIR);
     expect(skillsMount).toBeDefined();
     expect(skillsMount!.source).toBe(skillsDir);
     expect(skillsMount!.readonly).toBe(true);

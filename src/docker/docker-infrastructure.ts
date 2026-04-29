@@ -38,7 +38,8 @@ import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from '
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { errorMessage } from '../utils/error-message.js';
-import { stageSkillsToBundle } from '../skills/staging.js';
+import { createCachedStager } from '../skills/staging.js';
+import { CONTAINER_SKILLS_DIR } from '../skills/types.js';
 import type { ResolvedSkill } from '../skills/types.js';
 import * as logger from '../logger.js';
 
@@ -167,21 +168,20 @@ export interface PreContainerInfrastructure {
   /** Conversation state config from the adapter, if resume is supported. */
   readonly conversationStateConfig?: ConversationStateConfig;
   /**
-   * Host-side staged skills directory, bind-mounted read-only into the
-   * container at `CONTAINER_SKILLS_DIR`.
-   *
-   * In workflow mode this is always set: the staging dir (and bind
-   * mount) is created at container start even when the initial skill
-   * set is empty, so per-state persona skills layered in later (via
-   * `buildSessionConfig` borrow-mode re-staging) become visible without
-   * remounting the container. The bind mount is live; rewriting the
-   * host directory updates the container's view in place.
-   *
-   * In standalone mode this is set only when the resolved skill set
-   * was non-empty at session start (skills are static for the session's
-   * lifetime — no persona switching).
+   * Host-side staged skills directory bind-mounted at
+   * `CONTAINER_SKILLS_DIR`. Always set in workflow mode (so per-state
+   * `restageSkills` calls have a live mount to land in); set in
+   * standalone mode only when the initial skill set was non-empty.
    */
   readonly skillsDir?: string;
+  /**
+   * Re-stages the bundle's `skillsDir` with the given resolved set.
+   * No-op when `skillsDir` is undefined or when the set is byte-identical
+   * to the previous call. Workflow callers use this on every state
+   * transition; the bind mount is live, so the container's view updates
+   * in place.
+   */
+  restageSkills(skills: readonly ResolvedSkill[]): void;
   /**
    * Routes token-stream events from the MITM proxy's LLM API tap under the
    * given session ID, or disables routing when `undefined`.
@@ -224,12 +224,8 @@ const CONTAINER_NAME_PREFIX = 'ironcurtain-';
 /** Host gateway alias used by Docker containers on macOS/Windows. */
 const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
-/**
- * Container path where the merged skill set is bind-mounted read-only.
- * Matches the cross-vendor common path used by Claude Code, Goose, and
- * Codex for SKILL.md discovery (see docs/designs/skills-capability.md).
- */
-const CONTAINER_SKILLS_DIR = '/home/codespace/.agents/skills';
+/** Bundle-relative subdir staged into `CONTAINER_SKILLS_DIR`. */
+const BUNDLE_SKILLS_SUBDIR = 'skills';
 
 /**
  * Prepares the shared (non-container) parts of Docker session infrastructure.
@@ -489,29 +485,27 @@ export async function prepareDockerInfrastructure(
       ? prepareConversationStateDir(bundleDir, conversationStateConfig)
       : undefined;
 
-    // Stage merged skill set under the bundle. In workflow mode the
-    // staging dir is ALWAYS created (even if `resolvedSkills` is empty)
-    // because a single bundle is reused across states with different
-    // personas: the bind mount can only be established at container
-    // start, but persona transitions later in the run may add skills
-    // that must be visible to the agent. The bind mount is live, so
-    // re-staging the host directory at state-transition time updates
-    // the container's view in place (see `buildSessionConfig` borrow
-    // mode in `src/session/index.ts`).
-    //
-    // In standalone mode, persona is fixed for the session's lifetime,
-    // so the skill set is static and we skip the mount entirely when
-    // empty to avoid an empty cosmetic bind mount.
+    // Workflow bundles always create the staging dir (even when empty)
+    // because the bind mount can only be established at container start;
+    // per-state persona transitions need a live mount to re-stage into.
     const isWorkflowBundle = workflowId !== undefined;
     const initialSkills = resolvedSkills ?? [];
     let skillsDir: string | undefined;
+    let stage: ((skills: readonly ResolvedSkill[]) => boolean) | undefined;
     if (initialSkills.length > 0 || isWorkflowBundle) {
-      skillsDir = resolve(bundleDir, 'skills');
-      stageSkillsToBundle(initialSkills, skillsDir);
+      skillsDir = resolve(bundleDir, BUNDLE_SKILLS_SUBDIR);
+      stage = createCachedStager(skillsDir);
+      stage(initialSkills);
       if (initialSkills.length > 0) {
         logger.info(`Staged ${initialSkills.length} skill(s) to ${skillsDir}`);
       }
     }
+    const restageSkills = (skills: readonly ResolvedSkill[]): void => {
+      if (!stage) return;
+      if (stage(skills)) {
+        logger.info(`Re-staged ${skills.length} skill(s) to ${skillsDir}`);
+      }
+    };
 
     return {
       bundleId,
@@ -537,6 +531,7 @@ export async function prepareDockerInfrastructure(
       conversationStateDir,
       conversationStateConfig,
       skillsDir,
+      restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
       },
@@ -839,15 +834,8 @@ export async function createSessionContainers(
       });
     }
 
-    // Mount the merged skill set read-only at the cross-vendor common
-    // path. Only present when the bundle was built with a non-empty
-    // resolved skill set (see prepareDockerInfrastructure).
     if (core.skillsDir) {
-      mounts.push({
-        source: core.skillsDir,
-        target: CONTAINER_SKILLS_DIR,
-        readonly: true,
-      });
+      mounts.push({ source: core.skillsDir, target: CONTAINER_SKILLS_DIR, readonly: true });
     }
 
     mainContainerId = await core.docker.create({
