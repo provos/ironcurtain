@@ -77,10 +77,10 @@ export async function checkSandbox(): Promise<CheckResult> {
 }
 
 /**
- * Reports Docker daemon status. Returns `warn` (not `fail`) on unavailability
- * because the builtin agent runs without Docker — doctor doesn't know whether
- * the user intends to run Docker mode, so it surfaces the issue without
- * forcing a non-zero exit.
+ * Reports Docker daemon status. Returns `warn` (not `fail`) on unavailability —
+ * `checkPreferredMode` decides whether the warn is fatal based on the
+ * user's `preferredMode`. Keeping this check semantically agnostic lets it
+ * be reused in contexts that don't care about preferred mode.
  */
 export async function checkDocker(
   probe: () => Promise<DockerAvailability> = checkDockerAvailable,
@@ -94,6 +94,46 @@ export async function checkDocker(
     status: 'warn',
     message: 'unavailable',
     hint: status.detailedMessage,
+  };
+}
+
+/**
+ * Reports whether the user's `preferredMode` is satisfiable on this host.
+ *
+ * Reuses the prior `dockerResult` from `checkDocker` so Docker is probed
+ * exactly once per `doctor` run. Maps the (preferredMode × dockerResult ×
+ * api-key-presence) tuple to a status:
+ *
+ *   - preferredMode: 'docker' + Docker ok          -> ok
+ *   - preferredMode: 'docker' + Docker unavailable -> fail (sessions will refuse to start)
+ *   - preferredMode: 'builtin' + API key present   -> ok
+ *   - preferredMode: 'builtin' + no API key        -> warn (sessions will fail to start by default)
+ */
+export function checkPreferredMode(config: IronCurtainConfig, dockerResult: CheckResult): CheckResult {
+  const preferredMode = config.userConfig.preferredMode;
+
+  if (preferredMode === 'docker') {
+    if (dockerResult.status === 'ok') {
+      return { name: 'Preferred mode', status: 'ok', message: 'docker' };
+    }
+    return {
+      name: 'Preferred mode',
+      status: 'fail',
+      message: 'docker, but Docker is unavailable. Sessions will refuse to start.',
+      hint: 'Start Docker, or run `ironcurtain config` and set Session Mode > Preferred mode to "builtin".',
+    };
+  }
+
+  // preferredMode === 'builtin'
+  const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
+  if (apiKey.length > 0) {
+    return { name: 'Preferred mode', status: 'ok', message: 'builtin' };
+  }
+  return {
+    name: 'Preferred mode',
+    status: 'warn',
+    message: 'builtin, but no ANTHROPIC_API_KEY configured. Sessions will fail.',
+    hint: 'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
   };
 }
 

@@ -21,6 +21,7 @@ import {
   checkMcpServerLiveness,
   checkNodeVersion,
   checkPolicyArtifacts,
+  checkPreferredMode,
   checkSandbox,
   checkServerCredentials,
   collectDeclaredEnvVars,
@@ -117,6 +118,14 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     exitWithStatus(collected);
   }
   const config = configCheck.config;
+
+  // Reuse the dockerResult from the Environment section so Docker is
+  // probed at most once per doctor run. checkPreferredMode upgrades the
+  // earlier warn to a fail when preferredMode is "docker", because in that
+  // configuration Docker unavailability means sessions refuse to start.
+  const preferredModeResult = checkPreferredMode(config, dockerResult);
+  printCheck(preferredModeResult);
+  collected.push(preferredModeResult);
 
   const policyCheck = checkPolicyArtifacts(config);
   for (const r of policyCheck.results) {

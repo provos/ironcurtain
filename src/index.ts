@@ -16,7 +16,7 @@ import { checkHelp, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createStandaloneSession } from './session/index.js';
-import { resolveSessionMode } from './session/preflight.js';
+import { formatModeLine, resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
 import { shouldAutoSaveMemory } from './memory/auto-save.js';
 import type { AgentId } from './docker/agent-adapter.js';
@@ -122,9 +122,8 @@ export async function main(args?: string[]): Promise<void> {
     requestedAgent: agentName ? (agentName as AgentId) : undefined,
   });
 
-  // Log auto-selection reason (skip for explicit --agent)
   if (!agentName) {
-    process.stderr.write(chalk.dim(`Mode: ${preflight.mode.kind} (${preflight.reason})\n`));
+    process.stderr.write(chalk.dim(`${formatModeLine(preflight)}\n`));
   }
 
   const mode = preflight.mode;

@@ -39,6 +39,7 @@ export const USER_CONFIG_DEFAULTS = {
   auditRedaction: {
     enabled: true,
   },
+  preferredMode: 'docker',
 } as const;
 
 export const ESCALATION_TIMEOUT_MIN = 30;
@@ -204,6 +205,9 @@ export type GooseProvider = (typeof GOOSE_PROVIDERS)[number];
 export const DOCKER_AGENTS = ['claude-code', 'goose'] as const;
 export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 
+export const SESSION_MODES = ['docker', 'builtin'] as const;
+export type SessionModeKind = (typeof SESSION_MODES)[number];
+
 export const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
@@ -231,6 +235,7 @@ export const userConfigSchema = z.object({
   gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
   gooseModel: z.string().min(1).optional(),
   preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
+  preferredMode: z.enum(SESSION_MODES).optional(),
   packageInstall: packageInstallSchema,
 });
 
@@ -316,6 +321,8 @@ export interface ResolvedUserConfig {
   readonly gooseModel: string;
   /** Preferred Docker agent for auto-detection. */
   readonly preferredDockerAgent: DockerAgent;
+  /** Preferred session mode: 'docker' (default) or 'builtin'. */
+  readonly preferredMode: SessionModeKind;
   /** Package installation proxy configuration. */
   readonly packageInstall: ResolvedPackageInstallConfig;
 }
@@ -358,6 +365,7 @@ const DEFAULT_CONFIG_CONTENT =
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
       auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
+      preferredMode: USER_CONFIG_DEFAULTS.preferredMode,
     },
     null,
     2,
@@ -637,6 +645,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     gooseProvider: config.gooseProvider ?? 'anthropic',
     gooseModel: config.gooseModel ?? 'claude-sonnet-4-20250514',
     preferredDockerAgent: config.preferredDockerAgent ?? 'claude-code',
+    preferredMode: config.preferredMode ?? USER_CONFIG_DEFAULTS.preferredMode,
     packageInstall: {
       enabled: config.packageInstall?.enabled ?? true,
       quarantineDays: config.packageInstall?.quarantineDays ?? 2,

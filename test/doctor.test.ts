@@ -42,6 +42,7 @@ import {
   checkDocker,
   checkMcpServerLiveness,
   checkNodeVersion,
+  checkPreferredMode,
   checkServerCredentials,
   collectDeclaredEnvVars,
   type CheckResult,
@@ -133,6 +134,7 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
     gooseProvider: 'anthropic' as const,
     gooseModel: 'claude',
     preferredDockerAgent: 'claude-code' as const,
+    preferredMode: 'docker' as const,
     packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
   };
   return {
@@ -195,6 +197,58 @@ describe('checkDocker', () => {
     }));
     expect(result.status).toBe('warn');
     expect(result.hint).toBe('docker: command not found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit: checkPreferredMode
+// ---------------------------------------------------------------------------
+
+describe('checkPreferredMode', () => {
+  const dockerOk: CheckResult = { name: 'Docker', status: 'ok', message: 'running' };
+  const dockerWarn: CheckResult = {
+    name: 'Docker',
+    status: 'warn',
+    message: 'unavailable',
+    hint: 'docker: command not found',
+  };
+
+  function configWithMode(mode: 'docker' | 'builtin', anthropicApiKey = '') {
+    return buildConfig({
+      userConfig: { ...buildConfig().userConfig, preferredMode: mode, anthropicApiKey },
+    });
+  }
+
+  it('preferredMode=docker + Docker ok -> ok', () => {
+    const r = checkPreferredMode(configWithMode('docker', 'sk-test'), dockerOk);
+    expect(r.status).toBe('ok');
+    expect(r.message).toBe('docker');
+  });
+
+  it('preferredMode=docker + Docker unavailable -> fail', () => {
+    const r = checkPreferredMode(configWithMode('docker', 'sk-test'), dockerWarn);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/Docker is unavailable/);
+    expect(r.hint).toMatch(/Start Docker/);
+  });
+
+  it('preferredMode=builtin + API key present -> ok', () => {
+    const r = checkPreferredMode(configWithMode('builtin', 'sk-test'), dockerWarn);
+    expect(r.status).toBe('ok');
+    expect(r.message).toBe('builtin');
+  });
+
+  it('preferredMode=builtin + no API key -> warn (warn alone does not fail doctor)', () => {
+    const r = checkPreferredMode(configWithMode('builtin', ''), dockerOk);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/no ANTHROPIC_API_KEY/);
+    expect(r.hint).toMatch(/ANTHROPIC_API_KEY/);
+  });
+
+  it('preferredMode=builtin status is independent of Docker availability', () => {
+    // dockerWarn must not turn a builtin-mode user's status into fail.
+    const r = checkPreferredMode(configWithMode('builtin', 'sk-test'), dockerWarn);
+    expect(r.status).toBe('ok');
   });
 });
 
@@ -482,6 +536,14 @@ describe('runDoctorCommand', () => {
     const { output, exitCode } = await captureOutput(() => runDoctorCommand(['--bogus']));
     expect(output).toMatch(/--bogus/i);
     expect(exitCode).toBe(1);
+  });
+
+  it('prints a Preferred mode line in the Configuration section', async () => {
+    // Docker availability varies by env; only assert the line is labeled.
+    const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
+    const probeStub = vi.fn(async (): Promise<ProbeResult> => ({ status: 'ok', toolCount: 1, elapsedMs: 10 }));
+    const { output } = await captureOutput(() => runDoctorCommand([], { probeMcpServer: probeStub }));
+    expect(output).toContain('Preferred mode');
   });
 });
 
