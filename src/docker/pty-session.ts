@@ -644,6 +644,16 @@ function connectToTarget(target: PtyTarget): ReturnType<typeof createConnection>
 }
 
 /**
+ * `attachPtyOnce` return codes that signal a non-attached outcome.
+ * Distinguishing the two lets the caller decide whether to retry, exit
+ * silently, or surface a hard failure.
+ */
+/** Connected, but the remote closed before sending any data. */
+const ATTACH_INSTANT_CLOSE = -1;
+/** The socket connect itself failed (e.g. ECONNREFUSED, ENOENT). */
+const ATTACH_PRE_CONNECT_ERROR = -2;
+
+/**
  * Attaches the user's terminal to the container PTY via a Node.js socket.
  * Returns a promise that resolves with 0 on normal close, 1 on error.
  *
@@ -652,34 +662,43 @@ function connectToTarget(target: PtyTarget): ReturnType<typeof createConnection>
  * The socat inside the container does NOT use `fork`, so only one
  * connection is accepted — no separate readiness probe is used.
  */
-async function attachPty(options: PtyProxyOptions): Promise<number> {
+export async function attachPty(options: PtyProxyOptions): Promise<number> {
   const isTcp = typeof options.target !== 'string';
   if (isTcp) {
     // TCP: poll until the connection succeeds and stays open, then attach.
+    // Both pre-connect errors and instant-close indicate "not ready yet".
     const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const code = await attachPtyOnce(options);
-      // code 0 with very short duration means the connection was closed immediately
-      // (socat not ready or backend refused). Retry unless signal aborted.
       if (options.signal?.aborted) return 0;
-      // If we got a real session (not an instant close), return the exit code.
-      // We detect "instant close" by checking if the connection lasted meaningfully.
-      // attachPtyOnce sets a flag when data was received from the remote.
-      if (code !== -1) return code;
-      logger.info('PTY TCP connection closed immediately, retrying...');
+      if (code !== ATTACH_INSTANT_CLOSE && code !== ATTACH_PRE_CONNECT_ERROR) return code;
+      logger.info('PTY TCP connection not ready, retrying...');
       await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
     }
     throw new Error(`PTY TCP connection did not stabilize within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
   }
-  // UDS (Linux): readiness was already verified, so -1 (no data before close)
-  // is treated as a normal close — the container exited before sending output.
+  // UDS (Linux): readiness was already verified by waitForPtyReady. A
+  // pre-connect failure here means the socket file existed but nothing
+  // was actually listening — typically a stale file or a socat that
+  // crashed between probe and attach. Surface it instead of silently
+  // mapping to 0. Instant-close (connected then closed before data) is
+  // still treated as a normal close: the container started and exited
+  // before sending output.
   const code = await attachPtyOnce(options);
-  return code === -1 ? 0 : code;
+  if (code === ATTACH_PRE_CONNECT_ERROR) {
+    throw new Error(
+      'PTY socket exists but no listener accepted the connection. ' +
+        'The container may have crashed between readiness check and attach.',
+    );
+  }
+  return code === ATTACH_INSTANT_CLOSE ? 0 : code;
 }
 
 /**
- * Single attempt to attach to the PTY. Returns -1 if the connection
- * was closed before any data was received (signals retry for TCP).
+ * Single attempt to attach to the PTY. Returns one of:
+ *   ≥0                       — terminal exit code from a real session
+ *   ATTACH_INSTANT_CLOSE     — connected, remote closed before data
+ *   ATTACH_PRE_CONNECT_ERROR — socket connect itself failed
  */
 function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
   const conn = connectToTarget(options.target);
@@ -792,16 +811,19 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
 
       conn.once('close', () => {
         cleanup();
-        settle(receivedData ? 0 : -1);
+        settle(receivedData ? 0 : ATTACH_INSTANT_CLOSE);
       });
       conn.once('error', () => {
         cleanup();
-        settle(receivedData ? 1 : -1);
+        settle(receivedData ? 1 : ATTACH_INSTANT_CLOSE);
       });
     });
 
     conn.once('error', () => {
-      settle(-1); // connection failed, signal retry for TCP
+      // Pre-connect failure (no `connect` event ever fired). Distinct from
+      // a post-connect close so the UDS caller can surface a hard failure
+      // instead of treating a stale-socket false positive as success.
+      settle(ATTACH_PRE_CONNECT_ERROR);
     });
   });
 }

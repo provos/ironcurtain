@@ -444,9 +444,49 @@ describe('waitForPtyReady', () => {
     const { waitForPtyReady } = await import('../src/docker/pty-session.js');
     // Pass an unreachable TCP target. If waitForPtyReady tried to connect or
     // poll for file existence, it would either error or spin until timeout.
-    // Instead it returns immediately as a defensive no-op.
+    // Instead it returns immediately as a defensive no-op. The timing bound
+    // is generous to absorb CI scheduler jitter — anything under the 30s
+    // PTY_READINESS_TIMEOUT_MS proves the polling loop never engaged.
     const start = Date.now();
     await waitForPtyReady({ host: '127.0.0.1', port: 1 });
-    expect(Date.now() - start).toBeLessThan(50);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+});
+
+// --- attachPty UDS pre-connect-error handling ---
+//
+// Companion to waitForPtyReady's tighten-up: even when the readiness check
+// passes (socket file is a real socket inode), the listener could still be
+// gone by the time attachPty connects (stale file, crashed socat). Previously
+// that mapped to exit 0 — a silent "successful" exit. We now surface it.
+
+describe('attachPty (UDS)', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'attach-pty-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the UDS socket exists but no one is listening', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'closed-listener.sock');
+
+    // Create a UDS server and close it; the socket inode remains on disk
+    // but no process is accepting connections — connect() yields ECONNREFUSED.
+    const { createServer } = await import('node:net');
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    await expect(attachPty({ target: sockPath, containerId: 'unused' })).rejects.toThrow(/no listener/);
   });
 });
