@@ -15,7 +15,7 @@
 
 import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -644,6 +644,16 @@ function connectToTarget(target: PtyTarget): ReturnType<typeof createConnection>
 }
 
 /**
+ * `attachPtyOnce` return codes that signal a non-attached outcome.
+ * Distinguishing the two lets the caller decide whether to retry, exit
+ * silently, or surface a hard failure.
+ */
+/** Connected, but the remote closed before sending any data. */
+const ATTACH_INSTANT_CLOSE = -1;
+/** The socket connect itself failed (e.g. ECONNREFUSED, ENOENT). */
+const ATTACH_PRE_CONNECT_ERROR = -2;
+
+/**
  * Attaches the user's terminal to the container PTY via a Node.js socket.
  * Returns a promise that resolves with 0 on normal close, 1 on error.
  *
@@ -652,34 +662,43 @@ function connectToTarget(target: PtyTarget): ReturnType<typeof createConnection>
  * The socat inside the container does NOT use `fork`, so only one
  * connection is accepted — no separate readiness probe is used.
  */
-async function attachPty(options: PtyProxyOptions): Promise<number> {
+export async function attachPty(options: PtyProxyOptions): Promise<number> {
   const isTcp = typeof options.target !== 'string';
   if (isTcp) {
     // TCP: poll until the connection succeeds and stays open, then attach.
+    // Both pre-connect errors and instant-close indicate "not ready yet".
     const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const code = await attachPtyOnce(options);
-      // code 0 with very short duration means the connection was closed immediately
-      // (socat not ready or backend refused). Retry unless signal aborted.
       if (options.signal?.aborted) return 0;
-      // If we got a real session (not an instant close), return the exit code.
-      // We detect "instant close" by checking if the connection lasted meaningfully.
-      // attachPtyOnce sets a flag when data was received from the remote.
-      if (code !== -1) return code;
-      logger.info('PTY TCP connection closed immediately, retrying...');
+      if (code !== ATTACH_INSTANT_CLOSE && code !== ATTACH_PRE_CONNECT_ERROR) return code;
+      logger.info('PTY TCP connection not ready, retrying...');
       await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
     }
     throw new Error(`PTY TCP connection did not stabilize within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
   }
-  // UDS (Linux): readiness was already verified, so -1 (no data before close)
-  // is treated as a normal close — the container exited before sending output.
+  // UDS (Linux): readiness was already verified by waitForPtyReady. A
+  // pre-connect failure here means the socket file existed but nothing
+  // was actually listening — typically a stale file or a socat that
+  // crashed between probe and attach. Surface it instead of silently
+  // mapping to 0. Instant-close (connected then closed before data) is
+  // still treated as a normal close: the container started and exited
+  // before sending output.
   const code = await attachPtyOnce(options);
-  return code === -1 ? 0 : code;
+  if (code === ATTACH_PRE_CONNECT_ERROR) {
+    throw new Error(
+      'PTY socket exists but no listener accepted the connection. ' +
+        'The container may have crashed between readiness check and attach.',
+    );
+  }
+  return code === ATTACH_INSTANT_CLOSE ? 0 : code;
 }
 
 /**
- * Single attempt to attach to the PTY. Returns -1 if the connection
- * was closed before any data was received (signals retry for TCP).
+ * Single attempt to attach to the PTY. Returns one of:
+ *   ≥0                       — terminal exit code from a real session
+ *   ATTACH_INSTANT_CLOSE     — connected, remote closed before data
+ *   ATTACH_PRE_CONNECT_ERROR — socket connect itself failed
  */
 function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
   const conn = connectToTarget(options.target);
@@ -694,7 +713,22 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
       resolvePromise(code);
     };
 
+    const onPreConnectError = (): void => {
+      // Pre-connect failure (no `connect` event ever fired). Distinct from
+      // a post-connect close so the UDS caller can surface a hard failure
+      // instead of treating a stale-socket false positive as success.
+      settle(ATTACH_PRE_CONNECT_ERROR);
+    };
+    conn.once('error', onPreConnectError);
+
     conn.once('connect', () => {
+      // Once connected, the pre-connect classifier no longer applies; remove
+      // it so a post-connect 'error' (e.g. ECONNRESET mid-session) is handled
+      // only by the post-connect handler below — otherwise both fire and the
+      // earlier-registered pre-connect listener wins, mis-reporting the
+      // outcome as ATTACH_PRE_CONNECT_ERROR.
+      conn.removeListener('error', onPreConnectError);
+
       // Defer raw mode, stdin forwarding, and resize handling until the first
       // data arrives from the remote. For TCP retries, an instant close (no
       // data) returns -1 without touching the terminal, so the user is never
@@ -792,16 +826,12 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
 
       conn.once('close', () => {
         cleanup();
-        settle(receivedData ? 0 : -1);
+        settle(receivedData ? 0 : ATTACH_INSTANT_CLOSE);
       });
       conn.once('error', () => {
         cleanup();
-        settle(receivedData ? 1 : -1);
+        settle(receivedData ? 1 : ATTACH_INSTANT_CLOSE);
       });
-    });
-
-    conn.once('error', () => {
-      settle(-1); // connection failed, signal retry for TCP
     });
   });
 }
@@ -898,15 +928,32 @@ async function verifyInitialPtySize(
 // --- Readiness polling ---
 
 /**
- * Waits for the PTY socket/port to become connectable.
+ * Waits for the PTY socket file to appear (Linux UDS only). macOS TCP
+ * skips this probe because the container's socat does not use `fork`.
+ *
+ * We poll for a UDS *inode* rather than opening a connection. socat's
+ * `UNIX-LISTEN` creates the socket file at `bind()`, so file existence
+ * is a sufficient readiness signal — and avoids the connect-and-close
+ * that would trigger socat's `,fork` semantics, spawning a doomed child
+ * before the real `attachPty` connection arrives. That doomed child can
+ * race the real one for shared per-agent state (e.g. Goose's SQLite
+ * session DB at `~/.local/share/goose/sessions/sessions.db`), producing
+ * "table schema_version already exists" migration errors.
+ *
+ * We require the inode to be a socket — a stale regular file or
+ * directory at the path is not "ready", since the Linux/UDS attach path
+ * does not retry on connect failure.
  */
-async function waitForPtyReady(target: PtyTarget): Promise<void> {
+export async function waitForPtyReady(target: PtyTarget): Promise<void> {
+  if (typeof target !== 'string') {
+    // macOS TCP path is guarded out at the call site (pty-session.ts ~534);
+    // this branch exists only as a defensive no-op so the helper stays total.
+    return;
+  }
+
   const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
-
   while (Date.now() < deadline) {
-    const connected = await tryConnect(target);
-    if (connected) return;
-
+    if (isSocketPath(target)) return;
     await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
   }
 
@@ -914,29 +961,18 @@ async function waitForPtyReady(target: PtyTarget): Promise<void> {
 }
 
 /**
- * Tries to connect to a UDS target. Returns true if the connection succeeds.
- * Used only for Linux readiness polling (macOS TCP skips the readiness probe).
+ * Returns true when `path` exists and is a UNIX domain socket. ENOENT is
+ * treated as "not ready yet"; other lstat errors propagate, since they
+ * indicate a setup problem (permissions, missing parent directory) that
+ * silent polling would only mask.
  */
-function tryConnect(target: PtyTarget): Promise<boolean> {
-  return new Promise((resolve) => {
-    const conn = connectToTarget(target);
-
-    const timer = setTimeout(() => {
-      conn.destroy();
-      resolve(false);
-    }, 1000);
-
-    conn.on('connect', () => {
-      clearTimeout(timer);
-      conn.destroy();
-      resolve(true);
-    });
-
-    conn.on('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
+function isSocketPath(path: string): boolean {
+  try {
+    return lstatSync(path).isSocket();
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
 }
 
 // --- Port allocation ---
