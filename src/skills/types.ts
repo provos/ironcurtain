@@ -1,10 +1,3 @@
-/**
- * Container path for the read-only skills bind mount. Cross-vendor
- * common path used by Claude Code, Goose, and Codex for SKILL.md
- * discovery.
- */
-export const CONTAINER_SKILLS_DIR = '/home/codespace/.agents/skills';
-
 export interface SkillFrontmatter {
   readonly name: string;
   readonly description: string;

@@ -5,7 +5,6 @@ export type {
   SkillFrontmatter,
   SkillSource,
 } from './types.js';
-export { CONTAINER_SKILLS_DIR } from './types.js';
 export {
   ACTIONABLE_DISCOVERY_REASONS,
   discoverSkills,

@@ -14,8 +14,13 @@ import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
-import { CONTAINER_SKILLS_DIR } from '../src/skills/types.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
+
+// Container target the mock adapter advertises via `skillsContainerPath`.
+// Hardcoded here (rather than imported from a constant) because the
+// adapter contract makes this per-adapter — the test asserts the wired
+// target matches what the adapter declared.
+const TEST_SKILLS_CONTAINER_PATH = '/home/codespace/.claude/skills';
 
 const TEST_BUNDLE_ID = 'test-session-id' as BundleId;
 const TEST_SHORT_ID = getBundleShortId(TEST_BUNDLE_ID);
@@ -421,36 +426,60 @@ describe('createSessionContainers', () => {
     expect(mounts.some((m) => m.source === core.auditLogPath)).toBe(false);
   });
 
-  // --- Test (skills mount) ---
-  it('mounts the staged skills directory read-only when core.skillsDir is set', async () => {
+  // --- Skills mount tests ---
+  // All four scenarios share the same scaffold (mock docker + mock core +
+  // optional skillsMount overlay + assertion against the recorded mounts).
+  // `runSkillsMountScenario` collapses the boilerplate; each test below
+  // varies just the `skillsMount` shape.
+  async function runSkillsMountScenario(opts: {
+    skillsMount?: { hostDir: string; target?: string };
+  }): Promise<readonly { source: string; target: string; readonly: boolean }[]> {
     const { docker, createCalls } = makeMockDocker();
     const core = makeMockCore({ tempDir, useTcp: false, docker });
+    const coreWithSkills: PreContainerInfrastructure = opts.skillsMount
+      ? { ...core, skillsMount: opts.skillsMount }
+      : core;
+    await createSessionContainers(coreWithSkills, makeMockConfig());
+    expect(createCalls).toHaveLength(1);
+    return createCalls[0].mounts;
+  }
+
+  it('mounts the staged skills directory read-only when target is set', async () => {
+    // Goose-shaped case: separate skills mount because the adapter's
+    // container scan path is NOT inside any conversation-state mount.
     const skillsDir = join(tempDir, 'session', 'skills');
     mkdirSync(skillsDir, { recursive: true });
-    const coreWithSkills: PreContainerInfrastructure = { ...core, skillsDir };
 
-    await createSessionContainers(coreWithSkills, makeMockConfig());
+    const mounts = await runSkillsMountScenario({
+      skillsMount: { hostDir: skillsDir, target: TEST_SKILLS_CONTAINER_PATH },
+    });
 
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    // The mount target is the cross-vendor common path; both Claude Code
-    // and Goose discover SKILL.md under this prefix in the container.
-    const skillsMount = mounts.find((m) => m.target === CONTAINER_SKILLS_DIR);
+    const skillsMount = mounts.find((m) => m.target === TEST_SKILLS_CONTAINER_PATH);
     expect(skillsMount).toBeDefined();
     expect(skillsMount!.source).toBe(skillsDir);
     expect(skillsMount!.readonly).toBe(true);
   });
 
-  it('omits the skills mount entirely when core.skillsDir is undefined', async () => {
-    const { docker, createCalls } = makeMockDocker();
-    const core = makeMockCore({ tempDir, useTcp: false, docker });
+  it('omits the skills mount entirely when core.skillsMount is undefined', async () => {
+    const mounts = await runSkillsMountScenario({});
+    expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
+  });
 
-    await createSessionContainers(core, makeMockConfig());
+  it('in-place: no separate mount when staging lives inside another mount', async () => {
+    // Claude Code-shaped case: `skillsContainerPath` is a descendant of
+    // the conversation-state mount target, so the staging plan returns
+    // `target: undefined` and the staging dir is reached via the
+    // existing claude-state mount instead. A second overlapping mount
+    // would either fail (Linux) or shadow the parent (some platforms).
+    const skillsDir = join(tempDir, 'session', 'claude-state', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
 
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-    expect(mounts.some((m) => m.target === CONTAINER_SKILLS_DIR)).toBe(false);
+    const mounts = await runSkillsMountScenario({
+      skillsMount: { hostDir: skillsDir, target: undefined },
+    });
+
+    expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
+    expect(mounts.some((m) => m.source === skillsDir)).toBe(false);
   });
 
   it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {
@@ -458,17 +487,15 @@ describe('createSessionContainers', () => {
     // start so per-state persona transitions can re-stage into it later
     // (the bind mount is established once and cannot be added post-hoc).
     // An empty initial dir must still produce a mount.
-    const { docker, createCalls } = makeMockDocker();
-    const core = makeMockCore({ tempDir, useTcp: false, docker });
     const skillsDir = join(tempDir, 'session', 'skills');
     mkdirSync(skillsDir, { recursive: true });
     // No skill subdirs written — dir is empty.
-    const coreWithEmpty: PreContainerInfrastructure = { ...core, skillsDir };
 
-    await createSessionContainers(coreWithEmpty, makeMockConfig());
+    const mounts = await runSkillsMountScenario({
+      skillsMount: { hostDir: skillsDir, target: TEST_SKILLS_CONTAINER_PATH },
+    });
 
-    const mounts = createCalls[0].mounts;
-    const skillsMount = mounts.find((m) => m.target === CONTAINER_SKILLS_DIR);
+    const skillsMount = mounts.find((m) => m.target === TEST_SKILLS_CONTAINER_PATH);
     expect(skillsMount).toBeDefined();
     expect(skillsMount!.source).toBe(skillsDir);
     expect(skillsMount!.readonly).toBe(true);

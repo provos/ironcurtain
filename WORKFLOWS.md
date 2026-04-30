@@ -345,7 +345,7 @@ states:
 
 ### Skills
 
-Workflows can ship purpose-specific guidance to the agent as **skills**: SKILL.md packages (the open standard adopted by Claude Code, Goose, and Codex) bind-mounted read-only at `/home/codespace/.agents/skills/` inside the agent container. The agent discovers them automatically and decides when to read them based on each skill's frontmatter description.
+Workflows can ship purpose-specific guidance to the agent as **skills**: SKILL.md packages — the open standard adopted by Claude Code, Goose, and Codex. Each agent's discovery path differs (Claude Code: `~/.claude/skills/`, Goose: `~/.config/goose/skills/`); IronCurtain mounts the staged skills at the path the active agent's native discovery scans. The agent then decides when to read each skill based on the frontmatter description.
 
 A skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`, `description`) plus any supporting files (helper scripts, fixtures, embedded markdown). Two layers stack at session creation:
 

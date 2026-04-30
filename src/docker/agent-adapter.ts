@@ -300,4 +300,12 @@ export interface AgentAdapter {
    * and sessions will not be marked as resumable.
    */
   getConversationStateConfig?(): ConversationStateConfig;
+
+  /**
+   * Absolute container path that this adapter's native skill discovery
+   * scans for `<name>/SKILL.md`. `undefined` disables skill staging
+   * entirely. Path overlap with another mount (e.g. a conversation-state
+   * mount) is auto-handled by `planSkillsStaging`.
+   */
+  readonly skillsContainerPath?: string;
 }

@@ -29,6 +29,8 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 
 ## Commands
 
+**Development invocation.** When running the CLI from source (without an installed `ironcurtain` binary or after editing TS files without rebuilding), use `tsx src/cli.ts <subcommand> ...` — this runs the TypeScript entry point directly. Do NOT use `node dist/cli.js` after editing source unless you've rebuilt; do NOT use `tsx src/index.ts` (that's a different entry that spawns the agent). Examples: `tsx src/cli.ts workflow lint <path>`, `tsx src/cli.ts workflow list`.
+
 - `ironcurtain start "your task"` - run the agent with a task (or `npm start "your task"` during development)
 - `ironcurtain start -w ./path "task"` - run the agent in an existing directory instead of a fresh sandbox
 - `ironcurtain config` - interactively edit `~/.ironcurtain/config.json` (or `npm run config`)

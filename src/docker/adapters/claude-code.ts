@@ -88,6 +88,8 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
   return {
     id: 'claude-code' as AgentId,
     displayName: 'Claude Code',
+    // Path Claude Code's native skill discovery scans.
+    skillsContainerPath: '/home/codespace/.claude/skills',
 
     // eslint-disable-next-line @typescript-eslint/require-await -- interface requires Promise return
     async getImage(): Promise<string> {

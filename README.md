@@ -174,7 +174,7 @@ In mux mode, `/new my-assistant` spawns a tab using that persona. Personas can a
 
 ### Skills
 
-Drop SKILL.md packages under `~/.ironcurtain/skills/<name>/` to make purpose-specific guidance (helper scripts, deterministic checks, domain knowledge) available to every Docker agent session. Skills are bind-mounted read-only at `/home/codespace/.agents/skills/`; the agent discovers them automatically and decides when to read them based on each skill's frontmatter description. The format is the open standard adopted by Claude Code, Goose, and Codex. Workflows can ship per-state skills inside the workflow package — see [WORKFLOWS.md](WORKFLOWS.md#skills).
+Drop SKILL.md packages under `~/.ironcurtain/skills/<name>/` to make purpose-specific guidance (helper scripts, deterministic checks, domain knowledge) available to every Docker agent session. The merged set is staged so each agent's *native* skill discovery picks it up — Claude Code scans `~/.claude/skills/<name>/SKILL.md`, Goose scans `~/.config/goose/skills/<name>/SKILL.md`, and the Docker infrastructure stages skills at whichever path the adapter declares. The agent discovers them automatically and decides when to read them based on each skill's frontmatter description. The SKILL.md *format* is the open standard adopted by Claude Code, Goose, and Codex; only the *discovery path* differs per agent. Workflows can ship per-state skills inside the workflow package — see [WORKFLOWS.md](WORKFLOWS.md#skills).
 
 ## Policy: Constitution → Enforcement
 

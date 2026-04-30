@@ -7,10 +7,12 @@
  *   - real `validateWorkflowSkillReferences` at workflow load
  *   - real `resolveSkillsForSession` (user → workflow layering with filter)
  *   - real `stageSkillsToBundle` (the host-side staging operation a
- *     container observes through its `CONTAINER_SKILLS_DIR` bind mount)
+ *     container observes through the adapter-specific skills mount —
+ *     for Claude Code, via the `claude-state` mount that already
+ *     covers `~/.claude/`)
  *
  * Approach: option (3) from the design — skip Docker exec entirely and
- * inspect the host-side `bundle.skillsDir` directly between state
+ * inspect the host-side `bundle.skillsMount.hostDir` directly between state
  * transitions. The bind mount is a host directory, so its contents ARE
  * what the container would see; testing the host side is sufficient for
  * staging correctness. This keeps the test deterministic, fast, and free
@@ -100,7 +102,7 @@ function snapshotStagedSet(stateId: string, skillsDir: string): StagingSnapshot 
 
 /**
  * Builds a real-shape DockerInfrastructure stub backed by a real
- * on-disk `skillsDir`. `restageSkills` performs the actual host-side
+ * on-disk staging dir. `restageSkills` performs the actual host-side
  * staging operation a container would observe through its bind mount.
  */
 function makeBundleStub(workflowId: string, bundleId: BundleId, bundleDir: string): DockerInfrastructure {
@@ -110,7 +112,7 @@ function makeBundleStub(workflowId: string, bundleId: BundleId, bundleDir: strin
     bundleId,
     workflowId,
     bundleDir,
-    skillsDir,
+    skillsMount: { hostDir: skillsDir },
     workspaceDir: resolve(bundleDir, 'workspace'),
     escalationDir: resolve(bundleDir, 'escalations'),
     auditLogPath: resolve(bundleDir, 'audit.jsonl'),
@@ -259,14 +261,14 @@ describe('skills end-to-end (workflow + per-state filter + persona opt-out)', ()
     const createSessionFake = async (options: SessionOptions): Promise<MockSession> => {
       const bundle = options.workflowInfrastructure;
       const stateId = options.stateSlug?.split('.')[0] ?? 'unknown';
-      if (bundle?.skillsDir) {
+      if (bundle?.skillsMount) {
         const skills = resolveSkillsForSession({
           ...(options.persona ? { personaName: options.persona } : {}),
           ...(options.workflowSkillsDir ? { workflowSkillsDir: options.workflowSkillsDir } : {}),
           ...(options.workflowSkillFilter ? { workflowSkillFilter: options.workflowSkillFilter } : {}),
         });
         bundle.restageSkills(skills);
-        snapshots.push(snapshotStagedSet(stateId, bundle.skillsDir));
+        snapshots.push(snapshotStagedSet(stateId, bundle.skillsMount.hostDir));
       }
       return new MockSession({
         responses: () => {
@@ -398,16 +400,24 @@ interface ContainerStagingSnapshot {
 }
 
 /**
- * Enumerates `<CONTAINER_SKILLS_DIR>/<name>/SKILL.md` files inside the
- * container and computes their sha256 hashes via `sha256sum`. Output of
- * `sha256sum` is `<hash>  ./<name>/SKILL.md` per line, sorted for
- * determinism. Returns a `{ name → hash }` map keyed on the basename of
- * the skill directory.
+ * Enumerates `<adapter.skillsContainerPath>/<name>/SKILL.md` files
+ * inside the container and computes their sha256 hashes via
+ * `sha256sum`. Output of `sha256sum` is `<hash>  ./<name>/SKILL.md` per
+ * line, sorted for determinism. Returns a `{ name → hash }` map keyed
+ * on the basename of the skill directory.
+ *
+ * The container path comes from the adapter; this test exercises the
+ * Claude Code adapter, whose path is `/home/codespace/.claude/skills`
+ * (a descendant of the `~/.claude/` conversation-state mount).
  */
 async function snapshotContainerSkills(
   bundle: DockerInfrastructure,
   stateId: string,
 ): Promise<ContainerStagingSnapshot> {
+  const skillsPath = bundle.adapter.skillsContainerPath;
+  if (!skillsPath) {
+    throw new Error(`adapter ${bundle.adapter.id} declares no skillsContainerPath; cannot snapshot skills`);
+  }
   const result = await bundle.docker.exec(
     bundle.containerId,
     [
@@ -419,8 +429,8 @@ async function snapshotContainerSkills(
       // mortem can see the empty directory rather than guessing at a
       // possible sha256sum / xargs misuse. The pipeline after `&&` is
       // what produces the snapshot output we parse.
-      'ls -la /home/codespace/.agents/skills/ 1>&2; ' +
-        'cd /home/codespace/.agents/skills && find . -mindepth 2 -maxdepth 2 -name SKILL.md -print0 | xargs -0 sha256sum 2>/dev/null | sort',
+      `ls -la ${skillsPath}/ 1>&2; ` +
+        `cd ${skillsPath} && find . -mindepth 2 -maxdepth 2 -name SKILL.md -print0 | xargs -0 sha256sum 2>/dev/null | sort`,
     ],
     15_000,
   );
@@ -613,7 +623,7 @@ describe.skipIf(!dockerReady)('skills end-to-end with real Docker container', ()
     const createSessionFake = async (options: SessionOptions): Promise<MockSession> => {
       const bundle = options.workflowInfrastructure;
       const stateId = options.stateSlug?.split('.')[0] ?? 'unknown';
-      if (bundle?.skillsDir) {
+      if (bundle?.skillsMount) {
         const skills = resolveSkillsForSession({
           ...(options.persona ? { personaName: options.persona } : {}),
           ...(options.workflowSkillsDir ? { workflowSkillsDir: options.workflowSkillsDir } : {}),
