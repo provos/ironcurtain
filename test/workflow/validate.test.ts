@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest';
-import { validateDefinition, WorkflowValidationError } from '../../src/workflow/validate.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import {
+  validateDefinition,
+  validateWorkflowSkillReferences,
+  WorkflowValidationError,
+} from '../../src/workflow/validate.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -782,5 +789,209 @@ describe('validateDefinition', () => {
       };
       expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateWorkflowSkillReferences — name shape + manifest existence
+// ---------------------------------------------------------------------------
+
+describe('validateWorkflowSkillReferences', () => {
+  let packageDir: string;
+
+  beforeEach(() => {
+    packageDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-skill-refs-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(packageDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Builds a minimal workflow whose `plan` agent state references the
+   * given list of skills. The workflow itself is structurally valid;
+   * tests vary only the `skills:` slot.
+   */
+  function workflowWithSkills(skills: readonly string[]) {
+    return validateDefinition({
+      name: 'skills-test',
+      description: 'd',
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+          skills,
+        },
+        done: { type: 'terminal', description: 'd' },
+      },
+    });
+  }
+
+  /** Writes a SKILL.md sidecar so existsSync returns true for `<pkg>/skills/<name>/SKILL.md`. */
+  function writeSkillManifest(name: string): void {
+    const dir = resolve(packageDir, 'skills', name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: x\n---\nbody\n`);
+  }
+
+  it('passes when every skill name is valid and has a manifest', () => {
+    writeSkillManifest('fetcher');
+    writeSkillManifest('parser');
+    const def = workflowWithSkills(['fetcher', 'parser']);
+    expect(() => validateWorkflowSkillReferences(def, packageDir)).not.toThrow();
+  });
+
+  it('rejects an empty-string skill name', () => {
+    const def = workflowWithSkills(['']);
+    expect(() => validateWorkflowSkillReferences(def, packageDir)).toThrow(WorkflowValidationError);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/invalid skill name/i);
+      expect(issues[0]).toMatch(/empty/);
+    }
+  });
+
+  it('rejects a skill name with a forward slash', () => {
+    const def = workflowWithSkills(['foo/bar']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/path separator/);
+    }
+  });
+
+  it('rejects a parent-traversal skill name', () => {
+    const def = workflowWithSkills(['../escaped']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      // `../escaped` contains `/`, which trips the separator check
+      // before traversal detection — both rejections are valid.
+      expect(issues[0]).toMatch(/path separator|valid directory name/);
+    }
+  });
+
+  it('rejects "."', () => {
+    const def = workflowWithSkills(['.']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues[0]).toMatch(/valid directory name/);
+    }
+  });
+
+  it('rejects ".."', () => {
+    const def = workflowWithSkills(['..']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues[0]).toMatch(/valid directory name/);
+    }
+  });
+
+  it('reports shape errors and missing manifests in one batch', () => {
+    // Three problems, one call: authors should see all of them rather than
+    // chasing them one at a time.
+    const def = workflowWithSkills(['', 'foo/bar', 'absent']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues).toHaveLength(3);
+      expect(issues[0]).toMatch(/empty/);
+      expect(issues[1]).toMatch(/path separator/);
+      expect(issues[2]).toMatch(/no skill with that frontmatter name was found/);
+    }
+  });
+
+  it('skips the discovery check when the shape check fails', () => {
+    // `..` would normally trigger filesystem probing — but we should
+    // report the shape error and skip the discovery branch entirely.
+    const def = workflowWithSkills(['..']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).not.toMatch(/no skill with that frontmatter name was found/);
+    }
+  });
+
+  it('reports missing skill with the skills-root path the resolver scans', () => {
+    const def = workflowWithSkills(['absent']);
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues[0]).toContain(resolve(packageDir, 'skills'));
+    }
+  });
+
+  it('matches on frontmatter `name:`, not directory name', () => {
+    // The dir is `dir-name/`, but the SKILL.md frontmatter says
+    // `name: frontmatter-name`. The resolver matches on frontmatter
+    // name (see `workflowSkillFilter` in src/skills/discovery.ts), so
+    // the validator must agree: `frontmatter-name` passes,
+    // `dir-name` does not.
+    const dir = resolve(packageDir, 'skills', 'dir-name');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, 'SKILL.md'), '---\nname: frontmatter-name\ndescription: x\n---\nbody\n');
+
+    const passing = workflowWithSkills(['frontmatter-name']);
+    expect(() => validateWorkflowSkillReferences(passing, packageDir)).not.toThrow();
+
+    const failing = workflowWithSkills(['dir-name']);
+    try {
+      validateWorkflowSkillReferences(failing, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkflowValidationError);
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues[0]).toMatch(/no skill with that frontmatter name was found/);
+      // The available list should surface the real (frontmatter) name so
+      // an author hunting a typo gets pointed at the right identifier.
+      expect(issues[0]).toContain('frontmatter-name');
+    }
+  });
+
+  it('lists available frontmatter names in the error to help typo recovery', () => {
+    writeSkillManifest('fetcher');
+    writeSkillManifest('parser');
+    const def = workflowWithSkills(['fetchr']); // typo
+    try {
+      validateWorkflowSkillReferences(def, packageDir);
+      throw new Error('expected throw');
+    } catch (err) {
+      const issues = (err as WorkflowValidationError).issues;
+      expect(issues[0]).toContain('Available: fetcher, parser');
+    }
   });
 });

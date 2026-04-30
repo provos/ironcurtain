@@ -1,5 +1,16 @@
-export type { ResolvedSkill, SkillFrontmatter, SkillSource } from './types.js';
+export type {
+  ResolvedSkill,
+  SkillDiscoveryError,
+  SkillDiscoveryErrorReason,
+  SkillFrontmatter,
+  SkillSource,
+} from './types.js';
 export { CONTAINER_SKILLS_DIR } from './types.js';
-export { discoverSkills, resolveSkillsForSession } from './discovery.js';
-export type { ResolveSkillsOptions } from './discovery.js';
-export { stageSkillsToBundle, createCachedStager } from './staging.js';
+export {
+  ACTIONABLE_DISCOVERY_REASONS,
+  discoverSkills,
+  discoverSkillsWithErrors,
+  resolveSkillsForSession,
+} from './discovery.js';
+export type { DiscoverSkillsResult, ResolveSkillsOptions } from './discovery.js';
+export { stageSkillsToBundle, createCachedStager, validateSkillName } from './staging.js';

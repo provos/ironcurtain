@@ -1,6 +1,8 @@
-import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { validateSkillName } from '../skills/staging.js';
+import { discoverSkills } from '../skills/discovery.js';
+import { errorMessage } from '../utils/error-message.js';
 import type {
   WorkflowDefinition,
   WorkflowStateDefinition,
@@ -500,28 +502,65 @@ function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]
 // ---------------------------------------------------------------------------
 
 /**
- * Verifies that every `skills[]` entry on an agent state refers to a
- * SKILL.md package that actually exists under `<packageDir>/skills/`.
- * Called after structural validation by callers that know the workflow
- * file's on-disk location (orchestrator start/resume; the loader path
- * has the path but the lint surface does not, so it skips this check).
- *
- * @throws {WorkflowValidationError} when any entry resolves to a missing manifest
+ * One issue produced by {@link iterateSkillRefIssues}. Surface code
+ * (validate vs lint) formats the user-facing wording.
  */
-export function validateWorkflowSkillReferences(definition: WorkflowDefinition, packageDir: string): void {
-  const issues: string[] = [];
-  const skillsRoot = resolve(packageDir, 'skills');
+export type SkillRefIssue =
+  | { kind: 'invalid-name'; stateId: string; name: string; detail: string }
+  | { kind: 'unknown-name'; stateId: string; name: string };
 
+/**
+ * Walks every agent state's `skills[]` and yields a structured issue
+ * per offending entry, classifying shape failures (`invalid-name`)
+ * separately from membership failures (`unknown-name`). Shape-first:
+ * an entry that fails the shape check is yielded as such and not
+ * checked for membership, which would otherwise emit a confusing
+ * "skill not found" message for inputs that were never valid names.
+ */
+export function* iterateSkillRefIssues(
+  definition: WorkflowDefinition,
+  discoveredNames: ReadonlySet<string>,
+): Generator<SkillRefIssue> {
   for (const [stateId, state] of Object.entries(definition.states)) {
     if (state.type !== 'agent' || state.skills === undefined) continue;
     for (const name of state.skills) {
-      const manifest = resolve(skillsRoot, name, 'SKILL.md');
-      if (!existsSync(manifest)) {
-        issues.push(
-          `State "${stateId}" references skill "${name}" but no manifest exists at ${manifest}. ` +
-            `Each entry in \`skills:\` must correspond to <workflow-pkg>/skills/<name>/SKILL.md.`,
-        );
+      try {
+        validateSkillName(name);
+      } catch (err) {
+        yield { kind: 'invalid-name', stateId, name, detail: errorMessage(err) };
+        continue;
       }
+      if (!discoveredNames.has(name)) {
+        yield { kind: 'unknown-name', stateId, name };
+      }
+    }
+  }
+}
+
+/**
+ * Verifies every `skills[]` entry on an agent state matches a SKILL.md
+ * frontmatter `name:` under `<packageDir>/skills/`. Membership is
+ * keyed on the frontmatter name (also what `workflowSkillFilter` in
+ * `src/skills/discovery.ts` matches), not the directory name —
+ * `existsSync` on the dir would miss dir-vs-frontmatter mismatches.
+ * Called from orchestrator `start()` only.
+ *
+ * @throws {WorkflowValidationError} when any entry is invalid or unknown
+ */
+export function validateWorkflowSkillReferences(definition: WorkflowDefinition, packageDir: string): void {
+  const skillsRoot = resolve(packageDir, 'skills');
+  const discoveredNames = new Set(discoverSkills(skillsRoot, 'workflow').map((s) => s.name));
+  const available = [...discoveredNames].sort();
+  const availableHint = available.length > 0 ? available.join(', ') : '(none)';
+
+  const issues: string[] = [];
+  for (const issue of iterateSkillRefIssues(definition, discoveredNames)) {
+    if (issue.kind === 'invalid-name') {
+      issues.push(`State "${issue.stateId}" has invalid skill name "${issue.name}": ${issue.detail}.`);
+    } else {
+      issues.push(
+        `State "${issue.stateId}" references skill "${issue.name}" but no skill with that frontmatter name was found under ${skillsRoot}. Available: ${availableHint}.`,
+      );
     }
   }
 

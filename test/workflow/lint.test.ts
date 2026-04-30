@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -525,6 +526,269 @@ describe('WF008 — visit-cap transition ordering', () => {
 });
 
 // ---------------------------------------------------------------------------
+// WF010 — agent state references an invalid or missing skill
+// ---------------------------------------------------------------------------
+
+describe('WF010 — skill references', () => {
+  let packageDir: string;
+  let manifestPath: string;
+
+  beforeEach(() => {
+    // Each test gets its own package dir so we can write a workflow.yaml
+    // alongside an optional `skills/` sidecar tree. The lint check
+    // resolves `skills/` off the manifest's parent dir, mirroring what
+    // `getWorkflowPackageDir(workflowFilePath)` does at runtime.
+    packageDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-lint-skills-test-'));
+    manifestPath = resolve(packageDir, 'workflow.yaml');
+    writeFileSync(manifestPath, '# placeholder — lint reads only the package dir off this path\n');
+  });
+
+  afterEach(() => {
+    rmSync(packageDir, { recursive: true, force: true });
+  });
+
+  function writeSkillManifest(name: string): void {
+    const dir = resolve(packageDir, 'skills', name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: x\n---\n`);
+  }
+
+  /** Builds a workflow whose `plan` agent state declares the given skill list. */
+  function workflowWithSkills(skills: readonly string[]): WorkflowDefinition {
+    return validateDefinition({
+      name: 'lint-skills',
+      description: 'd',
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+          skills,
+        },
+        done: { type: 'terminal', description: 'd' },
+      },
+    });
+  }
+
+  function ctxWithPath(): LintContext {
+    return { personaExists: () => true, workflowFilePath: manifestPath };
+  }
+
+  it('passes when every skill exists at <pkg>/skills/<name>/SKILL.md', () => {
+    writeSkillManifest('fetcher');
+    const def = workflowWithSkills(['fetcher']);
+    expect(codes(lintWorkflow(def, ctxWithPath()))).not.toContain('WF010');
+  });
+
+  it('errors when a referenced skill manifest is missing', () => {
+    const def = workflowWithSkills(['absent']);
+    const result = lintWorkflow(def, ctxWithPath());
+    expect(codes(result)).toContain('WF010');
+    const d = result.find((x) => x.code === 'WF010');
+    expect(d?.severity).toBe('error');
+    expect(d?.stateId).toBe('plan');
+    expect(d?.message).toContain('"absent"');
+    expect(d?.message).toContain(resolve(packageDir, 'skills'));
+    expect(d?.message).toMatch(/no skill with that frontmatter name was found/);
+  });
+
+  it('matches on frontmatter `name:`, not directory name', () => {
+    // Dir is `dir-name/` but the SKILL.md frontmatter says
+    // `name: frontmatter-name`. Lint matches on frontmatter name (so
+    // `workflowSkillFilter` in the resolver agrees with the lint
+    // surface): `frontmatter-name` passes, `dir-name` does not.
+    const dir = resolve(packageDir, 'skills', 'dir-name');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, 'SKILL.md'), '---\nname: frontmatter-name\ndescription: x\n---\n');
+
+    const passing = workflowWithSkills(['frontmatter-name']);
+    expect(codes(lintWorkflow(passing, ctxWithPath()))).not.toContain('WF010');
+
+    const failing = workflowWithSkills(['dir-name']);
+    const result = lintWorkflow(failing, ctxWithPath());
+    const d = result.find((x) => x.code === 'WF010');
+    expect(d?.severity).toBe('error');
+    expect(d?.message).toMatch(/no skill with that frontmatter name was found/);
+    // Available list surfaces the real (frontmatter) identifier — what an
+    // author should reference instead.
+    expect(d?.message).toContain('frontmatter-name');
+  });
+
+  it('errors on an empty-string skill name', () => {
+    const def = workflowWithSkills(['']);
+    const result = lintWorkflow(def, ctxWithPath());
+    const d = result.find((x) => x.code === 'WF010');
+    expect(d?.severity).toBe('error');
+    expect(d?.message).toMatch(/Invalid skill name/);
+    expect(d?.message).toMatch(/empty/);
+  });
+
+  it('errors on a skill name containing a path separator', () => {
+    const def = workflowWithSkills(['foo/bar']);
+    const result = lintWorkflow(def, ctxWithPath());
+    const d = result.find((x) => x.code === 'WF010');
+    expect(d?.severity).toBe('error');
+    expect(d?.message).toMatch(/path separator/);
+  });
+
+  it('errors on "." and ".."', () => {
+    for (const bad of ['.', '..']) {
+      const def = workflowWithSkills([bad]);
+      const result = lintWorkflow(def, ctxWithPath());
+      const d = result.find((x) => x.code === 'WF010');
+      expect(d?.severity).toBe('error');
+      expect(d?.message).toMatch(/Invalid skill name/);
+    }
+  });
+
+  it('emits one diagnostic per offending entry (batched, not first-error-only)', () => {
+    const def = workflowWithSkills(['', 'foo/bar', 'absent']);
+    const result = lintWorkflow(def, ctxWithPath());
+    const wf010 = result.filter((d) => d.code === 'WF010');
+    expect(wf010).toHaveLength(3);
+  });
+
+  it('does not fire when ctx.workflowFilePath is omitted', () => {
+    // Lint callers without a path on hand (e.g., tests that synthesize a
+    // definition in memory, or `inspect` over a past run) should see the
+    // rule skip cleanly rather than emit noise about non-existent
+    // sidecars.
+    const def = workflowWithSkills(['absent']);
+    const noPathCtx: LintContext = { personaExists: () => true };
+    expect(codes(lintWorkflow(def, noPathCtx))).not.toContain('WF010');
+  });
+
+  it('does not fire on agent states without a skills field', () => {
+    const def = validateDefinition({
+      name: 'no-skills',
+      description: 'd',
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+          // skills omitted entirely
+        },
+        done: { type: 'terminal', description: 'd' },
+      },
+    });
+    expect(codes(lintWorkflow(def, ctxWithPath()))).not.toContain('WF010');
+  });
+
+  // -------------------------------------------------------------------------
+  // Package-scoped WF010: malformed SKILL.md surfaces even when no state
+  // references it. Closes the gap that let typo'd frontmatter ship silently.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Writes a `SKILL.md` under `<packageDir>/skills/<dirName>/` with the
+   * given exact body (no frontmatter wrapping). Lets tests construct
+   * malformed manifests that `writeSkillManifest` cannot.
+   */
+  function writeRawSkillManifest(dirName: string, body: string): string {
+    const dir = resolve(packageDir, 'skills', dirName);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, 'SKILL.md'), body);
+    return dir;
+  }
+
+  /** Definition with no `skills:` references — isolates the package walk. */
+  function workflowWithoutSkills(): WorkflowDefinition {
+    return validateDefinition({
+      name: 'no-refs',
+      description: 'd',
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'd' },
+      },
+    });
+  }
+
+  it('errors on a SKILL.md with malformed YAML even when no state references it', () => {
+    // Closes the WF010 gap: pre-fix, a typo'd frontmatter under
+    // `<pkg>/skills/<dir>/SKILL.md` produced zero diagnostics if no
+    // state happened to reference it. Authors had no signal at all.
+    const skillDir = writeRawSkillManifest('broken', '---\nname: "unterminated\n---\n');
+
+    const result = lintWorkflow(workflowWithoutSkills(), ctxWithPath());
+    const wf010 = result.filter((d) => d.code === 'WF010');
+    expect(wf010).toHaveLength(1);
+    expect(wf010[0].severity).toBe('error');
+    expect(wf010[0].stateId).toBeUndefined();
+    expect(wf010[0].message).toContain('Malformed SKILL.md');
+    expect(wf010[0].message).toContain(skillDir);
+  });
+
+  it('errors on a SKILL.md missing the `name:` field', () => {
+    const skillDir = writeRawSkillManifest('no-name', '---\ndescription: "x"\n---\n');
+
+    const result = lintWorkflow(workflowWithoutSkills(), ctxWithPath());
+    const wf010 = result.filter((d) => d.code === 'WF010');
+    expect(wf010).toHaveLength(1);
+    expect(wf010[0].severity).toBe('error');
+    expect(wf010[0].stateId).toBeUndefined();
+    expect(wf010[0].message).toContain(skillDir);
+    expect(wf010[0].message).toContain('SKILL.md');
+  });
+
+  it('surfaces both a healthy and a broken SKILL.md alongside each other', () => {
+    // Healthy manifest is discoverable for the reference check; broken
+    // manifest produces a package-scoped diagnostic. The reference
+    // check still passes for the healthy entry.
+    writeSkillManifest('healthy');
+    const brokenDir = writeRawSkillManifest('broken', '---\n\t- not: : a: mapping\n---\n');
+
+    const def = workflowWithSkills(['healthy']);
+    const result = lintWorkflow(def, ctxWithPath());
+    const wf010 = result.filter((d) => d.code === 'WF010');
+    // One package-scoped diagnostic for the broken file. The reference
+    // to `healthy` resolves cleanly, so no state-scoped diagnostic.
+    expect(wf010).toHaveLength(1);
+    expect(wf010[0].stateId).toBeUndefined();
+    expect(wf010[0].message).toContain(brokenDir);
+  });
+
+  it('does not fire on directories without a SKILL.md (legitimate sidecars)', () => {
+    // A skills root may legitimately contain helper subdirs (READMEs,
+    // fixtures, test artifacts). `missing-manifest` is intentionally
+    // not surfaced — same reasoning as the runtime warning gate.
+    const helperDir = resolve(packageDir, 'skills', 'shared-fixtures');
+    mkdirSync(helperDir, { recursive: true });
+    writeFileSync(resolve(helperDir, 'README.md'), '# notes\n');
+
+    expect(codes(lintWorkflow(workflowWithoutSkills(), ctxWithPath()))).not.toContain('WF010');
+  });
+
+  it('does not fire when `workflowFilePath` is omitted, even if a malformed manifest would exist', () => {
+    // Without a manifest path the lint surface has no way to locate
+    // the package dir; the rule must skip cleanly rather than guess.
+    writeRawSkillManifest('broken', '---\nname: "unterminated\n---\n');
+
+    const noPathCtx: LintContext = { personaExists: () => true };
+    expect(codes(lintWorkflow(workflowWithoutSkills(), noPathCtx))).not.toContain('WF010');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression — bundled workflows must lint clean (zero errors)
 // ---------------------------------------------------------------------------
 
@@ -537,11 +801,15 @@ describe('bundled workflows lint clean', () => {
 
   for (const name of ['vuln-discovery', 'design-and-code']) {
     it(`${name}: zero errors`, () => {
-      const raw = parseYaml(readFileSync(resolve(workflowsDir, name, 'workflow.yaml'), 'utf-8'), {
-        maxAliasCount: 0,
-      });
+      const manifestPath = resolve(workflowsDir, name, 'workflow.yaml');
+      const raw = parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 });
       const def = validateDefinition(raw);
-      const diagnostics = lintWorkflow(def, bundledCtx);
+      // Pass `workflowFilePath` so WF010 (skill references) runs against
+      // the real package directory — bundled workflows don't currently
+      // reference skills, but if they ever do this regression catches a
+      // missing manifest sidecar.
+      const ctx: LintContext = { ...bundledCtx, workflowFilePath: manifestPath };
+      const diagnostics = lintWorkflow(def, ctx);
       const errors = diagnostics.filter((d) => d.severity === 'error');
       if (errors.length > 0) {
         console.error('Unexpected errors:', errors);

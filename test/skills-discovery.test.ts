@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { discoverSkills, resolveSkillsForSession } from '../src/skills/discovery.js';
+import { discoverSkills, discoverSkillsWithErrors, resolveSkillsForSession } from '../src/skills/discovery.js';
 
 let tempDir: string;
 
@@ -140,6 +140,146 @@ describe('discoverSkills', () => {
 
     expect(discoverSkills(skillsRoot, 'persona')[0].source).toBe('persona');
     expect(discoverSkills(skillsRoot, 'workflow')[0].source).toBe('workflow');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoverSkillsWithErrors
+// ---------------------------------------------------------------------------
+
+describe('discoverSkillsWithErrors', () => {
+  it('returns empty skills and empty errors when the root is missing', () => {
+    const missing = resolve(tempDir, 'does-not-exist');
+    expect(discoverSkillsWithErrors(missing, 'user')).toEqual({ skills: [], errors: [] });
+  });
+
+  it('returns empty skills and empty errors for an empty skills root', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    mkdirSync(skillsRoot, { recursive: true });
+    expect(discoverSkillsWithErrors(skillsRoot, 'user')).toEqual({ skills: [], errors: [] });
+  });
+
+  it('returns valid skills alongside errors so one bad skill never hides the good ones', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    writeSkill(skillsRoot, 'good', { name: 'good', description: 'd' });
+
+    const broken = resolve(skillsRoot, 'broken');
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(resolve(broken, 'SKILL.md'), '---\n\t- not: : a: mapping\n---\n');
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(skills.map((s) => s.name)).toEqual(['good']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].skillDir).toBe(broken);
+    expect(errors[0].reason).toBe('malformed-frontmatter');
+  });
+
+  it('reports missing-manifest for directories with no SKILL.md', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    const noManifest = resolve(skillsRoot, 'no-manifest');
+    mkdirSync(noManifest, { recursive: true });
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(skills).toEqual([]);
+    expect(errors).toEqual([{ skillDir: noManifest, reason: 'missing-manifest' }]);
+  });
+
+  it('reports malformed-frontmatter when YAML fails to parse', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    const broken = resolve(skillsRoot, 'broken');
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(resolve(broken, 'SKILL.md'), '---\nname: "unterminated\n---\n');
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(skills).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toBe('malformed-frontmatter');
+    expect(errors[0].detail).toContain('YAML parse error');
+  });
+
+  it('reports malformed-frontmatter when there is no `---` fence at all', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    const noFence = resolve(skillsRoot, 'no-fence');
+    mkdirSync(noFence, { recursive: true });
+    writeFileSync(resolve(noFence, 'SKILL.md'), '# Just a markdown body, no frontmatter\n');
+
+    const { errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toBe('malformed-frontmatter');
+  });
+
+  it('reports missing-required-fields when name or description is absent', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    writeSkill(skillsRoot, 'no-name', { description: 'orphan' });
+    writeSkill(skillsRoot, 'no-desc', { name: 'orphan' });
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(skills).toEqual([]);
+    expect(errors).toHaveLength(2);
+    for (const err of errors) {
+      expect(err.reason).toBe('missing-required-fields');
+    }
+  });
+
+  it('reports missing-required-fields when the frontmatter is not an object', () => {
+    const skillsRoot = resolve(tempDir, 'skills');
+    const arrayFm = resolve(skillsRoot, 'array-fm');
+    mkdirSync(arrayFm, { recursive: true });
+    // Yaml fence containing an array, not a mapping.
+    writeFileSync(resolve(arrayFm, 'SKILL.md'), '---\n- one\n- two\n---\n');
+
+    const { errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toBe('malformed-frontmatter');
+  });
+
+  it('does not produce errors for non-directory entries at the skills root', () => {
+    // Loose files at the root are ignored entirely (neither skills nor
+    // errors). Treating them as malformed would over-report on harmless
+    // sibling files like `README.md`.
+    const skillsRoot = resolve(tempDir, 'skills');
+    mkdirSync(skillsRoot, { recursive: true });
+    writeFileSync(resolve(skillsRoot, 'README.md'), '# top-level readme\n');
+    writeSkill(skillsRoot, 'valid', { name: 'valid', description: 'd' });
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(skills.map((s) => s.name)).toEqual(['valid']);
+    expect(errors).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoverSkills (wrapper) — happy path unchanged
+// ---------------------------------------------------------------------------
+
+describe('discoverSkills (wrapper around discoverSkillsWithErrors)', () => {
+  it('returns the same ResolvedSkill[] shape as before for a well-formed root', () => {
+    // Regression for the wrapper refactor: callers that don't care
+    // about errors must continue to receive a plain ResolvedSkill[]
+    // with no behavior change for the happy path.
+    const skillsRoot = resolve(tempDir, 'skills');
+    writeSkill(skillsRoot, 'fetcher', { name: 'fetcher', description: 'fetches stuff' });
+    writeSkill(skillsRoot, 'parser', { name: 'parser', description: 'parses stuff' });
+
+    const result = discoverSkills(skillsRoot, 'user');
+    const names = result.map((r) => r.name).sort();
+    expect(names).toEqual(['fetcher', 'parser']);
+    for (const skill of result) {
+      expect(skill.source).toBe('user');
+    }
+  });
+
+  it('still drops malformed skills silently from the returned array', () => {
+    // The wrapper logs warnings but must not throw or pollute the
+    // returned skills with malformed entries.
+    const skillsRoot = resolve(tempDir, 'skills');
+    writeSkill(skillsRoot, 'good', { name: 'good', description: 'd' });
+    const broken = resolve(skillsRoot, 'broken');
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(resolve(broken, 'SKILL.md'), '---\n\t- bad: : :\n---\n');
+
+    expect(() => discoverSkills(skillsRoot, 'user')).not.toThrow();
+    expect(discoverSkills(skillsRoot, 'user').map((r) => r.name)).toEqual(['good']);
   });
 });
 

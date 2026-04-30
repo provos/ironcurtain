@@ -417,11 +417,15 @@ export interface SessionOptions {
   readonly stateSlug?: string;
 
   /**
-   * Workflow-bundled skills directory: `<workflow-pkg>/skills/`.
-   * When set, skills here are layered into the session's resolved skill
-   * set (see `src/skills/discovery.ts` for the layering order). Ignored
-   * in borrow mode — the workflow bundle has already mounted its merged
-   * skill set, so per-state resolution would just stomp on it.
+   * Workflow-bundled skills directory: `<workflow-pkg>/skills/`. When
+   * set, skills here are layered into the session's resolved skill set
+   * (see `src/skills/discovery.ts` for the layering order). Used in
+   * both modes: in standalone mode the resolved set rides through
+   * `SessionDirConfig.resolvedSkills` for the docker factory to stage
+   * at bundle creation; in borrow mode this matters MOST because the
+   * workflow orchestrator passes it per-state and `buildSessionConfig`
+   * re-stages in place via `restageSkills` — the bind mount is already
+   * live so each state's filter takes effect without a remount.
    */
   readonly workflowSkillsDir?: string;
 
@@ -429,7 +433,9 @@ export interface SessionOptions {
    * When set, restricts the workflow layer to skills whose `name` is in
    * this set. Built from the agent state's optional `skills:` field;
    * left undefined when the state should receive every workflow-package
-   * skill. User-global skills are always included regardless.
+   * skill. User-global skills are always included regardless. Honored
+   * in both modes — see `workflowSkillsDir` for how each mode applies
+   * the resolved set.
    */
   readonly workflowSkillFilter?: ReadonlySet<string>;
 

@@ -11,9 +11,27 @@ function computeSignature(skills: readonly ResolvedSkill[]): string {
 }
 
 /**
+ * Rejects skill names whose `resolve(destDir, name)` would either
+ * overlay the staging root (`''`, `.`), escape it (`..`), or nest
+ * beneath it (`/`, `\\`) — the container's one-level walk only sees
+ * `<root>/<name>/SKILL.md`. Throws on rejection.
+ */
+export function validateSkillName(name: string): void {
+  if (name === '') {
+    throw new Error('Invalid skill name: name is empty');
+  }
+  if (name === '.' || name === '..') {
+    throw new Error(`Invalid skill name: "${name}" is not a valid directory name`);
+  }
+  if (name.includes('/') || name.includes('\\')) {
+    throw new Error(`Invalid skill name: "${name}" contains a path separator`);
+  }
+}
+
+/**
  * Replaces the contents of `destDir` with the resolved set: each skill
- * is copied to `<destDir>/<skill.name>/`. Skill names that resolve
- * outside `destDir` (`..` or absolute paths) are rejected.
+ * is copied to `<destDir>/<skill.name>/`. Skill names are validated by
+ * {@link validateSkillName}.
  *
  * Wipes children individually rather than the parent itself. Workflow
  * bundles bind-mount this directory into a long-lived container; on
@@ -33,10 +51,8 @@ export function stageSkillsToBundle(skills: readonly ResolvedSkill[], destDir: s
   }
 
   for (const skill of skills) {
+    validateSkillName(skill.name);
     const target = resolve(normalizedDestDir, skill.name);
-    if (!target.startsWith(normalizedDestDir + '/') && target !== normalizedDestDir) {
-      throw new Error(`Skill name escapes staging directory: ${skill.name}`);
-    }
     cpSync(skill.sourceDir, target, { recursive: true });
   }
 }

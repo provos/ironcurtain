@@ -185,24 +185,40 @@ export function discoverWorkflows(): WorkflowEntry[] {
 }
 
 /**
- * Resolves a workflow reference to an absolute manifest path.
+ * Resolves a workflow reference to an absolute manifest path. User-facing
+ * refs are YAML-only — JSON path-style refs are silently dropped because
+ * `definition.json` is an internal serialization format produced by
+ * workflow-resume checkpointing, not a manifest authors should reference.
  *
- * Two reference styles are accepted:
- *  - **Path-style**: contains a path separator or a recognized YAML
- *    extension. Returned as-is when the path exists. Use this form for
- *    ad-hoc workflows that live outside the bundled and user roots
- *    (e.g., a workflow checked into a project repo).
- *  - **Name-style**: a bare identifier. Probed inside the user
- *    workflows directory first, then the bundled directory; matches
- *    `<root>/<name>/workflow.{yaml,yml}`.
+ * Resolution matrix:
+ *  - bare name (`my-flow`)       → probe user dir then bundled dir for
+ *                                  `<root>/<ref>/workflow.{yaml,yml}`
+ *  - path with no extension      → treat as a package directory, probe
+ *    (`./my-flow`, `/abs/foo`)     `<ref>/workflow.{yaml,yml}`
+ *  - explicit `.yaml` / `.yml`   → return as-is when the file exists
+ *  - any other extension         → undefined (JSON refs included; the
+ *                                  resume path reads `definition.json`
+ *                                  directly, not via this resolver)
  *
  * Returns `undefined` when the reference cannot be resolved.
  */
 export function resolveWorkflowPath(ref: string): string | undefined {
   const ext = extname(ref).toLowerCase();
-  if (ref.includes('/') || ref.includes('\\') || YAML_EXTENSIONS.has(ext)) {
+  const isPathStyle = ref.includes('/') || ref.includes('\\');
+
+  if (YAML_EXTENSIONS.has(ext)) {
     const resolved = resolve(ref);
     return existsSync(resolved) ? resolved : undefined;
+  }
+
+  if (isPathStyle) {
+    // No extension → package directory. A non-yaml extension (e.g.
+    // `.json`) on a path-style ref falls through to undefined: not a
+    // user-facing form.
+    if (ext === '') {
+      return findManifest(resolve(ref));
+    }
+    return undefined;
   }
 
   const userManifest = findManifest(resolve(getUserWorkflowsDir(), ref));

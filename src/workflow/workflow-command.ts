@@ -507,7 +507,11 @@ function runInspect(args: string[]): void {
     }
 
     // Informational lint of the checkpointed definition. Read-only — never
-    // affects exit code.
+    // affects exit code. Intentionally does NOT pass `workflowFilePath`:
+    // inspect operates on a past-run's `definition.json` whose sibling
+    // tree is the run directory, not the source workflow package, so
+    // WF010 (skill-reference) would emit false positives by looking for
+    // SKILL.md in a directory that never carried skills sidecars.
     if (loadedDef) {
       const diagnostics = lintWorkflow(loadedDef, defaultLintContext);
       if (diagnostics.length > 0) {
@@ -660,7 +664,8 @@ function runLintCommand(args: string[]): void {
   // Structural validation first — a malformed definition cannot be linted.
   const definition = loadAndValidateDefinition(resolved);
 
-  const diagnostics = lintWorkflow(definition, defaultLintContext);
+  const ctx = { ...defaultLintContext, workflowFilePath: resolved };
+  const diagnostics = lintWorkflow(definition, ctx);
 
   if (diagnostics.length === 0) {
     writeStderr(`${DIM}No lint diagnostics for ${resolved}.${RESET}`);

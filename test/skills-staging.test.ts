@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { stageSkillsToBundle, createCachedStager } from '../src/skills/staging.js';
+import { stageSkillsToBundle, createCachedStager, validateSkillName } from '../src/skills/staging.js';
 import type { ResolvedSkill } from '../src/skills/types.js';
 
 let tempDir: string;
@@ -140,7 +140,8 @@ describe('stageSkillsToBundle', () => {
       description: 'x',
     };
     const dest = resolve(tempDir, 'staged');
-    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/escapes staging directory/);
+    // The embedded `/` trips validateSkillName's path-separator check.
+    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/path separator/);
   });
 
   it('rejects absolute skill names', () => {
@@ -153,7 +154,68 @@ describe('stageSkillsToBundle', () => {
       description: 'x',
     };
     const dest = resolve(tempDir, 'staged');
-    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/escapes staging directory/);
+    // Absolute paths trip the separator check in validateSkillName.
+    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/path separator/);
+  });
+
+  it('rejects an empty skill name (would overlay the staging root)', () => {
+    const sourceParent = resolve(tempDir, 'sources');
+    const skillSrc = writeSourceSkill(sourceParent, 'src');
+    const skill: ResolvedSkill = { name: '', source: 'user', sourceDir: skillSrc, description: 'x' };
+    const dest = resolve(tempDir, 'staged');
+    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/Invalid skill name.*empty/);
+  });
+
+  it('rejects "." (would overlay the staging root)', () => {
+    const sourceParent = resolve(tempDir, 'sources');
+    const skillSrc = writeSourceSkill(sourceParent, 'src');
+    const skill: ResolvedSkill = { name: '.', source: 'user', sourceDir: skillSrc, description: 'x' };
+    const dest = resolve(tempDir, 'staged');
+    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/Invalid skill name/);
+  });
+
+  it('rejects skill names containing a path separator (would nest inside destDir)', () => {
+    const sourceParent = resolve(tempDir, 'sources');
+    const skillSrc = writeSourceSkill(sourceParent, 'src');
+    const skill: ResolvedSkill = {
+      name: 'foo/bar',
+      source: 'user',
+      sourceDir: skillSrc,
+      description: 'x',
+    };
+    const dest = resolve(tempDir, 'staged');
+    expect(() => stageSkillsToBundle([skill], dest)).toThrow(/path separator/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateSkillName — shape-only check shared by staging + workflow validation
+// ---------------------------------------------------------------------------
+
+describe('validateSkillName', () => {
+  it('accepts a single non-empty path segment', () => {
+    expect(() => validateSkillName('fetcher')).not.toThrow();
+    expect(() => validateSkillName('a-b_c.123')).not.toThrow();
+  });
+
+  it('rejects an empty string', () => {
+    expect(() => validateSkillName('')).toThrow(/empty/);
+  });
+
+  it('rejects "."', () => {
+    expect(() => validateSkillName('.')).toThrow(/valid directory name/);
+  });
+
+  it('rejects ".."', () => {
+    expect(() => validateSkillName('..')).toThrow(/valid directory name/);
+  });
+
+  it('rejects forward-slash separators', () => {
+    expect(() => validateSkillName('foo/bar')).toThrow(/path separator/);
+  });
+
+  it('rejects backslash separators', () => {
+    expect(() => validateSkillName('foo\\bar')).toThrow(/path separator/);
   });
 });
 

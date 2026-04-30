@@ -333,4 +333,44 @@ describe('resolveWorkflowPath', () => {
     const result = resolveWorkflowPath('/tmp/no-such-file.yaml');
     expect(result).toBeUndefined();
   });
+
+  it('resolves a path-style ref with no extension to the package manifest', () => {
+    // `./<dir>` and `/abs/<dir>` (both have a separator, neither has an
+    // extension) should be probed for `workflow.{yaml,yml}` inside.
+    const userDir = resolve(tempDir, 'workflows');
+    const filePath = writeWorkflowPackage(userDir, 'pkg-style', 'Pkg style', 'yaml');
+    const packageDir = resolve(userDir, 'pkg-style');
+
+    const result = resolveWorkflowPath(packageDir);
+    expect(result).toBe(filePath);
+  });
+
+  it('resolves a path-style ref with no extension via workflow.yml when only .yml exists', () => {
+    const userDir = resolve(tempDir, 'workflows');
+    const filePath = writeWorkflowPackage(userDir, 'pkg-yml', 'Pkg YML', 'yml');
+    const packageDir = resolve(userDir, 'pkg-yml');
+
+    const result = resolveWorkflowPath(packageDir);
+    expect(result).toBe(filePath);
+  });
+
+  it('returns undefined for a path-style ref with .json extension', () => {
+    // JSON path-style refs are silently dropped — `definition.json` is
+    // an internal serialization format produced by workflow-resume
+    // checkpointing, not a manifest authors should reference.
+    const dir = resolve(tempDir, 'json-ref');
+    mkdirSync(dir, { recursive: true });
+    const filePath = resolve(dir, 'flow.json');
+    writeFileSync(filePath, JSON.stringify({ name: 'x', description: '', initial: 's', states: {} }));
+
+    expect(resolveWorkflowPath(filePath)).toBeUndefined();
+    // Relative form too.
+    expect(resolveWorkflowPath('./flow.json')).toBeUndefined();
+  });
+
+  it('returns undefined for a path-style ref pointing at a directory without a manifest', () => {
+    const empty = resolve(tempDir, 'empty-pkg');
+    mkdirSync(empty, { recursive: true });
+    expect(resolveWorkflowPath(empty)).toBeUndefined();
+  });
 });
