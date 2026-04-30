@@ -713,7 +713,22 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
       resolvePromise(code);
     };
 
+    const onPreConnectError = (): void => {
+      // Pre-connect failure (no `connect` event ever fired). Distinct from
+      // a post-connect close so the UDS caller can surface a hard failure
+      // instead of treating a stale-socket false positive as success.
+      settle(ATTACH_PRE_CONNECT_ERROR);
+    };
+    conn.once('error', onPreConnectError);
+
     conn.once('connect', () => {
+      // Once connected, the pre-connect classifier no longer applies; remove
+      // it so a post-connect 'error' (e.g. ECONNRESET mid-session) is handled
+      // only by the post-connect handler below — otherwise both fire and the
+      // earlier-registered pre-connect listener wins, mis-reporting the
+      // outcome as ATTACH_PRE_CONNECT_ERROR.
+      conn.removeListener('error', onPreConnectError);
+
       // Defer raw mode, stdin forwarding, and resize handling until the first
       // data arrives from the remote. For TCP retries, an instant close (no
       // data) returns -1 without touching the terminal, so the user is never
@@ -817,13 +832,6 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
         cleanup();
         settle(receivedData ? 1 : ATTACH_INSTANT_CLOSE);
       });
-    });
-
-    conn.once('error', () => {
-      // Pre-connect failure (no `connect` event ever fired). Distinct from
-      // a post-connect close so the UDS caller can surface a hard failure
-      // instead of treating a stale-socket false positive as success.
-      settle(ATTACH_PRE_CONNECT_ERROR);
     });
   });
 }

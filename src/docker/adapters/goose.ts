@@ -11,7 +11,9 @@
  * - Config format is YAML (not JSON)
  * - System prompt is file-based (not inline CLI flag)
  * - No session continuity in batch mode (each turn is independent)
- * - Output is plain text (no --output-format json)
+ * - Batch mode invokes `goose run --output-format json` so `extractResponse`
+ *   can parse a structured envelope (incl. provider error surfacing); PTY
+ *   mode still streams plain text to the user's terminal.
  * - Provider-specific credential detection (not Anthropic-only)
  */
 
