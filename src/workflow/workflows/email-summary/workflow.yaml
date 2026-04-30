@@ -1,0 +1,100 @@
+name: email-summary
+description: 'Fetch last 3 sent emails (exec-assistant) then summarize to a file (global).'
+initial: fetch
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  sharedContainer: true
+  model: anthropic:claude-haiku-4-5
+
+states:
+  fetch:
+    type: agent
+    description: Fetches the last 3 sent emails via the Gmail MCP tools
+    persona: exec-assistant
+    # Test fixture: per-state `skills:` filter is set on `fetch` to exercise
+    # the "filtered subset" branch of the resolver. Of the four bundled
+    # skills under skills/, this state only sees these two. The shared
+    # `json-schema-emails` skill is also visible to `summarize` (overlap),
+    # while `gmail-query-syntax` is unique to this state.
+    skills:
+      - gmail-query-syntax
+      - json-schema-emails
+    prompt: |
+      Use the Gmail MCP tools (on the `google-workspace` server) to retrieve
+      the 3 most recently sent emails. In this Docker mode the only MCP tool
+      Claude Code sees is `execute_code` — write TypeScript inside it and
+      call the Gmail tools as Code Mode dotted callables. The server segment
+      is sanitized (`google-workspace` -> `google_workspace`); tool names are
+      unchanged.
+
+      The tool surface is two-step:
+        1. `google_workspace.gmail_search_messages({ query: "is:sent",
+           pageSize: 3 })` returns message IDs only (no body).
+        2. `google_workspace.gmail_get_messages_batch({ messageIds: [...] })`
+           (or repeated `google_workspace.gmail_get_message` calls) hydrates
+           each ID into a full message with headers and body.
+
+      Sketch:
+        const ids = google_workspace.gmail_search_messages({
+          query: "is:sent", pageSize: 3,
+        });
+        const msgs = google_workspace.gmail_get_messages_batch({
+          messageIds: ids.messages.map(m => m.id),
+        });
+
+      For each email, capture: sender, recipient(s), subject, date, and body.
+
+      Write the results to `.workflow/emails/emails.json` (a single JSON array
+      with three objects, newest-first) using your built-in `Write` tool —
+      `/workspace` is bind-mounted into the container, so native file I/O
+      operates on it directly. Do NOT route this write through the filesystem
+      MCP. Normalize each email to the shape described in the
+      json-schema-emails skill: string fields named `sender`, `recipient`,
+      `subject`, `date`, `body`. Strip HTML from the body if the message is
+      HTML-only.
+    inputs: []
+    outputs:
+      - emails
+    transitions:
+      - to: summarize
+
+  summarize:
+    type: agent
+    description: Summarizes the fetched emails into a single markdown file
+    persona: global
+    # Test fixture: `skills:` is intentionally OMITTED here to exercise the
+    # "default = all bundled skills" branch of the resolver. This state sees
+    # all four bundled skills (email-formatting, gmail-query-syntax,
+    # json-schema-emails, summary-style-guide) plus any user-global skills.
+    # The asymmetry vs. `fetch` (which has an explicit filter) is the point —
+    # do not "fix" it by adding a skills list to this state.
+    prompt: |
+      Read `.workflow/emails/emails.json` with your built-in `Read` tool and
+      write the output with your built-in `Write` tool. `/workspace` is
+      bind-mounted into the container, so native file I/O operates on it
+      directly — no MCP roundtrip is needed for in-workspace files.
+
+      Produce a concise summary file at the workspace root named
+      `email-summary.md`. Structure it as:
+        # Email summary
+        ## <subject>
+        - From: ...
+        - To: ...
+        - Date: ...
+        - Summary: <1-2 sentences>
+      Repeat for each of the three emails, in the order they appear in the
+      input. Keep each summary to a couple of sentences; no preamble or outro.
+    inputs:
+      - emails
+    outputs:
+      - summary
+    transitions:
+      - to: done
+
+  done:
+    type: terminal
+    description: Summary written to workspace/email-summary.md
+    outputs:
+      - summary
