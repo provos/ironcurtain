@@ -339,3 +339,154 @@ describe('PTY resize via socat', () => {
     }
   });
 });
+
+// --- waitForPtyReady regression tests ---
+//
+// Regression: a connect-based probe against a `socat ...,fork` listener spawns
+// a doomed child for the probe itself, before the real attach connects. That
+// pre-spawned child can race the real attach for shared per-agent state (e.g.
+// Goose's SQLite session DB), producing migration errors. The fix is to poll
+// the socket FILE rather than open a CONNECTION.
+
+describe('waitForPtyReady', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'pty-readiness-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Spawns a real UDS listener that counts connection attempts. The
+   * connection counter lets tests assert that `waitForPtyReady` never
+   * opens a connection — the spawn-prevention property the fix relies on.
+   */
+  async function startCountingUdsListener(sockPath: string): Promise<{
+    connectAttempts: () => number;
+    close: () => Promise<void>;
+  }> {
+    const { createServer } = await import('node:net');
+    let count = 0;
+    const server = createServer((socket) => {
+      count += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+    return {
+      connectAttempts: () => count,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  it('resolves immediately when a UDS socket already exists at the path', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'pty.sock');
+    const listener = await startCountingUdsListener(sockPath);
+
+    try {
+      const start = Date.now();
+      await waitForPtyReady(sockPath);
+      expect(Date.now() - start).toBeLessThan(500);
+      // Spawn-prevention property: the readiness check did not connect.
+      expect(listener.connectAttempts()).toBe(0);
+    } finally {
+      await listener.close();
+    }
+  });
+
+  it('rejects a regular file at the socket path (would otherwise mask a stale leftover)', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'not-a-socket');
+    writeFileSync(sockPath, '');
+
+    vi.useFakeTimers();
+    try {
+      const promise = waitForPtyReady(sockPath);
+      const settled = promise.catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await settled;
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(/did not become ready/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('throws when the UDS socket never appears within the deadline', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'never-appears.sock');
+
+    // The default deadline is 30s; this test sets a shorter wall-clock budget
+    // by leaning on vi.useFakeTimers and advancing past the deadline.
+    vi.useFakeTimers();
+    try {
+      const promise = waitForPtyReady(sockPath);
+      // Attach a catch to avoid unhandled rejection warnings while we tick.
+      const settled = promise.catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await settled;
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(/did not become ready/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is a no-op for TCP targets (macOS path delegates to attachPty retry)', async () => {
+    const { waitForPtyReady } = await import('../src/docker/pty-session.js');
+    // Pass an unreachable TCP target. If waitForPtyReady tried to connect or
+    // poll for file existence, it would either error or spin until timeout.
+    // Instead it returns immediately as a defensive no-op. The timing bound
+    // is generous to absorb CI scheduler jitter — anything under the 30s
+    // PTY_READINESS_TIMEOUT_MS proves the polling loop never engaged.
+    const start = Date.now();
+    await waitForPtyReady({ host: '127.0.0.1', port: 1 });
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+});
+
+// --- attachPty UDS pre-connect-error handling ---
+//
+// Companion to waitForPtyReady's tighten-up: even when the readiness check
+// passes (socket file is a real socket inode), the listener could still be
+// gone by the time attachPty connects (stale file, crashed socat). Previously
+// that mapped to exit 0 — a silent "successful" exit. We now surface it.
+
+describe('attachPty (UDS)', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'attach-pty-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the UDS socket exists but no one is listening', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'closed-listener.sock');
+
+    // Create a UDS server and close it; the socket inode remains on disk
+    // but no process is accepting connections — connect() yields ECONNREFUSED.
+    const { createServer } = await import('node:net');
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    await expect(attachPty({ target: sockPath, containerId: 'unused' })).rejects.toThrow(/no listener/);
+  });
+});
