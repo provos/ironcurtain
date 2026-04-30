@@ -107,7 +107,7 @@ export async function checkDocker(
  *   - preferredMode: 'docker' + Docker ok          -> ok
  *   - preferredMode: 'docker' + Docker unavailable -> fail (sessions will refuse to start)
  *   - preferredMode: 'builtin' + API key present   -> ok
- *   - preferredMode: 'builtin' + no API key        -> warn (sessions will fail later)
+ *   - preferredMode: 'builtin' + no API key        -> warn (sessions will fail to start by default)
  */
 export function checkPreferredMode(config: IronCurtainConfig, dockerResult: CheckResult): CheckResult {
   const preferredMode = config.userConfig.preferredMode;

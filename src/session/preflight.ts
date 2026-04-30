@@ -13,7 +13,12 @@ import { promisify } from 'node:util';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
-import { detectAuthMethod, preflightCredentialSources, type CredentialSources } from '../docker/oauth-credentials.js';
+import {
+  detectAuthMethod,
+  preflightCredentialSources,
+  readOnlyCredentialSources,
+  type CredentialSources,
+} from '../docker/oauth-credentials.js';
 import { resolveApiKeyForProvider } from '../config/model-provider.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 
@@ -145,14 +150,14 @@ interface CredentialState {
 async function detectCredentialState(
   agentId: AgentId,
   config: IronCurtainConfig,
-  sources?: CredentialSources,
+  sources: CredentialSources,
 ): Promise<CredentialState> {
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
     const key = resolveApiKeyForProvider(provider, config.userConfig);
     if (key) return { credKind: 'apikey', anthropicOAuthOnly: false };
 
-    const auth = await detectAuthMethod(config, sources ?? preflightCredentialSources);
+    const auth = await detectAuthMethod(config, sources);
     return {
       credKind: null,
       anthropicOAuthOnly:
@@ -160,9 +165,45 @@ async function detectCredentialState(
     };
   }
 
-  const auth = await detectAuthMethod(config, sources ?? preflightCredentialSources);
+  const auth = await detectAuthMethod(config, sources);
   if (auth.kind === 'none') return { credKind: null, anthropicOAuthOnly: false };
   return { credKind: auth.kind === 'oauth' ? 'oauth' : 'apikey', anthropicOAuthOnly: false };
+}
+
+/**
+ * Resolves Docker availability and credential presence concurrently, then —
+ * only on the success path — triggers a proactive OAuth-refresh round-trip.
+ *
+ * The phase split is what gives us both speed AND clean failure semantics:
+ *   - Phase 1 (parallel): Docker probe + read-only credential check.
+ *     No side effects. If either fails we throw without ever touching the
+ *     refresh path, so a Docker-unavailable run can't burn an OAuth refresh
+ *     token.
+ *   - Phase 2 (post-confirm): if both passed and the credential is OAuth,
+ *     re-run detection with `preflightCredentialSources` so a near-expired
+ *     token is rotated before the first MCP call.
+ *
+ * Tests that inject `credentialSources` get phase-1-only behavior with
+ * their fixture — the injection encodes the test's chosen semantics, so
+ * rerunning with refresh-capable sources would defeat the override.
+ */
+async function probeDockerAndCredentials(
+  agent: AgentId,
+  config: IronCurtainConfig,
+  isDockerAvailable: () => Promise<DockerAvailability>,
+  credentialSources: CredentialSources | undefined,
+): Promise<{ dockerStatus: DockerAvailability; credState: CredentialState }> {
+  const phase1Sources = credentialSources ?? readOnlyCredentialSources;
+  const [dockerStatus, credState] = await Promise.all([
+    isDockerAvailable(),
+    detectCredentialState(agent, config, phase1Sources),
+  ]);
+
+  if (!credentialSources && dockerStatus.available && credState.credKind === 'oauth') {
+    await detectAuthMethod(config, preflightCredentialSources);
+  }
+
+  return { dockerStatus, credState };
 }
 
 /**
@@ -303,10 +344,13 @@ async function resolveExplicit(
     };
   }
 
-  // Probe Docker first; credential detection can refresh OAuth tokens
-  // (rotating the refresh token) and we don't want that side effect on a
-  // failure path.
-  const dockerStatus = await isDockerAvailable();
+  const { dockerStatus, credState } = await probeDockerAndCredentials(
+    agent,
+    config,
+    isDockerAvailable,
+    credentialSources,
+  );
+
   if (!dockerStatus.available) {
     throw new PreflightError(
       `--agent ${agent} requires Docker, but it is not available:\n\n${dockerStatus.detailedMessage}\n\n` +
@@ -314,7 +358,6 @@ async function resolveExplicit(
     );
   }
 
-  const credState = await detectCredentialState(agent, config, credentialSources);
   if (credState.credKind === null) {
     throw new PreflightError(credentialErrorMessageForExplicit(agent, config, credState.anthropicOAuthOnly));
   }
@@ -343,15 +386,17 @@ async function resolveDefaultMode(
 
   const agent = preferredDockerAgent as AgentId;
 
-  // Probe Docker first; credential detection can refresh OAuth tokens
-  // (rotating the refresh token) and we don't want that side effect on a
-  // failure path.
-  const dockerStatus = await isDockerAvailable();
+  const { dockerStatus, credState } = await probeDockerAndCredentials(
+    agent,
+    config,
+    isDockerAvailable,
+    credentialSources,
+  );
+
   if (!dockerStatus.available) {
     throw new PreflightError(dockerUnavailableMessage(dockerStatus.detailedMessage));
   }
 
-  const credState = await detectCredentialState(agent, config, credentialSources);
   if (credState.credKind === null) {
     throw new PreflightError(credentialErrorMessageForPreferredMode(agent, config, credState.anthropicOAuthOnly));
   }
