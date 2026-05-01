@@ -181,12 +181,25 @@ function resolveLintMode(noLint: unknown, strictLint: unknown): LintMode {
   return 'warn';
 }
 
+type ParseArgsConfig = Parameters<typeof parseArgs>[0];
+
+function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnType<typeof parseArgs> {
+  try {
+    return parseArgs({ ...opts, strict: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    writeStderr(`${RED}${message}${RESET}`);
+    writeStderr(`${DIM}Run with --help to see available options.${RESET}`);
+    process.exit(1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
 async function runStart(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseArgsStrict({
     args,
     options: {
       model: { type: 'string' },
@@ -196,7 +209,6 @@ async function runStart(args: string[]): Promise<void> {
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
-    strict: false,
   });
 
   if (values.help) {
@@ -289,7 +301,7 @@ async function runStart(args: string[]): Promise<void> {
 }
 
 async function runResume(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseArgsStrict({
     args,
     options: {
       state: { type: 'string' },
@@ -299,7 +311,6 @@ async function runResume(args: string[]): Promise<void> {
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
-    strict: false,
   });
 
   if (values.help) {
@@ -392,14 +403,13 @@ async function runResume(args: string[]): Promise<void> {
 }
 
 function runInspect(args: string[]): void {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseArgsStrict({
     args,
     options: {
       all: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
-    strict: false,
   });
 
   if (values.help) {
@@ -633,14 +643,13 @@ function truncate(text: string, maxLen: number): string {
 // ---------------------------------------------------------------------------
 
 function runLintCommand(args: string[]): void {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseArgsStrict({
     args,
     options: {
       strict: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
-    strict: false,
   });
 
   if (values.help) {
