@@ -289,6 +289,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       mitmAddr,
       conversationStateDir,
       conversationStateConfig,
+      skillsMount,
     } = infra;
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
@@ -461,11 +462,26 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       });
     }
 
+    // Skills bind mount — read-only so the agent cannot modify staged
+    // skills mid-session. The mount target is a sibling path the adapter
+    // chose to NOT nest under any other mount; see `agent-adapter.ts`.
+    if (skillsMount) {
+      mounts.push({ source: skillsMount.hostDir, target: skillsMount.target, readonly: true });
+    }
+
     // Pass initial terminal size so start-claude.sh can set PTY dimensions
     // before Claude starts, eliminating the resize race condition.
     const { columns, rows } = process.stdout;
     if (columns) env.IRONCURTAIN_INITIAL_COLS = String(columns);
     if (rows) env.IRONCURTAIN_INITIAL_ROWS = String(rows);
+
+    // Adapter-declared env vars consumed by its start script when
+    // skills are mounted. Merged opaquely — the PTY driver does not
+    // interpret keys or values; the adapter and its script are the
+    // sole owners of that contract.
+    if (skillsMount && adapter.skillsPtyEnv) {
+      Object.assign(env, adapter.skillsPtyEnv);
+    }
 
     // Pass resume flags when resuming a session.
     // Validate each flag to prevent shell injection via adapter misconfiguration.

@@ -7,9 +7,10 @@
  *   - real `validateWorkflowSkillReferences` at workflow load
  *   - real `resolveSkillsForSession` (user → workflow layering with filter)
  *   - real `stageSkillsToBundle` (the host-side staging operation a
- *     container observes through the adapter-specific skills mount —
- *     for Claude Code, via the `claude-state` mount that already
- *     covers `~/.claude/`)
+ *     container observes through the adapter-specific read-only skills
+ *     bind mount — for Claude Code, a dedicated sibling mount at
+ *     `/home/codespace/skills/.claude/skills` paired with
+ *     `--add-dir /home/codespace/skills`)
  *
  * Approach: option (3) from the design — skip Docker exec entirely and
  * inspect the host-side `bundle.skillsMount.hostDir` directly between state
@@ -112,7 +113,7 @@ function makeBundleStub(workflowId: string, bundleId: BundleId, bundleDir: strin
     bundleId,
     workflowId,
     bundleDir,
-    skillsMount: { hostDir: skillsDir },
+    skillsMount: { hostDir: skillsDir, target: '/home/codespace/skills/.claude/skills' },
     workspaceDir: resolve(bundleDir, 'workspace'),
     escalationDir: resolve(bundleDir, 'escalations'),
     auditLogPath: resolve(bundleDir, 'audit.jsonl'),
@@ -407,8 +408,9 @@ interface ContainerStagingSnapshot {
  * on the basename of the skill directory.
  *
  * The container path comes from the adapter; this test exercises the
- * Claude Code adapter, whose path is `/home/codespace/.claude/skills`
- * (a descendant of the `~/.claude/` conversation-state mount).
+ * Claude Code adapter, whose path is `/home/codespace/skills/.claude/skills`
+ * (a sibling of the conversation-state mount, NOT nested under it —
+ * see `agent-adapter.ts` for why).
  */
 async function snapshotContainerSkills(
   bundle: DockerInfrastructure,

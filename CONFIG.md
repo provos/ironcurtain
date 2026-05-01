@@ -118,7 +118,7 @@ The memory server can also be configured via environment variables (`MEMORY_DB_P
 
 ## Skills
 
-User-global SKILL.md packages live under `~/.ironcurtain/skills/<name>/`. Each agent's discovery path differs (Claude Code scans `~/.claude/skills/<name>/SKILL.md`, Goose scans `~/.config/goose/skills/<name>/SKILL.md`); IronCurtain mounts the staged skills at the path the active agent's native discovery scans. There's nothing to configure in `config.json` — drop a directory containing a `SKILL.md` file (with `name` and `description` frontmatter) and any supporting files, and it's automatically picked up on next session start. See [WORKFLOWS.md](WORKFLOWS.md#skills) for the layering rules and the workflow-bundled skills variant.
+User-global SKILL.md packages live under `~/.ironcurtain/skills/<name>/`. Each agent's discovery path differs (Claude Code is pointed at the staging dir via `--add-dir`; Goose scans `~/.config/goose/skills/<name>/SKILL.md`); IronCurtain bind-mounts the staged skills (read-only) at the path the active agent's native discovery walks. There's nothing to configure in `config.json` — drop a directory containing a `SKILL.md` file (with `name` and `description` frontmatter) and any supporting files, and it's automatically picked up on next session start. See [WORKFLOWS.md](WORKFLOWS.md#skills) for the layering rules and the workflow-bundled skills variant.
 
 ## Multi-Provider Support
 

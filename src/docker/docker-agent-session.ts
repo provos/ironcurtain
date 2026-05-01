@@ -255,7 +255,7 @@ export class DockerAgentSession implements Session {
       // Write user context for the auto-approver
       this.writeUserContext(userMessage);
 
-      const command = this.infra.adapter.buildCommand(userMessage, this.systemPrompt, {
+      const baseCommand = this.infra.adapter.buildCommand(userMessage, this.systemPrompt, {
         // The adapter consumes this as the agent-CLI conversation id
         // (`--session-id <id>` / `--resume <id>`). It is NOT the IronCurtain
         // session id — see §8.5 in docs/designs/workflow-session-identity.md.
@@ -263,6 +263,17 @@ export class DockerAgentSession implements Session {
         firstTurn: !this.firstTurnComplete,
         modelOverride: this.agentModelOverride,
       });
+      // Append adapter-declared CLI args required when skills are mounted
+      // (e.g. Claude Code's `--add-dir <parent>`). Gated on the mount
+      // being present so we don't pass the flag for sessions without
+      // skills (where the path doesn't exist inside the container).
+      // Appended at the end: every adapter's `buildCommand` puts the
+      // user message in a flag-value pair (`-p <msg>` for Claude Code),
+      // so trailing flag-value pairs still parse cleanly.
+      const command =
+        this.infra.skillsMount && this.infra.adapter.skillsBatchArgs?.length
+          ? [...baseCommand, ...this.infra.adapter.skillsBatchArgs]
+          : baseCommand;
       logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
       const execStartMs = Date.now();

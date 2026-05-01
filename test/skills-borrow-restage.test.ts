@@ -3,11 +3,11 @@
  *
  * Workflow shared-container mode reuses one Docker container across
  * multiple agent states. The skills are exposed inside the container
- * via the adapter-specific mount (Claude Code: under the existing
- * `~/.claude/` conversation-state mount; Goose: a dedicated mount at
- * `~/.config/goose/skills/`) — established once at container start.
- * Different states may use different personas — and therefore
- * different skill sets.
+ * via a dedicated read-only bind mount per adapter (Claude Code:
+ * `/home/codespace/skills/.claude/skills` with `--add-dir
+ * /home/codespace/skills`; Goose: `/home/codespace/.config/goose/skills/`).
+ * The mount is established once at container start. Different states
+ * may use different personas — and therefore different skill sets.
  *
  * The orchestrator handles this by calling `buildSessionConfig` for
  * each state with a borrow-mode `workflowInfrastructure`. That branch
@@ -121,7 +121,7 @@ function makeFakeBundle(skillsDir: string | undefined, bundleDir: string): Docke
     workspaceDir: resolve(bundleDir, 'workspace'),
     escalationDir: resolve(bundleDir, 'escalations'),
     auditLogPath: resolve(bundleDir, 'audit.jsonl'),
-    ...(skillsDir ? { skillsMount: { hostDir: skillsDir } } : {}),
+    ...(skillsDir ? { skillsMount: { hostDir: skillsDir, target: '/home/codespace/skills/.claude/skills' } } : {}),
     setTokenSessionId: () => {},
     restageSkills: (skills: readonly ResolvedSkill[]) => {
       if (skillsDir) stageSkillsToBundle(skills, skillsDir);

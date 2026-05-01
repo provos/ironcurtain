@@ -6,7 +6,7 @@
  * and the PTY session module.
  */
 
-import { resolve, dirname, posix } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   existsSync,
@@ -168,13 +168,16 @@ export interface PreContainerInfrastructure {
   readonly conversationStateConfig?: ConversationStateConfig;
   /**
    * Host-side staging dir + container bind-mount target for skills.
-   * See `planSkillsStaging` for the routing rationale.
+   * Always emits a separate read-only bind mount — nested bind mounts
+   * (staging inside another mount's source dir) are unreliable on
+   * Docker Desktop / macOS, so we use a sibling path the adapter
+   * advertised as unused inside the container.
    */
   readonly skillsMount?: {
     /** Host-side staging dir (also passed to `restageSkills` and the cached stager). */
     readonly hostDir: string;
-    /** Container target path. `undefined` = staged in-place inside an existing mount; no separate bind mount needed. */
-    readonly target?: string;
+    /** Container target path; copied verbatim from `adapter.skillsContainerPath`. */
+    readonly target: string;
   };
   /**
    * Re-stages the bundle's skills with the given resolved set.
@@ -226,40 +229,8 @@ const CONTAINER_NAME_PREFIX = 'ironcurtain-';
 /** Host gateway alias used by Docker containers on macOS/Windows. */
 const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
-/** Bundle-relative subdir name when staging in a separate mount. */
+/** Bundle-relative subdir name for the skills staging dir. */
 const BUNDLE_SKILLS_SUBDIR = 'skills';
-
-/**
- * Computes how to stage skills so the agent's native discovery picks
- * them up. When `skillsContainerPath` is a descendant of an existing
- * mount (the conversation-state mount), we stage in-place inside that
- * mount's source dir — mounting on top of the same parent target either
- * fails or stacks unpredictably across platforms.
- */
-function planSkillsStaging(
-  adapter: AgentAdapter,
-  bundleDir: string,
-  conversationStateDir: string | undefined,
-  stateConfig: ConversationStateConfig | undefined,
-): { hostDir: string; target: string | undefined } | undefined {
-  const target = adapter.skillsContainerPath;
-  if (!target) return undefined;
-
-  if (conversationStateDir && stateConfig) {
-    // Container paths are POSIX; `posix.relative` handles trailing
-    // slashes, `..`, and equality without bespoke normalization.
-    const rel = posix.relative(stateConfig.containerMountPath, target);
-    const isStrictDescendant = rel !== '' && !rel.startsWith('..') && !posix.isAbsolute(rel);
-    if (isStrictDescendant) {
-      // Stage inside the conversation-state mount source so the skills
-      // appear via the existing mount; no second mount needed.
-      return { hostDir: resolve(conversationStateDir, rel), target: undefined };
-    }
-  }
-
-  // Fall back to a sibling staging dir + dedicated read-only mount.
-  return { hostDir: resolve(bundleDir, BUNDLE_SKILLS_SUBDIR), target };
-}
 
 /**
  * Prepares the shared (non-container) parts of Docker session infrastructure.
@@ -520,21 +491,23 @@ export async function prepareDockerInfrastructure(
       : undefined;
 
     // Workflow bundles always create the staging dir (even when empty)
-    // because the bind mount (or, in Claude Code's case, the parent
-    // conversation-state mount that carries the skills subdir) can only
-    // be established at container start; per-state persona transitions
-    // need a live mount to re-stage into.
+    // because the bind mount can only be established at container start;
+    // per-state persona transitions need a live mount to re-stage into.
+    // The mount target is the adapter-declared `skillsContainerPath`,
+    // which by contract is a sibling path (NOT nested under any other
+    // mount target) so Docker creates a clean fresh mount point.
     const isWorkflowBundle = workflowId !== undefined;
     const initialSkills = resolvedSkills ?? [];
-    const stagingPlan = planSkillsStaging(adapter, bundleDir, conversationStateDir, conversationStateConfig);
+    const skillsTarget = adapter.skillsContainerPath;
     let skillsMount: PreContainerInfrastructure['skillsMount'];
     let stage: ((skills: readonly ResolvedSkill[]) => boolean) | undefined;
-    if (stagingPlan && (initialSkills.length > 0 || isWorkflowBundle)) {
-      skillsMount = { hostDir: stagingPlan.hostDir, target: stagingPlan.target };
-      stage = createCachedStager(stagingPlan.hostDir);
+    if (skillsTarget && (initialSkills.length > 0 || isWorkflowBundle)) {
+      const hostDir = resolve(bundleDir, BUNDLE_SKILLS_SUBDIR);
+      skillsMount = { hostDir, target: skillsTarget };
+      stage = createCachedStager(hostDir);
       stage(initialSkills);
       if (initialSkills.length > 0) {
-        logger.info(`Staged ${initialSkills.length} skill(s) to ${stagingPlan.hostDir}`);
+        logger.info(`Staged ${initialSkills.length} skill(s) to ${hostDir}`);
       }
     }
     const restageSkills = (skills: readonly ResolvedSkill[]): void => {
@@ -871,10 +844,11 @@ export async function createSessionContainers(
       });
     }
 
-    // Skills mount: only when staging is NOT inside the
-    // conversation-state mount (Claude Code stages under the existing
-    // mount; mounting again would stack unpredictably).
-    if (core.skillsMount?.target) {
+    // Skills bind mount — read-only so the agent cannot modify staged
+    // skills mid-session (preserves the cached-stager assumption and
+    // the per-state filter's correctness). The target path is a
+    // sibling of any other mount target by adapter contract.
+    if (core.skillsMount) {
       mounts.push({ source: core.skillsMount.hostDir, target: core.skillsMount.target, readonly: true });
     }
 

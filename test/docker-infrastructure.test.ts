@@ -19,8 +19,10 @@ import { getBundleShortId, type BundleId } from '../src/session/types.js';
 // Container target the mock adapter advertises via `skillsContainerPath`.
 // Hardcoded here (rather than imported from a constant) because the
 // adapter contract makes this per-adapter — the test asserts the wired
-// target matches what the adapter declared.
-const TEST_SKILLS_CONTAINER_PATH = '/home/codespace/.claude/skills';
+// target matches what the adapter declared. Matches the post-refactor
+// Claude Code path (a sibling of the conversation-state mount, NOT
+// nested under it).
+const TEST_SKILLS_CONTAINER_PATH = '/home/codespace/skills/.claude/skills';
 
 const TEST_BUNDLE_ID = 'test-session-id' as BundleId;
 const TEST_SHORT_ID = getBundleShortId(TEST_BUNDLE_ID);
@@ -427,12 +429,14 @@ describe('createSessionContainers', () => {
   });
 
   // --- Skills mount tests ---
-  // All four scenarios share the same scaffold (mock docker + mock core +
-  // optional skillsMount overlay + assertion against the recorded mounts).
-  // `runSkillsMountScenario` collapses the boilerplate; each test below
-  // varies just the `skillsMount` shape.
+  // The skills mount is now ALWAYS a separate read-only bind mount when
+  // the adapter declares a `skillsContainerPath`. The previous in-place
+  // staging path (target: undefined, "stage inside the conversation-
+  // state mount") was deleted because nested bind mounts are unreliable
+  // on Docker Desktop / macOS — the kernel keeps the original inode at
+  // mount time and the container sees an empty inner mount.
   async function runSkillsMountScenario(opts: {
-    skillsMount?: { hostDir: string; target?: string };
+    skillsMount?: { hostDir: string; target: string };
   }): Promise<readonly { source: string; target: string; readonly: boolean }[]> {
     const { docker, createCalls } = makeMockDocker();
     const core = makeMockCore({ tempDir, useTcp: false, docker });
@@ -444,9 +448,9 @@ describe('createSessionContainers', () => {
     return createCalls[0].mounts;
   }
 
-  it('mounts the staged skills directory read-only when target is set', async () => {
-    // Goose-shaped case: separate skills mount because the adapter's
-    // container scan path is NOT inside any conversation-state mount.
+  it('mounts the staged skills directory read-only when skillsMount is set', async () => {
+    // The architectural invariant: a separate read-only bind mount from
+    // the bundle's staging dir to the adapter-declared container path.
     const skillsDir = join(tempDir, 'session', 'skills');
     mkdirSync(skillsDir, { recursive: true });
 
@@ -463,23 +467,6 @@ describe('createSessionContainers', () => {
   it('omits the skills mount entirely when core.skillsMount is undefined', async () => {
     const mounts = await runSkillsMountScenario({});
     expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
-  });
-
-  it('in-place: no separate mount when staging lives inside another mount', async () => {
-    // Claude Code-shaped case: `skillsContainerPath` is a descendant of
-    // the conversation-state mount target, so the staging plan returns
-    // `target: undefined` and the staging dir is reached via the
-    // existing claude-state mount instead. A second overlapping mount
-    // would either fail (Linux) or shadow the parent (some platforms).
-    const skillsDir = join(tempDir, 'session', 'claude-state', 'skills');
-    mkdirSync(skillsDir, { recursive: true });
-
-    const mounts = await runSkillsMountScenario({
-      skillsMount: { hostDir: skillsDir, target: undefined },
-    });
-
-    expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
-    expect(mounts.some((m) => m.source === skillsDir)).toBe(false);
   });
 
   it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {
