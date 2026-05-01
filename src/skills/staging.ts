@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ResolvedSkill } from './types.js';
 
@@ -42,12 +42,9 @@ export function validateSkillName(name: string): void {
  */
 export function stageSkillsToBundle(skills: readonly ResolvedSkill[], destDir: string): void {
   const normalizedDestDir = resolve(destDir);
-  if (existsSync(normalizedDestDir)) {
-    for (const entry of readdirSync(normalizedDestDir)) {
-      rmSync(resolve(normalizedDestDir, entry), { recursive: true, force: true });
-    }
-  } else {
-    mkdirSync(normalizedDestDir, { recursive: true });
+  mkdirSync(normalizedDestDir, { recursive: true });
+  for (const entry of readdirSync(normalizedDestDir)) {
+    rmSync(resolve(normalizedDestDir, entry), { recursive: true, force: true });
   }
 
   for (const skill of skills) {

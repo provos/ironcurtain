@@ -188,9 +188,6 @@ function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: string): str
   if (!existsSync(sourceSkillsDir)) return undefined;
 
   const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SKILLS_SUBDIR);
-  // `cpSync` recursively copies into `stagedDir`; an existing dir is
-  // overlaid (no `--force` semantics needed at start because the run
-  // directory was just created).
   cpSync(sourceSkillsDir, stagedDir, { recursive: true });
   return stagedDir;
 }
