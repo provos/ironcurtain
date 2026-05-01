@@ -325,7 +325,7 @@ describe('WorkflowOrchestrator shared-container mode — policy cycling', () => 
   // Test 3: distinct scopes borrow distinct bundles
   // -------------------------------------------------------------------------
 
-  it('passes a distinct workflowInfrastructure bundle to each scope', async () => {
+  it('passes a distinct workflow.infrastructure bundle to each scope', async () => {
     // Two states on explicitly distinct `containerScope` values. Under
     // lazy-mint, the factory is called once per distinct scope, and
     // each state borrows the bundle for its own scope — not a shared
@@ -379,7 +379,7 @@ describe('WorkflowOrchestrator shared-container mode — policy cycling', () => 
       { text: approvedResponse('reviewed'), artifacts: ['review'] },
     ];
     const sessionFactory = vi.fn(async (opts: SessionOptions) => {
-      seenInfra.push(opts.workflowInfrastructure);
+      seenInfra.push(opts.workflow?.infrastructure);
       const entry = responsesByCall[callIdx++];
       return createArtifactAwareSession([entry], tmpDir);
     });

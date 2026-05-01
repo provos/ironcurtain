@@ -1276,7 +1276,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     const runStagedDir = resolve(tmpDir, workflowId, 'workflow-skills');
     expect(existsSync(resolve(runStagedDir, 'fetcher', 'SKILL.md'))).toBe(true);
     expect(sessionsBeforeResume).toHaveLength(1);
-    expect(sessionsBeforeResume[0].workflowSkillsDir).toBe(runStagedDir);
+    expect(sessionsBeforeResume[0].workflow?.skillsDir).toBe(runStagedDir);
 
     // Sanity: checkpoint persists the staged path.
     const checkpoint = checkpointStore.load(workflowId);

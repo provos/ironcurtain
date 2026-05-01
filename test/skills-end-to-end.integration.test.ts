@@ -257,16 +257,16 @@ describe('skills end-to-end (workflow + per-state filter + persona opt-out)', ()
     // Models the borrow-mode side effect of `buildSessionConfig`:
     // re-resolve skills for this state's options and stage them onto
     // the live bundle. The orchestrator-level contract this test
-    // verifies is that `workflowSkillsDir` and `workflowSkillFilter`
+    // verifies is that `workflow.skillsDir` and `workflow.skillFilter`
     // arrive on `options` per-state (derived from `stateConfig.skills`).
     const createSessionFake = async (options: SessionOptions): Promise<MockSession> => {
-      const bundle = options.workflowInfrastructure;
-      const stateId = options.stateSlug?.split('.')[0] ?? 'unknown';
+      const bundle = options.workflow?.infrastructure;
+      const stateId = options.workflow?.stateSlug?.split('.')[0] ?? 'unknown';
       if (bundle?.skillsMount) {
         const skills = resolveSkillsForSession({
           ...(options.persona ? { personaName: options.persona } : {}),
-          ...(options.workflowSkillsDir ? { workflowSkillsDir: options.workflowSkillsDir } : {}),
-          ...(options.workflowSkillFilter ? { workflowSkillFilter: options.workflowSkillFilter } : {}),
+          ...(options.workflow?.skillsDir ? { workflowSkillsDir: options.workflow.skillsDir } : {}),
+          ...(options.workflow?.skillFilter ? { workflowSkillFilter: options.workflow.skillFilter } : {}),
         });
         bundle.restageSkills(skills);
         snapshots.push(snapshotStagedSet(stateId, bundle.skillsMount.hostDir));
@@ -618,13 +618,13 @@ describe.skipIf(!dockerReady)('skills end-to-end with real Docker container', ()
     // output artifact so the orchestrator can transition to the next
     // state without invoking the real agent CLI.
     const createSessionFake = async (options: SessionOptions): Promise<MockSession> => {
-      const bundle = options.workflowInfrastructure;
-      const stateId = options.stateSlug?.split('.')[0] ?? 'unknown';
+      const bundle = options.workflow?.infrastructure;
+      const stateId = options.workflow?.stateSlug?.split('.')[0] ?? 'unknown';
       if (bundle?.skillsMount) {
         const skills = resolveSkillsForSession({
           ...(options.persona ? { personaName: options.persona } : {}),
-          ...(options.workflowSkillsDir ? { workflowSkillsDir: options.workflowSkillsDir } : {}),
-          ...(options.workflowSkillFilter ? { workflowSkillFilter: options.workflowSkillFilter } : {}),
+          ...(options.workflow?.skillsDir ? { workflowSkillsDir: options.workflow.skillsDir } : {}),
+          ...(options.workflow?.skillFilter ? { workflowSkillFilter: options.workflow.skillFilter } : {}),
         });
         bundle.restageSkills(skills);
         // Bind mount is live; snapshot from the container side now.

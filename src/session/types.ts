@@ -251,6 +251,85 @@ export interface EscalationRequest {
 }
 
 /**
+ * Workflow-driven session options, grouped under one optional record so
+ * the all-or-nothing relationship between borrow-mode fields is
+ * structurally enforced. Set by the workflow orchestrator; standalone
+ * CLI / daemon callers leave it unset.
+ *
+ * Borrow-mode invariant: `stateDir` and `stateSlug` are only meaningful
+ * alongside `infrastructure` — the per-state artifact dir and slug have
+ * no owner without a bundle. `buildSessionConfig` enforces this at
+ * runtime; nesting both under one record keeps the bug surface tight.
+ *
+ * `skillsDir` and `skillFilter` are workflow-specific but apply in BOTH
+ * borrow and non-borrow modes (e.g., a non-shared-container Docker
+ * workflow still bundles its package's `skills/`). They live here
+ * because their meaning is "this is a workflow run", which is the same
+ * gate as the rest of the record.
+ *
+ * The caller's bundle MUST outlive the session: the session records
+ * references into the bundle (MCP clients, file paths, etc.) and
+ * expects them to remain valid for its lifetime. Do not destroy the
+ * bundle while any session is still holding it.
+ */
+export interface WorkflowBorrowOptions {
+  /**
+   * Pre-built Docker infrastructure bundle. When set, the session
+   * factory borrows this bundle instead of creating its own, and the
+   * resulting session is constructed with `ownsInfra: false` so
+   * `close()` does NOT destroy the bundle. The caller retains full
+   * responsibility for destroying it via `destroyDockerInfrastructure`.
+   *
+   * Optional because workflow runs in non-shared-container mode (each
+   * state owns its own bundle) still pass workflow-bundled skills
+   * through this record — they have no infrastructure to borrow but
+   * still need the rest of the workflow context.
+   */
+  readonly infrastructure?: DockerInfrastructure;
+
+  /**
+   * Per-state artifact directory. When set, the session writes
+   * `session.log` and `session-metadata.json` here instead of
+   * `{home}/sessions/{sessionId}/`. The directory is created by the
+   * caller (orchestrator) before session creation.
+   *
+   * Only valid alongside `infrastructure`; `buildSessionConfig` throws
+   * if `stateDir` is supplied without an infrastructure bundle.
+   */
+  readonly stateDir?: string;
+
+  /**
+   * Human-readable slug identifying this state invocation — used only
+   * for logging/diagnostics (e.g., "fetch.1", "plan.2"). Paired with
+   * `stateDir` so log messages identify which state produced them.
+   */
+  readonly stateSlug?: string;
+
+  /**
+   * Workflow-bundled skills directory: `<workflow-pkg>/skills/`. When
+   * set, skills here are layered into the session's resolved skill set
+   * (see `src/skills/discovery.ts` for the layering order). Used in
+   * both modes: in standalone mode the resolved set rides through
+   * `SessionDirConfig.resolvedSkills` for the docker factory to stage
+   * at bundle creation; in borrow mode this matters MOST because the
+   * workflow orchestrator passes it per-state and `buildSessionConfig`
+   * re-stages in place via `restageSkills` — the bind mount is already
+   * live so each state's filter takes effect without a remount.
+   */
+  readonly skillsDir?: string;
+
+  /**
+   * When set, restricts the workflow layer to skills whose `name` is in
+   * this set. Built from the agent state's optional `skills:` field;
+   * left undefined when the state should receive every workflow-package
+   * skill. User-global skills are always included regardless. Honored
+   * in both modes — see `skillsDir` for how each mode applies the
+   * resolved set.
+   */
+  readonly skillFilter?: ReadonlySet<string>;
+}
+
+/**
  * Options for creating a session. Extends the base config with
  * session-specific overrides.
  */
@@ -370,74 +449,15 @@ export interface SessionOptions {
   agentModelOverride?: string;
 
   /**
-   * Pre-built Docker infrastructure bundle. When set, the session
-   * factory borrows this bundle instead of creating its own, and the
-   * resulting session is constructed with `ownsInfra: false` so
-   * `close()` does NOT destroy the bundle. The caller retains full
-   * responsibility for destroying it via `destroyDockerInfrastructure`.
+   * Workflow context. When set, this session is part of a workflow run;
+   * the orchestrator populates fields like the borrowed Docker bundle,
+   * per-state artifact dir, and bundled skills. Standalone callers
+   * leave this unset.
    *
-   * Used by the workflow orchestrator: one bundle per workflow run (or
-   * per `containerScope` in a bifurcated workflow) is handed to every
-   * borrowing state's session.
-   *
-   * Standalone callers leave this unset; the factory calls
-   * `createDockerInfrastructure` and constructs the session with
-   * `ownsInfra: true` (today's behavior).
-   *
-   * The caller's bundle MUST outlive the session: the session records
-   * references into the bundle (MCP clients, file paths, etc.) and
-   * expects them to remain valid for its lifetime. Do not destroy the
-   * bundle while any session is still holding it.
-   *
-   * Ignored for builtin sessions (no Docker infrastructure).
+   * See {@link WorkflowBorrowOptions} for the borrow-mode invariants
+   * enforced when `infrastructure` is present.
    */
-  readonly workflowInfrastructure?: DockerInfrastructure;
-
-  /**
-   * Per-state artifact directory for borrow-mode (shared-container)
-   * workflow sessions. When set, the session writes `session.log` and
-   * `session-metadata.json` to this directory instead of
-   * `{home}/sessions/{sessionId}/`. The directory is created by the
-   * caller (orchestrator) before session creation.
-   *
-   * Only valid in combination with `workflowInfrastructure`. Passing
-   * `workflowStateDir` without `workflowInfrastructure` is a caller
-   * bug and throws.
-   *
-   * Ignored for builtin sessions.
-   */
-  readonly workflowStateDir?: string;
-
-  /**
-   * Human-readable slug identifying this state invocation — used
-   * only for logging/diagnostics (e.g., "fetch.1", "plan.2"). Paired
-   * with `workflowStateDir` so log messages identify which state
-   * produced them.
-   */
-  readonly stateSlug?: string;
-
-  /**
-   * Workflow-bundled skills directory: `<workflow-pkg>/skills/`. When
-   * set, skills here are layered into the session's resolved skill set
-   * (see `src/skills/discovery.ts` for the layering order). Used in
-   * both modes: in standalone mode the resolved set rides through
-   * `SessionDirConfig.resolvedSkills` for the docker factory to stage
-   * at bundle creation; in borrow mode this matters MOST because the
-   * workflow orchestrator passes it per-state and `buildSessionConfig`
-   * re-stages in place via `restageSkills` — the bind mount is already
-   * live so each state's filter takes effect without a remount.
-   */
-  readonly workflowSkillsDir?: string;
-
-  /**
-   * When set, restricts the workflow layer to skills whose `name` is in
-   * this set. Built from the agent state's optional `skills:` field;
-   * left undefined when the state should receive every workflow-package
-   * skill. User-global skills are always included regardless. Honored
-   * in both modes — see `workflowSkillsDir` for how each mode applies
-   * the resolved set.
-   */
-  readonly workflowSkillFilter?: ReadonlySet<string>;
+  readonly workflow?: WorkflowBorrowOptions;
 
   /**
    * The agent-CLI conversation id. Used as `--session-id` on first turn

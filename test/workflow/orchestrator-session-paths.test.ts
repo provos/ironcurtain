@@ -5,8 +5,8 @@
  *
  * Mocks `createSession` through deps to capture the options passed for
  * each state invocation and asserts:
- *   - `workflowStateDir` paths follow `.../states/{stateId}.{visitCount}/`
- *   - `stateSlug` is `${stateId}.${visitCount}`
+ *   - `workflow.stateDir` paths follow `.../states/{stateId}.{visitCount}/`
+ *   - `workflow.stateSlug` is `${stateId}.${visitCount}`
  *   - Re-entering a state produces `{stateId}.2` etc.
  */
 
@@ -174,17 +174,17 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     const mintedBundleId = createInfra.mock.calls[0][0].bundleId;
 
     // State 1: fetch, visit 1 -> fetch.1
-    expect(capturedOptions[0].stateSlug).toBe('fetch.1');
-    expect(capturedOptions[0].workflowStateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'fetch.1'));
-    expect(existsSync(capturedOptions[0].workflowStateDir as string)).toBe(true);
+    expect(capturedOptions[0].workflow?.stateSlug).toBe('fetch.1');
+    expect(capturedOptions[0].workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'fetch.1'));
+    expect(existsSync(capturedOptions[0].workflow?.stateDir as string)).toBe(true);
 
     // State 2: summarize, visit 1 -> summarize.1
-    expect(capturedOptions[1].stateSlug).toBe('summarize.1');
-    expect(capturedOptions[1].workflowStateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'summarize.1'));
-    expect(existsSync(capturedOptions[1].workflowStateDir as string)).toBe(true);
+    expect(capturedOptions[1].workflow?.stateSlug).toBe('summarize.1');
+    expect(capturedOptions[1].workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'summarize.1'));
+    expect(existsSync(capturedOptions[1].workflow?.stateDir as string)).toBe(true);
 
     // Each invocation carries the same borrowed bundle.
-    expect(capturedOptions[0].workflowInfrastructure).toBe(capturedOptions[1].workflowInfrastructure);
+    expect(capturedOptions[0].workflow?.infrastructure).toBe(capturedOptions[1].workflow?.infrastructure);
   });
 
   it('re-entering a state increments the visitCount portion of the slug', async () => {
@@ -199,7 +199,7 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     const capturedOptions: SessionOptions[] = [];
     const sessionFactory = vi.fn((opts: SessionOptions) => {
       capturedOptions.push(opts);
-      const slug = opts.stateSlug as string;
+      const slug = opts.workflow?.stateSlug as string;
       // Per state: stamp the right artifact and pick verdict.
       const artifact = slug.startsWith('plan')
         ? 'plan'
@@ -235,17 +235,17 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
 
     // Expected path: plan.1 -> code.1 -> review.1 (reject) ->
     //                plan.2 -> code.2 -> review.2 (approve) -> done
-    const slugs = capturedOptions.map((o) => o.stateSlug);
+    const slugs = capturedOptions.map((o) => o.workflow?.stateSlug);
     expect(slugs).toEqual(['plan.1', 'code.1', 'review.1', 'plan.2', 'code.2', 'review.2']);
 
     // Second visit to plan lives under plan.2, not plan.1.
     const mintedBundleId = createInfra.mock.calls[0][0].bundleId;
     const plan2 = capturedOptions[3];
-    expect(plan2.stateSlug).toBe('plan.2');
-    expect(plan2.workflowStateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'plan.2'));
+    expect(plan2.workflow?.stateSlug).toBe('plan.2');
+    expect(plan2.workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'plan.2'));
   });
 
-  it('non-shared-container workflows do NOT receive workflowStateDir', async () => {
+  it('non-shared-container workflows do NOT receive workflow.stateDir', async () => {
     // Per-state-container (opted-out of sharedContainer) workflows
     // construct their own infra per session — there is no borrow-mode
     // handshake to scope per-state dirs against.
@@ -273,9 +273,9 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
       await waitForCompletion(orchestrator, workflowId);
 
       for (const opts of capturedOptions) {
-        expect(opts.workflowStateDir).toBeUndefined();
-        expect(opts.stateSlug).toBeUndefined();
-        expect(opts.workflowInfrastructure).toBeUndefined();
+        expect(opts.workflow?.stateDir).toBeUndefined();
+        expect(opts.workflow?.stateSlug).toBeUndefined();
+        expect(opts.workflow?.infrastructure).toBeUndefined();
       }
     } finally {
       cleanup2();

@@ -10,7 +10,7 @@
  * may use different personas — and therefore different skill sets.
  *
  * The orchestrator handles this by calling `buildSessionConfig` for
- * each state with a borrow-mode `workflowInfrastructure`. That branch
+ * each state with a borrow-mode `workflow.infrastructure`. That branch
  * re-resolves user + persona + workflow skills and re-stages them into
  * the bundle's `skillsDir`. Because the bind mount is live, the
  * container picks up the new contents without remounting.
@@ -163,8 +163,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     const sessionId = createSessionId();
 
     buildSessionConfig(config, sessionId, sessionId, {
-      workflowInfrastructure: bundle,
-      workflowSkillsDir: workflowSkills,
+      workflow: { infrastructure: bundle, skillsDir: workflowSkills },
     });
 
     // The merged set was staged into the bundle's skillsDir.
@@ -172,7 +171,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     expect(existsSync(resolve(skillsDir, 'wf-tool', 'SKILL.md'))).toBe(true);
   });
 
-  it('skips persona skills in workflow mode (workflowSkillsDir set)', () => {
+  it('skips persona skills in workflow mode (workflow.skillsDir set)', () => {
     // Persona-as-skill-source is intentionally inert in workflow mode —
     // persona-as-mode-of-user does not fit a machine-driven workflow.
     // User and workflow layers still apply.
@@ -196,8 +195,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
 
     buildSessionConfig(config, sessionId, sessionId, {
       persona: 'reviewer',
-      workflowInfrastructure: bundle,
-      workflowSkillsDir: workflowSkills,
+      workflow: { infrastructure: bundle, skillsDir: workflowSkills },
     });
 
     // review-tool is absent — persona layer is suppressed in workflow mode.
@@ -207,8 +205,8 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
 
   it('layers persona skills on top of user when not in workflow mode', () => {
     // Standalone (non-workflow) borrow: persona skills still apply.
-    // workflowSkillsDir is unset, so the workflow-mode opt-out does not
-    // engage and the persona layer participates as before.
+    // workflow.skillsDir is unset, so the workflow-mode opt-out does
+    // not engage and the persona layer participates as before.
     const userSkillsRoot = resolve(TEST_HOME, 'skills');
     writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
 
@@ -226,7 +224,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
 
     buildSessionConfig(config, sessionId, sessionId, {
       persona: 'reviewer',
-      workflowInfrastructure: bundle,
+      workflow: { infrastructure: bundle },
     });
 
     const staged = readdirSync(skillsDir).sort();
@@ -234,7 +232,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
   });
 
   it('filters workflow skills to the per-state allowlist', () => {
-    // workflowSkillFilter is the per-state `skills:` set, plumbed by the
+    // skillFilter is the per-state `skills:` set, plumbed by the
     // orchestrator. User-global skills are unaffected.
     const userSkillsRoot = resolve(TEST_HOME, 'skills');
     writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
@@ -252,9 +250,11 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     const sessionId = createSessionId();
 
     buildSessionConfig(config, sessionId, sessionId, {
-      workflowInfrastructure: bundle,
-      workflowSkillsDir: workflowSkills,
-      workflowSkillFilter: new Set(['wf-keep']),
+      workflow: {
+        infrastructure: bundle,
+        skillsDir: workflowSkills,
+        skillFilter: new Set(['wf-keep']),
+      },
     });
 
     expect(readdirSync(skillsDir).sort()).toEqual(['global-tool', 'wf-keep']);
@@ -275,7 +275,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     const sessionId = createSessionId();
 
     buildSessionConfig(config, sessionId, sessionId, {
-      workflowInfrastructure: bundle,
+      workflow: { infrastructure: bundle },
       // No workflow skills, no persona — only the user-global layer.
     });
 
@@ -300,7 +300,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     const sessionId = createSessionId();
 
     const result = buildSessionConfig(config, sessionId, sessionId, {
-      workflowInfrastructure: bundle,
+      workflow: { infrastructure: bundle },
     });
     expect(result.resolvedSkills).toEqual([]);
   });
@@ -320,7 +320,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     const sessionId = createSessionId();
 
     buildSessionConfig(config, sessionId, sessionId, {
-      workflowInfrastructure: bundle,
+      workflow: { infrastructure: bundle },
     });
 
     // No skills dir was created at the bundle.
@@ -375,7 +375,7 @@ describe('readFileSync sanity check on staged files', () => {
     const sessionId = createSessionId();
 
     buildSessionConfig(config, sessionId, sessionId, {
-      workflowInfrastructure: bundle,
+      workflow: { infrastructure: bundle },
     });
 
     const staged = readFileSync(resolve(skillsDir, 'detail', 'SKILL.md'), 'utf-8');

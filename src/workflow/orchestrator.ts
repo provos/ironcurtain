@@ -1778,7 +1778,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     //   1. scope := stateConfig.containerScope ?? "primary"
     //   2. bundle := instance.bundlesByScope.get(scope)
     //   3. if absent: lazy-mint via ensureBundleForScope(instance, scope)
-    //   4. borrow bundle via SessionOptions.workflowInfrastructure
+    //   4. borrow bundle via SessionOptions.workflow.infrastructure
     let bundle: DockerInfrastructure | undefined;
     if (this.shouldUseSharedContainer(definition)) {
       const scope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
@@ -1849,6 +1849,17 @@ export class WorkflowOrchestrator implements WorkflowController {
     const workflowSkillsDir = instance.workflowSkillsDir;
     const workflowSkillFilter = stateConfig.skills ? new Set<string>(stateConfig.skills) : undefined;
 
+    // Workflow context for the session. Always emitted for workflow
+    // runs (so the orchestrator's identity isn't ambiguous), even when
+    // there's no bundle to borrow — `infrastructure` / `stateDir` /
+    // `stateSlug` opt in only when shared-container mode applies.
+    const workflowOptions = {
+      ...(bundle ? { infrastructure: bundle } : {}),
+      ...(workflowStateDir ? { stateDir: workflowStateDir, stateSlug } : {}),
+      ...(workflowSkillsDir !== undefined ? { skillsDir: workflowSkillsDir } : {}),
+      ...(workflowSkillFilter ? { skillFilter: workflowSkillFilter } : {}),
+    };
+
     let session: Session;
     try {
       session = await this.deps.createSession({
@@ -1857,20 +1868,15 @@ export class WorkflowOrchestrator implements WorkflowController {
         agentConversationId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
-        ...(workflowSkillsDir !== undefined ? { workflowSkillsDir } : {}),
-        ...(workflowSkillFilter ? { workflowSkillFilter } : {}),
         ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
         ...(settings.maxSessionSeconds != null
           ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
           : {}),
-        // Borrow the workflow-scoped Docker bundle so the session does
-        // not rebuild proxies / containers per state. Unset for builtin
-        // or opt-out workflows.
-        ...(bundle ? { workflowInfrastructure: bundle } : {}),
-        // Per-state artifact dir is only meaningful in borrow mode —
-        // `buildSessionConfig` throws if `workflowStateDir` is supplied
-        // without a bundle.
-        ...(workflowStateDir ? { workflowStateDir, stateSlug } : {}),
+        // The nested record colocates the borrowed bundle, per-state
+        // artifact dir, and workflow-bundled skills. `buildSessionConfig`
+        // enforces the borrow-mode invariant (stateDir requires
+        // infrastructure) at runtime.
+        ...(Object.keys(workflowOptions).length > 0 ? { workflow: workflowOptions } : {}),
       });
     } catch (err) {
       const errMsg = toErrorMessage(err);

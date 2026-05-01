@@ -208,7 +208,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
  *   agent container, sidecar and internal network for TCP mode). The
  *   session is constructed with `ownsInfra=true`, so `close()` tears down
  *   the bundle.
- * - Borrow (`options.workflowInfrastructure` set): uses the caller-supplied
+ * - Borrow (`options.workflow.infrastructure` set): uses the caller-supplied
  *   bundle as-is and constructs the session with `ownsInfra=false`. The
  *   caller retains full responsibility for the bundle's lifetime; the
  *   session's `close()` only tears down session-local state.
@@ -269,13 +269,13 @@ async function createDockerSession(
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
     const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
 
-    if (options.workflowInfrastructure) {
+    if (options.workflow?.infrastructure) {
       // Borrow path: the orchestrator owns the bundle's lifetime. We do
       // not call createDockerInfrastructure(); we do not destroy on close.
       // The orchestrator is also responsible for `setTokenSessionId`: it
       // flips the MITM proxy's routing target to the active agent's session
       // ID before each run and clears it on session end.
-      infra = options.workflowInfrastructure;
+      infra = options.workflow.infrastructure;
     } else {
       // Standalone path: factory creates and owns the bundle.
       // Single-session invariant (§2.1 of workflow-session-identity): the
@@ -446,12 +446,8 @@ export function buildSessionConfig(
     | 'systemPromptAugmentation'
     | 'jobId'
     | 'resourceBudgetOverrides'
-    | 'workflowInfrastructure'
-    | 'workflowStateDir'
-    | 'stateSlug'
+    | 'workflow'
     | 'agentConversationId'
-    | 'workflowSkillsDir'
-    | 'workflowSkillFilter'
     | 'mode'
   > = {},
 ): SessionDirConfig {
@@ -460,11 +456,14 @@ export function buildSessionConfig(
   let serverAllowlist: readonly string[] | undefined;
   let personaDef: PersonaDefinition | undefined = undefined;
 
-  // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
-  // is only meaningful alongside the bundle; passing it alone is a bug.
-  if (opts.workflowStateDir && !opts.workflowInfrastructure) {
+  // Borrow-mode invariant: per-state artifact dir / slug only make sense
+  // alongside an infrastructure bundle. The nested record keeps these
+  // fields colocated; the runtime guard catches the all-or-nothing
+  // mismatch (the union of the two-bit input domain isn't expressible
+  // at the type level without a discriminator on the workflow record).
+  if (opts.workflow?.stateDir && !opts.workflow.infrastructure) {
     throw new SessionError(
-      'workflowStateDir requires workflowInfrastructure; borrow-mode artifacts have no owner without a bundle',
+      'workflow.stateDir requires workflow.infrastructure; borrow-mode artifacts have no owner without a bundle',
       'SESSION_INIT_FAILED',
     );
   }
@@ -523,13 +522,13 @@ export function buildSessionConfig(
   }
 
   // Paths differ by mode:
-  // - Borrow mode: per-state artifacts go under `workflowStateDir` when
+  // - Borrow mode: per-state artifacts go under `workflow.stateDir` when
   //   the orchestrator supplied one; otherwise fall back to the bundle's
   //   bundleDir (legacy path, still used by factory-level tests). The
-  //   bundle owns workspace/escalation/audit on `workflowInfrastructure`.
+  //   bundle owns workspace/escalation/audit on `workflow.infrastructure`.
   // - Standalone/CLI: everything lives under `{home}/sessions/{id}/`.
-  const borrowInfra = opts.workflowInfrastructure;
-  const artifactDir = borrowInfra ? (opts.workflowStateDir ?? borrowInfra.bundleDir) : undefined;
+  const borrowInfra = opts.workflow?.infrastructure;
+  const artifactDir = borrowInfra ? (opts.workflow.stateDir ?? borrowInfra.bundleDir) : undefined;
   const sessionDir = artifactDir ?? getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
   const escalationDir = borrowInfra ? borrowInfra.escalationDir : getSessionEscalationDir(effectiveSessionId);
@@ -559,7 +558,7 @@ export function buildSessionConfig(
   // log file; a prior state's teardown in session.close() releases the
   // console hijack first.
   logger.setup({ logFilePath: sessionLogPath });
-  logger.info(`Session ${sessionId} created${opts.stateSlug ? ` (state=${opts.stateSlug})` : ''}`);
+  logger.info(`Session ${sessionId} created${opts.workflow?.stateSlug ? ` (state=${opts.workflow.stateSlug})` : ''}`);
   logger.info(`${workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
@@ -683,8 +682,8 @@ export function buildSessionConfig(
   if (borrowInfra || dockerMode) {
     resolvedSkills = resolveSkillsForSession({
       ...(opts.persona ? { personaName: opts.persona } : {}),
-      ...(opts.workflowSkillsDir ? { workflowSkillsDir: opts.workflowSkillsDir } : {}),
-      ...(opts.workflowSkillFilter ? { workflowSkillFilter: opts.workflowSkillFilter } : {}),
+      ...(opts.workflow?.skillsDir ? { workflowSkillsDir: opts.workflow.skillsDir } : {}),
+      ...(opts.workflow?.skillFilter ? { workflowSkillFilter: opts.workflow.skillFilter } : {}),
     });
     if (borrowInfra) {
       borrowInfra.restageSkills(resolvedSkills);
