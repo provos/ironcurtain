@@ -452,6 +452,7 @@ export function buildSessionConfig(
     | 'agentConversationId'
     | 'workflowSkillsDir'
     | 'workflowSkillFilter'
+    | 'mode'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
@@ -674,14 +675,20 @@ export function buildSessionConfig(
   // Borrow-mode: re-stage the bundle in-place so per-state persona skills
   // become visible without remounting. Standalone mode returns the set
   // through SessionDirConfig for the docker factory to stage at bundle
-  // creation.
-  const resolvedSkills = resolveSkillsForSession({
-    ...(opts.persona ? { personaName: opts.persona } : {}),
-    ...(opts.workflowSkillsDir ? { workflowSkillsDir: opts.workflowSkillsDir } : {}),
-    ...(opts.workflowSkillFilter ? { workflowSkillFilter: opts.workflowSkillFilter } : {}),
-  });
-  if (borrowInfra) {
-    borrowInfra.restageSkills(resolvedSkills);
+  // creation. Builtin (non-Docker) sessions never mount skills, so we
+  // skip the discovery walk entirely to avoid spurious filesystem reads
+  // and `[skills] Ignoring …` warnings.
+  const dockerMode = opts.mode?.kind === 'docker';
+  let resolvedSkills: readonly ResolvedSkill[] | undefined;
+  if (borrowInfra || dockerMode) {
+    resolvedSkills = resolveSkillsForSession({
+      ...(opts.persona ? { personaName: opts.persona } : {}),
+      ...(opts.workflowSkillsDir ? { workflowSkillsDir: opts.workflowSkillsDir } : {}),
+      ...(opts.workflowSkillFilter ? { workflowSkillFilter: opts.workflowSkillFilter } : {}),
+    });
+    if (borrowInfra) {
+      borrowInfra.restageSkills(resolvedSkills);
+    }
   }
 
   return {

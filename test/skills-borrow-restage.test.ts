@@ -31,6 +31,7 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import { stageSkillsToBundle } from '../src/skills/staging.js';
 import type { ResolvedSkill } from '../src/skills/types.js';
+import type { AgentId } from '../src/docker/agent-adapter.js';
 
 const TEST_HOME = `${REAL_TMP}/ironcurtain-skills-borrow-test-${process.pid}`;
 
@@ -326,10 +327,29 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     expect(existsSync(resolve(bundleDir, 'skills'))).toBe(false);
   });
 
-  it('returns the resolved set in standalone mode (no side-effect staging)', () => {
-    // Standalone path: the resolved set rides through SessionDirConfig
-    // and gets staged later by docker-infrastructure on initial bundle
-    // creation. `buildSessionConfig` itself does no staging here.
+  it('returns the resolved set in standalone Docker mode (no side-effect staging)', () => {
+    // Standalone Docker path: the resolved set rides through
+    // SessionDirConfig and gets staged later by docker-infrastructure
+    // on initial bundle creation. `buildSessionConfig` itself does no
+    // staging here.
+    const userSkillsRoot = resolve(TEST_HOME, 'skills');
+    writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
+
+    const config = createTestConfig();
+    const sessionId = createSessionId();
+
+    const result = buildSessionConfig(config, sessionId, sessionId, {
+      mode: { kind: 'docker', agent: 'claude-code' as AgentId },
+    });
+    const names = result.resolvedSkills?.map((s) => s.name) ?? [];
+    expect(names).toContain('global-tool');
+  });
+
+  it('skips skill resolution entirely for builtin (non-Docker) sessions', () => {
+    // Builtin sessions never mount skills, so `buildSessionConfig`
+    // must not perform the discovery walk: no filesystem reads, no
+    // `[skills] Ignoring …` warnings, and `resolvedSkills` left
+    // undefined to signal that no resolution happened.
     const userSkillsRoot = resolve(TEST_HOME, 'skills');
     writeSkill(userSkillsRoot, 'global-tool', { name: 'global-tool', description: 'u' });
 
@@ -337,8 +357,7 @@ describe('buildSessionConfig — borrow-mode skill re-staging', () => {
     const sessionId = createSessionId();
 
     const result = buildSessionConfig(config, sessionId, sessionId, {});
-    const names = result.resolvedSkills?.map((s) => s.name) ?? [];
-    expect(names).toContain('global-tool');
+    expect(result.resolvedSkills).toBeUndefined();
   });
 });
 
