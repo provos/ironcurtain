@@ -31,6 +31,10 @@ Thumbs.db
 # Out of repo references
 *-reference
 
+# Local-only workflow test fixtures (kept on disk for manual smoke tests
+# but not shipped — see `tsx src/cli.ts workflow start <name>`).
+src/workflow/workflows/email-summary/
+
 # Per-server intermediate artifacts from read-only policy compilation
 src/config/generated-readonly/servers/
 
