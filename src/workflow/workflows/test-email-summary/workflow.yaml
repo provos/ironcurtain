@@ -1,0 +1,89 @@
+name: test-email-summary
+description: 'TESTING ONLY — fetch a small set of emails (exec-assistant) then summarize them to a file (global). Used to smoke-test the agent skills feature; not a real workflow. The task description supplies the scope (which emails: sent/received, count, time range, etc.).'
+initial: fetch
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  sharedContainer: true
+  model: anthropic:claude-haiku-4-5
+
+states:
+  fetch:
+    type: agent
+    description: Fetches the in-scope emails (per the task description) via the Gmail MCP tools
+    persona: exec-assistant
+    # Test fixture: per-state `skills:` filter is set on `fetch` to exercise
+    # the "filtered subset" branch of the resolver. Of the four bundled
+    # skills under skills/, this state only sees these two. The shared
+    # `json-schema-emails` skill is also visible to `summarize` (overlap),
+    # while `gmail-query-syntax` is unique to this state.
+    skills:
+      - gmail-query-syntax
+      - json-schema-emails
+    prompt: |
+      The task description is the source of truth for which emails are in
+      scope (sent vs received, count, time range, sender/recipient
+      filters, labels, etc.). Read it carefully before constructing the
+      Gmail query.
+
+      Retrieve those emails via the Gmail tools on the `google-workspace`
+      MCP server and write them to `.workflow/emails/emails.json` using
+      your built-in `Write` tool. `/workspace` is bind-mounted into the
+      container, so native file I/O operates on it directly — do NOT
+      route writes through the filesystem MCP.
+
+      Two bundled skills cover the load-bearing details of this state:
+      `gmail-query-syntax` documents the Gmail query operators and the
+      Code Mode call shape; `json-schema-emails` is the canonical schema
+      for the emails.json file. Their `SKILL.md` bodies live at
+      `/home/codespace/skills/.claude/skills/<skill-name>/SKILL.md`. Read
+      both bodies before generating any tool calls or output — the
+      authoritative specifics (call sequence, query syntax, JSON field
+      names and semantics) are in those files, not in this prompt.
+    inputs: []
+    outputs:
+      - emails
+    transitions:
+      - to: summarize
+
+  summarize:
+    type: agent
+    description: Summarizes the fetched emails into a single markdown file
+    persona: global
+    # Test fixture: `skills:` is intentionally OMITTED here to exercise the
+    # "default = all bundled skills" branch of the resolver. This state sees
+    # all four bundled skills (email-formatting, gmail-query-syntax,
+    # json-schema-emails, summary-style-guide) plus any user-global skills.
+    # The asymmetry vs. `fetch` (which has an explicit filter) is the point —
+    # do not "fix" it by adding a skills list to this state.
+    prompt: |
+      Read `.workflow/emails/emails.json` with your built-in `Read` tool
+      and write a markdown summary to `.workflow/summary/email-summary.md`
+      with your built-in `Write` tool. `/workspace` is bind-mounted into
+      the container, so native file I/O operates on it directly.
+
+      The bundled skills carry the authoritative formatting and writing
+      conventions for this output: `email-formatting` covers document
+      structure (headings, metadata layout, footer requirements) and
+      `summary-style-guide` covers the per-email prose summary's voice
+      and length. Their `SKILL.md` bodies live at
+      `/home/codespace/skills/.claude/skills/<skill-name>/SKILL.md`. Read
+      both bodies before writing the output — the prompt deliberately
+      does not restate the structure, voice, or footer requirements; the
+      skills are the source of truth.
+
+      Title the document `# Email summary` and include one section per
+      email in the order they appear in the input.
+    inputs:
+      - emails
+    outputs:
+      - summary
+    transitions:
+      - to: done
+
+  done:
+    type: terminal
+    description: Summary written to .workflow/summary/email-summary.md
+    outputs:
+      - summary
