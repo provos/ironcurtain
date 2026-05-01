@@ -32,12 +32,19 @@ export interface ResolvedSkill {
  *   between fences failed to parse, or the parsed value isn't an object.
  * - `missing-required-fields`: frontmatter parsed but `name` or
  *   `description` is missing or non-string.
+ * - `duplicate-name`: two or more skill directories under the same
+ *   skills root resolve to the same frontmatter `name`. Composition is
+ *   keyed on the frontmatter name, so duplicates are non-deterministic
+ *   without a tiebreaker. Reported once per losing entry; the winner
+ *   (lexicographically-first directory name) is yielded as a normal
+ *   `ResolvedSkill`.
  */
 export type SkillDiscoveryErrorReason =
   | 'missing-manifest'
   | 'unreadable'
   | 'malformed-frontmatter'
-  | 'missing-required-fields';
+  | 'missing-required-fields'
+  | 'duplicate-name';
 
 export interface SkillDiscoveryError {
   /** Absolute path to the offending directory under the skills root. */

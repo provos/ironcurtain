@@ -466,6 +466,11 @@ function buildSkillManifestDiagnostic(err: SkillDiscoveryError): { message: stri
         message: `Missing SKILL.md at ${err.skillDir}: ${detail}.`,
         hint: 'Create a SKILL.md file with a `---`-fenced YAML frontmatter declaring `name:` and `description:`.',
       };
+    case 'duplicate-name':
+      return {
+        message: `Duplicate skill at ${err.skillDir}: ${detail}.`,
+        hint: 'Two skill directories under the same skills root cannot share the same frontmatter `name:`. Rename one in its SKILL.md frontmatter.',
+      };
   }
 }
 

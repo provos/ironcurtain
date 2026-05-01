@@ -786,6 +786,30 @@ describe('WF010 — skill references', () => {
     const noPathCtx: LintContext = { personaExists: () => true };
     expect(codes(lintWorkflow(workflowWithoutSkills(), noPathCtx))).not.toContain('WF010');
   });
+
+  it('errors on duplicate frontmatter names within a single skills root', () => {
+    // Two skill directories under the same root claim the same
+    // frontmatter `name:`. The lex-first directory wins discovery; the
+    // loser is reported as a duplicate so authors see the collision
+    // instead of silently losing one entry to last-write-wins layering.
+    writeSkillManifest('alpha-shared');
+    // `writeSkillManifest` derives the name from the directory; we need
+    // a second directory whose frontmatter collides with the first's
+    // name. `b-shared/` declares `name: alpha-shared` to force the
+    // collision.
+    const loserDir = resolve(packageDir, 'skills', 'b-shared');
+    mkdirSync(loserDir, { recursive: true });
+    writeFileSync(resolve(loserDir, 'SKILL.md'), `---\nname: alpha-shared\ndescription: x\n---\n`);
+
+    const result = lintWorkflow(workflowWithoutSkills(), ctxWithPath());
+    const wf010 = result.filter((d) => d.code === 'WF010');
+    expect(wf010).toHaveLength(1);
+    expect(wf010[0].severity).toBe('error');
+    expect(wf010[0].stateId).toBeUndefined();
+    expect(wf010[0].message).toContain('Duplicate skill');
+    expect(wf010[0].message).toContain(loserDir);
+    expect(wf010[0].message).toContain('"alpha-shared"');
+  });
 });
 
 // ---------------------------------------------------------------------------

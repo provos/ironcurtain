@@ -67,6 +67,14 @@ export interface DiscoverSkillsResult {
  * tolerates I/O failures so one bad skill doesn't break the rest of
  * the layer; the `errors` array lets callers (runtime sessions, lint)
  * decide how loudly to complain.
+ *
+ * Iteration order is the lexicographic sort of `readdirSync` output so
+ * identical input produces identical output across filesystems and
+ * runs. When two directories under the same root declare the same
+ * frontmatter `name:`, the lexicographically-first directory wins (its
+ * `ResolvedSkill` is included) and every later entry is reported as a
+ * `duplicate-name` discovery error so the collision is surfaced
+ * instead of silently swallowed by last-write-wins layering.
  */
 export function discoverSkillsWithErrors(skillsRoot: string, source: SkillSource): DiscoverSkillsResult {
   const skills: ResolvedSkill[] = [];
@@ -81,6 +89,18 @@ export function discoverSkillsWithErrors(skillsRoot: string, source: SkillSource
     // unavailable" signal that callers can detect via the empty result.
     return { skills, errors };
   }
+
+  // Sort once up-front. Without this the iteration order is whatever
+  // `readdirSync` returns, which is filesystem-dependent and varies
+  // across runs — making downstream layer composition non-deterministic
+  // when two skills under the same root share a frontmatter `name:`.
+  entries.sort();
+
+  // Tracks which frontmatter names have already been claimed in this
+  // layer. Because `entries` is sorted, the first occurrence is the
+  // lexicographically-first directory and wins; later occurrences are
+  // reported as `duplicate-name` and dropped from the result.
+  const claimedNames = new Map<string, string>();
 
   for (const entry of entries) {
     const skillDir = resolve(skillsRoot, entry);
@@ -116,8 +136,20 @@ export function discoverSkillsWithErrors(skillsRoot: string, source: SkillSource
       continue;
     }
 
+    const name = result.frontmatter.name;
+    const winner = claimedNames.get(name);
+    if (winner !== undefined) {
+      errors.push({
+        skillDir,
+        reason: 'duplicate-name',
+        detail: `frontmatter name "${name}" is already claimed by ${winner}`,
+      });
+      continue;
+    }
+    claimedNames.set(name, skillDir);
+
     skills.push({
-      name: result.frontmatter.name,
+      name,
       source,
       sourceDir: skillDir,
       description: result.frontmatter.description,
@@ -133,11 +165,16 @@ export function discoverSkillsWithErrors(skillsRoot: string, source: SkillSource
  * excluded: a skills root may legitimately contain helper subdirs
  * (`.git/`, `node_modules/`, READMEs) that have no SKILL.md, and
  * flagging each would drown the actionable signal in noise.
+ *
+ * `duplicate-name` IS surfaced — a collision is an authoring bug that
+ * silently drops a skill from the layered set, so making the loser
+ * visible is the whole point of detecting it.
  */
 export const ACTIONABLE_DISCOVERY_REASONS: ReadonlySet<SkillDiscoveryErrorReason> = new Set([
   'unreadable',
   'malformed-frontmatter',
   'missing-required-fields',
+  'duplicate-name',
 ]);
 
 /**

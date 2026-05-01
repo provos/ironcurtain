@@ -246,6 +246,54 @@ describe('discoverSkillsWithErrors', () => {
     expect(skills.map((s) => s.name)).toEqual(['valid']);
     expect(errors).toEqual([]);
   });
+
+  it('iterates entries in lexicographic order regardless of filesystem order', () => {
+    // Without sorting, `readdirSync` order is filesystem-dependent and
+    // can vary across runs. Two directories declaring the same
+    // frontmatter `name:` would then non-deterministically pick a
+    // winner during layer composition. Lexicographic sort makes the
+    // resolution stable: the lex-first directory wins.
+    const skillsRoot = resolve(tempDir, 'skills');
+    // Names chosen so a hash-bucketed FS order would not coincide with
+    // lex order; in particular, "z-first" sorts after "a-second" but
+    // is created first on disk.
+    writeSkill(skillsRoot, 'z-first', { name: 'shared', description: 'z-first wins?' });
+    writeSkill(skillsRoot, 'a-second', { name: 'shared', description: 'a-second wins?' });
+    writeSkill(skillsRoot, 'm-middle', { name: 'm', description: 'middle' });
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+
+    // Both runs must produce the same answer: `a-second` (lex-first)
+    // wins the duplicate `shared` collision; `z-first` is the
+    // duplicate.
+    const winner = skills.find((s) => s.name === 'shared');
+    expect(winner?.sourceDir).toBe(resolve(skillsRoot, 'a-second'));
+    expect(winner?.description).toBe('a-second wins?');
+
+    // The non-`shared` entry survives unchanged.
+    expect(skills.find((s) => s.name === 'm')?.sourceDir).toBe(resolve(skillsRoot, 'm-middle'));
+
+    // The losing duplicate is reported, not silently dropped.
+    const dup = errors.find((e) => e.reason === 'duplicate-name');
+    expect(dup?.skillDir).toBe(resolve(skillsRoot, 'z-first'));
+    expect(dup?.detail).toContain('"shared"');
+  });
+
+  it('reports duplicate-name once per losing entry when more than two collide', () => {
+    // Three entries claim the same name; the first (`a`) wins, `b` and
+    // `c` are both reported as duplicates.
+    const skillsRoot = resolve(tempDir, 'skills');
+    writeSkill(skillsRoot, 'a', { name: 'shared', description: 'a wins' });
+    writeSkill(skillsRoot, 'b', { name: 'shared', description: 'b loses' });
+    writeSkill(skillsRoot, 'c', { name: 'shared', description: 'c loses' });
+
+    const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'user');
+    expect(skills).toHaveLength(1);
+    expect(skills[0].sourceDir).toBe(resolve(skillsRoot, 'a'));
+
+    const dups = errors.filter((e) => e.reason === 'duplicate-name');
+    expect(dups.map((e) => e.skillDir).sort()).toEqual([resolve(skillsRoot, 'b'), resolve(skillsRoot, 'c')]);
+  });
 });
 
 // ---------------------------------------------------------------------------
