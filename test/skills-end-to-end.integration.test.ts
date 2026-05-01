@@ -406,11 +406,6 @@ interface ContainerStagingSnapshot {
  * `sha256sum`. Output of `sha256sum` is `<hash>  ./<name>/SKILL.md` per
  * line, sorted for determinism. Returns a `{ name → hash }` map keyed
  * on the basename of the skill directory.
- *
- * The container path comes from the adapter; this test exercises the
- * Claude Code adapter, whose path is `/home/codespace/skills/.claude/skills`
- * (a sibling of the conversation-state mount, NOT nested under it —
- * see `agent-adapter.ts` for why).
  */
 async function snapshotContainerSkills(
   bundle: DockerInfrastructure,

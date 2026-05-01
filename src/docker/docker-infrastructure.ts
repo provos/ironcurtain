@@ -493,9 +493,6 @@ export async function prepareDockerInfrastructure(
     // Workflow bundles always create the staging dir (even when empty)
     // because the bind mount can only be established at container start;
     // per-state persona transitions need a live mount to re-stage into.
-    // The mount target is the adapter-declared `skillsContainerPath`,
-    // which by contract is a sibling path (NOT nested under any other
-    // mount target) so Docker creates a clean fresh mount point.
     const isWorkflowBundle = workflowId !== undefined;
     const initialSkills = resolvedSkills ?? [];
     const skillsTarget = adapter.skillsContainerPath;

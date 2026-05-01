@@ -263,13 +263,8 @@ export class DockerAgentSession implements Session {
         firstTurn: !this.firstTurnComplete,
         modelOverride: this.agentModelOverride,
       });
-      // Append adapter-declared CLI args required when skills are mounted
-      // (e.g. Claude Code's `--add-dir <parent>`). Gated on the mount
-      // being present so we don't pass the flag for sessions without
-      // skills (where the path doesn't exist inside the container).
-      // Appended at the end: every adapter's `buildCommand` puts the
-      // user message in a flag-value pair (`-p <msg>` for Claude Code),
-      // so trailing flag-value pairs still parse cleanly.
+      // Gated on `skillsMount` so adapters don't pass flags pointing at
+      // a path that isn't bind-mounted into this session.
       const command =
         this.infra.skillsMount && this.infra.adapter.skillsBatchArgs?.length
           ? [...baseCommand, ...this.infra.adapter.skillsBatchArgs]

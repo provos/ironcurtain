@@ -429,12 +429,6 @@ describe('createSessionContainers', () => {
   });
 
   // --- Skills mount tests ---
-  // The skills mount is now ALWAYS a separate read-only bind mount when
-  // the adapter declares a `skillsContainerPath`. The previous in-place
-  // staging path (target: undefined, "stage inside the conversation-
-  // state mount") was deleted because nested bind mounts are unreliable
-  // on Docker Desktop / macOS — the kernel keeps the original inode at
-  // mount time and the container sees an empty inner mount.
   async function runSkillsMountScenario(opts: {
     skillsMount?: { hostDir: string; target: string };
   }): Promise<readonly { source: string; target: string; readonly: boolean }[]> {

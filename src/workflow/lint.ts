@@ -427,19 +427,6 @@ function checkSkillReferencesAndManifests(def: WorkflowDefinition, ctx: LintCont
   return [...checkSkillManifests(errors), ...checkSkillReferences(def, skills, skillsRoot)];
 }
 
-/**
- * Emits one WF010 diagnostic per malformed/unreadable/missing-fields
- * SKILL.md under the workflow package. Diagnostics are package-scoped
- * (no `stateId`) because the failure is a property of the file, not
- * any particular state's reference to it.
- *
- * Message + hint are tailored per `reason` so authors get actionable
- * guidance. `missing-manifest` is filtered upstream by
- * {@link ACTIONABLE_DISCOVERY_REASONS}; if a future `reason` is added
- * to {@link SkillDiscoveryErrorReason}, the switch falls through to a
- * generic message and TypeScript's exhaustive-check (`never`) flags
- * the gap at compile time.
- */
 function checkSkillManifests(errors: readonly SkillDiscoveryError[]): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   for (const err of errors) {
@@ -453,14 +440,11 @@ function checkSkillManifests(errors: readonly SkillDiscoveryError[]): Diagnostic
   return diagnostics;
 }
 
-/**
- * Tailors WF010's `message` + `hint` to the underlying discovery
- * `reason`. Each branch leads with a description that matches the
- * actual failure mode (so a permissions error doesn't get reported
- * as "malformed YAML"), and the hint points at the most likely fix.
- */
 function buildSkillManifestDiagnostic(err: SkillDiscoveryError): { message: string; hint: string } {
   const detail = err.detail ?? err.reason;
+  // Switch is exhaustive over `SkillDiscoveryErrorReason`. No `default`:
+  // a new union member must add a case here or TypeScript will flag the
+  // missing return-type coverage at compile time.
   switch (err.reason) {
     case 'malformed-frontmatter':
       return {
@@ -477,12 +461,10 @@ function buildSkillManifestDiagnostic(err: SkillDiscoveryError): { message: stri
         message: `Unreadable SKILL.md at ${err.skillDir}: ${detail}.`,
         hint: 'Check filesystem permissions or whether the path is a directory.',
       };
-    // `missing-manifest` is filtered out by ACTIONABLE_DISCOVERY_REASONS.
     case 'missing-manifest':
-    default:
       return {
-        message: `SKILL.md issue at ${err.skillDir}: ${detail}.`,
-        hint: 'Check the SKILL.md file for a malformed or missing `---`-fenced YAML frontmatter.',
+        message: `Missing SKILL.md at ${err.skillDir}: ${detail}.`,
+        hint: 'Create a SKILL.md file with a `---`-fenced YAML frontmatter declaring `name:` and `description:`.',
       };
   }
 }

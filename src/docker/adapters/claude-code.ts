@@ -103,11 +103,6 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
   return {
     id: 'claude-code' as AgentId,
     displayName: 'Claude Code',
-    // Bind-mount target for staged skills. Claude Code's --add-dir flag
-    // scans `<add-dir>/.claude/skills/<name>/SKILL.md`, so the CLI is
-    // pointed at the parent (CLAUDE_SKILLS_PARENT). Both batch mode and
-    // PTY mode need the flag; the latter consumes IRONCURTAIN_SKILLS_DIR
-    // from the start script (see generateOrientationFiles below).
     skillsContainerPath: CLAUDE_SKILLS_MOUNT_TARGET,
     skillsBatchArgs: ['--add-dir', CLAUDE_SKILLS_PARENT],
     skillsPtyEnv: { IRONCURTAIN_SKILLS_DIR: CLAUDE_SKILLS_PARENT },
