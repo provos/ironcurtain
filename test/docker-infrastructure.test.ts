@@ -16,6 +16,14 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
+// Container target the mock adapter advertises via `skills.containerPath`.
+// Hardcoded here (rather than imported from a constant) because the
+// adapter contract makes this per-adapter — the test asserts the wired
+// target matches what the adapter declared. Matches the post-refactor
+// Claude Code path (a sibling of the conversation-state mount, NOT
+// nested under it).
+const TEST_SKILLS_CONTAINER_PATH = '/home/codespace/skills/.claude/skills';
+
 const TEST_BUNDLE_ID = 'test-session-id' as BundleId;
 const TEST_SHORT_ID = getBundleShortId(TEST_BUNDLE_ID);
 import {
@@ -112,6 +120,7 @@ describe('DockerInfrastructure interface', () => {
       containerId: 'container-id',
       containerName: 'ironcurtain-test-session',
       setTokenSessionId: () => {},
+      restageSkills: () => {},
     };
 
     // Verify key fields are accessible at runtime
@@ -373,6 +382,7 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     mitmAddr,
     authKind: 'apikey',
     setTokenSessionId: () => {},
+    restageSkills: () => {},
   };
 }
 
@@ -416,6 +426,60 @@ describe('createSessionContainers', () => {
     // And neither is the escalation dir or audit log.
     expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
     expect(mounts.some((m) => m.source === core.auditLogPath)).toBe(false);
+  });
+
+  // --- Skills mount tests ---
+  async function runSkillsMountScenario(opts: {
+    skillsMount?: { hostDir: string; target: string };
+  }): Promise<readonly { source: string; target: string; readonly: boolean }[]> {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+    const coreWithSkills: PreContainerInfrastructure = opts.skillsMount
+      ? { ...core, skillsMount: opts.skillsMount }
+      : core;
+    await createSessionContainers(coreWithSkills, makeMockConfig());
+    expect(createCalls).toHaveLength(1);
+    return createCalls[0].mounts;
+  }
+
+  it('mounts the staged skills directory read-only when skillsMount is set', async () => {
+    // The architectural invariant: a separate read-only bind mount from
+    // the bundle's staging dir to the adapter-declared container path.
+    const skillsDir = join(tempDir, 'session', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+
+    const mounts = await runSkillsMountScenario({
+      skillsMount: { hostDir: skillsDir, target: TEST_SKILLS_CONTAINER_PATH },
+    });
+
+    const skillsMount = mounts.find((m) => m.target === TEST_SKILLS_CONTAINER_PATH);
+    expect(skillsMount).toBeDefined();
+    expect(skillsMount!.source).toBe(skillsDir);
+    expect(skillsMount!.readonly).toBe(true);
+  });
+
+  it('omits the skills mount entirely when core.skillsMount is undefined', async () => {
+    const mounts = await runSkillsMountScenario({});
+    expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
+  });
+
+  it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {
+    // Workflow-mode bundles always create the skills dir at container
+    // start so per-state persona transitions can re-stage into it later
+    // (the bind mount is established once and cannot be added post-hoc).
+    // An empty initial dir must still produce a mount.
+    const skillsDir = join(tempDir, 'session', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    // No skill subdirs written — dir is empty.
+
+    const mounts = await runSkillsMountScenario({
+      skillsMount: { hostDir: skillsDir, target: TEST_SKILLS_CONTAINER_PATH },
+    });
+
+    const skillsMount = mounts.find((m) => m.target === TEST_SKILLS_CONTAINER_PATH);
+    expect(skillsMount).toBeDefined();
+    expect(skillsMount!.source).toBe(skillsDir);
+    expect(skillsMount!.readonly).toBe(true);
   });
 
   // --- Test B (error-path critical) ---

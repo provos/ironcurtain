@@ -3,7 +3,7 @@
  *
  * Covers both standalone and borrow paths. The borrow path (where the
  * caller supplies a pre-built `DockerInfrastructure` via
- * `options.workflowInfrastructure`) is the Step 4 addition for workflow
+ * `options.workflow.infrastructure`) is the Step 4 addition for workflow
  * mode: the session must use the supplied bundle as-is and must not
  * destroy it on `close()` -- the caller retains ownership.
  *
@@ -179,6 +179,7 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     sidecarContainerId: undefined,
     internalNetwork: undefined,
     setTokenSessionId: () => {},
+    restageSkills: () => {},
   };
 }
 
@@ -224,7 +225,7 @@ describe('createDockerSession borrow path', () => {
     const session = await createSession({
       config: createTestConfig(),
       mode: { kind: 'docker', agent: 'claude-code' as never },
-      workflowInfrastructure: infra,
+      workflow: { infrastructure: infra },
       agentConversationId: createAgentConversationId(),
     });
 
@@ -245,7 +246,7 @@ describe('createDockerSession borrow path', () => {
     }
   });
 
-  it('borrow with workflowStateDir: creates zero entries under sessions/', async () => {
+  it('borrow with workflow.stateDir: creates zero entries under sessions/', async () => {
     // When the orchestrator passes a per-state artifact dir alongside
     // the bundle, the factory must route session.log and metadata into
     // that dir instead of under ~/.ironcurtain/sessions/<uuid>/. This
@@ -261,9 +262,7 @@ describe('createDockerSession borrow path', () => {
     const session = await createSession({
       config: createTestConfig(),
       mode: { kind: 'docker', agent: 'claude-code' as never },
-      workflowInfrastructure: infra,
-      workflowStateDir,
-      stateSlug: 'fetch.1',
+      workflow: { infrastructure: infra, stateDir: workflowStateDir, stateSlug: 'fetch.1' },
       agentConversationId: createAgentConversationId(),
     });
 
@@ -282,7 +281,7 @@ describe('createDockerSession borrow path', () => {
     }
   });
 
-  it('workflowStateDir without workflowInfrastructure is rejected', async () => {
+  it('workflow.stateDir without workflow.infrastructure is rejected', async () => {
     const workflowStateDir = join(tempDir, 'orphan-state');
     mkdirSync(workflowStateDir, { recursive: true });
 
@@ -290,12 +289,11 @@ describe('createDockerSession borrow path', () => {
       createSession({
         config: createTestConfig(),
         mode: { kind: 'docker', agent: 'claude-code' as never },
-        // Deliberately omit workflowInfrastructure.
-        workflowStateDir,
-        stateSlug: 'orphan.1',
+        // Deliberately omit infrastructure inside the workflow record.
+        workflow: { stateDir: workflowStateDir, stateSlug: 'orphan.1' },
         agentConversationId: createAgentConversationId(),
       }),
-    ).rejects.toThrow(/workflowStateDir requires workflowInfrastructure/);
+    ).rejects.toThrow(/workflow\.stateDir requires workflow\.infrastructure/);
   });
 
   it('close preserves bundle: destroyDockerInfrastructure is NOT invoked', async () => {
@@ -304,7 +302,7 @@ describe('createDockerSession borrow path', () => {
     const session = await createSession({
       config: createTestConfig(),
       mode: { kind: 'docker', agent: 'claude-code' as never },
-      workflowInfrastructure: infra,
+      workflow: { infrastructure: infra },
       agentConversationId: createAgentConversationId(),
     });
 
@@ -324,7 +322,7 @@ describe('createDockerSession borrow path', () => {
     const session1 = await createSession({
       config: createTestConfig(),
       mode: { kind: 'docker', agent: 'claude-code' as never },
-      workflowInfrastructure: infra,
+      workflow: { infrastructure: infra },
       agentConversationId: createAgentConversationId(),
     });
     expect(session1.getInfo().status).toBe('ready');
@@ -336,7 +334,7 @@ describe('createDockerSession borrow path', () => {
     const session2 = await createSession({
       config: createTestConfig(),
       mode: { kind: 'docker', agent: 'claude-code' as never },
-      workflowInfrastructure: infra,
+      workflow: { infrastructure: infra },
       agentConversationId: createAgentConversationId(),
     });
     try {
@@ -352,7 +350,7 @@ describe('createDockerSession borrow path', () => {
     expect(infraState.destroyCalls).toBe(0);
   });
 
-  it('standalone path (regression): factory calls createDockerInfrastructure when workflowInfrastructure is absent', async () => {
+  it('standalone path (regression): factory calls createDockerInfrastructure when workflow.infrastructure is absent', async () => {
     // In the standalone path the factory is expected to call
     // createDockerInfrastructure. Our mock for that function is scripted
     // to throw (see the module mock at top of file) because we do not
@@ -362,7 +360,7 @@ describe('createDockerSession borrow path', () => {
       createSession({
         config: createTestConfig(),
         mode: { kind: 'docker', agent: 'claude-code' as never },
-        // workflowInfrastructure intentionally omitted.
+        // workflow record intentionally omitted.
         agentConversationId: createAgentConversationId(),
       }),
     ).rejects.toThrow(/standalone path not used/);
@@ -390,7 +388,7 @@ describe('createDockerSession borrow path', () => {
       createSession({
         config: createTestConfig(),
         mode: { kind: 'docker', agent: 'claude-code' as never },
-        workflowInfrastructure: brokenInfra,
+        workflow: { infrastructure: brokenInfra },
         agentConversationId: createAgentConversationId(),
       }),
     ).rejects.toThrow();
@@ -457,7 +455,7 @@ describe('createDockerSession borrow path', () => {
       createSession({
         config: createTestConfig(),
         mode: { kind: 'docker', agent: 'claude-code' as never },
-        workflowInfrastructure: borrowedInfra,
+        workflow: { infrastructure: borrowedInfra },
         agentConversationId: createAgentConversationId(),
       }),
     ).rejects.toThrow();
@@ -496,7 +494,7 @@ describe('createDockerSession borrow path', () => {
     const session = await createSession({
       config: createTestConfig(),
       mode: { kind: 'docker', agent: 'claude-code' as never },
-      // workflowInfrastructure intentionally omitted -- standalone path.
+      // workflow record intentionally omitted -- standalone path.
       agentConversationId: createAgentConversationId(),
     });
 

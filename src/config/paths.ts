@@ -330,6 +330,18 @@ export function getUserWorkflowsDir(): string {
   return resolve(getIronCurtainHome(), 'workflows');
 }
 
+/**
+ * Returns the user-global skills directory: {home}/skills/
+ *
+ * Skills placed here are layered into every Docker session regardless
+ * of workflow or persona. See `src/skills/discovery.ts` for the
+ * resolution order (user-global → persona → workflow, last-wins on
+ * collision) and `docs/designs/skills-capability.md` for the format.
+ */
+export function getUserSkillsDir(): string {
+  return resolve(getIronCurtainHome(), 'skills');
+}
+
 // ---------------------------------------------------------------------------
 // OAuth paths
 // ---------------------------------------------------------------------------

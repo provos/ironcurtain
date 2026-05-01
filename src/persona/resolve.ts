@@ -44,6 +44,11 @@ export function getPersonaWorkspaceDir(name: PersonaName): string {
   return resolve(getPersonaDir(name), 'workspace');
 }
 
+/** Returns the skills directory for a persona: {home}/personas/{name}/skills/ */
+export function getPersonaSkillsDir(name: PersonaName): string {
+  return resolve(getPersonaDir(name), 'skills');
+}
+
 /** Returns the persona definition file path: {home}/personas/{name}/persona.json */
 export function getPersonaDefinitionPath(name: PersonaName): string {
   return resolve(getPersonaDir(name), 'persona.json');

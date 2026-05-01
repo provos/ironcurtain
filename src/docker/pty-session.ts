@@ -270,6 +270,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       sandboxDir,
       escalationDir,
       bundleId,
+      undefined,
+      undefined,
+      dirConfig.resolvedSkills,
     );
     // PTY sessions are standalone: pin the MITM proxy's token-stream
     // routing ID to this session's ID for the session's lifetime.
@@ -286,6 +289,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       mitmAddr,
       conversationStateDir,
       conversationStateConfig,
+      skillsMount,
     } = infra;
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
@@ -458,11 +462,22 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       });
     }
 
+    // Read-only so the agent cannot mutate skills mid-session — keeps
+    // the cached-stager assumption sound and prevents per-state filter
+    // contamination.
+    if (skillsMount) {
+      mounts.push({ source: skillsMount.hostDir, target: skillsMount.target, readonly: true });
+    }
+
     // Pass initial terminal size so start-claude.sh can set PTY dimensions
     // before Claude starts, eliminating the resize race condition.
     const { columns, rows } = process.stdout;
     if (columns) env.IRONCURTAIN_INITIAL_COLS = String(columns);
     if (rows) env.IRONCURTAIN_INITIAL_ROWS = String(rows);
+
+    if (skillsMount && adapter.skills?.ptyEnv) {
+      Object.assign(env, adapter.skills.ptyEnv);
+    }
 
     // Pass resume flags when resuming a session.
     // Validate each flag to prevent shell injection via adapter misconfiguration.

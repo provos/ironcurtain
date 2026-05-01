@@ -41,6 +41,21 @@ import {
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
+/**
+ * Container path used as the parent for Claude Code's skill discovery.
+ * Claude Code's `--add-dir <path>` flag scans `<path>/.claude/skills/`,
+ * so the bind-mount target is the deeper `.claude/skills/` subpath
+ * while the CLI is pointed at this parent.
+ *
+ * Picked deliberately to NOT nest under any other mount target — in
+ * particular, the conversation-state mount lives at
+ * `/home/codespace/.claude/`, so we cannot stage skills under that
+ * tree (nested bind mounts are unreliable across platforms; see
+ * `agent-adapter.ts` for context).
+ */
+const CLAUDE_SKILLS_PARENT = '/home/codespace/skills';
+const CLAUDE_SKILLS_MOUNT_TARGET = `${CLAUDE_SKILLS_PARENT}/.claude/skills`;
+
 function buildDockerEnvironmentPrompt(context: OrientationContext): string {
   return `## Docker Environment
 
@@ -88,6 +103,11 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
   return {
     id: 'claude-code' as AgentId,
     displayName: 'Claude Code',
+    skills: {
+      containerPath: CLAUDE_SKILLS_MOUNT_TARGET,
+      batchArgs: ['--add-dir', CLAUDE_SKILLS_PARENT],
+      ptyEnv: { IRONCURTAIN_SKILLS_DIR: CLAUDE_SKILLS_PARENT },
+    },
 
     // eslint-disable-next-line @typescript-eslint/require-await -- interface requires Promise return
     async getImage(): Promise<string> {
@@ -120,6 +140,14 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
       // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
       // Sets initial PTY size from host-provided env vars before exec, so the
       // PTY has the correct dimensions before Claude even starts.
+      //
+      // $IRONCURTAIN_SKILLS_DIR (optional): when set, appended as
+      // `--add-dir <dir>` so Claude Code's native skill discovery picks
+      // up `<dir>/.claude/skills/<name>/SKILL.md`. Empty/unset = no extra
+      // flags (keeps `--add-dir <missing-path>` from erroring on sessions
+      // without a skills mount). Mirrors the batch-mode wiring exposed
+      // via `skills.batchArgs`; the PTY driver merges `skills.ptyEnv`
+      // into the container environment, which is how this var arrives here.
       const startScript = `#!/bin/bash
 # Set initial terminal size from host env vars
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
@@ -132,17 +160,22 @@ if [ -n "$IRONCURTAIN_MODEL" ]; then
   MODEL_ARGS=(--model "$IRONCURTAIN_MODEL")
 fi
 
+SKILLS_ARGS=()
+if [ -n "$IRONCURTAIN_SKILLS_DIR" ]; then
+  SKILLS_ARGS=(--add-dir "$IRONCURTAIN_SKILLS_DIR")
+fi
+
 # shellcheck disable=SC2086
 if [ -n "$IRONCURTAIN_RESUME_FLAGS" ]; then
   # Try resume; if --continue fails (no conversation), fall back to fresh start
-  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}" $IRONCURTAIN_RESUME_FLAGS
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}" "\${SKILLS_ARGS[@]}" $IRONCURTAIN_RESUME_FLAGS
   STATUS=$?
   if [ $STATUS -ne 0 ]; then
-    claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}"
+    claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}" "\${SKILLS_ARGS[@]}"
     STATUS=$?
   fi
 else
-  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}"
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}" "\${SKILLS_ARGS[@]}"
   STATUS=$?
 fi
 

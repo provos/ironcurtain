@@ -190,6 +190,15 @@ export interface AgentStateDefinition {
    * See `docs/designs/workflow-session-identity.md` §2.4.
    */
   readonly containerScope?: string;
+  /**
+   * Per-state filter on workflow-package skills (`<workflow-pkg>/skills/`).
+   * When omitted (default), the state receives every workflow-package
+   * skill. When set, only the named entries from the workflow package
+   * are layered in — referenced names that do not exist as
+   * `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at workflow
+   * load. User-global skills always apply regardless of this field.
+   */
+  readonly skills?: readonly string[];
 }
 
 export interface HumanGateStateDefinition {
@@ -496,6 +505,17 @@ export interface WorkflowCheckpoint {
   readonly definitionPath: string;
   /** Workspace root directory. Used on resume to reconstruct artifactDir. */
   readonly workspacePath?: string;
+  /**
+   * Per-run staged copy of the workflow package's `skills/` tree (when
+   * the package shipped one). The orchestrator copies this at start
+   * under `<baseDir>/<workflowId>/workflow-skills/` so the run is
+   * self-contained: resume reads from the staged copy regardless of
+   * whether the original package path is still on disk. Absent when
+   * the workflow ships no skills, and absent on legacy checkpoints
+   * written before this field existed (resume falls back to re-staging
+   * from `definitionPath`'s package dir).
+   */
+  readonly workflowSkillsDir?: string;
   /**
    * Terminal-phase status, populated only when the workflow has reached a terminal
    * phase (completed / aborted / failed / waiting_human). Absent for mid-run

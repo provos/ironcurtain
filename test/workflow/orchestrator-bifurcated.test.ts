@@ -261,7 +261,7 @@ describe('WorkflowOrchestrator bifurcated workflow (containerScope)', () => {
     ];
     let callIdx = 0;
     const sessionFactory = vi.fn(async (opts: import('../../src/session/types.js').SessionOptions) => {
-      borrowedBundles.push(opts.workflowInfrastructure);
+      borrowedBundles.push(opts.workflow?.infrastructure);
       return createArtifactAwareSession([responses[callIdx++]], tmpDir);
     });
 

@@ -38,6 +38,8 @@ import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from '
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { errorMessage } from '../utils/error-message.js';
+import { createCachedStager } from '../skills/staging.js';
+import type { ResolvedSkill } from '../skills/types.js';
 import * as logger from '../logger.js';
 
 /**
@@ -165,6 +167,27 @@ export interface PreContainerInfrastructure {
   /** Conversation state config from the adapter, if resume is supported. */
   readonly conversationStateConfig?: ConversationStateConfig;
   /**
+   * Host-side staging dir + container bind-mount target for skills.
+   * Always emits a separate read-only bind mount — nested bind mounts
+   * (staging inside another mount's source dir) are unreliable on
+   * Docker Desktop / macOS, so we use a sibling path the adapter
+   * advertised as unused inside the container.
+   */
+  readonly skillsMount?: {
+    /** Host-side staging dir (also passed to `restageSkills` and the cached stager). */
+    readonly hostDir: string;
+    /** Container target path; copied verbatim from `adapter.skills.containerPath`. */
+    readonly target: string;
+  };
+  /**
+   * Re-stages the bundle's skills with the given resolved set.
+   * No-op when `skillsMount` is undefined or when the set is byte-identical
+   * to the previous call. Workflow callers use this on every state
+   * transition; the bind mount is live, so the container's view updates
+   * in place.
+   */
+  restageSkills(skills: readonly ResolvedSkill[]): void;
+  /**
    * Routes token-stream events from the MITM proxy's LLM API tap under the
    * given session ID, or disables routing when `undefined`.
    *
@@ -206,6 +229,9 @@ const CONTAINER_NAME_PREFIX = 'ironcurtain-';
 /** Host gateway alias used by Docker containers on macOS/Windows. */
 const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
+/** Bundle-relative subdir name for the skills staging dir. */
+const BUNDLE_SKILLS_SUBDIR = 'skills';
+
 /**
  * Prepares the shared (non-container) parts of Docker session infrastructure.
  *
@@ -231,6 +257,7 @@ export async function prepareDockerInfrastructure(
   bundleId: BundleId,
   workflowId?: WorkflowId,
   scope?: string,
+  resolvedSkills?: readonly ResolvedSkill[],
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -463,6 +490,30 @@ export async function prepareDockerInfrastructure(
       ? prepareConversationStateDir(bundleDir, conversationStateConfig)
       : undefined;
 
+    // Workflow bundles always create the staging dir (even when empty)
+    // because the bind mount can only be established at container start;
+    // per-state persona transitions need a live mount to re-stage into.
+    const isWorkflowBundle = workflowId !== undefined;
+    const initialSkills = resolvedSkills ?? [];
+    const skillsTarget = adapter.skills?.containerPath;
+    let skillsMount: PreContainerInfrastructure['skillsMount'];
+    let stage: ((skills: readonly ResolvedSkill[]) => boolean) | undefined;
+    if (skillsTarget && (initialSkills.length > 0 || isWorkflowBundle)) {
+      const hostDir = resolve(bundleDir, BUNDLE_SKILLS_SUBDIR);
+      skillsMount = { hostDir, target: skillsTarget };
+      stage = createCachedStager(hostDir);
+      stage(initialSkills);
+      if (initialSkills.length > 0) {
+        logger.info(`Staged ${initialSkills.length} skill(s) to ${hostDir}`);
+      }
+    }
+    const restageSkills = (skills: readonly ResolvedSkill[]): void => {
+      if (!stage || !skillsMount) return;
+      if (stage(skills)) {
+        logger.info(`Re-staged ${skills.length} skill(s) to ${skillsMount.hostDir}`);
+      }
+    };
+
     return {
       bundleId,
       workflowId,
@@ -486,6 +537,8 @@ export async function prepareDockerInfrastructure(
       authKind,
       conversationStateDir,
       conversationStateConfig,
+      skillsMount,
+      restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
       },
@@ -516,6 +569,7 @@ export async function createDockerInfrastructure(
   bundleId: BundleId,
   workflowId?: WorkflowId,
   scope?: string,
+  resolvedSkills?: readonly ResolvedSkill[],
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -526,6 +580,7 @@ export async function createDockerInfrastructure(
     bundleId,
     workflowId,
     scope,
+    resolvedSkills,
   );
 
   try {
@@ -784,6 +839,14 @@ export async function createSessionContainers(
         target: core.conversationStateConfig.containerMountPath,
         readonly: false,
       });
+    }
+
+    // Skills bind mount — read-only so the agent cannot modify staged
+    // skills mid-session (preserves the cached-stager assumption and
+    // the per-state filter's correctness). The target path is a
+    // sibling of any other mount target by adapter contract.
+    if (core.skillsMount) {
+      mounts.push({ source: core.skillsMount.hostDir, target: core.skillsMount.target, readonly: true });
     }
 
     mainContainerId = await core.docker.create({
