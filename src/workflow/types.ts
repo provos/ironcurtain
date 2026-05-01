@@ -506,6 +506,17 @@ export interface WorkflowCheckpoint {
   /** Workspace root directory. Used on resume to reconstruct artifactDir. */
   readonly workspacePath?: string;
   /**
+   * Per-run staged copy of the workflow package's `skills/` tree (when
+   * the package shipped one). The orchestrator copies this at start
+   * under `<baseDir>/<workflowId>/workflow-skills/` so the run is
+   * self-contained: resume reads from the staged copy regardless of
+   * whether the original package path is still on disk. Absent when
+   * the workflow ships no skills, and absent on legacy checkpoints
+   * written before this field existed (resume falls back to re-staging
+   * from `definitionPath`'s package dir).
+   */
+  readonly workflowSkillsDir?: string;
+  /**
    * Terminal-phase status, populated only when the workflow has reached a terminal
    * phase (completed / aborted / failed / waiting_human). Absent for mid-run
    * checkpoints and for legacy retained checkpoints written before this field existed.

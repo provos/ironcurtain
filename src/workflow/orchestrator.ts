@@ -7,6 +7,7 @@ import {
   readdirSync,
   statSync,
   unlinkSync,
+  cpSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
@@ -156,6 +157,96 @@ function tryParseAgentStatus(responseText: string): ParseResult {
  */
 function writeStderr(message: string): void {
   process.stderr.write(`${message}\n`);
+}
+
+/** Per-run subdirectory name for the staged copy of the workflow's bundled `skills/` tree. */
+const STAGED_WORKFLOW_SKILLS_SUBDIR = 'workflow-skills';
+
+/**
+ * Stages the workflow package's `skills/` tree into the run directory
+ * so the workflow becomes self-contained at start time. After this call
+ * the per-run path (`<runMetaDir>/workflow-skills/`) is the canonical
+ * source of workflow-bundled skills for both initial-set staging and
+ * per-state restage; the original package path under
+ * `getWorkflowPackageDir(definitionPath)` is no longer consulted at
+ * runtime.
+ *
+ * Returns the absolute path to the staged copy when source `skills/`
+ * exists and was copied, `undefined` when the source has no `skills/`
+ * directory (the workflow simply ships none — not an error). Throws
+ * only on copy I/O failure, since a half-copied tree would be worse
+ * than a missing one.
+ *
+ * Why copy at start (not symlink): the package directory may be
+ * deleted, moved, or rebuilt between start and resume — symlink chases
+ * lead to "skills silently empty on resume" without diagnostic. A
+ * shallow-recursive copy decouples the run from its source-of-record
+ * location.
+ */
+function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: string): string | undefined {
+  const sourceSkillsDir = resolve(packageDir, 'skills');
+  if (!existsSync(sourceSkillsDir)) return undefined;
+
+  const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SKILLS_SUBDIR);
+  // `cpSync` recursively copies into `stagedDir`; an existing dir is
+  // overlaid (no `--force` semantics needed at start because the run
+  // directory was just created).
+  cpSync(sourceSkillsDir, stagedDir, { recursive: true });
+  return stagedDir;
+}
+
+/**
+ * Resolves the workflow-skills directory to use for a resumed workflow.
+ *
+ * Priority order, from most-trusted to most-degraded:
+ *   1. The checkpointed staged path, if it still exists. The orchestrator
+ *      writes this at start under the run dir; we own the lifecycle so
+ *      it should normally still be there.
+ *   2. A fresh stage from the original package dir, when the staged
+ *      copy is gone but the source is reachable. Recovers from manual
+ *      pruning of the run dir without losing skills on resume.
+ *   3. `undefined`, with a stderr warning. Both the staged copy and
+ *      the source are gone; degrade gracefully but make the loss
+ *      visible (the original bug — silent empty discovery — is what
+ *      this whole resolver exists to prevent).
+ *
+ * Pre-feature checkpoints have no `workflowSkillsDir` field; they
+ * trigger the case-(2) fresh stage transparently.
+ */
+function resolveWorkflowSkillsDirOnResume(opts: {
+  workflowId: WorkflowId;
+  checkpointedStagedDir: string | undefined;
+  packageDir: string;
+  runMetaDir: string;
+}): string | undefined {
+  const { workflowId, checkpointedStagedDir, packageDir, runMetaDir } = opts;
+
+  if (checkpointedStagedDir !== undefined && existsSync(checkpointedStagedDir)) {
+    return checkpointedStagedDir;
+  }
+
+  try {
+    const restaged = stageWorkflowSkillsAtStart(packageDir, runMetaDir);
+    if (restaged !== undefined) {
+      writeStderr(
+        `[workflow] Resume ${workflowId}: workflow-skills staged copy missing, re-staged from ${packageDir}.`,
+      );
+      return restaged;
+    }
+  } catch (err) {
+    writeStderr(
+      `[workflow] Resume ${workflowId}: failed to re-stage workflow skills from ${packageDir}: ${toErrorMessage(err)}`,
+    );
+    return undefined;
+  }
+
+  // Both paths gone. Without this warning the resumed run silently
+  // loses every workflow-bundled skill — the exact failure mode this
+  // function was added to prevent.
+  writeStderr(
+    `[workflow] Resume ${workflowId}: no workflow-skills available (staged copy and ${packageDir}/skills both missing). Workflow-bundled skills will not be available in this run.`,
+  );
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +485,20 @@ interface WorkflowInstance {
   readonly id: WorkflowId;
   readonly definition: WorkflowDefinition;
   readonly definitionPath: string;
+  /**
+   * Per-run staged copy of the workflow package's `skills/` tree. Set
+   * by `start()` (when the package ships skills) and by `resume()`
+   * (which trusts the checkpointed path or re-stages on miss). All
+   * runtime call sites that previously recomputed
+   * `getWorkflowPackageDir(definitionPath) + '/skills'` read this
+   * cached path instead — guarantees a stable directory across the
+   * lifetime of the run even if the original package moves.
+   *
+   * `undefined` means the workflow has no bundled skills (either the
+   * package shipped none, or both the staged copy and the source were
+   * lost on resume — see `resolveWorkflowSkillsDirOnResume`).
+   */
+  readonly workflowSkillsDir: string | undefined;
   readonly actor: AnyActorRef;
   readonly gateStateNames: ReadonlySet<string>;
   readonly terminalStateNames: ReadonlySet<string>;
@@ -631,8 +736,10 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const requiredServers = this.getRequiredServersForScope(instance, scope);
     // Persona-less initial set; per-state restaging fills in persona skills later.
-    const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
-    const resolvedSkills = resolveSkillsForSession({ workflowSkillsDir });
+    // Reads the cached per-run staged path (set at start / resume) so
+    // the bundle never depends on the original package directory still
+    // being on disk.
+    const resolvedSkills = resolveSkillsForSession({ workflowSkillsDir: instance.workflowSkillsDir });
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
     const infra = await factory({
       workflowId: instance.id,
@@ -1041,6 +1148,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     mkdirSync(metaDir, { recursive: true });
     writeFileSync(resolve(metaDir, 'definition.json'), JSON.stringify(definition, null, 2));
 
+    // Stage the workflow package's `skills/` tree into the run dir so
+    // resume is independent of whether the original package path still
+    // exists. Cached on the instance and persisted in every checkpoint
+    // so all subsequent reads point at this stable per-run copy.
+    const workflowSkillsDir = stageWorkflowSkillsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
+
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
 
     const providedMachine = this.provideActors(machine, workflowId, definition);
@@ -1052,6 +1165,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       id: workflowId,
       definition,
       definitionPath,
+      workflowSkillsDir,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1124,10 +1238,28 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Append to existing log file (resume must not overwrite)
     const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
 
+    // Resolve workflow-skills with the run-dir staged copy as primary,
+    // a fresh re-stage from the original package dir as recovery, and
+    // a logged `undefined` as the last-resort degradation. See
+    // `resolveWorkflowSkillsDirOnResume` for the full priority order.
+    //
+    // Recovery uses `checkpoint.definitionPath` (the user's original
+    // package), not `definitionPath` — the latter resolves to the
+    // run-dir copy of `definition.json` whose `getWorkflowPackageDir`
+    // is the run dir itself, which never contains a sibling `skills/`.
+    const runMetaDir = resolve(this.deps.baseDir, workflowId);
+    const workflowSkillsDir = resolveWorkflowSkillsDirOnResume({
+      workflowId,
+      checkpointedStagedDir: checkpoint.workflowSkillsDir,
+      packageDir: getWorkflowPackageDir(checkpoint.definitionPath),
+      runMetaDir,
+    });
+
     const instance: WorkflowInstance = {
       id: workflowId,
       definition,
       definitionPath: checkpoint.definitionPath,
+      workflowSkillsDir,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1570,6 +1702,11 @@ export class WorkflowOrchestrator implements WorkflowController {
       transitionHistory: [...instance.transitionHistory],
       definitionPath: instance.definitionPath,
       workspacePath: instance.workspacePath,
+      // Persisted so resume can read the run-dir staged copy directly
+      // instead of recomputing from the (possibly moved/deleted)
+      // package path. Skipped when the workflow shipped no skills, to
+      // keep the checkpoint shape tight for the common case.
+      ...(instance.workflowSkillsDir !== undefined ? { workflowSkillsDir: instance.workflowSkillsDir } : {}),
       ...(finalStatus !== undefined ? { finalStatus } : {}),
     };
   }
@@ -1709,7 +1846,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       mkdirSync(workflowStateDir, { recursive: true });
     }
 
-    const workflowSkillsDir = resolve(getWorkflowPackageDir(instance.definitionPath), 'skills');
+    // Read the cached per-run staged path; never recompute from
+    // `instance.definitionPath` here. Computing it per-state would
+    // re-introduce the resume-fragility bug fixed by staging at start.
+    const workflowSkillsDir = instance.workflowSkillsDir;
     const workflowSkillFilter = stateConfig.skills ? new Set<string>(stateConfig.skills) : undefined;
 
     let session: Session;
@@ -1720,7 +1860,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         agentConversationId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
-        workflowSkillsDir,
+        ...(workflowSkillsDir !== undefined ? { workflowSkillsDir } : {}),
         ...(workflowSkillFilter ? { workflowSkillFilter } : {}),
         ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
         ...(settings.maxSessionSeconds != null
