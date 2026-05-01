@@ -43,6 +43,8 @@ const KNOWN_MODELS: { value: string; label: string }[] = [
   { value: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
   { value: 'openai:gpt-4o', label: 'GPT-4o' },
   { value: 'openai:gpt-4o-mini', label: 'GPT-4o Mini' },
+  { value: 'codex-cli:default', label: 'Codex CLI (default)' },
+  { value: 'claude-code-cli:default', label: 'Claude Code CLI (default)' },
 ];
 
 const CUSTOM_MODEL_SENTINEL = '__custom__';
@@ -118,13 +120,19 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     }
   }
 
-  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove', 'auditRedaction', 'memory'] as const;
+  const nestedSections = [
+    'resourceBudget',
+    'autoCompact',
+    'autoApprove',
+    'cliLlmBackends',
+    'auditRedaction',
+    'memory',
+  ] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
     if (!pendingSection) continue;
     const resolvedSection = resolved[section] as unknown as Record<string, unknown>;
     for (const [subKey, subValue] of Object.entries(pendingSection)) {
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: runtime data from spread objects
       if (subValue !== undefined && subValue !== resolvedSection[subKey]) {
         diffs.push([`${section}.${subKey}`, { from: resolvedSection[subKey], to: subValue }]);
       }
@@ -173,6 +181,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
 function formatDiffValue(key: string, value: unknown): string {
   if (value === null) return 'disabled';
   if (typeof value === 'boolean') return value ? 'on' : 'off';
+  if (typeof value === 'object') return JSON.stringify(value);
   if (key.includes('ModelId') || key.includes('modelId')) return formatModelShort(value as string);
   if (key.includes('Tokens') || key === 'resourceBudget.maxTotalTokens') return formatTokens(value as number);
   if (key.includes('Seconds') || key === 'resourceBudget.maxSessionSeconds') return formatSeconds(value as number);
@@ -280,6 +289,152 @@ async function handleModels(resolved: ResolvedUserConfig, pending: UserConfig): 
     const newValue = await promptModelId(promptLabel, current);
     if (newValue !== undefined && newValue !== current) {
       (pending as Record<string, unknown>)[field as string] = newValue;
+    }
+  }
+}
+
+type CliBackendKey = 'codex' | 'claude';
+type CliBackendConfig = NonNullable<NonNullable<UserConfig['cliLlmBackends']>[CliBackendKey]>;
+
+function effectiveCliBackend(resolved: ResolvedUserConfig, pending: UserConfig, key: CliBackendKey) {
+  return {
+    ...resolved.cliLlmBackends[key],
+    ...(pending.cliLlmBackends?.[key] ?? {}),
+  };
+}
+
+function setCliBackend(pending: UserConfig, key: CliBackendKey, changes: CliBackendConfig): void {
+  pending.cliLlmBackends = {
+    ...pending.cliLlmBackends,
+    [key]: {
+      ...pending.cliLlmBackends?.[key],
+      ...changes,
+    },
+  };
+}
+
+function parseJsonStringArray(value: string): string[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.every((entry): entry is string => typeof entry === 'string') ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function handleCliLlmBackends(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const codex = effectiveCliBackend(resolved, pending, 'codex');
+    const claude = effectiveCliBackend(resolved, pending, 'claude');
+    const selected = await p.select({
+      message: 'CLI LLM Backends',
+      options: [
+        { value: 'codex', label: 'Codex CLI', hint: `${codex.command} ${codex.args.join(' ')}` },
+        { value: 'claude', label: 'Claude Code CLI', hint: `${claude.command} ${claude.args.join(' ')}` },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(selected) || selected === 'back') return;
+    await handleCliLlmBackend(resolved, pending, selected as CliBackendKey);
+  }
+}
+
+async function handleCliLlmBackend(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  key: CliBackendKey,
+): Promise<void> {
+  const label = key === 'codex' ? 'Codex CLI' : 'Claude Code CLI';
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const current = effectiveCliBackend(resolved, pending, key);
+    const field = await p.select({
+      message: label,
+      options: [
+        { value: 'command', label: 'Command', hint: current.command },
+        { value: 'args', label: 'Arguments', hint: current.args.join(' ') || '(none)' },
+        { value: 'modelArg', label: 'Model flag', hint: current.modelArg ?? '(disabled)' },
+        { value: 'promptMode', label: 'Prompt mode', hint: current.promptMode },
+        { value: 'promptFileArg', label: 'Prompt file flag', hint: current.promptFileArg ?? '(path only)' },
+        { value: 'outputMode', label: 'Output mode', hint: current.outputMode },
+        { value: 'timeoutSeconds', label: 'Timeout', hint: formatSeconds(current.timeoutSeconds) },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'command') {
+      const command = await p.text({
+        message: `${label} command:`,
+        placeholder: current.command,
+        validate: (val) => (!val ? 'Command is required' : undefined),
+      });
+      if (isCancelled(command)) continue;
+      setCliBackend(pending, key, { command: command as string });
+    } else if (field === 'args') {
+      const args = await p.text({
+        message: `${label} default arguments (JSON array):`,
+        placeholder: JSON.stringify(current.args),
+        validate: (val) => {
+          if (!val) return 'Args are required';
+          return parseJsonStringArray(val) ? undefined : 'Args must be a JSON array of strings';
+        },
+      });
+      if (isCancelled(args)) continue;
+      const parsedArgs = parseJsonStringArray(args as string);
+      if (!parsedArgs) continue;
+      setCliBackend(pending, key, { args: parsedArgs });
+    } else if (field === 'modelArg') {
+      const modelArg = await p.text({
+        message: `${label} model flag (blank to disable):`,
+        placeholder: current.modelArg ?? '',
+      });
+      if (isCancelled(modelArg)) continue;
+      const value = (modelArg as string).trim();
+      setCliBackend(pending, key, { modelArg: value.length > 0 ? value : null });
+    } else if (field === 'promptMode') {
+      const promptMode = await p.select({
+        message: 'Prompt delivery:',
+        options: [
+          { value: 'stdin', label: 'stdin' },
+          { value: 'tempfile', label: 'temp file path' },
+        ],
+        initialValue: current.promptMode,
+      });
+      if (isCancelled(promptMode)) continue;
+      setCliBackend(pending, key, { promptMode: promptMode as 'stdin' | 'tempfile' });
+    } else if (field === 'promptFileArg') {
+      const promptFileArg = await p.text({
+        message: `${label} prompt file flag (blank to pass path without a flag):`,
+        placeholder: current.promptFileArg ?? '',
+      });
+      if (isCancelled(promptFileArg)) continue;
+      const value = (promptFileArg as string).trim();
+      setCliBackend(pending, key, { promptFileArg: value.length > 0 ? value : null });
+    } else if (field === 'outputMode') {
+      const outputMode = await p.select({
+        message: 'Output mode:',
+        options: [
+          { value: 'json', label: 'JSON' },
+          { value: 'text', label: 'Plain text' },
+        ],
+        initialValue: current.outputMode,
+      });
+      if (isCancelled(outputMode)) continue;
+      setCliBackend(pending, key, { outputMode: outputMode as 'json' | 'text' });
+    } else if (field === 'timeoutSeconds') {
+      const timeout = await p.text({
+        message: 'Timeout seconds:',
+        placeholder: String(current.timeoutSeconds),
+        validate: (val) => {
+          const parsed = Number(val);
+          return Number.isFinite(parsed) && parsed > 0 ? undefined : 'Timeout must be a positive number';
+        },
+      });
+      if (isCancelled(timeout)) continue;
+      setCliBackend(pending, key, { timeoutSeconds: Number(timeout) });
     }
   }
 }
@@ -782,6 +937,7 @@ const GOOSE_PROVIDER_LABELS: Readonly<Record<GooseProvider, string>> = {
 /** Human-readable labels for Docker agents. */
 const DOCKER_AGENT_LABELS: Readonly<Record<DockerAgent, string>> = {
   'claude-code': 'Claude Code',
+  'codex-cli': 'Codex CLI',
   goose: 'Goose',
 };
 
@@ -905,6 +1061,12 @@ function modelsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   return `${agent}, ${policy}, pre-filter: ${prefilter}`;
 }
 
+function cliLlmHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const codex = effectiveCliBackend(resolved, pending, 'codex').command;
+  const claude = effectiveCliBackend(resolved, pending, 'claude').command;
+  return `codex: ${codex}, claude: ${claude}`;
+}
+
 function securityHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const timeout = formatSeconds(pending.escalationTimeoutSeconds ?? resolved.escalationTimeoutSeconds);
   const autoApprove = (pending.autoApprove?.enabled ?? resolved.autoApprove.enabled) ? 'on' : 'off';
@@ -985,6 +1147,7 @@ export async function runConfigCommand(): Promise<void> {
       message: 'Select a category to configure',
       options: [
         { value: 'models', label: `Models (${modelsHint(resolved, pending)})` },
+        { value: 'cliLlm', label: `CLI LLM Backends (${cliLlmHint(resolved, pending)})` },
         { value: 'security', label: `Security (${securityHint(resolved, pending)})` },
         { value: 'resources', label: `Resource Limits (${resourceHint(resolved, pending)})` },
         { value: 'compact', label: `Auto-Compact (${autoCompactHint(resolved, pending)})` },
@@ -1005,6 +1168,9 @@ export async function runConfigCommand(): Promise<void> {
     switch (category) {
       case 'models':
         await handleModels(resolved, pending);
+        break;
+      case 'cliLlm':
+        await handleCliLlmBackends(resolved, pending);
         break;
       case 'security':
         await handleSecurity(resolved, pending);

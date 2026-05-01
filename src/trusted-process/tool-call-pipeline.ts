@@ -25,8 +25,8 @@ import { CallCircuitBreaker } from './call-circuit-breaker.js';
 import { autoApprove, extractArgsForAutoApprove, readUserContext, type UserContext } from './auto-approver.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
-import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { ToolAnnotation } from '../pipeline/types.js';
+import type { TextGenerationModel } from '../llm/text-generation.js';
 import {
   extractWhitelistCandidates,
   type ApprovalWhitelist,
@@ -518,7 +518,7 @@ export interface CallToolDeps {
   resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>;
   allowedDirectory: string | undefined;
   escalationDir: string | undefined;
-  autoApproveModel: LanguageModelV3 | null;
+  autoApproveModel: TextGenerationModel | null;
   serverContextMap: ServerContextMap;
   /** Ephemeral approval whitelist for this session. */
   whitelist: ApprovalWhitelist;

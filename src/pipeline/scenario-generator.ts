@@ -11,13 +11,14 @@
  * across batches.
  */
 
-import type { LanguageModel, SystemModelMessage } from 'ai';
+import type { SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import { DEFAULT_MAX_TOKENS, generateObjectWithRepair } from './generate-with-repair.js';
 import { chunk } from './tool-annotator.js';
 import type { ConditionalRoles, DynamicListsFile, StoredToolAnnotation, TestScenario } from './types.js';
 import { isConditionalRoles } from '../types/argument-roles.js';
 import { buildScenarioArgsSuperRefine, buildToolArgNamesMap, formatToolArgNames } from './scenario-schema-validator.js';
+import type { TextGenerationModel } from '../llm/text-generation.js';
 
 export const SCENARIO_BATCH_SIZE = 25;
 
@@ -236,7 +237,7 @@ export async function generateScenarios(
   annotations: StoredToolAnnotation[],
   handwrittenScenarios: TestScenario[],
   sandboxDirectory: string,
-  llm: LanguageModel,
+  llm: TextGenerationModel,
   permittedDirectories?: string[],
   onProgress?: (message: string) => void,
   dynamicLists?: DynamicListsFile,
@@ -319,7 +320,7 @@ export async function repairScenarios(
   constitutionText: string,
   annotations: StoredToolAnnotation[],
   sandboxDirectory: string,
-  llm: LanguageModel,
+  llm: TextGenerationModel,
   permittedDirectories?: string[],
   dynamicLists?: DynamicListsFile,
   onProgress?: (message: string) => void,

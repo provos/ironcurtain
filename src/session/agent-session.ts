@@ -22,6 +22,7 @@ import {
 } from 'ai';
 import { z } from 'zod';
 import { createLanguageModel } from '../config/model-provider.js';
+import { isCliLlmModelId } from '../llm/model-spec.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from '../observability/llm-logger.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
@@ -365,6 +366,12 @@ export class AgentSession implements Session {
   }
 
   private async buildModel(): Promise<LanguageModel> {
+    if (isCliLlmModelId(this.agentModelId)) {
+      throw new Error(
+        `Builtin Code Mode cannot use CLI LLM backend "${this.agentModelId}" because it requires AI SDK tool-calling. ` +
+          'Use a direct API model for builtin mode, or run a Docker CLI agent adapter for repository-touching work.',
+      );
+    }
     const baseModel = await createLanguageModel(this.agentModelId, this.config.userConfig);
     if (!this.config.llmLogPath) return baseModel;
 

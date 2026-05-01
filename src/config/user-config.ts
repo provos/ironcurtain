@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
 import { parseModelId } from './model-provider.js';
+import { isCliLlmModelId } from '../llm/model-spec.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 
 export const USER_CONFIG_DEFAULTS = {
@@ -35,6 +36,26 @@ export const USER_CONFIG_DEFAULTS = {
   autoApprove: {
     enabled: false,
     modelId: 'anthropic:claude-haiku-4-5',
+  },
+  cliLlmBackends: {
+    codex: {
+      command: 'codex',
+      args: ['exec', '--json'],
+      modelArg: '--model',
+      promptMode: 'stdin',
+      promptFileArg: null,
+      outputMode: 'json',
+      timeoutSeconds: 120,
+    },
+    claude: {
+      command: 'claude',
+      args: ['--output-format', 'json', '-p'],
+      modelArg: '--model',
+      promptMode: 'stdin',
+      promptFileArg: null,
+      outputMode: 'json',
+      timeoutSeconds: 120,
+    },
   },
   auditRedaction: {
     enabled: true,
@@ -70,6 +91,7 @@ function createModelIdSchema(options: { readonly strict: boolean; readonly messa
         // Reject malformed colon shapes ":tag" and "name:" — these otherwise
         // slip through parseModelId's unknown-prefix fallthrough as opaque IDs.
         if (val.startsWith(':') || val.endsWith(':')) return false;
+        if (isCliLlmModelId(val)) return true;
         try {
           const { modelId } = parseModelId(val);
           if (options.strict && val.includes(':') && val === modelId) return false;
@@ -89,7 +111,8 @@ function createModelIdSchema(options: { readonly strict: boolean; readonly messa
 export const qualifiedModelId = createModelIdSchema({
   strict: true,
   message:
-    'Model ID must be "model-name" or "provider:model-name" ' + 'where provider is one of: anthropic, google, openai',
+    'Model ID must be "model-name", "provider:model-name" (provider: anthropic, google, openai), ' +
+    'or a CLI backend such as "codex-cli:default" or "claude-code-cli:sonnet"',
 });
 
 /**
@@ -117,6 +140,23 @@ const autoApproveSchema = z
   .object({
     enabled: z.boolean().optional(),
     modelId: qualifiedModelId.optional(),
+  })
+  .optional();
+
+const cliLlmBackendSchema = z.object({
+  command: z.string().min(1).optional(),
+  args: z.array(z.string()).optional(),
+  modelArg: z.string().min(1).nullable().optional(),
+  promptMode: z.enum(['stdin', 'tempfile']).optional(),
+  promptFileArg: z.string().min(1).nullable().optional(),
+  outputMode: z.enum(['json', 'text']).optional(),
+  timeoutSeconds: z.number().positive().optional(),
+});
+
+const cliLlmBackendsSchema = z
+  .object({
+    codex: cliLlmBackendSchema.optional(),
+    claude: cliLlmBackendSchema.optional(),
   })
   .optional();
 
@@ -202,7 +242,7 @@ export const GOOSE_PROVIDERS = ['anthropic', 'openai', 'google'] as const;
 /** Goose provider — structurally identical to ProviderId from model-provider.ts. */
 export type GooseProvider = (typeof GOOSE_PROVIDERS)[number];
 
-export const DOCKER_AGENTS = ['claude-code', 'goose'] as const;
+export const DOCKER_AGENTS = ['claude-code', 'codex-cli', 'goose'] as const;
 export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 
 export const SESSION_MODES = ['docker', 'builtin'] as const;
@@ -227,6 +267,7 @@ export const userConfigSchema = z.object({
   resourceBudget: resourceBudgetSchema,
   autoCompact: autoCompactSchema,
   autoApprove: autoApproveSchema,
+  cliLlmBackends: cliLlmBackendsSchema,
   auditRedaction: auditRedactionSchema,
   webSearch: webSearchSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
@@ -263,6 +304,23 @@ export interface ResolvedAutoCompactConfig {
 export interface ResolvedAutoApproveConfig {
   readonly enabled: boolean;
   readonly modelId: string;
+}
+
+/** Resolved CLI LLM backend config with all fields present. */
+export interface ResolvedCliLlmBackendConfig {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly modelArg: string | null;
+  readonly promptMode: 'stdin' | 'tempfile';
+  readonly promptFileArg: string | null;
+  readonly outputMode: 'json' | 'text';
+  readonly timeoutSeconds: number;
+}
+
+/** Resolved CLI LLM backend configs. */
+export interface ResolvedCliLlmBackendsConfig {
+  readonly codex: ResolvedCliLlmBackendConfig;
+  readonly claude: ResolvedCliLlmBackendConfig;
 }
 
 /** Resolved audit redaction config with all fields present. */
@@ -309,6 +367,7 @@ export interface ResolvedUserConfig {
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
   readonly autoApprove: ResolvedAutoApproveConfig;
+  readonly cliLlmBackends: ResolvedCliLlmBackendsConfig;
   readonly auditRedaction: ResolvedAuditRedactionConfig;
   readonly memory: ResolvedMemoryConfig;
   readonly webSearch: ResolvedWebSearchConfig;
@@ -364,6 +423,7 @@ const DEFAULT_CONFIG_CONTENT =
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+      cliLlmBackends: USER_CONFIG_DEFAULTS.cliLlmBackends,
       auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
       preferredMode: USER_CONFIG_DEFAULTS.preferredMode,
     },
@@ -589,6 +649,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   const budgetDefaults = USER_CONFIG_DEFAULTS.resourceBudget;
   const compactDefaults = USER_CONFIG_DEFAULTS.autoCompact;
   const approveDefaults = USER_CONFIG_DEFAULTS.autoApprove;
+  const cliDefaults = USER_CONFIG_DEFAULTS.cliLlmBackends;
   const redactionDefaults = USER_CONFIG_DEFAULTS.auditRedaction;
   const b = config.resourceBudget;
   const c = config.autoCompact;
@@ -624,6 +685,26 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     autoApprove: {
       enabled: a?.enabled ?? approveDefaults.enabled,
       modelId: a?.modelId ?? approveDefaults.modelId,
+    },
+    cliLlmBackends: {
+      codex: {
+        command: config.cliLlmBackends?.codex?.command ?? cliDefaults.codex.command,
+        args: config.cliLlmBackends?.codex?.args ?? cliDefaults.codex.args,
+        modelArg: config.cliLlmBackends?.codex?.modelArg ?? cliDefaults.codex.modelArg,
+        promptMode: config.cliLlmBackends?.codex?.promptMode ?? cliDefaults.codex.promptMode,
+        promptFileArg: config.cliLlmBackends?.codex?.promptFileArg ?? cliDefaults.codex.promptFileArg,
+        outputMode: config.cliLlmBackends?.codex?.outputMode ?? cliDefaults.codex.outputMode,
+        timeoutSeconds: config.cliLlmBackends?.codex?.timeoutSeconds ?? cliDefaults.codex.timeoutSeconds,
+      },
+      claude: {
+        command: config.cliLlmBackends?.claude?.command ?? cliDefaults.claude.command,
+        args: config.cliLlmBackends?.claude?.args ?? cliDefaults.claude.args,
+        modelArg: config.cliLlmBackends?.claude?.modelArg ?? cliDefaults.claude.modelArg,
+        promptMode: config.cliLlmBackends?.claude?.promptMode ?? cliDefaults.claude.promptMode,
+        promptFileArg: config.cliLlmBackends?.claude?.promptFileArg ?? cliDefaults.claude.promptFileArg,
+        outputMode: config.cliLlmBackends?.claude?.outputMode ?? cliDefaults.claude.outputMode,
+        timeoutSeconds: config.cliLlmBackends?.claude?.timeoutSeconds ?? cliDefaults.claude.timeoutSeconds,
+      },
     },
     auditRedaction: {
       enabled: r?.enabled ?? redactionDefaults.enabled,

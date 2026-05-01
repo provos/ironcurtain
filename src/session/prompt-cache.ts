@@ -8,6 +8,7 @@
 
 import type { ModelMessage, SystemModelMessage, ToolSet } from 'ai';
 import { parseModelId } from '../config/model-provider.js';
+import { isCliLlmModelId } from '../llm/model-spec.js';
 
 const ANTHROPIC_CACHE_CONTROL = {
   anthropic: { cacheControl: { type: 'ephemeral' } },
@@ -91,6 +92,7 @@ export class NoOpCacheStrategy implements PromptCacheStrategy {
  * Factory: selects the right cache strategy based on the model's provider.
  */
 export function createCacheStrategy(qualifiedModelId: string): PromptCacheStrategy {
+  if (isCliLlmModelId(qualifiedModelId)) return new NoOpCacheStrategy();
   const { provider } = parseModelId(qualifiedModelId);
   if (provider === 'anthropic') {
     return new AnthropicCacheStrategy();

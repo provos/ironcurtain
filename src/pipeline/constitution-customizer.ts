@@ -12,8 +12,7 @@ import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } fro
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
-import type { LanguageModel, ModelMessage, SystemModelMessage } from 'ai';
-import { generateText, Output } from 'ai';
+import type { ModelMessage, SystemModelMessage } from 'ai';
 import chalk from 'chalk';
 import { z } from 'zod';
 import { getBaseUserConstitutionPath, getUserConstitutionPath, getUserGeneratedDir } from '../config/paths.js';
@@ -23,6 +22,8 @@ import type { GitHubIdentity } from './github-identity.js';
 import { discoverGitHubIdentity, resolveGitHubToken } from './github-identity.js';
 import { createPipelineLlm, loadExistingArtifact } from './pipeline-shared.js';
 import type { ToolAnnotation, ToolAnnotationsFile } from './types.js';
+import { generateTextWithModel, type TextGenerationModel } from '../llm/text-generation.js';
+import { parseJsonWithSchema, schemaToPromptHint } from '../llm/json.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -374,19 +375,23 @@ function handleCancel(value: unknown): void {
 // ---------------------------------------------------------------------------
 
 export async function callLlm(
-  model: LanguageModel,
+  model: TextGenerationModel,
   systemPrompt: string | SystemModelMessage,
   messages: ModelMessage[],
 ): Promise<CustomizerResponse> {
-  const result = await generateText({
-    model,
-    output: Output.object({ schema: CustomizerResponseSchema }),
+  const result = await generateTextWithModel(model, {
     system: systemPrompt,
-    messages,
+    messages: [
+      ...messages,
+      {
+        role: 'user',
+        content: 'Return your response in the required JSON shape.' + schemaToPromptHint(CustomizerResponseSchema),
+      },
+    ],
     maxOutputTokens: 4096,
   });
 
-  return result.output;
+  return parseJsonWithSchema(result.text, CustomizerResponseSchema);
 }
 
 // ---------------------------------------------------------------------------

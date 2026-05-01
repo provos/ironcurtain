@@ -502,21 +502,14 @@ describe('WF008 — visit-cap transition ordering', () => {
   // `isApprovalExitTransition` still treats them as loop-continuing for
   // defense-in-depth when multi-field `when` becomes a supported feature.
 
-  it('flags the vuln-discovery workflow (regression sample)', () => {
-    // Targeted check: the two bugs reported by the Copilot reviewer both
-    // fire and report the right states. Kept separate from the "bundled
-    // workflows lint clean" regression so that the intent of this check
-    // is discoverable by greppers.
+  it('accepts the appsec-assessment workflow (regression sample)', () => {
     const raw = parseYaml(
-      readFileSync(resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'vuln-discovery.yaml'), 'utf-8'),
+      readFileSync(resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'appsec-assessment.yaml'), 'utf-8'),
       { maxAliasCount: 0 },
     );
     const def = validateDefinition(raw);
     const diagnostics = lintWorkflow(def, stubCtx);
     const wf008 = diagnostics.filter((d) => d.code === 'WF008').map((d) => d.stateId);
-    // After Step 3 reorders the YAML this list is empty; WF008 no longer
-    // fires. (The bundled-workflows regression below asserts the same
-    // thing more broadly.)
     expect(wf008).toEqual([]);
   });
 });
@@ -532,7 +525,7 @@ describe('bundled workflows lint clean', () => {
   // GLOBAL_PERSONA throughout, so WF007 must skip via the alias, not the stub.
   const bundledCtx: LintContext = { personaExists: () => false };
 
-  for (const name of ['vuln-discovery.yaml', 'design-and-code.yaml']) {
+  for (const name of ['appsec-assessment.yaml', 'design-and-code.yaml']) {
     it(`${name}: zero errors`, () => {
       const raw = parseYaml(readFileSync(resolve(workflowsDir, name), 'utf-8'), {
         maxAliasCount: 0,

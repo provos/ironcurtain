@@ -17,6 +17,7 @@ mkdirSync(resolve(distConfig, 'generated'), { recursive: true });
 // Copy static config assets
 for (const file of [
   'constitution.md',
+  'constitution-appsec-defender.md',
   'constitution-readonly.md',
   'constitution-user-base.md',
   'mcp-servers.json',

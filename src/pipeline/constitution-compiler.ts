@@ -7,8 +7,7 @@
  * that faithfully implements the non-structural principles.
  */
 
-import type { LanguageModel, SystemModelMessage } from 'ai';
-import { generateText } from 'ai';
+import type { SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import {
   DEFAULT_MAX_TOKENS,
@@ -29,6 +28,7 @@ import type {
 } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 import { formatFailedResults } from './policy-verifier.js';
+import { generateTextWithModel, type TextGenerationModel } from '../llm/text-generation.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
@@ -432,7 +432,7 @@ export async function compileConstitution(
   constitutionText: string,
   annotations: StoredToolAnnotation[],
   config: CompilerConfig,
-  llm: LanguageModel,
+  llm: TextGenerationModel,
   repairContext?: RepairContext,
   onProgress?: (message: string) => void,
   system?: string | SystemModelMessage,
@@ -482,7 +482,7 @@ const INITIAL_COMPILE_MESSAGE = 'Compile the constitution into policy rules foll
  */
 export class ConstitutionCompilerSession {
   private readonly systemPrompt: string | SystemModelMessage;
-  private readonly model: LanguageModel;
+  private readonly model: TextGenerationModel;
   private readonly serverNames: [string, ...string[]];
   private readonly toolNames: [string, ...string[]];
   private readonly schema: ReturnType<typeof buildCompilerResponseSchema>;
@@ -493,7 +493,7 @@ export class ConstitutionCompilerSession {
 
   constructor(options: {
     system: string | SystemModelMessage;
-    model: LanguageModel;
+    model: TextGenerationModel;
     annotations: StoredToolAnnotation[];
     schemaOptions?: CompilerSchemaOptions;
   }) {
@@ -537,8 +537,7 @@ export class ConstitutionCompilerSession {
 
     onProgress?.('Compiling...');
 
-    const result = await generateText({
-      model: this.model,
+    const result = await generateTextWithModel(this.model, {
       system: this.systemPrompt,
       messages: this.history,
       maxOutputTokens: DEFAULT_MAX_TOKENS,
@@ -557,8 +556,7 @@ export class ConstitutionCompilerSession {
     // the successful response is persisted in the conversation.
     onProgress?.('Schema repair 1/1...');
 
-    const retryResult = await generateText({
-      model: this.model,
+    const retryResult = await generateTextWithModel(this.model, {
       system: this.systemPrompt,
       messages: [
         ...this.history,
@@ -626,8 +624,7 @@ export class ConstitutionCompilerSession {
 
     onProgress?.('Point-fix repair...');
 
-    const result = await generateText({
-      model: this.model,
+    const result = await generateTextWithModel(this.model, {
       system: this.systemPrompt,
       messages: this.history,
       maxOutputTokens: DEFAULT_MAX_TOKENS,
@@ -653,8 +650,7 @@ export class ConstitutionCompilerSession {
     // First parse failed -- attempt one schema repair retry
     onProgress?.('Patch schema repair 1/1...');
 
-    const retryResult = await generateText({
-      model: this.model,
+    const retryResult = await generateTextWithModel(this.model, {
       system: this.systemPrompt,
       messages: [
         ...this.history,

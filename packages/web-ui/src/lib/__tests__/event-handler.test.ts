@@ -884,10 +884,10 @@ describe('handleEvent', () => {
       const state = createMockState();
       handleEvent(state, createMockEffects(), 'workflow.started', {
         workflowId: 'wf-task',
-        name: 'vuln-discovery',
-        taskDescription: 'Investigate the auth bypass report',
+        name: 'appsec-assessment',
+        taskDescription: 'Assess the auth bypass report',
       });
-      expect(state.workflows.get('wf-task')?.taskDescription).toBe('Investigate the auth bypass report');
+      expect(state.workflows.get('wf-task')?.taskDescription).toBe('Assess the auth bypass report');
     });
 
     it('captures error string from workflow.failed onto the summary', () => {

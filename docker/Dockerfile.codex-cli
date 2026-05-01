@@ -1,0 +1,13 @@
+FROM ironcurtain-base:latest
+
+USER root
+RUN npm install -g @openai/codex
+
+COPY entrypoint-codex-cli.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER codespace
+RUN mkdir -p /home/codespace/.codex
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+

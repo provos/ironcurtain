@@ -16,7 +16,6 @@
  * forward calls to the real backend without any policy evaluation.
  */
 
-import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { CompiledPolicyFile, DynamicListsFile, StoredToolAnnotationsFile } from '../pipeline/types.js';
 import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
 import { AuditLog } from './audit-log.js';
@@ -41,6 +40,7 @@ import { loadPersonaPolicyArtifacts, safeForDisplay } from '../config/index.js';
 import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { proxyAnnotations, proxyPolicyRules } from '../docker/proxy-tools.js';
 import { ControlServer, type ControlServerAddress, type ControlServerListenOptions } from './control-server.js';
+import type { TextGenerationModel } from '../llm/text-generation.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -84,7 +84,7 @@ export interface ToolCallCoordinatorOptions {
   /** Whether to redact PII/credentials before writing. */
   readonly auditRedact?: boolean;
   /** Auto-approval model (null = disabled). */
-  readonly autoApproveModel?: LanguageModelV3 | null;
+  readonly autoApproveModel?: TextGenerationModel | null;
   /** Directory for file-based escalation IPC (used by file-IPC callers). */
   readonly escalationDir?: string;
   /**
@@ -140,7 +140,7 @@ export class ToolCallCoordinator {
   private readonly mcpManager: MCPClientManager;
   private readonly ownedMcpManager: boolean;
   private readonly resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>;
-  private readonly autoApproveModel: LanguageModelV3 | null;
+  private readonly autoApproveModel: TextGenerationModel | null;
   private readonly escalationDir?: string;
   private readonly onEscalation?: EscalationPromptFn;
   private readonly controlApiClient: ControlApiClient | null;

@@ -16,16 +16,17 @@
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { LanguageModel, ToolSet } from 'ai';
+import type { ToolSet } from 'ai';
 import { generateText, jsonSchema, stepCountIs, tool } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import { LIST_TYPE_REGISTRY } from './dynamic-list-types.js';
 import { computeHash } from './pipeline-shared.js';
 import type { ListDefinition, ResolvedList, DynamicListsFile } from './types.js';
+import { requireApiLanguageModel, type TextGenerationModel } from '../llm/text-generation.js';
 
 export interface ListResolverConfig {
-  readonly model: LanguageModel;
+  readonly model: TextGenerationModel;
 
   /**
    * Optional proxy connection for data-backed list resolution.
@@ -112,7 +113,7 @@ function postProcess(rawValues: string[], definition: ListDefinition, existing?:
  */
 async function resolveViaLlm(
   prompt: string,
-  model: LanguageModel,
+  model: TextGenerationModel,
   onProgress?: (message: string) => void,
 ): Promise<string[]> {
   const { output } = await generateObjectWithRepair({
@@ -166,14 +167,15 @@ export function bridgeProxyTools(client: Client, tools: ReadonlyArray<Tool>): To
  */
 async function resolveViaMcpTools(
   prompt: string,
-  model: LanguageModel,
+  model: TextGenerationModel,
   mcpTools: ToolSet,
   onProgress?: (message: string) => void,
 ): Promise<string[]> {
   onProgress?.('Querying MCP tools...');
 
+  const apiModel = requireApiLanguageModel(model, 'MCP-backed dynamic list resolution');
   const result = await generateText({
-    model,
+    model: apiModel,
     tools: mcpTools,
     stopWhen: [stepCountIs(MAX_MCP_TOOL_STEPS)],
     prompt: `${prompt}\n\nUse the available tools to query the data source, then provide your final answer as a JSON object with a "values" array containing the list items. Example: {"values": ["item1", "item2"]}`,

@@ -7,8 +7,7 @@
  * additional probe scenarios. Up to maxRounds iterations.
  */
 
-import type { LanguageModel, SystemModelMessage } from 'ai';
-import { generateText } from 'ai';
+import type { SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import { DEFAULT_MAX_TOKENS, parseJsonWithSchema, schemaToPromptHint } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
@@ -35,6 +34,7 @@ import type {
   AttributedFailure,
   ScenarioCorrection,
 } from './types.js';
+import { generateTextWithModel, type TextGenerationModel } from '../llm/text-generation.js';
 export type { DiscardedScenario };
 
 const DEFAULT_MAX_ROUNDS = 3;
@@ -283,7 +283,7 @@ type JudgeOutput = z.infer<ReturnType<typeof buildJudgeResponseSchema>>;
  */
 export class PolicyVerifierSession {
   private readonly systemPrompt: string | SystemModelMessage;
-  private readonly model: LanguageModel;
+  private readonly model: TextGenerationModel;
   private readonly schema: ReturnType<typeof buildJudgeResponseSchema>;
   private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   private readonly schemaHint: string;
@@ -291,7 +291,7 @@ export class PolicyVerifierSession {
 
   constructor(options: {
     system: string | SystemModelMessage;
-    model: LanguageModel;
+    model: TextGenerationModel;
     serverNames: [string, ...string[]];
     toolNames: [string, ...string[]];
     storedAnnotations?: StoredToolAnnotation[];
@@ -320,8 +320,7 @@ export class PolicyVerifierSession {
 
     onProgress?.('Judging...');
 
-    const result = await generateText({
-      model: this.model,
+    const result = await generateTextWithModel(this.model, {
       system: this.systemPrompt,
       messages: this.history,
       maxOutputTokens: DEFAULT_MAX_TOKENS,
@@ -340,8 +339,7 @@ export class PolicyVerifierSession {
     // the successful response is persisted in the conversation.
     onProgress?.('Schema repair 1/1...');
 
-    const retryResult = await generateText({
-      model: this.model,
+    const retryResult = await generateTextWithModel(this.model, {
       system: this.systemPrompt,
       messages: [
         ...this.history,
@@ -388,7 +386,7 @@ export async function verifyPolicy(
   toolAnnotations: StoredToolAnnotationsFile,
   protectedPaths: string[],
   scenarios: TestScenario[],
-  llm: LanguageModel,
+  llm: TextGenerationModel,
   maxRounds: number | undefined = DEFAULT_MAX_ROUNDS,
   allowedDirectory: string | undefined,
   onProgress: ((message: string) => void) | undefined,

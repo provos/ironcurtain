@@ -15,7 +15,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { Protocol } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
 import { CONTAINER_WORKSPACE_DIR } from '../docker/agent-adapter.js';
-import { createLanguageModel } from '../config/model-provider.js';
+import { createTextGenerationModel, type TextGenerationModel } from '../llm/text-generation.js';
 import {
   resolveNodeModulesBin,
   checkSandboxAvailability,
@@ -36,7 +36,6 @@ import {
 import * as logger from '../logger.js';
 import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../observability/llm-logger.js';
-import type { LanguageModelV3 } from '@ai-sdk/provider';
 
 // Workaround: UTCP creates MCP SDK Client instances without setting a per-request
 // timeout, so they inherit the SDK's DEFAULT_REQUEST_TIMEOUT_MSEC (60s). This is
@@ -543,12 +542,15 @@ export class Sandbox {
  * Wraps a language model with LLM logging middleware when a log path is
  * set. Mirrors the logging the proxy previously did in-subprocess.
  */
-function wrapAutoApproveModel(model: LanguageModelV3, llmLogPath?: string): LanguageModelV3 {
-  if (!llmLogPath) return model;
-  return wrapLanguageModel({
-    model,
-    middleware: createLlmLoggingMiddleware(llmLogPath, { stepName: 'auto-approve' }),
-  });
+function wrapAutoApproveModel(model: TextGenerationModel, llmLogPath?: string): TextGenerationModel {
+  if (!llmLogPath || model.kind !== 'api') return model;
+  return {
+    ...model,
+    languageModel: wrapLanguageModel({
+      model: model.languageModel,
+      middleware: createLlmLoggingMiddleware(llmLogPath, { stepName: 'auto-approve' }),
+    }),
+  };
 }
 
 /**
@@ -589,11 +591,11 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<CoordinatorB
 
   // Auto-approve model: build in-process now that the subprocess no
   // longer owns it.
-  let autoApproveModel: LanguageModelV3 | null = null;
+  let autoApproveModel: TextGenerationModel | null = null;
   const autoApprove = config.userConfig.autoApprove;
   if (autoApprove.enabled) {
     try {
-      const base = await createLanguageModel(autoApprove.modelId, config.userConfig);
+      const base = await createTextGenerationModel(autoApprove.modelId, config.userConfig);
       autoApproveModel = wrapAutoApproveModel(base, config.autoApproveLlmLogPath);
     } catch (err) {
       // Model construction failure is non-fatal: auto-approve becomes

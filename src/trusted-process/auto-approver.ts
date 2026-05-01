@@ -22,12 +22,13 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { LanguageModelV3 } from '@ai-sdk/provider';
-import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { getRoleDefinition } from '../types/argument-roles.js';
 import { extractDomainForRole } from './domain-utils.js';
 import type { ToolAnnotation, ArgumentRole } from '../pipeline/types.js';
+import type { TextGenerationModelLike } from '../llm/text-generation.js';
+import { generateTextWithModel } from '../llm/text-generation.js';
+import { parseJsonWithSchema, schemaToPromptHint } from '../llm/json.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -139,7 +140,10 @@ const responseSchema = z.object({
  * @param model - Pre-created LanguageModel instance
  * @returns The auto-approve decision with reasoning
  */
-export async function autoApprove(context: AutoApproveContext, model: LanguageModelV3): Promise<AutoApproveResult> {
+export async function autoApprove(
+  context: AutoApproveContext,
+  model: TextGenerationModelLike,
+): Promise<AutoApproveResult> {
   if (!context.userMessage.trim()) {
     return {
       decision: 'escalate',
@@ -148,21 +152,13 @@ export async function autoApprove(context: AutoApproveContext, model: LanguageMo
   }
 
   try {
-    const result = await generateText({
-      model,
+    const result = await generateTextWithModel(model, {
       system: SYSTEM_PROMPT,
-      prompt: buildUserPrompt(context),
-      output: Output.object({ schema: responseSchema }),
+      prompt: buildUserPrompt(context) + schemaToPromptHint(responseSchema),
+      maxOutputTokens: 512,
     });
 
-    const parsed = result.output;
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: output may be undefined at runtime if model fails
-    if (!parsed) {
-      return {
-        decision: 'escalate',
-        reasoning: 'Auto-approver returned invalid response; escalating to human',
-      };
-    }
+    const parsed = parseJsonWithSchema(result.text, responseSchema);
 
     return {
       decision: parsed.decision,

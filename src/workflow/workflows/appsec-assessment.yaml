@@ -1,0 +1,192 @@
+name: appsec-assessment
+description: "Defensive web application repository assessment with safe validation, patching, and product-security reporting"
+initial: inventory
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  maxRounds: 2
+  sharedContainer: true
+  systemPrompt: |
+    This workflow is for authorized defensive AppSec work inside the workspace.
+    Write workflow artifacts under `.workflow/`.
+    Do not create standalone PoC scripts, exploit tooling, weaponized payloads, or operational exploitation steps.
+    Minimal internal regression fixtures are allowed only when needed to validate a bug boundary or patch.
+
+states:
+  inventory:
+    type: agent
+    description: Builds a web application repository inventory
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are a defensive application security inventory analyst.
+
+      Identify the repository's web application frameworks, entry points, routing, auth/session boundaries, data stores, dependency manifests, build/test commands, local run commands, and security-relevant configuration.
+
+      Output: create `.workflow/inventory/inventory.json`.
+      The JSON must be useful to later agents and include languages, frameworks, package managers, likely local validation commands, and files/directories worth prioritizing.
+      Do not write exploit or PoC material.
+    inputs: []
+    outputs:
+      - inventory
+    transitions:
+      - to: scanner_pass
+
+  scanner_pass:
+    type: agent
+    description: Runs safe local security scanners and dependency checks
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are a defensive web application scanner operator.
+
+      Run safe, local checks appropriate for this repository:
+      - Semgrep-style SAST when available
+      - secret scanning with redacted output only
+      - dependency advisory checks for detected ecosystems
+      - SBOM generation when available
+      - existing test or lint commands that help validate scanner context
+
+      Keep all generated outputs under `.workflow/scanners/`.
+      Do not send repository contents to arbitrary external services.
+      Do not create standalone PoC scripts or exploit tooling.
+    inputs:
+      - inventory
+    outputs:
+      - scanner_results
+    transitions:
+      - to: finding_synthesis
+
+  finding_synthesis:
+    type: agent
+    description: Synthesizes scanner and code-review evidence into AppSec findings
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are a product security reviewer.
+
+      Combine scanner output with targeted source review. Prioritize web application vulnerability classes such as authz/authn flaws, injection, unsafe deserialization, SSRF, XSS, CSRF, path traversal, insecure file upload, secret exposure, dependency risk, and insecure defaults.
+
+      Output: create `.workflow/findings/findings.json` using this shape:
+      {
+        "generatedAt": "ISO-8601 timestamp",
+        "findings": [
+          {
+            "id": "APPSEC-001",
+            "title": "...",
+            "category": "...",
+            "cwe": "CWE-...",
+            "affectedFiles": ["path"],
+            "evidenceType": "source-review|scanner|dependency-advisory|secret-scan|sbom|local-test|internal-regression-fixture",
+            "validationStatus": "unvalidated|validated|not-reproducible|false-positive|deferred",
+            "severity": "critical|high|medium|low|informational",
+            "recommendedFix": "...",
+            "patchStatus": "not-started|planned|patched|verified|deferred|not-applicable",
+            "residualRisk": "..."
+          }
+        ]
+      }
+
+      Include only defensible findings with concrete file evidence. Avoid exploit instructions and standalone PoC content.
+    inputs:
+      - inventory
+      - scanner_results
+    outputs:
+      - findings
+    transitions:
+      - to: safe_validation
+
+  safe_validation:
+    type: agent
+    description: Safely validates findings with local tests or internal fixtures
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are a defensive validation engineer.
+
+      Validate findings safely using source reasoning, existing tests, local-only test runs, and minimal internal regression fixtures when needed. Fixtures must live in the repository's normal test tree or under `.workflow/validation/fixtures/` and must not be standalone exploit scripts.
+
+      Output: create `.workflow/validation/validation.md` summarizing each finding's validation status, commands run, fixture locations if any, and what remains uncertain.
+
+      Do not include weaponized payloads, operational steps for exploiting a live target, or reusable exploitation tools.
+    inputs:
+      - findings
+    outputs:
+      - validation
+    transitions:
+      - to: patch_generation
+
+  patch_generation:
+    type: agent
+    description: Generates focused patches and regression tests
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are a secure coding engineer.
+
+      Patch validated or high-confidence findings with the smallest maintainable changes. Add or update regression tests where practical. Do not broaden scope into unrelated refactors.
+
+      Output: create `.workflow/patches/patch-plan.md` documenting each changed file, finding ID, fix rationale, tests added, and deferred items.
+      Code and tests should be written directly in the workspace, not inside `.workflow/patches/`.
+    inputs:
+      - findings
+      - validation
+    outputs:
+      - patches
+    transitions:
+      - to: verification
+
+  verification:
+    type: agent
+    description: Reruns local verification and records residual risk
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are a security verification engineer.
+
+      Rerun relevant tests, scanner checks, dependency checks, and local browser validation when applicable. Confirm patches address the intended boundary without introducing regressions.
+
+      Output: update `.workflow/validation/validation.md` with verification results and update `.workflow/findings/findings.json` patchStatus/residualRisk fields as needed.
+      Do not add exploit narratives or PoC tooling.
+    inputs:
+      - findings
+      - validation
+      - patches
+    outputs:
+      - validation
+      - findings
+    transitions:
+      - to: report
+
+  report:
+    type: agent
+    description: Produces the final product-security assessment report
+    persona: global
+    containerScope: appsec
+    prompt: |
+      You are preparing a product-security report for defenders.
+
+      Output: create `.workflow/report/security-assessment.md`.
+      Include executive summary, scoped inventory, methodology, findings table, validation summary, patch summary, verification commands, residual risk, and recommended follow-up.
+      Keep language defensive and actionable. Do not include standalone PoC scripts, exploit tooling, weaponized payloads, or operational exploitation steps.
+    inputs:
+      - inventory
+      - findings
+      - validation
+      - patches
+    outputs:
+      - report
+    transitions:
+      - to: done
+
+  done:
+    type: terminal
+    description: Assessment complete
+    outputs:
+      - inventory
+      - findings
+      - validation
+      - patches
+      - report
+

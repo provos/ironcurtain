@@ -8,12 +8,12 @@
  * skipped and default-deny handles all its tools.
  */
 
-import type { LanguageModel } from 'ai';
 import pLimit from 'p-limit';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ConstitutionKind } from './pipeline-runner.js';
 import type { ToolAnnotation } from './types.js';
+import type { TextGenerationModel } from '../llm/text-generation.js';
 
 /** Cap concurrent pre-filter LLM calls to avoid rate-limit bursts. */
 const PREFILTER_CONCURRENCY = 5;
@@ -108,7 +108,7 @@ export async function checkServerRelevance(
   text: string,
   serverName: string,
   tools: ReadonlyArray<ToolAnnotation>,
-  model: LanguageModel,
+  model: TextGenerationModel,
   kind: ConstitutionKind,
 ): Promise<PrefilterDecision> {
   try {
@@ -140,7 +140,7 @@ export async function checkServerRelevance(
 export async function prefilterServers(
   text: string,
   servers: Array<[string, ReadonlyArray<ToolAnnotation>]>,
-  model: LanguageModel,
+  model: TextGenerationModel,
   kind: ConstitutionKind,
 ): Promise<PrefilterDecision[]> {
   const trimmed = text.trim();

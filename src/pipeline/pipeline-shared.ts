@@ -10,14 +10,12 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { LanguageModel } from 'ai';
-import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
 import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
 import type pLimit from 'p-limit';
 import ora, { type Ora } from 'ora';
 import { applyAllowedDirectoryToMcpArgs, computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
-import { createLanguageModel } from '../config/model-provider.js';
+import { createTextGenerationModel, type TextGenerationModel } from '../llm/text-generation.js';
 
 type LimitFunction = ReturnType<typeof pLimit>;
 import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '../config/paths.js';
@@ -232,9 +230,9 @@ export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
 // ---------------------------------------------------------------------------
 
 export interface PipelineLlm {
-  model: LanguageModel;
+  model: TextGenerationModel;
   /** The unwrapped base model (no middleware). Used to create per-server models. */
-  baseLlm: LanguageModelV3;
+  baseLlm: TextGenerationModel;
   logContext: LlmLogContext;
   logPath: string;
   cacheStrategy: PromptCacheStrategy;
@@ -246,13 +244,19 @@ export interface PipelineLlm {
  */
 export async function createPipelineLlm(generatedDir: string, initialStepName: string): Promise<PipelineLlm> {
   const userConfig = loadUserConfig();
-  const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig);
+  const baseLlm = await createTextGenerationModel(userConfig.policyModelId, userConfig);
   const logContext: LlmLogContext = { stepName: initialStepName };
   const logPath = resolve(generatedDir, 'llm-interactions.jsonl');
-  const model = wrapLanguageModel({
-    model: baseLlm,
-    middleware: createLlmLoggingMiddleware(logPath, logContext),
-  });
+  const model =
+    baseLlm.kind === 'api'
+      ? {
+          ...baseLlm,
+          languageModel: wrapLanguageModel({
+            model: baseLlm.languageModel,
+            middleware: createLlmLoggingMiddleware(logPath, logContext),
+          }),
+        }
+      : baseLlm;
   const cacheStrategy = createCacheStrategy(userConfig.policyModelId);
   return { model, baseLlm, logContext, logPath, cacheStrategy };
 }
@@ -263,15 +267,21 @@ export async function createPipelineLlm(generatedDir: string, initialStepName: s
  * lightweight logging middleware is per-server.
  */
 export function createPerServerModel(
-  baseLlm: LanguageModelV3,
+  baseLlm: TextGenerationModel,
   logPath: string,
   serverName: string,
-): { model: LanguageModelV3; logContext: LlmLogContext } {
+): { model: TextGenerationModel; logContext: LlmLogContext } {
   const logContext: LlmLogContext = { stepName: `init-${serverName}` };
-  const model = wrapLanguageModel({
-    model: baseLlm,
-    middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false, appendOnly: true }),
-  });
+  const model =
+    baseLlm.kind === 'api'
+      ? {
+          ...baseLlm,
+          languageModel: wrapLanguageModel({
+            model: baseLlm.languageModel,
+            middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false, appendOnly: true }),
+          }),
+        }
+      : baseLlm;
   return { model, logContext };
 }
 
@@ -280,11 +290,10 @@ export function createPerServerModel(
  * the semaphore before delegating. This caps total concurrent LLM API
  * calls across all servers.
  */
-export function createThrottledModel(model: LanguageModelV3, semaphore: LimitFunction): LanguageModelV3 {
+export function createThrottledModel(model: TextGenerationModel, semaphore: LimitFunction): TextGenerationModel {
   return {
     ...model,
-    doGenerate: (options: LanguageModelV3CallOptions) => semaphore(() => model.doGenerate(options)),
-    doStream: (options: LanguageModelV3CallOptions) => semaphore(() => model.doStream(options)),
+    callLimiter: (fn) => semaphore(fn),
   };
 }
 

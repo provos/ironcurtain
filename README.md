@@ -45,7 +45,7 @@ IronCurtain supports two session modes with different trust models:
 
 - **Builtin Agent (Code Mode)** — IronCurtain's own LLM agent writes TypeScript snippets that execute in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine. Every tool call exits the sandbox as a structured MCP request, passes through the policy engine (allow / deny / escalate), and only then reaches the real MCP server.
 
-- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), MCP tool calls pass through the same policy engine, and package installations (npm/PyPI) go through a validating registry proxy.
+- **Docker Agent Mode** — An external agent (Claude Code, Codex CLI, Goose, etc.) runs inside a Docker container with no network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), MCP tool calls pass through the same policy engine, and package installations (npm/PyPI) go through a validating registry proxy.
 
 In both modes, the agent is **untrusted**. Security does not depend on the model following instructions — it is enforced at the boundary.
 
@@ -57,7 +57,7 @@ See [SANDBOXING.md](SANDBOXING.md) for the full architecture with diagrams, laye
 
 - Node.js 22+ (required by `isolated-vm`; maximum Node 25)
 - Docker — not required but **strongly recommended** for Docker Agent Mode, which provides the strongest isolation
-- An API key for at least one LLM provider (Anthropic, Google, or OpenAI)
+- An API key for at least one LLM provider (Anthropic, Google, or OpenAI), or a supported local CLI LLM backend for IronCurtain control-plane calls
 
 ### Install
 
@@ -77,13 +77,21 @@ npm install
 
 ### One-time setup
 
-**1. Set your API key:**
+**1. Set your API key or CLI backend:**
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 You can also place keys in a `.env` file in the project root (loaded automatically via `dotenv`), or add them to `~/.ironcurtain/config.json` via `ironcurtain config`. Environment variables take precedence over config file values. Supported: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
+
+If you prefer not to use direct API calls for IronCurtain control-plane LLM work, configure a CLI backend instead:
+
+```bash
+ironcurtain config
+# Models -> choose codex-cli:default or claude-code-cli:default
+# CLI LLM Backends -> adjust command, args, output mode, and timeout
+```
 
 **2. Run the first-start wizard** (runs automatically on first `ironcurtain start`, or explicitly):
 
@@ -99,7 +107,7 @@ IronCurtain ships with a default policy geared towards the developer experience 
 
 ### Terminal multiplexer (recommended)
 
-The recommended way to use IronCurtain. It gives you the full power of your agent's interactive TUI (Claude Code or Goose) while IronCurtain mediates every tool call through its policy engine — all in a single terminal.
+The recommended way to use IronCurtain. It gives you the full power of your agent's interactive TUI (Claude Code, Codex CLI, or Goose) while IronCurtain mediates every tool call through its policy engine — all in a single terminal.
 
 ```bash
 ironcurtain mux
@@ -137,6 +145,26 @@ IronCurtain can orchestrate multiple AI agents through structured workflows -- p
 ironcurtain workflow start design-and-code \
   "Build a REST API with authentication" --model anthropic:claude-haiku-4-5
 ```
+
+IronCurtain also ships a defender-focused web application security assessment workflow:
+
+```bash
+ironcurtain workflow start appsec-assessment \
+  "Assess this web application repository for auth, injection, dependency, and secret risks" \
+  --workspace ./my-web-app
+```
+
+`appsec-assessment` is built for internal product security work. It inventories the repository, runs local scanner and dependency checks, synthesizes findings, validates them with source reasoning or minimal internal regression fixtures, generates patches/tests, verifies the fixes, and writes a final product-security report. It intentionally forbids standalone PoC scripts, exploit tooling, weaponized payloads, and operational exploitation steps.
+
+Standard assessment artifacts are written under `.workflow/`:
+
+- `.workflow/inventory/inventory.json`
+- `.workflow/findings/findings.json`
+- `.workflow/validation/validation.md`
+- `.workflow/patches/patch-plan.md`
+- `.workflow/report/security-assessment.md`
+
+Findings use the `AppSecFinding` schema: id, title, category/CWE, affected files, evidence type, validation status, severity, recommended fix, patch status, and residual risk.
 
 Workflows can also be started, monitored, and reviewed from the web UI (`ironcurtain daemon --web-ui`). See [WORKFLOWS.md](WORKFLOWS.md) for the full documentation.
 
@@ -269,7 +297,29 @@ Edit configuration interactively:
 ironcurtain config
 ```
 
-Key configuration areas: models and API keys, resource budgets (token/step/time/cost limits), auto-approve escalations, web search provider, audit redaction, and memory server LLM settings. See [CONFIG.md](CONFIG.md) for the full reference.
+Key configuration areas: models and API keys, CLI LLM backends, resource budgets (token/step/time/cost limits), auto-approve escalations, web search provider, audit redaction, and memory server LLM settings. See [CONFIG.md](CONFIG.md) for the full reference.
+
+### CLI LLM Backends
+
+Most IronCurtain control-plane LLM calls can use either a direct API model or a host-side CLI backend. This covers policy compilation, scenario generation, repair loops, summarization, auto-approval checks, and doctor round trips.
+
+Supported CLI model ID prefixes:
+
+- `codex-cli:<model>` for Codex CLI
+- `claude-cli:<model>` or `claude-code-cli:<model>` for Claude CLI / Claude Code CLI
+
+Examples:
+
+```json
+{
+  "policyModelId": "codex-cli:default",
+  "autoApprove": { "enabled": true, "modelId": "claude-code-cli:sonnet" }
+}
+```
+
+CLI-backed calls are trusted IronCurtain host operations. They are launched with argument arrays, and prompts are delivered through stdin or a temporary prompt file. If a CLI backend does not report token usage, IronCurtain marks token and cost accounting unavailable for that call and continues enforcing step and wall-clock budgets.
+
+Builtin Code Mode still requires an AI SDK-compatible API model because it depends on model semantics and tool-calling behavior. If you select a CLI model for builtin mode, IronCurtain fails clearly and tells you to use a direct API model or a Docker CLI agent adapter. Repository-touching CLI agents should run through Docker Agent Mode, where Codex CLI and Claude Code remain contained and mediated.
 
 To route LLM traffic through a gateway like LiteLLM or OpenRouter (in both Code Mode and Docker Agent Mode), see [MODEL_ROUTING.md](MODEL_ROUTING.md).
 
@@ -287,6 +337,8 @@ IronCurtain ships with six pre-configured MCP servers. All tool calls (except me
 | **Memory**           | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |
 
 Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`). See [ADDING_MCP_SERVERS.md](ADDING_MCP_SERVERS.md) to add your own.
+
+Docker agent images also include defensive AppSec tooling for local repository assessment with `--network=none`: Semgrep, detect-secrets, pip-audit, CycloneDX cdxgen for SBOM generation, and Playwright/Chromium for local browser validation. These tools are used by the bundled `appsec-assessment` workflow when they fit the target repository.
 
 ### Network Passthrough (Docker Agent Mode)
 
@@ -323,6 +375,8 @@ See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat
 | Issue                                   | Guidance                                                                                                                                                                                                                                                 |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Missing API key**                     | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`.                                                                                    |
+| **CLI LLM backend not runnable**        | Run `ironcurtain doctor`. It probes configured Codex/Claude CLI backends and reports missing commands, nonzero exits, malformed output, timeout behavior, and whether token usage is available. Update `cliLlmBackends` with `ironcurtain config`.       |
+| **Builtin mode rejects CLI model**      | Builtin Code Mode requires an AI SDK-compatible API model. Use a direct API model for builtin mode, or switch to Docker Agent Mode with the Codex CLI / Claude Code adapter for repository-touching work.                                                |
 | **Sandbox unavailable**                 | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                         |
 | **Budget exhausted**                    | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                                  |
 | **Node version errors**                 | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                          |
@@ -350,7 +404,9 @@ See [TESTING.md](TESTING.md) for the full testing guide, including integration t
 src/
 ├── index.ts                    # Entry point
 ├── cli.ts                      # CLI command dispatcher
+├── appsec/                     # Defensive AppSec artifact schemas
 ├── config/                     # Configuration loading, constitution, MCP server definitions
+├── llm/                        # API/CLI text-generation abstraction for control-plane LLM calls
 ├── session/                    # Multi-turn session management, budgets, loop detection
 ├── sandbox/                    # V8 isolated execution environment
 ├── trusted-process/            # Policy engine, MCP proxy, audit log, escalation handler

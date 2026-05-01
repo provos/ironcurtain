@@ -34,6 +34,11 @@ RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
 
 RUN npm install -g node-gyp
 
+# Defensive AppSec tooling for web application repository assessment.
+# Pre-installed because agent containers normally run with --network=none.
+RUN python3 -m pip install --break-system-packages semgrep detect-secrets pip-audit && \
+    npm install -g @cyclonedx/cdxgen
+
 # Playwright + Chromium: pre-install so containers work with --network=none.
 # Install system deps as root, then browser to a shared path.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers

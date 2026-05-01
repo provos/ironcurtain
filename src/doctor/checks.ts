@@ -16,6 +16,8 @@ import {
   parseModelId,
   type ProviderId,
 } from '../config/model-provider.js';
+import { parseCliLlmModelId, formatCliLlmBackendLabel } from '../llm/model-spec.js';
+import { probeCliLlmBackend } from '../llm/cli-backend.js';
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
 import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
@@ -125,6 +127,14 @@ export function checkPreferredMode(config: IronCurtainConfig, dockerResult: Chec
   }
 
   // preferredMode === 'builtin'
+  if (parseCliLlmModelId(config.agentModelId)) {
+    return {
+      name: 'Preferred mode',
+      status: 'fail',
+      message: 'builtin, but agentModelId is a CLI LLM backend. Builtin Code Mode requires AI SDK tool-calling.',
+      hint: 'Use a direct API model for builtin mode, or set Session Mode > Preferred mode to "docker".',
+    };
+  }
   const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
   if (apiKey.length > 0) {
     return { name: 'Preferred mode', status: 'ok', message: 'builtin' };
@@ -413,6 +423,22 @@ function formatElapsed(ms: number): string {
  * Anthropic — IronCurtain supports OpenAI and Google too).
  */
 export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise<CheckResult> {
+  const cliSpec = parseCliLlmModelId(config.agentModelId);
+  if (cliSpec) {
+    const label = formatCliLlmBackendLabel(cliSpec.backend);
+    const probe = await probeCliLlmBackend(cliSpec.backend, config.userConfig.cliLlmBackends, cliSpec.modelId);
+    return {
+      name: `${label} round-trip`,
+      status: probe.runnable ? 'ok' : 'fail',
+      message: probe.message,
+      hint: probe.runnable
+        ? probe.tokenUsageAvailable
+          ? undefined
+          : 'This CLI did not report token usage; IronCurtain will continue enforcing step and wall-clock budgets.'
+        : `Verify command "${probe.command}" is installed, runnable, and configured for ${probe.outputMode} output.`,
+    };
+  }
+
   const { provider } = parseModelId(config.agentModelId);
   const label = formatProviderLabel(provider);
   const name = `${label} API round-trip`;

@@ -5,9 +5,9 @@
  * Standalone and unit-testable. No dependency on AgentSession.
  */
 
-import { generateText, type LanguageModel, type ModelMessage } from 'ai';
-import { createLanguageModel } from '../config/model-provider.js';
+import type { ModelMessage } from 'ai';
 import type { ResolvedAutoCompactConfig, ResolvedUserConfig } from '../config/user-config.js';
+import { createTextGenerationModel, generateTextWithModel, type TextGenerationModel } from '../llm/text-generation.js';
 
 const SUMMARIZER_SYSTEM_PROMPT = `You are summarizing a conversation between a user and an AI coding agent.
 Provide a detailed but concise summary that preserves all context needed to continue the conversation naturally.
@@ -33,7 +33,7 @@ export interface CompactionResult {
 
 export class MessageCompactor {
   private readonly config: ResolvedAutoCompactConfig;
-  private summaryModel: LanguageModel | null = null;
+  private summaryModel: TextGenerationModel | null = null;
   private lastInputTokens = 0;
 
   constructor(config: ResolvedAutoCompactConfig) {
@@ -68,11 +68,10 @@ export class MessageCompactor {
     const toKeep = messages.slice(splitIndex);
 
     if (!this.summaryModel) {
-      this.summaryModel = await createLanguageModel(this.config.summaryModelId, userConfig);
+      this.summaryModel = await createTextGenerationModel(this.config.summaryModelId, userConfig);
     }
 
-    const result = await generateText({
-      model: this.summaryModel,
+    const result = await generateTextWithModel(this.summaryModel, {
       system: SUMMARIZER_SYSTEM_PROMPT,
       messages: [...toSummarize, { role: 'user', content: 'Summarize the conversation above.' }],
     });

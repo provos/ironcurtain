@@ -16,6 +16,7 @@
 
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { ResolvedUserConfig } from './user-config.js';
+import { isCliLlmModelId } from '../llm/model-spec.js';
 
 /**
  * Returns a proxy-aware fetch function if HTTPS_PROXY or HTTP_PROXY is set.
@@ -104,6 +105,7 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
 export async function createLanguageModel(qualifiedId: string, config: ResolvedUserConfig): Promise<LanguageModelV3> {
+  rejectCliModelForAiSdk(qualifiedId, 'AI SDK language model creation');
   const { provider } = parseModelId(qualifiedId);
   return createLanguageModelFromEnv(
     qualifiedId,
@@ -128,6 +130,7 @@ export async function createLanguageModelFromEnv(
   apiKey: string,
   baseURL?: string,
 ): Promise<LanguageModelV3> {
+  rejectCliModelForAiSdk(qualifiedId, 'AI SDK language model creation');
   const { provider, modelId } = parseModelId(qualifiedId);
   const key = apiKey || undefined;
   const url = baseURL || undefined;
@@ -147,6 +150,14 @@ export async function createLanguageModelFromEnv(
       return createOpenAI({ apiKey: key, baseURL: url, fetch })(modelId);
     }
   }
+}
+
+function rejectCliModelForAiSdk(qualifiedId: string, featureName: string): void {
+  if (!isCliLlmModelId(qualifiedId)) return;
+  throw new Error(
+    `${featureName} cannot use CLI LLM backend "${qualifiedId}" because this path requires AI SDK model semantics ` +
+      '(and may require tool calling). Use a direct API model here, or choose a Docker CLI agent adapter for repository work.',
+  );
 }
 
 /**

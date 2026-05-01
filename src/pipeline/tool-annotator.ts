@@ -6,7 +6,6 @@
  * with Zod schema validation and repair loops to ensure correctness.
  */
 
-import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import {
   ARGUMENT_ROLE_REGISTRY,
@@ -16,6 +15,7 @@ import {
 } from '../types/argument-roles.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { StoredToolAnnotation } from './types.js';
+import type { TextGenerationModel } from '../llm/text-generation.js';
 
 /** Default number of tools per LLM call. */
 export const ANNOTATION_BATCH_SIZE = 25;
@@ -264,7 +264,7 @@ Return annotations for ALL ${tools.length} tools. Use the exact tool names as pr
 export async function annotateTools(
   serverName: string,
   tools: MCPToolSchema[],
-  llm: LanguageModel,
+  llm: TextGenerationModel,
   onProgress?: (message: string) => void,
 ): Promise<StoredToolAnnotation[]> {
   if (tools.length === 0) return [];

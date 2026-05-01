@@ -167,9 +167,9 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     collected.push(r);
   }
 
-  // Optional API round-trip.
+  // Optional LLM round-trip.
   if (args.checkApi) {
-    printSection('API round-trip');
+    printSection('LLM round-trip');
     const apiResult = await checkAgentApiRoundtrip(config);
     printCheck(apiResult);
     collected.push(apiResult);

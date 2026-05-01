@@ -7,7 +7,7 @@ import {
   checkAnnotationFreshness,
   getPackageGeneratedDir,
 } from '../config/index.js';
-import { createLanguageModel } from '../config/model-provider.js';
+import { createTextGenerationModel } from '../llm/text-generation.js';
 import type { MCPClientManager } from './mcp-client-manager.js';
 import { MCPClientManager as McpClientManagerImpl } from './mcp-client-manager.js';
 import type { McpRoot } from './mcp-client-manager.js';
@@ -138,7 +138,7 @@ export class TrustedProcess {
     const autoApproveConfig = this.config.userConfig.autoApprove;
     if (!autoApproveConfig.enabled) return null;
     try {
-      return await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
+      return await createTextGenerationModel(autoApproveConfig.modelId, this.config.userConfig);
     } catch {
       logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
       return null;

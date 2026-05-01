@@ -14,57 +14,15 @@
 import type { LanguageModel, SystemModelMessage } from 'ai';
 import { generateText } from 'ai';
 import type { z } from 'zod';
+import type { TextGenerationModel } from '../llm/text-generation.js';
+import { generateTextWithModel, isTextGenerationModel } from '../llm/text-generation.js';
+import { parseJsonWithSchema, schemaToPromptHint } from '../llm/json.js';
+export { extractJson, parseJsonWithSchema, schemaToPromptHint } from '../llm/json.js';
 
 export const DEFAULT_MAX_TOKENS = 8192;
 
-/** Converts a Zod schema to a JSON Schema string for inclusion in prompts. */
-export function schemaToPromptHint(schema: z.ZodType): string {
-  try {
-    const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any' });
-    return `\n\nYour response must be a JSON object matching this schema:\n${JSON.stringify(jsonSchema, null, 2)}`;
-  } catch {
-    // Some schemas (e.g. with transforms) can't be converted to JSON Schema
-    return '\n\nReturn your response as valid JSON.';
-  }
-}
-
-/**
- * Extracts a JSON object or array from LLM text that may include
- * markdown fences or surrounding prose.
- */
-export function extractJson(text: string): string {
-  // Try markdown code block first
-  const codeBlock = text.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
-  if (codeBlock) return codeBlock[1].trim();
-
-  // Find the outermost { ... } or [ ... ]
-  const objStart = text.indexOf('{');
-  const arrStart = text.indexOf('[');
-  if (objStart === -1 && arrStart === -1) return text;
-
-  const start = objStart === -1 ? arrStart : arrStart === -1 ? objStart : Math.min(objStart, arrStart);
-  const openChar = text[start];
-  const closeChar = openChar === '{' ? '}' : ']';
-  const end = text.lastIndexOf(closeChar);
-  if (end === -1) return text;
-
-  return text.slice(start, end + 1);
-}
-
-/**
- * Extracts and validates JSON from LLM text output against a Zod schema.
- * Handles markdown fences, surrounding prose, and schema validation.
- *
- * Exported for reuse by callers that manage their own message history
- * but need the same extraction+validation logic.
- */
-export function parseJsonWithSchema<T extends z.ZodType>(text: string, schema: T): z.infer<T> {
-  const json: unknown = JSON.parse(extractJson(text));
-  return schema.parse(json) as z.infer<T>;
-}
-
 interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
-  model: LanguageModel;
+  model: LanguageModel | TextGenerationModel;
   schema: T;
   system?: string | SystemModelMessage;
   prompt: string;
@@ -92,9 +50,11 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
       onProgress?.(`Schema repair ${attempt}/${maxRepairAttempts}...`);
     }
 
-    const result = system
-      ? await generateText({ model, system, messages, maxOutputTokens })
-      : await generateText({ model, messages, maxOutputTokens });
+    const result = await callTextModel(model, {
+      ...(system ? { system } : {}),
+      messages,
+      maxOutputTokens,
+    });
 
     const text = result.text;
 
@@ -117,4 +77,23 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
 
   // Should never reach here due to the throw in the loop
   throw new Error('generateObjectWithRepair: exhausted all repair attempts');
+}
+
+async function callTextModel(
+  model: LanguageModel | TextGenerationModel,
+  options: {
+    readonly system?: string | SystemModelMessage;
+    readonly messages: readonly { readonly role: 'user' | 'assistant'; readonly content: string }[];
+    readonly maxOutputTokens: number;
+  },
+): Promise<{ readonly text: string }> {
+  if (isTextGenerationModel(model)) {
+    return generateTextWithModel(model, options);
+  }
+  return generateText({
+    model,
+    ...(options.system ? { system: options.system } : {}),
+    messages: [...options.messages],
+    maxOutputTokens: options.maxOutputTokens,
+  });
 }

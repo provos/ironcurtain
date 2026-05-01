@@ -10,7 +10,6 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import type { LanguageModel } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { permissiveJsonSchemaValidator } from '../trusted-process/permissive-output-validator.js';
@@ -29,6 +28,7 @@ import {
 import { annotateTools, buildAnnotationPrompt } from './tool-annotator.js';
 import type { StoredToolAnnotation, StoredToolAnnotationsFile } from './types.js';
 import { VERSION } from '../version.js';
+import type { TextGenerationModel } from '../llm/text-generation.js';
 
 // ---------------------------------------------------------------------------
 // CLI Argument Parsing
@@ -158,7 +158,7 @@ async function annotateServerTools(
   serverName: string,
   tools: ServerConnection['tools'],
   existingAnnotations: StoredToolAnnotationsFile | undefined,
-  llm: LanguageModel,
+  llm: TextGenerationModel,
 ): Promise<AnnotationResult> {
   const inputHash = computeAnnotationHash(serverName, tools);
   const stepText = `[2/2] Annotating tools for ${serverName}`;

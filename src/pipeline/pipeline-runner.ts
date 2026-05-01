@@ -12,14 +12,13 @@
  */
 
 import { resolve } from 'node:path';
-import type { LanguageModelV3 } from '@ai-sdk/provider';
-import type { LanguageModel, SystemModelMessage } from 'ai';
+import type { SystemModelMessage } from 'ai';
 import chalk from 'chalk';
 import pLimit from 'p-limit';
 import { extractServerDomainAllowlists, findAnnotationServerDrift, safeForDisplay } from '../config/index.js';
-import { createLanguageModel } from '../config/model-provider.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
+import { createTextGenerationModel, type TextGenerationModel } from '../llm/text-generation.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import {
   buildCompilerSystemPrompt,
@@ -149,11 +148,11 @@ export interface PipelineRunConfig {
  */
 export interface PipelineModels {
   /** The unwrapped base model for creating per-server wrapped models. */
-  readonly baseLlm: LanguageModelV3;
+  readonly baseLlm: TextGenerationModel;
   readonly cacheStrategy: PromptCacheStrategy;
   readonly logPath: string;
   /** Cheap model for pre-filter classification (Haiku). */
-  readonly prefilterModel: LanguageModel;
+  readonly prefilterModel: TextGenerationModel;
 }
 
 /** Creates PipelineModels from user config. Delegates to shared createPipelineLlm. */
@@ -161,7 +160,7 @@ export async function createPipelineModels(logDir?: string): Promise<PipelineMod
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
   const llm = await createPipelineLlm(effectiveLogDir, 'unknown');
   const userConfig = loadUserConfig();
-  const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig);
+  const haikuBaseLlm = await createTextGenerationModel(userConfig.prefilterModelId, userConfig);
   const { model: prefilterModel } = createPerServerModel(haikuBaseLlm, llm.logPath, 'prefilter');
   return {
     baseLlm: llm.baseLlm,
@@ -576,10 +575,10 @@ export function mergeServerResults(
  * (broad principles) and 'task-policy' (strict whitelist) modes.
  */
 export class PipelineRunner {
-  private readonly baseLlm: LanguageModelV3;
+  private readonly baseLlm: TextGenerationModel;
   private readonly cacheStrategy: PromptCacheStrategy;
   private readonly logPath: string;
-  private readonly prefilterModel: LanguageModel;
+  private readonly prefilterModel: TextGenerationModel;
 
   constructor(models: PipelineModels) {
     this.baseLlm = models.baseLlm;
@@ -829,7 +828,7 @@ export class PipelineRunner {
   private createServerModel(
     serverName: string,
     llmSemaphore: ReturnType<typeof pLimit>,
-  ): { model: LanguageModel; logContext: LlmLogContext } {
+  ): { model: TextGenerationModel; logContext: LlmLogContext } {
     const { model, logContext } = createPerServerModel(this.baseLlm, this.logPath, serverName);
     return { model: createThrottledModel(model, llmSemaphore), logContext };
   }
@@ -960,7 +959,7 @@ export class PipelineRunner {
     unit: ServerCompilationUnit,
     config: PipelineRunConfig,
     constitutionHash: string,
-    model: LanguageModel,
+    model: TextGenerationModel,
     logContext: LlmLogContext,
     reporter: ServerProgressReporter,
   ): Promise<ServerCompilationResult> {
@@ -1174,7 +1173,7 @@ export class PipelineRunner {
     scenarioResult: { scenarios: TestScenario[]; inputHash: string },
     permittedDirectories: string[],
     compilerSystem: string | SystemModelMessage,
-    model: LanguageModel,
+    model: TextGenerationModel,
     logContext: LlmLogContext,
     reporter: ServerProgressReporter,
     serverOutputDir: string,
@@ -1313,7 +1312,7 @@ export class PipelineRunner {
     unit: ServerCompilationUnit,
     permittedDirectories: string[],
     dynamicLists: DynamicListsFile | undefined,
-    model: LanguageModel,
+    model: TextGenerationModel,
     logContext: LlmLogContext,
     reporter: ServerProgressReporter,
   ): Promise<{ filteredScenarios: TestScenario[] }> {
@@ -1386,7 +1385,7 @@ export class PipelineRunner {
     serverNames: [string, ...string[]],
     serverTools: { serverName: string; toolName: string }[],
     compilerSystem: string | SystemModelMessage,
-    model: LanguageModel,
+    model: TextGenerationModel,
     logContext: LlmLogContext,
     reporter: ServerProgressReporter,
     serverOutputDir: string,
@@ -1582,7 +1581,7 @@ export class PipelineRunner {
     unit: ServerCompilationUnit,
     system: string | SystemModelMessage,
     inputHash: string,
-    model: LanguageModel,
+    model: TextGenerationModel,
     reporter: ServerProgressReporter,
   ): Promise<{
     rules: CompiledRule[];
@@ -1630,7 +1629,7 @@ export class PipelineRunner {
     repairContext: RepairContext,
     system: string | SystemModelMessage,
     session: ConstitutionCompilerSession | undefined,
-    model: LanguageModel,
+    model: TextGenerationModel,
     onProgress?: (message: string) => void,
     reporter?: ServerProgressReporter,
   ): Promise<{
@@ -1680,7 +1679,7 @@ export class PipelineRunner {
     system: string | SystemModelMessage,
     session: ConstitutionCompilerSession | undefined,
     existingListDefinitions: ListDefinition[],
-    model: LanguageModel,
+    model: TextGenerationModel,
     onProgress?: (message: string) => void,
     reporter?: ServerProgressReporter,
   ): Promise<{
@@ -1727,7 +1726,7 @@ export class PipelineRunner {
     serverOutputDir: string,
     config: PipelineRunConfig,
     labelPrefix: string,
-    model: LanguageModel,
+    model: TextGenerationModel,
     logContext: LlmLogContext,
     reporter: ServerProgressReporter,
   ): Promise<DynamicListsFile> {
@@ -1778,7 +1777,7 @@ export class PipelineRunner {
     stepLabel: string,
     permittedDirectories: string[] | undefined,
     dynamicLists: DynamicListsFile | undefined,
-    model: LanguageModel,
+    model: TextGenerationModel,
     reporter: ServerProgressReporter,
   ): Promise<{
     scenarios: TestScenario[];

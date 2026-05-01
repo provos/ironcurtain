@@ -45,6 +45,12 @@ export async function registerBuiltinAdapters(userConfig?: ResolvedUserConfig): 
     registry.set(claudeCodeAdapter.id, claudeCodeAdapter);
   }
 
+  if (!registry.has('codex-cli' as AgentId)) {
+    const { createCodexCliAdapter } = await import('./adapters/codex-cli.js');
+    const codexCliAdapter = createCodexCliAdapter(userConfig);
+    registry.set(codexCliAdapter.id, codexCliAdapter);
+  }
+
   if (!registry.has('goose' as AgentId)) {
     const { createGooseAdapter } = await import('./adapters/goose.js');
     const gooseAdapter = createGooseAdapter(userConfig);
