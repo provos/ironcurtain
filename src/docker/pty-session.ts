@@ -475,8 +475,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     if (columns) env.IRONCURTAIN_INITIAL_COLS = String(columns);
     if (rows) env.IRONCURTAIN_INITIAL_ROWS = String(rows);
 
-    if (skillsMount && adapter.skillsPtyEnv) {
-      Object.assign(env, adapter.skillsPtyEnv);
+    if (skillsMount && adapter.skills?.ptyEnv) {
+      Object.assign(env, adapter.skills.ptyEnv);
     }
 
     // Pass resume flags when resuming a session.

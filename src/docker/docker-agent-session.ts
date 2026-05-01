@@ -265,10 +265,8 @@ export class DockerAgentSession implements Session {
       });
       // Gated on `skillsMount` so adapters don't pass flags pointing at
       // a path that isn't bind-mounted into this session.
-      const command =
-        this.infra.skillsMount && this.infra.adapter.skillsBatchArgs?.length
-          ? [...baseCommand, ...this.infra.adapter.skillsBatchArgs]
-          : baseCommand;
+      const batchArgs = this.infra.adapter.skills?.batchArgs;
+      const command = this.infra.skillsMount && batchArgs?.length ? [...baseCommand, ...batchArgs] : baseCommand;
       logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
       const execStartMs = Date.now();

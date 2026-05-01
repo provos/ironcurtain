@@ -176,7 +176,7 @@ export interface PreContainerInfrastructure {
   readonly skillsMount?: {
     /** Host-side staging dir (also passed to `restageSkills` and the cached stager). */
     readonly hostDir: string;
-    /** Container target path; copied verbatim from `adapter.skillsContainerPath`. */
+    /** Container target path; copied verbatim from `adapter.skills.containerPath`. */
     readonly target: string;
   };
   /**
@@ -495,7 +495,7 @@ export async function prepareDockerInfrastructure(
     // per-state persona transitions need a live mount to re-stage into.
     const isWorkflowBundle = workflowId !== undefined;
     const initialSkills = resolvedSkills ?? [];
-    const skillsTarget = adapter.skillsContainerPath;
+    const skillsTarget = adapter.skills?.containerPath;
     let skillsMount: PreContainerInfrastructure['skillsMount'];
     let stage: ((skills: readonly ResolvedSkill[]) => boolean) | undefined;
     if (skillsTarget && (initialSkills.length > 0 || isWorkflowBundle)) {

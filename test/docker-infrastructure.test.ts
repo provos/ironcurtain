@@ -16,7 +16,7 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
-// Container target the mock adapter advertises via `skillsContainerPath`.
+// Container target the mock adapter advertises via `skills.containerPath`.
 // Hardcoded here (rather than imported from a constant) because the
 // adapter contract makes this per-adapter — the test asserts the wired
 // target matches what the adapter declared. Matches the post-refactor

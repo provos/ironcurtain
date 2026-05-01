@@ -190,8 +190,9 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     id: 'goose' as AgentId,
     displayName: 'Goose',
     credentialHelpText,
-    // Path Goose's native skill discovery scans.
-    skillsContainerPath: '/home/codespace/.config/goose/skills',
+    // Path Goose's native skill discovery scans. No batch args or PTY env —
+    // Goose auto-discovers from this fixed path.
+    skills: { containerPath: '/home/codespace/.config/goose/skills' },
 
     // eslint-disable-next-line @typescript-eslint/require-await -- interface requires Promise return
     async getImage(): Promise<string> {

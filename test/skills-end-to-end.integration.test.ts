@@ -401,7 +401,7 @@ interface ContainerStagingSnapshot {
 }
 
 /**
- * Enumerates `<adapter.skillsContainerPath>/<name>/SKILL.md` files
+ * Enumerates `<adapter.skills.containerPath>/<name>/SKILL.md` files
  * inside the container and computes their sha256 hashes via
  * `sha256sum`. Output of `sha256sum` is `<hash>  ./<name>/SKILL.md` per
  * line, sorted for determinism. Returns a `{ name → hash }` map keyed
@@ -411,9 +411,9 @@ async function snapshotContainerSkills(
   bundle: DockerInfrastructure,
   stateId: string,
 ): Promise<ContainerStagingSnapshot> {
-  const skillsPath = bundle.adapter.skillsContainerPath;
+  const skillsPath = bundle.adapter.skills?.containerPath;
   if (!skillsPath) {
-    throw new Error(`adapter ${bundle.adapter.id} declares no skillsContainerPath; cannot snapshot skills`);
+    throw new Error(`adapter ${bundle.adapter.id} declares no skills.containerPath; cannot snapshot skills`);
   }
   const result = await bundle.docker.exec(
     bundle.containerId,

@@ -103,9 +103,11 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
   return {
     id: 'claude-code' as AgentId,
     displayName: 'Claude Code',
-    skillsContainerPath: CLAUDE_SKILLS_MOUNT_TARGET,
-    skillsBatchArgs: ['--add-dir', CLAUDE_SKILLS_PARENT],
-    skillsPtyEnv: { IRONCURTAIN_SKILLS_DIR: CLAUDE_SKILLS_PARENT },
+    skills: {
+      containerPath: CLAUDE_SKILLS_MOUNT_TARGET,
+      batchArgs: ['--add-dir', CLAUDE_SKILLS_PARENT],
+      ptyEnv: { IRONCURTAIN_SKILLS_DIR: CLAUDE_SKILLS_PARENT },
+    },
 
     // eslint-disable-next-line @typescript-eslint/require-await -- interface requires Promise return
     async getImage(): Promise<string> {
@@ -144,8 +146,8 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
       // up `<dir>/.claude/skills/<name>/SKILL.md`. Empty/unset = no extra
       // flags (keeps `--add-dir <missing-path>` from erroring on sessions
       // without a skills mount). Mirrors the batch-mode wiring exposed
-      // via `skillsBatchArgs`; the PTY driver merges `skillsPtyEnv` into
-      // the container environment, which is how this var arrives here.
+      // via `skills.batchArgs`; the PTY driver merges `skills.ptyEnv`
+      // into the container environment, which is how this var arrives here.
       const startScript = `#!/bin/bash
 # Set initial terminal size from host env vars
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
