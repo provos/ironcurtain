@@ -552,9 +552,9 @@ describe('buildAgentCommand with artifact inputs', () => {
     const command = buildAgentCommand('test', stateConfig, makeContext(), makeDefinition());
 
     // Should reference the directory path with .workflow/ prefix, not inline content
-    expect(command).toContain('`.workflow/spec/`');
-    expect(command).toContain('Read the contents');
-    expect(command).toContain('file reading tools');
+    expect(command).toContain('## Inputs');
+    expect(command).toContain('`.workflow/<name>/`');
+    expect(command).toContain('- `spec` (required)');
   });
 
   it('includes path references for multiple input artifacts', () => {
@@ -570,10 +570,11 @@ describe('buildAgentCommand with artifact inputs', () => {
 
     const command = buildAgentCommand('test', stateConfig, makeContext(), makeDefinition());
 
-    expect(command).toContain('## Input: plan');
-    expect(command).toContain('`.workflow/plan/`');
-    expect(command).toContain('## Input: spec');
-    expect(command).toContain('`.workflow/spec/`');
+    expect(command).toContain('## Inputs');
+    expect(command).toContain('- `plan` (required)');
+    expect(command).toContain('- `spec` (required)');
+    // All-required: should NOT include the optional-inputs sentence
+    expect(command).not.toContain('Optional inputs');
   });
 
   it('handles optional inputs by stripping the ? suffix', () => {
@@ -589,8 +590,9 @@ describe('buildAgentCommand with artifact inputs', () => {
 
     const command = buildAgentCommand('test', stateConfig, makeContext(), makeDefinition());
 
-    expect(command).toContain('## Input: feedback');
-    expect(command).toContain('`.workflow/feedback/`');
+    expect(command).toContain('## Inputs');
+    expect(command).toContain('- `feedback` (optional)');
+    expect(command).toContain('Optional inputs');
     expect(command).not.toContain('feedback?');
   });
 });
