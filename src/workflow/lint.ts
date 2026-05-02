@@ -7,6 +7,7 @@
  * See `docs/designs/workflow-semantic-linter-v2.md` for each check's
  * rationale.
  */
+import { resolve } from 'node:path';
 import type {
   WorkflowDefinition,
   WorkflowStateDefinition,
@@ -14,7 +15,10 @@ import type {
   AgentTransitionDefinition,
 } from './types.js';
 import { GLOBAL_PERSONA } from './types.js';
-import { findReachableStates, parseArtifactRef } from './validate.js';
+import { findReachableStates, iterateSkillRefIssues, parseArtifactRef } from './validate.js';
+import { getWorkflowPackageDir } from './discovery.js';
+import { ACTIONABLE_DISCOVERY_REASONS, discoverSkillsWithErrors } from '../skills/discovery.js';
+import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -33,8 +37,22 @@ import { findReachableStates, parseArtifactRef } from './validate.js';
  * WF005 (parallelKey + worktree needs gitRepoPath) is retired: the
  * `parallelKey` schema field was removed as unused, so the trigger
  * condition can no longer fire. Must not be reused.
+ *
+ * WF010 covers two related concerns under a single code:
+ *   1. State-scoped: an agent state's `skills:` entry is invalid or
+ *      doesn't match any discoverable skill in the package.
+ *   2. Package-scoped: a `SKILL.md` under the workflow package's
+ *      `skills/` tree is malformed, unreadable, or missing required
+ *      frontmatter fields. These are surfaced even when no state
+ *      references the broken skill, so authors get fast feedback on a
+ *      typo in frontmatter rather than discovering it via a "skill not
+ *      found" message at runtime.
+ *
+ * Both concerns are skipped cleanly when the lint caller did not
+ * supply a `workflowFilePath` (the package dir is the only place skill
+ * manifests can live).
  */
-export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008';
+export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008' | 'WF010';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -48,12 +66,20 @@ export interface Diagnostic {
 /**
  * Injected facts the linter cannot derive from the definition alone.
  *
- * Kept minimal: only `personaExists` is declared. New methods should be
- * added only when a new check genuinely needs external context.
+ * Kept minimal: methods/fields are added only when a new check
+ * genuinely needs external context.
  */
 export interface LintContext {
   /** Returns true iff the named persona is installed locally. */
   personaExists(name: string): boolean;
+  /**
+   * Absolute path to the workflow file being linted, when known. Used
+   * by checks that resolve co-packaged resources off the manifest's
+   * directory (currently WF010 — skill references). Lint callers that
+   * do not have a path on hand (e.g., synthesized definitions in tests)
+   * may omit this; rules that need it skip cleanly when absent.
+   */
+  readonly workflowFilePath?: string;
 }
 
 export type LintResult = readonly Diagnostic[];
@@ -78,6 +104,7 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkMaxRoundsHasGuard(def),
     ...checkPersonaExists(def, ctx),
     ...checkVisitCapTransitionOrder(def),
+    ...checkSkillReferencesAndManifests(def, ctx),
   ];
 }
 
@@ -379,4 +406,114 @@ function describeTransition(t: AgentTransitionDefinition): string {
     return `when { ${parts.join(', ')} } -> ${t.to}`;
   }
   return `unconditional -> ${t.to}`;
+}
+
+// ---------------------------------------------------------------------------
+// WF010 — skill references and skill-manifest integrity
+// ---------------------------------------------------------------------------
+
+/**
+ * Entry point for WF010. Skips cleanly when `ctx.workflowFilePath` is
+ * absent (in-memory definitions have no package dir to scan).
+ * `checkSkillManifests` runs independently of any state reference so
+ * a typo'd frontmatter — which would silently disappear from
+ * discovery — still surfaces.
+ */
+function checkSkillReferencesAndManifests(def: WorkflowDefinition, ctx: LintContext): Diagnostic[] {
+  if (!ctx.workflowFilePath) return [];
+  const skillsRoot = resolve(getWorkflowPackageDir(ctx.workflowFilePath), 'skills');
+  const { skills, errors } = discoverSkillsWithErrors(skillsRoot, 'workflow');
+
+  return [...checkSkillManifests(errors), ...checkSkillReferences(def, skills, skillsRoot)];
+}
+
+function checkSkillManifests(errors: readonly SkillDiscoveryError[]): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const err of errors) {
+    if (!ACTIONABLE_DISCOVERY_REASONS.has(err.reason)) continue;
+    diagnostics.push({
+      code: 'WF010',
+      severity: 'error',
+      ...buildSkillManifestDiagnostic(err),
+    });
+  }
+  return diagnostics;
+}
+
+function buildSkillManifestDiagnostic(err: SkillDiscoveryError): { message: string; hint: string } {
+  const detail = err.detail ?? err.reason;
+  // Switch is exhaustive over `SkillDiscoveryErrorReason`. No `default`:
+  // a new union member must add a case here or TypeScript will flag the
+  // missing return-type coverage at compile time.
+  switch (err.reason) {
+    case 'malformed-frontmatter':
+      return {
+        message: `Malformed SKILL.md frontmatter at ${err.skillDir}: ${detail}.`,
+        hint: 'Fix the YAML frontmatter (the block fenced by `---` lines at the top of SKILL.md).',
+      };
+    case 'missing-required-fields':
+      return {
+        message: `SKILL.md at ${err.skillDir} is missing required frontmatter fields: ${detail}.`,
+        hint: 'SKILL.md frontmatter must declare both `name:` and `description:` as strings.',
+      };
+    case 'unreadable':
+      return {
+        message: `Unreadable SKILL.md at ${err.skillDir}: ${detail}.`,
+        hint: 'Check filesystem permissions or whether the path is a directory.',
+      };
+    case 'missing-manifest':
+      return {
+        message: `Missing SKILL.md at ${err.skillDir}: ${detail}.`,
+        hint: 'Create a SKILL.md file with a `---`-fenced YAML frontmatter declaring `name:` and `description:`.',
+      };
+    case 'duplicate-name':
+      return {
+        message: `Duplicate skill at ${err.skillDir}: ${detail}.`,
+        hint: 'Two skill directories under the same skills root cannot share the same frontmatter `name:`. Rename one in its SKILL.md frontmatter.',
+      };
+  }
+}
+
+/**
+ * Walks every agent state's `skills?: string[]` and emits one
+ * diagnostic per offending entry — either an invalid name (rejected by
+ * `validateSkillName`) or a name that does not match any discovered
+ * skill's frontmatter `name:` under `<packageDir>/skills/`. The
+ * frontmatter name is the user-facing identifier (matched by
+ * `workflowSkillFilter` in `src/skills/discovery.ts`), not the
+ * directory name. The orchestrator's `validateWorkflowSkillReferences`
+ * throws for the same conditions at start; surfacing them at lint time
+ * gives authors fast feedback before they hit runtime.
+ */
+function checkSkillReferences(
+  def: WorkflowDefinition,
+  discovered: readonly ResolvedSkill[],
+  skillsRoot: string,
+): Diagnostic[] {
+  const discoveredNames = new Set(discovered.map((s) => s.name));
+  const available = [...discoveredNames].sort();
+  const availableHint = available.length > 0 ? available.join(', ') : '(none)';
+  const diagnostics: Diagnostic[] = [];
+
+  for (const issue of iterateSkillRefIssues(def, discoveredNames)) {
+    if (issue.kind === 'invalid-name') {
+      diagnostics.push({
+        code: 'WF010',
+        severity: 'error',
+        stateId: issue.stateId,
+        message: `Invalid skill name "${issue.name}" in state "${issue.stateId}": ${issue.detail}.`,
+        hint: 'Skill names must be a single non-empty path segment with no separators or "."/"..".',
+      });
+    } else {
+      diagnostics.push({
+        code: 'WF010',
+        severity: 'error',
+        stateId: issue.stateId,
+        message: `State "${issue.stateId}" references skill "${issue.name}" but no skill with that frontmatter name was found under ${skillsRoot}. Available: ${availableHint}.`,
+        hint: `Add a SKILL.md under <workflow-pkg>/skills/ whose frontmatter \`name:\` is "${issue.name}", or remove "${issue.name}" from the state's skills list.`,
+      });
+    }
+  }
+
+  return diagnostics;
 }

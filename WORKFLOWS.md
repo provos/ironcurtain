@@ -287,6 +287,7 @@ my_state:
 - **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
 - **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
 - **`maxVisits`** -- Optional positive integer. Caps how many times this specific state can be entered. Pairs with the `isStateVisitLimitReached` guard, which fires on the Nth visit's `onDone` (i.e., after the Nth invocation completes). Independent of `settings.maxRounds`. Only valid on `agent` states; placing it on other state types is a validation error. See "Transition actions" for the pairing with `resetVisitCounts`.
+- **`skills`** -- Optional list of skill names (strings) selecting which workflow-bundled skills are visible to this state. When omitted, the state gets every skill in the workflow package's `skills/` dir (default = all). When present, the state is restricted to the listed names. User-global skills (under `~/.ironcurtain/skills/`) always apply on top, with last-wins on collision. Names that don't exist as `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at workflow load. See "Skills" below.
 
 ### Model selection
 
@@ -341,6 +342,45 @@ states:
 5. Hardcoded default (`anthropic:claude-sonnet-4-6`)
 
 **Goose caveat.** Per-state switching only takes effect at container spawn for the Goose adapter: Goose reads `GOOSE_MODEL` from its container environment at startup and cannot change models per turn. Claude Code supports per-turn switching via `--model`, so per-state overrides within a single state's multi-round loop work as expected.
+
+### Skills
+
+Workflows can ship purpose-specific guidance to the agent as **skills**: SKILL.md packages — the open standard adopted by Claude Code, Goose, and Codex. IronCurtain stages the resolved set into a per-bundle host directory and bind-mounts it read-only into the container at the path the active agent's native discovery walks (Claude Code: a sibling path picked up via `--add-dir`; Goose: `~/.config/goose/skills/`). The agent then decides when to read each skill based on the frontmatter description.
+
+A skill is a directory containing a `SKILL.md` with YAML frontmatter (`name`, `description`) plus any supporting files (helper scripts, fixtures, embedded markdown). Two layers stack at session creation:
+
+- **User-global** -- `~/.ironcurtain/skills/<name>/` -- always applied to every Docker session, regardless of workflow or persona.
+- **Workflow-bundled** -- `<workflow-pkg>/skills/<name>/` -- ships alongside `workflow.yaml` inside the workflow's package directory. Per-state filtering with the `skills:` field on agent states selects which workflow-bundled skills are visible to that state; omit the field to expose all of them.
+
+On collision (same `name` in multiple layers), the workflow layer wins over user-global. State filtering excludes the workflow's version of a colliding name, so the user-global one wins by default for that state.
+
+**Workflow package layout.**
+
+```
+my-workflow/
+├── workflow.yaml         # the manifest
+└── skills/               # optional; bundled skills available to this workflow
+    ├── analyze/
+    │   └── SKILL.md
+    └── synthesize/
+        ├── SKILL.md
+        └── helper.sh
+```
+
+Inside an agent state's YAML:
+
+```yaml
+review:
+  type: agent
+  persona: global
+  prompt: ...
+  inputs: [plan]
+  outputs: [reviews]
+  transitions: [{ to: done }]
+  skills: [analyze] # only `analyze` from workflow package; user-global always applies
+```
+
+In workflow mode the persona-skills layer (`~/.ironcurtain/personas/<name>/skills/`) is intentionally inert — workflow states use the per-state `skills:` field for differentiation, not the persona. Personas still carry skills for standalone (`ironcurtain start --persona <name>`) sessions.
 
 ### Human gate states
 

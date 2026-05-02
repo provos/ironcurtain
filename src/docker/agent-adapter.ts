@@ -300,4 +300,77 @@ export interface AgentAdapter {
    * and sessions will not be marked as resumable.
    */
   getConversationStateConfig?(): ConversationStateConfig;
+
+  /**
+   * Skill-staging configuration. Absent on adapters that don't support
+   * skills at all; when present, the bind mount is established and the
+   * batch / PTY hooks fire.
+   *
+   * Grouped under one optional record so the all-or-nothing relationship
+   * is type-enforced: callers need only check `adapter.skills` before
+   * accessing `containerPath` / `batchArgs` / `ptyEnv`, and the required
+   * inner `containerPath` makes the "batchArgs without containerPath"
+   * shape unrepresentable.
+   */
+  readonly skills?: AgentSkillsConfig;
+}
+
+/**
+ * Adapter-supplied configuration for skill staging.
+ *
+ * Set via {@link AgentAdapter.skills}. The required `containerPath` field
+ * doubles as the gate: when absent (i.e. the whole `skills` field is
+ * undefined on the adapter), no bind mount is established and the
+ * optional `batchArgs` / `ptyEnv` fields are not consumed.
+ */
+export interface AgentSkillsConfig {
+  /**
+   * Absolute container path used as the bind-mount target for the
+   * skills staging directory.
+   *
+   * Architectural invariant: this path MUST NOT nest under any other
+   * mount target (e.g. a conversation-state mount). Nested bind mounts
+   * are unreliable on Docker Desktop / macOS (silent empty inner
+   * mount on 4.67.x; known Lima/Colima overlapping-mount bugs). Pick
+   * a sibling path that is otherwise unused inside the container.
+   *
+   * The mount is established read-only; the agent cannot modify
+   * skills mid-session (preserves the cached-stager assumption and
+   * the per-state filter's correctness).
+   *
+   * Adapters whose native discovery expects a specific layout under
+   * this path (e.g. Claude Code looks for `<add-dir>/.claude/skills/`)
+   * should advertise the relevant prefix here and use
+   * {@link batchArgs} / {@link ptyEnv} to point the CLI at the parent.
+   */
+  readonly containerPath: string;
+
+  /**
+   * Extra CLI tokens to append to batch-mode {@link AgentAdapter.buildCommand}
+   * output when skills are mounted (e.g. Claude Code's
+   * `['--add-dir', '<parent>']`).
+   *
+   * Treated opaquely by the session driver: the array is passed through
+   * verbatim with no parsing or shape assumptions. Empty / undefined for
+   * adapters that auto-discover skills from a fixed path (Goose).
+   *
+   * Setting this does NOT itself mount the skills dir — the bind mount
+   * is created by docker-infrastructure when {@link containerPath} is
+   * set; this hook only adjusts the agent CLI invocation.
+   */
+  readonly batchArgs?: readonly string[];
+
+  /**
+   * Environment variables the PTY-mode startup script reads to pick up
+   * skill-discovery configuration. Merged opaquely into the container's
+   * env when skills are mounted; the script (returned by the adapter's
+   * {@link AgentAdapter.buildPtyCommand}) decides how to consume them.
+   *
+   * Kept separate from {@link batchArgs} because PTY mode runs a shell
+   * script (not a direct exec), and pre-formatted CLI tokens don't
+   * round-trip through env vars cleanly. Adapters that need both batch
+   * args and PTY env (Claude Code uses `--add-dir <parent>` either way)
+   * are responsible for keeping the two in sync.
+   */
+  readonly ptyEnv?: Readonly<Record<string, string>>;
 }

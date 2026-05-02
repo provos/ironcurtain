@@ -30,6 +30,8 @@ import { validatePolicyDir as sharedValidatePolicyDir } from '../config/validate
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { resolvePersona, applyServerAllowlist, filterMcpServersByPolicy } from '../persona/resolve.js';
+import { resolveSkillsForSession } from '../skills/discovery.js';
+import type { ResolvedSkill } from '../skills/types.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
 import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
@@ -206,7 +208,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
  *   agent container, sidecar and internal network for TCP mode). The
  *   session is constructed with `ownsInfra=true`, so `close()` tears down
  *   the bundle.
- * - Borrow (`options.workflowInfrastructure` set): uses the caller-supplied
+ * - Borrow (`options.workflow.infrastructure` set): uses the caller-supplied
  *   bundle as-is and constructs the session with `ownsInfra=false`. The
  *   caller retains full responsibility for the bundle's lifetime; the
  *   session's `close()` only tears down session-local state.
@@ -267,13 +269,13 @@ async function createDockerSession(
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
     const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
 
-    if (options.workflowInfrastructure) {
+    if (options.workflow?.infrastructure) {
       // Borrow path: the orchestrator owns the bundle's lifetime. We do
       // not call createDockerInfrastructure(); we do not destroy on close.
       // The orchestrator is also responsible for `setTokenSessionId`: it
       // flips the MITM proxy's routing target to the active agent's session
       // ID before each run and clears it on session end.
-      infra = options.workflowInfrastructure;
+      infra = options.workflow.infrastructure;
     } else {
       // Standalone path: factory creates and owns the bundle.
       // Single-session invariant (§2.1 of workflow-session-identity): the
@@ -289,6 +291,9 @@ async function createDockerSession(
         sessionConfig.sandboxDir,
         sessionConfig.escalationDir,
         bundleId,
+        undefined,
+        undefined,
+        sessionConfig.resolvedSkills,
       );
       // Standalone sessions use their bundle for the session's entire
       // lifetime; pin the token-stream routing ID to this session's ID.
@@ -381,6 +386,12 @@ export interface SessionDirConfig {
   systemPromptAugmentation?: string;
   /** Memory MCP gate decision derived from persona/job/userConfig. */
   memoryEnabled: boolean;
+  /**
+   * Skills resolved via user → persona → workflow last-wins. Always
+   * `[]` in borrow mode — staging happened in-place via
+   * `borrowInfra.restageSkills`, so callers shouldn't re-stage.
+   */
+  resolvedSkills?: readonly ResolvedSkill[];
 }
 
 /**
@@ -435,10 +446,9 @@ export function buildSessionConfig(
     | 'systemPromptAugmentation'
     | 'jobId'
     | 'resourceBudgetOverrides'
-    | 'workflowInfrastructure'
-    | 'workflowStateDir'
-    | 'stateSlug'
+    | 'workflow'
     | 'agentConversationId'
+    | 'mode'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
@@ -446,11 +456,14 @@ export function buildSessionConfig(
   let serverAllowlist: readonly string[] | undefined;
   let personaDef: PersonaDefinition | undefined = undefined;
 
-  // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
-  // is only meaningful alongside the bundle; passing it alone is a bug.
-  if (opts.workflowStateDir && !opts.workflowInfrastructure) {
+  // Borrow-mode invariant: per-state artifact dir / slug only make sense
+  // alongside an infrastructure bundle. The nested record keeps these
+  // fields colocated; the runtime guard catches the all-or-nothing
+  // mismatch (the union of the two-bit input domain isn't expressible
+  // at the type level without a discriminator on the workflow record).
+  if (opts.workflow?.stateDir && !opts.workflow.infrastructure) {
     throw new SessionError(
-      'workflowStateDir requires workflowInfrastructure; borrow-mode artifacts have no owner without a bundle',
+      'workflow.stateDir requires workflow.infrastructure; borrow-mode artifacts have no owner without a bundle',
       'SESSION_INIT_FAILED',
     );
   }
@@ -509,13 +522,13 @@ export function buildSessionConfig(
   }
 
   // Paths differ by mode:
-  // - Borrow mode: per-state artifacts go under `workflowStateDir` when
+  // - Borrow mode: per-state artifacts go under `workflow.stateDir` when
   //   the orchestrator supplied one; otherwise fall back to the bundle's
   //   bundleDir (legacy path, still used by factory-level tests). The
-  //   bundle owns workspace/escalation/audit on `workflowInfrastructure`.
+  //   bundle owns workspace/escalation/audit on `workflow.infrastructure`.
   // - Standalone/CLI: everything lives under `{home}/sessions/{id}/`.
-  const borrowInfra = opts.workflowInfrastructure;
-  const artifactDir = borrowInfra ? (opts.workflowStateDir ?? borrowInfra.bundleDir) : undefined;
+  const borrowInfra = opts.workflow?.infrastructure;
+  const artifactDir = borrowInfra ? (opts.workflow.stateDir ?? borrowInfra.bundleDir) : undefined;
   const sessionDir = artifactDir ?? getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
   const escalationDir = borrowInfra ? borrowInfra.escalationDir : getSessionEscalationDir(effectiveSessionId);
@@ -545,7 +558,7 @@ export function buildSessionConfig(
   // log file; a prior state's teardown in session.close() releases the
   // console hijack first.
   logger.setup({ logFilePath: sessionLogPath });
-  logger.info(`Session ${sessionId} created${opts.stateSlug ? ` (state=${opts.stateSlug})` : ''}`);
+  logger.info(`Session ${sessionId} created${opts.workflow?.stateSlug ? ` (state=${opts.workflow.stateSlug})` : ''}`);
   logger.info(`${workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
@@ -658,6 +671,25 @@ export function buildSessionConfig(
     }
   }
 
+  // Borrow-mode: re-stage the bundle in-place so per-state persona skills
+  // become visible without remounting. Standalone mode returns the set
+  // through SessionDirConfig for the docker factory to stage at bundle
+  // creation. Builtin (non-Docker) sessions never mount skills, so we
+  // skip the discovery walk entirely to avoid spurious filesystem reads
+  // and `[skills] Ignoring …` warnings.
+  const dockerMode = opts.mode?.kind === 'docker';
+  let resolvedSkills: readonly ResolvedSkill[] | undefined;
+  if (borrowInfra || dockerMode) {
+    resolvedSkills = resolveSkillsForSession({
+      ...(opts.persona ? { personaName: opts.persona } : {}),
+      ...(opts.workflow?.skillsDir ? { workflowSkillsDir: opts.workflow.skillsDir } : {}),
+      ...(opts.workflow?.skillFilter ? { workflowSkillFilter: opts.workflow.skillFilter } : {}),
+    });
+    if (borrowInfra) {
+      borrowInfra.restageSkills(resolvedSkills);
+    }
+  }
+
   return {
     config: sessionConfig,
     sessionDir,
@@ -666,6 +698,7 @@ export function buildSessionConfig(
     auditLogPath,
     systemPromptAugmentation,
     memoryEnabled,
+    resolvedSkills: borrowInfra ? [] : resolvedSkills,
   };
 }
 

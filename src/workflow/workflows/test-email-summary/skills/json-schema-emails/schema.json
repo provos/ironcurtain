@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ironcurtain.local/workflows/test-email-summary/emails.json",
+  "title": "emails.json",
+  "description": "Array of email records exchanged between the fetch and summarize states of the test-email-summary workflow.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["sender", "recipient", "subject", "date", "body"],
+    "properties": {
+      "sender": {
+        "type": "string",
+        "description": "From address; either a bare email or 'Display Name <addr@example.com>'."
+      },
+      "recipient": {
+        "type": "string",
+        "description": "Comma-separated To addresses. CC/BCC are not represented."
+      },
+      "subject": {
+        "type": "string",
+        "description": "Subject line verbatim. Empty string is allowed."
+      },
+      "date": {
+        "type": "string",
+        "description": "Date as it appears in the source headers. Not normalized."
+      },
+      "body": {
+        "type": "string",
+        "description": "Plain text body. HTML must be stripped by the producer; newlines preserved."
+      }
+    }
+  }
+}

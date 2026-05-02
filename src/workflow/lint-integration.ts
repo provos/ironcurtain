@@ -74,9 +74,12 @@ export type RunPreflightResult =
 
 /**
  * Loads + validates a definition from `definitionPath`, then runs
- * {@link preflightLint} with the {@link defaultLintContext}. Never throws —
- * returns a discriminated result that callers map to their own error
- * surfaces (stderr+exit for CLI, RpcError for the daemon).
+ * {@link preflightLint} with a {@link LintContext} derived from
+ * {@link defaultLintContext} but bound to `definitionPath` so
+ * package-relative checks (currently WF010 — skill references) can
+ * resolve sibling resources. Never throws — returns a discriminated
+ * result that callers map to their own error surfaces (stderr+exit
+ * for CLI, RpcError for the daemon).
  */
 export function runPreflight(definitionPath: string, mode: LintMode): RunPreflightResult {
   const loaded = loadDefinition(definitionPath);
@@ -84,7 +87,8 @@ export function runPreflight(definitionPath: string, mode: LintMode): RunPreflig
     return { ok: false, kind: 'load', loadKind: loaded.kind, message: loaded.message };
   }
 
-  const lintResult = preflightLint(loaded.definition, defaultLintContext, mode);
+  const ctx: LintContext = { ...defaultLintContext, workflowFilePath: definitionPath };
+  const lintResult = preflightLint(loaded.definition, ctx, mode);
   const { errors, warnings } = countBySeverity(lintResult.diagnostics);
 
   if (lintResult.ok) {

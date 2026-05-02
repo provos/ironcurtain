@@ -1,12 +1,21 @@
 /**
  * Workflow definition discovery.
  *
- * Scans bundled and user directories for workflow definition files (YAML or JSON),
- * and resolves workflow references (by name or file path) to absolute paths.
+ * Workflows are packaged as directories: each workflow lives under its
+ * own directory containing a `workflow.yaml` (or `workflow.yml`)
+ * manifest plus optional sibling resources like a `skills/` subdir.
+ *
+ *   src/workflow/workflows/<name>/workflow.yaml      (bundled)
+ *   ~/.ironcurtain/workflows/<name>/workflow.yaml    (user)
+ *
+ * The directory shape is what allows skills (and other future co-packaged
+ * resources) to travel with the workflow definition. Single-file and
+ * JSON manifest forms are not accepted as inputs; JSON remains an
+ * internal serialization format used by workflow-resume checkpointing.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, resolve, extname, basename } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { getUserWorkflowsDir } from '../config/paths.js';
@@ -28,31 +37,41 @@ export interface WorkflowEntry {
 // File format support
 // ---------------------------------------------------------------------------
 
-/** File extensions recognized as workflow definition files. */
-const DEFINITION_EXTENSIONS = new Set(['.yaml', '.yml', '.json']);
+/** Manifest filenames probed inside a workflow package directory. */
+const MANIFEST_BASENAMES = ['workflow.yaml', 'workflow.yml'] as const;
+
+/** Recognized YAML extensions for ad-hoc file-path workflow refs. */
+const YAML_EXTENSIONS = new Set(['.yaml', '.yml']);
 
 /**
- * Extension priority for name-based resolution.
- * YAML is preferred over JSON for bundled/user workflows.
- */
-const EXTENSION_PRIORITY = ['.yaml', '.yml', '.json'] as const;
-
-/**
- * Parses a workflow definition file, dispatching on extension.
- * Returns the parsed object (unvalidated).
+ * Parses a workflow definition file. Dispatches on extension:
+ *   - `.yaml` / `.yml` -> YAML parse with alias expansion disabled
+ *     (prevents YAML-bomb DoS via reference amplification)
+ *   - `.json`          -> JSON parse
+ *
+ * Returns the parsed value unvalidated — the workflow definition Zod
+ * schema enforces structure downstream.
+ *
+ * Note on the JSON branch: user-facing manifests must be YAML; the
+ * discovery layer (`discoverWorkflows`, `resolveWorkflowPath`) only
+ * looks for `workflow.{yaml,yml}` and rejects JSON path-style refs.
+ * The JSON branch survives only for internal serialization — the
+ * resume path reads `<runDir>/definition.json` written at workflow
+ * start, which is JSON for compactness and because it round-trips a
+ * validated `WorkflowDefinition` rather than user-authored markup.
  *
  * @throws if the file cannot be read or parsed
  */
 export function parseDefinitionFile(filePath: string): unknown {
   const ext = extname(filePath).toLowerCase();
   const content = readFileSync(filePath, 'utf-8');
-
   if (ext === '.yaml' || ext === '.yml') {
-    // Workflow definitions should not use YAML aliases/anchors.
-    // Disallow alias expansion to prevent YAML bomb DoS.
     return YAML.parse(content, { maxAliasCount: 0 });
   }
-  return JSON.parse(content);
+  if (ext === '.json') {
+    return JSON.parse(content);
+  }
+  throw new Error(`Unsupported workflow file extension: ${ext}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -69,53 +88,85 @@ export function getBundledWorkflowsDir(): string {
   return resolve(__dirname, 'workflows');
 }
 
+/**
+ * Returns the directory containing a workflow's package, given the
+ * absolute path to its manifest. Co-packaged resources (currently the
+ * optional `skills/` subdir) live here.
+ */
+export function getWorkflowPackageDir(workflowFilePath: string): string {
+  return dirname(workflowFilePath);
+}
+
+/**
+ * Locates the manifest file inside a workflow package directory.
+ * Returns the absolute path to `workflow.yaml` or `workflow.yml` if
+ * present (yaml takes precedence on collision), `undefined` otherwise.
+ */
+function findManifest(packageDir: string): string | undefined {
+  for (const basename of MANIFEST_BASENAMES) {
+    const candidate = resolve(packageDir, basename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
 
 /**
- * Scans a directory for workflow definition files (.yaml, .yml, .json).
- * Returns entries with the given source tag.
- * When multiple files share a name, YAML takes precedence over JSON.
+ * Scans a workflows root for package directories and returns one entry
+ * per directory that contains a valid manifest. Subdirectories without
+ * a `workflow.yaml`/`workflow.yml`, or whose manifest fails to parse,
+ * are skipped silently — the same forgiving posture other discovery
+ * paths in this project take (e.g., `discoverSkills`).
+ *
+ * The entry's `name` is the package directory's name, NOT the
+ * manifest's `name:` field. This matches `resolveWorkflowPath`, which
+ * looks up workflows by directory name.
  */
 function scanDirectory(dir: string, source: WorkflowSource): WorkflowEntry[] {
   if (!existsSync(dir)) return [];
 
-  const byName = new Map<string, WorkflowEntry>();
-
-  for (const fileName of readdirSync(dir)) {
-    const ext = extname(fileName).toLowerCase();
-    if (!DEFINITION_EXTENSIONS.has(ext)) continue;
-
-    const filePath = resolve(dir, fileName);
-    const name = basename(fileName, ext);
-
-    // When multiple files share a name, higher-priority extensions win (.yaml > .yml > .json)
-    const existing = byName.get(name);
-    if (existing) {
-      const existingExt = extname(existing.path).toLowerCase();
-      const existingPri = EXTENSION_PRIORITY.indexOf(existingExt as (typeof EXTENSION_PRIORITY)[number]);
-      const newPri = EXTENSION_PRIORITY.indexOf(ext as (typeof EXTENSION_PRIORITY)[number]);
-      if (newPri >= existingPri) continue;
-    }
-
-    try {
-      const raw: unknown = parseDefinitionFile(filePath);
-      const obj = raw as Record<string, unknown>;
-      const description = typeof obj.description === 'string' ? obj.description : '';
-      byName.set(name, { name, description, path: filePath, source });
-    } catch {
-      // Skip files that cannot be parsed
-    }
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
   }
 
-  return [...byName.values()];
+  const out: WorkflowEntry[] = [];
+  for (const name of entries) {
+    const packageDir = resolve(dir, name);
+    let stats;
+    try {
+      stats = statSync(packageDir);
+    } catch {
+      continue;
+    }
+    if (!stats.isDirectory()) continue;
+
+    const manifest = findManifest(packageDir);
+    if (!manifest) continue;
+
+    let description = '';
+    try {
+      const raw = parseDefinitionFile(manifest) as Record<string, unknown>;
+      if (typeof raw.description === 'string') description = raw.description;
+    } catch {
+      // Skip packages with unparseable manifests
+      continue;
+    }
+    out.push({ name, description, path: manifest, source });
+  }
+
+  return out;
 }
 
 /**
- * Discovers all available workflow definitions from bundled and user directories.
- * User workflows override bundled ones on name collision.
- * Returns entries sorted alphabetically by name.
+ * Discovers all available workflow definitions from bundled and user
+ * directories. User workflows override bundled ones on name collision.
+ * Returned entries are sorted alphabetically by name.
  */
 export function discoverWorkflows(): WorkflowEntry[] {
   const bundled = scanDirectory(getBundledWorkflowsDir(), 'bundled');
@@ -134,33 +185,47 @@ export function discoverWorkflows(): WorkflowEntry[] {
 }
 
 /**
- * Resolves a workflow reference to an absolute file path.
+ * Resolves a workflow reference to an absolute manifest path. User-facing
+ * refs are YAML-only — JSON path-style refs are silently dropped because
+ * `definition.json` is an internal serialization format produced by
+ * workflow-resume checkpointing, not a manifest authors should reference.
  *
- * Accepts either:
- * - A file path (absolute or relative) -- returned as-is if it exists
- * - A workflow name -- looked up in user dir first, then bundled dir
+ * Resolution matrix:
+ *  - bare name (`my-flow`)       → probe user dir then bundled dir for
+ *                                  `<root>/<ref>/workflow.{yaml,yml}`
+ *  - path with no extension      → treat as a package directory, probe
+ *    (`./my-flow`, `/abs/foo`)     `<ref>/workflow.{yaml,yml}`
+ *  - explicit `.yaml` / `.yml`   → return as-is when the file exists
+ *  - any other extension         → undefined (JSON refs included; the
+ *                                  resume path reads `definition.json`
+ *                                  directly, not via this resolver)
  *
- * For name-based lookup, tries extensions in priority order: .yaml, .yml, .json.
- * Returns undefined if the reference cannot be resolved.
+ * Returns `undefined` when the reference cannot be resolved.
  */
 export function resolveWorkflowPath(ref: string): string | undefined {
-  // If it looks like a file path (has extension or separators), treat as path
   const ext = extname(ref).toLowerCase();
-  if (ref.includes('/') || ref.includes('\\') || DEFINITION_EXTENSIONS.has(ext)) {
+  const isPathStyle = ref.includes('/') || ref.includes('\\');
+
+  if (YAML_EXTENSIONS.has(ext)) {
     const resolved = resolve(ref);
     return existsSync(resolved) ? resolved : undefined;
   }
 
-  // Name-based lookup: user dir first, then bundled, YAML preferred
-  for (const searchExt of EXTENSION_PRIORITY) {
-    const userPath = resolve(getUserWorkflowsDir(), `${ref}${searchExt}`);
-    if (existsSync(userPath)) return userPath;
+  if (isPathStyle) {
+    // No extension → package directory. A non-yaml extension (e.g.
+    // `.json`) on a path-style ref falls through to undefined: not a
+    // user-facing form.
+    if (ext === '') {
+      return findManifest(resolve(ref));
+    }
+    return undefined;
   }
 
-  for (const searchExt of EXTENSION_PRIORITY) {
-    const bundledPath = resolve(getBundledWorkflowsDir(), `${ref}${searchExt}`);
-    if (existsSync(bundledPath)) return bundledPath;
-  }
+  const userManifest = findManifest(resolve(getUserWorkflowsDir(), ref));
+  if (userManifest) return userManifest;
+
+  const bundledManifest = findManifest(resolve(getBundledWorkflowsDir(), ref));
+  if (bundledManifest) return bundledManifest;
 
   return undefined;
 }

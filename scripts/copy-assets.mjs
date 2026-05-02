@@ -4,7 +4,7 @@
  */
 
 import { cpSync, chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { dirname, extname, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -51,15 +51,18 @@ if (existsSync(readOnlyDir)) {
   }
 }
 
-// Copy bundled workflow definitions (.yaml, .yml, .json)
+// Copy bundled workflow packages. Each workflow lives in its own
+// directory under src/workflow/workflows/<name>/ with a workflow.yaml
+// (or workflow.yml) manifest plus optional sibling resources like
+// skills/. The whole package directory is copied recursively so any
+// co-packaged files travel with the manifest.
 const srcWorkflows = resolve(__dirname, '..', 'src', 'workflow', 'workflows');
 const distWorkflows = resolve(__dirname, '..', 'dist', 'workflow', 'workflows');
-// Keep in sync with DEFINITION_EXTENSIONS in src/workflow/discovery.ts
-const WORKFLOW_EXTS = new Set(['.yaml', '.yml', '.json']);
 if (existsSync(srcWorkflows)) {
   mkdirSync(distWorkflows, { recursive: true });
-  for (const file of readdirSync(srcWorkflows).filter((f) => WORKFLOW_EXTS.has(extname(f)))) {
-    cpSync(resolve(srcWorkflows, file), resolve(distWorkflows, file));
+  for (const entry of readdirSync(srcWorkflows, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    cpSync(resolve(srcWorkflows, entry.name), resolve(distWorkflows, entry.name), { recursive: true });
   }
 }
 

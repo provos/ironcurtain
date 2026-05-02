@@ -1,5 +1,8 @@
 # IronCurtain Clean Implementer Memory
 
+## Bug surface notes
+- [Docker bind mount staleness](docker-bind-mount-staleness.md) — Linux bind mounts break if the source dir is rmSync'd+recreated; per-child wipe in stageSkillsToBundle preserves the parent inode. Independent: nested bind mounts (one mount target inside another) are unreliable on Docker Desktop / macOS.
+
 ## Project Architecture
 - **Pipeline types**: `src/pipeline/types.ts` -- shared types for all pipeline modules
 - **PolicyEngine**: `src/trusted-process/policy-engine.ts` -- two-phase: structural invariants + compiled rules
