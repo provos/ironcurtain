@@ -351,8 +351,8 @@ states:
 
       - **The sweep range**: the full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere.
       - **The search strategy**: exhaustive enumeration if the space is < 100M combinations; boundary-dense + random sampling otherwise.
-      - **The observables**: at each input value, what should the harness record? (e.g., "stored value in `slice_table`", "result of the comparison at line 2344", "return value of `ff_h264_parse_ref_count`", "ASAN error", "canary state")
-      - **The positive finding condition**: what pattern in the observables indicates the hypothesis is confirmed? Be specific — not "a crash happens" but "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice."
+      - **The observables**: at each input value, what should the harness record? (e.g., "stored value in the target buffer", "result of the bounds check at `<file>:<line>`", "return value of the target function", "ASAN error", "canary state")
+      - **The positive finding condition**: what pattern in the observables indicates the hypothesis is confirmed? Be specific — not "a crash happens" but "the bounds check at `<file>:<line>` evaluates true when the input value exceeds the buffer's allocated size."
 
       The design specifies input variables and ranges. The build agent implements the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
 
@@ -408,11 +408,11 @@ states:
 
       1. **Tier matches hypothesis scope.** Single-function hypothesis → Tier 1. Cross-function or cross-component hypothesis → Tier 2+. Hypothesis requiring real initialization, protocol framing, or global state → Tier 3. Tier 1 for a cross-component bug is an automatic fail.
 
-      2. **Hypothesis is stated precisely.** One sentence naming specific functions, specific values, and the expected violation. "There may be memory corruption here" is a fail; "the length field at ff_h264.c:1234 is stored in a uint16_t but the source can reach 2^17" is a pass.
+      2. **Hypothesis is stated precisely.** One sentence naming specific functions, specific values, and the expected violation. "There may be memory corruption here" is a fail; "the length field at <file>:<line> is stored in a fixed-width integer type that the input source can overflow" is a pass.
 
       3. **Input sweep range is concrete.** Named input variables, explicit ranges, specified search strategy (exhaustive / boundary-dense+random / libFuzzer / AFL / bounded enumeration). "Test a few values" is a fail.
 
-      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice" is a pass.
+      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the bounds check at <file>:<line> evaluates true when the input value exceeds the buffer's allocated size" is a pass.
 
       5. **Coverage targets the right code — both kinds.** The design must separately name (a) the fuzzer-feedback mechanism (e.g., libFuzzer's `-fsanitize-coverage=...`, AFL++'s `afl-clang-fast`, or a runtime agent for managed stacks), (b) the audit-coverage tool, and (c) the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer `cov`, AFL++ `edges_found`). It must name which units of code receive (a) — specifically the target code, not just the harness wrapper. A design that names only audit-coverage tooling, names feedback instrumentation only on the wrapper, or omits (c) is a fail. A design missing a fallback path on a *different* instrumentation mechanism is also a fail.
 
@@ -425,7 +425,7 @@ states:
       ## Verdicts
 
       - **approved**: All applicable checklist items pass. Write a brief note to `.workflow/harness_design_review/review.md` listing what you verified.
-      - **rejected**: One or more items fail. Write `.workflow/harness_design_review/review.md` listing each failure by checklist number, the specific problem, and what the designer must change. Be concrete — "item 3 fails: input range for slice_num is not specified; design must specify the sweep (e.g., 0..65535 covering the uint16_t boundary)" beats "item 3: needs more detail."
+      - **rejected**: One or more items fail. Write `.workflow/harness_design_review/review.md` listing each failure by checklist number, the specific problem, and what the designer must change. Be concrete — "item 3 fails: input range for the named index variable is not specified; design must specify the sweep covering the full representable range of its type plus boundary points" beats "item 3: needs more detail."
 
       Do NOT modify the design document yourself. The designer iterates on their own output.
     inputs:
