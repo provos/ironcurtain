@@ -6,7 +6,7 @@ settings:
   mode: docker
   dockerAgent: claude-code
   sharedContainer: true
-  model: anthropic:claude-opus-4-7
+  model: anthropic:claude-sonnet-4-6
   maxRounds: 12
   maxSessionSeconds: 10800
   unversionedArtifacts:
@@ -54,6 +54,8 @@ states:
 
       7. **Cross-cutting data flow analysis.** After completing the function catalog, trace these patterns ACROSS function boundaries. The most important bugs live at the intersection of separately-correct functions.
 
+         Apply each pattern that plausibly fits the code surface — do not stop at the first match. Surfaces that admit multiple bug classes (memory safety + bookkeeping off-by-ones + state-machine assumptions + sentinel collisions) deserve documented findings across each. Tunnel-visioning on one bug class (e.g., reporting only integer overflows when the code also has check-use gaps) is the most common failure mode of this state.
+
          - **Type narrowing at storage boundaries.** Where does a wider type get stored into a narrower container (e.g., int into uint16_t, long into int, double into float)? What is the maximum value the source can reach? What value gets stored at the truncation point? Trace every write where source and destination types differ in width.
 
          - **Sentinel and magic value reachability.** Identify every sentinel or magic value used in the code (-1, 0, NULL, 0xFFFF, MAX_INT, special constants). For each one, trace whether any computed value — through normal execution, overflow, truncation, or wrapping — can equal the sentinel. Pay special attention to counters or accumulators that grow toward a sentinel value.
@@ -64,7 +66,7 @@ states:
 
          - **Arithmetic result range vs destination range.** Where can a multiplication, addition, or shift produce a value that exceeds the range of its destination type or comparison operand?
 
-         For each pattern found, document: the source location (file:line), the data flow path, the types involved, and the boundary value where the pattern activates. Do not assess exploitability — just document the structural fact.
+         For each pattern found, document: the source location (file:line), the data flow path, the types involved, the boundary value where the pattern activates, and a **Reachability sketch** — a short trace from attacker-controlled input to the pattern site naming each guard between (file:line of the guard, what it checks, what value range it admits). If prior journal rounds have evidence that a guard along the path is impassable or has been bypassed, note that. Reachability is structural, not dynamic — do not validate by execution; just document what the code shows. Do not assess exploitability beyond reachability; that is downstream agents' job.
 
       The function catalog and cross-cutting analysis are the most important outputs. They give downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
 
@@ -156,6 +158,7 @@ states:
 
       - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below) and the design class (see Design class below).
       - **Directive must supply:** Tier, design class (trigger-driven OR coverage-driven), the target (a hypothesis with named violation site for trigger-driven; a named under-exercised code region with dispatch axes for coverage-driven), component scope, WHY this tier and class. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given what you describe.
+      - **Bundling multiple hypotheses.** A trigger-driven directive may scope a single hypothesis or a related set when they share input space and code region. Bundle when consolidating doesn't dilute the sweep (e.g., three integer-overflow hypotheses on the same allocator → one harness). Keep separate when input distributions conflict (one wants huge dimensions, another wants small) or observation points differ enough that one harness can't see both.
       - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it. The state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct, and `harness_validate`'s approved transition is declared before the visit-cap escalation guard, so the guard never fires on approved verdicts (a buggy validator can keep re-entering the harness pipeline until the workflow-level round cap kicks in). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
 
       ### `discover` — verdict: `discover`
@@ -368,6 +371,8 @@ states:
 
       The design specifies input variables and ranges. The build agent implements the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
 
+      **Multi-hypothesis bundling.** If the directive scopes a related set of hypotheses (rather than one), the sweep range is the union of their input-variable ranges, the positive-finding condition is a disjunction (any of the named violation patterns firing counts), and observables must cover all named sites. Justify the bundling briefly — bundled designs only pay off when the hypotheses share enough input space and code region that one harness can exercise them coherently.
+
       **Leverage existing fuzzing tools when appropriate.** For large input spaces, structured inputs, or whenever coverage-guided exploration would outperform a hand-rolled loop, design the harness around an existing fuzzer rather than reinventing one. Canonical examples: **libFuzzer** (in-process, coverage-guided; natural fit for Tier 1/2 with an `LLVMFuzzerTestOneInput` entry point), **AFL/AFL++** (out-of-process, coverage-guided; good for Tier 3 file/stdin-driven binaries). Managed-runtime stacks have their own equivalents (Jazzer for JVM, atheris for Python, `go test -fuzz` for Go). The build agent installs the tool; your design specifies WHICH tool and WHY, plus the entry-point shape.
 
       **Seed corpus covers the dispatch surface.** If the target has a structured dispatch table (tag table, opcode switch, protocol message-type enum, state machine), the design MUST specify seeds generated programmatically from that table — at least one per dispatch case. Hand-curated deep-path seeds are additive, not a substitute. For small discrete targets, mark N/A with a one-line reason.
@@ -432,7 +437,7 @@ states:
 
       7. **Seed corpus matches dispatch surface.** If the target has a structured dispatch table, the design must specify seeds generated programmatically from it. For small discrete targets, N/A with a one-line reason is acceptable.
 
-      8. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail.
+      8. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail. For consolidated designs covering multiple hypotheses, the design must briefly justify the bundling — too many hypotheses (>3) in one harness without strong shared-input-space rationale signals an unfocused design and is a fail.
 
       ## Verdicts
 
