@@ -154,8 +154,8 @@ states:
 
       ### `harness_design` — verdict: `harness_design`
 
-      - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below).
-      - **Directive must supply:** Hypothesis, tier, component scope, WHY this tier. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given the hypothesis you describe.
+      - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below) and the design class (see Design class below).
+      - **Directive must supply:** Tier, design class (trigger-driven OR coverage-driven), the target (a hypothesis with named violation site for trigger-driven; a named under-exercised code region with dispatch axes for coverage-driven), component scope, WHY this tier and class. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given what you describe.
       - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it. The state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct, and `harness_validate`'s approved transition is declared before the visit-cap escalation guard, so the guard never fires on approved verdicts (a buggy validator can keep re-entering the harness pipeline until the workflow-level round cap kicks in). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
 
       ### `discover` — verdict: `discover`
@@ -211,6 +211,13 @@ states:
       `conclude` routes to `review`; `review` may bounce back here with `rejected`. Treat it as a FORCE_REVISION: read `.workflow/report_review/review.md` for the failed checklist items, then route per the standard rules — `complete` for writeup-only fixes the existing artifacts support, `discover`/`triage`/`reanalyze` for evidence gaps, `escalate` for threat-model policy calls.
 
       **Feedback-driven directives.** When human feedback or prior-round evidence changes the focus, your directive should point the next agent AT the specific thing to investigate, not prescribe how to investigate it. Example shape: "Re-analyze focusing on the interaction between [function A] and [data structure B] — prior round missed [the specific case]." Let the agent's prompt drive HOW.
+
+      ## Design class — pick before tier
+
+      Each harness_design directive picks one of two classes. Tier and class are orthogonal — any tier can be either class.
+
+      - **Trigger-driven**: Use when analyze (or a prior round) produced a falsifiable claim with a named violation site — a specific function, value range, and expected oracle (bounds check fires, type narrows lossy, sentinel collides). The harness sweeps the hypothesis variables.
+      - **Coverage-driven**: Use when analyze diagnosed an under-exercised dispatch surface without a specific theory — a code region the project's existing fuzzers don't reach, with dispatch axes (option flags, message types, opcode tables, mode bits) the input space hasn't crossed. The harness sweeps the dispatch axes; the oracle is any sanitizer error within the named region. Pick this when prior trigger-driven rounds against the same region have been mitigated by upstream guards but the region itself is untested by the existing fuzz infrastructure.
 
       ## Tiered harness strategy
 
@@ -302,7 +309,12 @@ states:
     prompt: |
       You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md` and the investigation journal at `.workflow/journal/journal.md`.
 
-      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection is the orchestrator's authoritative description of what to design — the hypothesis, the tier, the component scope, and WHY this tier. The Notes subsection is a short summary. If the scoping section is missing or the directive does not specify a tier and hypothesis, STOP and report back with an `escalate`-style agent_status — do not pick a tier or hypothesis by guessing from the analysis or journal alone.
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection is the orchestrator's authoritative description of what to design — the tier, the design class (trigger-driven or coverage-driven), the target (a specific hypothesis OR a named under-covered surface), the component scope, and WHY this tier. The Notes subsection is a short summary. If the scoping section is missing or the directive does not specify both a tier and a design class with its target, STOP and report back with an `escalate`-style agent_status — do not pick those by guessing from the analysis or journal alone.
+
+      ## Design classes
+
+      - **Trigger-driven**: directive names a falsifiable hypothesis with a specific violation site. Sweep the hypothesis input variables, oracle is the named bounds check / type-narrowing / state-machine violation firing.
+      - **Coverage-driven**: directive names an under-exercised dispatch surface (file/function set + dispatch axes). Sweep the dispatch axes (option flags, message types, opcode tables, mode bits), oracle is any sanitizer error within the named region. Use this when analyze diagnosed a coverage gap without a specific theory.
 
       ## Your scope: DESIGN ONLY
 
@@ -316,8 +328,8 @@ states:
       DO include:
       - What source files to link and why
       - What types and structs to preserve
-      - What input variables to sweep and over what range
-      - What conditions constitute a positive finding
+      - What to sweep and over what range — hypothesis input variables (trigger-driven) or dispatch axes (coverage-driven)
+      - What conditions constitute a positive finding — specific violation pattern (trigger-driven) or any sanitizer error within the named region (coverage-driven)
       - What instrumentation (sanitizers, canaries, coverage) to use
 
       Keep the design document concise. Aim for something the build agent can read and act on without wading through reference implementation.
@@ -347,12 +359,12 @@ states:
 
       ## Systematic input exploration (required for all tiers)
 
-      The harness must FUZZ, not unit-test. Hand-picked scenarios miss the interesting boundary values. For each input variable in the hypothesis, the design must specify:
+      The harness must FUZZ, not unit-test. Hand-picked scenarios miss the interesting boundary values. For each swept variable (hypothesis inputs for trigger-driven, dispatch axes for coverage-driven), the design must specify:
 
-      - **The sweep range**: the full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere.
+      - **The sweep range**: the full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere. For coverage-driven dispatch axes, the range is the full set of dispatch values (option flags, message types, mode bits) plus their realistic combinations.
       - **The search strategy**: exhaustive enumeration if the space is < 100M combinations; boundary-dense + random sampling otherwise.
       - **The observables**: at each input value, what should the harness record? (e.g., "stored value in the target buffer", "result of the bounds check at `<file>:<line>`", "return value of the target function", "ASAN error", "canary state")
-      - **The positive finding condition**: what pattern in the observables indicates the hypothesis is confirmed? Be specific — not "a crash happens" but "the bounds check at `<file>:<line>` evaluates true when the input value exceeds the buffer's allocated size."
+      - **The positive finding condition**: what pattern in the observables confirms the design's claim? For trigger-driven: be specific — not "a crash happens" but "the bounds check at `<file>:<line>` evaluates true when the input value exceeds the buffer's allocated size." For coverage-driven: "any sanitizer error within the named code region" is acceptable, but the named region must be concrete (file/function set), not "somewhere in the target."
 
       The design specifies input variables and ranges. The build agent implements the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
 
@@ -406,13 +418,13 @@ states:
 
       ## Checklist
 
-      1. **Tier matches hypothesis scope.** Single-function hypothesis → Tier 1. Cross-function or cross-component hypothesis → Tier 2+. Hypothesis requiring real initialization, protocol framing, or global state → Tier 3. Tier 1 for a cross-component bug is an automatic fail.
+      1. **Tier matches target scope.** For trigger-driven: single-function hypothesis → Tier 1; cross-function or cross-component hypothesis → Tier 2+; hypothesis requiring real initialization, protocol framing, or global state → Tier 3. For coverage-driven: a single function's dispatch surface → Tier 1; a multi-function dispatcher (option/message/opcode router) → Tier 2+; a CLI or protocol entry point → Tier 3. Tier 1 for a cross-component target is an automatic fail in either class.
 
-      2. **Hypothesis is stated precisely.** One sentence naming specific functions, specific values, and the expected violation. "There may be memory corruption here" is a fail; "the length field at <file>:<line> is stored in a fixed-width integer type that the input source can overflow" is a pass.
+      2. **Design class and target are stated precisely.** Either a trigger-driven hypothesis (specific functions, specific values, expected violation — "the length field at <file>:<line> is stored in a fixed-width integer type that the input source can overflow") or a coverage-driven surface (named under-exercised code region + dispatch axes to sweep — "the option-flag dispatcher in <file> reaches five extractor variants, only one has prior fuzz exposure"). "There may be memory corruption here" or "fuzz the project" is a fail.
 
       3. **Input sweep range is concrete.** Named input variables, explicit ranges, specified search strategy (exhaustive / boundary-dense+random / libFuzzer / AFL / bounded enumeration). "Test a few values" is a fail.
 
-      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the bounds check at <file>:<line> evaluates true when the input value exceeds the buffer's allocated size" is a pass.
+      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern confirms the design's claim. For trigger-driven: a specific violation pattern ("the bounds check at <file>:<line> evaluates true when the input value exceeds the buffer's allocated size"). For coverage-driven: "any sanitizer error within <named code region>" — where the region is a concrete file/function set, not "somewhere in the target." "A crash happens" is a fail in either mode.
 
       5. **Coverage targets the right code — both kinds.** The design must separately name (a) the fuzzer-feedback mechanism (e.g., libFuzzer's `-fsanitize-coverage=...`, AFL++'s `afl-clang-fast`, or a runtime agent for managed stacks), (b) the audit-coverage tool, and (c) the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer `cov`, AFL++ `edges_found`). It must name which units of code receive (a) — specifically the target code, not just the harness wrapper. A design that names only audit-coverage tooling, names feedback instrumentation only on the wrapper, or omits (c) is a fail. A design missing a fallback path on a *different* instrumentation mechanism is also a fail.
 
