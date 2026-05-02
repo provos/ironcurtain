@@ -853,6 +853,7 @@ states:
     inputs:
       - report
       - discoveries?
+      - differential?
       - triage?
       - journal
       - analysis

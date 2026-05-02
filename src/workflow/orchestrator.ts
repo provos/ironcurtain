@@ -79,7 +79,7 @@ import {
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
-import { validateDefinition, validateWorkflowSkillReferences } from './validate.js';
+import { parseArtifactRef, validateDefinition, validateWorkflowSkillReferences } from './validate.js';
 import { parseDefinitionFile, getWorkflowPackageDir } from './discovery.js';
 import { resolveSkillsForSession } from '../skills/discovery.js';
 import type { ResolvedSkill } from '../skills/types.js';
@@ -2254,11 +2254,12 @@ export class WorkflowOrchestrator implements WorkflowController {
   ): HumanGateRequest {
     const instance = this.workflows.get(workflowId);
     const presentedArtifacts = new Map<string, string>();
-    for (const artifactName of stateDef.present ?? []) {
+    for (const artifactRef of stateDef.present ?? []) {
       if (instance) {
-        const dir = resolve(instance.artifactDir, artifactName);
+        const { name } = parseArtifactRef(artifactRef);
+        const dir = resolve(instance.artifactDir, name);
         if (existsSync(dir)) {
-          presentedArtifacts.set(artifactName, dir);
+          presentedArtifacts.set(name, dir);
         }
       }
     }

@@ -280,11 +280,21 @@ function stageWorkspace(
 ): StagedWorkspace {
   assertDirectory(artifactsSrc, '--artifacts');
   if (workspaceSrc != null) assertDirectory(workspaceSrc, '--workspace');
-  let existingEntries: string[];
+  let existingEntries: string[] = [];
   try {
     existingEntries = readdirSync(outputDir);
-  } catch {
-    existingEntries = [];
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOTDIR') {
+      writeStderr(`${RED}--output exists but is not a directory: ${outputDir}${RESET}`);
+      process.exit(2);
+    }
+    if (code !== 'ENOENT') {
+      writeStderr(
+        `${RED}Cannot read --output dir ${outputDir}: ${err instanceof Error ? err.message : String(err)}${RESET}`,
+      );
+      process.exit(2);
+    }
   }
   if (existingEntries.length > 0) {
     writeStderr(`${RED}Output dir already exists and is not empty: ${outputDir}${RESET}`);
@@ -312,8 +322,12 @@ function stageWorkspace(
       continue;
     }
     if (!srcStat.isDirectory()) {
-      writeStderr(`${YELLOW}Warning: ${srcPath} is not a directory; skipping.${RESET}`);
-      continue;
+      if (isOptional) {
+        writeStderr(`${YELLOW}Warning: optional input ${srcPath} is not a directory; skipping.${RESET}`);
+        continue;
+      }
+      writeStderr(`${RED}Required input ${name} at ${srcPath} is not a directory${RESET}`);
+      process.exit(2);
     }
     cpSync(srcPath, resolve(artifactDir, name), { recursive: true });
   }
