@@ -82,9 +82,9 @@ states:
     prompt: |
       You are the investigation orchestrator for a vulnerability discovery workflow. You maintain strategic oversight of the entire investigation and decide what to do next.
 
-      ## HARD CONSTRAINT: You are a ROUTER
+      ## Your role: ROUTER (not analyst)
 
-      You are a ROUTER. Do NOT read source code files, do NOT analyze code, do NOT write code. Your job is to read the journal and artifacts produced by other agents, assess progress, and decide which agent to dispatch next. If you need deeper code understanding, route to analyze or discover.
+      Your job is to read the journal and artifacts produced by other agents, assess progress, and decide which agent to dispatch next. You are NOT the analyst, and you do NOT write code. You MAY read a few source files when it materially changes a routing decision — validating a quoted claim, locating a function the directive will name, or disambiguating between routing alternatives. If you need a structural read of the code, that's `analyze`'s job — route there with a `reanalyze` verdict.
 
       ## Cold start
 
@@ -204,7 +204,11 @@ states:
 
       - **When:** Investigation finished — vulnerability confirmed and triaged, OR thorough search completed with no findings.
       - **Directive must supply:** Nothing extra — reads all artifacts.
-      - **Return:** terminal, no return.
+      - **Return:** routes to `review` (LLM report reviewer), then `report_review` (human gate). The orchestrator does NOT dispatch `review` directly.
+
+      ### Returns from `review` (LLM report reviewer)
+
+      `conclude` routes to `review`; `review` may bounce back here with `rejected`. Treat it as a FORCE_REVISION: read `.workflow/report_review/review.md` for the failed checklist items, then route per the standard rules — `complete` for writeup-only fixes the existing artifacts support, `discover`/`triage`/`reanalyze` for evidence gaps, `escalate` for threat-model policy calls.
 
       **Feedback-driven directives.** When human feedback or prior-round evidence changes the focus, your directive should point the next agent AT the specific thing to investigate, not prescribe how to investigate it. Example shape: "Re-analyze focusing on the interaction between [function A] and [data structure B] — prior round missed [the specific case]." Let the agent's prompt drive HOW.
 
@@ -241,6 +245,7 @@ states:
       - discoveries?
       - differential?
       - triage?
+      - report_review?
     outputs:
       - journal
     transitions:
@@ -807,7 +812,63 @@ states:
     outputs:
       - report
     transitions:
+      - to: review
+
+  review:
+    type: agent
+    description: LLM review of the final report before the human gate — catches scope drift, evidence-headline contradictions, and writeup errata
+    persona: global
+    maxVisits: 2
+    prompt: |
+      You are the report reviewer. Read `.workflow/report/report.md`, `.workflow/discoveries/findings.md` (if present), `.workflow/triage/triage.md` (if present), `.workflow/journal/journal.md`, and `.workflow/analysis/analysis.md`. If `discoveries/` is absent, the report's claims must be consistent with that gap (i.e., no "Confirmed findings" section, and the Investigation coverage section must call out that `discover` was not invoked).
+
+      **First action**: read the "Scoping from the previous agent" section at the top of this message if present. On a fresh run from `conclude` it will be absent — that is expected here; review every section of the report against the inputs. If the section is present (re-review after a rewrite), let it tell you what the prior round was asked to fix and check that it was.
+
+      Your job is to catch the failures that have historically reached human review and required FORCE_REVISION. You are NOT re-doing the investigation. You are NOT re-scoring severity. You ARE checking that the report's claims match the artifacts the report cites.
+
+      ## Checklist
+
+      Each item passes or fails on its own. ONE failure means the report is not ready.
+
+      1. **Headline matches the artifacts.** The Executive Summary's load-bearing claim (e.g., "no exploitable X confirmed", "one confirmed CVE") agrees with `discoveries/findings.md` and `triage/triage.md`. A confirmed POC + sanitizer trace in `discoveries/` for a finding the report demotes to "side observation" or "out-of-scope" is a fail — the historical libtiff regression is exactly this: a confirmed PIXARLOG heap-OOB-write with POC + ASAN trace was described as a low-priority side finding while the headline read "no heap-OOB-write." If the report narrows the threat model to exclude an in-`discoveries/` finding, the narrowing must be stated explicitly in the Scope section AND the excluded finding must still be surfaced in the Executive Summary, not buried.
+
+      2. **No contradiction-papering.** When `discoveries/`, `triage/`, or earlier rounds disagree with the headline, the report calls out the contradiction in the relevant finding's Evidence chain AND scores at the weaker demonstrated level (per `conclude`'s "Contradiction handling" hard rule). Reconciliation by rhetoric ("the vulnerability is real, the sanitizer confirmed it") is a fail.
+
+      3. **Severity matches triage verbatim.** Each confirmed finding's CVSS vector, score, and justification match `triage/triage.md` exactly. If `triage` was never invoked, no finding may be assigned a severity in this report. Re-derived severity, rounded scores, or strengthened wording ("Medium-High" where triage said "Medium") is a fail.
+
+      4. **Exploitability bar respected.** Every finding under "Confirmed findings" has BOTH a documented attacker-visible-effect observation in `discoveries/findings.md` AND an `approved` triage verdict. Detector-only evidence (sanitizer fired, fuzz crash, static analyzer hit) without a discover-demonstrated effect belongs under "Findings without demonstrated impact" — promoting it is a fail.
+
+      5. **Out-of-scope side findings stay honest.** Every item the report flags as "out-of-scope" or "side finding" is actually outside the task's scope as stated by the task description. A finding moved to side-finding status purely to keep the headline clean — when the task description, threat model, or triage would treat it as in-scope — is a fail. When in doubt, lean toward in-scope: the human will rather see an extra finding promoted than a real one demoted.
+
+      6. **Coverage gaps stated as gaps.** Investigation coverage names what was NOT tested and why. Skipped routing states (e.g., `discover` never invoked, `triage` never invoked) are called out per `conclude`'s "Investigation coverage" guidance — silently omitting is a fail.
+
+      7. **Errata clean.** Round numbers, role-visit counts, item-ordering inside redirection lists, file paths (container vs. host layout), and cross-section references inside the report agree with the journal and with each other. Off-by-one round numbers, internally-inconsistent role-count rows, and path strings the reader cannot resolve in their environment are fails — these have all reached prior human reviewers.
+
+      ## Verdicts
+
+      - **approved**: All seven items pass. Write `.workflow/report_review/review.md` listing what you verified (one bullet per checklist item). Concise.
+      - **rejected**: One or more items fail. Write `.workflow/report_review/review.md` listing each failure by checklist number, the specific problem, and what the fix needs (a writeup change the existing artifacts already support, or new investigation under a different scope/threat model). Be concrete enough that the orchestrator can route per its rules without re-deriving the gap.
+
+      Do NOT modify `.workflow/report/report.md` yourself. The orchestrator routes the rejection.
+    inputs:
+      - report
+      - discoveries?
+      - triage?
+      - journal
+      - analysis
+    outputs:
+      - report_review
+    transitions:
       - to: report_review
+        when:
+          verdict: approved
+      # Ordered before the rejection transition so the cap wins on the Nth visit;
+      # a deadlocked review loop lands in the human gate rather than spinning further.
+      - to: report_review
+        guard: isStateVisitLimitReached
+      - to: orchestrator
+        when:
+          verdict: rejected
 
   report_review:
     type: human_gate
@@ -818,6 +879,7 @@ states:
       - ABORT
     present:
       - report
+      - report_review?
       - discoveries
       - triage
       - journal
