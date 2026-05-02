@@ -47,6 +47,7 @@ import {
   YELLOW,
   RESET,
 } from './cli-support.js';
+import { runRunState } from './run-state-command.js';
 
 // ---------------------------------------------------------------------------
 // Help specs
@@ -61,6 +62,7 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow resume <baseDir> [--state <stateName>] [--model <model>] [--no-lint] [--strict-lint]',
     'ironcurtain workflow inspect <baseDir> [--all]',
     'ironcurtain workflow lint <name-or-path> [--strict]',
+    'ironcurtain workflow run-state <name-or-path> <state> --artifacts <dir> [options]',
   ],
   subcommands: [
     { name: 'list', description: 'List available workflow definitions' },
@@ -68,6 +70,7 @@ const workflowSpec: CommandSpec = {
     { name: 'resume', description: 'Resume a checkpointed workflow' },
     { name: 'inspect', description: 'Show workflow status, artifacts, and recent messages' },
     { name: 'lint', description: 'Run semantic checks on a workflow definition' },
+    { name: 'run-state', description: 'Run a single agent state once against pre-staged artifacts' },
   ],
   options: [
     { flag: 'model', description: 'Override the agent model (start, resume)', placeholder: '<model-id>' },
@@ -147,7 +150,7 @@ function loadAndValidateDefinition(path: string): WorkflowDefinition {
  * without re-parsing (start/resume have already routed through the same
  * file before calling this).
  */
-function runCliPreflightLint(definitionPath: string, mode: LintMode): WorkflowDefinition {
+export function runCliPreflightLint(definitionPath: string, mode: LintMode): WorkflowDefinition {
   const result = runPreflight(definitionPath, mode);
 
   if (result.ok) {
@@ -183,7 +186,7 @@ function resolveLintMode(noLint: unknown, strictLint: unknown): LintMode {
 
 type ParseArgsConfig = Parameters<typeof parseArgs>[0];
 
-function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnType<typeof parseArgs> {
+export function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnType<typeof parseArgs> {
   try {
     return parseArgs({ ...opts, strict: true });
   } catch (err) {
@@ -742,6 +745,9 @@ export async function main(args: string[]): Promise<void> {
       break;
     case 'lint':
       runLintCommand(subArgs);
+      break;
+    case 'run-state':
+      await runRunState(subArgs);
       break;
     default:
       writeStderr(`${RED}Unknown workflow subcommand: ${subcommand}${RESET}`);

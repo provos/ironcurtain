@@ -183,7 +183,7 @@ const STAGED_WORKFLOW_SKILLS_SUBDIR = 'workflow-skills';
  * shallow-recursive copy decouples the run from its source-of-record
  * location.
  */
-function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: string): string | undefined {
+export function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: string): string | undefined {
   const sourceSkillsDir = resolve(packageDir, 'skills');
   if (!existsSync(sourceSkillsDir)) return undefined;
 
