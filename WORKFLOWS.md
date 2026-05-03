@@ -219,6 +219,59 @@ The following checks are enforced during workflow validation before lint runs, s
 - `maxVisits` declared on a non-agent state (only agent states support per-state visit caps)
 - State ID does not match `^[A-Za-z_][A-Za-z0-9_]*$` (empty, leading digit, or contains `.`/space/`-`)
 
+### `ironcurtain workflow run-state`
+
+Run a single agent state once against a pre-staged artifact directory. Skips the orchestrator, journal, checkpoint, and transition machinery — one agent invocation, one response written to disk. Intended for prompt iteration, A/B comparing models on identical inputs, and reproducing a state's verdict from a real run without replaying the whole workflow.
+
+```bash
+ironcurtain workflow run-state <name-or-path> <state> --artifacts <dir> [options]
+```
+
+Options:
+
+- `--artifacts <dir>` -- Required. Directory containing pre-staged artifact subdirs (one per workflow input name)
+- `--workspace <dir>` -- Source tree to stage alongside `.workflow/` so the agent can read code
+- `--directive <text>` / `--directive-file <path>` -- Inline scoping directive injected as the previous agent's output (synthetic prior state name `debug`)
+- `--task <text>` / `--task-file <path>` -- Task description; defaults to `<artifacts>/task/description.md` if present
+- `--model <model-id>` -- Override the agent model
+- `--mode <builtin|docker>` -- Override `settings.mode`
+
+See `--help` for the full flag list.
+
+#### Staging
+
+The command stages a fresh workspace under `~/.ironcurtain/debug-runs/<workflow>-<state>-<timestamp>/workspace/` (override with `--output`). Each subdirectory of `--artifacts` whose name matches one of the state's declared `inputs` is copied into `workspace/.workflow/<name>/`. Required inputs missing on disk abort with a structured error; optional inputs (`?` suffix) are silently skipped.
+
+When `--workspace` is provided, its contents are copied into the staged workspace first, **excluding any top-level `.workflow/` directory**. Artifact staging always wins on conflict, so pointing `--workspace` at a tree that already contains `.workflow/` will not overwrite the artifacts you staged separately via `--artifacts`.
+
+#### Output
+
+After the agent returns, the command writes:
+
+- `agent-output.md` at the run's output dir -- full agent response (the primary debug artifact; the response can be megabytes and is inconvenient to recover from terminal scrollback)
+- Anything the agent wrote to `workspace/.workflow/<output>/` per its declared `outputs`
+- A short verdict line on stdout parsed from the response's `agent_status` block
+
+#### Examples
+
+```bash
+# Re-run a state against pre-staged artifacts, no source tree
+ironcurtain workflow run-state <workflow> <state> --artifacts ~/path/to/.workflow
+
+# Include a workspace so the agent can read code alongside the artifacts
+ironcurtain workflow run-state <workflow> <state> \
+  --workspace ~/path/to/repo --artifacts ~/path/to/repo/.workflow
+
+# Test routing-driven scoping with an explicit directive
+ironcurtain workflow run-state <workflow> <state> \
+  --artifacts ~/path/to/.workflow \
+  --directive "focus on the issue identified by the prior agent"
+```
+
+#### Caveats
+
+This is a single-state runner. It does not transition to other states, does not update the journal, does not write a checkpoint, and does not persist anything back to the source `--artifacts` directory. If a state's behavior depends on the workflow journal or on artifacts produced by other states earlier in the run, those artifacts must be present in the `--artifacts` dir before invocation.
+
 ## Human gates
 
 When a workflow reaches a human gate, you're prompted to choose:
