@@ -45,7 +45,7 @@ states:
 
       5. **Protocol and interaction sequences.** What multi-step interactions are required to reach the target code (handshakes, authentication, session setup, state machine transitions)?
 
-      6. **Function catalog with assumption inventory.** For each key function in the in-scope code, document:
+      6. **Function catalog with assumption inventory.** Every function reachable from the entry-point call graph (mapped in item 2) must be accounted for in writing — either with a full entry below or a one-line "examined and dismissed because <reason>" note. Silent omission is forbidden; functions raised in the call graph but missing from the catalog are implicit blind spots. Dispatch-family variants (per-bps, per-codec, per-message-type, per-mode) each get their own entry — "same as variant X" is not a sufficient dismissal because variants commonly have differing per-element arithmetic. For each function with a full entry, document:
          - Signature, parameters, and return type
          - Data types used — especially type widths, signed/unsigned distinctions, casts between types, and any macros or wrappers around comparisons or arithmetic
          - Stated invariants: assertions, comments like "should never happen," documented preconditions
