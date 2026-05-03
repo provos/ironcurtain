@@ -171,15 +171,22 @@ function buildScopingSection(
   return parts.join('\n\n');
 }
 
-/** Appends input artifact path reference sections. */
+/** Appends a single `## Inputs` section listing declared inputs as bullets. */
 function appendInputArtifacts(sections: string[], inputs: readonly string[]): void {
-  for (const inputRef of inputs) {
-    const { name, isOptional } = parseArtifactRef(inputRef);
-    const instruction = isOptional
-      ? `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace if it exists. This input is optional — skip it if the directory is not present.`
-      : `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace using your file reading tools.`;
-    sections.push(`## Input: ${name}\n\n${instruction}`);
-  }
+  if (inputs.length === 0) return;
+
+  const parsed = inputs.map((ref) => parseArtifactRef(ref));
+  const hasOptional = parsed.some((p) => p.isOptional);
+
+  const preamble = hasOptional
+    ? `Read these from \`${WORKFLOW_ARTIFACT_DIR}/<name>/\` in your workspace. Optional inputs (marked optional) may be absent — skip them if so.`
+    : `Read these from \`${WORKFLOW_ARTIFACT_DIR}/<name>/\` in your workspace.`;
+
+  const bullets = parsed
+    .map(({ name, isOptional }) => `- \`${name}\` (${isOptional ? 'optional' : 'required'})`)
+    .join('\n');
+
+  sections.push(`## Inputs\n\n${preamble}\n\n${bullets}`);
 }
 
 /** Appends expected outputs section if there are any outputs. */

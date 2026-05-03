@@ -45,7 +45,7 @@ states:
 
       5. **Protocol and interaction sequences.** What multi-step interactions are required to reach the target code (handshakes, authentication, session setup, state machine transitions)?
 
-      6. **Function catalog with assumption inventory.** For each key function in the in-scope code, document:
+      6. **Function catalog with assumption inventory.** Every function reachable from the entry-point call graph (mapped in item 2) must be accounted for in writing — either with a full entry below or a one-line "examined and dismissed because <reason>" note. Silent omission is forbidden; functions raised in the call graph but missing from the catalog are implicit blind spots. Dispatch-family variants (per-bps, per-codec, per-message-type, per-mode) each get their own entry — "same as variant X" is not a sufficient dismissal because variants commonly have differing per-element arithmetic. For each function with a full entry, document:
          - Signature, parameters, and return type
          - Data types used — especially type widths, signed/unsigned distinctions, casts between types, and any macros or wrappers around comparisons or arithmetic
          - Stated invariants: assertions, comments like "should never happen," documented preconditions
@@ -53,6 +53,8 @@ states:
          - Where external input reaches this function and what validation (if any) occurs before it arrives
 
       7. **Cross-cutting data flow analysis.** After completing the function catalog, trace these patterns ACROSS function boundaries. The most important bugs live at the intersection of separately-correct functions.
+
+         Apply each pattern that plausibly fits the code surface — do not stop at the first match. Surfaces that admit multiple bug classes (memory safety + bookkeeping off-by-ones + state-machine assumptions + sentinel collisions) deserve documented findings across each. Tunnel-visioning on one bug class (e.g., reporting only integer overflows when the code also has check-use gaps) is the most common failure mode of this state.
 
          - **Type narrowing at storage boundaries.** Where does a wider type get stored into a narrower container (e.g., int into uint16_t, long into int, double into float)? What is the maximum value the source can reach? What value gets stored at the truncation point? Trace every write where source and destination types differ in width.
 
@@ -64,7 +66,7 @@ states:
 
          - **Arithmetic result range vs destination range.** Where can a multiplication, addition, or shift produce a value that exceeds the range of its destination type or comparison operand?
 
-         For each pattern found, document: the source location (file:line), the data flow path, the types involved, and the boundary value where the pattern activates. Do not assess exploitability — just document the structural fact.
+         For each pattern found, document: the source location (file:line), the data flow path, the types involved, the boundary value where the pattern activates, and a **Reachability sketch** — a short trace from attacker-controlled input to the pattern site naming each guard between (file:line of the guard, what it checks, what value range it admits). If prior journal rounds have evidence that a guard along the path is impassable or has been bypassed, note that. Reachability is structural, not dynamic — do not validate by execution; just document what the code shows. Do not assess exploitability beyond reachability; that is downstream agents' job.
 
       The function catalog and cross-cutting analysis are the most important outputs. They give downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
 
@@ -82,9 +84,9 @@ states:
     prompt: |
       You are the investigation orchestrator for a vulnerability discovery workflow. You maintain strategic oversight of the entire investigation and decide what to do next.
 
-      ## HARD CONSTRAINT: You are a ROUTER
+      ## Your role: ROUTER (not analyst)
 
-      You are a ROUTER. Do NOT read source code files, do NOT analyze code, do NOT write code. Your job is to read the journal and artifacts produced by other agents, assess progress, and decide which agent to dispatch next. If you need deeper code understanding, route to analyze or discover.
+      Your job is to read the journal and artifacts produced by other agents, assess progress, and decide which agent to dispatch next. You are NOT the analyst, and you do NOT write code. You MAY read a few source files when it materially changes a routing decision — validating a quoted claim, locating a function the directive will name, or disambiguating between routing alternatives. If you need a structural read of the code, that's `analyze`'s job — route there with a `reanalyze` verdict.
 
       ## Cold start
 
@@ -154,8 +156,9 @@ states:
 
       ### `harness_design` — verdict: `harness_design`
 
-      - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below).
-      - **Directive must supply:** Hypothesis, tier, component scope, WHY this tier. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given the hypothesis you describe.
+      - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below) and the design class (see Design class below).
+      - **Directive must supply:** Tier, design class (trigger-driven OR coverage-driven), the target (a hypothesis with named violation site for trigger-driven; a named under-exercised code region with dispatch axes for coverage-driven), component scope, WHY this tier and class. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given what you describe.
+      - **Bundling multiple hypotheses.** A trigger-driven directive may scope a single hypothesis or a related set when they share input space and code region. Bundle when consolidating doesn't dilute the sweep (e.g., three integer-overflow hypotheses on the same allocator → one harness). Keep separate when input distributions conflict (one wants huge dimensions, another wants small) or observation points differ enough that one harness can't see both.
       - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it. The state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct, and `harness_validate`'s approved transition is declared before the visit-cap escalation guard, so the guard never fires on approved verdicts (a buggy validator can keep re-entering the harness pipeline until the workflow-level round cap kicks in). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
 
       ### `discover` — verdict: `discover`
@@ -204,9 +207,20 @@ states:
 
       - **When:** Investigation finished — vulnerability confirmed and triaged, OR thorough search completed with no findings.
       - **Directive must supply:** Nothing extra — reads all artifacts.
-      - **Return:** terminal, no return.
+      - **Return:** routes to `review` (LLM report reviewer), then `report_review` (human gate). The orchestrator does NOT dispatch `review` directly.
+
+      ### Returns from `review` (LLM report reviewer)
+
+      `conclude` routes to `review`; `review` may bounce back here with `rejected`. Treat it as a FORCE_REVISION: read `.workflow/report_review/review.md` for the failed checklist items, then route per the standard rules — `complete` for writeup-only fixes the existing artifacts support, `discover`/`triage`/`reanalyze` for evidence gaps, `escalate` for threat-model policy calls.
 
       **Feedback-driven directives.** When human feedback or prior-round evidence changes the focus, your directive should point the next agent AT the specific thing to investigate, not prescribe how to investigate it. Example shape: "Re-analyze focusing on the interaction between [function A] and [data structure B] — prior round missed [the specific case]." Let the agent's prompt drive HOW.
+
+      ## Design class — pick before tier
+
+      Each harness_design directive picks one of two classes. Tier and class are orthogonal — any tier can be either class.
+
+      - **Trigger-driven**: Use when analyze (or a prior round) produced a falsifiable claim with a named violation site — a specific function, value range, and expected oracle (bounds check fires, type narrows lossy, sentinel collides). The harness sweeps the hypothesis variables.
+      - **Coverage-driven**: Use when analyze diagnosed an under-exercised dispatch surface without a specific theory — a code region the project's existing fuzzers don't reach, with dispatch axes (option flags, message types, opcode tables, mode bits) the input space hasn't crossed. The harness sweeps the dispatch axes; the oracle is any sanitizer error within the named region. Pick this when prior trigger-driven rounds against the same region have been mitigated by upstream guards but the region itself is untested by the existing fuzz infrastructure.
 
       ## Tiered harness strategy
 
@@ -241,6 +255,7 @@ states:
       - discoveries?
       - differential?
       - triage?
+      - report_review?
     outputs:
       - journal
     transitions:
@@ -297,7 +312,12 @@ states:
     prompt: |
       You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md` and the investigation journal at `.workflow/journal/journal.md`.
 
-      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection is the orchestrator's authoritative description of what to design — the hypothesis, the tier, the component scope, and WHY this tier. The Notes subsection is a short summary. If the scoping section is missing or the directive does not specify a tier and hypothesis, STOP and report back with an `escalate`-style agent_status — do not pick a tier or hypothesis by guessing from the analysis or journal alone.
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection is the orchestrator's authoritative description of what to design — the tier, the design class (trigger-driven or coverage-driven), the target (a specific hypothesis OR a named under-covered surface), the component scope, and WHY this tier. The Notes subsection is a short summary. If the scoping section is missing or the directive does not specify both a tier and a design class with its target, STOP and report back with an `escalate`-style agent_status — do not pick those by guessing from the analysis or journal alone.
+
+      ## Design classes
+
+      - **Trigger-driven**: directive names a falsifiable hypothesis with a specific violation site. Sweep the hypothesis input variables, oracle is the named bounds check / type-narrowing / state-machine violation firing.
+      - **Coverage-driven**: directive names an under-exercised dispatch surface (file/function set + dispatch axes). Sweep the dispatch axes (option flags, message types, opcode tables, mode bits), oracle is any sanitizer error within the named region. Use this when analyze diagnosed a coverage gap without a specific theory.
 
       ## Your scope: DESIGN ONLY
 
@@ -311,8 +331,8 @@ states:
       DO include:
       - What source files to link and why
       - What types and structs to preserve
-      - What input variables to sweep and over what range
-      - What conditions constitute a positive finding
+      - What to sweep and over what range — hypothesis input variables (trigger-driven) or dispatch axes (coverage-driven)
+      - What conditions constitute a positive finding — specific violation pattern (trigger-driven) or any sanitizer error within the named region (coverage-driven)
       - What instrumentation (sanitizers, canaries, coverage) to use
 
       Keep the design document concise. Aim for something the build agent can read and act on without wading through reference implementation.
@@ -342,14 +362,16 @@ states:
 
       ## Systematic input exploration (required for all tiers)
 
-      The harness must FUZZ, not unit-test. Hand-picked scenarios miss the interesting boundary values. For each input variable in the hypothesis, the design must specify:
+      The harness must FUZZ, not unit-test. Hand-picked scenarios miss the interesting boundary values. For each swept variable (hypothesis inputs for trigger-driven, dispatch axes for coverage-driven), the design must specify:
 
-      - **The sweep range**: the full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere.
+      - **The sweep range**: the full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere. For coverage-driven dispatch axes, the range is the full set of dispatch values (option flags, message types, mode bits) plus their realistic combinations.
       - **The search strategy**: exhaustive enumeration if the space is < 100M combinations; boundary-dense + random sampling otherwise.
-      - **The observables**: at each input value, what should the harness record? (e.g., "stored value in `slice_table`", "result of the comparison at line 2344", "return value of `ff_h264_parse_ref_count`", "ASAN error", "canary state")
-      - **The positive finding condition**: what pattern in the observables indicates the hypothesis is confirmed? Be specific — not "a crash happens" but "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice."
+      - **The observables**: at each input value, what should the harness record? (e.g., "stored value in the target buffer", "result of the bounds check at `<file>:<line>`", "return value of the target function", "ASAN error", "canary state")
+      - **The positive finding condition**: what pattern in the observables confirms the design's claim? For trigger-driven: be specific — not "a crash happens" but "the bounds check at `<file>:<line>` evaluates true when the input value exceeds the buffer's allocated size." For coverage-driven: "any sanitizer error within the named code region" is acceptable, but the named region must be concrete (file/function set), not "somewhere in the target."
 
       The design specifies input variables and ranges. The build agent implements the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
+
+      **Multi-hypothesis bundling.** If the directive scopes a related set of hypotheses (rather than one), the sweep range is the union of their input-variable ranges, the positive-finding condition is a disjunction (any of the named violation patterns firing counts), and observables must cover all named sites. Justify the bundling briefly — bundled designs only pay off when the hypotheses share enough input space and code region that one harness can exercise them coherently.
 
       **Leverage existing fuzzing tools when appropriate.** For large input spaces, structured inputs, or whenever coverage-guided exploration would outperform a hand-rolled loop, design the harness around an existing fuzzer rather than reinventing one. Canonical examples: **libFuzzer** (in-process, coverage-guided; natural fit for Tier 1/2 with an `LLVMFuzzerTestOneInput` entry point), **AFL/AFL++** (out-of-process, coverage-guided; good for Tier 3 file/stdin-driven binaries). Managed-runtime stacks have their own equivalents (Jazzer for JVM, atheris for Python, `go test -fuzz` for Go). The build agent installs the tool; your design specifies WHICH tool and WHY, plus the entry-point shape.
 
@@ -401,13 +423,13 @@ states:
 
       ## Checklist
 
-      1. **Tier matches hypothesis scope.** Single-function hypothesis → Tier 1. Cross-function or cross-component hypothesis → Tier 2+. Hypothesis requiring real initialization, protocol framing, or global state → Tier 3. Tier 1 for a cross-component bug is an automatic fail.
+      1. **Tier matches target scope.** For trigger-driven: single-function hypothesis → Tier 1; cross-function or cross-component hypothesis → Tier 2+; hypothesis requiring real initialization, protocol framing, or global state → Tier 3. For coverage-driven: a single function's dispatch surface → Tier 1; a multi-function dispatcher (option/message/opcode router) → Tier 2+; a CLI or protocol entry point → Tier 3. Tier 1 for a cross-component target is an automatic fail in either class.
 
-      2. **Hypothesis is stated precisely.** One sentence naming specific functions, specific values, and the expected violation. "There may be memory corruption here" is a fail; "the length field at ff_h264.c:1234 is stored in a uint16_t but the source can reach 2^17" is a pass.
+      2. **Design class and target are stated precisely.** Either a trigger-driven hypothesis (specific functions, specific values, expected violation — "the length field at <file>:<line> is stored in a fixed-width integer type that the input source can overflow") or a coverage-driven surface (named under-exercised code region + dispatch axes to sweep — "the option-flag dispatcher in <file> reaches five extractor variants, only one has prior fuzz exposure"). "There may be memory corruption here" or "fuzz the project" is a fail.
 
       3. **Input sweep range is concrete.** Named input variables, explicit ranges, specified search strategy (exhaustive / boundary-dense+random / libFuzzer / AFL / bounded enumeration). "Test a few values" is a fail.
 
-      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice" is a pass.
+      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern confirms the design's claim. For trigger-driven: a specific violation pattern ("the bounds check at <file>:<line> evaluates true when the input value exceeds the buffer's allocated size"). For coverage-driven: "any sanitizer error within <named code region>" — where the region is a concrete file/function set, not "somewhere in the target." "A crash happens" is a fail in either mode.
 
       5. **Coverage targets the right code — both kinds.** The design must separately name (a) the fuzzer-feedback mechanism (e.g., libFuzzer's `-fsanitize-coverage=...`, AFL++'s `afl-clang-fast`, or a runtime agent for managed stacks), (b) the audit-coverage tool, and (c) the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer `cov`, AFL++ `edges_found`). It must name which units of code receive (a) — specifically the target code, not just the harness wrapper. A design that names only audit-coverage tooling, names feedback instrumentation only on the wrapper, or omits (c) is a fail. A design missing a fallback path on a *different* instrumentation mechanism is also a fail.
 
@@ -415,12 +437,12 @@ states:
 
       7. **Seed corpus matches dispatch surface.** If the target has a structured dispatch table, the design must specify seeds generated programmatically from it. For small discrete targets, N/A with a one-line reason is acceptable.
 
-      8. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail.
+      8. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail. For consolidated designs covering multiple hypotheses, the design must briefly justify the bundling — too many hypotheses (>3) in one harness without strong shared-input-space rationale signals an unfocused design and is a fail.
 
       ## Verdicts
 
       - **approved**: All applicable checklist items pass. Write a brief note to `.workflow/harness_design_review/review.md` listing what you verified.
-      - **rejected**: One or more items fail. Write `.workflow/harness_design_review/review.md` listing each failure by checklist number, the specific problem, and what the designer must change. Be concrete — "item 3 fails: input range for slice_num is not specified; design must specify the sweep (e.g., 0..65535 covering the uint16_t boundary)" beats "item 3: needs more detail."
+      - **rejected**: One or more items fail. Write `.workflow/harness_design_review/review.md` listing each failure by checklist number, the specific problem, and what the designer must change. Be concrete — "item 3 fails: input range for the named index variable is not specified; design must specify the sweep covering the full representable range of its type plus boundary points" beats "item 3: needs more detail."
 
       Do NOT modify the design document yourself. The designer iterates on their own output.
     inputs:
@@ -807,7 +829,64 @@ states:
     outputs:
       - report
     transitions:
+      - to: review
+
+  review:
+    type: agent
+    description: LLM review of the final report before the human gate — catches scope drift, evidence-headline contradictions, and writeup errata
+    persona: global
+    maxVisits: 2
+    prompt: |
+      You are the report reviewer. Read `.workflow/report/report.md`, `.workflow/discoveries/findings.md` (if present), `.workflow/triage/triage.md` (if present), `.workflow/journal/journal.md`, and `.workflow/analysis/analysis.md`. If `discoveries/` is absent, the report's claims must be consistent with that gap (i.e., no "Confirmed findings" section, and the Investigation coverage section must call out that `discover` was not invoked).
+
+      **First action**: read the "Scoping from the previous agent" section at the top of this message if present. On a fresh run from `conclude` it will be absent — that is expected here; review every section of the report against the inputs. If the section is present (re-review after a rewrite), let it tell you what the prior round was asked to fix and check that it was.
+
+      Your job is to catch the failures that have historically reached human review and required FORCE_REVISION. You are NOT re-doing the investigation. You are NOT re-scoring severity. You ARE checking that the report's claims match the artifacts the report cites.
+
+      ## Checklist
+
+      Each item passes or fails on its own. ONE failure means the report is not ready.
+
+      1. **Headline matches the artifacts.** The Executive Summary's load-bearing claim (e.g., "no exploitable X confirmed", "one confirmed CVE") agrees with `discoveries/findings.md` and `triage/triage.md`. A finding with execution evidence in `discoveries/` (POC, sanitizer trace, observed attacker-visible effect, runtime sink reached) that the report demotes to "side observation" or "out-of-scope" is a fail — the canonical "buried CVE" pattern. If the report narrows the threat model to exclude an in-`discoveries/` finding, the narrowing must be stated explicitly in the Scope section AND the excluded finding must still be surfaced in the Executive Summary, not buried.
+
+      2. **No contradiction-papering.** When `discoveries/`, `triage/`, or earlier rounds disagree with the headline, the report calls out the contradiction in the relevant finding's Evidence chain AND scores at the weaker demonstrated level (per `conclude`'s "Contradiction handling" hard rule). Reconciliation by rhetoric ("the vulnerability is real, the sanitizer confirmed it") is a fail.
+
+      3. **Severity matches triage verbatim.** Each confirmed finding's CVSS vector, score, and justification match `triage/triage.md` exactly. If `triage` was never invoked, no finding may be assigned a severity in this report. Re-derived severity, rounded scores, or strengthened wording ("Medium-High" where triage said "Medium") is a fail.
+
+      4. **Exploitability bar respected.** Every finding under "Confirmed findings" has BOTH a documented attacker-visible-effect observation in `discoveries/findings.md` AND an `approved` triage verdict. Detector-only evidence — any tool that flagged something without a discover-demonstrated effect (sanitizer, fuzz crash, static analyzer, tainted-flow tracer, schema-validator alert, assertion failure, etc.) — belongs under "Findings without demonstrated impact"; promoting it is a fail.
+
+      5. **Out-of-scope side findings stay honest.** Every item the report flags as "out-of-scope" or "side finding" is actually outside the task's scope as stated by the task description. A finding moved to side-finding status purely to keep the headline clean — when the task description, threat model, or triage would treat it as in-scope — is a fail. When in doubt, lean toward in-scope: the human will rather see an extra finding promoted than a real one demoted.
+
+      6. **Coverage gaps stated as gaps.** Investigation coverage names what was NOT tested and why. Skipped routing states (e.g., `discover` never invoked, `triage` never invoked) are called out per `conclude`'s "Investigation coverage" guidance — silently omitting is a fail.
+
+      7. **Errata clean.** Round numbers, role-visit counts, item-ordering inside redirection lists, file paths (container vs. host layout), and cross-section references inside the report agree with the journal and with each other. Off-by-one round numbers, internally-inconsistent role-count rows, and path strings the reader cannot resolve in their environment are fails — these have all reached prior human reviewers.
+
+      ## Verdicts
+
+      - **approved**: All seven items pass. Write `.workflow/report_review/review.md` listing what you verified (one bullet per checklist item). Concise.
+      - **rejected**: One or more items fail. Write `.workflow/report_review/review.md` listing each failure by checklist number, the specific problem, and what the fix needs (a writeup change the existing artifacts already support, or new investigation under a different scope/threat model). Be concrete enough that the orchestrator can route per its rules without re-deriving the gap.
+
+      Do NOT modify `.workflow/report/report.md` yourself. The orchestrator routes the rejection.
+    inputs:
+      - report
+      - discoveries?
+      - differential?
+      - triage?
+      - journal
+      - analysis
+    outputs:
+      - report_review
+    transitions:
       - to: report_review
+        when:
+          verdict: approved
+      # Ordered before the rejection transition so the cap wins on the Nth visit;
+      # a deadlocked review loop lands in the human gate rather than spinning further.
+      - to: report_review
+        guard: isStateVisitLimitReached
+      - to: orchestrator
+        when:
+          verdict: rejected
 
   report_review:
     type: human_gate
@@ -818,6 +897,7 @@ states:
       - ABORT
     present:
       - report
+      - report_review?
       - discoveries
       - triage
       - journal
