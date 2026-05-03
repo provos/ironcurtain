@@ -327,6 +327,15 @@ export interface WorkflowBorrowOptions {
    * resolved set.
    */
   readonly skillFilter?: ReadonlySet<string>;
+
+  /**
+   * Hard off-switch for every skill layer. When true, no user-global,
+   * persona, or workflow-package skills are resolved for this session.
+   * Set by workflow states that declare `skills: none`. Mutually
+   * exclusive in spirit with `skillsDir` / `skillFilter` — when this
+   * is true, those fields are ignored and the resolver returns `[]`.
+   */
+  readonly disableAllSkills?: boolean;
 }
 
 /**

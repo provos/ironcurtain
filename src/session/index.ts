@@ -684,6 +684,7 @@ export function buildSessionConfig(
       ...(opts.persona ? { personaName: opts.persona } : {}),
       ...(opts.workflow?.skillsDir ? { workflowSkillsDir: opts.workflow.skillsDir } : {}),
       ...(opts.workflow?.skillFilter ? { workflowSkillFilter: opts.workflow.skillFilter } : {}),
+      ...(opts.workflow?.disableAllSkills ? { disableAllSkills: true } : {}),
     });
     if (borrowInfra) {
       borrowInfra.restageSkills(resolvedSkills);

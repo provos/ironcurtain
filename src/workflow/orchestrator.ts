@@ -32,7 +32,13 @@ import type {
   DeterministicStateDefinition,
   AgentOutput,
 } from './types.js';
-import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA, DEFAULT_CONTAINER_SCOPE } from './types.js';
+import {
+  createWorkflowId,
+  WORKFLOW_ARTIFACT_DIR,
+  GLOBAL_PERSONA,
+  DEFAULT_CONTAINER_SCOPE,
+  resolveWorkflowSkillsOptions,
+} from './types.js';
 import {
   getBundleAuditLogPath,
   getBundleBundleDir,
@@ -1847,7 +1853,6 @@ export class WorkflowOrchestrator implements WorkflowController {
     // `instance.definitionPath` here. Computing it per-state would
     // re-introduce the resume-fragility bug fixed by staging at start.
     const workflowSkillsDir = instance.workflowSkillsDir;
-    const workflowSkillFilter = stateConfig.skills ? new Set<string>(stateConfig.skills) : undefined;
 
     // Workflow context for the session. Always emitted for workflow
     // runs (so the orchestrator's identity isn't ambiguous), even when
@@ -1856,8 +1861,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const workflowOptions = {
       ...(bundle ? { infrastructure: bundle } : {}),
       ...(workflowStateDir ? { stateDir: workflowStateDir, stateSlug } : {}),
-      ...(workflowSkillsDir !== undefined ? { skillsDir: workflowSkillsDir } : {}),
-      ...(workflowSkillFilter ? { skillFilter: workflowSkillFilter } : {}),
+      ...resolveWorkflowSkillsOptions(stateConfig.skills, workflowSkillsDir),
     };
 
     let session: Session;

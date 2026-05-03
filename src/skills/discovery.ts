@@ -207,6 +207,12 @@ export interface ResolveSkillsOptions {
    * that field is present.
    */
   readonly workflowSkillFilter?: ReadonlySet<string>;
+  /**
+   * When true, short-circuit and return `[]` — no user-global, persona,
+   * or workflow-package skills are loaded. Used by workflow states that
+   * declare `skills: none` to opt out of every skill layer.
+   */
+  readonly disableAllSkills?: boolean;
 }
 
 /**
@@ -224,6 +230,8 @@ export interface ResolveSkillsOptions {
  * every workflow-package skill.
  */
 export function resolveSkillsForSession(opts: ResolveSkillsOptions): ResolvedSkill[] {
+  if (opts.disableAllSkills) return [];
+
   const userSkills = discoverSkills(getUserSkillsDir(), 'user');
 
   // Workflow mode: persona-as-skill-source is intentionally inert.

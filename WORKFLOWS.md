@@ -340,7 +340,7 @@ my_state:
 - **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
 - **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
 - **`maxVisits`** -- Optional positive integer. Caps how many times this specific state can be entered. Pairs with the `isStateVisitLimitReached` guard, which fires on the Nth visit's `onDone` (i.e., after the Nth invocation completes). Independent of `settings.maxRounds`. Only valid on `agent` states; placing it on other state types is a validation error. See "Transition actions" for the pairing with `resetVisitCounts`.
-- **`skills`** -- Optional list of skill names (strings) selecting which workflow-bundled skills are visible to this state. When omitted, the state gets every skill in the workflow package's `skills/` dir (default = all). When present, the state is restricted to the listed names. User-global skills (under `~/.ironcurtain/skills/`) always apply on top, with last-wins on collision. Names that don't exist as `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at workflow load. See "Skills" below.
+- **`skills`** -- Optional list of skill names (strings) selecting which workflow-bundled skills are visible to this state, or the literal string `none` to disable every skill layer. When omitted, the state gets every skill in the workflow package's `skills/` dir (default = all). When set to an array, the state is restricted to the listed names. User-global skills (under `~/.ironcurtain/skills/`) always apply on top, with last-wins on collision. Names that don't exist as `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at workflow load. The `skills: none` sentinel is the true off-switch: no workflow-package, user-global, or persona skills are loaded. See "Skills" below.
 
 ### Model selection
 
@@ -434,6 +434,14 @@ review:
 ```
 
 In workflow mode the persona-skills layer (`~/.ironcurtain/personas/<name>/skills/`) is intentionally inert — workflow states use the per-state `skills:` field for differentiation, not the persona. Personas still carry skills for standalone (`ironcurtain start --persona <name>`) sessions.
+
+**Three forms of the `skills:` field.**
+
+- `skills:` omitted — default. The state receives every workflow-package skill, plus user-global, plus persona skills.
+- `skills: [name1, name2]` — array. The workflow-package layer is filtered to the listed entries; user-global skills still apply on top.
+- `skills: none` — string sentinel. True off-switch: no skills of any kind (workflow-package, user-global, or persona) are loaded for the state. Useful when validating that a specific skill is carrying the work, or when a state should run with no skill context at all.
+
+Note that `skills: []` (empty array) is **not** the off-switch — it filters the workflow-package layer to zero, but user-global and persona skills still load. Use `skills: none` for the strict off-switch.
 
 ### Human gate states
 

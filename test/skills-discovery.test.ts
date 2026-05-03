@@ -485,4 +485,25 @@ describe('resolveSkillsForSession', () => {
       expect(filtered).toEqual([]);
     });
   });
+
+  it('returns [] when disableAllSkills is true, even with user/persona/workflow layers populated', () => {
+    const userSkills = resolve(tempDir, 'skills');
+    writeSkill(userSkills, 'u', { name: 'u', description: 'user' });
+
+    const personaDir = resolve(tempDir, 'personas', 'reviewer', 'skills');
+    writeSkill(personaDir, 'p', { name: 'p', description: 'persona' });
+    writeFileSync(resolve(tempDir, 'personas', 'reviewer', 'persona.json'), JSON.stringify({ name: 'reviewer' }));
+
+    const workflowSkills = resolve(tempDir, 'wf-skills');
+    writeSkill(workflowSkills, 'w', { name: 'w', description: 'workflow' });
+
+    withTempHome(() => {
+      const result = resolveSkillsForSession({
+        disableAllSkills: true,
+        personaName: 'reviewer',
+        workflowSkillsDir: workflowSkills,
+      });
+      expect(result).toEqual([]);
+    });
+  });
 });

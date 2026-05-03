@@ -18,7 +18,7 @@ import { parseArtifactRef } from './validate.js';
 import { stageWorkflowSkillsAtStart } from './orchestrator.js';
 import { parseArgsStrict, runCliPreflightLint } from './workflow-command.js';
 import type { AgentStateDefinition, WorkflowContext, WorkflowDefinition, WorkflowStateDefinition } from './types.js';
-import { WORKFLOW_ARTIFACT_DIR } from './types.js';
+import { WORKFLOW_ARTIFACT_DIR, resolveWorkflowSkillsOptions } from './types.js';
 
 import {
   createWorkflowSessionFactory,
@@ -406,7 +406,6 @@ export async function runRunState(args: string[]): Promise<void> {
   const staged = stageWorkspace(outputDir, parsed.artifactsDir, stateConfig.inputs, parsed.workspaceSrc);
 
   const workflowSkillsDir = stageWorkflowSkillsAtStart(getWorkflowPackageDir(definitionPath), outputDir);
-  const skillFilter = stateConfig.skills ? new Set(stateConfig.skills) : undefined;
 
   const taskDescription = resolveTaskDescription(parsed);
   const context = buildContext(definition, taskDescription, parsed.stateId, parsed.directive);
@@ -437,10 +436,7 @@ export async function runRunState(args: string[]): Promise<void> {
       ...(settings.maxSessionSeconds != null
         ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
         : {}),
-      workflow: {
-        ...(workflowSkillsDir !== undefined ? { skillsDir: workflowSkillsDir } : {}),
-        ...(skillFilter ? { skillFilter } : {}),
-      },
+      workflow: resolveWorkflowSkillsOptions(stateConfig.skills, workflowSkillsDir),
     });
   } catch (err) {
     writeStderr(`${RED}Session creation failed: ${err instanceof Error ? err.message : String(err)}${RESET}`);
