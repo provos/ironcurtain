@@ -6,7 +6,7 @@ settings:
   mode: docker
   dockerAgent: claude-code
   sharedContainer: true
-  model: anthropic:claude-sonnet-4-6
+  model: anthropic:claude-opus-4-7
   maxRounds: 12
   maxSessionSeconds: 10800
   unversionedArtifacts:
