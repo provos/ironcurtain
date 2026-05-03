@@ -837,7 +837,7 @@ states:
     persona: global
     maxVisits: 2
     prompt: |
-      You are the report reviewer. Read `.workflow/report/report.md`, `.workflow/discoveries/findings.md` (if present), `.workflow/triage/triage.md` (if present), `.workflow/journal/journal.md`, and `.workflow/analysis/analysis.md`. If `discoveries/` is absent, the report's claims must be consistent with that gap (i.e., no "Confirmed findings" section, and the Investigation coverage section must call out that `discover` was not invoked).
+      You are the report reviewer. Read `.workflow/report/report.md`, `.workflow/discoveries/findings.md` (if present), `.workflow/differential/diagnosis.md` (if present), `.workflow/triage/triage.md` (if present), `.workflow/journal/journal.md`, and `.workflow/analysis/analysis.md`. If `discoveries/` is absent, the "Confirmed findings" section must contain no entries — the conclude template emits the section heading with the "No exploitable vulnerabilities confirmed" sentinel under it, which is the correct form — and the Investigation coverage section must call out that `discover` was not invoked.
 
       **First action**: read the "Scoping from the previous agent" section at the top of this message if present. On a fresh run from `conclude` it will be absent — that is expected here; review every section of the report against the inputs. If the section is present (re-review after a rewrite), let it tell you what the prior round was asked to fix and check that it was.
 
@@ -849,7 +849,7 @@ states:
 
       1. **Headline matches the artifacts.** The Executive Summary's load-bearing claim (e.g., "no exploitable X confirmed", "one confirmed CVE") agrees with `discoveries/findings.md` and `triage/triage.md`. A finding with execution evidence in `discoveries/` (POC, sanitizer trace, observed attacker-visible effect, runtime sink reached) that the report demotes to "side observation" or "out-of-scope" is a fail — the canonical "buried CVE" pattern. If the report narrows the threat model to exclude an in-`discoveries/` finding, the narrowing must be stated explicitly in the Scope section AND the excluded finding must still be surfaced in the Executive Summary, not buried.
 
-      2. **No contradiction-papering.** When `discoveries/`, `triage/`, or earlier rounds disagree with the headline, the report calls out the contradiction in the relevant finding's Evidence chain AND scores at the weaker demonstrated level (per `conclude`'s "Contradiction handling" hard rule). Reconciliation by rhetoric ("the vulnerability is real, the sanitizer confirmed it") is a fail.
+      2. **No contradiction-papering.** When `discoveries/`, `differential/`, `triage/`, or earlier rounds disagree with the headline, the report calls out the contradiction in the relevant finding's Evidence chain AND scores at the weaker demonstrated level (per `conclude`'s "Contradiction handling" hard rule). Reconciliation by rhetoric ("the vulnerability is real, the sanitizer confirmed it") is a fail.
 
       3. **Severity matches triage verbatim.** Each confirmed finding's CVSS vector, score, and justification match `triage/triage.md` exactly. If `triage` was never invoked, no finding may be assigned a severity in this report. Re-derived severity, rounded scores, or strengthened wording ("Medium-High" where triage said "Medium") is a fail.
 
