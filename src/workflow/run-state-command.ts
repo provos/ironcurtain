@@ -32,9 +32,21 @@ import {
   RESET,
   YELLOW,
 } from './cli-support.js';
+import {
+  captureContainerLogs,
+  captureConversationLogs,
+  resolveCapturePaths,
+  type RunStateCapturePaths,
+} from './run-state-debug-capture.js';
 import { createAgentConversationId } from '../session/types.js';
-import type { Session, SessionMode } from '../session/types.js';
+import type { BundleId, Session, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+
+function printCaptureLocations(target: 'stdout' | 'stderr', paths: RunStateCapturePaths): void {
+  const write = target === 'stdout' ? writeStdout : writeStderr;
+  write(`${DIM}Container logs: ${paths.containerLogsPath}${RESET}`);
+  write(`${DIM}Conversation logs: ${paths.claudeLogsDir}${RESET}`);
+}
 
 // ---------------------------------------------------------------------------
 // Help spec
@@ -443,16 +455,35 @@ export async function runRunState(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // SessionId == BundleId in standalone mode (src/session/index.ts:285).
+  const capturePaths =
+    mode.kind === 'docker' ? resolveCapturePaths(session.getInfo().id as unknown as BundleId, outputDir) : undefined;
+
   let responseText = '';
+  let invocationFailed = false;
+  let invocationError: unknown;
   try {
     responseText = await session.sendMessage(command);
   } catch (err) {
-    writeStderr(`${RED}Agent invocation failed: ${err instanceof Error ? err.message : String(err)}${RESET}`);
-    await session.close().catch(() => {});
-    process.exit(1);
+    invocationFailed = true;
+    invocationError = err;
+  } finally {
+    if (capturePaths) await captureContainerLogs(capturePaths);
+    await session
+      .close()
+      .catch((err: unknown) =>
+        writeStderr(`[run-state] session.close() failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    if (capturePaths) captureConversationLogs(capturePaths);
   }
 
-  await session.close().catch(() => {});
+  if (invocationFailed) {
+    writeStderr(
+      `${RED}Agent invocation failed: ${invocationError instanceof Error ? invocationError.message : String(invocationError)}${RESET}`,
+    );
+    if (capturePaths) printCaptureLocations('stderr', capturePaths);
+    process.exit(1);
+  }
 
   // Sidecar — agent response can be megabytes; stderr is inconvenient to recover from CI logs.
   const outputFile = resolve(outputDir, 'agent-output.md');
@@ -478,4 +509,5 @@ export async function runRunState(args: string[]): Promise<void> {
   writeStdout('');
   writeStdout(`${DIM}Workspace: ${staged.workspacePath}${RESET}`);
   writeStdout(`${DIM}Agent output: ${outputFile}${RESET}`);
+  if (capturePaths) printCaptureLocations('stdout', capturePaths);
 }

@@ -251,6 +251,7 @@ After the agent returns, the command writes:
 - `agent-output.md` at the run's output dir -- full agent response (the primary debug artifact; the response can be megabytes and is inconvenient to recover from terminal scrollback)
 - Anything the agent wrote to `workspace/.workflow/<output>/` per its declared `outputs`
 - A short verdict line on stdout parsed from the response's `agent_status` block
+- For Docker-mode runs only: `container-logs.txt` (`docker logs` capture, useful for diagnosing OOM-kills and other container-side failures) and `claude-session-logs/` (a copy of the in-container Claude Code conversation JSONL, useful for verifying what the agent actually saw)
 
 #### Examples
 
