@@ -28,6 +28,8 @@ states:
     type: agent
     description: 'Structural code analysis — maps call chains, entry points, and build system'
     persona: global
+    skills:
+      - memory-safety-c-cpp
     prompt: |
       You are a code analyst mapping the structure of code in scope for a vulnerability investigation. Read the task description first — it defines the scope (file, directory, module, subsystem) and the threat model (who can reach this code and how). You have access to a source tree at the workspace root.
 
@@ -47,26 +49,16 @@ states:
 
       6. **Function catalog with assumption inventory.** Every function reachable from the entry-point call graph (mapped in item 2) must be accounted for in writing — either with a full entry below or a one-line "examined and dismissed because <reason>" note. Silent omission is forbidden; functions raised in the call graph but missing from the catalog are implicit blind spots. Dispatch-family variants (per-bps, per-codec, per-message-type, per-mode) each get their own entry — "same as variant X" is not a sufficient dismissal because variants commonly have differing per-element arithmetic. For each function with a full entry, document:
          - Signature, parameters, and return type
-         - Data types used — especially type widths, signed/unsigned distinctions, casts between types, and any macros or wrappers around comparisons or arithmetic
+         - Data types used — record details that matter for the bug-class vocabulary the surface admits (for native C/C++ memory safety, that means type widths, signed/unsigned distinctions, casts between types, and any macros or wrappers around comparisons or arithmetic; consult the relevant surface skill for the canonical list).
          - Stated invariants: assertions, comments like "should never happen," documented preconditions
          - Unstated assumptions: values that are used without validation, conditions that are assumed true but never checked, state that is expected to be non-null or within bounds without guards
          - Where external input reaches this function and what validation (if any) occurs before it arrives
 
-      7. **Cross-cutting data flow analysis.** After completing the function catalog, trace these patterns ACROSS function boundaries. The most important bugs live at the intersection of separately-correct functions.
+      7. **Cross-cutting data flow analysis.** After completing the function catalog, trace bug-class patterns ACROSS function boundaries. The most important bugs live at the intersection of separately-correct functions. The patterns themselves — what bug classes apply, what arithmetic / lifetime / dispatch shapes to look for — are surface-specific; consult the relevant skill for the canonical taxonomy and the high-yield search patterns. For native C/C++ memory safety, see the `memory-safety-c-cpp` skill.
 
-         Apply each pattern that plausibly fits the code surface — do not stop at the first match. Surfaces that admit multiple bug classes (memory safety + bookkeeping off-by-ones + state-machine assumptions + sentinel collisions) deserve documented findings across each. Tunnel-visioning on one bug class (e.g., reporting only integer overflows when the code also has check-use gaps) is the most common failure mode of this state.
+         Apply every pattern from the surface skill that plausibly fits the code — do not stop at the first match. Surfaces that admit multiple bug classes deserve documented findings across each. Tunnel-visioning on one bug class is the most common failure mode of this state; if the skill names five patterns and you only walked the code for one, the analysis is incomplete.
 
-         - **Type narrowing at storage boundaries.** Where does a wider type get stored into a narrower container (e.g., int into uint16_t, long into int, double into float)? What is the maximum value the source can reach? What value gets stored at the truncation point? Trace every write where source and destination types differ in width.
-
-         - **Sentinel and magic value reachability.** Identify every sentinel or magic value used in the code (-1, 0, NULL, 0xFFFF, MAX_INT, special constants). For each one, trace whether any computed value — through normal execution, overflow, truncation, or wrapping — can equal the sentinel. Pay special attention to counters or accumulators that grow toward a sentinel value.
-
-         - **Check-use separation.** Where is a value validated in one place and consumed in another? Can the value change between the check and the use — through concurrent access, callbacks, re-reads from shared or global state, or intervening function calls that modify it?
-
-         - **Unbounded growth meeting fixed-size storage.** Where does a counter or accumulator grow without a hard cap? Where is it stored in or compared against a fixed-width field? What happens when the counter reaches the maximum representable value of the storage type?
-
-         - **Arithmetic result range vs destination range.** Where can a multiplication, addition, or shift produce a value that exceeds the range of its destination type or comparison operand?
-
-         For each pattern found, document: the source location (file:line), the data flow path, the types involved, the boundary value where the pattern activates, and a **Reachability sketch** — a short trace from attacker-controlled input to the pattern site naming each guard between (file:line of the guard, what it checks, what value range it admits). If prior journal rounds have evidence that a guard along the path is impassable or has been bypassed, note that. Reachability is structural, not dynamic — do not validate by execution; just document what the code shows. Do not assess exploitability beyond reachability; that is downstream agents' job.
+         For each pattern instance found, document: the source location (file:line), the data flow path, the types involved, the boundary value where the pattern activates, the bug-class identifier from the surface skill's taxonomy, and a **Reachability sketch** — a short trace from attacker-controlled input to the pattern site naming each guard between (file:line of the guard, what it checks, what value range it admits). If prior journal rounds have evidence that a guard along the path is impassable or has been bypassed, note that. Reachability is structural, not dynamic — do not validate by execution; just document what the code shows. Do not assess exploitability beyond reachability; that is downstream agents' job.
 
       The function catalog and cross-cutting analysis are the most important outputs. They give downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
 
