@@ -49,6 +49,20 @@ These are the high-yield sites to look for whenever the surface processes attack
 
 - **Arithmetic result range vs destination range.** A multiplication, addition, or shift produces a value that exceeds the range of its destination type or comparison operand. Worth tracing whether intermediate computations widen the type before narrowing.
 
+## Common non-arithmetic patterns
+
+These produce memory corruption without an arithmetic root cause. They cluster around contract violations between functions — a writer leaves a buffer in a state the reader does not expect, or a sink assumes an invariant the source did not enforce. Apply alongside the arithmetic patterns; the bug at any given site may be in either category, and a surface that admits one usually admits both.
+
+- **Missing null-termination on string sinks.** A function copies `n` bytes from a `(count, ptr)` pair into a buffer without appending a NUL. A downstream `printf("%s", ...)`, `strlen`, `strcat`, or `strchr` reads past the allocation searching for a terminator that does not exist. Particularly common in parsing routines that copy attacker-controlled strings field-by-field; the named violation site is the read sink, but the root cause is the writer's missing terminator.
+
+- **Format-string controlled by attacker.** Attacker bytes reach the format-string argument of a `printf`-family call (`printf(user)` instead of `printf("%s", user)`). Yields memory disclosure via `%s` / `%n` and crashes via malformed specifiers. Trace every variadic-print call where the first argument is not a compile-time constant.
+
+- **Length pair desynchronized from buffer.** A `(ptr, len)` interface is called with `len` exceeding the allocation behind `ptr`. Common when the length is read from input and the pointer is allocated to a different size, or when the buffer was reallocated but a stale length is used elsewhere. The bound check happens in one function; the read or write happens in another that assumes the check was honored.
+
+- **Sentinel-driven iteration without an independent bound.** A loop walks until it hits a sentinel (`NUL`, `0xFFFF`, end-marker tag) without a hard cap. If the data lacks the sentinel — because validation did not enforce it, or the attacker stripped it — iteration runs past the buffer. Pairs naturally with terminated-string or terminated-list assumptions on input that has not been verified to terminate.
+
+- **Print, dump, and diagnostic paths trust upstream invariants.** Print and dump routines often assume the data they receive has already been validated — terminated, bounded, well-formed — because they run after the parser. If validation skipped fields the print path consumes (common for "diagnostic" or "verbose" outputs), the print path becomes the OOB-read site even though the bug is the validator's omission. Every code path used only by `-v` / `-D` / `--debug` flags is its own attack surface that typically gets less validation attention than the main path.
+
 ## Dispatch-family discipline
 
 When the target dispatches over a typed surface — a per-bps codec table, a per-message-type handler array, a per-opcode switch, a per-mode initializer, a per-format decoder — **every variant is its own attack surface**. Variants commonly share a contract on paper but differ in per-element arithmetic, buffer sizes, or guard placement.
