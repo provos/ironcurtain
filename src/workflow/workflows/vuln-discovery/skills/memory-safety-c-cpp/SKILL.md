@@ -91,6 +91,18 @@ UAFs cluster around lifetime confusion, not single-line bugs. The high-yield sea
 - **Stale iterator / span / reference.** A container is mutated (resize, erase, rehash) while an iterator, `string_view`, `span`, or raw pointer derived from it is held. The reference dereferences memory the container has moved or freed.
 - **Object-resurrection patterns.** A reference-counted object's count drops to zero and is re-incremented before destruction completes — typically through a weak-pointer race.
 
+## Primitive-extent scaling axes
+
+Each memory-safety primitive class has natural scaling axes — the dimensions along which a minimum trigger can be pushed to characterize what an attacker can actually do with the primitive. Discover exercises these axes to produce adversary-maximal evidence; triage scores on the demonstrated extent. Mirrored from `vulnerability-triage`'s *Primitive extent* section so this skill (loaded by `discover` and `analyze`) carries the same canonical enumeration triage uses.
+
+- **Out-of-bounds write/read.** Push distance past the allocation, total bytes accessed, attacker control over the written/read byte values, and stride between accesses. The minimum trigger may demonstrate one byte past one allocation with a fixed value; the axes ask whether that extends to attacker-chosen bytes across a larger span at a controllable stride.
+- **Use-after-free.** Push reuse delay against any deferred-free queue or generation counter, and characterize the type set that can land in the freed slot under attacker-influenceable allocation pressure.
+- **Type confusion.** Push the type-pair set the confusion lands on across the surrounding dispatch, and the depth of polymorphic dispatch reached in the confused state before the program faults or returns.
+- **Integer overflow into undersized allocation.** Push the undersize ratio between requested and allocated size, and the extent of the downstream write or read that consumes the un-truncated value.
+- **Unbounded iteration.** Push the iteration count against the buffer or frame the iteration writes into, and the attacker control over the value written at each step.
+
+If this list and `vulnerability-triage`'s *Primitive extent* section drift, fix both at once — triage's scoring rule and discover's evidence-gathering rule must reference the same axes.
+
 ## Exploitability reference
 
 Whether a confirmed sanitizer crash is a real security risk depends on the runtime environment. This is reference material for triage, not a procedure.
