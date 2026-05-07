@@ -229,7 +229,30 @@ states:
 
       **Detector evidence vs. impact evidence.** A validated harness tells you a detector fired (sanitizer, fuzz crash, static analyzer, tainted-flow report, assertion). That proves the detector caught something; it does NOT prove an attacker can demonstrate impact in the real system — padding, runtime guards, input sanitizers, schema validators, or attacker-uncontrolled state often absorb the effect. The attacker-observable outcome (data leak of non-trivial bytes, privilege escalation, auth bypass, injection landing in a reachable sink, controlled crash/DoS) must be demonstrated by `discover` with adversary-maximal parameters before triage can score severity beyond "detector anomaly present." If you are about to route `harness_validate` → `triage` without a `discover` round in between, stop — route to `discover` first.
 
-      **Completing the investigation.** When the evidence chain is conclusive — either a vulnerability is confirmed and fully documented, or all viable hypotheses have been tested at appropriate tiers — set verdict to `complete`. Escalation is for being stuck; completion is for being done. "No exploitable vulnerability found" is a valid and valuable outcome.
+      **Completing the investigation.** `complete` is OR-shaped by default — a single confirmed finding is tempting to treat as sufficient — but multi-hypothesis investigations close prematurely if you route to `conclude` after the first hit while other analyze-produced hypotheses remain untested. To prevent that, `complete` requires every hypothesis from `.workflow/analysis/analysis.md` (cross-cutting analysis section) to be in one of three terminal states. Before you can route to `conclude` with `complete`, your status block's `notes` field MUST contain a hypothesis ledger of the following form:
+
+      ```
+      Hypothesis status:
+      - h1: confirmed (triage verdict: approved, severity: <severity>)
+      - h2: harness-tested-and-rejected (rejected at <discover|differential_validate>, round <N>)
+      - h3: deferred (reason: <reason>)
+      ```
+
+      Use stable hypothesis IDs (`h1`, `h2`, ...) — assign them on first ledger emission by walking the analyze artifact's cross-cutting pattern instances in order, then keep those IDs stable across rounds (they are the same IDs that flow into `report.hN.md` filenames at `conclude`). Every hypothesis the analysis enumerates MUST appear in the ledger; silent omission is forbidden.
+
+      Terminal states:
+      - **confirmed** — `discover` returned `approved` for this hypothesis AND `triage` produced a verdict (approved, insufficient, or escalate). Confirmed-but-insufficient counts as terminal because triage made the call.
+      - **harness-tested-and-rejected** — `discover` returned `blocked` with execution evidence per the `discover` audit rules above, OR `differential_validate` concluded the hypothesis is not exploitable. Text-only "looks safe" is NOT terminal — that hypothesis is still open and you must route to `harness_design` / `discover`, not defer.
+      - **deferred** — orchestrator's documented choice. Acceptable reasons, named inline in the ledger entry: (a) **out-of-scope per task description** — the task description's scope or threat model excludes this hypothesis; (b) **intrinsic capability the workflow cannot acquire** — e.g., kernel debugger, hardware attack surface (firmware, side channels, physical access), network-only stack the workflow cannot exercise, or a target environment the harness fundamentally cannot replicate (different OS/architecture, proprietary toolchain). This reason does NOT cover fixable harness-build problems: missing apt-installable libraries, missing pip packages, missing build flags, missing codec libraries that exist as packages, or any dependency the harness build could install. For those, route back through `harness_design` with directive to budget the environment fix — do not defer; (c) **duplicate of another confirmed hypothesis** — the same primitive at the same site, already covered by hN.
+
+      Rounds-budget exhaustion is NOT a deferral reason. If rounds run out before the ledger is fully terminal, route `escalate` (the human will decide whether to extend the budget or accept the gap) — never `complete`.
+
+      `complete` is FORBIDDEN when:
+      - any hypothesis is unaccounted-for in the ledger, OR
+      - any `deferred` entry omits a reason or names a reason outside the (a)–(c) list, OR
+      - any `deferred (b)` entry's underlying issue is a fixable harness-build problem (missing apt/pip dependency, missing build flag, missing codec library that exists as a package) rather than an intrinsic limitation — route through `harness_design` with an environment-fix directive instead.
+
+      When the ledger is fully terminal — every hypothesis is `confirmed`, `harness-tested-and-rejected`, or `deferred` with a valid reason — set verdict to `complete`. Escalation is for being stuck; completion is for being done. "No exploitable vulnerability found" is a valid and valuable outcome, but it must be backed by a ledger showing every hypothesis was actually tested or explicitly deferred — not merely by the absence of a confirmed finding.
 
       **Stall detection.** If the same state has been visited 3+ times without progress, results contradict across layers, or you are uncertain about strategy, set verdict `escalate` rather than burning more rounds.
     inputs:
@@ -723,7 +746,20 @@ states:
 
       #### Investigation coverage
 
-      - Hypotheses tested and their outcomes (confirmed / no demonstrated impact / mitigated / insufficient)
+      The first element of this section MUST be a per-hypothesis ledger; the supporting bullets sit alongside it, not in place of it.
+
+      ##### Hypothesis ledger
+
+      List every analyze-produced hypothesis (`h1`, `h2`, ...) with its terminal status — one of `confirmed`, `harness-tested-and-rejected`, or `deferred (reason: ...)`. The ledger here mirrors the orchestrator's notes-channel ledger and uses the same allowed deferral reasons enumerated in the orchestrator's "Completing the investigation" paragraph: (a) out-of-scope per task description, (b) intrinsic capability the workflow cannot acquire (does NOT cover fixable harness-build dependencies — those route through `harness_design`), (c) duplicate of another confirmed hypothesis. Rounds-budget exhaustion is not a deferral reason; an investigation that ran out of rounds with non-terminal hypotheses must `escalate`, not `complete`.
+
+      Coherence rules (a missing or violated rule is a fail and triggers FORCE_REVISION at review):
+
+      - The IDs in this ledger MUST match the `report.hN.md` filenames. A `confirmed` hypothesis without a corresponding `report.hN.md` is a fail, and a `report.hN.md` without a ledger entry is a fail.
+      - A `deferred (b)` entry whose underlying issue was a missing apt-installable dependency, missing pip package, missing build flag, missing codec library that exists as a package, or any other fixable harness-build problem is a fail (incoherent — should have routed through `harness_design` for the environment fix instead of deferring).
+      - Every hypothesis the analysis enumerates MUST appear in the ledger; silent omission is forbidden.
+
+      ##### Supporting coverage notes
+
       - Code paths exercised via harness, including coverage percentages as reported
       - What was NOT tested and why (time limits, infrastructure gaps, skipped states like discover)
       - If the workflow skipped states that the routing rules call for (e.g., `discover` was never invoked), call that out here — it is a coverage gap even when the state machine accepted the path.
@@ -815,6 +851,8 @@ states:
 
       6. **Coverage gaps stated as gaps.** The index's Investigation coverage section names what was NOT tested and why. Skipped routing states (e.g., `discover` never invoked, `triage` never invoked) are called out per `conclude`'s "Investigation coverage" guidance — silently omitting is a fail.
 
+      6a. **Hypothesis ledger present and coherent.** The index's Investigation coverage section MUST carry a per-hypothesis ledger covering every analyze-produced hypothesis (`h1`, `h2`, ...) with a terminal status — `confirmed`, `harness-tested-and-rejected`, or `deferred (reason: ...)`. Every `deferred` entry MUST name a reason from the orchestrator's allowed set: (a) out-of-scope per task description, (b) intrinsic capability the workflow cannot acquire, (c) duplicate of another confirmed hypothesis. A `deferred (b)` entry whose underlying issue was a fixable harness-build problem (missing apt/pip dependency, missing build flag, missing codec library that exists as a package) is a fail (incoherent — should have routed through `harness_design` for the environment fix). Rounds-budget exhaustion is not a valid deferral reason; if the investigation ran out of rounds with non-terminal hypotheses, the orchestrator should have escalated rather than completed — flag any ledger that cites budget exhaustion as the deferral reason. A hypothesis enumerated in `analysis.md`'s cross-cutting section but missing from the ledger is a fail (silent drop). This is the canonical "premature complete on first hit" failure: a confirmed h1 plus an unmentioned h2 is a fail, not an approval. FORCE_REVISION when this item fails — it is the human gate's stand-in too.
+
       7. **Errata clean.** Round numbers, role-visit counts, item-ordering inside redirection lists, file paths (container vs. host layout), and cross-section references between the index and hypothesis files agree with each other and with the journal. Hypothesis-ranking rows that link to non-existent `report.hN.md` files, hypothesis files whose `Status:` line disagrees with the index ranking, off-by-one round numbers, and path strings the reader cannot resolve in their environment are fails — these have all reached prior human reviewers.
 
       ## Verdicts
@@ -851,7 +889,7 @@ states:
   report_review:
     type: human_gate
     description: |
-      Human review of the final vulnerability report. The report is split: read `.workflow/report/report.md` (the index) for the executive summary and hypothesis ranking, then drill into the per-hypothesis writeups at `.workflow/report/report.hN.md`. The first line of `report.md` is an `Updated:` line naming the `report.hN.md` files authored or modified in the latest `conclude` round — that on-disk line is the authoritative scoping signal (the human gate sees only artifacts, not orchestrator directives). On a fresh review, read every hypothesis file. On revision, read the index plus the `report.hN.md` files named in the index's `Updated:` line (cross-referenced with the LLM reviewer's `report_review/review.md`) — unchanged hypothesis files were not touched. When emitting FORCE_REVISION, your feedback prompt SHOULD name which `report.hN.md` files need re-authoring (and whether the index itself needs an update) so the orchestrator's next directive can scope the conclude re-entry to those files.
+      Human review of the final vulnerability report. The report is split: read `.workflow/report/report.md` (the index) for the executive summary and hypothesis ranking, then drill into the per-hypothesis writeups at `.workflow/report/report.hN.md`. The first line of `report.md` is an `Updated:` line naming the `report.hN.md` files authored or modified in the latest `conclude` round — that on-disk line is the authoritative scoping signal (the human gate sees only artifacts, not orchestrator directives). On a fresh review, read every hypothesis file. On revision, read the index plus the `report.hN.md` files named in the index's `Updated:` line (cross-referenced with the LLM reviewer's `report_review/review.md`) — unchanged hypothesis files were not touched. When emitting FORCE_REVISION, your feedback prompt SHOULD name which `report.hN.md` files need re-authoring (and whether the index itself needs an update) so the orchestrator's next directive can scope the conclude re-entry to those files. Before approving, verify the index's "Investigation coverage" section contains a per-hypothesis ledger covering every analyze-produced hypothesis with a terminal status (`confirmed` / `harness-tested-and-rejected` / `deferred (reason: ...)`) — and FORCE_REVISION when the ledger is missing, when it contains silent omissions (a hypothesis enumerated in `analysis.md`'s cross-cutting section but not in the ledger), when it carries an incoherent `deferred (b)` entry whose underlying issue was a fixable harness-build problem (missing apt/pip dependency, missing build flag, missing codec library that exists as a package), or when it cites rounds-budget exhaustion as a deferral reason (the orchestrator should have escalated rather than completed).
     acceptedEvents:
       - APPROVE
       - FORCE_REVISION
