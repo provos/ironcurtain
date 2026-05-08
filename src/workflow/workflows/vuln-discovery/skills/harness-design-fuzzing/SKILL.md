@@ -151,8 +151,9 @@ Mitigation discipline applies at the link layer too. A harness that links agains
 
 - **Class A — I/O / allocator stubs.** Replace operations whose behavior is irrelevant to the violation site: fixed-buffer reads/writes, controlled-return allocators, no-op logging, deterministic clocks. Acceptable.
 - **Class B — Validator / parser / decoder stubs.** Replace upstream components that perform trust-boundary validation in production: format parsers, input validators, signature/checksum verifiers, schema validators, dimension/type checkers inside delegate libraries. **Forbidden.** A Class B stub strips production validation at the linker level — equivalent to redefining `VALIDATE_INPUT` to a no-op. The violation site may be reachable in the harness while in production the upstream library rejects the trigger before it lands.
+- **Class C — Non-production build configuration.** Real upstream library, but built or installed with optional features/components disabled that production deployments typically enable (compile-time build flags, language build tags, optional-dependency extras, conditional-compilation gates). Equivalent to a Class B stub of those features — **forbidden**. The design must enumerate each delegate's build-time configuration and confirm parity with the production-default build.
 
-The design must enumerate every stub it introduces and classify each. Any Class B stub is a redesign trigger, not a tradeoff. If the violation site is unreachable through the real upstream library because the library's own validation pre-empts the trigger, the bug is a latent code smell — not an exploitable vulnerability — and the hypothesis should be re-evaluated rather than papered over with a permissive stub.
+The design must enumerate every stub it introduces and classify each. Any Class B stub or Class C build-flag mismatch is a redesign trigger, not a tradeoff. If the violation site is unreachable through the real upstream library because the library's own validation pre-empts the trigger, the bug is a latent code smell — not an exploitable vulnerability — and the hypothesis should be re-evaluated rather than papered over with a permissive stub.
 
 If integrating the real upstream library requires a higher tier than the design currently states, escalate the tier. Class B stubbing is not an acceptable shortcut to keep a Tier 1 design viable.
 
@@ -188,7 +189,7 @@ Include:
 - The fallback tool and why its mechanism differs
 - Diagnostic checkpoints with named thresholds
 - Infrastructure assumptions and fallbacks
-- Stub inventory and classification (Class A or B per *Delegate library realism*); designs declare every stub they introduce
+- Stub inventory and classification (Class A/B/C per *Delegate library realism*); designs declare every stub and every delegate's build-flag parity status
 
 Exclude:
 
