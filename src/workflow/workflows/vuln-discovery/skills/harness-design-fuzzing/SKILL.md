@@ -151,7 +151,7 @@ Mitigation discipline applies at the link layer too. A harness that links agains
 
 - **Class A — I/O / allocator stubs.** Replace operations whose behavior is irrelevant to the violation site: fixed-buffer reads/writes, controlled-return allocators, no-op logging, deterministic clocks. Acceptable.
 - **Class B — Validator / parser / decoder stubs.** Replace upstream components that perform trust-boundary validation in production: format parsers, input validators, signature/checksum verifiers, schema validators, dimension/type checkers inside delegate libraries. **Forbidden.** A Class B stub strips production validation at the linker level — equivalent to redefining `VALIDATE_INPUT` to a no-op. The violation site may be reachable in the harness while in production the upstream library rejects the trigger before it lands.
-- **Class C — Non-production build configuration.** Real upstream library, but built or installed with optional features/components disabled that production deployments typically enable (compile-time build flags, language build tags, optional-dependency extras, conditional-compilation gates). Equivalent to a Class B stub of those features — **forbidden**. The design must enumerate each delegate's build-time configuration and confirm parity with the production-default build.
+- **Class C — Non-production build configuration.** A third-party library or package the harness depends on, but built or installed with optional features/components disabled that production deployments typically enable (compile-time build flags, language build tags, optional-dependency extras, conditional-compilation gates). Equivalent to a Class B stub of those features — **forbidden**. For each such dependency the design must record how it was built or installed and confirm parity with the production-default build/install for that dependency. Note: this is about each dependency's *own* configuration, not about which dependency a consumer selected to use (e.g., a meson/feature-flag option that picks one backend over another is a consumer-side selection, not a Class C concern; the picked backend's *own* build options are).
 
 The design must enumerate every stub it introduces and classify each. Any Class B stub or Class C build-flag mismatch is a redesign trigger, not a tradeoff. If the violation site is unreachable through the real upstream library because the library's own validation pre-empts the trigger, the bug is a latent code smell — not an exploitable vulnerability — and the hypothesis should be re-evaluated rather than papered over with a permissive stub.
 
@@ -189,7 +189,7 @@ Include:
 - The fallback tool and why its mechanism differs
 - Diagnostic checkpoints with named thresholds
 - Infrastructure assumptions and fallbacks
-- Stub inventory and classification (Class A/B/C per *Delegate library realism*); designs declare every stub and every delegate's build-flag parity status
+- Stub inventory and classification (Class A/B/C per *Delegate library realism*); designs declare every stub and, for each third-party library/package the harness depends on, the build-or-install-time configuration with production-default parity status
 
 Exclude:
 
