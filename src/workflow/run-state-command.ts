@@ -18,7 +18,7 @@ import { parseArtifactRef } from './validate.js';
 import { stageWorkflowSkillsAtStart } from './orchestrator.js';
 import { parseArgsStrict, runCliPreflightLint } from './workflow-command.js';
 import type { AgentStateDefinition, WorkflowContext, WorkflowDefinition, WorkflowStateDefinition } from './types.js';
-import { WORKFLOW_ARTIFACT_DIR } from './types.js';
+import { WORKFLOW_ARTIFACT_DIR, resolveWorkflowSkillsOptions } from './types.js';
 
 import {
   createWorkflowSessionFactory,
@@ -32,9 +32,21 @@ import {
   RESET,
   YELLOW,
 } from './cli-support.js';
-import { createAgentConversationId } from '../session/types.js';
+import {
+  captureContainerLogs,
+  captureConversationLogs,
+  resolveCapturePaths,
+  type RunStateCapturePaths,
+} from './run-state-debug-capture.js';
+import { bundleIdFromSessionId, createAgentConversationId } from '../session/types.js';
 import type { Session, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+
+function printCaptureLocations(target: 'stdout' | 'stderr', paths: RunStateCapturePaths): void {
+  const write = target === 'stdout' ? writeStdout : writeStderr;
+  write(`${DIM}Container logs: ${paths.containerLogsPath}${RESET}`);
+  write(`${DIM}Conversation logs: ${paths.claudeLogsDir}${RESET}`);
+}
 
 // ---------------------------------------------------------------------------
 // Help spec
@@ -406,7 +418,6 @@ export async function runRunState(args: string[]): Promise<void> {
   const staged = stageWorkspace(outputDir, parsed.artifactsDir, stateConfig.inputs, parsed.workspaceSrc);
 
   const workflowSkillsDir = stageWorkflowSkillsAtStart(getWorkflowPackageDir(definitionPath), outputDir);
-  const skillFilter = stateConfig.skills ? new Set(stateConfig.skills) : undefined;
 
   const taskDescription = resolveTaskDescription(parsed);
   const context = buildContext(definition, taskDescription, parsed.stateId, parsed.directive);
@@ -437,26 +448,43 @@ export async function runRunState(args: string[]): Promise<void> {
       ...(settings.maxSessionSeconds != null
         ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
         : {}),
-      workflow: {
-        ...(workflowSkillsDir !== undefined ? { skillsDir: workflowSkillsDir } : {}),
-        ...(skillFilter ? { skillFilter } : {}),
-      },
+      workflow: resolveWorkflowSkillsOptions(stateConfig.skills, workflowSkillsDir),
     });
   } catch (err) {
     writeStderr(`${RED}Session creation failed: ${err instanceof Error ? err.message : String(err)}${RESET}`);
     process.exit(1);
   }
 
+  // bundleIdFromSessionId carries the standalone-mode invariant
+  // (workflow-session-identity §2.1) — see helper in session/types.
+  const capturePaths =
+    mode.kind === 'docker' ? resolveCapturePaths(bundleIdFromSessionId(session.getInfo().id), outputDir) : undefined;
+
   let responseText = '';
+  let invocationFailed = false;
+  let invocationError: unknown;
   try {
     responseText = await session.sendMessage(command);
   } catch (err) {
-    writeStderr(`${RED}Agent invocation failed: ${err instanceof Error ? err.message : String(err)}${RESET}`);
-    await session.close().catch(() => {});
-    process.exit(1);
+    invocationFailed = true;
+    invocationError = err;
+  } finally {
+    if (capturePaths) await captureContainerLogs(capturePaths);
+    await session
+      .close()
+      .catch((err: unknown) =>
+        writeStderr(`[run-state] session.close() failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    if (capturePaths) captureConversationLogs(capturePaths);
   }
 
-  await session.close().catch(() => {});
+  if (invocationFailed) {
+    writeStderr(
+      `${RED}Agent invocation failed: ${invocationError instanceof Error ? invocationError.message : String(invocationError)}${RESET}`,
+    );
+    if (capturePaths) printCaptureLocations('stderr', capturePaths);
+    process.exit(1);
+  }
 
   // Sidecar — agent response can be megabytes; stderr is inconvenient to recover from CI logs.
   const outputFile = resolve(outputDir, 'agent-output.md');
@@ -482,4 +510,5 @@ export async function runRunState(args: string[]): Promise<void> {
   writeStdout('');
   writeStdout(`${DIM}Workspace: ${staged.workspacePath}${RESET}`);
   writeStdout(`${DIM}Agent output: ${outputFile}${RESET}`);
+  if (capturePaths) printCaptureLocations('stdout', capturePaths);
 }

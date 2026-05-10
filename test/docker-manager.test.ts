@@ -151,6 +151,16 @@ describe('DockerManager', () => {
       expect(args.slice(-2)).toEqual(['sleep', 'infinity']);
     });
 
+    it('passes --init so docker-init reaps zombie children inside the container', () => {
+      // Load-bearing for agent watchdog scripts that use `until ! kill -0
+      // <pid>; do sleep ...; done` — without --init, orphaned children
+      // become zombies under `sleep infinity` and `kill -0` keeps
+      // returning success, deadlocking the loop. See workflow-scratch
+      // entry #22 / commit a7f1c21 for the failure mode.
+      const args = buildCreateArgs(sampleConfig);
+      expect(args).toContain('--init');
+    });
+
     it('emits bundle, workflow, and scope labels in workflow mode', () => {
       const config: DockerContainerConfig = {
         ...sampleConfig,

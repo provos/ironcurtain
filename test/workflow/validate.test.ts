@@ -994,4 +994,31 @@ describe('validateWorkflowSkillReferences', () => {
       expect(issues[0]).toContain('Available: fetcher, parser');
     }
   });
+
+  it('parses cleanly and skips manifest checks when skills is the "none" sentinel', () => {
+    const def = validateDefinition({
+      name: 'skills-test',
+      description: 'd',
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+          skills: 'none',
+        },
+        done: { type: 'terminal', description: 'd' },
+      },
+    });
+    expect(() => validateWorkflowSkillReferences(def, packageDir)).not.toThrow();
+  });
+
+  it('still rejects an array with a missing skill name (regression guard)', () => {
+    const def = workflowWithSkills(['nonexistent']);
+    expect(() => validateWorkflowSkillReferences(def, packageDir)).toThrow(WorkflowValidationError);
+  });
 });

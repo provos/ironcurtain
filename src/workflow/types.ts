@@ -23,6 +23,36 @@ export const WORKFLOW_ARTIFACT_DIR = '.workflow';
 export const GLOBAL_PERSONA = 'global';
 
 /**
+ * Sentinel value for an agent state's `skills:` field meaning "no skills
+ * of any kind". Strictly stronger than `[]` (which still loads
+ * user-global + persona skills); this disables every layer.
+ */
+export const SKILLS_NONE = 'none';
+
+/**
+ * Translate an agent state's `skills:` field into the subset of
+ * `WorkflowBorrowOptions` that controls skill resolution. `disableAllSkills`
+ * is mutually exclusive with `skillsDir` / `skillFilter`: when the sentinel
+ * is present, only `disableAllSkills: true` is set; otherwise `skillsDir`
+ * and `skillFilter` may co-occur. Used by both the orchestrator and the
+ * run-state CLI so the invariant lives in one place.
+ */
+export function resolveWorkflowSkillsOptions(
+  skills: readonly string[] | typeof SKILLS_NONE | undefined,
+  skillsDir: string | undefined,
+): {
+  skillsDir?: string;
+  skillFilter?: ReadonlySet<string>;
+  disableAllSkills?: true;
+} {
+  if (skills === SKILLS_NONE) return { disableAllSkills: true };
+  const result: { skillsDir?: string; skillFilter?: ReadonlySet<string> } = {};
+  if (skillsDir !== undefined) result.skillsDir = skillsDir;
+  if (Array.isArray(skills)) result.skillFilter = new Set(skills);
+  return result;
+}
+
+/**
  * Default `containerScope` value assigned to agent states that do not
  * declare one explicitly. Every such state shares the workflow's primary
  * bundle. The orchestrator's scope-lookup path resolves
@@ -193,12 +223,15 @@ export interface AgentStateDefinition {
   /**
    * Per-state filter on workflow-package skills (`<workflow-pkg>/skills/`).
    * When omitted (default), the state receives every workflow-package
-   * skill. When set, only the named entries from the workflow package
-   * are layered in — referenced names that do not exist as
-   * `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at workflow
-   * load. User-global skills always apply regardless of this field.
+   * skill. When set to an array, only the named entries from the
+   * workflow package are layered in — referenced names that do not
+   * exist as `<workflow-pkg>/skills/<name>/SKILL.md` fail validation at
+   * workflow load. User-global skills always apply regardless of this
+   * field. The literal sentinel `'none'` is a true off-switch: no skills
+   * of any kind (workflow-package, user-global, or persona) are loaded
+   * for the state.
    */
-  readonly skills?: readonly string[];
+  readonly skills?: readonly string[] | typeof SKILLS_NONE;
 }
 
 export interface HumanGateStateDefinition {

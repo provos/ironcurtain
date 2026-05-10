@@ -11,7 +11,7 @@ import type {
   AgentTransitionDefinition,
   HumanGateTransitionDefinition,
 } from './types.js';
-import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
+import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES, SKILLS_NONE } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
 import { looseModelId } from '../config/user-config.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
@@ -64,7 +64,7 @@ const agentStateSchema = z.object({
   model: looseModelId.optional(),
   maxVisits: z.number().int().positive().optional(),
   containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
-  skills: z.array(z.string()).optional(),
+  skills: z.union([z.array(z.string()), z.literal(SKILLS_NONE)]).optional(),
 });
 
 const humanGateStateSchema = z.object({
@@ -523,6 +523,7 @@ export function* iterateSkillRefIssues(
 ): Generator<SkillRefIssue> {
   for (const [stateId, state] of Object.entries(definition.states)) {
     if (state.type !== 'agent' || state.skills === undefined) continue;
+    if (state.skills === SKILLS_NONE) continue;
     for (const name of state.skills) {
       try {
         validateSkillName(name);

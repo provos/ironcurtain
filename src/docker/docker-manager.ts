@@ -46,6 +46,14 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
   args.push('--name', config.name);
   args.push('--network', config.network);
 
+  // Run an init process (docker-init / tini) as PID 1 so zombie children are
+  // reaped. Without this, processes orphaned inside the container linger as
+  // zombies under `sleep infinity`, and `kill -0 <pid>` returns success for
+  // them — which silently breaks watcher loops in agent-generated scripts
+  // (see workflow-scratch.md entry #22). The flag is harmless for short-
+  // lived sidecar/service containers.
+  args.push('--init');
+
   // Custom host mappings override the default host-gateway mapping
   if (config.extraHosts && config.extraHosts.length > 0) {
     for (const entry of config.extraHosts) {

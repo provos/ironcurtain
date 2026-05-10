@@ -43,11 +43,10 @@ import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from '../types/errors.js';
 import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
-import { createAgentConversationId, createSessionId } from './types.js';
+import { bundleIdFromSessionId, createAgentConversationId, createSessionId } from './types.js';
 import type {
   AgentConversationId,
   BuiltinSessionOptions,
-  BundleId,
   DockerSessionOptions,
   Session,
   SessionId,
@@ -279,10 +278,10 @@ async function createDockerSession(
     } else {
       // Standalone path: factory creates and owns the bundle.
       // Single-session invariant (§2.1 of workflow-session-identity): the
-      // SessionId value doubles as the BundleId. Casting at this boundary
-      // preserves the deterministic `ironcurtain-<sessionId[0:12]>`
-      // container name for prior-crash recovery.
-      const bundleId = sessionId as unknown as BundleId;
+      // SessionId value doubles as the BundleId. The helper preserves
+      // the deterministic `ironcurtain-<sessionId[0:12]>` container
+      // name for prior-crash recovery.
+      const bundleId = bundleIdFromSessionId(sessionId);
       const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
       infra = await createDockerInfrastructure(
         sessionConfig.config,
@@ -684,6 +683,7 @@ export function buildSessionConfig(
       ...(opts.persona ? { personaName: opts.persona } : {}),
       ...(opts.workflow?.skillsDir ? { workflowSkillsDir: opts.workflow.skillsDir } : {}),
       ...(opts.workflow?.skillFilter ? { workflowSkillFilter: opts.workflow.skillFilter } : {}),
+      ...(opts.workflow?.disableAllSkills ? { disableAllSkills: true } : {}),
     });
     if (borrowInfra) {
       borrowInfra.restageSkills(resolvedSkills);
