@@ -455,7 +455,7 @@ export async function runRunState(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  // SessionId == BundleId in standalone mode (src/session/index.ts:285).
+  // SessionId == BundleId in standalone mode (workflow-session-identity §2.1).
   const capturePaths =
     mode.kind === 'docker' ? resolveCapturePaths(session.getInfo().id as unknown as BundleId, outputDir) : undefined;
 

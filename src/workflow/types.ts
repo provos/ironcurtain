@@ -31,11 +31,11 @@ export const SKILLS_NONE = 'none';
 
 /**
  * Translate an agent state's `skills:` field into the subset of
- * `WorkflowBorrowOptions` that controls skill resolution. The three
- * output fields are mutually exclusive: `disableAllSkills` is set when
- * the sentinel is present; otherwise `skillsDir` and/or `skillFilter`
- * are populated. Used by both the orchestrator and the run-state CLI
- * so the invariant lives in one place.
+ * `WorkflowBorrowOptions` that controls skill resolution. `disableAllSkills`
+ * is mutually exclusive with `skillsDir` / `skillFilter`: when the sentinel
+ * is present, only `disableAllSkills: true` is set; otherwise `skillsDir`
+ * and `skillFilter` may co-occur. Used by both the orchestrator and the
+ * run-state CLI so the invariant lives in one place.
  */
 export function resolveWorkflowSkillsOptions(
   skills: readonly string[] | typeof SKILLS_NONE | undefined,
