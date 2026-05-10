@@ -60,6 +60,11 @@ export async function captureContainerLogs(paths: RunStateCapturePaths): Promise
   proc.stdout.pipe(out, { end: false });
   proc.stderr.pipe(out, { end: false });
   await new Promise<void>((res) => {
+    out.on('error', (err) => {
+      process.stderr.write(`[run-state] container-log write failed: ${err.message}\n`);
+      proc.kill();
+      res();
+    });
     proc.on('exit', (code, signal) => {
       out.end();
       if (code !== 0) {
@@ -77,19 +82,19 @@ export async function captureContainerLogs(paths: RunStateCapturePaths): Promise
 
 export function captureConversationLogs(paths: RunStateCapturePaths): void {
   if (!existsSync(paths.claudeProjectsSrc)) return;
-  // Skip empty source dir: an empty `claude-session-logs/` would
-  // misleadingly suggest the agent ran silently when in reality it
-  // crashed before writing the first JSONL frame.
-  if (readdirSync(paths.claudeProjectsSrc).length === 0) {
-    process.stderr.write(
-      '[run-state] no conversation log captured (claude-state/projects empty -- agent likely crashed before first message)\n',
-    );
-    return;
-  }
   try {
+    // Skip empty source dir: an empty `claude-session-logs/` would
+    // misleadingly suggest the agent ran silently when in reality it
+    // crashed before writing the first JSONL frame.
+    if (readdirSync(paths.claudeProjectsSrc).length === 0) {
+      process.stderr.write(
+        '[run-state] no conversation log captured (claude-state/projects empty -- agent likely crashed before first message)\n',
+      );
+      return;
+    }
     cpSync(paths.claudeProjectsSrc, paths.claudeLogsDir, { recursive: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[run-state] conversation-log copy failed: ${message}\n`);
+    process.stderr.write(`[run-state] conversation-log capture failed: ${message}\n`);
   }
 }

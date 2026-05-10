@@ -438,11 +438,11 @@ In workflow mode the persona-skills layer (`~/.ironcurtain/personas/<name>/skill
 
 **Three forms of the `skills:` field.**
 
-- `skills:` omitted — default. The state receives every workflow-package skill, plus user-global, plus persona skills.
+- `skills:` omitted — default. The state receives every workflow-package skill plus user-global skills (last-wins on name collisions). Persona skills are not loaded in workflow mode (see paragraph above); they apply only to standalone sessions.
 - `skills: [name1, name2]` — array. The workflow-package layer is filtered to the listed entries; user-global skills still apply on top.
-- `skills: none` — string sentinel. True off-switch: no skills of any kind (workflow-package, user-global, or persona) are loaded for the state. Useful when validating that a specific skill is carrying the work, or when a state should run with no skill context at all.
+- `skills: none` — string sentinel. True off-switch: no workflow-package, user-global, or persona skills are loaded for the state in any session mode. Useful when validating that a specific skill is carrying the work, or when a state should run with no skill context at all.
 
-Note that `skills: []` (empty array) is **not** the off-switch — it filters the workflow-package layer to zero, but user-global and persona skills still load. Use `skills: none` for the strict off-switch.
+Note that `skills: []` (empty array) is **not** the off-switch — it filters the workflow-package layer to zero, but user-global skills still load. Use `skills: none` for the strict off-switch.
 
 ### Human gate states
 
