@@ -763,6 +763,121 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().context.previousTestCount).toBe(42);
     });
 
+    it('forwards failure errors as previousAgentOutput on deterministic failure', async () => {
+      const result = buildWorkflowMachine(deterministicLoopDefinition, 'task');
+      let testCount = 0;
+      const errorDump = 'FAIL src/foo.test.ts\n  expected 1 to equal 2';
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+          deterministicService: fromPromise(async () => {
+            testCount++;
+            if (testCount === 1) {
+              return makeDeterministicResult({ passed: false, testCount: 5, errors: errorDump });
+            }
+            return makeDeterministicResult({ passed: true });
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      // Snapshot context right after the first deterministic failure transitions
+      // back into `implement`, before the second deterministic run overwrites it.
+      let snapshot: ReturnType<typeof actor.getSnapshot> | undefined;
+      actor.subscribe((s) => {
+        if (s.value === 'implement' && testCount === 1 && !snapshot) {
+          snapshot = s;
+        }
+      });
+      actor.start();
+
+      await settle();
+
+      expect(snapshot).toBeDefined();
+      const ctx = snapshot!.context;
+      expect(ctx.previousAgentOutput).toBe(errorDump);
+      expect(ctx.previousAgentNotes).toBeNull();
+      expect(ctx.previousStateName).toBe('test');
+      expect(ctx.previousTestCount).toBe(5);
+    });
+
+    it('leaves previousAgentOutput / previousStateName untouched on deterministic success', async () => {
+      const result = buildWorkflowMachine(deterministicLoopDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            return makeAgentResult({ responseText: `Response from ${input.stateId}` });
+          }),
+          deterministicService: fromPromise(async () => makeDeterministicResult({ passed: true, testCount: 7 })),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      const ctx = actor.getSnapshot().context;
+      // The last writer to these fields was the `implement` agent step.
+      expect(ctx.previousAgentOutput).toBe('Response from implement');
+      expect(ctx.previousStateName).toBe('implement');
+      expect(ctx.previousTestCount).toBe(7);
+    });
+
+    it('is a no-op when deterministic result output is undefined', async () => {
+      // Use a fixture where the deterministic state's default transition lands
+      // on a terminal so an undefined result (which routes as VALIDATION_FAILED)
+      // doesn't trap us in an infinite implement -> test loop.
+      const detTerminatingDefinition: WorkflowDefinition = {
+        name: 'deterministic-terminating-test',
+        description: 'Deterministic state whose default transition is terminal',
+        initial: 'implement',
+        states: {
+          implement: {
+            type: 'agent',
+            description: 'Writes code',
+            persona: 'coder',
+            prompt: 'You are a coder.',
+            inputs: [],
+            outputs: ['code'],
+            transitions: [{ to: 'test' }],
+          },
+          test: {
+            type: 'deterministic',
+            description: 'Runs tests',
+            run: [['npm', 'test']],
+            transitions: [{ to: 'done' }],
+          },
+          done: { type: 'terminal', description: 'Done', outputs: ['code'] },
+        },
+      };
+
+      const result = buildWorkflowMachine(detTerminatingDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            return makeAgentResult({ responseText: `Response from ${input.stateId}` });
+          }),
+          // Intentionally returns undefined to exercise the !result guard.
+          deterministicService: fromPromise(async () => undefined as unknown as DeterministicInvokeResult),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      const ctx = actor.getSnapshot().context;
+      // Deterministic update was a no-op; agent-side fields still reflect `implement`.
+      expect(ctx.previousAgentOutput).toBe('Response from implement');
+      expect(ctx.previousStateName).toBe('implement');
+      expect(ctx.previousTestCount).toBeNull();
+    });
+
     it('stores previousAgentOutput (truncated) and previousStateName from agent results', async () => {
       const result = buildWorkflowMachine(linearDefinition, 'task');
 
