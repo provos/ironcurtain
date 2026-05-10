@@ -82,7 +82,7 @@ describe('buildAgentCommand — first-visit FORCE_REVISION framing', () => {
     // Self-revision framing, not cross-agent-review framing
     expect(command).toContain('## Your Previous Output');
     expect(command).toContain('This is your own prior output');
-    expect(command).not.toContain('The work agent produced the following output');
+    expect(command).not.toContain('The work state produced the following output');
     expect(command).not.toContain('reviewed your work');
 
     // Human feedback appears BEFORE previous output (feedback is the driver)
@@ -108,7 +108,7 @@ describe('buildAgentCommand — first-visit FORCE_REVISION framing', () => {
     const command = buildAgentCommand('work', state, context, definition);
 
     expect(command).toContain('## Output from reviewer');
-    expect(command).toContain('The reviewer agent produced the following output');
+    expect(command).toContain('The reviewer state produced the following output');
     expect(command).not.toContain('## Your Previous Output');
     expect(command).not.toContain('revise your previous work');
 
@@ -193,7 +193,7 @@ describe('buildAgentCommand — re-visit FORCE_REVISION framing', () => {
     const command = buildAgentCommand('work', state, context, definition);
 
     expect(command).toContain('## New Input from review');
-    expect(command).toContain('The review agent produced the following output');
+    expect(command).toContain('The review state produced the following output');
     // No longer say "reviewed your work" — that was misleading when it was
     // actually the same state self-revising.
     expect(command).not.toContain('reviewed your work');

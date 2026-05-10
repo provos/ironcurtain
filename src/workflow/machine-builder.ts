@@ -514,8 +514,8 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         if (result.passed) return baseUpdate;
 
         // Set previousStateName to the deterministic state's id (not the prior agent)
-        // so prompt-builder's cross-state framing renders the failure as
-        // "Output from <det-state>" for the next agent. See prompt-builder.ts:70.
+        // so prompt-builder's cross-state framing (buildScopingSection) renders the
+        // failure as "Output from <det-state>" for the next agent.
         const stateId = (event as unknown as { type: string }).type.replace('xstate.done.actor.', '');
         return {
           ...baseUpdate,

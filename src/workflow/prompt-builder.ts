@@ -157,7 +157,7 @@ function buildScopingSection(
 
   const header =
     `## ${crossStateHeading} ${context.previousStateName}\n\n` +
-    `The ${context.previousStateName} agent produced the following output. ` +
+    `The ${context.previousStateName} state produced the following output. ` +
     `Treat this as the authoritative scoping for what to do this round — ` +
     `if it is missing or vague, STOP and report back rather than improvising.`;
 
