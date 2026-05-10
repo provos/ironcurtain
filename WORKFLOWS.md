@@ -426,6 +426,8 @@ validate:
 
 Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard for success transitions.
 
+When a deterministic state fails (any command exited non-zero) and routes to an agent state, the joined stderr/stdout from the failed commands is forwarded as the agent's prior-state context, rendered under `## Output from <det-state> / Directive: ...` in the agent's prompt. Successful deterministic results forward only `previousTestCount`; the agent does not see the success output.
+
 ### Terminal states
 
 ```yaml
