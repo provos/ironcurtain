@@ -436,11 +436,11 @@ review:
 
 In workflow mode the persona-skills layer (`~/.ironcurtain/personas/<name>/skills/`) is intentionally inert — workflow states use the per-state `skills:` field for differentiation, not the persona. Personas still carry skills for standalone (`ironcurtain start --persona <name>`) sessions.
 
-**Three forms of the `skills:` field.**
+**Three forms of the `skills:` field.** All three only affect Docker-mode sessions (`mode: docker` in `~/.ironcurtain/config.json`). Builtin-mode sessions do not stage skills regardless of this field — skill discovery is skipped entirely on the builtin path. The descriptions below describe Docker-mode behavior.
 
 - `skills:` omitted — default. The state receives every workflow-package skill plus user-global skills (last-wins on name collisions). Persona skills are not loaded in workflow mode (see paragraph above); they apply only to standalone sessions.
 - `skills: [name1, name2]` — array. The workflow-package layer is filtered to the listed entries; user-global skills still apply on top.
-- `skills: none` — string sentinel. True off-switch: no workflow-package, user-global, or persona skills are loaded for the state in any session mode. Useful when validating that a specific skill is carrying the work, or when a state should run with no skill context at all.
+- `skills: none` — string sentinel. True off-switch: no workflow-package, user-global, or persona skills are loaded for the state. Useful when validating that a specific skill is carrying the work, or when a state should run with no skill context at all.
 
 Note that `skills: []` (empty array) is **not** the off-switch — it filters the workflow-package layer to zero, but user-global skills still load. Use `skills: none` for the strict off-switch.
 

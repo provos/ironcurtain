@@ -60,22 +60,32 @@ export async function captureContainerLogs(paths: RunStateCapturePaths): Promise
   proc.stdout.pipe(out, { end: false });
   proc.stderr.pipe(out, { end: false });
   await new Promise<void>((res) => {
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      res();
+    };
+    // Resolve only after the file write stream has flushed to disk.
+    // `out.on('finish')` fires after `out.end()` has drained the buffer.
+    out.on('finish', done);
     out.on('error', (err) => {
       process.stderr.write(`[run-state] container-log write failed: ${err.message}\n`);
       proc.kill();
-      res();
+      done();
     });
-    proc.on('exit', (code, signal) => {
-      out.end();
+    // `close` (vs. `exit`) waits for the child's stdio to fully drain,
+    // so any data still piping into `out` has been written by the time
+    // we call `out.end()`. Resolving on `exit` could truncate large logs.
+    proc.on('close', (code, signal) => {
       if (code !== 0) {
         process.stderr.write(`[run-state] docker logs ${paths.containerName} exited ${code ?? signal}\n`);
       }
-      res();
+      out.end();
     });
     proc.on('error', (err) => {
-      out.end();
       process.stderr.write(`[run-state] docker logs failed: ${err.message}\n`);
-      res();
+      out.end();
     });
   });
 }

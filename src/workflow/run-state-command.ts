@@ -38,8 +38,8 @@ import {
   resolveCapturePaths,
   type RunStateCapturePaths,
 } from './run-state-debug-capture.js';
-import { createAgentConversationId } from '../session/types.js';
-import type { BundleId, Session, SessionMode } from '../session/types.js';
+import { bundleIdFromSessionId, createAgentConversationId } from '../session/types.js';
+import type { Session, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 
 function printCaptureLocations(target: 'stdout' | 'stderr', paths: RunStateCapturePaths): void {
@@ -455,9 +455,10 @@ export async function runRunState(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  // SessionId == BundleId in standalone mode (workflow-session-identity §2.1).
+  // bundleIdFromSessionId carries the standalone-mode invariant
+  // (workflow-session-identity §2.1) — see helper in session/types.
   const capturePaths =
-    mode.kind === 'docker' ? resolveCapturePaths(session.getInfo().id as unknown as BundleId, outputDir) : undefined;
+    mode.kind === 'docker' ? resolveCapturePaths(bundleIdFromSessionId(session.getInfo().id), outputDir) : undefined;
 
   let responseText = '';
   let invocationFailed = false;

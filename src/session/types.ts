@@ -53,6 +53,22 @@ export function createBundleId(): BundleId {
 }
 
 /**
+ * Re-brand a `SessionId` as a `BundleId`. Use ONLY in standalone single-
+ * session mode, where the workflow-session-identity invariant (§2.1)
+ * guarantees the SessionId value doubles as the BundleId and the
+ * deterministic `ironcurtain-<sessionId[0:12]>` container name is
+ * preserved across crashes.
+ *
+ * Workflow / multi-session mode mints a separate BundleId; in that mode
+ * SessionId and BundleId values diverge and this helper must NOT be
+ * used. Centralized here so the cross-brand cast appears in one auditable
+ * place rather than scattered `as unknown as BundleId` sites.
+ */
+export function bundleIdFromSessionId(sessionId: SessionId): BundleId {
+  return sessionId as unknown as BundleId;
+}
+
+/**
  * Length of the deterministic short slug derived from a `BundleId` for
  * Docker container names (`ironcurtain-<shortId>`). Matches Docker's
  * conventional short-form container-id truncation.
