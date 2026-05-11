@@ -40,6 +40,7 @@ import {
   checkAnnotationDrift,
   checkConstitutionDrift,
   checkDocker,
+  checkDockerResources,
   checkMcpServerLiveness,
   checkNodeVersion,
   checkPreferredMode,
@@ -47,6 +48,7 @@ import {
   collectDeclaredEnvVars,
   type CheckResult,
 } from '../src/doctor/checks.js';
+import type { AgentId } from '../src/docker/agent-adapter.js';
 import type { ProbeResult } from '../src/doctor/mcp-liveness.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../src/config/types.js';
 import { detectAuthMethod, refreshOAuthToken, saveOAuthCredentials } from '../src/docker/oauth-credentials.js';
@@ -136,6 +138,7 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
     preferredDockerAgent: 'claude-code' as const,
     preferredMode: 'docker' as const,
     packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
+    dockerResources: { memoryMb: 8192, cpus: 4 },
   };
   return {
     auditLogPath: '/tmp/audit.jsonl',
@@ -249,6 +252,99 @@ describe('checkPreferredMode', () => {
     // dockerWarn must not turn a builtin-mode user's status into fail.
     const r = checkPreferredMode(configWithMode('builtin', 'sk-test'), dockerWarn);
     expect(r.status).toBe('ok');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit: checkDockerResources
+// ---------------------------------------------------------------------------
+
+describe('checkDockerResources', () => {
+  /** Build a config with custom dockerResources values. */
+  function configWithResources(resources: { memoryMb: number | null; cpus: number | null }): IronCurtainConfig {
+    const base = buildConfig();
+    return {
+      ...base,
+      userConfig: { ...base.userConfig, dockerResources: resources },
+    };
+  }
+
+  it('skips probe with ok when image is not present locally', async () => {
+    // execFile rejects -> isImagePresent returns false -> no probe.
+    const execFile = vi.fn().mockRejectedValue(new Error('no such image'));
+    const resolveImage = async () => 'fake-image:latest';
+    const result = await checkDockerResources(configWithResources({ memoryMb: 1024, cpus: 1 }), {
+      execFile,
+      resolveImage,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.message).toMatch(/not yet pulled/);
+    expect(result.message).toMatch(/fake-image:latest/);
+  });
+
+  it('runs the probe when image is present and Docker accepts the limits', async () => {
+    // First call: image inspect succeeds. Second call: docker run succeeds.
+    const execFile = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    const resolveImage = async () => 'fake-image:latest';
+    const result = await checkDockerResources(configWithResources({ memoryMb: 512, cpus: 1 }), {
+      execFile,
+      resolveImage,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.message).toMatch(/512 MB/);
+    expect(result.message).toMatch(/1 cpus/);
+  });
+
+  it('reports clamping in the message when configured exceeds host', async () => {
+    // 999999 MB / 999 cpus is way beyond any test host -- the clamp will
+    // lower both. The probe never runs because we make image-inspect fail.
+    const execFile = vi.fn().mockRejectedValue(new Error('no such image'));
+    const resolveImage = async () => 'fake-image:latest';
+    const result = await checkDockerResources(configWithResources({ memoryMb: 999_999, cpus: 999 }), {
+      execFile,
+      resolveImage,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.message).toMatch(/clamped from/);
+  });
+
+  it('reports unlimited when configured null', async () => {
+    const execFile = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    const resolveImage = async () => 'fake-image:latest';
+    const result = await checkDockerResources(configWithResources({ memoryMb: null, cpus: null }), {
+      execFile,
+      resolveImage,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.message).toMatch(/unlimited/);
+  });
+
+  it('returns fail with suggested values when Docker rejects the limits', async () => {
+    let callIndex = 0;
+    const stderr = 'Range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available.';
+    const execFile = vi.fn().mockImplementation(async () => {
+      // First call (image inspect) succeeds, second call (docker run) fails.
+      if (callIndex++ === 0) return { stdout: '[{}]', stderr: '' };
+      throw Object.assign(new Error('docker run failed'), { stderr });
+    });
+    const resolveImage = async () => 'fake-image:latest';
+    const result = await checkDockerResources(configWithResources({ memoryMb: 1024, cpus: 1 }), {
+      execFile,
+      resolveImage,
+    });
+    expect(result.status).toBe('fail');
+    expect(result.hint).toMatch(/ironcurtain config/);
+    expect(result.hint).toMatch(/cpus=1/);
+  });
+
+  it('returns warn when image resolution throws', async () => {
+    const resolveImage: (id: AgentId) => Promise<string> = () =>
+      Promise.reject(new Error('agent registry not initialized'));
+    const result = await checkDockerResources(configWithResources({ memoryMb: 1024, cpus: 1 }), {
+      resolveImage,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.hint).toMatch(/agent registry/);
   });
 });
 

@@ -17,10 +17,15 @@ import {
   WEB_SEARCH_PROVIDER_URLS,
   loadUserConfig,
   saveUserConfig,
+  type ResolvedDockerResourcesConfig,
   type UserConfig,
   type WebSearchProvider,
 } from './user-config.js';
 import { parseModelId, type ProviderId } from './model-provider.js';
+import { clampDockerResources, isImagePresent, probeDockerResources } from '../docker/resource-limits.js';
+import { getAgent, registerBuiltinAdapters } from '../docker/agent-registry.js';
+import type { AgentId } from '../docker/agent-adapter.js';
+import { checkDockerAvailable } from '../session/preflight.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -224,6 +229,8 @@ export async function runFirstStart(): Promise<void> {
   handleCancel(enableAutoApprove);
   pending.autoApprove = { enabled: enableAutoApprove as boolean };
 
+  await maybeOfferDockerResourceFix(pending);
+
   // Persist all wizard choices in a single write
   saveUserConfig(pending);
 
@@ -242,4 +249,65 @@ export async function runFirstStart(): Promise<void> {
 
   // Step 8: Outro
   p.outro('Run `ironcurtain start` to begin.');
+}
+
+/**
+ * If Docker is up and the preferred-agent image is already cached locally,
+ * runs a tiny `docker run` against the configured (default) resource
+ * ceilings. On parsed failure (e.g. "Range of CPUs is from 0.01 to 2.00"),
+ * surfaces the suggested values and offers to write them into `pending`.
+ *
+ * Silently skipped in all other cases: no Docker, no image, no parsed
+ * suggestion, or user declines. Never blocks setup completion.
+ */
+async function maybeOfferDockerResourceFix(pending: UserConfig): Promise<void> {
+  const dockerStatus = await checkDockerAvailable();
+  if (!dockerStatus.available) return;
+
+  // First-start runs before the user picks an agent, so resolve the same
+  // default as `resolveUserConfig`.
+  await registerBuiltinAdapters();
+  let image: string;
+  try {
+    image = await getAgent('claude-code' as AgentId).getImage();
+  } catch {
+    return;
+  }
+  if (!(await isImagePresent(image))) return;
+
+  const configured: ResolvedDockerResourcesConfig = {
+    memoryMb: USER_CONFIG_DEFAULTS.dockerResources.memoryMb,
+    cpus: USER_CONFIG_DEFAULTS.dockerResources.cpus,
+  };
+  const { effective, host, clamped } = clampDockerResources(configured);
+  const probe = await probeDockerResources(image, effective);
+  if (probe.ok) return;
+
+  const suggested = probe.suggested ?? {};
+  const cpuTarget = suggested.cpus ?? (host.cpus > 1 ? host.cpus - 1 : 0.01);
+  const memoryTarget = suggested.memoryMb ?? Math.floor(host.memoryMb * 0.75);
+
+  const clampNote = clamped ? '(Auto-clamp already lowered the defaults but Docker still rejected them.)\n' : '';
+  const summary =
+    `Docker rejected the default container resource limits.\n\n` +
+    `  Detected host: ${host.cpus} cpus, ${host.memoryMb} MB total\n` +
+    `  Probe error:   ${probe.stderr.replace(/\s+/g, ' ').trim().slice(0, 200)}\n\n` +
+    `Suggested settings: cpus=${cpuTarget}, memoryMb=${memoryTarget}\n` +
+    clampNote;
+
+  p.note(summary, 'Docker resources');
+
+  const apply = await p.confirm({
+    message: 'Save the suggested Docker resource settings to your config?',
+    initialValue: true,
+  });
+  handleCancel(apply);
+  if (apply !== true) return;
+
+  pending.dockerResources = {
+    ...(pending.dockerResources ?? {}),
+    cpus: cpuTarget,
+    memoryMb: memoryTarget,
+  };
+  p.log.success(`Docker resources updated: cpus=${cpuTarget}, memoryMb=${memoryTarget}`);
 }

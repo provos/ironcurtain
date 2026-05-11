@@ -20,7 +20,7 @@ export type ExecFileFn = (
   opts: { timeout?: number; maxBuffer?: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
-const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
+export const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
   const execFileAsync = promisify(execFileCb);
   return execFileAsync(cmd, [...args], opts);
 };

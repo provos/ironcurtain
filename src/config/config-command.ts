@@ -118,7 +118,14 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     }
   }
 
-  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove', 'auditRedaction', 'memory'] as const;
+  const nestedSections = [
+    'resourceBudget',
+    'autoCompact',
+    'autoApprove',
+    'auditRedaction',
+    'memory',
+    'dockerResources',
+  ] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
     if (!pendingSection) continue;
@@ -797,6 +804,11 @@ async function handleDockerAgent(resolved: ResolvedUserConfig, pending: UserConf
         hint: DOCKER_AGENT_LABELS[currentPreferred],
       },
       {
+        value: 'dockerResources',
+        label: 'Container resources...',
+        hint: dockerResourcesSummary(resolved, pending),
+      },
+      {
         value: 'configureGoose',
         label: 'Configure Goose...',
         hint: gooseConfigHint(resolved, pending),
@@ -829,8 +841,72 @@ async function handleDockerAgent(resolved: ResolvedUserConfig, pending: UserConf
       }
     } else if (field === 'configureGoose') {
       await handleGooseConfig(resolved, pending);
+    } else if (field === 'dockerResources') {
+      await handleDockerResources(resolved, pending);
     }
   }
+}
+
+/** Submenu for Docker container memory and cpu ceilings. */
+async function handleDockerResources(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const current = { ...resolved.dockerResources, ...(pending.dockerResources ?? {}) };
+
+    const field = await p.select({
+      message: 'Docker container resources',
+      options: [
+        {
+          value: 'memoryMb',
+          label: 'Memory ceiling (MB)',
+          hint: current.memoryMb === null ? 'unlimited' : `${current.memoryMb} MB`,
+        },
+        {
+          value: 'cpus',
+          label: 'CPU ceiling',
+          hint: current.cpus === null ? 'unlimited' : String(current.cpus),
+        },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'memoryMb') {
+      const result = await promptNullableNumber({
+        message: 'Memory ceiling (MB):',
+        current: current.memoryMb,
+        format: (n) => (n === null ? 'unlimited' : `${n} MB`),
+        validate: (n) => {
+          if (!Number.isInteger(n)) return 'Must be an integer';
+          if (n < 6) return 'Must be at least 6 (Docker minimum)';
+          return undefined;
+        },
+      });
+      if (result !== undefined) {
+        pending.dockerResources = { ...(pending.dockerResources ?? {}), memoryMb: result };
+      }
+    } else if (field === 'cpus') {
+      const result = await promptNullableNumber({
+        message: 'CPU ceiling (decimal allowed, e.g. 1.5):',
+        current: current.cpus,
+        format: (n) => (n === null ? 'unlimited' : String(n)),
+        validate: (n) => {
+          if (n < 0.01) return 'Must be at least 0.01 (Docker minimum)';
+          return undefined;
+        },
+      });
+      if (result !== undefined) {
+        pending.dockerResources = { ...(pending.dockerResources ?? {}), cpus: result };
+      }
+    }
+  }
+}
+
+function dockerResourcesSummary(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const r = { ...resolved.dockerResources, ...(pending.dockerResources ?? {}) };
+  const cpu = r.cpus === null ? 'unlimited' : `${r.cpus} cpus`;
+  const mem = r.memoryMb === null ? 'unlimited' : `${r.memoryMb} MB`;
+  return `${cpu}, ${mem}`;
 }
 
 /** Goose-specific configuration submenu (provider + model). */
@@ -941,7 +1017,8 @@ function memoryHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
 }
 
 function dockerAgentHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
-  return DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
+  const agent = DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
+  return `${agent}, ${dockerResourcesSummary(resolved, pending)}`;
 }
 
 function sessionModeHint(resolved: ResolvedUserConfig, pending: UserConfig): string {

@@ -18,6 +18,7 @@ import {
   checkConfigLoad,
   checkConstitutionDrift,
   checkDocker,
+  checkDockerResources,
   checkMcpServerLiveness,
   checkNodeVersion,
   checkPolicyArtifacts,
@@ -127,6 +128,11 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
   printCheck(preferredModeResult);
   collected.push(preferredModeResult);
 
+  // The resource probe is the slow part of this section (can take up to ~30s
+  // worst case waiting on `docker run`). Kick it off in parallel with the
+  // synchronous policy-artifact checks below and await before printing.
+  const resourcePromise = dockerResult.status === 'ok' ? checkDockerResources(config) : undefined;
+
   const policyCheck = checkPolicyArtifacts(config);
   for (const r of policyCheck.results) {
     printCheck(r);
@@ -141,6 +147,12 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     const annotationResult = checkAnnotationDrift(policyCheck.toolAnnotations, config.mcpServers);
     printCheck(annotationResult);
     collected.push(annotationResult);
+  }
+
+  if (resourcePromise !== undefined) {
+    const resourceResult = await resourcePromise;
+    printCheck(resourceResult);
+    collected.push(resourceResult);
   }
 
   // Credentials.

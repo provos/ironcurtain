@@ -494,6 +494,9 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
         deniedPackages: [],
       },
       serverCredentials: {},
+      // null/null = "no flag emitted" so the integration test stays
+      // independent of host CPU/memory capacity.
+      dockerResources: { memoryMb: null, cpus: null },
     },
   } as unknown as IronCurtainConfig;
 }

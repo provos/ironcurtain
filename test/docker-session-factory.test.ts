@@ -127,6 +127,7 @@ function createTestConfig(): IronCurtainConfig {
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: true },
       memory: { enabled: false, llmBaseUrl: undefined, llmApiKey: undefined },
+      dockerResources: { memoryMb: null, cpus: null },
     },
   } as unknown as IronCurtainConfig;
 }

@@ -11,6 +11,17 @@ import { checkSandboxViability } from '../utils/preflight-checks.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import { detectAuthMethod, readOnlyCredentialSources } from '../docker/oauth-credentials.js';
 import {
+  clampDockerResources,
+  isImagePresent,
+  probeDockerResources,
+  type ClampedDockerResources,
+  type ExecFileFn,
+  type HostResources,
+  type ProbeResult as ResourceProbeResult,
+} from '../docker/resource-limits.js';
+import { getAgent, registerBuiltinAdapters } from '../docker/agent-registry.js';
+import type { AgentId } from '../docker/agent-adapter.js';
+import {
   resolveApiKeyForProvider,
   createLanguageModel,
   parseModelId,
@@ -135,6 +146,113 @@ export function checkPreferredMode(config: IronCurtainConfig, dockerResult: Chec
     message: 'builtin, but no ANTHROPIC_API_KEY configured. Sessions will fail.',
     hint: 'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
   };
+}
+
+/**
+ * Reports whether the user's Docker resource ceilings (after clamping)
+ * are accepted by Docker. Two-step:
+ *
+ *   1. Clamp the configured `dockerResources` against host capacity. If
+ *      clamping happened, mention it in the message so the user sees what
+ *      they're actually getting.
+ *   2. Resolve the preferred Docker agent's image. If it isn't present
+ *      locally, skip the probe with status `ok` (we deliberately do NOT
+ *      pull images from doctor). If it is present, run a tiny throwaway
+ *      `docker run` to confirm Docker accepts the limits. Parse failures
+ *      into actionable hints.
+ *
+ * Callers should only invoke this when `dockerResult.status === 'ok'`.
+ *
+ * Exported for testing; tests pass stubbed `execFile` and `getImage` deps.
+ */
+export interface CheckDockerResourcesDeps {
+  readonly execFile?: ExecFileFn;
+  readonly resolveImage?: (agentId: AgentId) => Promise<string>;
+}
+
+export async function checkDockerResources(
+  config: IronCurtainConfig,
+  deps: CheckDockerResourcesDeps = {},
+): Promise<CheckResult> {
+  const clamp = clampDockerResources(config.userConfig.dockerResources);
+  const summary = describeClamp(clamp);
+
+  let image: string;
+  try {
+    image = await resolveAgentImage(config.userConfig.preferredDockerAgent, deps.resolveImage);
+  } catch (err) {
+    return {
+      name: 'Docker resource limits',
+      status: 'warn',
+      message: `${summary}; could not resolve preferred-agent image`,
+      hint: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // We deliberately do not pull images during a doctor run; if the image
+  // isn't already on the host, the user hasn't started a session yet, so a
+  // resource probe would just push work into the wrong command.
+  if (!(await isImagePresent(image, deps.execFile))) {
+    return {
+      name: 'Docker resource limits',
+      status: 'ok',
+      message: `${summary}; image ${image} not yet pulled — skipping probe`,
+    };
+  }
+
+  const probe = await probeDockerResources(image, clamp.effective, deps.execFile);
+  return renderProbeResult(probe, summary, clamp.host);
+}
+
+function describeClamp(clamp: ClampedDockerResources): string {
+  const cpusLabel = clamp.effective.cpus === undefined ? 'unlimited' : `${clamp.effective.cpus} cpus`;
+  const memLabel = clamp.effective.memoryMb === undefined ? 'unlimited' : `${clamp.effective.memoryMb} MB`;
+  if (!clamp.clamped) {
+    return `${cpusLabel}, ${memLabel}`;
+  }
+  // Report the pre-clamp values too so the user knows what they configured.
+  const requestedCpus = clamp.requested.cpus === null ? 'unlimited' : `${clamp.requested.cpus} cpus`;
+  const requestedMem = clamp.requested.memoryMb === null ? 'unlimited' : `${clamp.requested.memoryMb} MB`;
+  return `${cpusLabel}, ${memLabel} (clamped from ${requestedCpus}, ${requestedMem} to fit host)`;
+}
+
+async function resolveAgentImage(
+  agentId: AgentId | string,
+  override?: (agentId: AgentId) => Promise<string>,
+): Promise<string> {
+  if (override) return override(agentId as AgentId);
+  await registerBuiltinAdapters();
+  return getAgent(agentId as AgentId).getImage();
+}
+
+function renderProbeResult(probe: ResourceProbeResult, summary: string, host: HostResources): CheckResult {
+  if (probe.ok) {
+    return { name: 'Docker resource limits', status: 'ok', message: summary };
+  }
+  const suggested = probe.suggested ?? {};
+  const hintParts: string[] = ['Run `ironcurtain config` and adjust Docker Agent > Resources.'];
+  if (suggested.cpus !== undefined) {
+    hintParts.push(`Try cpus=${suggested.cpus}`);
+  }
+  if (suggested.memoryMb !== undefined) {
+    hintParts.push(`Try memoryMb=${suggested.memoryMb}`);
+  }
+  // On macOS, the host snapshot can over-report what Docker Desktop's VM
+  // will accept; surfacing it lets the user sanity-check against the VM's
+  // allocation.
+  hintParts.push(`(Host: ${host.cpus} cpus, ${host.memoryMb} MB.)`);
+  return {
+    name: 'Docker resource limits',
+    status: 'fail',
+    message: `Docker rejected ${summary}: ${truncateForMessage(probe.stderr)}`,
+    hint: hintParts.join(' '),
+  };
+}
+
+function truncateForMessage(stderr: string): string {
+  const cleaned = stderr.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= 200) return cleaned;
+  return `${cleaned.slice(0, 200)}…`;
 }
 
 export interface ConfigLoadOk {

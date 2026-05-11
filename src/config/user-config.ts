@@ -40,6 +40,12 @@ export const USER_CONFIG_DEFAULTS = {
     enabled: true,
   },
   preferredMode: 'docker',
+  dockerResources: {
+    /** Memory ceiling in MB; null means "do not pass --memory". */
+    memoryMb: 8192,
+    /** CPU ceiling (fractional ok); null means "do not pass --cpus". */
+    cpus: 4,
+  },
 } as const;
 
 export const ESCALATION_TIMEOUT_MIN = 30;
@@ -52,6 +58,23 @@ const resourceBudgetSchema = z
     maxSessionSeconds: z.number().positive().nullable().optional(),
     maxEstimatedCostUsd: z.number().positive().nullable().optional(),
     warnThresholdPercent: z.number().min(1).max(99).optional(),
+  })
+  .optional();
+
+/**
+ * Docker container resource ceilings. Both fields are independently nullable:
+ *   - `number` = pass `--memory <N>m` / `--cpus <N>` (subject to clamping)
+ *   - `null`   = explicitly no limit, do not emit the flag
+ *   - missing  = fall through to USER_CONFIG_DEFAULTS.dockerResources
+ *
+ * Memory is bounded below at 6 MB (Docker's own minimum); CPUs is bounded
+ * below at 0.01 (Docker's own minimum). Upper bounds are enforced at
+ * runtime by `clampDockerResources()` against the host's actual capacity.
+ */
+const dockerResourcesSchema = z
+  .object({
+    memoryMb: z.number().int().min(6).nullable().optional(),
+    cpus: z.number().min(0.01).nullable().optional(),
   })
   .optional();
 
@@ -237,6 +260,7 @@ export const userConfigSchema = z.object({
   preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
   preferredMode: z.enum(SESSION_MODES).optional(),
   packageInstall: packageInstallSchema,
+  dockerResources: dockerResourcesSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -286,6 +310,23 @@ export interface ResolvedPackageInstallConfig {
   readonly deniedPackages: readonly string[];
 }
 
+/**
+ * Resolved Docker container resource ceilings.
+ *
+ * `null` is a deliberate "no limit" signal: callers must omit the
+ * corresponding `--memory` / `--cpus` flag, matching the existing pattern
+ * in `docker-manager.ts:buildCreateArgs()`.
+ *
+ * These are the user-configured ceilings BEFORE clamping. The runtime
+ * clamp (`clampDockerResources()` in `src/docker/resource-limits.ts`) lowers
+ * either value to fit the host's actual capacity; nulls pass through
+ * unchanged.
+ */
+export interface ResolvedDockerResourcesConfig {
+  readonly memoryMb: number | null;
+  readonly cpus: number | null;
+}
+
 /** Resolved web search config with all fields present. */
 export interface ResolvedWebSearchConfig {
   readonly provider: WebSearchProvider | null;
@@ -325,6 +366,8 @@ export interface ResolvedUserConfig {
   readonly preferredMode: SessionModeKind;
   /** Package installation proxy configuration. */
   readonly packageInstall: ResolvedPackageInstallConfig;
+  /** Docker container resource ceilings (pre-clamp). */
+  readonly dockerResources: ResolvedDockerResourcesConfig;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -366,6 +409,7 @@ const DEFAULT_CONFIG_CONTENT =
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
       auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
       preferredMode: USER_CONFIG_DEFAULTS.preferredMode,
+      dockerResources: USER_CONFIG_DEFAULTS.dockerResources,
     },
     null,
     2,
@@ -652,6 +696,15 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       allowedPackages: config.packageInstall?.allowedPackages ?? [],
       deniedPackages: config.packageInstall?.deniedPackages ?? [],
     },
+    // Destructure preserves explicit `null` (= "no limit"); only `undefined`
+    // falls back to the default.
+    dockerResources: (() => {
+      const {
+        memoryMb = USER_CONFIG_DEFAULTS.dockerResources.memoryMb,
+        cpus = USER_CONFIG_DEFAULTS.dockerResources.cpus,
+      } = config.dockerResources ?? {};
+      return { memoryMb, cpus };
+    })(),
   };
 }
 

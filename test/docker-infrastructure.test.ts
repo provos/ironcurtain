@@ -324,6 +324,9 @@ function makeMockConfig(): IronCurtainConfig {
       },
       escalationTimeoutSeconds: 120,
       auditRedaction: { enabled: true },
+      // null/null = "no flag emitted" — avoids the clamp helper having to
+      // probe real host resources in unit tests.
+      dockerResources: { memoryMb: null, cpus: null },
     },
   } as unknown as IronCurtainConfig;
 }

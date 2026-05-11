@@ -204,6 +204,7 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
           deniedPackages: [],
         },
         serverCredentials: {},
+        dockerResources: { memoryMb: null, cpus: null },
       },
     } as unknown as IronCurtainConfig;
 

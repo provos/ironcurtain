@@ -34,6 +34,7 @@ import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
+import { clampDockerResources } from './resource-limits.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -491,7 +492,11 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       env.IRONCURTAIN_RESUME_FLAGS = conversationStateConfig.resumeFlags.join(' ');
     }
 
-    // Create and start container with PTY command and TTY
+    // Create and start container with PTY command and TTY.
+    // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
+    // are clamped to fit the host. `null` in either field is preserved as
+    // "no flag emitted" (see clampDockerResources docs).
+    const { effective: ptyResources } = clampDockerResources(options.config.userConfig.dockerResources);
     containerId = await docker.create({
       image,
       name: mainContainerName,
@@ -502,7 +507,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       // PTY sessions are standalone (no workflow/scope), so only the
       // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
       bundleLabel: bundleId,
-      resources: { memoryMb: 8192, cpus: 4 },
+      resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
       extraHosts,
       capAdd: [
         'SETUID', // sudo setuid
