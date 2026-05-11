@@ -88,29 +88,27 @@ const COLLIDING_UID = 33;
  * the entrypoint is still running after `timeoutMs` — that indicates a
  * hang, not normal slowness.
  */
-async function waitForEntrypointHandoff(containerId: string, timeoutMs: number): Promise<void> {
+async function waitForRemapComplete(containerId: string, expectedUid: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  // Poll on `/workspace`'s owner UID rather than on the absence of
+  // `usermod`/`groupmod` processes. The entrypoint runs `chown -R
+  // "$UID:$GID" /home/codespace /workspace` after usermod/groupmod; a
+  // process-presence poll could return while `chown -R` is still
+  // walking the bind mount, and the `stat`-based assertions below
+  // would flake. `/workspace` is processed last in the chown arg list
+  // (after `/home/codespace`), so seeing its UID flip is a sufficient
+  // signal that the full remap chain is done.
   while (Date.now() < deadline) {
-    // `pgrep -c X` prints the count and exits non-zero when 0, which
-    // would make `dockerExecAs` report failure; the explicit `; true`
-    // neutralises that.
-    const result = await dockerExecAs(
-      containerId,
-      '0:0',
-      'sh',
-      '-c',
-      'pgrep -c usermod || true; pgrep -c groupmod || true',
-    );
+    const result = await dockerExecAs(containerId, '0:0', 'stat', '-c', '%u', '/workspace');
     if (result.exitCode !== 0) {
       // Container gone or exec broken — bail so assertions produce a
       // meaningful error rather than silent looping.
       return;
     }
-    const counts = result.stdout.trim().split(/\s+/);
-    if (counts.length >= 2 && counts.every((c) => c === '0')) return;
+    if (result.stdout.trim() === String(expectedUid)) return;
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`Entrypoint did not finish remap within ${timeoutMs}ms`);
+  throw new Error(`Entrypoint did not complete remap to UID ${expectedUid} within ${timeoutMs}ms`);
 }
 
 /** Runs `cmd` inside `containerId` as the given user. */
@@ -215,9 +213,12 @@ describe.skipIf(!gooseDockerReady)('Goose agent container UID/GID remap (issue #
         { timeout: 30_000 },
       );
 
-      // Wait for the entrypoint to finish the remap before reading state.
-      // See `waitForEntrypointHandoff` for the timing rationale.
-      await waitForEntrypointHandoff(containerName, 90_000);
+      // Wait for the entrypoint to finish the full remap (including the
+      // recursive chown of /workspace) before reading state. Polling on
+      // /workspace ownership is strictly stronger than polling on the
+      // usermod/groupmod processes: it observes the final post-condition
+      // every subsequent assertion depends on.
+      await waitForRemapComplete(containerName, REMAP_UID, 90_000);
 
       // `id codespace` reflects the renumbered passwd entry.
       const idOut = await dockerExecAs(containerName, '0:0', 'id', 'codespace');
@@ -248,20 +249,27 @@ describe.skipIf(!gooseDockerReady)('Goose agent container UID/GID remap (issue #
       const runuserName = await dockerExecAs(containerName, 'codespace', 'whoami');
       observations.runuserUid = runuserUid.stdout.trim();
       observations.runuserName = runuserName.stdout.trim();
-
-      // Restore workspace ownership BEFORE the container is torn down.
-      // The entrypoint's `chown -R ${REMAP_UID} /workspace` propagates
-      // through the bind mount; without this restore, the host tempdir
-      // would be left owned by UID 1500 and the afterAll `rmSync` would
-      // either EACCES or leak files.
-      await dockerExecAs(containerName, '0:0', 'chown', '-R', `${originalUid}:${originalGid}`, '/workspace');
     }, 120_000);
 
     afterAll(async () => {
-      try {
-        await execFile('docker', ['rm', '-f', containerName], { timeout: 10_000 });
-      } catch {
-        /* container already gone */
+      if (containerName) {
+        // Restore workspace ownership BEFORE the container is torn down.
+        // The entrypoint's `chown -R ${REMAP_UID} /workspace` propagates
+        // through the bind mount; without this restore, the host tempdir
+        // would be left owned by UID 1500 and the `rmSync` below would
+        // either EACCES or leak files. Best-effort: if `beforeAll` threw
+        // before the chown landed, or the container is already gone,
+        // there is nothing to restore.
+        try {
+          await dockerExecAs(containerName, '0:0', 'chown', '-R', `${originalUid}:${originalGid}`, '/workspace');
+        } catch {
+          /* container gone or chown failed */
+        }
+        try {
+          await execFile('docker', ['rm', '-f', containerName], { timeout: 10_000 });
+        } catch {
+          /* container already gone */
+        }
       }
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     });
