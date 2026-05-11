@@ -4,6 +4,34 @@
 # Non-PTY mode: CMD is "sleep infinity" (agent commands arrive via docker exec).
 # PTY mode: CMD is the socat PTY command from buildPtyCommand().
 
+# Runtime UID remap (Linux only).
+#
+# Issue #232: when the host UID is not 1000, bind-mounted directories
+# (e.g., the conversation-state dir) appear inside the container owned
+# by the host UID, and the baked codespace user (UID 1000) cannot write
+# to them. The host-side launcher passes `--user 0:0` plus the host
+# UID/GID via IRONCURTAIN_AGENT_UID / IRONCURTAIN_AGENT_GID so this
+# block (running as root) can renumber the codespace account to match
+# the host before dropping privileges. On macOS, Docker Desktop's
+# VirtioFS translates UIDs transparently and the env vars are not set,
+# so this block is skipped.
+if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN_AGENT_GID" ]; then
+  if [ "$IRONCURTAIN_AGENT_UID" != "1000" ] || [ "$IRONCURTAIN_AGENT_GID" != "1000" ]; then
+    # Renumber the codespace user/group to the host UID/GID, then fix
+    # ownership on the baked home dir and workspace mount so the
+    # remapped codespace user can read/write them. Bind-mounted
+    # subdirectories (conversation state, sockets, orientation) keep
+    # their host-side ownership, which now matches codespace.
+    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace
+    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace
+    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace
+  fi
+  # Re-exec the entrypoint as the (possibly remapped) codespace user.
+  # The remainder of this script runs under codespace, so $HOME and
+  # sudoers (which keys on the username) resolve correctly.
+  exec runuser -u codespace -- "$0" "$@"
+fi
+
 # Bridge UDS to local TCP so HTTPS_PROXY works
 MITM_SOCK="/run/ironcurtain/mitm-proxy.sock"
 PROXY_PORT=18080

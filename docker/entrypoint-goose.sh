@@ -2,6 +2,18 @@
 # IronCurtain entrypoint for Goose containers.
 # Sets up proxy bridges, writes Goose config, then hands off to CMD.
 
+# Runtime UID remap (Linux only). See entrypoint-claude-code.sh for the
+# full rationale (issue #232). Skipped on macOS where Docker Desktop
+# translates UIDs and the env vars are not set.
+if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN_AGENT_GID" ]; then
+  if [ "$IRONCURTAIN_AGENT_UID" != "1000" ] || [ "$IRONCURTAIN_AGENT_GID" != "1000" ]; then
+    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace
+    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace
+    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace
+  fi
+  exec runuser -u codespace -- "$0" "$@"
+fi
+
 # 1. Bridge MITM proxy UDS to local TCP (same as Claude Code entrypoint)
 MITM_SOCK="/run/ironcurtain/mitm-proxy.sock"
 PROXY_PORT=18080

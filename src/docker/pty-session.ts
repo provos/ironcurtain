@@ -34,6 +34,7 @@ import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
+import { buildAgentUidRemap } from './docker-infrastructure.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -491,13 +492,20 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       env.IRONCURTAIN_RESUME_FLAGS = conversationStateConfig.resumeFlags.join(' ');
     }
 
+    // Linux-only UID-remap wiring (issue #232). Matches the parallel
+    // setup in `docker-infrastructure.ts::createSessionContainers`;
+    // when adding fields here, mirror the change there. macOS skips
+    // the remap because VirtioFS translates UIDs transparently.
+    const uidRemap = buildAgentUidRemap(useTcp);
+
     // Create and start container with PTY command and TTY
     containerId = await docker.create({
       image,
       name: mainContainerName,
       network: network ?? 'none',
       mounts,
-      env,
+      env: { ...env, ...uidRemap.env },
+      user: uidRemap.user,
       command: ptyCommand,
       // PTY sessions are standalone (no workflow/scope), so only the
       // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
@@ -761,7 +769,20 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
           isFirstResize = false;
           execFile(
             'docker',
-            ['exec', options.containerId, '/etc/ironcurtain/resize-pty.sh', String(columns), String(rows)],
+            [
+              'exec',
+              // The container may be running as root (Linux UID-remap path,
+              // issue #232) or as codespace (macOS). Pinning the exec user
+              // to codespace works in both cases — codespace is the baked
+              // user (renumbered, but the username is unchanged) and
+              // re-asserting it under macOS is a no-op.
+              '--user',
+              'codespace',
+              options.containerId,
+              '/etc/ironcurtain/resize-pty.sh',
+              String(columns),
+              String(rows),
+            ],
             { timeout: 5000 },
             (err, _stdout, stderr) => {
               if (err) {
@@ -869,7 +890,9 @@ function checkPtySize(containerId: string): Promise<{ rows: number; cols: number
   return new Promise((resolve) => {
     execFile(
       'docker',
-      ['exec', containerId, '/etc/ironcurtain/check-pty-size.sh'],
+      // `--user codespace` mirrors DockerManager.exec; see the resize
+      // callsite above for the issue #232 rationale.
+      ['exec', '--user', 'codespace', containerId, '/etc/ironcurtain/check-pty-size.sh'],
       { timeout: 5000 },
       (err, stdout) => {
         if (err) {
@@ -918,7 +941,16 @@ async function verifyInitialPtySize(
     await new Promise<void>((resolve) => {
       execFile(
         'docker',
-        ['exec', containerId, '/etc/ironcurtain/resize-pty.sh', String(expectedCols), String(expectedRows)],
+        // `--user codespace` mirrors DockerManager.exec; see issue #232.
+        [
+          'exec',
+          '--user',
+          'codespace',
+          containerId,
+          '/etc/ironcurtain/resize-pty.sh',
+          String(expectedCols),
+          String(expectedRows),
+        ],
         { timeout: 5000 },
         () => resolve(),
       );

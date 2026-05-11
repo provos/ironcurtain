@@ -99,6 +99,25 @@ export interface DockerContainerConfig {
    * Optional. Defaults to false (no TTY allocated).
    */
   readonly tty?: boolean;
+
+  /**
+   * Override the container's effective user at creation time.
+   * Maps to `docker create --user <value>` (formats: `uid`, `uid:gid`,
+   * or `name[:group]`).
+   *
+   * Used on Linux to start the agent container as `0:0` so the
+   * entrypoint can renumber the baked codespace user to match the
+   * host UID/GID before dropping privileges (see issue #232 and
+   * `docker/entrypoint-claude-code.sh`). Must be omitted on macOS,
+   * where Docker Desktop's VirtioFS translates UIDs transparently and
+   * passing `--user 0:0` would defeat that translation.
+   *
+   * When this is set to anything other than `codespace`, every
+   * `docker exec` against the container must pass `--user codespace`
+   * explicitly — Docker treats this field as the default exec user,
+   * overriding the Dockerfile `USER` directive.
+   */
+  readonly user?: string;
 }
 
 /** A volume mount for a Docker container. */

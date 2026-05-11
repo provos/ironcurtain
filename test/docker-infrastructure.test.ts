@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { DockerInfrastructure, PreContainerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import {
+  buildAgentUidRemap,
   prepareConversationStateDir,
   createSessionContainers,
   destroyDockerInfrastructure,
@@ -145,6 +146,25 @@ describe('DockerInfrastructure interface', () => {
     const udsAddr: DockerInfrastructure['mitmAddr'] = { socketPath: '/tmp/mitm.sock' };
     expect(udsAddr.socketPath).toBe('/tmp/mitm.sock');
     expect(udsAddr.port).toBeUndefined();
+  });
+});
+
+describe('buildAgentUidRemap (issue #232)', () => {
+  it('returns empty mapping on macOS (useTcp=true)', () => {
+    // VirtioFS handles UID translation transparently; passing
+    // `--user 0:0` would break that. macOS path must be a pure no-op.
+    const remap = buildAgentUidRemap(true);
+    expect(remap.user).toBeUndefined();
+    expect(remap.env).toEqual({});
+  });
+
+  it('returns 0:0 + host UID/GID env on Linux (useTcp=false)', () => {
+    const remap = buildAgentUidRemap(false);
+    expect(remap.user).toBe('0:0');
+    // The entrypoint reads these to renumber codespace before
+    // dropping privileges via runuser.
+    expect(remap.env.IRONCURTAIN_AGENT_UID).toBe(String(process.getuid?.() ?? 1000));
+    expect(remap.env.IRONCURTAIN_AGENT_GID).toBe(String(process.getgid?.() ?? 1000));
   });
 });
 
@@ -412,6 +432,13 @@ describe('createSessionContainers', () => {
 
     // Only one docker.create call in UDS mode: the main container.
     expect(createCalls).toHaveLength(1);
+
+    // Issue #232: Linux UDS mode runs the container as 0:0 and passes
+    // the host UID/GID via env so the entrypoint can renumber codespace.
+    expect(createCalls[0].user).toBe('0:0');
+    expect(createCalls[0].env.IRONCURTAIN_AGENT_UID).toBe(String(process.getuid?.() ?? 1000));
+    expect(createCalls[0].env.IRONCURTAIN_AGENT_GID).toBe(String(process.getgid?.() ?? 1000));
+
     const mounts = createCalls[0].mounts;
 
     // Defense-in-depth: /run/ironcurtain must map to sockets/ only, so the
@@ -461,6 +488,28 @@ describe('createSessionContainers', () => {
   it('omits the skills mount entirely when core.skillsMount is undefined', async () => {
     const mounts = await runSkillsMountScenario({});
     expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
+  });
+
+  // --- UID remap (issue #232) ---
+  it('does NOT pass --user 0:0 or UID env in TCP (macOS) mode', async () => {
+    // On macOS, VirtioFS handles UID translation and `--user 0:0` would
+    // break it; the agent container must run as the baked codespace user.
+    // We construct a TCP-mode core but bypass the connectivity check by
+    // returning exitCode 0 from the mocked exec.
+    const { docker, createCalls } = makeMockDocker({
+      async exec() {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    const core = makeMockCore({ tempDir, useTcp: true, docker });
+    await createSessionContainers(core, makeMockConfig());
+
+    // Two creates in TCP mode: [0] sidecar, [1] main container.
+    expect(createCalls).toHaveLength(2);
+    const mainCreate = createCalls[1];
+    expect(mainCreate.user).toBeUndefined();
+    expect(mainCreate.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
+    expect(mainCreate.env.IRONCURTAIN_AGENT_GID).toBeUndefined();
   });
 
   it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {

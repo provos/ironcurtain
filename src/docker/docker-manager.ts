@@ -120,6 +120,14 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
     args.push('-t');
   }
 
+  // Linux-only: when set (typically to '0:0'), runs the entrypoint as
+  // root so it can renumber the codespace user before dropping
+  // privileges. macOS skips this (VirtioFS handles UID translation).
+  // See `DockerContainerConfig.user` JSDoc.
+  if (config.user !== undefined) {
+    args.push('--user', config.user);
+  }
+
   args.push(config.image);
   args.push(...config.command);
 
@@ -159,7 +167,15 @@ export function createDockerManager(
     async exec(nameOrId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
       try {
-        const { stdout, stderr } = await exec('docker', ['exec', nameOrId, ...command], {
+        // Always pin the exec user to `codespace`. On Linux, agent
+        // containers are created with `--user 0:0` (see issue #232) so
+        // the entrypoint can renumber the codespace user; without an
+        // explicit `--user codespace` here, every exec would land as
+        // root and bypass the sudoers / $HOME setup the agent expects.
+        // On macOS, `--user 0:0` is not passed and the Dockerfile
+        // `USER codespace` directive already takes effect, but
+        // re-asserting `codespace` is a harmless no-op.
+        const { stdout, stderr } = await exec('docker', ['exec', '--user', 'codespace', nameOrId, ...command], {
           timeout,
           maxBuffer: 50 * 1024 * 1024,
         });
