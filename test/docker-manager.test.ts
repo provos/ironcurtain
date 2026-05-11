@@ -321,6 +321,31 @@ describe('DockerManager', () => {
       expect(args[2]).toBe('codespace');
     });
 
+    it('skips --user when execUser is null (non-agent containers)', async () => {
+      // signal-cli-rest-api has no codespace account; pinning it would
+      // make `docker exec` fail with "unable to find user codespace" and
+      // break stale-bind-mount detection. `execUser: null` opts out.
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('signal-cli', ['test', '-d', '/data'], 5_000, null);
+      const args = mock.calls[0].args;
+      expect(args[0]).toBe('exec');
+      expect(args).not.toContain('--user');
+      expect(args).toEqual(['exec', 'signal-cli', 'test', '-d', '/data']);
+    });
+
+    it('honors a custom execUser override (string value)', async () => {
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('container-id', ['cmd'], undefined, 'root');
+      const args = mock.calls[0].args;
+      expect(args[0]).toBe('exec');
+      expect(args[1]).toBe('--user');
+      expect(args[2]).toBe('root');
+    });
+
     it('returns non-zero exit code without throwing', async () => {
       mock.setError(1, 'error output', 'stderr output');
       const manager = createDockerManager(mock.mockExec);

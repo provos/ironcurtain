@@ -159,8 +159,22 @@ export interface DockerManager {
    * Returns when the command exits. Both stdout and stderr are captured.
    *
    * @param timeoutMs - kill the exec process after this many ms.
+   * @param execUser - override the exec user via `docker exec --user <value>`.
+   *   - `undefined` (default): pins `--user codespace`, the correct behavior
+   *     for agent containers (which on Linux are created with `--user 0:0`
+   *     so the entrypoint can renumber the baked codespace user — every
+   *     subsequent exec must opt back into codespace explicitly).
+   *   - A string: passes that value as `--user`.
+   *   - `null`: skip the `--user` flag entirely. Required for non-agent
+   *     containers that have no `codespace` account (e.g. the
+   *     `bbernhard/signal-cli-rest-api` image).
    */
-  exec(nameOrId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult>;
+  exec(
+    nameOrId: string,
+    command: readonly string[],
+    timeoutMs?: number,
+    execUser?: string | null,
+  ): Promise<DockerExecResult>;
 
   /** Stop a running container (SIGTERM, then SIGKILL after grace period). */
   stop(nameOrId: string): Promise<void>;

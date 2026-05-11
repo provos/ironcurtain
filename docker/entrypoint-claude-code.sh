@@ -22,9 +22,27 @@ if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN
     # remapped codespace user can read/write them. Bind-mounted
     # subdirectories (conversation state, sockets, orientation) keep
     # their host-side ownership, which now matches codespace.
-    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace
-    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace
-    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace
+    #
+    # FAIL HARD on remap errors. Previously these commands ran without
+    # return-code checks: if `usermod -u $HOST_UID codespace` collided
+    # with an existing image user (plausible for system UIDs like 33
+    # `www-data` or 100 `systemd-network`), the entrypoint would
+    # silently continue, then `chown` and `runuser -u codespace`
+    # would operate on the still-UID-1000 codespace — recreating the
+    # original issue #232 bug with no diagnostic. Abort with an explicit
+    # error instead so the operator sees what went wrong.
+    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace || {
+      echo "[ironcurtain] groupmod failed: cannot remap codespace group to GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
+      exit 1
+    }
+    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace || {
+      echo "[ironcurtain] usermod failed: cannot remap codespace user to UID $IRONCURTAIN_AGENT_UID (already in use?)" >&2
+      exit 1
+    }
+    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace || {
+      echo "[ironcurtain] chown failed: cannot reset ownership of /home/codespace and /workspace to $IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" >&2
+      exit 1
+    }
   fi
   # Re-exec the entrypoint as the (possibly remapped) codespace user.
   # The remainder of this script runs under codespace, so $HOME and
