@@ -12,24 +12,38 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { getPtyRegistryDir } from '../config/paths.js';
-import { loadUserConfig } from '../config/user-config.js';
+import type { ResolvedUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 import { loadConfig } from '../config/index.js';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
-import { createMuxApp } from './mux-app.js';
+import {
+  resolveSessionMode as defaultResolveSessionMode,
+  formatModeLine,
+  PreflightError,
+} from '../session/preflight.js';
+import type { PreflightOptions, PreflightResult } from '../session/preflight.js';
+import type { AgentId } from '../docker/agent-adapter.js';
+import { createMuxApp, type MuxApp, type MuxAppOptions } from './mux-app.js';
 
 const muxSpec: CommandSpec = {
   name: 'ironcurtain mux',
   description: 'Terminal multiplexer for PTY sessions (requires node-pty)',
   usage: ['ironcurtain mux [options]'],
   options: [
-    { flag: 'agent', short: 'a', description: 'Agent mode (default: claude-code)', placeholder: '<name>' },
+    { flag: 'agent', short: 'a', description: 'Agent mode (default: from config)', placeholder: '<name>' },
     { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
   ],
 };
 
-export async function main(args?: string[]): Promise<void> {
-  // Check for optional mux dependencies
+/** Test injection points; production callers pass nothing. */
+export interface MuxMainDeps {
+  readonly resolveSessionMode?: (options: PreflightOptions) => Promise<PreflightResult>;
+  readonly createMuxApp?: (options: MuxAppOptions) => MuxApp;
+  readonly skipNativeProbes?: boolean;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+async function probeNativeDependencies(): Promise<void> {
   try {
     await import('node-pty');
   } catch {
@@ -65,6 +79,7 @@ export async function main(args?: string[]): Promise<void> {
       // its own error if spawning fails.
     }
   }
+
   try {
     await import('terminal-kit');
   } catch {
@@ -73,6 +88,33 @@ export async function main(args?: string[]): Promise<void> {
         'Install it with: npm install terminal-kit\n',
     );
     process.exit(1);
+  }
+}
+
+/** Returns true if a warning was emitted (caller should pause before fullscreen). */
+function emitAutoApproveWarning(userConfig: ResolvedUserConfig): boolean {
+  if (!userConfig.autoApprove.enabled) return false;
+
+  const { provider } = parseModelId(userConfig.autoApprove.modelId);
+  const apiKey = resolveApiKeyForProvider(provider, userConfig);
+  if (apiKey) return false;
+
+  process.stderr.write(
+    chalk.yellow(
+      `Warning: auto-approve is enabled but no API key found for provider "${provider}".\n` +
+        'Auto-approve will be silently disabled. Set the API key in your environment or config.\n',
+    ),
+  );
+  return true;
+}
+
+export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<void> {
+  const resolveSessionMode = deps.resolveSessionMode ?? defaultResolveSessionMode;
+  const createApp = deps.createMuxApp ?? createMuxApp;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  if (!deps.skipNativeProbes) {
+    await probeNativeDependencies();
   }
 
   // Parse args
@@ -89,8 +131,47 @@ export async function main(args?: string[]): Promise<void> {
 
   if (checkHelp(values as { help?: boolean }, muxSpec)) return;
 
-  const agent = (values.agent as string | undefined) ?? 'claude-code';
+  const requestedAgentRaw = values.agent as string | undefined;
   const model = values.model as string | undefined;
+
+  const config = loadConfig();
+
+  // Preflight runs before the autoApprove sleep so a fatal preflight does not wait 3 seconds.
+  let preflight: PreflightResult;
+  try {
+    preflight = await resolveSessionMode({
+      config,
+      requestedAgent: requestedAgentRaw ? (requestedAgentRaw as AgentId) : undefined,
+    });
+  } catch (err) {
+    if (err instanceof PreflightError) {
+      process.stderr.write(chalk.red(err.message) + '\n');
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  process.stderr.write(chalk.dim(formatModeLine(preflight)) + '\n');
+
+  // Builtin mode does not have a `--agent` flag to pass to the child PTY,
+  // and the PTY child requires Docker mode anyway. Refuse cleanly here so
+  // the user gets a single coherent message rather than per-tab failures.
+  if (preflight.mode.kind !== 'docker') {
+    process.stderr.write(
+      chalk.red(
+        'ironcurtain mux requires Docker agent mode.\n' +
+          'Pass --agent claude-code, or set Session Mode > Preferred mode to "docker" in `ironcurtain config`.\n',
+      ),
+    );
+    process.exit(1);
+  }
+  const resolvedAgent = preflight.mode.agent;
+
+  const hasWarnings = emitAutoApproveWarning(config.userConfig);
+  if (hasWarnings) {
+    process.stderr.write(chalk.dim('\nStarting in 3 seconds...\n'));
+    await sleep(3000);
+  }
 
   // Generate a unique mux instance ID for session ownership
   const muxId = `mux-${randomBytes(4).toString('hex')}`;
@@ -99,45 +180,11 @@ export async function main(args?: string[]): Promise<void> {
   const registryDir = getPtyRegistryDir();
   mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 
-  // Pre-flight warnings (shown before fullscreen takes over)
-  let hasWarnings = false;
-  try {
-    const userConfig = loadUserConfig({ readOnly: true });
-    if (userConfig.autoApprove.enabled) {
-      const { provider } = parseModelId(userConfig.autoApprove.modelId);
-      const apiKey = resolveApiKeyForProvider(provider, userConfig);
-      if (!apiKey) {
-        process.stderr.write(
-          chalk.yellow(
-            `Warning: auto-approve is enabled but no API key found for provider "${provider}".\n` +
-              'Auto-approve will be silently disabled. Set the API key in your environment or config.\n',
-          ),
-        );
-        hasWarnings = true;
-      }
-    }
-  } catch {
-    // Config load failure is not fatal here -- the child sessions will report it.
-  }
-
-  if (hasWarnings) {
-    process.stderr.write(chalk.dim('\nStarting in 3 seconds...\n'));
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-
-  // Load config once for workspace validation
-  let protectedPaths: string[] = [];
-  try {
-    protectedPaths = loadConfig().protectedPaths;
-  } catch {
-    // Config load failure is not fatal; child sessions will report it.
-  }
-
-  const app = createMuxApp({
-    agent,
+  const app = createApp({
+    agent: resolvedAgent,
     model,
     autoSpawn: false,
-    protectedPaths,
+    protectedPaths: config.protectedPaths,
     muxId,
     muxPid: process.pid,
   });

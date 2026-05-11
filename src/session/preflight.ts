@@ -312,6 +312,41 @@ export function formatModeLine(preflight: PreflightResult): string {
   return `Mode: docker / ${preflight.reason}`;
 }
 
+/** Per-call-site message strategy for `resolveDockerAgent`. */
+interface DockerAgentMessages {
+  dockerUnavailable: (detailedMessage: string) => string;
+  credentialsMissing: (anthropicOAuthOnly: boolean) => string;
+  successReason: (authKind: 'oauth' | 'apikey') => string;
+}
+
+async function resolveDockerAgent(
+  agent: AgentId,
+  config: IronCurtainConfig,
+  isDockerAvailable: () => Promise<DockerAvailability>,
+  credentialSources: CredentialSources | undefined,
+  messages: DockerAgentMessages,
+): Promise<PreflightResult> {
+  const { dockerStatus, credState } = await probeDockerAndCredentials(
+    agent,
+    config,
+    isDockerAvailable,
+    credentialSources,
+  );
+
+  if (!dockerStatus.available) {
+    throw new PreflightError(messages.dockerUnavailable(dockerStatus.detailedMessage));
+  }
+
+  if (credState.credKind === null) {
+    throw new PreflightError(messages.credentialsMissing(credState.anthropicOAuthOnly));
+  }
+
+  return {
+    mode: { kind: 'docker', agent, authKind: credState.credKind },
+    reason: messages.successReason(credState.credKind),
+  };
+}
+
 /**
  * Resolves the session mode based on the explicit `--agent` flag or the
  * user's `preferredMode`.
@@ -344,28 +379,13 @@ async function resolveExplicit(
     };
   }
 
-  const { dockerStatus, credState } = await probeDockerAndCredentials(
-    agent,
-    config,
-    isDockerAvailable,
-    credentialSources,
-  );
-
-  if (!dockerStatus.available) {
-    throw new PreflightError(
-      `--agent ${agent} requires Docker, but it is not available:\n\n${dockerStatus.detailedMessage}\n\n` +
-        'Please fix your Docker installation or use the builtin agent.',
-    );
-  }
-
-  if (credState.credKind === null) {
-    throw new PreflightError(credentialErrorMessageForExplicit(agent, config, credState.anthropicOAuthOnly));
-  }
-
-  return {
-    mode: { kind: 'docker', agent, authKind: credState.credKind },
-    reason: `Explicit --agent selection (${credState.credKind === 'oauth' ? 'OAuth' : 'API key'})`,
-  };
+  return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, {
+    dockerUnavailable: (detailedMessage) =>
+      `--agent ${agent} requires Docker, but it is not available:\n\n${detailedMessage}\n\n` +
+      'Please fix your Docker installation or use the builtin agent.',
+    credentialsMissing: (oauthOnly) => credentialErrorMessageForExplicit(agent, config, oauthOnly),
+    successReason: (authKind) => `Explicit --agent selection (${authKind === 'oauth' ? 'OAuth' : 'API key'})`,
+  });
 }
 
 async function resolveDefaultMode(
@@ -386,23 +406,9 @@ async function resolveDefaultMode(
 
   const agent = preferredDockerAgent as AgentId;
 
-  const { dockerStatus, credState } = await probeDockerAndCredentials(
-    agent,
-    config,
-    isDockerAvailable,
-    credentialSources,
-  );
-
-  if (!dockerStatus.available) {
-    throw new PreflightError(dockerUnavailableMessage(dockerStatus.detailedMessage));
-  }
-
-  if (credState.credKind === null) {
-    throw new PreflightError(credentialErrorMessageForPreferredMode(agent, config, credState.anthropicOAuthOnly));
-  }
-
-  return {
-    mode: { kind: 'docker', agent, authKind: credState.credKind },
-    reason: `${preferredDockerAgent} (${credState.credKind === 'oauth' ? 'OAuth' : 'API key'})`,
-  };
+  return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, {
+    dockerUnavailable: dockerUnavailableMessage,
+    credentialsMissing: (oauthOnly) => credentialErrorMessageForPreferredMode(agent, config, oauthOnly),
+    successReason: (authKind) => `${preferredDockerAgent} (${authKind === 'oauth' ? 'OAuth' : 'API key'})`,
+  });
 }
