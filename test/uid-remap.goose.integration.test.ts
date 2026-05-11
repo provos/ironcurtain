@@ -101,9 +101,17 @@ async function waitForRemapComplete(containerId: string, expectedUid: number, ti
   while (Date.now() < deadline) {
     const result = await dockerExecAs(containerId, '0:0', 'stat', '-c', '%u', '/workspace');
     if (result.exitCode !== 0) {
-      // Container gone or exec broken — bail so assertions produce a
-      // meaningful error rather than silent looping.
-      return;
+      // Don't silently return: a non-zero exit here means the container
+      // is gone, exec is broken, or /workspace doesn't exist yet. Bailing
+      // with `return` would let the downstream assertions fail with
+      // confusing "expected undefined toBe ..." messages that hide the
+      // real cause. Throw with the captured stdio so the failure points
+      // straight at the underlying problem.
+      throw new Error(
+        `docker exec failed while polling /workspace ownership ` +
+          `(exit=${result.exitCode}); stdout=${JSON.stringify(result.stdout)} ` +
+          `stderr=${JSON.stringify(result.stderr)}`,
+      );
     }
     if (result.stdout.trim() === String(expectedUid)) return;
     await new Promise((r) => setTimeout(r, 500));
