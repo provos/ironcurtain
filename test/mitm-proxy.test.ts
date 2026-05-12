@@ -1450,6 +1450,56 @@ describe('MitmProxy', () => {
       socket?.destroy();
     });
 
+    it('routes mixed-case provider CONNECT through MITM (case-insensitive allowlist)', async () => {
+      // The provider is registered as `api.test.com`. A CONNECT request with
+      // the host in mixed case must match the allowlist and go through MITM —
+      // not fall through to the wildcard tunnel and bypass key/endpoint checks.
+      process.env[ENV_KEY] = '1';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'API.TEST.COM', 443);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // Confirm the MITM path (not raw tunnel) by completing a TLS handshake
+      // against the proxy's CA-signed cert for api.test.com.
+      await new Promise<void>((resolve, reject) => {
+        const tlsSocket = tls.connect(
+          {
+            socket: socket!,
+            servername: 'api.test.com',
+            ca: ca.certPem,
+          },
+          () => {
+            tlsSocket.destroy();
+            resolve();
+          },
+        );
+        tlsSocket.on('error', reject);
+      });
+    });
+
+    it('treats mixed-case provider host as allowed even with wildcard off', async () => {
+      // Sanity check that case normalization works for the default allowlist
+      // path too — not just under the wildcard. Without normalization, this
+      // CONNECT would 403 because providersByHost is keyed by `api.test.com`.
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'API.TEST.COM', 443);
+      expect(statusCode).toBe(200);
+      socket?.destroy();
+    });
+
     it('forwards plain HTTP proxy requests to unknown hosts when set', async () => {
       const httpServer = http.createServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
