@@ -755,6 +755,50 @@ describe('DockerManager', () => {
       expect(signals).toContain('SIGKILL');
     });
 
+    it('skips SIGKILL when the child exits within the grace period', async () => {
+      // Cooperative path: the child receives SIGTERM and emits `close`
+      // before the grace expires. The helper's `exited` flag (set at the
+      // top of the close handler) must keep the grace timer from firing
+      // SIGKILL. Regression test for the original bug — when escalation
+      // was gated on `child.killed`, this case would have sent SIGKILL
+      // anyway because Node flips `killed` to true on signal *send*.
+      const inner = createMockSpawn();
+      const signals: NodeJS.Signals[] = [];
+      const recordingSpawn: SpawnFn = (cmd, args, options) => {
+        const child = inner.spawn(cmd, args, options) as ChildProcess & { killed: boolean };
+        child.kill = ((signal?: NodeJS.Signals | number) => {
+          signals.push(typeof signal === 'string' ? signal : 'SIGTERM');
+          child.killed = true;
+          return true;
+        }) as ChildProcess['kill'];
+        return child;
+      };
+
+      const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
+        idleTimeoutMs: 10,
+        operation: 'docker pull',
+        spawn: recordingSpawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+        killGraceMs: 40,
+      });
+      const expectation = expect(promise).rejects.toThrow();
+
+      // Wait for the idle timer to fire and SIGTERM to be sent.
+      await new Promise((r) => setTimeout(r, 25));
+      expect(signals).toEqual(['SIGTERM']);
+
+      // Simulate the child honoring SIGTERM and exiting before the grace
+      // period expires. The close handler flips `exited = true`.
+      inner.handles[0].exit(143, 'SIGTERM');
+
+      // Wait past the kill grace window to confirm SIGKILL was NOT sent.
+      await new Promise((r) => setTimeout(r, 60));
+      await expectation;
+
+      expect(signals).toEqual(['SIGTERM']);
+    });
+
     it('passes operation label and stderr tail in non-zero exit errors', async () => {
       const spawnMock = createMockSpawn();
       const promise = spawnWithIdleTimeout('docker', ['build'], {
