@@ -514,6 +514,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // Dynamically added passthrough hosts (no key swap, no endpoint filtering)
   const passthroughHosts = new Set<string>();
 
+  // Escape hatch: when IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set to "1" or "true",
+  // any host not matched as a provider/registry is treated as a passthrough
+  // tunnel. Defeats egress filtering — only use in trusted environments.
+  const allowAllHosts =
+    process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === '1' || process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === 'true';
+  if (allowAllHosts) {
+    logger.warn(
+      '[mitm-proxy] IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set — all unknown hosts will be tunneled (egress filtering DISABLED)',
+    );
+  }
+
   // Certificate cache: hostname → { ctx, expiresAt }
   const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
 
@@ -1085,7 +1096,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // validation path instead.
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const isDebianRegistry = parsed ? registriesByHost.get(parsed.hostname)?.type === 'debian' : false;
-    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry)) {
+    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry || allowAllHosts)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }
@@ -1121,7 +1132,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // 1. Check allowlist (providers, registries, and dynamic passthrough)
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
-    const isPassthrough = !provider && !registry && passthroughHosts.has(host);
+    const isDynamicPassthrough = passthroughHosts.has(host);
+    const isPassthrough = !provider && !registry && (isDynamicPassthrough || allowAllHosts);
     if (!provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -1129,7 +1141,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
-    const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
+    const passthroughKind = isDynamicPassthrough ? 'passthrough' : 'passthrough-wildcard';
+    const connType = provider ? 'provider' : registry ? 'registry' : passthroughKind;
 
     // 2. For passthrough domains, create a raw TCP tunnel (no MITM).
     //    The proxy just pipes bytes bidirectionally — this supports both
@@ -1241,7 +1254,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    if (!parsed || !passthroughHosts.has(parsed.hostname)) {
+    if (!parsed || (!passthroughHosts.has(parsed.hostname) && !allowAllHosts)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
