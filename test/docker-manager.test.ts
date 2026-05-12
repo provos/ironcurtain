@@ -1,6 +1,16 @@
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createDockerManager, buildCreateArgs, type ExecFileFn } from '../src/docker/docker-manager.js';
+import {
+  createDockerManager,
+  buildCreateArgs,
+  BUILD_IDLE_TIMEOUT_MS,
+  PULL_IDLE_TIMEOUT_MS,
+  type ExecFileFn,
+} from '../src/docker/docker-manager.js';
+import { spawnWithIdleTimeout, type SpawnFn } from '../src/docker/spawn-with-idle-timeout.js';
 import type { DockerContainerConfig } from '../src/docker/types.js';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
 type ExecCall = {
   cmd: string;
@@ -90,6 +100,72 @@ function createMockExec(): {
       state.callIndex = 0;
     },
   };
+}
+
+interface SpawnCall {
+  cmd: string;
+  args: readonly string[];
+  options: SpawnOptions | undefined;
+}
+
+interface FakeChildHandle {
+  child: ChildProcess;
+  emitStdout: (chunk: string) => void;
+  emitStderr: (chunk: string) => void;
+  exit: (code: number | null, signal?: NodeJS.Signals | null) => void;
+  spawnError: (err: Error) => void;
+}
+
+interface MockSpawn {
+  spawn: SpawnFn;
+  calls: SpawnCall[];
+  handles: FakeChildHandle[];
+}
+
+/**
+ * Builds a `SpawnFn`-shaped fake plus handles for driving each spawned child
+ * (emit stdout/stderr chunks, fire the close event, etc.). Lets us exercise
+ * the streaming + idle-timeout path without launching real processes.
+ */
+function createMockSpawn(): MockSpawn {
+  const calls: SpawnCall[] = [];
+  const handles: FakeChildHandle[] = [];
+
+  const spawn: SpawnFn = (cmd, args, options) => {
+    calls.push({ cmd, args, options });
+
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = new EventEmitter() as ChildProcess & { killed: boolean };
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.killed = false;
+    child.kill = (() => {
+      child.killed = true;
+      return true;
+    }) as ChildProcess['kill'];
+
+    handles.push({
+      child,
+      emitStdout: (chunk: string) => stdout.write(chunk),
+      emitStderr: (chunk: string) => stderr.write(chunk),
+      exit: (code: number | null, signal: NodeJS.Signals | null = null) => {
+        child.emit('close', code, signal);
+      },
+      spawnError: (err: Error) => {
+        child.emit('error', err);
+      },
+    });
+
+    return child;
+  };
+
+  return { spawn, calls, handles };
+}
+
+/** Silent writable so tests don't spew docker output into the test runner. */
+function nullSink(): NodeJS.WritableStream {
+  return new PassThrough();
 }
 
 const sampleConfig: DockerContainerConfig = {
@@ -482,15 +558,26 @@ describe('DockerManager', () => {
 
   describe('buildImage', () => {
     it('passes labels as --label flags', async () => {
-      mock.setResponse('');
-      const manager = createDockerManager(mock.mockExec);
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
 
-      await manager.buildImage('my-image:latest', '/path/to/Dockerfile', '/context', {
+      const promise = manager.buildImage('my-image:latest', '/path/to/Dockerfile', '/context', {
         'ironcurtain.build-hash': 'abc123',
         'ironcurtain.ca-hash': 'def456',
       });
 
-      const args = mock.calls[0].args;
+      // Wait a tick for the spawn to be registered, then close cleanly.
+      await Promise.resolve();
+      spawnMock.handles[0].exit(0);
+      await promise;
+
+      const args = spawnMock.calls[0].args;
+      expect(spawnMock.calls[0].cmd).toBe('docker');
+      expect(args[0]).toBe('build');
       expect(args).toContain('--label');
       expect(args).toContain('ironcurtain.build-hash=abc123');
       expect(args).toContain('ironcurtain.ca-hash=def456');
@@ -498,13 +585,246 @@ describe('DockerManager', () => {
     });
 
     it('builds without labels when none provided', async () => {
-      mock.setResponse('');
-      const manager = createDockerManager(mock.mockExec);
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
 
-      await manager.buildImage('my-image:latest', '/path/to/Dockerfile', '/context');
+      const promise = manager.buildImage('my-image:latest', '/path/to/Dockerfile', '/context');
+      await Promise.resolve();
+      spawnMock.handles[0].exit(0);
+      await promise;
 
-      const args = mock.calls[0].args;
+      const args = spawnMock.calls[0].args;
       expect(args).not.toContain('--label');
+    });
+
+    it('forces BuildKit and plain progress for streamed heartbeats', async () => {
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+
+      const promise = manager.buildImage('img:latest', '/Dockerfile', '/ctx');
+      await Promise.resolve();
+      spawnMock.handles[0].exit(0);
+      await promise;
+
+      expect(spawnMock.calls[0].args).toContain('--progress=plain');
+      const env = spawnMock.calls[0].options?.env;
+      expect(env?.DOCKER_BUILDKIT).toBe('1');
+    });
+
+    it('surfaces stderr tail when the build exits non-zero', async () => {
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+
+      const promise = manager.buildImage('img:latest', '/Dockerfile', '/ctx');
+      await Promise.resolve();
+      spawnMock.handles[0].emitStderr('ERROR: Dockerfile syntax error on line 3\n');
+      await new Promise((r) => setImmediate(r));
+      spawnMock.handles[0].exit(1);
+
+      await expect(promise).rejects.toThrow(/docker build .*exited with code 1.*Dockerfile syntax error/s);
+    });
+  });
+
+  describe('pullImage', () => {
+    it('streams docker pull and resolves on clean exit', async () => {
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+
+      const promise = manager.pullImage('alpine:latest');
+      await Promise.resolve();
+      spawnMock.handles[0].emitStdout('latest: Pulling from library/alpine\n');
+      spawnMock.handles[0].exit(0);
+      await promise;
+
+      expect(spawnMock.calls[0].cmd).toBe('docker');
+      expect(spawnMock.calls[0].args).toEqual(['pull', 'alpine:latest']);
+    });
+
+    it('rejects when the spawn itself errors (e.g. docker not on PATH)', async () => {
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+
+      const promise = manager.pullImage('alpine:latest');
+      await Promise.resolve();
+      spawnMock.handles[0].spawnError(new Error('spawn docker ENOENT'));
+
+      await expect(promise).rejects.toThrow(/docker pull failed to spawn: spawn docker ENOENT/);
+    });
+  });
+
+  // The watchdog primitive is tested directly with real timers and a
+  // tiny idle threshold so the test runs in milliseconds. Driving it
+  // through `pullImage` would either need the real 2-minute timeout
+  // (impractical) or fake timers (which leak across tests when an
+  // assertion fails mid-test, breaking unrelated suites).
+  describe('spawnWithIdleTimeout', () => {
+    it('rejects with a labeled error when the child stays silent', async () => {
+      const spawnMock = createMockSpawn();
+      const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
+        idleTimeoutMs: 20,
+        operation: 'docker pull',
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+        killGraceMs: 5,
+      });
+
+      await expect(promise).rejects.toThrow(/docker pull produced no output for 20ms/);
+      // SIGTERM is sent on watchdog fire.
+      expect(spawnMock.handles[0].child.killed).toBe(true);
+    });
+
+    it('resets the watchdog when the child emits output', async () => {
+      const spawnMock = createMockSpawn();
+      const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
+        idleTimeoutMs: 40,
+        operation: 'docker pull',
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+
+      // Heartbeat every 20ms (under the 40ms idle threshold) for 5
+      // iterations — never silent for long enough to trip the watchdog.
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        spawnMock.handles[0].emitStdout(`chunk ${i}\n`);
+      }
+      // Now exit cleanly. The watchdog should NOT have fired.
+      spawnMock.handles[0].exit(0);
+      await promise;
+      expect(spawnMock.handles[0].child.killed).toBe(false);
+    });
+
+    it('escalates from SIGTERM to SIGKILL after the grace period', async () => {
+      const signals: NodeJS.Signals[] = [];
+      // Pre-install a recording `kill` on every spawned child BEFORE the
+      // watchdog can fire, so the SIGTERM that arrives ~10ms after spawn
+      // is captured. Mirror Node's real semantics by flipping `child.killed`
+      // to true once a signal is sent — SIGKILL escalation is gated on the
+      // helper's internal `exited` flag (set in the `close` handler), not on
+      // `child.killed`, so leaving the child without ever emitting `close`
+      // is what lets the SIGKILL path fire.
+      const recordingSpawn: SpawnFn = (cmd, args, options) => {
+        const child = createMockSpawn().spawn(cmd, args, options) as ChildProcess & { killed: boolean };
+        child.kill = ((signal?: NodeJS.Signals | number) => {
+          signals.push(typeof signal === 'string' ? signal : 'SIGTERM');
+          child.killed = true;
+          return true;
+        }) as ChildProcess['kill'];
+        return child;
+      };
+
+      const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
+        idleTimeoutMs: 10,
+        operation: 'docker pull',
+        spawn: recordingSpawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+        killGraceMs: 20,
+      });
+      // Attach a handler immediately so the eventual rejection is observed.
+      const expectation = expect(promise).rejects.toThrow();
+
+      // Wait long enough for both the idle timer (10ms) and the kill
+      // grace (20ms) to elapse.
+      await new Promise((r) => setTimeout(r, 60));
+      await expectation;
+
+      expect(signals[0]).toBe('SIGTERM');
+      expect(signals).toContain('SIGKILL');
+    });
+
+    it('skips SIGKILL when the child exits within the grace period', async () => {
+      // Cooperative path: the child receives SIGTERM and emits `close`
+      // before the grace expires. The helper's `exited` flag (set at the
+      // top of the close handler) must keep the grace timer from firing
+      // SIGKILL. Regression test for the original bug — when escalation
+      // was gated on `child.killed`, this case would have sent SIGKILL
+      // anyway because Node flips `killed` to true on signal *send*.
+      const inner = createMockSpawn();
+      const signals: NodeJS.Signals[] = [];
+      const recordingSpawn: SpawnFn = (cmd, args, options) => {
+        const child = inner.spawn(cmd, args, options) as ChildProcess & { killed: boolean };
+        child.kill = ((signal?: NodeJS.Signals | number) => {
+          signals.push(typeof signal === 'string' ? signal : 'SIGTERM');
+          child.killed = true;
+          return true;
+        }) as ChildProcess['kill'];
+        return child;
+      };
+
+      const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
+        idleTimeoutMs: 10,
+        operation: 'docker pull',
+        spawn: recordingSpawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+        killGraceMs: 40,
+      });
+      const expectation = expect(promise).rejects.toThrow();
+
+      // Wait for the idle timer to fire and SIGTERM to be sent.
+      await new Promise((r) => setTimeout(r, 25));
+      expect(signals).toEqual(['SIGTERM']);
+
+      // Simulate the child honoring SIGTERM and exiting before the grace
+      // period expires. The close handler flips `exited = true`.
+      inner.handles[0].exit(143, 'SIGTERM');
+
+      // Wait past the kill grace window to confirm SIGKILL was NOT sent.
+      await new Promise((r) => setTimeout(r, 60));
+      await expectation;
+
+      expect(signals).toEqual(['SIGTERM']);
+    });
+
+    it('passes operation label and stderr tail in non-zero exit errors', async () => {
+      const spawnMock = createMockSpawn();
+      const promise = spawnWithIdleTimeout('docker', ['build'], {
+        idleTimeoutMs: 60_000, // generous; we'll exit explicitly
+        operation: 'docker build',
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+      await Promise.resolve();
+      spawnMock.handles[0].emitStderr('failed to compute cache key\n');
+      await new Promise((r) => setImmediate(r));
+      spawnMock.handles[0].exit(2);
+
+      await expect(promise).rejects.toThrow(/docker build exited with code 2.*failed to compute cache key/s);
+    });
+  });
+
+  describe('idle-timeout primitive', () => {
+    // Sanity check the constants haven't drifted accidentally — they're the
+    // visible contract callers (and bug reports) refer to.
+    it('pull idle timeout is 120s', () => {
+      expect(PULL_IDLE_TIMEOUT_MS).toBe(120_000);
+    });
+    it('build idle timeout is 300s', () => {
+      expect(BUILD_IDLE_TIMEOUT_MS).toBe(300_000);
     });
   });
 
