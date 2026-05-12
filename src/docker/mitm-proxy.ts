@@ -1144,7 +1144,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
     const isDynamicPassthrough = passthroughHosts.has(host);
-    const isPassthrough = !provider && !registry && (isDynamicPassthrough || allowAllHosts);
+    const isWildcardEligible = allowAllHosts && !isKnownStaticHost(host);
+    const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
     if (!provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
