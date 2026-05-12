@@ -2,6 +2,31 @@
 # IronCurtain entrypoint for Goose containers.
 # Sets up proxy bridges, writes Goose config, then hands off to CMD.
 
+# Runtime UID remap (Linux only). See entrypoint-claude-code.sh for the
+# full rationale (issue #232). Skipped on macOS where Docker Desktop
+# translates UIDs and the env vars are not set.
+if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN_AGENT_GID" ]; then
+  if [ "$IRONCURTAIN_AGENT_UID" != "1000" ] || [ "$IRONCURTAIN_AGENT_GID" != "1000" ]; then
+    # Fail hard on remap errors — see entrypoint-claude-code.sh for the
+    # full rationale. Without explicit checks, a UID collision (host UID
+    # already in use by a system user baked into the image) silently
+    # recreates the original issue #232 bug.
+    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace || {
+      echo "[ironcurtain] groupmod failed: cannot remap codespace group to GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
+      exit 1
+    }
+    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace || {
+      echo "[ironcurtain] usermod failed: cannot remap codespace user to UID $IRONCURTAIN_AGENT_UID (already in use?)" >&2
+      exit 1
+    }
+    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace || {
+      echo "[ironcurtain] chown failed: cannot reset ownership of /home/codespace and /workspace to $IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" >&2
+      exit 1
+    }
+  fi
+  exec runuser -u codespace -- "$0" "$@"
+fi
+
 # 1. Bridge MITM proxy UDS to local TCP (same as Claude Code entrypoint)
 MITM_SOCK="/run/ironcurtain/mitm-proxy.sock"
 PROXY_PORT=18080

@@ -34,6 +34,7 @@ import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
+import { buildAgentUidRemap } from './docker-infrastructure.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -68,6 +69,16 @@ export interface PtyProxyOptions {
 
 /** Maximum time to wait for the PTY socket to appear (ms). */
 const PTY_READINESS_TIMEOUT_MS = 30_000;
+
+/**
+ * Extended PTY readiness timeout for the Linux UID-remap path. The
+ * universal-image entrypoint does `usermod -u`, `groupmod -g`, and a
+ * recursive `chown` of `/home/codespace` (Conda, NVM, Hugo, etc.) and
+ * `/workspace` before exec'ing the agent, which is what eventually
+ * runs socat and creates the UDS. On slower disks the chown alone can
+ * take 25–30s; budget 90s so non-1000 hosts don't flap during startup.
+ */
+const PTY_READINESS_TIMEOUT_REMAP_MS = 90_000;
 
 /** Poll interval when waiting for PTY socket (ms). */
 const PTY_READINESS_POLL_MS = 200;
@@ -491,13 +502,20 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       env.IRONCURTAIN_RESUME_FLAGS = conversationStateConfig.resumeFlags.join(' ');
     }
 
+    // Linux-only UID-remap wiring (issue #232). Matches the parallel
+    // setup in `docker-infrastructure.ts::createSessionContainers`;
+    // when adding fields here, mirror the change there. macOS skips
+    // the remap because VirtioFS translates UIDs transparently.
+    const uidRemap = buildAgentUidRemap(useTcp);
+
     // Create and start container with PTY command and TTY
     containerId = await docker.create({
       image,
       name: mainContainerName,
       network: network ?? 'none',
       mounts,
-      env,
+      env: { ...env, ...uidRemap.env },
+      user: uidRemap.user,
       command: ptyCommand,
       // PTY sessions are standalone (no workflow/scope), so only the
       // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
@@ -546,7 +564,13 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     }
 
     if (!useTcp) {
-      await waitForPtyReady(ptyTarget);
+      // When `uidRemap.user` is set (Linux non-1000 host, issue #232) the
+      // entrypoint runs usermod/groupmod and a recursive chown before
+      // exec'ing the agent, so socat — and therefore the UDS — appears
+      // 25–30s later than the no-remap case. Stretch the readiness
+      // budget so PTY sessions on non-1000 hosts don't flap.
+      const readinessTimeoutMs = uidRemap.user ? PTY_READINESS_TIMEOUT_REMAP_MS : PTY_READINESS_TIMEOUT_MS;
+      await waitForPtyReady(ptyTarget, readinessTimeoutMs);
       logger.info('PTY readiness check passed');
     }
 
@@ -761,7 +785,20 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
           isFirstResize = false;
           execFile(
             'docker',
-            ['exec', options.containerId, '/etc/ironcurtain/resize-pty.sh', String(columns), String(rows)],
+            [
+              'exec',
+              // The container may be running as root (Linux UID-remap path,
+              // issue #232) or as codespace (macOS). Pinning the exec user
+              // to codespace works in both cases — codespace is the baked
+              // user (renumbered, but the username is unchanged) and
+              // re-asserting it under macOS is a no-op.
+              '--user',
+              'codespace',
+              options.containerId,
+              '/etc/ironcurtain/resize-pty.sh',
+              String(columns),
+              String(rows),
+            ],
             { timeout: 5000 },
             (err, _stdout, stderr) => {
               if (err) {
@@ -869,7 +906,9 @@ function checkPtySize(containerId: string): Promise<{ rows: number; cols: number
   return new Promise((resolve) => {
     execFile(
       'docker',
-      ['exec', containerId, '/etc/ironcurtain/check-pty-size.sh'],
+      // `--user codespace` mirrors DockerManager.exec; see the resize
+      // callsite above for the issue #232 rationale.
+      ['exec', '--user', 'codespace', containerId, '/etc/ironcurtain/check-pty-size.sh'],
       { timeout: 5000 },
       (err, stdout) => {
         if (err) {
@@ -918,7 +957,16 @@ async function verifyInitialPtySize(
     await new Promise<void>((resolve) => {
       execFile(
         'docker',
-        ['exec', containerId, '/etc/ironcurtain/resize-pty.sh', String(expectedCols), String(expectedRows)],
+        // `--user codespace` mirrors DockerManager.exec; see issue #232.
+        [
+          'exec',
+          '--user',
+          'codespace',
+          containerId,
+          '/etc/ironcurtain/resize-pty.sh',
+          String(expectedCols),
+          String(expectedRows),
+        ],
         { timeout: 5000 },
         () => resolve(),
       );
@@ -959,20 +1007,20 @@ async function verifyInitialPtySize(
  * directory at the path is not "ready", since the Linux/UDS attach path
  * does not retry on connect failure.
  */
-export async function waitForPtyReady(target: PtyTarget): Promise<void> {
+export async function waitForPtyReady(target: PtyTarget, timeoutMs: number = PTY_READINESS_TIMEOUT_MS): Promise<void> {
   if (typeof target !== 'string') {
     // macOS TCP path is guarded out at the call site (pty-session.ts ~534);
     // this branch exists only as a defensive no-op so the helper stays total.
     return;
   }
 
-  const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (isSocketPath(target)) return;
     await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
   }
 
-  throw new Error(`PTY socket did not become ready within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
+  throw new Error(`PTY socket did not become ready within ${timeoutMs / 1000}s`);
 }
 
 /**
