@@ -1362,4 +1362,280 @@ describe('MitmProxy', () => {
       wsServer.close();
     }
   });
+
+  describe('IRONCURTAIN_MITM_ALLOW_ALL_HOSTS escape hatch', () => {
+    const ENV_KEY = 'IRONCURTAIN_MITM_ALLOW_ALL_HOSTS';
+    let savedEnv: string | undefined;
+
+    beforeEach(() => {
+      savedEnv = process.env[ENV_KEY];
+      delete process.env[ENV_KEY];
+    });
+
+    afterEach(() => {
+      if (savedEnv === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = savedEnv;
+    });
+
+    it('allows CONNECT to an unknown host when set', async () => {
+      process.env[ENV_KEY] = '1';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'random.example.com', 443);
+      expect(statusCode).toBe(200);
+      socket?.destroy();
+    });
+
+    it('denies CONNECT to an unknown host when unset (default)', async () => {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'random.example.com', 443);
+      expect(statusCode).toBe(403);
+      socket?.destroy();
+    });
+
+    it('still routes provider CONNECT through MITM (not wildcard tunnel) when set', async () => {
+      process.env[ENV_KEY] = '1';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // If MITM is active (provider path), the proxy presents a CA-signed cert
+      // for api.test.com. If the wildcard wrongly took over the provider host,
+      // this would be a raw TCP tunnel to nowhere and the TLS handshake would fail.
+      await new Promise<void>((resolve, reject) => {
+        const tlsSocket = tls.connect(
+          {
+            socket: socket!,
+            servername: 'api.test.com',
+            ca: ca.certPem,
+          },
+          () => {
+            tlsSocket.destroy();
+            resolve();
+          },
+        );
+        tlsSocket.on('error', reject);
+      });
+    });
+
+    it('accepts "true" as well as "1"', async () => {
+      process.env[ENV_KEY] = 'true';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'random.example.com', 443);
+      expect(statusCode).toBe(200);
+      socket?.destroy();
+    });
+
+    it('routes mixed-case provider CONNECT through MITM (case-insensitive allowlist)', async () => {
+      // The provider is registered as `api.test.com`. A CONNECT request with
+      // the host in mixed case must match the allowlist and go through MITM —
+      // not fall through to the wildcard tunnel and bypass key/endpoint checks.
+      process.env[ENV_KEY] = '1';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'API.TEST.COM', 443);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // Confirm the MITM path (not raw tunnel) by completing a TLS handshake
+      // against the proxy's CA-signed cert for api.test.com.
+      await new Promise<void>((resolve, reject) => {
+        const tlsSocket = tls.connect(
+          {
+            socket: socket!,
+            servername: 'api.test.com',
+            ca: ca.certPem,
+          },
+          () => {
+            tlsSocket.destroy();
+            resolve();
+          },
+        );
+        tlsSocket.on('error', reject);
+      });
+    });
+
+    it('treats mixed-case provider host as allowed even with wildcard off', async () => {
+      // Sanity check that case normalization works for the default allowlist
+      // path too — not just under the wildcard. Without normalization, this
+      // CONNECT would 403 because providersByHost is keyed by `api.test.com`.
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'API.TEST.COM', 443);
+      expect(statusCode).toBe(200);
+      socket?.destroy();
+    });
+
+    it('forwards plain HTTP proxy requests to unknown hosts when set', async () => {
+      const httpServer = http.createServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('hello-from-unknown');
+      });
+      const httpPort = await new Promise<number>((resolve) => {
+        httpServer.listen(0, '127.0.0.1', () => {
+          resolve((httpServer.address() as import('node:net').AddressInfo).port);
+        });
+      });
+
+      try {
+        process.env[ENV_KEY] = '1';
+        proxy = createMitmProxy({
+          socketPath,
+          ca,
+          providers: [{ config: testProvider, fakeKey, realKey }],
+          dnsLookup: localhostDnsLookup,
+        });
+        await proxy.start();
+
+        const { statusCode, body } = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+          const req = http.request(
+            {
+              socketPath,
+              method: 'GET',
+              path: `http://unknown.example.com:${httpPort}/`,
+              headers: { host: `unknown.example.com:${httpPort}` },
+            },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+              res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+            },
+          );
+          req.on('error', reject);
+          req.end();
+        });
+
+        expect(statusCode).toBe(200);
+        expect(body).toBe('hello-from-unknown');
+      } finally {
+        httpServer.close();
+      }
+    });
+
+    it('returns 403 for plain HTTP proxy requests to provider hosts even when set', async () => {
+      process.env[ENV_KEY] = '1';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      // Plain HTTP to a known provider host must NOT be widened by the
+      // wildcard — providers only accept their MITM/HTTPS path.
+      const statusCode = await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          {
+            socketPath,
+            method: 'GET',
+            path: 'http://api.test.com/v1/messages',
+            headers: { host: 'api.test.com' },
+          },
+          (res) => {
+            resolve(res.statusCode ?? 0);
+            res.resume();
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      expect(statusCode).toBe(403);
+    });
+
+    it('allows ws:// upgrade to an unknown host when set', async () => {
+      const { server: wsServer, port: wsPort } = await createWsEchoServer();
+      try {
+        process.env[ENV_KEY] = '1';
+        proxy = createMitmProxy({
+          socketPath,
+          ca,
+          providers: [{ config: testProvider, fakeKey, realKey }],
+          dnsLookup: localhostDnsLookup,
+        });
+        await proxy.start();
+
+        const { socket, headers } = await sendWsUpgrade(socketPath, 'ws-unknown.example.com', wsPort, '/echo');
+        expect(headers['upgrade'].toLowerCase()).toBe('websocket');
+        expect(headers['sec-websocket-accept']).toBeDefined();
+        socket.destroy();
+      } finally {
+        wsServer.close();
+      }
+    });
+
+    it('rejects ws:// upgrade to a provider host even when set', async () => {
+      process.env[ENV_KEY] = '1';
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: testProvider, fakeKey, realKey }],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      // The proxy writes a raw 403 line and closes the socket, so the HTTP
+      // client may surface this as either a response or an error/close.
+      const rejected = await new Promise<boolean>((resolve) => {
+        const wsKey = crypto.randomBytes(16).toString('base64');
+        const req = http.request({
+          socketPath,
+          method: 'GET',
+          path: 'http://api.test.com/ws',
+          headers: {
+            host: 'api.test.com',
+            upgrade: 'websocket',
+            connection: 'Upgrade',
+            'sec-websocket-key': wsKey,
+            'sec-websocket-version': '13',
+          },
+        });
+        req.on('upgrade', (_res, socket) => {
+          socket.destroy();
+          resolve(false);
+        });
+        req.on('response', (res) => {
+          resolve(res.statusCode === 403);
+          res.resume();
+        });
+        req.on('error', () => resolve(true));
+        req.end();
+      });
+      expect(rejected).toBe(true);
+    });
+  });
 });

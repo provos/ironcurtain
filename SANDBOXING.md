@@ -125,7 +125,7 @@ The AI agent is **untrusted**. It may be compromised via prompt injection, multi
 └──────────────────────────────────────────────────────────┘
 ```
 
-### Layer 1: Docker Container *(Docker Agent Mode only)*
+### Layer 1: Docker Container _(Docker Agent Mode only)_
 
 The agent process runs inside a Docker container with strong isolation:
 
@@ -150,7 +150,7 @@ The agent cannot reach the host gateway or any host service directly — it can 
 
 If the connectivity check fails at startup, IronCurtain aborts session initialization rather than falling back to a less secure network configuration.
 
-### Layer 2: TLS-Terminating MITM Proxy *(Docker Agent Mode only)*
+### Layer 2: TLS-Terminating MITM Proxy _(Docker Agent Mode only)_
 
 The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`). Since the container has no network, these requests go through a MITM proxy running on the host.
 
@@ -169,22 +169,28 @@ The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`
 
 **Dynamic domain management:** The agent can request access to additional internet domains at runtime via `add_proxy_domain` / `remove_proxy_domain` / `list_proxy_domains` MCP tools. Adding a domain always requires human approval (escalation); removing one is auto-allowed since it reduces the attack surface. Dynamically added hosts are passthrough-only -- TLS is still terminated for auditability, but no credential replacement or endpoint filtering is applied.
 
+**Escape hatch -- `IRONCURTAIN_MITM_ALLOW_ALL_HOSTS`:** Setting `IRONCURTAIN_MITM_ALLOW_ALL_HOSTS=1` (or `=true`) on the host process makes the MITM proxy treat any **unknown** host as a passthrough tunnel. The flag applies to all three host-allowlist gates: HTTPS CONNECT, plain-HTTP proxy requests (absolute-form `GET http://host/...`), and `ws://` upgrade requests. Configured providers and registries are _never_ widened by this flag -- they continue to flow through their dedicated MITM/registry paths (TLS termination, credential swap, endpoint filtering, package validation), so a `http://api.anthropic.com/...` or `ws://npm-registry/...` request to a known host still goes through the normal protection. Intended for build flows that fetch from many hosts (e.g. Bazel pulling from arbitrary mirror endpoints) where `add_proxy_domain` round-trips are impractical. **Only use in trusted environments** -- the flag disables egress filtering for unknown destinations. The proxy logs a `WARN` on startup when set.
+
+> **Why this exists:** Workflows don't yet have escalation plumbing, so an agent inside a workflow run cannot interactively use `add_proxy_domain` to broaden the allowlist mid-run. Until that wiring lands, this env var is the only way to support workflows that legitimately need access to dynamic build-time hosts. Once workflow escalation is implemented, prefer `add_proxy_domain` and treat this flag as a stop-gap.
+
 **Package installation proxy:** The MITM proxy doubles as a filtering registry proxy for npm, PyPI, and Debian APT package installations. Packages are validated against configurable allowlists, denylists, and a quarantine age gate (default: 2 days) that blocks newly published versions. The proxy rewrites registry metadata to hide disallowed versions and blocks direct tarball downloads for packages that fail validation. See [docs/designs/package-installation-proxy.md](docs/designs/package-installation-proxy.md) for the full design.
 
 **What this blocks:**
+
 - Requests to non-allowlisted hosts (403 at CONNECT)
 - Requests to non-allowlisted endpoints on allowed hosts (403 at HTTP layer)
 - Requests with wrong or missing fake keys (403)
 - Any attempt to extract the real API key (it exists only in host process memory)
 - Installation of denied or too-recently-published packages
 
-### Layer 3: MCP Policy Engine *(both modes)*
+### Layer 3: MCP Policy Engine _(both modes)_
 
 All external operations beyond LLM API calls -- filesystem access, git operations, network fetch, etc. -- go through MCP (Model Context Protocol) tool calls. Every tool call passes through a policy engine before reaching the real MCP server.
 
 The policy is compiled from a human-readable **constitution** -- a short document describing what the agent is and isn't allowed to do. The compilation pipeline translates English intent into deterministic JSON rules that are enforced without further LLM involvement at runtime.
 
 Policy decisions are:
+
 - **Allow** -- The tool call proceeds.
 - **Deny** -- The tool call is blocked (default when no rule matches).
 - **Escalate** -- The user is prompted for approval before proceeding.
@@ -197,7 +203,7 @@ When a user approves an escalated tool call, the **approval whitelist** extracts
 
 See the [README](README.md) for details on the policy compilation pipeline.
 
-### Layer 4: OS-Level Sandbox (bubblewrap/srt) *(both modes)*
+### Layer 4: OS-Level Sandbox (bubblewrap/srt) _(both modes)_
 
 MCP server processes themselves can be sandboxed using `@anthropic-ai/sandbox-runtime` (`srt`). Each sandboxed MCP server runs in its own `srt` process with independent:
 
@@ -213,16 +219,16 @@ See [docs/designs/execution-containment.md](docs/designs/execution-containment.m
 
 Each layer addresses a different class of threat:
 
-| Threat | Layer 1 (Docker) | Layer 2 (MITM) | Layer 3 (Policy) | Layer 4 (srt) |
-|--------|:-:|:-:|:-:|:-:|
-| Network exfiltration | Blocked | Filtered | N/A | Blocked |
-| API key theft | N/A | Prevented | N/A | N/A |
-| Unauthorized file access | Contained | N/A | Blocked | Contained |
-| Unauthorized git operations | N/A | N/A | Blocked/Escalated | N/A |
-| Compromised MCP server | N/A | N/A | N/A | Contained |
-| Prompt injection → bad tool calls | N/A | N/A | Blocked/Escalated | N/A |
-| Malicious package install | N/A | Age gate + deny list | N/A | N/A |
-| Excessive API spending | N/A | Endpoint filter | Budget limits | N/A |
+| Threat                            | Layer 1 (Docker) |    Layer 2 (MITM)    | Layer 3 (Policy)  | Layer 4 (srt) |
+| --------------------------------- | :--------------: | :------------------: | :---------------: | :-----------: |
+| Network exfiltration              |     Blocked      |       Filtered       |        N/A        |    Blocked    |
+| API key theft                     |       N/A        |      Prevented       |        N/A        |      N/A      |
+| Unauthorized file access          |    Contained     |         N/A          |      Blocked      |   Contained   |
+| Unauthorized git operations       |       N/A        |         N/A          | Blocked/Escalated |      N/A      |
+| Compromised MCP server            |       N/A        |         N/A          |        N/A        |   Contained   |
+| Prompt injection → bad tool calls |       N/A        |         N/A          | Blocked/Escalated |      N/A      |
+| Malicious package install         |       N/A        | Age gate + deny list |        N/A        |      N/A      |
+| Excessive API spending            |       N/A        |   Endpoint filter    |   Budget limits   |      N/A      |
 
 No single layer handles everything. A prompt-injected agent might try to exfiltrate data via an API call, but Layer 2 blocks non-allowlisted endpoints. It might try to read sensitive files, but Layer 3 enforces the policy. It might try to exploit an MCP server, but Layer 4 contains the blast radius.
 

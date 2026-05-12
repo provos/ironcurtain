@@ -505,14 +505,31 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
   const caKey = forge.pki.privateKeyFromPem(options.ca.keyPem);
 
+  // Hostnames are case-insensitive (RFC 1035 §2.3.3, RFC 7230 §5.4). Normalize
+  // to lowercase at every storage and lookup site so the allowlist cannot be
+  // bypassed by varying the case (e.g. `CONNECT API.TEST.COM:443` while the
+  // provider is registered as `api.test.com`).
+  function normalizeHost(hostname: string): string {
+    return hostname.toLowerCase();
+  }
+
   // Build host → provider lookup
   const providersByHost = new Map<string, ProviderKeyMapping>();
   for (const mapping of options.providers) {
-    providersByHost.set(mapping.config.host, mapping);
+    providersByHost.set(normalizeHost(mapping.config.host), mapping);
   }
 
   // Dynamically added passthrough hosts (no key swap, no endpoint filtering)
   const passthroughHosts = new Set<string>();
+
+  // Escape hatch: when IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set to "1" or "true",
+  // any host that is NOT a configured provider or registry is treated as a
+  // passthrough tunnel. Known providers/registries still flow through the
+  // normal MITM path (TLS termination, credential swap, endpoint filtering) —
+  // this flag only widens the catch-all for unknown destinations. Defeats
+  // egress filtering for unknown hosts; only use in trusted environments.
+  const allowAllHosts =
+    process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === '1' || process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === 'true';
 
   // Certificate cache: hostname → { ctx, expiresAt }
   const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
@@ -563,13 +580,23 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const registriesByHost = new Map<string, RegistryConfig>();
   if (options.registries) {
     for (const reg of options.registries) {
-      registriesByHost.set(reg.host, reg);
+      registriesByHost.set(normalizeHost(reg.host), reg);
       if (reg.mirrorHosts) {
         for (const mirror of reg.mirrorHosts) {
-          registriesByHost.set(mirror, reg);
+          registriesByHost.set(normalizeHost(mirror), reg);
         }
       }
     }
+  }
+
+  // True when a host is statically known to the proxy. Gates the wildcard
+  // escape hatch so known providers/registries always follow their dedicated
+  // MITM/registry path, never the passthrough tunnel. Accepts the hostname
+  // as given (case may vary on the wire); normalization happens here so all
+  // callers can trust the result regardless of input case.
+  function isKnownStaticHost(hostname: string): boolean {
+    const h = normalizeHost(hostname);
+    return providersByHost.has(h) || registriesByHost.has(h);
   }
 
   // AllowedVersionCache for tarball backstop
@@ -1085,7 +1112,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // validation path instead.
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const isDebianRegistry = parsed ? registriesByHost.get(parsed.hostname)?.type === 'debian' : false;
-    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry)) {
+    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry || isWildcardEligible)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }
@@ -1103,7 +1131,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   outerServer.on('connect', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const url = req.url ?? '';
     const colonIndex = url.lastIndexOf(':');
-    const host = colonIndex > 0 ? url.substring(0, colonIndex) : url;
+    const rawHost = colonIndex > 0 ? url.substring(0, colonIndex) : url;
+    // Normalize so the allowlist is case-insensitive (RFC 1035 §2.3.3).
+    // Critical when the wildcard escape hatch is enabled — without this,
+    // `CONNECT API.TEST.COM:443` would miss the provider map and be treated
+    // as an unknown host, opening a raw tunnel that bypasses MITM.
+    const host = normalizeHost(rawHost);
     const port = colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443;
     const connId = ++connectionId;
 
@@ -1121,7 +1154,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // 1. Check allowlist (providers, registries, and dynamic passthrough)
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
-    const isPassthrough = !provider && !registry && passthroughHosts.has(host);
+    const isDynamicPassthrough = passthroughHosts.has(host);
+    const isWildcardEligible = allowAllHosts && !isKnownStaticHost(host);
+    const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
     if (!provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -1129,7 +1164,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
-    const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
+    const passthroughKind = isDynamicPassthrough ? 'passthrough' : 'passthrough-wildcard';
+    const connType = provider ? 'provider' : registry ? 'registry' : passthroughKind;
 
     // 2. For passthrough domains, create a raw TCP tunnel (no MITM).
     //    The proxy just pipes bytes bidirectionally — this supports both
@@ -1241,7 +1277,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    if (!parsed || !passthroughHosts.has(parsed.hostname)) {
+    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    if (!parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
@@ -1462,16 +1499,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const hostController: DynamicHostController = {
     addHost(domain: string): boolean {
       validateDomain(domain);
-      if (providersByHost.has(domain)) return false;
-      if (passthroughHosts.has(domain)) return false;
-      passthroughHosts.add(domain);
+      const h = normalizeHost(domain);
+      if (providersByHost.has(h)) return false;
+      if (passthroughHosts.has(h)) return false;
+      passthroughHosts.add(h);
       // Pre-warm cert cache for the new domain
-      getOrCreateSecureContext(domain);
+      getOrCreateSecureContext(h);
       return true;
     },
 
     removeHost(domain: string): boolean {
-      return passthroughHosts.delete(domain);
+      return passthroughHosts.delete(normalizeHost(domain));
     },
 
     listHosts(): DomainListing {
@@ -1590,9 +1628,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     },
 
     async start() {
+      // Emit the egress-filter downgrade notice once per actual listening
+      // proxy. Construction-time logging would fire even for proxies that
+      // are created and discarded (tests, aborted setup).
+      if (allowAllHosts) {
+        logger.warn(
+          '[mitm-proxy] IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set — unknown hosts will be tunneled (egress filtering DISABLED for unknown hosts)',
+        );
+      }
+
       // Pre-warm cert cache for all configured providers and registries
       for (const mapping of options.providers) {
-        getOrCreateSecureContext(mapping.config.host);
+        getOrCreateSecureContext(normalizeHost(mapping.config.host));
       }
       for (const host of registriesByHost.keys()) {
         getOrCreateSecureContext(host);
