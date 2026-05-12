@@ -12,6 +12,7 @@ import type { DockerContainerConfig, DockerExecResult, DockerManager } from './t
 import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
+import { spawnWithIdleTimeout, type SpawnFn } from './spawn-with-idle-timeout.js';
 
 /** Async exec function signature matching promisified execFile. */
 export type ExecFileFn = (
@@ -27,6 +28,23 @@ const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
 
 /** Default timeout for docker exec commands (10 minutes). */
 export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
+
+/**
+ * Idle (no-stdout/stderr) timeout for `docker pull`. The Docker daemon
+ * heartbeats layer progress every few hundred ms during a healthy pull, so
+ * 2 minutes of silence reliably indicates a hung daemon or dead registry
+ * connection. The total wall-clock can still legitimately be hours for a
+ * slow connection on a large base image like `devcontainers/universal`.
+ */
+export const PULL_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * Idle timeout for `docker build`. Builds can have legitimately quiet RUN
+ * steps (e.g. compilers running without output), so we allow longer silence
+ * than for pulls before declaring the build hung. Combined with
+ * `--progress=plain`, BuildKit will still emit per-step progress.
+ */
+export const BUILD_IDLE_TIMEOUT_MS = 300_000;
 
 /** Grace period for docker stop before SIGKILL. */
 const STOP_TIMEOUT_SECONDS = 10;
@@ -134,11 +152,24 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
   return args;
 }
 
+/** Test seams for the streaming spawn path used by pull/build. */
+export interface CreateDockerManagerOptions {
+  spawn?: SpawnFn;
+  stdoutSink?: NodeJS.WritableStream;
+  stderrSink?: NodeJS.WritableStream;
+}
+
 export function createDockerManager(
   execFileFn?: ExecFileFn,
   dockerAvailabilityProbe: () => Promise<DockerAvailability> = checkDockerAvailable,
+  spawnOpts?: CreateDockerManagerOptions,
 ): DockerManager {
   const exec = execFileFn ?? defaultExecFile;
+  const streamOpts = {
+    spawn: spawnOpts?.spawn,
+    stdoutSink: spawnOpts?.stdoutSink,
+    stderrSink: spawnOpts?.stderrSink,
+  };
 
   return {
     async preflight(image: string): Promise<void> {
@@ -253,16 +284,22 @@ export function createDockerManager(
       contextDir: string,
       labels?: Record<string, string>,
     ): Promise<void> {
-      const args = ['build', '-t', tag, '-f', dockerfilePath];
+      // `--progress=plain` plus BuildKit gives line-oriented streamed output,
+      // which (a) makes the user-visible "what's happening" question
+      // answerable and (b) provides the per-step heartbeat the idle-timeout
+      // watchdog needs to distinguish a quiet RUN from a hung builder.
+      const args = ['build', '--progress=plain', '-t', tag, '-f', dockerfilePath];
       if (labels) {
         for (const [key, value] of Object.entries(labels)) {
           args.push('--label', `${key}=${value}`);
         }
       }
       args.push(contextDir);
-      await exec('docker', args, {
-        timeout: 600_000,
-        maxBuffer: 50 * 1024 * 1024,
+      await spawnWithIdleTimeout('docker', args, {
+        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
+        operation: 'docker build',
+        env: { DOCKER_BUILDKIT: '1' },
+        ...streamOpts,
       });
     },
 
@@ -317,9 +354,14 @@ export function createDockerManager(
     },
 
     async pullImage(image: string): Promise<void> {
-      await exec('docker', ['pull', image], {
-        timeout: 300_000, // 5 minutes for large images
-        maxBuffer: 50 * 1024 * 1024,
+      // Streamed via spawn (not execFile) so the user sees per-layer
+      // progress and the watchdog can reset on every heartbeat. Large
+      // images like devcontainers/universal (~5 GB) on slow links
+      // legitimately take an hour or more; only true silence kills.
+      await spawnWithIdleTimeout('docker', ['pull', image], {
+        idleTimeoutMs: PULL_IDLE_TIMEOUT_MS,
+        operation: 'docker pull',
+        ...streamOpts,
       });
     },
 
