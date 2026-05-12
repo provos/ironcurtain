@@ -515,13 +515,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const passthroughHosts = new Set<string>();
 
   // Escape hatch: when IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set to "1" or "true",
-  // any host not matched as a provider/registry is treated as a passthrough
-  // tunnel. Defeats egress filtering — only use in trusted environments.
+  // any host that is NOT a configured provider or registry is treated as a
+  // passthrough tunnel. Known providers/registries still flow through the
+  // normal MITM path (TLS termination, credential swap, endpoint filtering) —
+  // this flag only widens the catch-all for unknown destinations. Defeats
+  // egress filtering for unknown hosts; only use in trusted environments.
   const allowAllHosts =
     process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === '1' || process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === 'true';
   if (allowAllHosts) {
     logger.warn(
-      '[mitm-proxy] IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set — all unknown hosts will be tunneled (egress filtering DISABLED)',
+      '[mitm-proxy] IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set — unknown hosts will be tunneled (egress filtering DISABLED for unknown hosts)',
     );
   }
 
@@ -581,6 +584,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         }
       }
     }
+  }
+
+  // True when a host is statically known to the proxy. Gates the wildcard
+  // escape hatch so known providers/registries always follow their dedicated
+  // MITM/registry path, never the passthrough tunnel.
+  function isKnownStaticHost(hostname: string): boolean {
+    return providersByHost.has(hostname) || registriesByHost.has(hostname);
   }
 
   // AllowedVersionCache for tarball backstop
@@ -1096,7 +1106,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // validation path instead.
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const isDebianRegistry = parsed ? registriesByHost.get(parsed.hostname)?.type === 'debian' : false;
-    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry || allowAllHosts)) {
+    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry || isWildcardEligible)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }
@@ -1254,7 +1265,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    if (!parsed || (!passthroughHosts.has(parsed.hostname) && !allowAllHosts)) {
+    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    if (!parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
