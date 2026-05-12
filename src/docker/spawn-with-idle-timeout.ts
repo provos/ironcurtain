@@ -36,8 +36,15 @@ export interface SpawnWithIdleTimeoutOptions {
   killGraceMs?: number;
 }
 
-/** Max bytes of stderr we keep around to attach to error messages on failure. */
-const STDERR_TAIL_BYTES = 4096;
+/**
+ * Cap on the rolling stderr tail kept for error messages. Measured in JS
+ * string length (UTF-16 code units), not UTF-8 bytes — for ASCII-only
+ * output (the overwhelming majority of docker stderr) the two are equal;
+ * for multi-byte UTF-8 the retained byte count is up to ~3× this value.
+ * 4096 is comfortably enough headroom for the short stderr blurbs we
+ * actually quote back to the user.
+ */
+const STDERR_TAIL_CHARS = 4096;
 
 const DEFAULT_KILL_GRACE_MS = 2_000;
 
@@ -69,6 +76,7 @@ export function spawnWithIdleTimeout(
 
     let stderrTail = '';
     let settled = false;
+    let exited = false;
     let idleTimer: NodeJS.Timeout | null = null;
 
     const settle = (action: () => void): void => {
@@ -89,11 +97,16 @@ export function spawnWithIdleTimeout(
 
     const onIdleTimeout = (): void => {
       // Two-phase kill: SIGTERM first, SIGKILL after the grace period for
-      // children that ignore SIGTERM. The grace timer is `.unref()`'d so a
-      // dropped promise never keeps the Node event loop alive on it alone.
+      // children that ignore SIGTERM. We gate the SIGKILL on our own
+      // `exited` flag (set in the `close` handler) rather than on
+      // `child.killed`, because Node flips `child.killed` to true the moment
+      // a signal is *sent*, not when the child actually exits — using it
+      // here would make SIGKILL unreachable in practice. The grace timer is
+      // `.unref()`'d so a dropped promise never keeps the Node event loop
+      // alive on it alone.
       child.kill('SIGTERM');
       setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL');
+        if (!exited) child.kill('SIGKILL');
       }, killGraceMs).unref();
 
       settle(() => {
@@ -120,7 +133,7 @@ export function spawnWithIdleTimeout(
       // Best-effort write; ignore backpressure since stdio piping is informational.
       sink.write(text);
       if (captureTail) {
-        stderrTail = (stderrTail + text).slice(-STDERR_TAIL_BYTES);
+        stderrTail = (stderrTail + text).slice(-STDERR_TAIL_CHARS);
       }
       resetIdleTimer();
     };
@@ -139,6 +152,7 @@ export function spawnWithIdleTimeout(
     });
 
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      exited = true;
       if (settled) return;
       if (code === 0 && !signal) {
         settle(() => resolvePromise());

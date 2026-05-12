@@ -720,12 +720,16 @@ describe('DockerManager', () => {
       const signals: NodeJS.Signals[] = [];
       // Pre-install a recording `kill` on every spawned child BEFORE the
       // watchdog can fire, so the SIGTERM that arrives ~10ms after spawn
-      // is captured. We also leave `child.killed` false so the helper's
-      // `if (!child.killed) child.kill('SIGKILL')` path actually runs.
+      // is captured. Mirror Node's real semantics by flipping `child.killed`
+      // to true once a signal is sent — SIGKILL escalation is gated on the
+      // helper's internal `exited` flag (set in the `close` handler), not on
+      // `child.killed`, so leaving the child without ever emitting `close`
+      // is what lets the SIGKILL path fire.
       const recordingSpawn: SpawnFn = (cmd, args, options) => {
         const child = createMockSpawn().spawn(cmd, args, options) as ChildProcess & { killed: boolean };
         child.kill = ((signal?: NodeJS.Signals | number) => {
           signals.push(typeof signal === 'string' ? signal : 'SIGTERM');
+          child.killed = true;
           return true;
         }) as ChildProcess['kill'];
         return child;
