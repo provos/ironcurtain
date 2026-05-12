@@ -687,6 +687,39 @@ export function buildBundleLabels(core: Pick<PreContainerInfrastructure, 'bundle
   return { bundleLabel: core.bundleId };
 }
 
+/**
+ * Returns the `user` override and env vars needed for runtime UID
+ * remapping on Linux (issue #232). When the host UID is not 1000, the
+ * baked codespace user (UID 1000) cannot write to bind-mounted
+ * directories owned by the host UID. To fix this without committing to
+ * a hardcoded UID in the image, the host launches the container as
+ * `0:0` and passes `IRONCURTAIN_AGENT_UID` / `IRONCURTAIN_AGENT_GID`
+ * so the entrypoint (running as root) can renumber the codespace
+ * account before dropping privileges via `runuser`.
+ *
+ * On macOS (`useTcp === true`), Docker Desktop's VirtioFS handles UID
+ * translation transparently and `--user 0:0` would defeat it; this
+ * function returns an empty mapping there, leaving the container to
+ * run as the baked `codespace` user from the Dockerfile.
+ *
+ * Exported for testability.
+ */
+export function buildAgentUidRemap(useTcp: boolean): {
+  readonly user: string | undefined;
+  readonly env: Record<string, string>;
+} {
+  if (useTcp) return { user: undefined, env: {} };
+  const uid = process.getuid?.() ?? 1000;
+  const gid = process.getgid?.() ?? 1000;
+  return {
+    user: '0:0',
+    env: {
+      IRONCURTAIN_AGENT_UID: String(uid),
+      IRONCURTAIN_AGENT_GID: String(gid),
+    },
+  };
+}
+
 /** Container-level resources layered on top of the pre-container bundle. */
 export interface ContainerResources {
   readonly containerId: string;
@@ -850,16 +883,27 @@ export async function createSessionContainers(
       mounts.push({ source: core.skillsMount.hostDir, target: core.skillsMount.target, readonly: true });
     }
 
+    // Linux-only UID-remap wiring (issue #232). On Linux, run the
+    // container as root and pass the host UID/GID via env so the
+    // entrypoint can renumber codespace before dropping privileges.
+    // On macOS (useTcp), VirtioFS translates UIDs transparently —
+    // passing `--user 0:0` would actually break that translation,
+    // so we leave the container running as the baked codespace user
+    // and skip the env vars entirely.
+    const uidRemap = buildAgentUidRemap(core.useTcp);
+
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as
     // "no flag emitted" (see clampDockerResources docs).
     const { effective: containerResources } = clampDockerResources(config.userConfig.dockerResources);
+
     mainContainerId = await core.docker.create({
       image: core.image,
       name: mainContainerName,
       network: network ?? 'none',
       mounts,
-      env,
+      env: { ...env, ...uidRemap.env },
+      user: uidRemap.user,
       command: ['sleep', 'infinity'],
       ...bundleLabels,
       resources: { memoryMb: containerResources.memoryMb, cpus: containerResources.cpus },

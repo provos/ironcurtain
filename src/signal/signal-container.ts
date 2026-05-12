@@ -61,7 +61,13 @@ function sleep(ms: number): Promise<void> {
  */
 async function hasStaleBindMount(docker: DockerManager, containerName: string): Promise<boolean> {
   try {
-    const result = await docker.exec(containerName, ['test', '-d', `${SIGNAL_CLI_DATA_DIR}/data`], 5_000);
+    // Pass `execUser: null` to skip `--user codespace`: the
+    // bbernhard/signal-cli-rest-api image has no codespace account, and
+    // pinning it would cause `docker exec` to fail with a confusing
+    // "unable to find user codespace" error — which the catch below
+    // would swallow, silently returning false and breaking stale-mount
+    // detection on WSL/Windows reboots.
+    const result = await docker.exec(containerName, ['test', '-d', `${SIGNAL_CLI_DATA_DIR}/data`], 5_000, null);
     return result.exitCode !== 0;
   } catch {
     return false; // Can't tell — assume OK

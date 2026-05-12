@@ -208,6 +208,22 @@ describe('DockerManager', () => {
 
       expect(args).toContain('--add-host=host.docker.internal:host-gateway');
     });
+
+    it('emits --user when config.user is set (issue #232 Linux UID remap)', () => {
+      const config: DockerContainerConfig = {
+        ...sampleConfig,
+        user: '0:0',
+      };
+      const args = buildCreateArgs(config);
+      expect(args).toContain('--user');
+      expect(args[args.indexOf('--user') + 1]).toBe('0:0');
+    });
+
+    it('omits --user when config.user is undefined (macOS path)', () => {
+      // sampleConfig has no `user` field, so --user must be absent.
+      const args = buildCreateArgs(sampleConfig);
+      expect(args).not.toContain('--user');
+    });
   });
 
   describe('preflight', () => {
@@ -278,7 +294,56 @@ describe('DockerManager', () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe('task completed');
       expect(result.stderr).toBe('');
-      expect(mock.calls[0].args).toEqual(['exec', 'container-id', 'claude', '--continue', '-p', 'Hello']);
+      // `--user codespace` is always injected: agent containers are
+      // created with `--user 0:0` on Linux for the UID-remap entrypoint
+      // (issue #232), so every subsequent exec must opt back into the
+      // codespace user explicitly.
+      expect(mock.calls[0].args).toEqual([
+        'exec',
+        '--user',
+        'codespace',
+        'container-id',
+        'claude',
+        '--continue',
+        '-p',
+        'Hello',
+      ]);
+    });
+
+    it('always passes --user codespace (issue #232)', async () => {
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('container-id', ['anything']);
+      const args = mock.calls[0].args;
+      expect(args[0]).toBe('exec');
+      expect(args[1]).toBe('--user');
+      expect(args[2]).toBe('codespace');
+    });
+
+    it('skips --user when execUser is null (non-agent containers)', async () => {
+      // signal-cli-rest-api has no codespace account; pinning it would
+      // make `docker exec` fail with "unable to find user codespace" and
+      // break stale-bind-mount detection. `execUser: null` opts out.
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('signal-cli', ['test', '-d', '/data'], 5_000, null);
+      const args = mock.calls[0].args;
+      expect(args[0]).toBe('exec');
+      expect(args).not.toContain('--user');
+      expect(args).toEqual(['exec', 'signal-cli', 'test', '-d', '/data']);
+    });
+
+    it('honors a custom execUser override (string value)', async () => {
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('container-id', ['cmd'], undefined, 'root');
+      const args = mock.calls[0].args;
+      expect(args[0]).toBe('exec');
+      expect(args[1]).toBe('--user');
+      expect(args[2]).toBe('root');
     });
 
     it('returns non-zero exit code without throwing', async () => {
