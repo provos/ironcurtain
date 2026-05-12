@@ -230,7 +230,7 @@ function renderProbeResult(probe: ResourceProbeResult, summary: string, host: Ho
     return { name: 'Docker resource limits', status: 'ok', message: summary };
   }
   const suggested = probe.suggested ?? {};
-  const hintParts: string[] = ['Run `ironcurtain config` and adjust Docker Agent > Resources.'];
+  const hintParts: string[] = ['Run `ironcurtain config` and adjust Docker Agent > Container resources.'];
   if (suggested.cpus !== undefined) {
     hintParts.push(`Try cpus=${suggested.cpus}`);
   }

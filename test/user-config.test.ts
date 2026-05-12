@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadUserConfig, saveUserConfig, validateModelId, USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
+import {
+  loadUserConfig,
+  saveUserConfig,
+  userConfigSchema,
+  validateModelId,
+  USER_CONFIG_DEFAULTS,
+} from '../src/config/user-config.js';
 
 /** Env var names that need save/restore between tests. */
 const ENV_VARS_TO_ISOLATE = [
@@ -147,6 +153,17 @@ describe('loadUserConfig', () => {
     writeRawConfigFile(JSON.stringify({ agentModelId: 123 }));
 
     expect(() => loadUserConfig()).toThrow(/agentModelId/);
+  });
+
+  it('schema rejects non-finite dockerResources values', () => {
+    // Infinity/NaN can land in the resolved object via interactive prompts
+    // before serialization (JSON.stringify would later turn them into `null`,
+    // silently flipping a huge value into "unlimited"). The schema must
+    // reject these at the boundary.
+    expect(userConfigSchema.safeParse({ dockerResources: { cpus: Infinity } }).success).toBe(false);
+    expect(userConfigSchema.safeParse({ dockerResources: { cpus: NaN } }).success).toBe(false);
+    expect(userConfigSchema.safeParse({ dockerResources: { memoryMb: Infinity } }).success).toBe(false);
+    expect(userConfigSchema.safeParse({ dockerResources: { memoryMb: NaN } }).success).toBe(false);
   });
 
   it('warns about unknown fields to stderr', () => {

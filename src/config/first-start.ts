@@ -22,7 +22,13 @@ import {
   type WebSearchProvider,
 } from './user-config.js';
 import { parseModelId, type ProviderId } from './model-provider.js';
-import { clampDockerResources, isImagePresent, probeDockerResources } from '../docker/resource-limits.js';
+import {
+  clampDockerResources,
+  isImagePresent,
+  probeDockerResources,
+  DOCKER_MIN_CPUS,
+  DOCKER_MIN_MEMORY_MB,
+} from '../docker/resource-limits.js';
 import { getAgent, registerBuiltinAdapters } from '../docker/agent-registry.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import { checkDockerAvailable } from '../session/preflight.js';
@@ -284,8 +290,8 @@ async function maybeOfferDockerResourceFix(pending: UserConfig): Promise<void> {
   if (probe.ok) return;
 
   const suggested = probe.suggested ?? {};
-  const cpuTarget = suggested.cpus ?? (host.cpus > 1 ? host.cpus - 1 : 0.01);
-  const memoryTarget = suggested.memoryMb ?? Math.floor(host.memoryMb * 0.75);
+  const cpuTarget = suggested.cpus ?? Math.max(DOCKER_MIN_CPUS, host.cpus > 1 ? host.cpus - 1 : DOCKER_MIN_CPUS);
+  const memoryTarget = suggested.memoryMb ?? Math.max(DOCKER_MIN_MEMORY_MB, Math.floor(host.memoryMb * 0.75));
 
   const clampNote = clamped ? '(Auto-clamp already lowered the defaults but Docker still rejected them.)\n' : '';
   const summary =

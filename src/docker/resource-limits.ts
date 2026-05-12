@@ -56,8 +56,8 @@ export interface ClampedDockerResources {
 }
 
 /** Docker's documented absolute minimums for these flags. */
-const DOCKER_MIN_CPUS = 0.01;
-const DOCKER_MIN_MEMORY_MB = 6;
+export const DOCKER_MIN_CPUS = 0.01;
+export const DOCKER_MIN_MEMORY_MB = 6;
 
 /**
  * Reads the host's CPU count and total memory in MB.
