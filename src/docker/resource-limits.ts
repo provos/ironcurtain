@@ -91,7 +91,9 @@ export function getHostResources(): HostResources {
  *     the flag). We do NOT clamp nulls.
  *   - `number` is treated as a user-supplied ceiling. We lower it if it
  *     exceeds what we can safely give the container:
- *       * cpus    -> max(1, hostCpus - 1)        // leave one core for the host
+ *       * cpus    -> hostCpus - 1 on multi-core hosts, DOCKER_MIN_CPUS on
+ *                    single-core hosts (reserving a full core would leave
+ *                    none for the container)
  *       * memoryMb-> floor(hostMemoryMb * 0.75)  // leave 25% headroom
  *   - The final value is also bounded below by Docker's own minimum so we
  *     never produce a request Docker would reject for being too small.
@@ -232,7 +234,8 @@ function extractStderr(err: unknown): string {
  * Known patterns (case-insensitive matching, real-world examples):
  *
  *   1. "range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs
- *      available" -- suggests reducing `--cpus` to the upper bound.
+ *      available" -- suggests `--cpus = upperBound - 1` on multi-core hosts
+ *      (leaving a core for the host) or DOCKER_MIN_CPUS on single-core hosts.
  *
  *   2. "Minimum memory limit allowed is 6 MB" -- the user passed something
  *      below 6 MB; suggest the minimum.

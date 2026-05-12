@@ -163,7 +163,7 @@ export function checkPreferredMode(config: IronCurtainConfig, dockerResult: Chec
  *
  * Callers should only invoke this when `dockerResult.status === 'ok'`.
  *
- * Exported for testing; tests pass stubbed `execFile` and `getImage` deps.
+ * Exported for testing; tests pass stubbed `execFile` and `resolveImage` deps.
  */
 export interface CheckDockerResourcesDeps {
   readonly execFile?: ExecFileFn;

@@ -248,7 +248,7 @@ async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | 
     validate: (val) => {
       if (!val || val.trim() === '') return 'Must be a number';
       const n = Number(val);
-      if (isNaN(n)) return 'Must be a number';
+      if (!Number.isFinite(n)) return 'Must be a finite number';
       return opts.validate?.(n);
     },
   });
