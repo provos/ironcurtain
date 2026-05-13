@@ -681,15 +681,15 @@ describe('DockerManager', () => {
     it('rejects with a labeled error when the child stays silent', async () => {
       const spawnMock = createMockSpawn();
       const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
-        idleTimeoutMs: 20,
+        idleTimeoutMs: 100,
         operation: 'docker pull',
         spawn: spawnMock.spawn,
         stdoutSink: nullSink(),
         stderrSink: nullSink(),
-        killGraceMs: 5,
+        killGraceMs: 20,
       });
 
-      await expect(promise).rejects.toThrow(/docker pull produced no output for 20ms/);
+      await expect(promise).rejects.toThrow(/docker pull produced no output for 100ms/);
       // SIGTERM is sent on watchdog fire.
       expect(spawnMock.handles[0].child.killed).toBe(true);
     });
@@ -697,17 +697,18 @@ describe('DockerManager', () => {
     it('resets the watchdog when the child emits output', async () => {
       const spawnMock = createMockSpawn();
       const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
-        idleTimeoutMs: 40,
+        idleTimeoutMs: 150,
         operation: 'docker pull',
         spawn: spawnMock.spawn,
         stdoutSink: nullSink(),
         stderrSink: nullSink(),
       });
 
-      // Heartbeat every 20ms (under the 40ms idle threshold) for 5
-      // iterations — never silent for long enough to trip the watchdog.
+      // Heartbeat every 50ms (3× under the 150ms idle threshold) for 5
+      // iterations. The slack absorbs event-loop jitter on loaded CI
+      // runners that would otherwise stretch a 20ms timer past 40ms.
       for (let i = 0; i < 5; i++) {
-        await new Promise((r) => setTimeout(r, 20));
+        await new Promise((r) => setTimeout(r, 50));
         spawnMock.handles[0].emitStdout(`chunk ${i}\n`);
       }
       // Now exit cleanly. The watchdog should NOT have fired.
@@ -736,19 +737,19 @@ describe('DockerManager', () => {
       };
 
       const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
-        idleTimeoutMs: 10,
+        idleTimeoutMs: 80,
         operation: 'docker pull',
         spawn: recordingSpawn,
         stdoutSink: nullSink(),
         stderrSink: nullSink(),
-        killGraceMs: 20,
+        killGraceMs: 150,
       });
       // Attach a handler immediately so the eventual rejection is observed.
       const expectation = expect(promise).rejects.toThrow();
 
-      // Wait long enough for both the idle timer (10ms) and the kill
-      // grace (20ms) to elapse.
-      await new Promise((r) => setTimeout(r, 60));
+      // Wait long enough for both the idle timer (80ms) and the kill
+      // grace (150ms) to elapse, with slack for CI jitter.
+      await new Promise((r) => setTimeout(r, 300));
       await expectation;
 
       expect(signals[0]).toBe('SIGTERM');
@@ -775,28 +776,72 @@ describe('DockerManager', () => {
       };
 
       const promise = spawnWithIdleTimeout('docker', ['pull', 'x'], {
-        idleTimeoutMs: 10,
+        idleTimeoutMs: 80,
         operation: 'docker pull',
         spawn: recordingSpawn,
         stdoutSink: nullSink(),
         stderrSink: nullSink(),
-        killGraceMs: 40,
+        killGraceMs: 300,
       });
       const expectation = expect(promise).rejects.toThrow();
 
-      // Wait for the idle timer to fire and SIGTERM to be sent.
-      await new Promise((r) => setTimeout(r, 25));
+      // Wait for the idle timer (80ms) to fire and SIGTERM to be sent.
+      await new Promise((r) => setTimeout(r, 150));
       expect(signals).toEqual(['SIGTERM']);
 
       // Simulate the child honoring SIGTERM and exiting before the grace
       // period expires. The close handler flips `exited = true`.
       inner.handles[0].exit(143, 'SIGTERM');
 
-      // Wait past the kill grace window to confirm SIGKILL was NOT sent.
-      await new Promise((r) => setTimeout(r, 60));
+      // Wait past the kill grace window (300ms) to confirm SIGKILL was NOT sent.
+      await new Promise((r) => setTimeout(r, 400));
       await expectation;
 
       expect(signals).toEqual(['SIGTERM']);
+    });
+
+    it('reformats synchronous spawn() throws with the operation label', async () => {
+      // `spawn()` can throw synchronously on invalid options/args — distinct
+      // from the async `error` event for ENOENT-class failures. The helper
+      // should catch and reformat so callers see a consistent error shape.
+      const throwingSpawn: SpawnFn = () => {
+        throw new Error('Invalid stdio option');
+      };
+
+      await expect(
+        spawnWithIdleTimeout('docker', ['pull', 'x'], {
+          idleTimeoutMs: 60_000,
+          operation: 'docker pull',
+          spawn: throwingSpawn,
+          stdoutSink: nullSink(),
+          stderrSink: nullSink(),
+        }),
+      ).rejects.toThrow(/docker pull failed to spawn: Invalid stdio option/);
+    });
+
+    it('swallows kill() throws so the watchdog still rejects cleanly', async () => {
+      // If `kill()` throws (e.g. invalid signal, torn-down handle), the
+      // helper must not leak the exception into the timer callback. The
+      // promise should still reject with the idle-timeout error message.
+      const inner = createMockSpawn();
+      const throwingKillSpawn: SpawnFn = (cmd, args, options) => {
+        const child = inner.spawn(cmd, args, options) as ChildProcess & { killed: boolean };
+        child.kill = (() => {
+          throw new Error('unexpected kill() failure');
+        }) as ChildProcess['kill'];
+        return child;
+      };
+
+      await expect(
+        spawnWithIdleTimeout('docker', ['pull', 'x'], {
+          idleTimeoutMs: 100,
+          operation: 'docker pull',
+          spawn: throwingKillSpawn,
+          stdoutSink: nullSink(),
+          stderrSink: nullSink(),
+          killGraceMs: 20,
+        }),
+      ).rejects.toThrow(/docker pull produced no output for 100ms/);
     });
 
     it('passes operation label and stderr tail in non-zero exit errors', async () => {

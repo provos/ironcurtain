@@ -69,10 +69,30 @@ export function spawnWithIdleTimeout(
   } = options;
 
   return new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn(cmd, [...args], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: env ? { ...process.env, ...env } : process.env,
-    });
+    let child: ChildProcess;
+    try {
+      child = spawn(cmd, [...args], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: env ? { ...process.env, ...env } : process.env,
+      });
+    } catch (err: unknown) {
+      // `spawn()` can throw synchronously on invalid options/args (the
+      // async `error` event handles the ENOENT-class failures). Reformat
+      // with the operation label so callers get a consistent error shape.
+      rejectPromise(new Error(`${operation} failed to spawn: ${err instanceof Error ? err.message : String(err)}`));
+      return;
+    }
+
+    const safeKill = (signal: NodeJS.Signals): void => {
+      try {
+        child.kill(signal);
+      } catch {
+        // kill() returns false (doesn't throw) on ESRCH per Node's docs;
+        // a throw here would only come from an invalid signal name or an
+        // unexpectedly torn-down child handle. Either way the timeout
+        // callback should never crash the process.
+      }
+    };
 
     let stderrTail = '';
     let settled = false;
@@ -96,6 +116,11 @@ export function spawnWithIdleTimeout(
     };
 
     const onIdleTimeout = (): void => {
+      // Defensive bail: settle() clears the idle timer synchronously, so a
+      // queued callback should not see settled=true — but if a future edit
+      // ever rearranges the close path, the guard prevents duplicate kills
+      // (and a no-op settle()) from this callback.
+      if (settled || exited) return;
       // Two-phase kill: SIGTERM first, SIGKILL after the grace period for
       // children that ignore SIGTERM. We gate the SIGKILL on our own
       // `exited` flag (set in the `close` handler) rather than on
@@ -104,9 +129,9 @@ export function spawnWithIdleTimeout(
       // here would make SIGKILL unreachable in practice. The grace timer is
       // `.unref()`'d so a dropped promise never keeps the Node event loop
       // alive on it alone.
-      child.kill('SIGTERM');
+      safeKill('SIGTERM');
       setTimeout(() => {
-        if (!exited) child.kill('SIGKILL');
+        if (!exited) safeKill('SIGKILL');
       }, killGraceMs).unref();
 
       settle(() => {
