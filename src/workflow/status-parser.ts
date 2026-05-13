@@ -116,13 +116,15 @@ export function stripStatusBlock(responseText: string): string {
 
 /** Base informational status block lines (verdict does not affect routing). */
 const INFORMATIONAL_STATUS_LINES: readonly string[] = [
-  'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+  'When all your work is finished and you are ready to exit, include the following YAML block as the LAST content of your FINAL response, inside a fenced code block. Do not run any further tool calls after emitting it:',
   '',
   '```',
   'agent_status:',
   '  verdict: completed',
   '  notes: "brief summary of what was done"',
   '```',
+  '',
+  'Only the agent_status block in your final response is parsed. Blocks emitted earlier (e.g. as progress checkpoints) are ignored — do not use this block to "check in" mid-task.',
   '',
   'Use EXACTLY these field names (`verdict`, `notes`). Do NOT add additional fields, rename fields, or use synonyms (e.g. `status`, `result`, `scope`, `artifacts`) — any deviation is a hard error and will force the workflow to reject your response. If you want to include more context, put it in the `notes` string.',
   '',
@@ -186,13 +188,15 @@ function buildVerdictRoutedInstructions(
   const verdictList = verdictValues.map((v) => `\`${v}\``).join(', ');
 
   const lines = [
-    'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+    'When all your work is finished and you are ready to exit, include the following YAML block as the LAST content of your FINAL response, inside a fenced code block. Do not run any further tool calls after emitting it:',
     '',
     '```',
     'agent_status:',
     `  verdict: ${verdictExample}`,
     '  notes: "brief summary of what was done"',
     '```',
+    '',
+    'Only the agent_status block in your final response is parsed. Blocks emitted earlier (e.g. as progress checkpoints) are ignored — do not use this block to "check in" mid-task.',
     '',
     'Fields:',
     `- verdict: determines what happens next. Set this to exactly one of: ${verdictList}`,
@@ -239,9 +243,16 @@ export function buildStatusBlockReprompt(statusInstructions?: string, parseError
     ? [
         'Your previous response had a malformed `agent_status` block and could not be parsed.',
         `Parse error: ${parseError.message}`,
-        'Please emit a new block using exactly the fields shown below.',
+        '',
+        'Emit a new block as the LAST content of your FINAL response, after all work is complete and before you exit. Use exactly the fields shown below.',
       ]
-    : ['Your response is missing the required agent_status block.', 'Please include it at the end of your response.'];
+    : [
+        'Your final response did not include the required agent_status block.',
+        '',
+        'The block must be the LAST content of your FINAL response — emitted after all work is complete and immediately before you exit. Only the closing block of your final message is parsed; any agent_status blocks you may have emitted earlier in this conversation are ignored.',
+        '',
+        'If your work is finished: stop calling tools and emit a single final message ending with the YAML block below. If you still have work to do, complete it first, then emit the block as your closing content.',
+      ];
 
   return [...header, '', statusInstructions ?? MINIMAL_STATUS_INSTRUCTIONS].join('\n');
 }

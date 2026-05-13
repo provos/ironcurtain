@@ -277,9 +277,19 @@ describe('buildStatusBlockReprompt', () => {
     expect(prompt).toContain('agent_status:');
   });
 
-  it('mentions the missing block', () => {
+  it('signals that the agent_status block was absent', () => {
     const prompt = buildStatusBlockReprompt();
-    expect(prompt).toContain('missing');
+    expect(prompt).toMatch(/did not include the required agent_status block/);
+  });
+
+  it('anchors the block on the final response, not just any response', () => {
+    const prompt = buildStatusBlockReprompt();
+    expect(prompt).toMatch(/LAST content of your FINAL response/);
+  });
+
+  it('warns that intermediate agent_status blocks are ignored', () => {
+    const prompt = buildStatusBlockReprompt();
+    expect(prompt).toMatch(/blocks you may have emitted earlier .* are ignored/);
   });
 
   it('uses the minimal format with verdict and notes', () => {
@@ -304,7 +314,7 @@ describe('buildStatusBlockReprompt', () => {
 
   it('uses missing-block wording when no parse error is supplied', () => {
     const prompt = buildStatusBlockReprompt();
-    expect(prompt).toContain('missing the required agent_status block');
+    expect(prompt).toMatch(/did not include the required agent_status block/);
     expect(prompt).not.toContain('malformed');
   });
 });
