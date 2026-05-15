@@ -199,6 +199,15 @@ export interface PreContainerInfrastructure {
    * wrapper over `MitmProxy.setTokenSessionId()`.
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
+
+  /**
+   * Sets (or clears) the kind of agent currently driving the infrastructure.
+   * Thin wrapper over `MitmProxy.setAgentKind()`. Flipped by callers around
+   * each agent run, parallel to `setTokenSessionId`. Used by request-body
+   * rewriters to apply agent-kind-conditional strips (currently: removing
+   * the schedule built-in skill's tools from workflow agent requests).
+   */
+  setAgentKind(kind: import('./provider-config.js').AgentKind | undefined): void;
 }
 
 /**
@@ -542,6 +551,9 @@ export async function prepareDockerInfrastructure(
       restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
+      },
+      setAgentKind: (kind) => {
+        mitmProxy.setAgentKind(kind);
       },
     };
   } catch (error) {

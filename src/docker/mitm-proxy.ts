@@ -24,6 +24,7 @@ import { randomSerialNumber, type CertificateAuthority } from './ca.js';
 import {
   isEndpointAllowed,
   shouldRewriteBody,
+  type AgentKind,
   type ProviderConfig,
   type RequestBodyRewriter,
 } from './provider-config.js';
@@ -102,6 +103,20 @@ export interface MitmProxy {
    * `bus.push()` entirely — no events are emitted under a sentinel value.
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
+
+  /**
+   * Set (or clear) the kind of agent currently driving requests through
+   * this proxy. Flipped by callers around each agent run, parallel to
+   * `setTokenSessionId`. Provided to request-body rewriters so they can
+   * apply agent-kind-specific transforms (e.g. stripping the schedule
+   * built-in skill's tools only for workflow agents — see
+   * `anthropicRequestRewriter` in `provider-config.ts`).
+   *
+   * `undefined` means "no agent-kind context available," which rewriters
+   * treat as the most conservative behavior (no agent-kind-conditional
+   * stripping).
+   */
+  setAgentKind(kind: AgentKind | undefined): void;
 }
 
 export interface MitmProxyOptions {
@@ -500,6 +515,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // fetched lazily at each push site so `resetTokenStreamBus()` between
   // tests is honored.
   let tokenSessionId: import('../session/types.js').SessionId | undefined = options.sessionId;
+
+  // Mutable per-proxy value flipped around each agent run via setAgentKind
+  // on the returned handle. Snapshotted into the request-body rewriter
+  // context so concurrent flips can't split a single request's strips
+  // across two kinds. `undefined` means rewriters fall back to the most
+  // conservative (non-stripping) behavior.
+  let agentKind: AgentKind | undefined = undefined;
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -957,14 +979,20 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
           const reqMethod = method as string;
           const reqPath = path as string;
+          // Snapshot agentKind here (alongside sidForToolResults above) so a
+          // concurrent setAgentKind flip can't split this request's strips
+          // across two kinds.
+          const kindForRewrite = agentKind;
           try {
             const parsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
-            const result = rewriter(parsed, { method: reqMethod, path: reqPath });
+            const result = rewriter(parsed, {
+              method: reqMethod,
+              path: reqPath,
+              agentKind: kindForRewrite,
+            });
             if (result) {
               finalBody = Buffer.from(JSON.stringify(result.modified));
-              logger.info(
-                `[mitm-proxy] POST ${targetHost}${path} - stripped server-side tools: ${result.stripped.join(', ')}`,
-              );
+              logger.info(`[mitm-proxy] POST ${targetHost}${path} - stripped tools: ${result.stripped.join(', ')}`);
             }
           } catch {
             logger.info(`[mitm-proxy] POST ${targetHost}${path} - failed to parse request body, forwarding as-is`);
@@ -1625,6 +1653,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void {
       tokenSessionId = id;
+    },
+
+    setAgentKind(kind: AgentKind | undefined): void {
+      agentKind = kind;
     },
 
     async start() {

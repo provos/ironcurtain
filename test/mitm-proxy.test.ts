@@ -8,7 +8,9 @@ import { tmpdir } from 'node:os';
 import { loadOrCreateCA, type CertificateAuthority } from '../src/docker/ca.js';
 import { createMitmProxy, type MitmProxy, type MitmProxyOptions } from '../src/docker/mitm-proxy.js';
 import {
+  anthropicRequestRewriter,
   isEndpointAllowed,
+  stripScheduleSkillTools,
   stripServerSideTools,
   shouldRewriteBody,
   type ProviderConfig,
@@ -251,6 +253,145 @@ describe('stripServerSideTools', () => {
     expect(result).not.toBeNull();
     expect(result!.modified.tools).toEqual([]);
     expect(result!.stripped).toEqual(['web_search_20250305', 'computer_20250124']);
+  });
+});
+
+describe('stripScheduleSkillTools', () => {
+  it('returns null when body has no tools field', () => {
+    expect(stripScheduleSkillTools({ model: 'claude-3', messages: [] })).toBeNull();
+  });
+
+  it('returns null when tools array is empty', () => {
+    expect(stripScheduleSkillTools({ tools: [] })).toBeNull();
+  });
+
+  it('returns null when no tool name matches the schedule skill set', () => {
+    const body = {
+      tools: [
+        { name: 'read_file', input_schema: {} },
+        { name: 'Bash', input_schema: {} },
+        { name: 'Skill', input_schema: {} },
+      ],
+    };
+    expect(stripScheduleSkillTools(body)).toBeNull();
+  });
+
+  it('strips ScheduleWakeup and the Cron tool family by name', () => {
+    const body = {
+      model: 'claude-3',
+      tools: [
+        { name: 'Read', input_schema: {} },
+        { name: 'ScheduleWakeup', input_schema: {} },
+        { name: 'CronCreate', input_schema: {} },
+        { name: 'CronList', input_schema: {} },
+        { name: 'CronDelete', input_schema: {} },
+        { name: 'Bash', input_schema: {} },
+      ],
+    };
+    const result = stripScheduleSkillTools(body);
+    expect(result).not.toBeNull();
+    expect(result!.modified.tools).toEqual([
+      { name: 'Read', input_schema: {} },
+      { name: 'Bash', input_schema: {} },
+    ]);
+    expect(result!.stripped).toEqual(['ScheduleWakeup', 'CronCreate', 'CronList', 'CronDelete']);
+    expect(result!.modified.model).toBe('claude-3');
+  });
+
+  it('strips only schedule tools and leaves server-side tools alone', () => {
+    // stripScheduleSkillTools is name-keyed; server-side tools (no `name`,
+    // identified by `type`) are out of its remit and must pass through.
+    const body = {
+      tools: [{ name: 'ScheduleWakeup', input_schema: {} }, { type: 'web_search_20250305' }],
+    };
+    const result = stripScheduleSkillTools(body);
+    expect(result).not.toBeNull();
+    expect(result!.modified.tools).toEqual([{ type: 'web_search_20250305' }]);
+    expect(result!.stripped).toEqual(['ScheduleWakeup']);
+  });
+
+  it('does not strip tools whose name happens to be similar but not exact', () => {
+    const body = {
+      tools: [
+        { name: 'schedulewakeup', input_schema: {} }, // case-sensitive
+        { name: 'ScheduleWakeupExtra', input_schema: {} },
+        { name: 'Cron', input_schema: {} },
+      ],
+    };
+    expect(stripScheduleSkillTools(body)).toBeNull();
+  });
+});
+
+describe('anthropicRequestRewriter', () => {
+  const ctx = (agentKind?: 'workflow' | 'standalone') => ({
+    method: 'POST',
+    path: '/v1/messages',
+    agentKind,
+  });
+
+  it('strips server-side tools regardless of agentKind', () => {
+    const body = {
+      tools: [{ name: 'Read', input_schema: {} }, { type: 'web_search_20250305' }],
+    };
+    for (const kind of ['workflow', 'standalone', undefined] as const) {
+      const result = anthropicRequestRewriter(body, ctx(kind));
+      expect(result, `agentKind=${String(kind)}`).not.toBeNull();
+      expect(result!.modified.tools).toEqual([{ name: 'Read', input_schema: {} }]);
+      expect(result!.stripped).toEqual(['web_search_20250305']);
+    }
+  });
+
+  it('does NOT strip schedule skill tools when agentKind is standalone', () => {
+    const body = {
+      tools: [
+        { name: 'Read', input_schema: {} },
+        { name: 'ScheduleWakeup', input_schema: {} },
+      ],
+    };
+    expect(anthropicRequestRewriter(body, ctx('standalone'))).toBeNull();
+  });
+
+  it('does NOT strip schedule skill tools when agentKind is undefined', () => {
+    const body = {
+      tools: [
+        { name: 'Read', input_schema: {} },
+        { name: 'ScheduleWakeup', input_schema: {} },
+      ],
+    };
+    expect(anthropicRequestRewriter(body, ctx(undefined))).toBeNull();
+  });
+
+  it('strips schedule skill tools when agentKind is workflow', () => {
+    const body = {
+      tools: [
+        { name: 'Read', input_schema: {} },
+        { name: 'ScheduleWakeup', input_schema: {} },
+        { name: 'CronCreate', input_schema: {} },
+      ],
+    };
+    const result = anthropicRequestRewriter(body, ctx('workflow'));
+    expect(result).not.toBeNull();
+    expect(result!.modified.tools).toEqual([{ name: 'Read', input_schema: {} }]);
+    expect(result!.stripped).toEqual(['ScheduleWakeup', 'CronCreate']);
+  });
+
+  it('combines server-side and schedule strips in workflow mode', () => {
+    const body = {
+      tools: [
+        { name: 'Read', input_schema: {} },
+        { type: 'web_search_20250305' },
+        { name: 'ScheduleWakeup', input_schema: {} },
+      ],
+    };
+    const result = anthropicRequestRewriter(body, ctx('workflow'));
+    expect(result).not.toBeNull();
+    expect(result!.modified.tools).toEqual([{ name: 'Read', input_schema: {} }]);
+    expect(result!.stripped).toEqual(['web_search_20250305', 'ScheduleWakeup']);
+  });
+
+  it('returns null when nothing needs stripping in workflow mode', () => {
+    const body = { tools: [{ name: 'Read', input_schema: {} }] };
+    expect(anthropicRequestRewriter(body, ctx('workflow'))).toBeNull();
   });
 });
 
@@ -955,6 +1096,144 @@ describe('MitmProxy', () => {
     // start completed and the proxy is functional.
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
     expect(statusCode).toBe(200);
+  });
+
+  // --- End-to-end strip verification via setAgentKind ---
+  //
+  // Drives a real proxy with a local HTTP upstream, exercises the full
+  // TLS-terminate / parse / rewrite / forward path, and asserts on what
+  // the upstream actually received. The previous unit tests on
+  // anthropicRequestRewriter cover the strip logic itself; these tests
+  // cover the plumbing: that setAgentKind reaches the rewriter context,
+  // and that the rewritten body — not the original — is what flushes
+  // upstream.
+
+  /**
+   * Stands up a localhost HTTP server that captures the body of each request
+   * it receives. Returns the port and a getter for captured bodies.
+   */
+  async function startCapturingUpstream(): Promise<{
+    port: number;
+    server: http.Server;
+    bodies: () => Buffer[];
+  }> {
+    const captured: Buffer[] = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        captured.push(Buffer.concat(chunks));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        resolve((server.address() as import('node:net').AddressInfo).port);
+      });
+    });
+    return { port, server, bodies: () => captured };
+  }
+
+  /**
+   * Body containing the schedule skill's tools alongside benign ones —
+   * the standard fixture for these scenarios.
+   */
+  const requestBodyWithScheduleTools = JSON.stringify({
+    model: 'claude-3',
+    messages: [],
+    tools: [
+      { name: 'Read', input_schema: {} },
+      { name: 'ScheduleWakeup', input_schema: {} },
+      { name: 'CronCreate', input_schema: {} },
+      { name: 'Bash', input_schema: {} },
+    ],
+  });
+
+  /**
+   * Builds a provider that mirrors `anthropicProvider`'s rewrite shape but
+   * forwards to a localhost HTTP upstream so the test can capture the body
+   * that left the proxy.
+   */
+  function makeLocalRewriteProvider(upstreamPort: number): ProviderConfig {
+    return {
+      host: 'api.rewrite-test.com',
+      displayName: 'Rewrite Test (e2e)',
+      allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+      keyInjection: { type: 'header', headerName: 'x-api-key' },
+      fakeKeyPrefix: 'sk-rw-',
+      requestRewriter: anthropicRequestRewriter,
+      rewriteEndpoints: ['/v1/messages'],
+      upstreamTarget: { hostname: '127.0.0.1', port: upstreamPort, pathPrefix: '', useTls: false },
+    };
+  }
+
+  /**
+   * Runs the schedule-tool-strip scenario end-to-end. Returns the parsed
+   * `tools` array that the upstream actually received.
+   */
+  async function runScheduleStripScenario(agentKind: 'workflow' | 'standalone' | undefined): Promise<unknown[]> {
+    const { port, server, bodies } = await startCapturingUpstream();
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: makeLocalRewriteProvider(port), fakeKey: rewriteFakeKey, realKey: rewriteRealKey }],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      if (agentKind !== undefined) {
+        proxy.setAgentKind(agentKind);
+      }
+
+      const { socket, statusCode: connectStatus } = await sendConnect(socketPath, 'api.rewrite-test.com', 443);
+      expect(connectStatus).toBe(200);
+      expect(socket).not.toBeNull();
+
+      const response = await makeHttpsRequest(socket!, ca, 'api.rewrite-test.com', {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'x-api-key': rewriteFakeKey, 'content-type': 'application/json' },
+        body: requestBodyWithScheduleTools,
+      });
+
+      expect(response.statusCode).toBe(200);
+      const captured = bodies();
+      expect(captured.length).toBe(1);
+      const forwarded = JSON.parse(captured[0].toString()) as Record<string, unknown>;
+      return forwarded.tools as unknown[];
+    } finally {
+      server.close();
+    }
+  }
+
+  it('strips ScheduleWakeup + CronCreate from upstream body when agentKind=workflow', async () => {
+    const forwardedTools = await runScheduleStripScenario('workflow');
+    expect(forwardedTools).toEqual([
+      { name: 'Read', input_schema: {} },
+      { name: 'Bash', input_schema: {} },
+    ]);
+  });
+
+  it('preserves schedule-skill tools when agentKind=standalone', async () => {
+    const forwardedTools = await runScheduleStripScenario('standalone');
+    expect(forwardedTools).toEqual([
+      { name: 'Read', input_schema: {} },
+      { name: 'ScheduleWakeup', input_schema: {} },
+      { name: 'CronCreate', input_schema: {} },
+      { name: 'Bash', input_schema: {} },
+    ]);
+  });
+
+  it('preserves schedule-skill tools when agentKind is unset (default-conservative)', async () => {
+    const forwardedTools = await runScheduleStripScenario(undefined);
+    expect(forwardedTools).toEqual([
+      { name: 'Read', input_schema: {} },
+      { name: 'ScheduleWakeup', input_schema: {} },
+      { name: 'CronCreate', input_schema: {} },
+      { name: 'Bash', input_schema: {} },
+    ]);
   });
 
   it('rejects requests with Content-Encoding on rewrite endpoints', async () => {

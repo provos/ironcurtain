@@ -42,6 +42,7 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     workflowId,
     bundleId,
     setTokenSessionId: () => {},
+    setAgentKind: () => {},
   } as unknown as DockerInfrastructure;
   return bundle;
 }
@@ -564,8 +565,10 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     try {
       const defPath = writeDefinitionFile(tmpDir, twoAgentDef);
 
-      // Record every setTokenSessionId call on the shared bundle.
+      // Record every setTokenSessionId and setAgentKind call on the shared
+      // bundle. Both are flipped in lock-step around each agent run.
       const tokenSessionIdCalls: Array<string | undefined> = [];
+      const agentKindCalls: Array<string | undefined> = [];
       const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
         const bundle = {
           __stub: true,
@@ -573,6 +576,9 @@ describe('WorkflowOrchestrator shared-container mode', () => {
           bundleId: input.bundleId,
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
+          },
+          setAgentKind: (kind: string | undefined) => {
+            agentKindCalls.push(kind);
           },
         } as unknown as DockerInfrastructure;
         return bundle;
@@ -612,6 +618,11 @@ describe('WorkflowOrchestrator shared-container mode', () => {
       expect(tokenSessionIdCalls).toEqual(['agent-session-1', undefined, 'agent-session-2', undefined]);
       // Sanity: the workflow ID was NEVER used as a routing target.
       expect(tokenSessionIdCalls).not.toContain(workflowId);
+
+      // setAgentKind is flipped in lock-step with setTokenSessionId, marking
+      // each per-agent run as 'workflow' so the MITM rewriter applies
+      // workflow-scoped strips (see provider-config.ts:anthropicRequestRewriter).
+      expect(agentKindCalls).toEqual(['workflow', undefined, 'workflow', undefined]);
     } finally {
       stubCleanup();
     }
@@ -654,6 +665,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
+          setAgentKind: () => {},
         } as unknown as DockerInfrastructure;
       });
       const destroyInfra = vi.fn(async () => {});

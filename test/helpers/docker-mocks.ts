@@ -226,6 +226,7 @@ export function createMockMitmProxy(): MitmProxy {
       listHosts: () => ({ providers: [], dynamic: [] }),
     },
     setTokenSessionId: () => {},
+    setAgentKind: () => {},
   };
 }
 

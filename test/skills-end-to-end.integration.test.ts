@@ -118,6 +118,7 @@ function makeBundleStub(workflowId: string, bundleId: BundleId, bundleDir: strin
     escalationDir: resolve(bundleDir, 'escalations'),
     auditLogPath: resolve(bundleDir, 'audit.jsonl'),
     setTokenSessionId: () => {},
+    setAgentKind: () => {},
     restageSkills: (skills: readonly ResolvedSkill[]) => {
       stageSkillsToBundle(skills, skillsDir);
     },

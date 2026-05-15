@@ -55,6 +55,7 @@ function makeStubInfrastructure(
     bundleId,
     scope,
     setTokenSessionId: () => {},
+    setAgentKind: () => {},
   } as unknown as DockerInfrastructure & { readonly __scope: string };
 }
 

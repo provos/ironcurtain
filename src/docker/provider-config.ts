@@ -7,6 +7,14 @@
  */
 
 /**
+ * Discriminator for the agent invoking the proxy. Flipped by callers around
+ * each agent run via `MitmProxy.setAgentKind()`. Currently only used by the
+ * request-body rewriter to scope strips that depend on agent context (e.g.
+ * stripping the schedule built-in skill's tools only for workflow agents).
+ */
+export type AgentKind = 'workflow' | 'standalone';
+
+/**
  * Result from a RequestBodyRewriter when modifications were made.
  */
 export interface RewriteResult {
@@ -19,10 +27,15 @@ export interface RewriteResult {
 /**
  * A function that inspects and optionally modifies a parsed JSON request body.
  * Returns a RewriteResult if the body was modified, or null if no changes needed.
+ *
+ * `context.agentKind` is the kind of agent that originated the request, when
+ * known. Rewriters that condition on agent kind should treat `undefined` as
+ * "no agent-kind context available" and fall back to the most conservative
+ * (i.e. non-stripping) behavior.
  */
 export type RequestBodyRewriter = (
   body: Record<string, unknown>,
-  context: { method: string; path: string },
+  context: { method: string; path: string; agentKind?: AgentKind },
 ) => RewriteResult | null;
 
 /**
@@ -203,6 +216,85 @@ export function stripServerSideTools(body: Record<string, unknown>): RewriteResu
 }
 
 /**
+ * Claude Code's built-in `schedule` skill exposes `ScheduleWakeup`,
+ * `CronCreate`, `CronList`, and `CronDelete`. These tools end the current
+ * assistant turn expecting an external Claude Code runtime to re-fire the
+ * session at the scheduled time. IronCurtain invokes `claude` as a one-shot
+ * subprocess and does NOT honor those wakeups: a workflow agent that calls
+ * `ScheduleWakeup` will silently end its turn (often with an empty thinking
+ * block and no text), which produces no parseable `agent_status` block and
+ * trips the workflow harness's missing-status guard.
+ *
+ * Upstream tracking: https://github.com/anthropics/claude-code/issues/53746
+ * (open enhancement, no committed fix). Workflow-side reproduction logged
+ * across runs `5cc70e67-...` and `c2e5473b-...`.
+ */
+const SCHEDULE_SKILL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'ScheduleWakeup',
+  'CronCreate',
+  'CronList',
+  'CronDelete',
+]);
+
+/**
+ * Strips the schedule built-in skill's tools from the Anthropic Messages API
+ * `tools` array. Filters by tool `name` (these tools arrive as custom-shaped
+ * entries declared by the Claude Code CLI client, not as server-side tools).
+ */
+export function stripScheduleSkillTools(body: Record<string, unknown>): RewriteResult | null {
+  const tools = body.tools;
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+
+  const stripped: string[] = [];
+  const kept: unknown[] = [];
+
+  for (const tool of tools) {
+    if (typeof tool === 'object' && tool !== null && 'name' in tool) {
+      const { name } = tool as Record<string, unknown>;
+      if (typeof name === 'string' && SCHEDULE_SKILL_TOOL_NAMES.has(name)) {
+        stripped.push(name);
+        continue;
+      }
+    }
+    kept.push(tool);
+  }
+
+  if (stripped.length === 0) return null;
+
+  return {
+    modified: { ...body, tools: kept },
+    stripped,
+  };
+}
+
+/**
+ * Combined rewriter for Anthropic /v1/messages requests. Always strips
+ * server-side tools; additionally strips the schedule built-in skill's tools
+ * when the originating agent is a workflow agent. Agent kinds other than
+ * 'workflow' (including `undefined`) do not strip the schedule tools, so
+ * interactive and standalone sessions are unaffected.
+ */
+export function anthropicRequestRewriter(
+  body: Record<string, unknown>,
+  context: { method: string; path: string; agentKind?: AgentKind },
+): RewriteResult | null {
+  const serverSide = stripServerSideTools(body);
+  const afterServerSide = serverSide ? serverSide.modified : body;
+
+  if (context.agentKind === 'workflow') {
+    const scheduleStrip = stripScheduleSkillTools(afterServerSide);
+    if (scheduleStrip) {
+      return {
+        modified: scheduleStrip.modified,
+        stripped: [...(serverSide?.stripped ?? []), ...scheduleStrip.stripped],
+      };
+    }
+  }
+
+  return serverSide;
+}
+
+/**
  * Returns true if this request should have its body buffered and rewritten.
  * Only matches POST requests to paths listed in the provider's rewriteEndpoints.
  */
@@ -242,7 +334,7 @@ export const anthropicProvider: ProviderConfig = {
   ],
   keyInjection: { type: 'header', headerName: 'x-api-key' },
   fakeKeyPrefix: 'sk-ant-api03-ironcurtain-',
-  requestRewriter: stripServerSideTools,
+  requestRewriter: anthropicRequestRewriter,
   rewriteEndpoints: ['/v1/messages'],
 };
 
@@ -275,7 +367,7 @@ export const anthropicOAuthProvider: ProviderConfig = {
   ],
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
-  requestRewriter: stripServerSideTools,
+  requestRewriter: anthropicRequestRewriter,
   rewriteEndpoints: ['/v1/messages'],
 };
 
