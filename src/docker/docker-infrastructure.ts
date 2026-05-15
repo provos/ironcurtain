@@ -24,7 +24,7 @@ import {
 import { arch, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { quote } from 'shell-quote';
-import type { IronCurtainConfig } from '../config/types.js';
+import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import { getBundleRuntimeRoot } from '../config/paths.js';
 import { getBundleShortId, type BundleId, type SessionId, type SessionMode } from '../session/types.js';
 import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
@@ -162,7 +162,7 @@ export interface PreContainerInfrastructure {
   /** MITM proxy listen address (port for TCP mode, socketPath for UDS mode). */
   readonly mitmAddr: { socketPath?: string; port?: number };
   /** Authentication method used for this session. */
-  readonly authKind: 'oauth' | 'apikey' | 'apikey-bearer';
+  readonly authKind: DockerAuthKind;
   /** Host-side conversation state directory, if the adapter supports resume. */
   readonly conversationStateDir?: string;
   /** Conversation state config from the adapter, if resume is supported. */

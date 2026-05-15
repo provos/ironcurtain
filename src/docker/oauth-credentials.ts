@@ -56,9 +56,6 @@ export type AuthMethod =
   | { readonly kind: 'apikey-bearer'; readonly token: string }
   | { readonly kind: 'none' };
 
-/** Narrow kind type used by adapters that need to discriminate on auth method. */
-export type AuthMethodKind = AuthMethod['kind'];
-
 /** Minimum remaining token lifetime (5 minutes) to consider a token usable. */
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
@@ -442,10 +439,10 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
   // Allow explicit override to force bearer mode (demotes OAuth so the
   // gateway token wins even when ~/.claude/.credentials.json exists).
   if (process.env.IRONCURTAIN_DOCKER_AUTH === 'apikey-bearer') {
-    const bearer = resolveBearerAuth(config);
-    if (bearer.kind === 'apikey-bearer') {
+    const auth = resolveAnthropicAuth(config.userConfig);
+    if (auth.mode === 'bearer') {
       logger.info('Docker auth override: forced bearer mode via IRONCURTAIN_DOCKER_AUTH=apikey-bearer');
-      return bearer;
+      return { kind: 'apikey-bearer', token: auth.credential };
     }
     logger.warn(
       'IRONCURTAIN_DOCKER_AUTH=apikey-bearer set but ANTHROPIC_AUTH_TOKEN is not configured; falling back to default detection',
@@ -553,26 +550,11 @@ async function tryRefreshKeychainCreds(
 }
 
 /**
- * Resolves bearer-token authentication for an Anthropic-compatible gateway.
- * Returns `none` when no `anthropicAuthToken` is configured.
- */
-function resolveBearerAuth(config: IronCurtainConfig): AuthMethod {
-  const auth = resolveAnthropicAuth(config.userConfig);
-  if (auth.mode === 'bearer') {
-    return { kind: 'apikey-bearer', token: auth.credential };
-  }
-  return { kind: 'none' };
-}
-
-/**
  * Resolves the configured Anthropic credential (bearer-first, then API
  * key). Used as the non-OAuth fallback in `detectAuthMethod()` and as
- * the result of the `IRONCURTAIN_DOCKER_AUTH=apikey` override.
- *
- * Bearer wins when both happen to be set because `resolveAnthropicAuth`
- * already enforces mutual exclusion at config-load time; the explicit
- * precedence here is defensive in case a caller constructs a
- * ResolvedUserConfig directly.
+ * the result of the `IRONCURTAIN_DOCKER_AUTH=apikey` override. Mutual
+ * exclusion of api-key / bearer is enforced at config load (see
+ * `applyEnvOverrides` in `user-config.ts`).
  */
 function resolveAnthropicCredentialAuth(config: IronCurtainConfig): AuthMethod {
   const auth = resolveAnthropicAuth(config.userConfig);

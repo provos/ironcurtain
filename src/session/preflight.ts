@@ -10,7 +10,7 @@
 
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { IronCurtainConfig } from '../config/types.js';
+import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
 import {
@@ -144,8 +144,15 @@ export async function checkDockerAvailable(execFileFn: ProbeExecFileFn = execFil
 /** `anthropicOAuthOnly` is only meaningful for goose: it lets the goose
  *  error message tell a tester that present OAuth credentials are unusable. */
 interface CredentialState {
-  credKind: 'oauth' | 'apikey' | null;
+  credKind: DockerAuthKind | null;
   anthropicOAuthOnly: boolean;
+}
+
+/** Human-readable label for a resolved auth kind, used in the preflight banner. */
+function authKindLabel(kind: DockerAuthKind): string {
+  if (kind === 'oauth') return 'OAuth';
+  if (kind === 'apikey-bearer') return 'Bearer token';
+  return 'API key';
 }
 
 async function detectCredentialState(
@@ -168,7 +175,7 @@ async function detectCredentialState(
 
   const auth = await detectAuthMethod(config, sources);
   if (auth.kind === 'none') return { credKind: null, anthropicOAuthOnly: false };
-  return { credKind: auth.kind === 'oauth' ? 'oauth' : 'apikey', anthropicOAuthOnly: false };
+  return { credKind: auth.kind, anthropicOAuthOnly: false };
 }
 
 /**
@@ -320,7 +327,7 @@ export function formatModeLine(preflight: PreflightResult): string {
 interface DockerAgentMessages {
   dockerUnavailable: (detailedMessage: string) => string;
   credentialsMissing: (anthropicOAuthOnly: boolean) => string;
-  successReason: (authKind: 'oauth' | 'apikey') => string;
+  successReason: (authKind: DockerAuthKind) => string;
 }
 
 async function resolveDockerAgent(
@@ -388,7 +395,7 @@ async function resolveExplicit(
       `--agent ${agent} requires Docker, but it is not available:\n\n${detailedMessage}\n\n` +
       'Please fix your Docker installation or use the builtin agent.',
     credentialsMissing: (oauthOnly) => credentialErrorMessageForExplicit(agent, config, oauthOnly),
-    successReason: (authKind) => `Explicit --agent selection (${authKind === 'oauth' ? 'OAuth' : 'API key'})`,
+    successReason: (authKind) => `Explicit --agent selection (${authKindLabel(authKind)})`,
   });
 }
 
@@ -415,6 +422,6 @@ async function resolveDefaultMode(
   return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, {
     dockerUnavailable: dockerUnavailableMessage,
     credentialsMissing: (oauthOnly) => credentialErrorMessageForPreferredMode(agent, config, oauthOnly),
-    successReason: (authKind) => `${preferredDockerAgent} (${authKind === 'oauth' ? 'OAuth' : 'API key'})`,
+    successReason: (authKind) => `${preferredDockerAgent} (${authKindLabel(authKind)})`,
   });
 }

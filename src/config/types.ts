@@ -1,6 +1,13 @@
 import type { ResolvedUserConfig } from './user-config.js';
 
 /**
+ * Auth kinds an adapter may receive. Subset of `AuthMethod['kind']` from
+ * `docker/oauth-credentials.ts` minus `'none'`: by the time an adapter is
+ * consulted, a credential has been resolved.
+ */
+export type DockerAuthKind = 'oauth' | 'apikey' | 'apikey-bearer';
+
+/**
  * Network access configuration for a sandboxed MCP server.
  *
  * Invariant: when `allowedDomains` is empty, no network access is permitted.
@@ -113,7 +120,7 @@ export interface IronCurtainConfig {
    * Adapters use this to choose between OAuth, API key, and bearer-token env vars.
    * `apikey-bearer` is the OpenRouter / Anthropic-compatible gateway path.
    */
-  dockerAuth?: { readonly kind: 'oauth' | 'apikey' | 'apikey-bearer' };
+  dockerAuth?: { readonly kind: DockerAuthKind };
   /**
    * Whether this is a PTY session. When true, the proxy requires
    * trusted input source ("mux-trusted-input") for auto-approval.

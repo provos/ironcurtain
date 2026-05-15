@@ -796,10 +796,10 @@ export interface AnthropicAuth {
 /**
  * Selects which Anthropic credential to use based on the resolved config.
  *
- * Precedence: if both are present we already throw at load time, so by the
- * time this runs at most one is set. Bearer wins over apikey only because
- * the throw happens upstream — the explicit check here is for clarity, not
- * conflict resolution.
+ * Mutual exclusion is enforced at config load (see `applyEnvOverrides`),
+ * so at most one field is set when this runs. The cascade order is
+ * defensive: if a caller constructs a `ResolvedUserConfig` directly
+ * without going through `applyEnvOverrides`, bearer takes precedence.
  */
 export function resolveAnthropicAuth(
   config: Pick<ResolvedUserConfig, 'anthropicApiKey' | 'anthropicAuthToken'>,

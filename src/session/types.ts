@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { IronCurtainConfig } from '../config/types.js';
+import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
@@ -155,7 +155,7 @@ export type SessionStatus = 'initializing' | 'ready' | 'processing' | 'closed';
  */
 export type SessionMode =
   | { readonly kind: 'builtin' }
-  | { readonly kind: 'docker'; readonly agent: AgentId; readonly authKind?: 'oauth' | 'apikey' };
+  | { readonly kind: 'docker'; readonly agent: AgentId; readonly authKind?: DockerAuthKind };
 
 /**
  * A single turn in the conversation. Captures what the user said,
@@ -507,7 +507,7 @@ export interface SessionOptions {
  * `--resume <id>`. See `SessionOptions.agentConversationId`.
  */
 export type DockerSessionOptions = SessionOptions & {
-  readonly mode: { readonly kind: 'docker'; readonly agent: AgentId; readonly authKind?: 'oauth' | 'apikey' };
+  readonly mode: { readonly kind: 'docker'; readonly agent: AgentId; readonly authKind?: DockerAuthKind };
   readonly agentConversationId: AgentConversationId;
 };
 

@@ -6,7 +6,7 @@
  * config format, system prompt injection, and output parsing.
  */
 
-import type { IronCurtainConfig } from '../config/types.js';
+import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import type { ProviderConfig } from './provider-config.js';
 import type { ServerListing } from '../types/server-listing.js';
 import type { AuthMethod } from './oauth-credentials.js';
@@ -240,7 +240,7 @@ export interface AgentAdapter {
    *     used for OpenRouter / LiteLLM / enterprise Anthropic-compatible
    *     gateways. `platform.claude.com` is dropped (gateways don't expose it).
    */
-  getProviders(authKind?: 'oauth' | 'apikey' | 'apikey-bearer'): readonly ProviderConfig[];
+  getProviders(authKind?: DockerAuthKind): readonly ProviderConfig[];
 
   /**
    * Constructs environment variables for the container.

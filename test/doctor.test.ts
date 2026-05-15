@@ -644,6 +644,41 @@ describe('runDoctorCommand', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Unit: checkAnthropicCredentials
+// ---------------------------------------------------------------------------
+
+describe('checkAnthropicCredentials', () => {
+  const baseConfig = buildConfig();
+
+  it('reports a bearer-token (gateway) credential as ok', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'apikey-bearer', token: 'sk-or-v1-test' });
+    const { checkAnthropicCredentials } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkAnthropicCredentials(baseConfig);
+    expect(r.status).toBe('ok');
+    expect(r.message).toMatch(/Bearer token set/);
+  });
+
+  it('reports an API key as ok', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'apikey', key: 'sk-ant-api03-test' });
+    const { checkAnthropicCredentials } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkAnthropicCredentials(baseConfig);
+    expect(r.status).toBe('ok');
+    expect(r.message).toMatch(/API key set/);
+  });
+
+  it('warns and lists all three credential options when none are configured', async () => {
+    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'none' });
+    const { checkAnthropicCredentials } = await import('../src/doctor/oauth-checks.js');
+    const r = await checkAnthropicCredentials(baseConfig);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/no credentials detected/);
+    expect(r.hint).toMatch(/ANTHROPIC_API_KEY/);
+    expect(r.hint).toMatch(/ANTHROPIC_AUTH_TOKEN/);
+    expect(r.hint).toMatch(/claude login/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Unit: checkOAuthRefresh
 // ---------------------------------------------------------------------------
 

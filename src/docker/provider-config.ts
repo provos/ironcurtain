@@ -306,13 +306,10 @@ export const claudePlatformOAuthProvider: ProviderConfig = {
  * chatter, which the gateway doesn't implement.
  */
 export const anthropicBearerProvider: ProviderConfig = {
-  host: 'api.anthropic.com',
+  ...anthropicOAuthProvider,
   displayName: 'Anthropic (Bearer)',
   allowedEndpoints: anthropicProvider.allowedEndpoints,
-  keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ant-or-ironcurtain-',
-  requestRewriter: stripServerSideTools,
-  rewriteEndpoints: ['/v1/messages'],
 };
 
 export const googleProvider: ProviderConfig = {
