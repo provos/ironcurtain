@@ -417,7 +417,11 @@ export const readOnlyCredentialSources: CredentialSources = {
  * expired OAuth tokens before falling back to API key auth.
  *
  * Priority:
- * 1. `IRONCURTAIN_DOCKER_AUTH=apikey` env var forces API key mode (skips OAuth + bearer)
+ * 1. `IRONCURTAIN_DOCKER_AUTH=apikey` env var skips OAuth detection and selects
+ *    the configured Anthropic credential (bearer-first, then api-key — see
+ *    `resolveAnthropicCredentialAuth`). The legacy `=apikey` name is preserved
+ *    for backward compatibility; use `=apikey-bearer` if you specifically need
+ *    to demote OAuth in favor of `ANTHROPIC_AUTH_TOKEN`.
  * 2. `IRONCURTAIN_DOCKER_AUTH=apikey-bearer` env var forces bearer mode
  *    (skips OAuth even when host has OAuth credentials — opt-in opt-out for
  *    OpenRouter / gateway users who also have `~/.claude/.credentials.json`)
@@ -430,9 +434,11 @@ export const readOnlyCredentialSources: CredentialSources = {
 export async function detectAuthMethod(config: IronCurtainConfig, sources?: CredentialSources): Promise<AuthMethod> {
   const s = sources ?? defaultSources;
 
-  // Allow explicit override to force API key mode
+  // Allow explicit override to skip OAuth detection. Selects the configured
+  // Anthropic credential (bearer-first, then api-key) — see
+  // `resolveAnthropicCredentialAuth` for the precedence rule.
   if (process.env.IRONCURTAIN_DOCKER_AUTH === 'apikey') {
-    logger.info('Docker auth override: forced API key mode via IRONCURTAIN_DOCKER_AUTH');
+    logger.info('Docker auth override: skipping OAuth detection via IRONCURTAIN_DOCKER_AUTH=apikey');
     return resolveAnthropicCredentialAuth(config);
   }
 
@@ -454,13 +460,17 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
   if (fileCreds) {
     if (!isTokenExpired(fileCreds)) {
       logger.info('Detected OAuth credentials from ~/.claude/.credentials.json');
+      warnIfBearerDemoted(config);
       return { kind: 'oauth', credentials: fileCreds, source: 'file' };
     }
 
     // Attempt refresh if refresh function is available
     if (s.refreshToken) {
       const refreshed = await tryRefreshFileCreds(fileCreds, s.refreshToken, s.saveToFile);
-      if (refreshed) return refreshed;
+      if (refreshed) {
+        warnIfBearerDemoted(config);
+        return refreshed;
+      }
     }
     logger.warn('OAuth token from credentials file is expired');
   }
@@ -470,6 +480,7 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
     const keychainResult = s.loadFromKeychainWithService?.() ?? toKeychainResult(s.loadFromKeychain());
     if (keychainResult) {
       if (!isTokenExpired(keychainResult.credentials)) {
+        warnIfBearerDemoted(config);
         return {
           kind: 'oauth',
           credentials: keychainResult.credentials,
@@ -481,7 +492,10 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
       // Attempt refresh if refresh function is available
       if (s.refreshToken) {
         const refreshed = await tryRefreshKeychainCreds(keychainResult, s.refreshToken, s.writeToKeychain);
-        if (refreshed) return refreshed;
+        if (refreshed) {
+          warnIfBearerDemoted(config);
+          return refreshed;
+        }
       }
       logger.warn('OAuth token from macOS Keychain is expired');
     }
@@ -498,6 +512,21 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
 function toKeychainResult(creds: OAuthCredentials | null): KeychainResult | null {
   if (!creds) return null;
   return { credentials: creds, serviceName: KEYCHAIN_SERVICE_NAMES[0] };
+}
+
+/**
+ * Emits a one-shot info log when OAuth wins detection despite the user also
+ * having `ANTHROPIC_AUTH_TOKEN` configured. Without this, OpenRouter / gateway
+ * users with stale `~/.claude/.credentials.json` would silently keep using
+ * OAuth — surfacing the precedence makes the override discoverable.
+ */
+function warnIfBearerDemoted(config: IronCurtainConfig): void {
+  if (config.userConfig.anthropicAuthToken) {
+    logger.info(
+      'OAuth credentials take precedence over ANTHROPIC_AUTH_TOKEN; ' +
+        'set IRONCURTAIN_DOCKER_AUTH=apikey-bearer to flip',
+    );
+  }
 }
 
 /**

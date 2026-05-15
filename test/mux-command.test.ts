@@ -286,6 +286,44 @@ describe('ironcurtain mux preflight integration', () => {
     expect(stderrText).toMatch(/ironcurtain mux requires Docker agent mode/);
   });
 
+  it('does NOT warn when auto-approve is enabled and only ANTHROPIC_AUTH_TOKEN (bearer) is configured', async () => {
+    // Regression guard for `emitAutoApproveWarning`: bearer auth is a valid
+    // credential for the Anthropic provider — `createLanguageModel` wires it
+    // through as `Authorization: Bearer ...`. The warning (and the 3s sleep)
+    // must be skipped when only the auth token is configured for an Anthropic
+    // auto-approve model.
+    const configWithBearerAutoApprove: IronCurtainConfig = {
+      ...mockConfig,
+      userConfig: {
+        ...mockConfig.userConfig,
+        autoApprove: { enabled: true, modelId: 'anthropic:claude-haiku-4-5' },
+        anthropicApiKey: '',
+        anthropicAuthToken: 'sk-or-v1-test-bearer',
+        googleApiKey: '',
+        openaiApiKey: '',
+      },
+    };
+    const configModule = await import('../src/config/index.js');
+    vi.mocked(configModule.loadConfig).mockReturnValue(configWithBearerAutoApprove);
+
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const resolveSessionMode = vi.fn().mockResolvedValue(makePreflightSuccess('claude-code'));
+    const createMuxApp = vi.fn(() => makeFakeMuxApp());
+
+    await muxMain([], {
+      resolveSessionMode,
+      createMuxApp,
+      skipNativeProbes: true,
+      sleep,
+    });
+
+    // The warning sleep is only invoked when `emitAutoApproveWarning` returns
+    // true. Bearer-mode must short-circuit it.
+    expect(sleep).not.toHaveBeenCalled();
+    const stderrText = stderr.lines.join('');
+    expect(stderrText).not.toMatch(/auto-approve is enabled but no API key/);
+  });
+
   it('uses the resolved preflight agent (not the raw --agent value) when constructing the MuxApp', async () => {
     // When --agent is omitted, the resolved agent must come from preflight
     // (driven by preferredDockerAgent), not from a hardcoded default.

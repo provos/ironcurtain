@@ -298,7 +298,8 @@ export async function prepareDockerInfrastructure(
     throw new Error(
       adapter.credentialHelpText ??
         'No credentials available for Docker session. ' +
-          'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
+          'Log in with `claude login` (OAuth), set ANTHROPIC_API_KEY, ' +
+          'or set ANTHROPIC_AUTH_TOKEN (OpenRouter / Anthropic-compatible gateway).',
     );
   }
   const authKind = authMethod.kind;

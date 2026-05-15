@@ -247,12 +247,22 @@ function credentialErrorMessageForExplicit(agentId: AgentId, config: IronCurtain
       `--agent goose requires an API key for provider "${provider}". ` +
       'Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY, ' +
       'or configure via `ironcurtain config`.';
+    const parts: string[] = [base];
     if (provider === 'anthropic' && oauthOnly) {
-      return `${base}\n\nOAuth credentials are not usable with goose; provider "anthropic" requires an API key.`;
+      parts.push('OAuth credentials are not usable with goose; provider "anthropic" requires an API key.');
     }
-    return base;
+    if (provider === 'anthropic' && config.userConfig.anthropicAuthToken) {
+      parts.push(
+        'Goose does not support `ANTHROPIC_AUTH_TOKEN` (Bearer/gateway auth); ' +
+          'use Claude Code or set `ANTHROPIC_API_KEY` directly.',
+      );
+    }
+    return parts.join('\n\n');
   }
-  return `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`;
+  return (
+    `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth), ` +
+    'set ANTHROPIC_API_KEY, or set ANTHROPIC_AUTH_TOKEN (OpenRouter / Anthropic-compatible gateway).'
+  );
 }
 
 function credentialErrorMessageForPreferredMode(
@@ -276,9 +286,17 @@ function credentialErrorMessageForPreferredMode(
       lines.push('');
       lines.push('OAuth credentials are not usable with goose; provider "anthropic" requires an API key.');
     }
+    if (provider === 'anthropic' && config.userConfig.anthropicAuthToken) {
+      lines.push('');
+      lines.push(
+        'Goose does not support `ANTHROPIC_AUTH_TOKEN` (Bearer/gateway auth); ' +
+          'use Claude Code or set `ANTHROPIC_API_KEY` directly.',
+      );
+    }
   } else {
     lines.push(
-      `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`,
+      `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth), ` +
+        'set ANTHROPIC_API_KEY, or set ANTHROPIC_AUTH_TOKEN (OpenRouter / Anthropic-compatible gateway).',
     );
   }
   lines.push('');

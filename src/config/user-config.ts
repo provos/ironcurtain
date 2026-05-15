@@ -764,9 +764,9 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
     anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN || config.anthropicAuthToken,
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
-    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL || config.anthropicBaseUrl,
-    openaiBaseUrl: process.env.OPENAI_BASE_URL || config.openaiBaseUrl,
-    googleBaseUrl: process.env.GOOGLE_API_BASE_URL || config.googleBaseUrl,
+    anthropicBaseUrl: validateBaseUrlEnv('ANTHROPIC_BASE_URL') ?? config.anthropicBaseUrl,
+    openaiBaseUrl: validateBaseUrlEnv('OPENAI_BASE_URL') ?? config.openaiBaseUrl,
+    googleBaseUrl: validateBaseUrlEnv('GOOGLE_API_BASE_URL') ?? config.googleBaseUrl,
   };
 
   if (result.anthropicApiKey && result.anthropicAuthToken) {
@@ -778,6 +778,24 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
   }
 
   return result;
+}
+
+/**
+ * Validates a base-URL environment variable using the same schema as the
+ * config file (`z.url()`). Returns the validated string when set, or
+ * `undefined` when the env var is unset/empty (callers fall back to the
+ * config-file value). Throws on malformed URLs so misconfiguration surfaces
+ * at config load instead of as an opaque fetch failure later.
+ */
+function validateBaseUrlEnv(envVarName: string): string | undefined {
+  const value = process.env[envVarName];
+  if (!value) return undefined;
+  const parsed = z.url().safeParse(value);
+  if (!parsed.success) {
+    const detail = parsed.error.issues[0]?.message ?? 'invalid URL';
+    throw new Error(`Invalid ${envVarName}: ${detail} (got: ${JSON.stringify(value)})`);
+  }
+  return parsed.data;
 }
 
 /**

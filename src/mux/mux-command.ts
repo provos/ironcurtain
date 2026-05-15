@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { getPtyRegistryDir } from '../config/paths.js';
-import type { ResolvedUserConfig } from '../config/user-config.js';
+import { resolveAnthropicAuth, type ResolvedUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 import { loadConfig } from '../config/index.js';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
@@ -98,6 +98,13 @@ function emitAutoApproveWarning(userConfig: ResolvedUserConfig): boolean {
   const { provider } = parseModelId(userConfig.autoApprove.modelId);
   const apiKey = resolveApiKeyForProvider(provider, userConfig);
   if (apiKey) return false;
+
+  // For Anthropic, ANTHROPIC_AUTH_TOKEN (bearer / gateway path) is also a
+  // valid credential — `createLanguageModel` is bearer-aware. Don't warn
+  // when only the auth token is set.
+  if (provider === 'anthropic' && resolveAnthropicAuth(userConfig).mode !== 'none') {
+    return false;
+  }
 
   process.stderr.write(
     chalk.yellow(

@@ -491,7 +491,38 @@ export function extractFromJsonResponse(body: Buffer, sessionId: import('../sess
   });
 }
 
+/**
+ * Throws if two provider entries share the same host (case-insensitive).
+ *
+ * The host map built inside `createMitmProxy` is last-write-wins, which would
+ * silently drop a provider on collision and break credential injection. This
+ * check forces the caller to surface the conflict instead.
+ */
+function assertUniqueProviderHosts(providers: readonly ProviderKeyMapping[]): void {
+  const seen = new Set<string>();
+  for (const { config } of providers) {
+    const host = config.host.toLowerCase();
+    if (seen.has(host)) {
+      throw new Error(
+        `createMitmProxy: duplicate provider host "${config.host}". ` +
+          'Each provider must have a unique host — the MITM proxy uses host as the routing key.',
+      );
+    }
+    seen.add(host);
+  }
+}
+
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
+  // Defensive invariant: the per-host provider lookup below is built by
+  // `Map.set()`, which is last-write-wins on duplicates. If two providers
+  // share the same host (case-insensitive), the first one is silently
+  // dropped — that breaks credential injection and endpoint filtering for
+  // whichever provider got overwritten. Today `getProviders()` only ever
+  // returns one variant per host (api-key / oauth / bearer are mutually
+  // exclusive), so this can't happen in production. The assertion guards
+  // against future drift if a caller assembles providers manually.
+  assertUniqueProviderHosts(options.providers);
+
   // Token stream extractor installation is gated on `tokenSessionId`.
   // This is a mutable per-proxy value that callers flip around each
   // active agent (see `setTokenSessionId` on the returned handle). When

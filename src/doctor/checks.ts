@@ -27,6 +27,7 @@ import {
   parseModelId,
   type ProviderId,
 } from '../config/model-provider.js';
+import { resolveAnthropicAuth } from '../config/user-config.js';
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
 import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
@@ -113,12 +114,12 @@ export async function checkDocker(
  *
  * Reuses the prior `dockerResult` from `checkDocker` so Docker is probed
  * exactly once per `doctor` run. Maps the (preferredMode × dockerResult ×
- * api-key-presence) tuple to a status:
+ * credential-presence) tuple to a status:
  *
- *   - preferredMode: 'docker' + Docker ok          -> ok
- *   - preferredMode: 'docker' + Docker unavailable -> fail (sessions will refuse to start)
- *   - preferredMode: 'builtin' + API key present   -> ok
- *   - preferredMode: 'builtin' + no API key        -> warn (sessions will fail to start by default)
+ *   - preferredMode: 'docker' + Docker ok                  -> ok
+ *   - preferredMode: 'docker' + Docker unavailable         -> fail (sessions will refuse to start)
+ *   - preferredMode: 'builtin' + API key OR bearer token   -> ok
+ *   - preferredMode: 'builtin' + no Anthropic credentials  -> warn (sessions will fail to start by default)
  */
 export function checkPreferredMode(config: IronCurtainConfig, dockerResult: CheckResult): CheckResult {
   const preferredMode = config.userConfig.preferredMode;
@@ -135,16 +136,17 @@ export function checkPreferredMode(config: IronCurtainConfig, dockerResult: Chec
     };
   }
 
-  // preferredMode === 'builtin'
-  const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
-  if (apiKey.length > 0) {
+  // preferredMode === 'builtin' — accept either an API key OR a bearer auth
+  // token (ANTHROPIC_AUTH_TOKEN). Both are valid credentials for builtin mode
+  // since `createLanguageModel` is bearer-aware.
+  if (resolveAnthropicAuth(config.userConfig).mode !== 'none') {
     return { name: 'Preferred mode', status: 'ok', message: 'builtin' };
   }
   return {
     name: 'Preferred mode',
     status: 'warn',
-    message: 'builtin, but no ANTHROPIC_API_KEY configured. Sessions will fail.',
-    hint: 'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
+    message: 'builtin, but no Anthropic credentials configured. Sessions will fail.',
+    hint: 'Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in your environment, or run `ironcurtain config`.',
   };
 }
 
@@ -535,7 +537,11 @@ export async function checkAgentApiRoundtrip(config: IronCurtainConfig): Promise
   const label = formatProviderLabel(provider);
   const name = `${label} API round-trip`;
   const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
-  if (apiKey.length === 0) {
+  // Bearer auth (ANTHROPIC_AUTH_TOKEN) is a valid credential for builtin mode
+  // — `createLanguageModel` wires it as `Authorization: Bearer <token>`. Fall
+  // through to the round-trip attempt in that case rather than skipping.
+  const hasBearer = provider === 'anthropic' && resolveAnthropicAuth(config.userConfig).mode === 'bearer';
+  if (apiKey.length === 0 && !hasBearer) {
     if (provider === 'anthropic' && (await detectAuthMethod(config, readOnlyCredentialSources)).kind === 'oauth') {
       return {
         name,

@@ -144,6 +144,13 @@ export async function runFirstStart(): Promise<void> {
   // gateway like OpenRouter or LiteLLM (ANTHROPIC_AUTH_TOKEN + optional
   // ANTHROPIC_BASE_URL). Don't warn about ANTHROPIC_API_KEY if the user
   // has the gateway path configured.
+  //
+  // Note: this is an env-only check used during first-start onboarding.
+  // Values stored in `~/.ironcurtain/config.json` are accepted by
+  // `resolveAnthropicAuth` at session start, so an empty env block here
+  // does not mean the user has no credential — only that they haven't
+  // exported one in the current shell. The downstream session preflight
+  // (`resolveSessionMode`) does the authoritative gate.
   const requiredProviders = getRequiredProviders();
   let allPresent = true;
   for (const provider of requiredProviders) {

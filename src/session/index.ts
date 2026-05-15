@@ -637,9 +637,9 @@ export function buildSessionConfig(
     if (!memoryLlmKey && config.userConfig.anthropicAuthToken) {
       logger.info(
         '[memory] LLM-backed memory enrichment disabled: ANTHROPIC_AUTH_TOKEN (bearer) ' +
-          'is not usable by the memory server. To enable dedup/compaction set ANTHROPIC_API_KEY ' +
-          'alongside the auth token, or configure `memory.llmApiKey` / `memory.llmBaseUrl` ' +
-          'explicitly. Basic memory storage and retrieval still work.',
+          'is not usable by the memory server. To enable dedup/compaction configure ' +
+          '`memory.llmApiKey` / `memory.llmBaseUrl` explicitly in ~/.ironcurtain/config.json. ' +
+          'Basic memory storage and retrieval still work.',
       );
     }
     sessionConfig.mcpServers[MEMORY_SERVER_NAME] = buildMemoryServerConfig({

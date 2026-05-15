@@ -313,6 +313,77 @@ describe('generateFakeKey', () => {
   });
 });
 
+describe('createMitmProxy duplicate-host invariant', () => {
+  let tempDir: string;
+  let ca: CertificateAuthority;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'mitm-proxy-dup-host-test-'));
+    ca = loadOrCreateCA(join(tempDir, 'ca'));
+  });
+
+  afterEach(() => {
+    if (tempDir && existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when two providers share the same host', () => {
+    // Regression guard: the MITM proxy's per-host provider map is
+    // last-write-wins. Two providers pointing at the same host would
+    // silently drop one of them, breaking credential injection for the
+    // overwritten provider. Surface the conflict instead.
+    const providerA: ProviderConfig = {
+      host: 'api.anthropic.com',
+      displayName: 'Anthropic A',
+      allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+      keyInjection: { type: 'header', headerName: 'x-api-key' },
+      fakeKeyPrefix: 'sk-a-',
+    };
+    const providerB: ProviderConfig = {
+      ...providerA,
+      displayName: 'Anthropic B',
+      keyInjection: { type: 'bearer' },
+      fakeKeyPrefix: 'sk-b-',
+    };
+
+    expect(() =>
+      createMitmProxy({
+        socketPath: join(tempDir, 'mitm-proxy.sock'),
+        ca,
+        providers: [
+          { config: providerA, fakeKey: 'sk-a-fake', realKey: 'sk-a-real' },
+          { config: providerB, fakeKey: 'sk-b-fake', realKey: 'sk-b-real' },
+        ],
+      }),
+    ).toThrow(/duplicate provider host/i);
+  });
+
+  it('treats hosts as case-insensitive when checking for duplicates', () => {
+    // Hostnames are case-insensitive per RFC 1035; the duplicate check
+    // must normalize before comparing so a varying-case spoof cannot
+    // sneak through.
+    const provider: ProviderConfig = {
+      host: 'api.example.com',
+      displayName: 'Example',
+      allowedEndpoints: [],
+      keyInjection: { type: 'header', headerName: 'x-api-key' },
+      fakeKeyPrefix: 'sk-',
+    };
+
+    expect(() =>
+      createMitmProxy({
+        socketPath: join(tempDir, 'mitm-proxy.sock'),
+        ca,
+        providers: [
+          { config: provider, fakeKey: 'a', realKey: 'A' },
+          { config: { ...provider, host: 'API.EXAMPLE.COM' }, fakeKey: 'b', realKey: 'B' },
+        ],
+      }),
+    ).toThrow(/duplicate provider host/i);
+  });
+});
+
 describe('MitmProxy', () => {
   let proxy: MitmProxy | undefined;
   let tempDir: string;
