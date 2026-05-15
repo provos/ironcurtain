@@ -29,6 +29,7 @@ import {
   claudePlatformProvider,
   anthropicOAuthProvider,
   claudePlatformOAuthProvider,
+  anthropicBearerProvider,
 } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import {
@@ -240,9 +241,15 @@ exit $STATUS
       return `${codeModePrompt}\n${dockerPrompt}`;
     },
 
-    getProviders(authKind?: 'oauth' | 'apikey'): readonly ProviderConfig[] {
+    getProviders(authKind?: 'oauth' | 'apikey' | 'apikey-bearer'): readonly ProviderConfig[] {
       if (authKind === 'oauth') {
         return [anthropicOAuthProvider, claudePlatformOAuthProvider];
+      }
+      if (authKind === 'apikey-bearer') {
+        // Gateway mode: drop platform.claude.com — OpenRouter / LiteLLM
+        // don't implement Anthropic's OAuth platform endpoints. Claude Code
+        // will skip those calls silently when the host is not reachable.
+        return [anthropicBearerProvider];
       }
       return [anthropicProvider, claudePlatformProvider];
     },
@@ -267,6 +274,14 @@ exit $STATUS
         // OAuth mode: pass fake token via Claude Code's native env var.
         // Claude Code reads CLAUDE_CODE_OAUTH_TOKEN as its highest-priority auth.
         env.CLAUDE_CODE_OAUTH_TOKEN = fakeKey;
+      } else if (config.dockerAuth?.kind === 'apikey-bearer') {
+        // Bearer mode (OpenRouter / Anthropic-compatible gateway): pass the
+        // fake bearer directly via Anthropic SDK's native auth-token env var.
+        // The SDK uses Bearer auth when ANTHROPIC_AUTH_TOKEN is set and skips
+        // x-api-key, so no apiKeyHelper is needed. We also clear
+        // ANTHROPIC_API_KEY so the SDK never sees both at once.
+        env.ANTHROPIC_AUTH_TOKEN = fakeKey;
+        env.ANTHROPIC_API_KEY = '';
       } else {
         // API key mode: pass the fake key via a non-Claude env var; apiKeyHelper
         // in settings.json echoes it so Claude Code never prompts for approval.

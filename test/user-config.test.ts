@@ -7,6 +7,7 @@ import {
   saveUserConfig,
   userConfigSchema,
   validateModelId,
+  resolveAnthropicAuth,
   USER_CONFIG_DEFAULTS,
 } from '../src/config/user-config.js';
 
@@ -14,6 +15,8 @@ import {
 const ENV_VARS_TO_ISOLATE = [
   'IRONCURTAIN_HOME',
   'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
   'GOOGLE_GENERATIVE_AI_API_KEY',
   'OPENAI_API_KEY',
 ] as const;
@@ -257,6 +260,75 @@ describe('loadUserConfig', () => {
     const config = loadUserConfig();
 
     expect(config.openaiApiKey).toBe('from-env');
+  });
+
+  // --- Anthropic auth token (OpenRouter / gateway path) ---
+
+  it('anthropicAuthToken defaults to empty string', () => {
+    const config = loadUserConfig();
+    expect(config.anthropicAuthToken).toBe('');
+  });
+
+  it('reads anthropicAuthToken from config file', () => {
+    writeConfigFile({ anthropicAuthToken: 'sk-or-v1-from-config' });
+    const config = loadUserConfig();
+    expect(config.anthropicAuthToken).toBe('sk-or-v1-from-config');
+  });
+
+  it('ANTHROPIC_AUTH_TOKEN env var overrides config anthropicAuthToken', () => {
+    writeConfigFile({ anthropicAuthToken: 'sk-or-v1-from-config' });
+    process.env.ANTHROPIC_AUTH_TOKEN = 'sk-or-v1-from-env';
+    const config = loadUserConfig();
+    expect(config.anthropicAuthToken).toBe('sk-or-v1-from-env');
+  });
+
+  it('does not backfill anthropicAuthToken into the config file', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+    loadUserConfig();
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.anthropicAuthToken).toBeUndefined();
+  });
+
+  it('throws at config-load time when BOTH anthropicApiKey and anthropicAuthToken are set in the file', () => {
+    writeConfigFile({
+      anthropicApiKey: 'sk-ant-api03-key',
+      anthropicAuthToken: 'sk-or-v1-token',
+    });
+    expect(() => loadUserConfig()).toThrow(/Both ANTHROPIC_API_KEY .* and ANTHROPIC_AUTH_TOKEN/);
+  });
+
+  it('throws when env vars contradict (api key in env, auth token in env)', () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-env-key';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'sk-or-v1-env-token';
+    expect(() => loadUserConfig()).toThrow(/Both ANTHROPIC_API_KEY .* and ANTHROPIC_AUTH_TOKEN/);
+  });
+
+  it('throws when api key is in config and auth token comes from env', () => {
+    writeConfigFile({ anthropicApiKey: 'sk-ant-api03-config' });
+    process.env.ANTHROPIC_AUTH_TOKEN = 'sk-or-v1-env';
+    expect(() => loadUserConfig()).toThrow(/Both ANTHROPIC_API_KEY .* and ANTHROPIC_AUTH_TOKEN/);
+  });
+
+  it('resolveAnthropicAuth returns apikey mode when only anthropicApiKey is set', () => {
+    const auth = resolveAnthropicAuth({ anthropicApiKey: 'sk-ant-api03-key', anthropicAuthToken: '' });
+    expect(auth).toEqual({ mode: 'apikey', credential: 'sk-ant-api03-key' });
+  });
+
+  it('resolveAnthropicAuth returns bearer mode when only anthropicAuthToken is set', () => {
+    const auth = resolveAnthropicAuth({ anthropicApiKey: '', anthropicAuthToken: 'sk-or-v1-token' });
+    expect(auth).toEqual({ mode: 'bearer', credential: 'sk-or-v1-token' });
+  });
+
+  it('resolveAnthropicAuth returns none when neither is set', () => {
+    const auth = resolveAnthropicAuth({ anthropicApiKey: '', anthropicAuthToken: '' });
+    expect(auth).toEqual({ mode: 'none', credential: '' });
+  });
+
+  it('resolveAnthropicAuth prefers bearer over apikey defensively (should never happen post-validation)', () => {
+    // Validation throws when both are set, so this is a defensive guard for
+    // callers that construct ResolvedUserConfig directly. Bearer wins.
+    const auth = resolveAnthropicAuth({ anthropicApiKey: 'sk-ant-api03-key', anthropicAuthToken: 'sk-or-v1-token' });
+    expect(auth).toEqual({ mode: 'bearer', credential: 'sk-or-v1-token' });
   });
 
   // --- Qualified model ID validation ---

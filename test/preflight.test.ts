@@ -46,6 +46,7 @@ function createTestConfig(
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       anthropicApiKey: overrides.anthropicApiKey ?? 'test-api-key',
+      anthropicAuthToken: '',
       googleApiKey: '',
       openaiApiKey: '',
       escalationTimeoutSeconds: 300,
@@ -269,8 +270,8 @@ describe('resolveSessionMode', () => {
         expect(isDockerAvailable).not.toHaveBeenCalled();
       });
 
-      it('throws without probing OAuth or Docker when no ANTHROPIC_API_KEY is set', async () => {
-        // Two cases that both hit the same `apiKey.length === 0` check before
+      it('throws without probing OAuth or Docker when no Anthropic credentials are set', async () => {
+        // Two cases that both hit the same `auth.mode === 'none'` check before
         // any auth or Docker probe. Spied sources prove the shortcut.
         const dockerSpy = vi.fn(dockerAvailable);
         const loadFromFile = vi.fn(() => null);
@@ -283,10 +284,33 @@ describe('resolveSessionMode', () => {
         });
 
         await expect(promise).rejects.toThrow(PreflightError);
-        await expect(promise).rejects.toThrow(/no ANTHROPIC_API_KEY/);
+        await expect(promise).rejects.toThrow(/no Anthropic credentials/);
         expect(dockerSpy).not.toHaveBeenCalled();
         expect(loadFromFile).not.toHaveBeenCalled();
         expect(loadFromKeychain).not.toHaveBeenCalled();
+      });
+
+      it('accepts ANTHROPIC_AUTH_TOKEN as a builtin credential (bearer / OpenRouter path)', async () => {
+        // Bearer-only configuration: no API key, no OAuth, just the auth token.
+        // Builtin preflight should treat it as a valid credential and skip the
+        // Docker probe entirely.
+        const dockerSpy = vi.fn(dockerAvailable);
+
+        const config = createTestConfig({ anthropicApiKey: '', preferredMode: 'builtin' });
+        const configWithBearer = {
+          ...config,
+          userConfig: { ...config.userConfig, anthropicAuthToken: 'sk-or-v1-test-token' },
+        };
+
+        const result = await resolveSessionMode({
+          config: configWithBearer,
+          isDockerAvailable: dockerSpy,
+          credentialSources: noOAuthSources,
+        });
+
+        expect(result.mode).toEqual({ kind: 'builtin' });
+        expect(result.reason).toBe('preferredMode = builtin');
+        expect(dockerSpy).not.toHaveBeenCalled();
       });
     });
 

@@ -627,6 +627,21 @@ export function buildSessionConfig(
       jobId: opts.jobId,
     });
     mkdirSync(dirname(dbPath), { recursive: true });
+    // The memory server reaches out to an LLM for semantic dedup / compaction.
+    // It needs a direct API key (Anthropic OpenAI-compatible endpoint or an
+    // explicit memory-specific key). A bearer auth-token (OpenRouter / gateway
+    // path) cannot be used: the memory server hits the LLM through its own
+    // HTTP client, not via the MITM proxy that swaps the host-side fake key.
+    // Surface this so the user knows why dedup looks degraded.
+    const memoryLlmKey = memoryConfig.llmApiKey ?? config.userConfig.anthropicApiKey;
+    if (!memoryLlmKey && config.userConfig.anthropicAuthToken) {
+      logger.info(
+        '[memory] LLM-backed memory enrichment disabled: ANTHROPIC_AUTH_TOKEN (bearer) ' +
+          'is not usable by the memory server. To enable dedup/compaction set ANTHROPIC_API_KEY ' +
+          'alongside the auth token, or configure `memory.llmApiKey` / `memory.llmBaseUrl` ' +
+          'explicitly. Basic memory storage and retrieval still work.',
+      );
+    }
     sessionConfig.mcpServers[MEMORY_SERVER_NAME] = buildMemoryServerConfig({
       dbPath,
       namespace: (opts.persona ?? opts.jobId) as string,

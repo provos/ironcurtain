@@ -1638,4 +1638,118 @@ describe('MitmProxy', () => {
       expect(rejected).toBe(true);
     });
   });
+
+  describe('Anthropic bearer (OpenRouter / gateway) key swap', () => {
+    it('swaps the fake bearer for the real one when forwarding to the gateway upstream', async () => {
+      // Drive the bearer-parameterized Anthropic provider with `upstreamTarget`
+      // pointing at a local HTTP server (simulates OpenRouter / LiteLLM).
+      // The server captures the Authorization header so we can assert the
+      // sentinel fake token was swapped for the real gateway token.
+      let receivedAuth: string | undefined;
+      const upstream = http.createServer((req, res) => {
+        receivedAuth = req.headers.authorization;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      const upstreamPort = await new Promise<number>((resolve) => {
+        upstream.listen(0, '127.0.0.1', () => {
+          resolve((upstream.address() as import('node:net').AddressInfo).port);
+        });
+      });
+
+      try {
+        const bearerAnthropic: ProviderConfig = {
+          host: 'api.anthropic.com',
+          displayName: 'Anthropic (Bearer)',
+          allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+          keyInjection: { type: 'bearer' },
+          fakeKeyPrefix: 'sk-ant-or-ironcurtain-',
+          upstreamTarget: {
+            hostname: '127.0.0.1',
+            port: upstreamPort,
+            pathPrefix: '',
+            useTls: false,
+          },
+        };
+        const fakeBearer = 'sk-ant-or-ironcurtain-FAKE';
+        const realBearer = 'sk-or-v1-real-gateway-token';
+
+        proxy = createMitmProxy({
+          socketPath,
+          ca,
+          providers: [{ config: bearerAnthropic, fakeKey: fakeBearer, realKey: realBearer }],
+        });
+        await proxy.start();
+
+        const { socket } = await sendConnect(socketPath, 'api.anthropic.com', 443);
+        expect(socket).not.toBeNull();
+
+        const response = await makeHttpsRequest(socket!, ca, 'api.anthropic.com', {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: {
+            authorization: `Bearer ${fakeBearer}`,
+            'content-type': 'application/json',
+          },
+          body: '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}',
+        });
+
+        // Upstream received the request — proves CONNECT → MITM → forward path worked.
+        expect(response.statusCode).toBe(200);
+        // The sentinel bearer was swapped for the real one, and NO x-api-key
+        // header was synthesized (that would mean bearer/header mode confusion).
+        expect(receivedAuth).toBe(`Bearer ${realBearer}`);
+      } finally {
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      }
+    });
+
+    it('passes a non-sentinel bearer through unchanged (agent own credential)', async () => {
+      // If the agent presents a Bearer token that does not match our sentinel
+      // prefix, the proxy must NOT swap. The agent's credential goes upstream
+      // verbatim. We assert this by checking the upstream-received header.
+      let receivedAuth: string | undefined;
+      const upstream = http.createServer((req, res) => {
+        receivedAuth = req.headers.authorization;
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+      });
+      const upstreamPort = await new Promise<number>((resolve) => {
+        upstream.listen(0, '127.0.0.1', () => {
+          resolve((upstream.address() as import('node:net').AddressInfo).port);
+        });
+      });
+
+      try {
+        const bearerAnthropic: ProviderConfig = {
+          host: 'api.anthropic.com',
+          displayName: 'Anthropic (Bearer)',
+          allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+          keyInjection: { type: 'bearer' },
+          fakeKeyPrefix: 'sk-ant-or-ironcurtain-',
+          upstreamTarget: { hostname: '127.0.0.1', port: upstreamPort, pathPrefix: '', useTls: false },
+        };
+
+        proxy = createMitmProxy({
+          socketPath,
+          ca,
+          providers: [{ config: bearerAnthropic, fakeKey: 'sk-ant-or-ironcurtain-FAKE', realKey: 'sk-or-v1-real' }],
+        });
+        await proxy.start();
+
+        const { socket } = await sendConnect(socketPath, 'api.anthropic.com', 443);
+        const response = await makeHttpsRequest(socket!, ca, 'api.anthropic.com', {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { authorization: 'Bearer agent-own-credential', 'content-type': 'application/json' },
+          body: '{}',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(receivedAuth).toBe('Bearer agent-own-credential');
+      } finally {
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      }
+    });
+  });
 });

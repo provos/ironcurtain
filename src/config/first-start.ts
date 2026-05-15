@@ -51,6 +51,19 @@ function handleCancel(value: unknown): void {
 }
 
 /**
+ * Strips credentials/query and renders only `scheme://host[:port]` for log display.
+ * Falls back to the raw string when not a parseable URL.
+ */
+function sanitizeBaseUrlForDisplay(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}`;
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * Extracts the set of unique providers required by the default model configuration.
  */
 function getRequiredProviders(): Set<ProviderId> {
@@ -126,20 +139,38 @@ export async function runFirstStart(): Promise<void> {
   p.note(constitutionText, 'Default Constitution');
 
   // Step 3: API key validation
+  // The Anthropic credential can be satisfied two ways: a direct API key
+  // (ANTHROPIC_API_KEY) or a bearer auth token for an Anthropic-compatible
+  // gateway like OpenRouter or LiteLLM (ANTHROPIC_AUTH_TOKEN + optional
+  // ANTHROPIC_BASE_URL). Don't warn about ANTHROPIC_API_KEY if the user
+  // has the gateway path configured.
   const requiredProviders = getRequiredProviders();
   let allPresent = true;
   for (const provider of requiredProviders) {
     const envVar = PROVIDER_ENV_VARS[provider];
     if (process.env[envVar]) {
       p.log.success(`API key configured for ${provider} (${envVar})`);
-    } else {
-      allPresent = false;
-      p.log.warn(
-        `Missing API key for ${provider}.\n` +
-          `  Set it via: export ${envVar}=<your-key>\n` +
-          `  Or add ${envVar}=<your-key> to a .env file in your project directory.`,
-      );
+      continue;
     }
+    if (provider === 'anthropic' && process.env.ANTHROPIC_AUTH_TOKEN) {
+      const baseUrlHint = process.env.ANTHROPIC_BASE_URL
+        ? ` (routing to ${sanitizeBaseUrlForDisplay(process.env.ANTHROPIC_BASE_URL)})`
+        : '';
+      p.log.success(`Anthropic auth token configured (ANTHROPIC_AUTH_TOKEN)${baseUrlHint}`);
+      continue;
+    }
+    allPresent = false;
+    const extraHint =
+      provider === 'anthropic'
+        ? '\n  Or for OpenRouter / Anthropic-compatible gateway:\n' +
+          '    export ANTHROPIC_AUTH_TOKEN=<token>\n' +
+          '    export ANTHROPIC_BASE_URL=<gateway-url>  # optional'
+        : '';
+    p.log.warn(
+      `Missing API key for ${provider}.\n` +
+        `  Set it via: export ${envVar}=<your-key>\n` +
+        `  Or add ${envVar}=<your-key> to a .env file in your project directory.${extraHint}`,
+    );
   }
   if (allPresent) {
     p.log.info('All required API keys are configured.');

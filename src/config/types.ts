@@ -110,9 +110,10 @@ export interface IronCurtainConfig {
   /**
    * Docker session authentication method.
    * Set by prepareDockerInfrastructure() after detecting credentials.
-   * Adapters use this to choose between OAuth and API key env vars.
+   * Adapters use this to choose between OAuth, API key, and bearer-token env vars.
+   * `apikey-bearer` is the OpenRouter / Anthropic-compatible gateway path.
    */
-  dockerAuth?: { readonly kind: 'oauth' | 'apikey' };
+  dockerAuth?: { readonly kind: 'oauth' | 'apikey' | 'apikey-bearer' };
   /**
    * Whether this is a PTY session. When true, the proxy requires
    * trusted input source ("mux-trusted-input") for auto-approval.

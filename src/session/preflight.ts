@@ -20,6 +20,7 @@ import {
   type CredentialSources,
 } from '../docker/oauth-credentials.js';
 import { resolveApiKeyForProvider } from '../config/model-provider.js';
+import { resolveAnthropicAuth } from '../config/user-config.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 
 const execFile = promisify(execFileCb);
@@ -292,12 +293,15 @@ function dockerUnavailableMessage(detailedMessage: string): string {
 function builtinNeedsApiKeyMessage(): string {
   return [
     'Cannot start IronCurtain.',
-    'preferredMode is "builtin" but no ANTHROPIC_API_KEY is configured.',
-    'Builtin mode talks to Anthropic directly using an API key — Claude OAuth credentials are not usable in builtin mode.',
+    'preferredMode is "builtin" but no Anthropic credentials are configured.',
+    'Builtin mode talks to Anthropic directly. Claude OAuth credentials are not usable in builtin mode.',
     '',
     ...formatModeRemediation('docker'),
     '',
-    'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
+    'Set one of the following in your environment, or run `ironcurtain config`:',
+    '  ANTHROPIC_API_KEY=<your-key>          (direct Anthropic access)',
+    '  ANTHROPIC_AUTH_TOKEN=<token>          (OpenRouter / Anthropic-compatible gateway)',
+    '  ANTHROPIC_BASE_URL=<url>              (optional, pair with the auth token)',
   ].join('\n');
 }
 
@@ -397,8 +401,10 @@ async function resolveDefaultMode(
 
   if (preferredMode === 'builtin') {
     // Fail before the Docker probe — fast feedback for missing keys.
-    const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
-    if (apiKey.length === 0) {
+    // Both `anthropicApiKey` and `anthropicAuthToken` (OpenRouter / gateway)
+    // are valid credentials for builtin mode; either satisfies the gate.
+    const auth = resolveAnthropicAuth(config.userConfig);
+    if (auth.mode === 'none') {
       throw new PreflightError(builtinNeedsApiKeyMessage());
     }
     return { mode: { kind: 'builtin' }, reason: 'preferredMode = builtin' };

@@ -96,13 +96,29 @@ Keys must match server names in `mcp-servers.json`. A warning is emitted for unm
 
 API keys can be set via environment variables (preferred) or in the config file. Environment variables take precedence.
 
-| Env Var                        | Config Field      | Description       |
-| ------------------------------ | ----------------- | ----------------- |
-| `ANTHROPIC_API_KEY`            | `anthropicApiKey` | Anthropic API key |
-| `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`    | Google AI API key |
-| `OPENAI_API_KEY`               | `openaiApiKey`    | OpenAI API key    |
+| Env Var                        | Config Field         | Description                                                                                       |
+| ------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`            | `anthropicApiKey`    | Anthropic API key (direct, `x-api-key` header)                                                    |
+| `ANTHROPIC_AUTH_TOKEN`         | `anthropicAuthToken` | Anthropic-compatible bearer token (OpenRouter / LiteLLM / enterprise gateway; sends `Bearer ...`) |
+| `ANTHROPIC_BASE_URL`           | `anthropicBaseUrl`   | Override the Anthropic upstream endpoint (typically paired with the auth token)                   |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`       | Google AI API key                                                                                 |
+| `OPENAI_API_KEY`               | `openaiApiKey`       | OpenAI API key                                                                                    |
 
-In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
+`anthropicApiKey` and `anthropicAuthToken` are mutually exclusive. Setting both (in any combination of config + env) fails at load time with a clear error — the Anthropic SDK rejects the combination at request time anyway.
+
+In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode. Set `IRONCURTAIN_DOCKER_AUTH=apikey-bearer` to force the bearer-token (gateway) path even when OAuth credentials are present — needed when you want to route through OpenRouter / a gateway despite having `claude login` configured.
+
+### OpenRouter / Enterprise gateway
+
+To route Anthropic traffic through OpenRouter, LiteLLM, or any Anthropic-compatible gateway:
+
+```bash
+export ANTHROPIC_AUTH_TOKEN="sk-or-v1-..."
+export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"   # optional; gateway-dependent
+ironcurtain start "your task"
+```
+
+Works in both Code Mode (builtin agent) and Docker Agent Mode (Claude Code). In Docker mode, the host-side MITM proxy swaps the in-container fake bearer for the real one before forwarding; the container never sees the real token. Note that the memory MCP server's LLM-backed dedup/compaction features require a direct `ANTHROPIC_API_KEY` (the memory server hits Anthropic outside the proxy and cannot use the gateway token); basic memory storage still works without it.
 
 ## Memory
 

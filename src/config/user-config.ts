@@ -236,6 +236,14 @@ export const userConfigSchema = z.object({
   policyModelId: qualifiedModelId.optional(),
   prefilterModelId: qualifiedModelId.optional(),
   anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
+  /**
+   * Anthropic-compatible bearer auth token. When set, IronCurtain talks
+   * to Anthropic via `Authorization: Bearer <token>` instead of the
+   * `x-api-key` header — the path used by OpenRouter and other gateways.
+   * Mutually exclusive with `anthropicApiKey`; setting both is rejected
+   * at config-load time. See `resolveAnthropicAuth()`.
+   */
+  anthropicAuthToken: z.string().min(1, 'anthropicAuthToken must be non-empty').optional(),
   googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
   openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
   anthropicBaseUrl: z.url().optional(),
@@ -341,6 +349,7 @@ export interface ResolvedUserConfig {
   readonly policyModelId: string;
   readonly prefilterModelId: string;
   readonly anthropicApiKey: string;
+  readonly anthropicAuthToken: string;
   readonly googleApiKey: string;
   readonly openaiApiKey: string;
   readonly anthropicBaseUrl: string;
@@ -376,6 +385,7 @@ const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 /** Fields that must never be backfilled into the config file. */
 const SENSITIVE_FIELDS = new Set([
   'anthropicApiKey',
+  'anthropicAuthToken',
   'googleApiKey',
   'openaiApiKey',
   'serverCredentials',
@@ -643,6 +653,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
     prefilterModelId: config.prefilterModelId ?? USER_CONFIG_DEFAULTS.prefilterModelId,
     anthropicApiKey: config.anthropicApiKey ?? '',
+    anthropicAuthToken: config.anthropicAuthToken ?? '',
     googleApiKey: config.googleApiKey ?? '',
     openaiApiKey: config.openaiApiKey ?? '',
     anthropicBaseUrl: config.anthropicBaseUrl ?? '',
@@ -739,17 +750,67 @@ function resolveSignalFromUserConfig(
 /**
  * Applies environment variable overrides for all provider API keys.
  * Each provider's standard env var takes precedence over config file values.
+ *
+ * Also validates the Anthropic credential precedence rule: setting both
+ * `ANTHROPIC_API_KEY` (or `anthropicApiKey`) AND `ANTHROPIC_AUTH_TOKEN`
+ * (or `anthropicAuthToken`) is a configuration error — the SDK rejects
+ * the combination at request time anyway, but the user-facing error is
+ * clearer when raised at config-load time.
  */
 function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
-  return {
+  const result: ResolvedUserConfig = {
     ...config,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || config.anthropicApiKey,
+    anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN || config.anthropicAuthToken,
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
     anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL || config.anthropicBaseUrl,
     openaiBaseUrl: process.env.OPENAI_BASE_URL || config.openaiBaseUrl,
     googleBaseUrl: process.env.GOOGLE_API_BASE_URL || config.googleBaseUrl,
   };
+
+  if (result.anthropicApiKey && result.anthropicAuthToken) {
+    throw new Error(
+      'Both ANTHROPIC_API_KEY (anthropicApiKey) and ANTHROPIC_AUTH_TOKEN (anthropicAuthToken) are set. ' +
+        'Pick exactly one: an API key for direct Anthropic access, or an auth token for ' +
+        'an Anthropic-compatible gateway (OpenRouter, LiteLLM, enterprise proxy, etc.).',
+    );
+  }
+
+  return result;
+}
+
+/**
+ * Resolved Anthropic auth selection.
+ *
+ * - `apikey`: use the `x-api-key` header path with the configured Anthropic API key.
+ * - `bearer`: use the `Authorization: Bearer <token>` path with the configured
+ *   `anthropicAuthToken`. This is the OpenRouter / LiteLLM / enterprise-gateway path.
+ * - `none`: no Anthropic credential configured.
+ */
+export interface AnthropicAuth {
+  readonly mode: 'apikey' | 'bearer' | 'none';
+  readonly credential: string;
+}
+
+/**
+ * Selects which Anthropic credential to use based on the resolved config.
+ *
+ * Precedence: if both are present we already throw at load time, so by the
+ * time this runs at most one is set. Bearer wins over apikey only because
+ * the throw happens upstream — the explicit check here is for clarity, not
+ * conflict resolution.
+ */
+export function resolveAnthropicAuth(
+  config: Pick<ResolvedUserConfig, 'anthropicApiKey' | 'anthropicAuthToken'>,
+): AnthropicAuth {
+  if (config.anthropicAuthToken) {
+    return { mode: 'bearer', credential: config.anthropicAuthToken };
+  }
+  if (config.anthropicApiKey) {
+    return { mode: 'apikey', credential: config.anthropicApiKey };
+  }
+  return { mode: 'none', credential: '' };
 }
 
 /**

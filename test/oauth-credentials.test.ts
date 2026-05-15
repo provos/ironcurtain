@@ -42,6 +42,7 @@ function makeConfig(overrides?: Partial<IronCurtainConfig['userConfig']>): IronC
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       anthropicApiKey: '',
+      anthropicAuthToken: '',
       googleApiKey: '',
       openaiApiKey: '',
       escalationTimeoutSeconds: 300,
@@ -473,6 +474,65 @@ describe('detectAuthMethod', () => {
       expect(result.keychainServiceName).toBe('Claude Code');
     }
   });
+
+  // --- Bearer-token (OpenRouter / Anthropic-compatible gateway) ---
+
+  it('returns apikey-bearer when only anthropicAuthToken is configured', async () => {
+    const sources = makeSources({});
+    const config = makeConfig({ anthropicApiKey: '', anthropicAuthToken: 'sk-or-v1-gateway' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey-bearer');
+    if (result.kind === 'apikey-bearer') {
+      expect(result.token).toBe('sk-or-v1-gateway');
+    }
+  });
+
+  it('prefers OAuth credentials over anthropicAuthToken by default', async () => {
+    // OpenRouter user who also happens to have `claude login` credentials.
+    // Without the explicit `IRONCURTAIN_DOCKER_AUTH=apikey-bearer` opt-in,
+    // OAuth wins (this is the documented behavior).
+    const sources = makeSources({ loadFromFile: () => validCreds() });
+    const config = makeConfig({ anthropicAuthToken: 'sk-or-v1-gateway' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('oauth');
+  });
+
+  it('IRONCURTAIN_DOCKER_AUTH=apikey-bearer demotes OAuth when bearer token is configured', async () => {
+    process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey-bearer';
+    const sources = makeSources({ loadFromFile: () => validCreds() });
+    const config = makeConfig({ anthropicAuthToken: 'sk-or-v1-gateway' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey-bearer');
+    if (result.kind === 'apikey-bearer') {
+      expect(result.token).toBe('sk-or-v1-gateway');
+    }
+  });
+
+  it('IRONCURTAIN_DOCKER_AUTH=apikey-bearer falls back to default detection when no bearer token is set', async () => {
+    // Override is requested but the user has no auth token to fulfill it.
+    // We should fall through to the normal OAuth-then-apikey detection.
+    process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey-bearer';
+    const sources = makeSources({ loadFromFile: () => validCreds() });
+    const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-fallback' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('oauth');
+  });
+
+  it('IRONCURTAIN_DOCKER_AUTH=apikey override picks apikey-bearer over apikey when both are conceptually available', async () => {
+    // With `apikey` override, OAuth is skipped — but the configured
+    // Anthropic credential is still selected. Bearer wins over apikey
+    // (validation prevents both being set in real configs).
+    process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey';
+    const sources = makeSources({ loadFromFile: () => validCreds() });
+    const config = makeConfig({ anthropicApiKey: '', anthropicAuthToken: 'sk-or-v1-gateway' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey-bearer');
+  });
 });
 
 // --- extractFromKeychain ---
@@ -617,6 +677,42 @@ describe('Claude Code adapter OAuth support', () => {
     const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-api03-ironcurtain-FAKE']]);
     const env = claudeCodeAdapter.buildEnv(config, fakeKeys);
     expect(env.IRONCURTAIN_API_KEY).toBe('sk-ant-api03-ironcurtain-FAKE');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  // --- Bearer-token (OpenRouter / Anthropic-compatible gateway) ---
+
+  it('returns the bearer-parameterized Anthropic provider when authKind is apikey-bearer', async () => {
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
+    const providers = claudeCodeAdapter.getProviders('apikey-bearer');
+
+    // Single provider: gateway doesn't implement platform.claude.com endpoints.
+    expect(providers).toHaveLength(1);
+    expect(providers[0].host).toBe('api.anthropic.com');
+    expect(providers[0].displayName).toBe('Anthropic (Bearer)');
+    expect(providers[0].keyInjection).toEqual({ type: 'bearer' });
+    // Distinct fake-key prefix so audit logs identify the gateway path.
+    expect(providers[0].fakeKeyPrefix).toBe('sk-ant-or-ironcurtain-');
+  });
+
+  it('sets ANTHROPIC_AUTH_TOKEN and clears ANTHROPIC_API_KEY in apikey-bearer mode', async () => {
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
+    const config = {
+      dockerAuth: { kind: 'apikey-bearer' as const },
+      userConfig: { anthropicApiKey: '', anthropicAuthToken: 'sk-or-v1-token' },
+    } as unknown as IronCurtainConfig;
+
+    const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-or-ironcurtain-FAKE']]);
+    const env = claudeCodeAdapter.buildEnv(config, fakeKeys);
+
+    // The container-side SDK reads ANTHROPIC_AUTH_TOKEN and sends Bearer auth.
+    // ANTHROPIC_API_KEY is explicitly cleared so the SDK doesn't see both
+    // (the @anthropic-ai/sdk rejects that combination).
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-ant-or-ironcurtain-FAKE');
+    expect(env.ANTHROPIC_API_KEY).toBe('');
+    expect(env.IRONCURTAIN_API_KEY).toBeUndefined();
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
 });
