@@ -38,7 +38,6 @@ function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): Reso
     agentModelId: 'anthropic:claude-sonnet-4-6',
     policyModelId: 'anthropic:claude-sonnet-4-6',
     anthropicApiKey: 'test-anthropic-key',
-    anthropicAuthToken: '',
     googleApiKey: 'test-google-key',
     openaiApiKey: 'test-openai-key',
     anthropicBaseUrl: '',
@@ -214,55 +213,6 @@ describe('createLanguageModel', () => {
       if (original) process.env.HTTPS_PROXY = original;
       else delete process.env.HTTPS_PROXY;
     }
-  });
-
-  it('passes authToken (not apiKey) to Anthropic in bearer mode', async () => {
-    // When anthropicAuthToken is set, model construction should switch to
-    // the bearer path: authToken populated, apiKey unset. The Anthropic SDK
-    // rejects passing both — this is how OpenRouter / LiteLLM are wired in.
-    const config = createTestUserConfig({
-      anthropicApiKey: '',
-      anthropicAuthToken: 'sk-or-v1-bearer-token',
-      anthropicBaseUrl: 'https://openrouter.ai/api/v1',
-    });
-    await createLanguageModel('anthropic:claude-sonnet-4-6', config);
-
-    const { createAnthropic } = await import('@ai-sdk/anthropic');
-    const lastCall = (createAnthropic as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1);
-    expect(lastCall).toBeDefined();
-    const opts = lastCall![0] as { apiKey?: unknown; authToken?: unknown; baseURL?: unknown };
-    expect(opts.authToken).toBe('sk-or-v1-bearer-token');
-    expect(opts.apiKey).toBeUndefined();
-    expect(opts.baseURL).toBe('https://openrouter.ai/api/v1');
-  });
-
-  it('passes apiKey (not authToken) to Anthropic in api-key mode', async () => {
-    const config = createTestUserConfig({
-      anthropicApiKey: 'sk-ant-api03-key',
-      anthropicAuthToken: '',
-    });
-    await createLanguageModel('anthropic:claude-sonnet-4-6', config);
-
-    const { createAnthropic } = await import('@ai-sdk/anthropic');
-    const lastCall = (createAnthropic as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1);
-    const opts = lastCall![0] as { apiKey?: unknown; authToken?: unknown };
-    expect(opts.apiKey).toBe('sk-ant-api03-key');
-    expect(opts.authToken).toBeUndefined();
-  });
-
-  it('ignores authToken for non-Anthropic providers', async () => {
-    // Bearer-mode is Anthropic-only. Google/OpenAI calls must not see authToken.
-    const config = createTestUserConfig({
-      anthropicApiKey: '',
-      anthropicAuthToken: 'sk-or-v1-token',
-    });
-    await createLanguageModel('openai:gpt-4o', config);
-
-    const { createOpenAI } = await import('@ai-sdk/openai');
-    const lastCall = (createOpenAI as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1);
-    const opts = lastCall![0] as { apiKey?: unknown; authToken?: unknown };
-    expect(opts.apiKey).toBe('test-openai-key');
-    expect(opts.authToken).toBeUndefined();
   });
 
   it('omits proxy fetch when no proxy env vars are set', async () => {

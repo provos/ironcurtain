@@ -298,8 +298,7 @@ export async function prepareDockerInfrastructure(
     throw new Error(
       adapter.credentialHelpText ??
         'No credentials available for Docker session. ' +
-          'Log in with `claude login` (OAuth), set ANTHROPIC_API_KEY, ' +
-          'or set ANTHROPIC_AUTH_TOKEN (OpenRouter / Anthropic-compatible gateway).',
+          'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
     );
   }
   const authKind = authMethod.kind;
@@ -342,15 +341,10 @@ export async function prepareDockerInfrastructure(
   const ca = loadOrCreateCA(caDir);
 
   // Generate fake keys and build provider key mappings.
-  // - OAuth mode: bearer-based providers, OAuth access token as the real credential.
-  // - apikey-bearer mode (OpenRouter / gateway): bearer-based providers, the
-  //   configured `anthropicAuthToken` as the real credential. No token refresh
-  //   (gateway tokens are static).
-  // - apikey mode: header-based providers, the configured API key.
+  // In OAuth mode, use bearer-based providers and the OAuth access token as the real key.
   // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
   // reuse the same fake key so a single container token authenticates against all hosts.
   const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
-  const bearerAuthToken = authMethod.kind === 'apikey-bearer' ? authMethod.token : undefined;
   const tokenManagerKeychainDeps =
     authMethod.kind === 'oauth' && authMethod.source === 'keychain'
       ? { writeToKeychain, keychainServiceName: authMethod.keychainServiceName }
@@ -378,10 +372,8 @@ export async function prepareDockerInfrastructure(
     }
     fakeKeys.set(providerConfig.host, fakeKey);
 
-    const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken, bearerAuthToken);
-    // Attach the token manager only to Anthropic hosts (the ones using OAuth).
-    // Bearer-token mode (apikey-bearer) intentionally has no token manager:
-    // gateway tokens are static, not refreshable via Anthropic's OAuth endpoint.
+    const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);
+    // Attach the token manager only to Anthropic hosts (the ones using OAuth)
     const hostTokenManager = tokenManager && ANTHROPIC_HOSTS.has(providerConfig.host) ? tokenManager : undefined;
     providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
   }
@@ -983,26 +975,12 @@ async function checkInternalNetworkConnectivity(
 /**
  * Resolves the real credential for a provider host.
  *
- * Precedence for Anthropic hosts:
- *   1. OAuth access token (when present) — the canonical `claude login` path.
- *   2. Bearer auth token (when present) — the OpenRouter / gateway path
- *      driven by `anthropicAuthToken`.
- *   3. API key from `anthropicApiKey`.
- *
- * Non-Anthropic hosts always fall back to their per-provider API key.
- * OAuth and bearer auth tokens are mutually exclusive in practice
- * (config-load validation rejects api-key + auth-token; OAuth is detected
- * separately and wins for Anthropic), so the layered fallthrough is safe.
+ * For Anthropic hosts in OAuth mode, uses the OAuth access token.
+ * For all other cases, falls back to the API key from config.
  */
-function resolveRealKey(
-  host: string,
-  config: IronCurtainConfig,
-  oauthAccessToken: string | undefined,
-  bearerAuthToken: string | undefined,
-): string {
-  if (ANTHROPIC_HOSTS.has(host)) {
-    if (oauthAccessToken) return oauthAccessToken;
-    if (bearerAuthToken) return bearerAuthToken;
+function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToken: string | undefined): string {
+  if (oauthAccessToken && ANTHROPIC_HOSTS.has(host)) {
+    return oauthAccessToken;
   }
 
   let key: string;

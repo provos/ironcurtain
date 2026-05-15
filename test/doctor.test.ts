@@ -113,7 +113,6 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
     policyModelId: 'anthropic:claude-sonnet-4-6',
     prefilterModelId: 'anthropic:claude-haiku-4-5',
     anthropicApiKey: '',
-    anthropicAuthToken: '',
     googleApiKey: '',
     openaiApiKey: '',
     anthropicBaseUrl: '',
@@ -245,31 +244,14 @@ describe('checkPreferredMode', () => {
   it('preferredMode=builtin + no API key -> warn (warn alone does not fail doctor)', () => {
     const r = checkPreferredMode(configWithMode('builtin', ''), dockerOk);
     expect(r.status).toBe('warn');
-    expect(r.message).toMatch(/no Anthropic credentials/);
-    expect(r.hint).toMatch(/ANTHROPIC_AUTH_TOKEN/);
+    expect(r.message).toMatch(/no ANTHROPIC_API_KEY/);
+    expect(r.hint).toMatch(/ANTHROPIC_API_KEY/);
   });
 
   it('preferredMode=builtin status is independent of Docker availability', () => {
     // dockerWarn must not turn a builtin-mode user's status into fail.
     const r = checkPreferredMode(configWithMode('builtin', 'sk-test'), dockerWarn);
     expect(r.status).toBe('ok');
-  });
-
-  it('preferredMode=builtin + bearer auth token (no API key) -> ok', () => {
-    // Regression guard: `createLanguageModel` accepts ANTHROPIC_AUTH_TOKEN
-    // for builtin mode. Don't false-warn just because anthropicApiKey is empty.
-    const base = buildConfig();
-    const cfg = buildConfig({
-      userConfig: {
-        ...base.userConfig,
-        preferredMode: 'builtin',
-        anthropicApiKey: '',
-        anthropicAuthToken: 'sk-or-v1-test-bearer',
-      },
-    });
-    const r = checkPreferredMode(cfg, dockerOk);
-    expect(r.status).toBe('ok');
-    expect(r.message).toBe('builtin');
   });
 });
 
@@ -662,41 +644,6 @@ describe('runDoctorCommand', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Unit: checkAnthropicCredentials
-// ---------------------------------------------------------------------------
-
-describe('checkAnthropicCredentials', () => {
-  const baseConfig = buildConfig();
-
-  it('reports a bearer-token (gateway) credential as ok', async () => {
-    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'apikey-bearer', token: 'sk-or-v1-test' });
-    const { checkAnthropicCredentials } = await import('../src/doctor/oauth-checks.js');
-    const r = await checkAnthropicCredentials(baseConfig);
-    expect(r.status).toBe('ok');
-    expect(r.message).toMatch(/Bearer token set/);
-  });
-
-  it('reports an API key as ok', async () => {
-    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'apikey', key: 'sk-ant-api03-test' });
-    const { checkAnthropicCredentials } = await import('../src/doctor/oauth-checks.js');
-    const r = await checkAnthropicCredentials(baseConfig);
-    expect(r.status).toBe('ok');
-    expect(r.message).toMatch(/API key set/);
-  });
-
-  it('warns and lists all three credential options when none are configured', async () => {
-    vi.mocked(detectAuthMethod).mockResolvedValueOnce({ kind: 'none' });
-    const { checkAnthropicCredentials } = await import('../src/doctor/oauth-checks.js');
-    const r = await checkAnthropicCredentials(baseConfig);
-    expect(r.status).toBe('warn');
-    expect(r.message).toMatch(/no credentials detected/);
-    expect(r.hint).toMatch(/ANTHROPIC_API_KEY/);
-    expect(r.hint).toMatch(/ANTHROPIC_AUTH_TOKEN/);
-    expect(r.hint).toMatch(/claude login/);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Unit: checkOAuthRefresh
 // ---------------------------------------------------------------------------
 
@@ -849,27 +796,6 @@ describe('checkAgentApiRoundtrip', () => {
     };
     expect(callArgs.abortSignal).toBeInstanceOf(AbortSignal);
     expect(callArgs.maxRetries).toBe(0);
-  });
-
-  it('attempts a round-trip for Anthropic when only a bearer auth token is configured', async () => {
-    // Regression guard: bearer mode (OpenRouter / gateway) is wired through
-    // `createLanguageModel` — the round-trip must NOT skip just because
-    // `anthropicApiKey` is empty.
-    vi.mocked(createLanguageModel).mockResolvedValueOnce(fakeModel);
-    vi.mocked(generateText).mockResolvedValueOnce({} as never);
-    const base = buildConfig();
-    const bearerConfig = buildConfig({
-      agentModelId: 'anthropic:claude-sonnet-4-6',
-      userConfig: {
-        ...base.userConfig,
-        anthropicApiKey: '',
-        anthropicAuthToken: 'sk-or-v1-test-bearer',
-      },
-    });
-    const { checkAgentApiRoundtrip } = await import('../src/doctor/checks.js');
-    const r = await checkAgentApiRoundtrip(bearerConfig);
-    expect(r.status).toBe('ok');
-    expect(generateText).toHaveBeenCalled();
   });
 });
 

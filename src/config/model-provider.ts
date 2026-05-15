@@ -16,7 +16,6 @@
 
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { ResolvedUserConfig } from './user-config.js';
-import { resolveAnthropicAuth } from './user-config.js';
 
 /**
  * Returns a proxy-aware fetch function if HTTPS_PROXY or HTTP_PROXY is set.
@@ -97,39 +96,20 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
 /**
  * Creates a LanguageModel from a qualified model ID and user config.
  *
- * Resolves the API key (or bearer auth token, for Anthropic-compatible
- * gateways) from config based on the model's provider, then delegates to
- * createLanguageModelFromEnv().
+ * Resolves the API key from config based on the model's provider,
+ * then delegates to createLanguageModelFromEnv().
  *
  * @param qualifiedId - Model specifier like "anthropic:claude-sonnet-4-6"
- * @param config - Resolved user config for credential lookup
+ * @param config - Resolved user config for API key lookup
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
 export async function createLanguageModel(qualifiedId: string, config: ResolvedUserConfig): Promise<LanguageModelV3> {
   const { provider } = parseModelId(qualifiedId);
-  const baseURL = resolveBaseUrlForProvider(provider, config);
-
-  if (provider === 'anthropic') {
-    const auth = resolveAnthropicAuth(config);
-    if (auth.mode === 'bearer') {
-      return createLanguageModelFromEnv(qualifiedId, '', baseURL, { authToken: auth.credential });
-    }
-    return createLanguageModelFromEnv(qualifiedId, auth.credential, baseURL);
-  }
-
-  return createLanguageModelFromEnv(qualifiedId, resolveApiKeyForProvider(provider, config), baseURL);
-}
-
-/**
- * Optional auth overrides for {@link createLanguageModelFromEnv}.
- *
- * `authToken` selects the Anthropic SDK's bearer path (`Authorization:
- * Bearer <token>`) instead of the default `x-api-key` header path. This
- * is the OpenRouter / LiteLLM / enterprise-gateway path. Only honored
- * when the provider is `anthropic`; ignored for OpenAI/Google.
- */
-export interface ModelAuthOverrides {
-  readonly authToken?: string;
+  return createLanguageModelFromEnv(
+    qualifiedId,
+    resolveApiKeyForProvider(provider, config),
+    resolveBaseUrlForProvider(provider, config),
+  );
 }
 
 /**
@@ -141,15 +121,12 @@ export interface ModelAuthOverrides {
  *
  * @param qualifiedId - Model specifier like "anthropic:claude-haiku-4-5"
  * @param apiKey - Explicit API key for the model's provider (empty string uses env/default)
- * @param baseURL - Optional base URL override for the provider endpoint
- * @param auth - Optional auth overrides (currently only `authToken` for Anthropic bearer mode)
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
 export async function createLanguageModelFromEnv(
   qualifiedId: string,
   apiKey: string,
   baseURL?: string,
-  auth?: ModelAuthOverrides,
 ): Promise<LanguageModelV3> {
   const { provider, modelId } = parseModelId(qualifiedId);
   const key = apiKey || undefined;
@@ -159,12 +136,6 @@ export async function createLanguageModelFromEnv(
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      // `@ai-sdk/anthropic` accepts EITHER apiKey OR authToken and throws
-      // when both are set. We've already enforced mutual exclusion at
-      // config-load time, so passing exactly one of `key`/`authToken` is safe.
-      if (auth?.authToken) {
-        return createAnthropic({ authToken: auth.authToken, baseURL: url, fetch })(modelId);
-      }
       return createAnthropic({ apiKey: key, baseURL: url, fetch })(modelId);
     }
     case 'google': {

@@ -17,7 +17,6 @@ import { homedir, platform, userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { IronCurtainConfig } from '../config/types.js';
-import { resolveAnthropicAuth } from '../config/user-config.js';
 import * as logger from '../logger.js';
 
 /** OAuth credentials from Claude Code's credential store. */
@@ -46,14 +45,6 @@ export type AuthMethod =
       readonly keychainServiceName: string;
     }
   | { readonly kind: 'apikey'; readonly key: string }
-  /**
-   * Bearer auth token for Anthropic-compatible gateways (OpenRouter,
-   * LiteLLM, enterprise proxies). Wire-identical to OAuth from the
-   * MITM proxy's perspective — same bearer header, distinct fake-key
-   * prefix. Selected when `ANTHROPIC_AUTH_TOKEN` is set (and OAuth is
-   * either absent or explicitly demoted via `IRONCURTAIN_DOCKER_AUTH=apikey-bearer`).
-   */
-  | { readonly kind: 'apikey-bearer'; readonly token: string }
   | { readonly kind: 'none' };
 
 /** Minimum remaining token lifetime (5 minutes) to consider a token usable. */
@@ -417,42 +408,19 @@ export const readOnlyCredentialSources: CredentialSources = {
  * expired OAuth tokens before falling back to API key auth.
  *
  * Priority:
- * 1. `IRONCURTAIN_DOCKER_AUTH=apikey` env var skips OAuth detection and selects
- *    the configured Anthropic credential (bearer-first, then api-key — see
- *    `resolveAnthropicCredentialAuth`). The legacy `=apikey` name is preserved
- *    for backward compatibility; use `=apikey-bearer` if you specifically need
- *    to demote OAuth in favor of `ANTHROPIC_AUTH_TOKEN`.
- * 2. `IRONCURTAIN_DOCKER_AUTH=apikey-bearer` env var forces bearer mode
- *    (skips OAuth even when host has OAuth credentials — opt-in opt-out for
- *    OpenRouter / gateway users who also have `~/.claude/.credentials.json`)
- * 3. OAuth credentials from ~/.claude/.credentials.json (valid or refreshable)
- * 4. OAuth credentials from macOS Keychain (valid or refreshable)
- * 5. `ANTHROPIC_AUTH_TOKEN` from config (bearer mode for Anthropic-compatible gateways)
- * 6. API key from config
- * 7. None
+ * 1. IRONCURTAIN_DOCKER_AUTH=apikey env var forces API key mode
+ * 2. OAuth credentials from ~/.claude/.credentials.json (valid or refreshable)
+ * 3. OAuth credentials from macOS Keychain (valid or refreshable)
+ * 4. API key from config
+ * 5. None
  */
 export async function detectAuthMethod(config: IronCurtainConfig, sources?: CredentialSources): Promise<AuthMethod> {
   const s = sources ?? defaultSources;
 
-  // Allow explicit override to skip OAuth detection. Selects the configured
-  // Anthropic credential (bearer-first, then api-key) — see
-  // `resolveAnthropicCredentialAuth` for the precedence rule.
+  // Allow explicit override to force API key mode
   if (process.env.IRONCURTAIN_DOCKER_AUTH === 'apikey') {
-    logger.info('Docker auth override: skipping OAuth detection via IRONCURTAIN_DOCKER_AUTH=apikey');
-    return resolveAnthropicCredentialAuth(config);
-  }
-
-  // Allow explicit override to force bearer mode (demotes OAuth so the
-  // gateway token wins even when ~/.claude/.credentials.json exists).
-  if (process.env.IRONCURTAIN_DOCKER_AUTH === 'apikey-bearer') {
-    const auth = resolveAnthropicAuth(config.userConfig);
-    if (auth.mode === 'bearer') {
-      logger.info('Docker auth override: forced bearer mode via IRONCURTAIN_DOCKER_AUTH=apikey-bearer');
-      return { kind: 'apikey-bearer', token: auth.credential };
-    }
-    logger.warn(
-      'IRONCURTAIN_DOCKER_AUTH=apikey-bearer set but ANTHROPIC_AUTH_TOKEN is not configured; falling back to default detection',
-    );
+    logger.info('Docker auth override: forced API key mode via IRONCURTAIN_DOCKER_AUTH');
+    return resolveApiKeyAuth(config);
   }
 
   // Try OAuth from credentials file
@@ -460,17 +428,13 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
   if (fileCreds) {
     if (!isTokenExpired(fileCreds)) {
       logger.info('Detected OAuth credentials from ~/.claude/.credentials.json');
-      warnIfBearerDemoted(config);
       return { kind: 'oauth', credentials: fileCreds, source: 'file' };
     }
 
     // Attempt refresh if refresh function is available
     if (s.refreshToken) {
       const refreshed = await tryRefreshFileCreds(fileCreds, s.refreshToken, s.saveToFile);
-      if (refreshed) {
-        warnIfBearerDemoted(config);
-        return refreshed;
-      }
+      if (refreshed) return refreshed;
     }
     logger.warn('OAuth token from credentials file is expired');
   }
@@ -480,7 +444,6 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
     const keychainResult = s.loadFromKeychainWithService?.() ?? toKeychainResult(s.loadFromKeychain());
     if (keychainResult) {
       if (!isTokenExpired(keychainResult.credentials)) {
-        warnIfBearerDemoted(config);
         return {
           kind: 'oauth',
           credentials: keychainResult.credentials,
@@ -492,17 +455,14 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
       // Attempt refresh if refresh function is available
       if (s.refreshToken) {
         const refreshed = await tryRefreshKeychainCreds(keychainResult, s.refreshToken, s.writeToKeychain);
-        if (refreshed) {
-          warnIfBearerDemoted(config);
-          return refreshed;
-        }
+        if (refreshed) return refreshed;
       }
       logger.warn('OAuth token from macOS Keychain is expired');
     }
   }
 
-  // Fall back to the configured Anthropic credential (bearer or API key)
-  return resolveAnthropicCredentialAuth(config);
+  // Fall back to API key
+  return resolveApiKeyAuth(config);
 }
 
 /**
@@ -512,21 +472,6 @@ export async function detectAuthMethod(config: IronCurtainConfig, sources?: Cred
 function toKeychainResult(creds: OAuthCredentials | null): KeychainResult | null {
   if (!creds) return null;
   return { credentials: creds, serviceName: KEYCHAIN_SERVICE_NAMES[0] };
-}
-
-/**
- * Emits a one-shot info log when OAuth wins detection despite the user also
- * having `ANTHROPIC_AUTH_TOKEN` configured. Without this, OpenRouter / gateway
- * users with stale `~/.claude/.credentials.json` would silently keep using
- * OAuth — surfacing the precedence makes the override discoverable.
- */
-function warnIfBearerDemoted(config: IronCurtainConfig): void {
-  if (config.userConfig.anthropicAuthToken) {
-    logger.info(
-      'OAuth credentials take precedence over ANTHROPIC_AUTH_TOKEN; ' +
-        'set IRONCURTAIN_DOCKER_AUTH=apikey-bearer to flip',
-    );
-  }
 }
 
 /**
@@ -579,21 +524,13 @@ async function tryRefreshKeychainCreds(
 }
 
 /**
- * Resolves the configured Anthropic credential (bearer-first, then API
- * key). Used as the non-OAuth fallback in `detectAuthMethod()` and as
- * the result of the `IRONCURTAIN_DOCKER_AUTH=apikey` override. Mutual
- * exclusion of api-key / bearer is enforced at config load (see
- * `applyEnvOverrides` in `user-config.ts`).
+ * Resolves API key authentication from config.
  */
-function resolveAnthropicCredentialAuth(config: IronCurtainConfig): AuthMethod {
-  const auth = resolveAnthropicAuth(config.userConfig);
-  if (auth.mode === 'bearer') {
-    logger.info('Using Anthropic auth token (bearer) for Docker session');
-    return { kind: 'apikey-bearer', token: auth.credential };
-  }
-  if (auth.mode === 'apikey') {
+function resolveApiKeyAuth(config: IronCurtainConfig): AuthMethod {
+  const key = config.userConfig.anthropicApiKey;
+  if (key) {
     logger.info('Using API key authentication for Docker session');
-    return { kind: 'apikey', key: auth.credential };
+    return { kind: 'apikey', key };
   }
   return { kind: 'none' };
 }

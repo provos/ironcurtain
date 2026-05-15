@@ -86,16 +86,13 @@ fi
 # Auth mode determines how Claude Code gets its API credentials:
 # - OAuth mode (CLAUDE_CODE_OAUTH_TOKEN set): Claude Code reads the token from
 #   this env var directly -- no apiKeyHelper needed.
-# - Bearer mode (ANTHROPIC_AUTH_TOKEN set, e.g. OpenRouter / gateway):
-#   the Anthropic SDK reads ANTHROPIC_AUTH_TOKEN directly and sends
-#   `Authorization: Bearer ...`. No apiKeyHelper, no x-api-key dialog.
 # - API key mode: apiKeyHelper echoes the fake key so Claude Code skips the
 #   custom API key approval dialog entirely.
 # Always written (even on resume) because auth mode is runtime-specific.
 mkdir -p "$HOME/.claude"
 
-if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
-  # OAuth or bearer mode: Claude Code / the SDK reads the token from env var directly.
+if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+  # OAuth mode: Claude Code reads the token from env var directly.
   cat > "$HOME/.claude/settings.json" <<EOSETTINGS
 {
   "permissions": {

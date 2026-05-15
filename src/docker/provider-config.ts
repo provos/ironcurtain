@@ -287,31 +287,6 @@ export const claudePlatformOAuthProvider: ProviderConfig = {
   fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
 };
 
-/**
- * Bearer-token Anthropic provider for OpenRouter and other
- * Anthropic-compatible gateways.
- *
- * Wire-identical to `anthropicOAuthProvider`: same allowed endpoints
- * (with the OAuth-only `/api/oauth/usage` removed since gateways don't
- * implement it), same bearer injection, same rewriter. The only
- * meaningful difference is the fake-key prefix — distinct from both
- * the API-key prefix (`sk-ant-api03-…`) and the OAuth prefix
- * (`sk-ant-oat01-…`) so audit logs and request traces unambiguously
- * identify the gateway path.
- *
- * Important: `host` stays `api.anthropic.com`. The container believes
- * it's talking to Anthropic; the MITM proxy rewrites upstream to
- * the gateway via `upstreamTarget` (populated from `ANTHROPIC_BASE_URL`).
- * Changing `host` would break Claude Code's internal `/api/claude_code/*`
- * chatter, which the gateway doesn't implement.
- */
-export const anthropicBearerProvider: ProviderConfig = {
-  ...anthropicOAuthProvider,
-  displayName: 'Anthropic (Bearer)',
-  allowedEndpoints: anthropicProvider.allowedEndpoints,
-  fakeKeyPrefix: 'sk-ant-or-ironcurtain-',
-};
-
 export const googleProvider: ProviderConfig = {
   host: 'generativelanguage.googleapis.com',
   displayName: 'Google',

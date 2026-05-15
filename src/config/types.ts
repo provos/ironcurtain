@@ -5,7 +5,7 @@ import type { ResolvedUserConfig } from './user-config.js';
  * `docker/oauth-credentials.ts` minus `'none'`: by the time an adapter is
  * consulted, a credential has been resolved.
  */
-export type DockerAuthKind = 'oauth' | 'apikey' | 'apikey-bearer';
+export type DockerAuthKind = 'oauth' | 'apikey';
 
 /**
  * Network access configuration for a sandboxed MCP server.
@@ -117,8 +117,7 @@ export interface IronCurtainConfig {
   /**
    * Docker session authentication method.
    * Set by prepareDockerInfrastructure() after detecting credentials.
-   * Adapters use this to choose between OAuth, API key, and bearer-token env vars.
-   * `apikey-bearer` is the OpenRouter / Anthropic-compatible gateway path.
+   * Adapters use this to choose between OAuth and API key env vars.
    */
   dockerAuth?: { readonly kind: DockerAuthKind };
   /**

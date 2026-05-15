@@ -232,13 +232,8 @@ export interface AgentAdapter {
    * The MITM proxy uses these to build the host allowlist,
    * generate fake API keys, swap keys in requests, and filter endpoints.
    *
-   * @param authKind - Selects the provider variant:
-   *   - `'oauth'`: bearer injection with OAuth fake-key prefix; includes
-   *     `platform.claude.com` so `/v1/oauth/hello` round-trips work.
-   *   - `'apikey'`: header (`x-api-key`) injection; default.
-   *   - `'apikey-bearer'`: bearer injection with a gateway fake-key prefix;
-   *     used for OpenRouter / LiteLLM / enterprise Anthropic-compatible
-   *     gateways. `platform.claude.com` is dropped (gateways don't expose it).
+   * @param authKind - When 'oauth', returns providers configured for bearer
+   *   token injection instead of header-based API key injection.
    */
   getProviders(authKind?: DockerAuthKind): readonly ProviderConfig[];
 

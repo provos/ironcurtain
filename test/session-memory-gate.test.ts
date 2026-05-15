@@ -13,7 +13,7 @@
  *   - Global kill switch overrides per-persona "on".
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as loggerModule from '../src/logger.js';
@@ -234,41 +234,6 @@ describe('buildSessionConfig memory gate', () => {
     // but the memory protocol fragment is suppressed.
     expect(result.systemPromptAugmentation).toBeDefined();
     expect(result.systemPromptAugmentation).not.toContain('memory.context');
-  });
-
-  // Regression guard: when memory is enabled and the user is on the bearer
-  // (OpenRouter / gateway) path with no `memory.llmApiKey` override, the
-  // memory server can't reach an LLM for dedup/compaction. The session
-  // logs an info-level message advising the user to configure
-  // `memory.llmApiKey` / `memory.llmBaseUrl` explicitly. The previous
-  // wording suggested setting ANTHROPIC_API_KEY alongside ANTHROPIC_AUTH_TOKEN,
-  // which actually triggers a fatal mutual-exclusion error at config load.
-  it('logs guidance about memory.llmApiKey when running in bearer-only mode with no explicit memory key', () => {
-    createTestPersonaOnDisk('default-persona');
-    const config = createTestConfig(true);
-    // Bearer-only: no API key, no explicit memory key.
-    const bearerConfig: IronCurtainConfig = {
-      ...config,
-      userConfig: {
-        ...config.userConfig,
-        anthropicApiKey: '',
-        anthropicAuthToken: 'sk-or-v1-test-bearer',
-      },
-    } as IronCurtainConfig;
-    const sessionId = createSessionId();
-    const infoSpy = vi.spyOn(loggerModule, 'info');
-
-    buildSessionConfig(bearerConfig, sessionId, sessionId, { persona: 'default-persona' });
-
-    const bearerInfoMessages = infoSpy.mock.calls
-      .map((args) => args.join(' '))
-      .filter((msg) => msg.includes('LLM-backed memory enrichment disabled'));
-    expect(bearerInfoMessages).toHaveLength(1);
-    expect(bearerInfoMessages[0]).toContain('memory.llmApiKey');
-    expect(bearerInfoMessages[0]).toContain('memory.llmBaseUrl');
-    // The old wording is gone — must not advise setting ANTHROPIC_API_KEY
-    // alongside the auth token (that throws at config load).
-    expect(bearerInfoMessages[0]).not.toContain('alongside the auth token');
   });
 });
 

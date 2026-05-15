@@ -1050,10 +1050,7 @@ export async function runConfigCommand(): Promise<void> {
 
   p.intro('IronCurtain Configuration');
   p.note(
-    `Config path: ${getUserConfigPath()}\n` +
-      'API keys: set via environment variables or edit JSON directly.\n' +
-      'OpenRouter / Anthropic-compatible gateway: set ANTHROPIC_AUTH_TOKEN ' +
-      '(and optionally ANTHROPIC_BASE_URL).',
+    `Config path: ${getUserConfigPath()}\n` + 'API keys: set via environment variables or edit JSON directly.',
     'Info',
   );
 

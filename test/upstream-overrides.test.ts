@@ -207,28 +207,4 @@ describe('applyUpstreamOverrides', () => {
     expect(result[1].upstreamTarget!.hostname).toBe('localhost');
     expect(result[2].upstreamTarget).toBeUndefined();
   });
-
-  it('populates upstreamTarget for the bearer (gateway) Anthropic provider from ANTHROPIC_BASE_URL', async () => {
-    // Regression guard for the bearer-auth (OpenRouter / gateway) path:
-    // the bearer provider shares `host: 'api.anthropic.com'` with the
-    // api-key and oauth variants, so ANTHROPIC_BASE_URL must apply to it
-    // exactly the same way. Without this, the container would TLS-terminate
-    // against `api.anthropic.com` but the proxy would forward to the wrong
-    // upstream (or none at all).
-    process.env.ANTHROPIC_BASE_URL = 'https://openrouter.ai/anthropic';
-    const { anthropicBearerProvider } = await import('../src/docker/provider-config.js');
-
-    const result = applyUpstreamOverrides([anthropicBearerProvider], mockParser);
-
-    expect(result[0].upstreamTarget).toEqual({
-      hostname: 'openrouter.ai',
-      port: 443,
-      pathPrefix: '/anthropic',
-      useTls: true,
-    });
-    // The provider's logical host stays api.anthropic.com — only the
-    // forwarding target changes.
-    expect(result[0].host).toBe('api.anthropic.com');
-    expect(result[0].keyInjection).toEqual({ type: 'bearer' });
-  });
 });

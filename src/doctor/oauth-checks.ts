@@ -72,14 +72,11 @@ export async function checkAnthropicCredentials(config: IronCurtainConfig): Prom
   if (auth.kind === 'apikey') {
     return { name: 'Anthropic', status: 'ok', message: 'API key set' };
   }
-  if (auth.kind === 'apikey-bearer') {
-    return { name: 'Anthropic', status: 'ok', message: 'Bearer token set (gateway)' };
-  }
   return {
     name: 'Anthropic',
     status: 'warn',
     message: 'no credentials detected',
-    hint: 'Set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN (gateway), or run `claude login` for OAuth.',
+    hint: 'Set ANTHROPIC_API_KEY or run `claude login` to obtain OAuth credentials.',
   };
 }
 

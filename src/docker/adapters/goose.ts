@@ -263,9 +263,8 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- interface requires authKind parameter
     getProviders(_authKind?: DockerAuthKind): readonly ProviderConfig[] {
-      // Goose uses exactly one provider based on user config. The authKind
-      // parameter is ignored: Goose does not support OAuth or bearer-token
-      // auth — only the per-provider API key path.
+      // Goose uses exactly one provider based on user config.
+      // The authKind parameter is ignored because Goose does not support OAuth.
       return [getProviderConfig(gooseProvider)];
     },
 

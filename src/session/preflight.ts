@@ -20,7 +20,6 @@ import {
   type CredentialSources,
 } from '../docker/oauth-credentials.js';
 import { resolveApiKeyForProvider } from '../config/model-provider.js';
-import { resolveAnthropicAuth } from '../config/user-config.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 
 const execFile = promisify(execFileCb);
@@ -150,9 +149,7 @@ interface CredentialState {
 
 /** Human-readable label for a resolved auth kind, used in the preflight banner. */
 function authKindLabel(kind: DockerAuthKind): string {
-  if (kind === 'oauth') return 'OAuth';
-  if (kind === 'apikey-bearer') return 'Bearer token';
-  return 'API key';
+  return kind === 'oauth' ? 'OAuth' : 'API key';
 }
 
 async function detectCredentialState(
@@ -251,18 +248,16 @@ function credentialErrorMessageForExplicit(agentId: AgentId, config: IronCurtain
     if (provider === 'anthropic' && oauthOnly) {
       parts.push('OAuth credentials are not usable with goose; provider "anthropic" requires an API key.');
     }
-    if (provider === 'anthropic' && config.userConfig.anthropicAuthToken) {
+    if (provider === 'anthropic' && process.env.ANTHROPIC_AUTH_TOKEN) {
       parts.push(
-        'Goose does not support `ANTHROPIC_AUTH_TOKEN` (Bearer/gateway auth); ' +
-          'use Claude Code or set `ANTHROPIC_API_KEY` directly.',
+        'Note: IronCurtain does not honor `ANTHROPIC_AUTH_TOKEN` (Bearer/gateway auth). ' +
+          'To route Anthropic traffic through a gateway, run LiteLLM as a sidecar and ' +
+          'point `ANTHROPIC_BASE_URL` at it with `ANTHROPIC_API_KEY` set to the LiteLLM key.',
       );
     }
     return parts.join('\n\n');
   }
-  return (
-    `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth), ` +
-    'set ANTHROPIC_API_KEY, or set ANTHROPIC_AUTH_TOKEN (OpenRouter / Anthropic-compatible gateway).'
-  );
+  return `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`;
 }
 
 function credentialErrorMessageForPreferredMode(
@@ -286,17 +281,17 @@ function credentialErrorMessageForPreferredMode(
       lines.push('');
       lines.push('OAuth credentials are not usable with goose; provider "anthropic" requires an API key.');
     }
-    if (provider === 'anthropic' && config.userConfig.anthropicAuthToken) {
+    if (provider === 'anthropic' && process.env.ANTHROPIC_AUTH_TOKEN) {
       lines.push('');
       lines.push(
-        'Goose does not support `ANTHROPIC_AUTH_TOKEN` (Bearer/gateway auth); ' +
-          'use Claude Code or set `ANTHROPIC_API_KEY` directly.',
+        'Note: IronCurtain does not honor `ANTHROPIC_AUTH_TOKEN` (Bearer/gateway auth). ' +
+          'To route Anthropic traffic through a gateway, run LiteLLM as a sidecar and ' +
+          'point `ANTHROPIC_BASE_URL` at it with `ANTHROPIC_API_KEY` set to the LiteLLM key.',
       );
     }
   } else {
     lines.push(
-      `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth), ` +
-        'set ANTHROPIC_API_KEY, or set ANTHROPIC_AUTH_TOKEN (OpenRouter / Anthropic-compatible gateway).',
+      `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`,
     );
   }
   lines.push('');
@@ -318,15 +313,12 @@ function dockerUnavailableMessage(detailedMessage: string): string {
 function builtinNeedsApiKeyMessage(): string {
   return [
     'Cannot start IronCurtain.',
-    'preferredMode is "builtin" but no Anthropic credentials are configured.',
-    'Builtin mode talks to Anthropic directly. Claude OAuth credentials are not usable in builtin mode.',
+    'preferredMode is "builtin" but no ANTHROPIC_API_KEY is configured.',
+    'Builtin mode talks to Anthropic directly using an API key — Claude OAuth credentials are not usable in builtin mode.',
     '',
     ...formatModeRemediation('docker'),
     '',
-    'Set one of the following in your environment, or run `ironcurtain config`:',
-    '  ANTHROPIC_API_KEY=<your-key>          (direct Anthropic access)',
-    '  ANTHROPIC_AUTH_TOKEN=<token>          (OpenRouter / Anthropic-compatible gateway)',
-    '  ANTHROPIC_BASE_URL=<url>              (optional, pair with the auth token)',
+    'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
   ].join('\n');
 }
 
@@ -426,10 +418,8 @@ async function resolveDefaultMode(
 
   if (preferredMode === 'builtin') {
     // Fail before the Docker probe — fast feedback for missing keys.
-    // Both `anthropicApiKey` and `anthropicAuthToken` (OpenRouter / gateway)
-    // are valid credentials for builtin mode; either satisfies the gate.
-    const auth = resolveAnthropicAuth(config.userConfig);
-    if (auth.mode === 'none') {
+    const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
+    if (apiKey.length === 0) {
       throw new PreflightError(builtinNeedsApiKeyMessage());
     }
     return { mode: { kind: 'builtin' }, reason: 'preferredMode = builtin' };
