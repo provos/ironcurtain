@@ -636,6 +636,14 @@ function mergeProxyAnnotations(src: StoredToolAnnotationsFile): StoredToolAnnota
  * Server-level drift (entire server not annotated) is already surfaced by
  * `checkAnnotationFreshness` at policy-load time; this helper only fires
  * when the server has an annotations entry and its tool set diverges.
+ *
+ * Contract: only invoked for servers whose proxy subprocess connected at
+ * least one backend (see `hasAtLeastOneConnectedBackend` in
+ * `mcp-proxy-server.ts`). A subprocess where every backend was skipped --
+ * missing env var, missing OAuth credentials, not authorized -- exits
+ * non-zero before the parent calls `registerTools`, so this helper never
+ * sees the empty-liveTools-vs-N-annotations case that would otherwise
+ * flag every annotated tool as stale.
  */
 function warnOnToolAnnotationDrift(
   serverName: string,

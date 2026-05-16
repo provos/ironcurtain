@@ -153,6 +153,20 @@ export interface SandboxValidationResult {
 }
 
 /**
+ * True when this proxy subprocess has at least one usable backend (or is in
+ * virtual-only mode with no backends configured). Returning false here means
+ * the parent should treat this subprocess as failed -- otherwise it would
+ * register zero tools for the server and trigger a misleading
+ * "stale annotations" warning in the coordinator's drift check.
+ */
+export function hasAtLeastOneConnectedBackend(
+  serversConfig: Record<string, MCPServerConfig>,
+  connectedBackendCount: number,
+): boolean {
+  return Object.keys(serversConfig).length === 0 || connectedBackendCount > 0;
+}
+
+/**
  * Reads and validates proxy environment variables.
  * Returns a typed config object or calls process.exit(1) on missing required vars.
  */
@@ -579,6 +593,26 @@ async function main(): Promise<void> {
         inputSchema: tool.inputSchema as Record<string, unknown>,
       });
     }
+  }
+
+  // If every backend in this subprocess failed to start (missing env var,
+  // missing/unauthorized OAuth credentials, etc.), exit non-zero so the
+  // parent's `MCPClientManager.connect()` call throws on the broken MCP
+  // handshake. The parent already logs and skips, and -- critically --
+  // never reaches `registerTools(serverName, [], ...)`, which would
+  // otherwise emit a misleading "tools no longer exposed by the server"
+  // drift warning.
+  if (!hasAtLeastOneConnectedBackend(serversConfig, clientStates.size)) {
+    const serverNames = Object.keys(serversConfig).join(', ');
+    const errMsg = `proxy subprocess for SERVER_FILTER="${process.env.SERVER_FILTER ?? '<unset>'}" has no connected backend (configured: ${serverNames}); exiting`;
+    process.stderr.write(`ERROR: ${errMsg}\n`);
+    if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${errMsg}`);
+    for (const refresher of tokenRefreshers.values()) {
+      refresher.stop();
+    }
+    tokenRefreshers.clear();
+    cleanupSettingsFiles(settingsDir);
+    process.exit(1);
   }
 
   // In virtual-only mode (SERVER_FILTER=proxy), register proxy tool definitions

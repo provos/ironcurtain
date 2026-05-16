@@ -4,7 +4,9 @@ import {
   parseProxyEnvConfig,
   validateSandboxAvailability,
   selectTransportConfig,
+  hasAtLeastOneConnectedBackend,
 } from '../src/trusted-process/mcp-proxy-server.js';
+import type { MCPServerConfig } from '../src/config/types.js';
 import {
   buildToolMap,
   buildAuditEntry,
@@ -320,6 +322,31 @@ describe('parseProxyEnvConfig', () => {
 
     exitSpy.mockRestore();
     stderrSpy.mockRestore();
+  });
+});
+
+// ── hasAtLeastOneConnectedBackend tests ────────────────────────────────
+
+describe('hasAtLeastOneConnectedBackend', () => {
+  const stubConfig: MCPServerConfig = { command: 'node', args: [] };
+
+  it('returns true when no backends are configured (virtual-only proxy mode)', () => {
+    expect(hasAtLeastOneConnectedBackend({}, 0)).toBe(true);
+  });
+
+  it('returns true when at least one configured backend connected', () => {
+    expect(hasAtLeastOneConnectedBackend({ github: stubConfig, git: stubConfig }, 1)).toBe(true);
+  });
+
+  it('returns false when backends were configured but none connected', () => {
+    expect(hasAtLeastOneConnectedBackend({ github: stubConfig }, 0)).toBe(false);
+  });
+
+  it('returns false for the missing-env-var case (single backend skipped)', () => {
+    // Mirrors the exact failure mode from the bug report: github server
+    // configured, GITHUB_PERSONAL_ACCESS_TOKEN unset, loop continues past
+    // it, clientStates ends empty.
+    expect(hasAtLeastOneConnectedBackend({ github: stubConfig }, 0)).toBe(false);
   });
 });
 
