@@ -28,7 +28,13 @@ import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import { getBundleRuntimeRoot } from '../config/paths.js';
 import { getBundleShortId, type BundleId, type SessionId, type SessionMode } from '../session/types.js';
 import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
-import { CONTAINER_WORKSPACE_DIR, type AgentAdapter, type ConversationStateConfig } from './agent-adapter.js';
+import {
+  CONTAINER_WORKSPACE_DIR,
+  type AgentAdapter,
+  type AgentId,
+  type ConversationStateConfig,
+} from './agent-adapter.js';
+import type { ResolvedUserConfig } from '../config/user-config.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
@@ -1055,6 +1061,32 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
   }
 
   return stateDir;
+}
+
+/**
+ * Public pre-flight: resolves the adapter for `agentId`, makes sure the CA
+ * and Docker manager are in place, and runs the same `ensureImage` work
+ * that `prepareDockerInfrastructure` would do later.
+ *
+ * Why expose this: image pull/build streams progress to the parent
+ * terminal (via the progress sink), and the CLI normally wraps session
+ * init in an `ora` spinner. Running this BEFORE the spinner starts keeps
+ * the two renderers from fighting for the same line. The inner
+ * `ensureImage` call inside `prepareDockerInfrastructure` is content-hash
+ * cached, so a second call from the session-init path is a cheap no-op.
+ */
+export async function ensureDockerImage(agentId: AgentId, userConfig: ResolvedUserConfig): Promise<void> {
+  const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
+  const { loadOrCreateCA } = await import('./ca.js');
+  const { createDockerManager } = await import('./docker-manager.js');
+  const { getIronCurtainHome } = await import('../config/paths.js');
+
+  await registerBuiltinAdapters(userConfig);
+  const adapter = getAgent(agentId);
+  const image = await adapter.getImage();
+  const docker = createDockerManager();
+  const ca = loadOrCreateCA(resolve(getIronCurtainHome(), 'ca'));
+  await ensureImage(image, docker, ca);
 }
 
 /**
