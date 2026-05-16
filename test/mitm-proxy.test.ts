@@ -11,6 +11,7 @@ import {
   anthropicRequestRewriter,
   isEndpointAllowed,
   stripScheduleSkillTools,
+  stripScheduleSkillToolReferences,
   stripServerSideTools,
   shouldRewriteBody,
   type ProviderConfig,
@@ -322,6 +323,182 @@ describe('stripScheduleSkillTools', () => {
   });
 });
 
+describe('stripScheduleSkillToolReferences', () => {
+  /** Reach into a single-message, single-block fixture's tool_result.content. */
+  function innerOf(result: { modified: Record<string, unknown> }): Array<Record<string, unknown>> {
+    const msg = (result.modified.messages as Array<Record<string, unknown>>)[0];
+    const block = (msg.content as Array<Record<string, unknown>>)[0];
+    return block.content as Array<Record<string, unknown>>;
+  }
+
+  it('returns null when body has no messages field', () => {
+    expect(stripScheduleSkillToolReferences({ model: 'claude-3' })).toBeNull();
+  });
+
+  it('returns null when messages array is empty', () => {
+    expect(stripScheduleSkillToolReferences({ messages: [] })).toBeNull();
+  });
+
+  it('returns null when no tool_result references stripped tools', () => {
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_abc',
+              content: [
+                { type: 'tool_reference', tool_name: 'TodoWrite' },
+                { type: 'tool_reference', tool_name: 'TaskOutput' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(stripScheduleSkillToolReferences(body)).toBeNull();
+  });
+
+  it('drops tool_reference entries for schedule-skill tool names', () => {
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_abc',
+              content: [
+                { type: 'tool_reference', tool_name: 'TaskOutput' },
+                { type: 'tool_reference', tool_name: 'CronCreate' },
+                { type: 'tool_reference', tool_name: 'ScheduleWakeup' },
+                { type: 'tool_reference', tool_name: 'TodoWrite' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const result = stripScheduleSkillToolReferences(body);
+    expect(result).not.toBeNull();
+    expect(result!.stripped).toEqual(['tool_reference:CronCreate', 'tool_reference:ScheduleWakeup']);
+    expect(innerOf(result!)).toEqual([
+      { type: 'tool_reference', tool_name: 'TaskOutput' },
+      { type: 'tool_reference', tool_name: 'TodoWrite' },
+    ]);
+  });
+
+  it('substitutes a placeholder when every entry was stripped', () => {
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_abc',
+              content: [
+                { type: 'tool_reference', tool_name: 'CronCreate' },
+                { type: 'tool_reference', tool_name: 'CronDelete' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const result = stripScheduleSkillToolReferences(body);
+    expect(result).not.toBeNull();
+    expect(innerOf(result!)).toEqual([{ type: 'text', text: '(filtered)' }]);
+  });
+
+  it('removes <function> schema blocks naming stripped tools from text content', () => {
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_abc',
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    '<functions>\n' +
+                    '<function>{"description":"Sched","name":"CronCreate","parameters":{}}</function>\n' +
+                    '<function>{"description":"Todos","name":"TodoWrite","parameters":{}}</function>\n' +
+                    '</functions>',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const result = stripScheduleSkillToolReferences(body);
+    expect(result).not.toBeNull();
+    expect(result!.stripped).toEqual(['function_block:CronCreate']);
+    const innerContent = innerOf(result!);
+    expect(innerContent).toHaveLength(1);
+    expect((innerContent[0] as { text: string }).text).not.toContain('CronCreate');
+    expect((innerContent[0] as { text: string }).text).toContain('TodoWrite');
+  });
+
+  it('leaves non-tool_result content blocks untouched', () => {
+    const body = {
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'CronCreate is a tool I read about.' }],
+        },
+      ],
+    };
+    expect(stripScheduleSkillToolReferences(body)).toBeNull();
+  });
+
+  it('leaves messages with string content untouched', () => {
+    const body = { messages: [{ role: 'user', content: 'plain string content' }] };
+    expect(stripScheduleSkillToolReferences(body)).toBeNull();
+  });
+
+  // ToolSearch keyword-match result that wedged a workflow: the CronCreate
+  // tool_reference survives in history even though the tools array no
+  // longer contains it, so Anthropic 400s the next request.
+  it('strips CronCreate from a real-world ToolSearch tool_result fixture', () => {
+    const body = {
+      model: 'claude-opus-4-7',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_01SxC1QRJq1rNG6vRLtQ1gVM',
+              content: [
+                { type: 'tool_reference', tool_name: 'TaskOutput' },
+                { type: 'tool_reference', tool_name: 'TaskStop' },
+                { type: 'tool_reference', tool_name: 'Monitor' },
+                { type: 'tool_reference', tool_name: 'TodoWrite' },
+                { type: 'tool_reference', tool_name: 'CronCreate' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const result = stripScheduleSkillToolReferences(body);
+    expect(result).not.toBeNull();
+    expect(result!.stripped).toEqual(['tool_reference:CronCreate']);
+    const serialized = JSON.stringify(result!.modified);
+    expect(serialized).not.toContain('CronCreate');
+    expect(serialized).toContain('TaskOutput');
+    expect(serialized).toContain('TaskStop');
+    expect(serialized).toContain('Monitor');
+    expect(serialized).toContain('TodoWrite');
+  });
+});
+
 describe('anthropicRequestRewriter', () => {
   const ctx = (agentKind?: 'workflow') => ({
     method: 'POST',
@@ -382,6 +559,64 @@ describe('anthropicRequestRewriter', () => {
   it('returns null when nothing needs stripping in workflow mode', () => {
     const body = { tools: [{ name: 'Read', input_schema: {} }] };
     expect(anthropicRequestRewriter(body, ctx('workflow'))).toBeNull();
+  });
+
+  // Real-world regression: the actual broken request shape from the aborted
+  // run. The tools array no longer contains CronCreate (Claude Code never
+  // surfaced it as a custom tool), but the messages history carries a
+  // tool_reference to it from a prior ToolSearch result. Without history
+  // scrubbing, the rewriter would forward this unchanged and Anthropic
+  // would 400 with "Tool reference 'CronCreate' not found in available
+  // tools". Both the tools-array path and the history path must fire.
+  it('scrubs both tools array and history references in workflow mode', () => {
+    const body = {
+      model: 'claude-opus-4-7',
+      tools: [
+        { name: 'Read', input_schema: {} },
+        { name: 'ScheduleWakeup', input_schema: {} },
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_01SxC1QRJq1rNG6vRLtQ1gVM',
+              content: [
+                { type: 'tool_reference', tool_name: 'TaskOutput' },
+                { type: 'tool_reference', tool_name: 'CronCreate' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const result = anthropicRequestRewriter(body, ctx('workflow'));
+    expect(result).not.toBeNull();
+    expect(result!.stripped).toEqual(['ScheduleWakeup', 'tool_reference:CronCreate']);
+    const serialized = JSON.stringify(result!.modified);
+    expect(serialized).not.toContain('CronCreate');
+    expect(serialized).not.toContain('ScheduleWakeup');
+    expect(serialized).toContain('Read');
+    expect(serialized).toContain('TaskOutput');
+  });
+
+  it('history scrub does NOT fire when agentKind is undefined', () => {
+    const body = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_abc',
+              content: [{ type: 'tool_reference', tool_name: 'CronCreate' }],
+            },
+          ],
+        },
+      ],
+    };
+    expect(anthropicRequestRewriter(body, ctx(undefined))).toBeNull();
   });
 });
 

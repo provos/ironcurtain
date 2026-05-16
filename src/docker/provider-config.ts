@@ -6,6 +6,8 @@
  * sentinel keys for real ones.
  */
 
+import { isPlainObject } from '../utils/is-plain-object.js';
+
 /**
  * Discriminator for the agent invoking the proxy. Set at proxy construction
  * time via `MitmProxyOptions.agentKind`. Currently the only named kind is
@@ -244,31 +246,166 @@ export function stripScheduleSkillTools(body: Record<string, unknown>): RewriteR
   });
 }
 
+const FUNCTION_BLOCK_PATTERN = /<function>([\s\S]*?)<\/function>\s*/g;
+const FUNCTION_BLOCK_NAME_PATTERN = /"name"\s*:\s*"([^"]+)"/;
+
+/**
+ * Walks `body.messages[].content[].tool_result.content[]` and removes
+ * references to schedule-skill tools that `stripScheduleSkillTools` strips
+ * from the outgoing `tools` array. Two leakage paths are scrubbed:
+ * `{type:"tool_reference", tool_name:"<stripped>"}` entries from ToolSearch
+ * keyword/`select:` results, and `<function>{"name":"<stripped>",...}</function>`
+ * schema blocks from `select:` results that load a full tool schema.
+ *
+ * Necessary because removing a tool from `tools` does NOT remove dangling
+ * references already recorded in conversation history. Anthropic 400s the
+ * next request with "Tool reference 'X' not found in available tools" if
+ * any such reference survives, and Claude Code records that 400 as a
+ * synthetic assistant turn it cannot recover from — wedging the session.
+ */
+export function stripScheduleSkillToolReferences(body: Record<string, unknown>): RewriteResult | null {
+  const messages = body.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+
+  const stripped: string[] = [];
+  const newMessages: unknown[] = [];
+
+  for (const rawMsg of messages as unknown[]) {
+    const result = rewriteMessageContent(rawMsg);
+    if (result === null) {
+      newMessages.push(rawMsg);
+      continue;
+    }
+    newMessages.push(result.value);
+    stripped.push(...result.labels);
+  }
+
+  if (stripped.length === 0) return null;
+  return { modified: { ...body, messages: newMessages }, stripped };
+}
+
+interface Rewrite {
+  readonly value: Record<string, unknown>;
+  readonly labels: readonly string[];
+}
+
+function rewriteMessageContent(rawMsg: unknown): Rewrite | null {
+  if (!isPlainObject(rawMsg)) return null;
+  const content = rawMsg.content;
+  if (!Array.isArray(content)) return null;
+
+  const labels: string[] = [];
+  const newContent: unknown[] = [];
+  let changed = false;
+
+  for (const rawBlock of content as unknown[]) {
+    const result = rewriteToolResultBlock(rawBlock);
+    if (result === null) {
+      newContent.push(rawBlock);
+      continue;
+    }
+    newContent.push(result.value);
+    labels.push(...result.labels);
+    changed = true;
+  }
+
+  if (!changed) return null;
+  return { value: { ...rawMsg, content: newContent }, labels };
+}
+
+function rewriteToolResultBlock(rawBlock: unknown): Rewrite | null {
+  if (!isPlainObject(rawBlock)) return null;
+  if (rawBlock.type !== 'tool_result') return null;
+  const innerContent = rawBlock.content;
+  if (!Array.isArray(innerContent)) return null;
+
+  const labels: string[] = [];
+  const keptInner: unknown[] = [];
+  let changed = false;
+
+  for (const rawEntry of innerContent as unknown[]) {
+    const result = scrubToolResultEntry(rawEntry);
+    if (result === null) {
+      keptInner.push(rawEntry);
+      continue;
+    }
+    if (result.kind !== 'drop') {
+      keptInner.push(result.value);
+    }
+    labels.push(...result.labels);
+    changed = true;
+  }
+
+  if (!changed) return null;
+  // Empty tool_result.content arrays are accepted by the Anthropic API,
+  // but a deterministic placeholder makes the scrub visible to the agent
+  // and avoids depending on that acceptance.
+  const finalInner = keptInner.length > 0 ? keptInner : [{ type: 'text', text: '(filtered)' }];
+  return { value: { ...rawBlock, content: finalInner }, labels };
+}
+
+type EntryResult =
+  | { readonly kind: 'drop'; readonly labels: readonly string[] }
+  | { readonly kind: 'replace'; readonly value: Record<string, unknown>; readonly labels: readonly string[] };
+
+function scrubToolResultEntry(rawEntry: unknown): EntryResult | null {
+  if (!isPlainObject(rawEntry)) return null;
+
+  if (rawEntry.type === 'tool_reference' && typeof rawEntry.tool_name === 'string') {
+    if (!SCHEDULE_SKILL_TOOL_NAMES.has(rawEntry.tool_name)) return null;
+    return { kind: 'drop', labels: [`tool_reference:${rawEntry.tool_name}`] };
+  }
+
+  if (rawEntry.type === 'text' && typeof rawEntry.text === 'string') {
+    // Fast-path: most tool_result text is tool output, not ToolSearch results.
+    if (!rawEntry.text.includes('<function>')) return null;
+    const labels: string[] = [];
+    const scrubbed = rawEntry.text.replace(FUNCTION_BLOCK_PATTERN, (match, blockBody: string) => {
+      const nameMatch = FUNCTION_BLOCK_NAME_PATTERN.exec(blockBody);
+      if (nameMatch && SCHEDULE_SKILL_TOOL_NAMES.has(nameMatch[1])) {
+        labels.push(`function_block:${nameMatch[1]}`);
+        return '';
+      }
+      return match;
+    });
+    if (labels.length === 0) return null;
+    return { kind: 'replace', value: { ...rawEntry, text: scrubbed }, labels };
+  }
+
+  return null;
+}
+
 /**
  * Combined rewriter for Anthropic /v1/messages requests. Always strips
  * server-side tools; additionally strips the schedule built-in skill's tools
- * when the originating agent is a workflow agent. Agent kinds other than
- * 'workflow' (including `undefined`) do not strip the schedule tools, so
- * interactive and standalone sessions are unaffected.
+ * and any dangling history references to them when the originating agent is
+ * a workflow agent. Agent kinds other than 'workflow' (including `undefined`)
+ * do not strip the schedule tools, so interactive and standalone sessions
+ * are unaffected.
  */
 export function anthropicRequestRewriter(
   body: Record<string, unknown>,
   context: { method: string; path: string; agentKind?: AgentKind },
 ): RewriteResult | null {
   const serverSide = stripServerSideTools(body);
-  const afterServerSide = serverSide ? serverSide.modified : body;
+  let current = serverSide ? serverSide.modified : body;
+  const stripped: string[] = serverSide ? [...serverSide.stripped] : [];
 
   if (context.agentKind === 'workflow') {
-    const scheduleStrip = stripScheduleSkillTools(afterServerSide);
-    if (scheduleStrip) {
-      return {
-        modified: scheduleStrip.modified,
-        stripped: [...(serverSide?.stripped ?? []), ...scheduleStrip.stripped],
-      };
+    const toolsStrip = stripScheduleSkillTools(current);
+    if (toolsStrip) {
+      current = toolsStrip.modified;
+      stripped.push(...toolsStrip.stripped);
+    }
+    const historyStrip = stripScheduleSkillToolReferences(current);
+    if (historyStrip) {
+      current = historyStrip.modified;
+      stripped.push(...historyStrip.stripped);
     }
   }
 
-  return serverSide;
+  if (stripped.length === 0) return null;
+  return { modified: current, stripped };
 }
 
 /**
