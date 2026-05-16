@@ -13,6 +13,11 @@ import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 import { spawnWithIdleTimeout, type SpawnFn } from './spawn-with-idle-timeout.js';
+import {
+  createDockerProgressSink,
+  type CreateDockerProgressSinkOptions,
+  type DockerProgressSink,
+} from './docker-progress-sink.js';
 
 /** Async exec function signature matching promisified execFile. */
 export type ExecFileFn = (
@@ -157,6 +162,12 @@ export interface CreateDockerManagerOptions {
   spawn?: SpawnFn;
   stdoutSink?: NodeJS.WritableStream;
   stderrSink?: NodeJS.WritableStream;
+  /**
+   * Override the progress-sink factory (tests). When `stdoutSink` /
+   * `stderrSink` are provided explicitly the progress sink is bypassed
+   * regardless of this option.
+   */
+  progressSinkFactory?: (opts: CreateDockerProgressSinkOptions) => DockerProgressSink;
 }
 
 export function createDockerManager(
@@ -169,6 +180,39 @@ export function createDockerManager(
     spawn: spawnOpts?.spawn,
     stdoutSink: spawnOpts?.stdoutSink,
     stderrSink: spawnOpts?.stderrSink,
+  };
+  const progressSinkFactory = spawnOpts?.progressSinkFactory ?? createDockerProgressSink;
+
+  // Runs a `docker pull` / `docker build` invocation with the streaming
+  // idle-timeout primitive, wrapped in a progress sink that collapses the
+  // raw output flood into a single updating status line (TTY) or
+  // verbatim pass-through (non-TTY). When the test seam provides explicit
+  // sinks we honor them and skip the wrapper.
+  const runStreamed = async (params: {
+    operation: 'docker pull' | 'docker build';
+    args: readonly string[];
+    idleTimeoutMs: number;
+    env?: NodeJS.ProcessEnv;
+  }): Promise<void> => {
+    const hasInjectedSinks = streamOpts.stdoutSink !== undefined && streamOpts.stderrSink !== undefined;
+    const progress: DockerProgressSink | undefined = hasInjectedSinks
+      ? undefined
+      : progressSinkFactory({ operation: params.operation });
+    try {
+      await spawnWithIdleTimeout('docker', params.args, {
+        idleTimeoutMs: params.idleTimeoutMs,
+        operation: params.operation,
+        env: params.env,
+        spawn: streamOpts.spawn,
+        stdoutSink: streamOpts.stdoutSink ?? progress?.stdout,
+        stderrSink: streamOpts.stderrSink ?? progress?.stderr,
+      });
+      progress?.finish(true);
+    } catch (err) {
+      progress?.finish(false);
+      progress?.dumpRecent();
+      throw err;
+    }
   };
 
   return {
@@ -295,11 +339,11 @@ export function createDockerManager(
         }
       }
       args.push(contextDir);
-      await spawnWithIdleTimeout('docker', args, {
-        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
+      await runStreamed({
         operation: 'docker build',
+        args,
+        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
         env: { DOCKER_BUILDKIT: '1' },
-        ...streamOpts,
       });
     },
 
@@ -354,14 +398,15 @@ export function createDockerManager(
     },
 
     async pullImage(image: string): Promise<void> {
-      // Streamed via spawn (not execFile) so the user sees per-layer
-      // progress and the watchdog can reset on every heartbeat. Large
-      // images like devcontainers/universal (~5 GB) on slow links
-      // legitimately take an hour or more; only true silence kills.
-      await spawnWithIdleTimeout('docker', ['pull', image], {
-        idleTimeoutMs: PULL_IDLE_TIMEOUT_MS,
+      // Streamed via spawn (not execFile) so the watchdog can reset on
+      // every heartbeat. Large images like devcontainers/universal
+      // (~5 GB) on slow links legitimately take an hour or more; only
+      // true silence kills. The progress sink collapses the per-layer
+      // chatter into a single updating status line.
+      await runStreamed({
         operation: 'docker pull',
-        ...streamOpts,
+        args: ['pull', image],
+        idleTimeoutMs: PULL_IDLE_TIMEOUT_MS,
       });
     },
 
