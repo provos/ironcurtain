@@ -639,8 +639,8 @@ function mergeProxyAnnotations(src: StoredToolAnnotationsFile): StoredToolAnnota
  *
  * Spurious "stale annotations" warnings from servers that simply failed
  * to start are avoided upstream: in the sandbox/router path the proxy
- * subprocess exits non-zero when no backend connects (see
- * `hasAtLeastOneConnectedBackend` in `mcp-proxy-server.ts`); in the direct
+ * subprocess exits non-zero when no backend connects (see `proxyCanServe`
+ * in `mcp-proxy-server.ts`); in the direct
  * `TrustedProcess.connectMcpServers` path the caller applies its own
  * env-var guard before reaching `registerTools`. A backend that does
  * connect but legitimately exposes zero tools will still surface a drift

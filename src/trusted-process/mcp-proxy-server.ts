@@ -155,16 +155,14 @@ export interface SandboxValidationResult {
 }
 
 /**
- * True when this proxy subprocess has at least one usable backend (or is in
- * virtual-only mode with no backends configured). Returning false here means
- * the parent should treat this subprocess as failed -- otherwise it would
- * register zero tools for the server and trigger a misleading
- * "stale annotations" warning in the coordinator's drift check.
+ * True when this proxy subprocess is in a viable serving state -- either
+ * virtual-only mode (no backends configured) or at least one configured
+ * backend connected. Returning false means the parent should treat this
+ * subprocess as failed; otherwise it would register zero tools for the
+ * server and trigger a misleading "stale annotations" warning in the
+ * coordinator's drift check.
  */
-export function hasAtLeastOneConnectedBackend(
-  serversConfig: Record<string, MCPServerConfig>,
-  connectedBackendCount: number,
-): boolean {
+export function proxyCanServe(serversConfig: Record<string, MCPServerConfig>, connectedBackendCount: number): boolean {
   return Object.keys(serversConfig).length === 0 || connectedBackendCount > 0;
 }
 
@@ -623,7 +621,7 @@ async function main(): Promise<void> {
   // Exit non-zero so the parent's `MCPClientManager.connect()` fails the
   // handshake -- the existing try/catch in `connectBackendSubprocesses`
   // skips the server without reaching `registerTools`.
-  if (!hasAtLeastOneConnectedBackend(serversConfig, clientStates.size)) {
+  if (!proxyCanServe(serversConfig, clientStates.size)) {
     const serverNames = Object.keys(serversConfig).join(', ');
     emitProxyDiagnostic(
       'ERROR',

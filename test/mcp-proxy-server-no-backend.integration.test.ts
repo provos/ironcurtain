@@ -4,9 +4,9 @@
  * Spawns the proxy subprocess with a single configured backend whose
  * `-e VAR_NAME` arg references an env var that is not set. The proxy's
  * backend-connect loop should skip the backend, the post-loop
- * `hasAtLeastOneConnectedBackend` guard should fire, and the subprocess
- * should exit non-zero before the MCP transport is brought up. The unit
- * tests in `mcp-proxy-server.test.ts` cover the predicate in isolation;
+ * `proxyCanServe` guard should fire, and the subprocess should exit
+ * non-zero before the MCP transport is brought up. The unit tests in
+ * `mcp-proxy-server.test.ts` cover the predicate in isolation;
  * this test exercises the wiring (condition direction, diagnostic emit,
  * cleanup, exit code) so a regression in any of those is caught.
  */
@@ -51,8 +51,10 @@ describe('mcp-proxy-server no-backend exit', { timeout: 30_000 }, () => {
       stderr += chunk.toString('utf-8');
     });
 
+    // Wait for `close`, not `exit`: `exit` can fire before stdio streams
+    // have flushed, leaving the ERROR line we assert on truncated.
     const exitCode: number = await new Promise((resolveExit, rejectExit) => {
-      child.once('exit', (code) => resolveExit(code ?? -1));
+      child.once('close', (code) => resolveExit(code ?? -1));
       child.once('error', rejectExit);
     });
 

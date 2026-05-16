@@ -4,7 +4,7 @@ import {
   parseProxyEnvConfig,
   validateSandboxAvailability,
   selectTransportConfig,
-  hasAtLeastOneConnectedBackend,
+  proxyCanServe,
 } from '../src/trusted-process/mcp-proxy-server.js';
 import type { MCPServerConfig } from '../src/config/types.js';
 import {
@@ -327,21 +327,21 @@ describe('parseProxyEnvConfig', () => {
   });
 });
 
-// ── hasAtLeastOneConnectedBackend tests ────────────────────────────────
+// ── proxyCanServe tests ────────────────────────────────────────────────
 
-describe('hasAtLeastOneConnectedBackend', () => {
+describe('proxyCanServe', () => {
   const stubConfig: MCPServerConfig = { command: 'node', args: [] };
 
   it('returns true when no backends are configured (virtual-only proxy mode)', () => {
-    expect(hasAtLeastOneConnectedBackend({}, 0)).toBe(true);
+    expect(proxyCanServe({}, 0)).toBe(true);
   });
 
   it('returns true when at least one configured backend connected', () => {
-    expect(hasAtLeastOneConnectedBackend({ github: stubConfig, git: stubConfig }, 1)).toBe(true);
+    expect(proxyCanServe({ github: stubConfig, git: stubConfig }, 1)).toBe(true);
   });
 
   it('returns false when backends were configured but none connected', () => {
-    expect(hasAtLeastOneConnectedBackend({ github: stubConfig }, 0)).toBe(false);
+    expect(proxyCanServe({ github: stubConfig }, 0)).toBe(false);
   });
 });
 
