@@ -9,6 +9,7 @@ import {
   type ExecFileFn,
 } from '../src/docker/docker-manager.js';
 import { spawnWithIdleTimeout, type SpawnFn } from '../src/docker/spawn-with-idle-timeout.js';
+import type { CreateDockerProgressSinkOptions, DockerProgressSink } from '../src/docker/docker-progress-sink.js';
 import type { DockerContainerConfig } from '../src/docker/types.js';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
@@ -166,6 +167,45 @@ function createMockSpawn(): MockSpawn {
 /** Silent writable so tests don't spew docker output into the test runner. */
 function nullSink(): NodeJS.WritableStream {
   return new PassThrough();
+}
+
+interface SpyProgressSinkHandle {
+  factory: (opts: CreateDockerProgressSinkOptions) => DockerProgressSink;
+  /** Each created sink, in construction order. */
+  sinks: Array<{
+    operation: CreateDockerProgressSinkOptions['operation'];
+    finishCalls: boolean[];
+    dumpRecentCalls: number;
+  }>;
+}
+
+/**
+ * Builds a `progressSinkFactory` that records calls to `finish` and
+ * `dumpRecent` on each constructed sink. The sink itself is just a
+ * pair of `PassThrough` streams so the streaming pipeline can drain
+ * normally.
+ */
+function createSpyProgressSink(): SpyProgressSinkHandle {
+  const sinks: SpyProgressSinkHandle['sinks'] = [];
+  const factory = (opts: CreateDockerProgressSinkOptions): DockerProgressSink => {
+    const entry = {
+      operation: opts.operation,
+      finishCalls: [] as boolean[],
+      dumpRecentCalls: 0,
+    };
+    sinks.push(entry);
+    return {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      finish: (success: boolean) => {
+        entry.finishCalls.push(success);
+      },
+      dumpRecent: () => {
+        entry.dumpRecentCalls += 1;
+      },
+    };
+  };
+  return { factory, sinks };
 }
 
 const sampleConfig: DockerContainerConfig = {
@@ -669,6 +709,89 @@ describe('DockerManager', () => {
       spawnMock.handles[0].spawnError(new Error('spawn docker ENOENT'));
 
       await expect(promise).rejects.toThrow(/docker pull failed to spawn: spawn docker ENOENT/);
+    });
+  });
+
+  // The default code path (no `stdoutSink`/`stderrSink` injected) wraps
+  // pullImage/buildImage in the progress sink: success → finish(true);
+  // failure → finish(false) + dumpRecent(). These tests guard the
+  // dispatch via an injected spy factory so a future regression in
+  // runStreamed can't silently bypass the failure-context dump.
+  describe('progress sink dispatch', () => {
+    it('calls finish(true) and skips dumpRecent on a clean pullImage', async () => {
+      const spawnMock = createMockSpawn();
+      const spy = createSpyProgressSink();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        progressSinkFactory: spy.factory,
+      });
+
+      const promise = manager.pullImage('alpine:latest');
+      await Promise.resolve();
+      spawnMock.handles[0].exit(0);
+      await promise;
+
+      expect(spy.sinks).toHaveLength(1);
+      expect(spy.sinks[0].operation).toBe('docker pull');
+      expect(spy.sinks[0].finishCalls).toEqual([true]);
+      expect(spy.sinks[0].dumpRecentCalls).toBe(0);
+    });
+
+    it('calls finish(false) then dumpRecent when buildImage exits non-zero', async () => {
+      const spawnMock = createMockSpawn();
+      const spy = createSpyProgressSink();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        progressSinkFactory: spy.factory,
+      });
+
+      const promise = manager.buildImage('img:latest', '/Dockerfile', '/ctx');
+      await Promise.resolve();
+      spawnMock.handles[0].emitStderr('ERROR: bad step\n');
+      await new Promise((r) => setImmediate(r));
+      spawnMock.handles[0].exit(1);
+
+      await expect(promise).rejects.toThrow(/docker build .*exited with code 1/);
+      expect(spy.sinks).toHaveLength(1);
+      expect(spy.sinks[0].operation).toBe('docker build');
+      expect(spy.sinks[0].finishCalls).toEqual([false]);
+      expect(spy.sinks[0].dumpRecentCalls).toBe(1);
+    });
+
+    it('also flushes dumpRecent when spawn itself errors', async () => {
+      const spawnMock = createMockSpawn();
+      const spy = createSpyProgressSink();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        progressSinkFactory: spy.factory,
+      });
+
+      const promise = manager.pullImage('alpine:latest');
+      await Promise.resolve();
+      spawnMock.handles[0].spawnError(new Error('spawn docker ENOENT'));
+
+      await expect(promise).rejects.toThrow(/docker pull failed to spawn/);
+      expect(spy.sinks[0].finishCalls).toEqual([false]);
+      expect(spy.sinks[0].dumpRecentCalls).toBe(1);
+    });
+
+    it('skips the progress sink when stdoutSink/stderrSink are injected', async () => {
+      const spawnMock = createMockSpawn();
+      const spy = createSpyProgressSink();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+        progressSinkFactory: spy.factory,
+      });
+
+      const promise = manager.pullImage('alpine:latest');
+      await Promise.resolve();
+      spawnMock.handles[0].exit(0);
+      await promise;
+
+      // Test seam wins: the factory was never called.
+      expect(spy.sinks).toHaveLength(0);
     });
   });
 
