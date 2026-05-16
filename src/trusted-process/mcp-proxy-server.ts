@@ -44,7 +44,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, writeFileSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
@@ -145,11 +145,38 @@ export interface ProxyEnvConfig {
   allowedDirectory: string | undefined;
   serverCredentials: Record<string, string>;
   sandboxPolicy: SandboxAvailabilityPolicy;
+  /** Raw `SERVER_FILTER` env value (e.g., backend name, "proxy", or undefined). */
+  serverFilter: string | undefined;
 }
 
 /** Result of sandbox availability validation. */
 export interface SandboxValidationResult {
   sandboxAvailable: boolean;
+}
+
+/**
+ * True when this proxy subprocess is in a viable serving state -- either
+ * virtual-only mode (no backends configured) or at least one configured
+ * backend connected. Returning false means the parent should treat this
+ * subprocess as failed; otherwise it would register zero tools for the
+ * server and trigger a misleading "stale annotations" warning in the
+ * coordinator's drift check.
+ */
+export function proxyCanServe(serversConfig: Record<string, MCPServerConfig>, connectedBackendCount: number): boolean {
+  return Object.keys(serversConfig).length === 0 || connectedBackendCount > 0;
+}
+
+/**
+ * Writes a diagnostic line to stderr and (if configured) the proxy session log.
+ *
+ * Uses `fs.writeSync` so the bytes reach the OS before the function returns
+ * even when stderr is a pipe (parent-spawned subprocess). `process.stderr.write`
+ * is asynchronous in that case, which would let a follow-up `process.exit(1)`
+ * truncate the diagnostic before delivery.
+ */
+function emitProxyDiagnostic(level: 'WARNING' | 'ERROR', message: string, sessionLogPath: string | undefined): void {
+  writeSync(2, `${level}: ${message}\n`);
+  if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${message}`);
 }
 
 /**
@@ -215,6 +242,7 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
     allowedDirectory,
     serverCredentials,
     sandboxPolicy,
+    serverFilter,
   };
 }
 
@@ -340,6 +368,7 @@ async function main(): Promise<void> {
     allowedDirectory,
     serverCredentials,
     sandboxPolicy,
+    serverFilter,
   } = envConfig;
 
   // Load compiled policy + annotations to derive MCP roots advertised
@@ -391,9 +420,11 @@ async function main(): Promise<void> {
     // that aren't set — the server will fail to start without them.
     const missingEnvVars = getMissingEnvVars(config.args);
     if (missingEnvVars.length > 0) {
-      const warning = `Skipping MCP server "${serverName}": missing environment variable(s) ${missingEnvVars.join(', ')}`;
-      process.stderr.write(`WARNING: ${warning}\n`);
-      if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+      emitProxyDiagnostic(
+        'WARNING',
+        `Skipping MCP server "${serverName}": missing environment variable(s) ${missingEnvVars.join(', ')}`,
+        sessionLogPath,
+      );
       continue;
     }
 
@@ -403,17 +434,21 @@ async function main(): Promise<void> {
     if (oauthProvider) {
       const clientCreds = loadClientCredentials(oauthProvider);
       if (!clientCreds) {
-        const warning = `Skipping MCP server "${serverName}": no OAuth credentials. Run 'ironcurtain auth import ${oauthProvider.id} <file>'`;
-        process.stderr.write(`WARNING: ${warning}\n`);
-        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        emitProxyDiagnostic(
+          'WARNING',
+          `Skipping MCP server "${serverName}": no OAuth credentials. Run 'ironcurtain auth import ${oauthProvider.id} <file>'`,
+          sessionLogPath,
+        );
         continue;
       }
 
       const tokenProvider = new OAuthTokenProvider(oauthProvider, clientCreds);
       if (!tokenProvider.isAuthorized()) {
-        const warning = `Skipping MCP server "${serverName}": not authorized. Run 'ironcurtain auth ${oauthProvider.id}'`;
-        process.stderr.write(`WARNING: ${warning}\n`);
-        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        emitProxyDiagnostic(
+          'WARNING',
+          `Skipping MCP server "${serverName}": not authorized. Run 'ironcurtain auth ${oauthProvider.id}'`,
+          sessionLogPath,
+        );
         continue;
       }
 
@@ -481,9 +516,11 @@ async function main(): Promise<void> {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const warning = `Skipping MCP server "${serverName}": OAuth token error: ${message}. Run 'ironcurtain auth ${oauthProvider.id}'`;
-        process.stderr.write(`WARNING: ${warning}\n`);
-        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        emitProxyDiagnostic(
+          'WARNING',
+          `Skipping MCP server "${serverName}": OAuth token error: ${message}. Run 'ironcurtain auth ${oauthProvider.id}'`,
+          sessionLogPath,
+        );
         continue;
       }
     }
@@ -581,9 +618,26 @@ async function main(): Promise<void> {
     }
   }
 
+  // Exit non-zero so the parent's `MCPClientManager.connect()` fails the
+  // handshake -- the existing try/catch in `connectBackendSubprocesses`
+  // skips the server without reaching `registerTools`.
+  if (!proxyCanServe(serversConfig, clientStates.size)) {
+    const serverNames = Object.keys(serversConfig).join(', ');
+    emitProxyDiagnostic(
+      'ERROR',
+      `proxy subprocess for SERVER_FILTER="${serverFilter ?? '<unset>'}" has no connected backend (configured: ${serverNames}); exiting`,
+      sessionLogPath,
+    );
+    for (const refresher of tokenRefreshers.values()) {
+      refresher.stop();
+    }
+    cleanupSettingsFiles(settingsDir);
+    process.exit(1);
+  }
+
   // In virtual-only mode (SERVER_FILTER=proxy), register proxy tool definitions
   // and create the control API client for communicating with the MITM proxy.
-  const isVirtualOnlyMode = process.env.SERVER_FILTER === 'proxy' && Object.keys(serversConfig).length === 0;
+  const isVirtualOnlyMode = serverFilter === 'proxy' && Object.keys(serversConfig).length === 0;
   let controlApiClient: ControlApiClient | null = null;
 
   if (isVirtualOnlyMode) {

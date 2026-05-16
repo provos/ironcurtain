@@ -130,9 +130,24 @@ export async function connectViaProxy(
     stderr: 'pipe',
   });
 
-  // Drain piped stderr to prevent backpressure
+  // Forward only the proxy's own diagnostic lines (WARNING:/ERROR:
+  // emitted by `emitProxyDiagnostic`) to the parent. Backend MCP-server
+  // stderr can include unredacted credentials in failure paths, so we
+  // never echo arbitrary subprocess output verbatim. Incomplete lines
+  // are buffered until the trailing newline.
   if (transport.stderr) {
-    transport.stderr.on('data', () => {});
+    let buffer = '';
+    transport.stderr.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf-8');
+      let nl: number;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (/^(WARNING|ERROR): /.test(line)) {
+          process.stderr.write(`${line}\n`);
+        }
+      }
+    });
   }
 
   const client = new Client(

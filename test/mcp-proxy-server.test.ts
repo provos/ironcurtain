@@ -4,7 +4,9 @@ import {
   parseProxyEnvConfig,
   validateSandboxAvailability,
   selectTransportConfig,
+  proxyCanServe,
 } from '../src/trusted-process/mcp-proxy-server.js';
+import type { MCPServerConfig } from '../src/config/types.js';
 import {
   buildToolMap,
   buildAuditEntry,
@@ -243,6 +245,7 @@ describe('parseProxyEnvConfig', () => {
     expect(config.allowedDirectory).toBeUndefined();
     expect(config.sandboxPolicy).toBe('warn');
     expect(config.serverCredentials).toEqual({});
+    expect(config.serverFilter).toBeUndefined();
   });
 
   it('parses SERVER_CREDENTIALS and scrubs from process.env', () => {
@@ -270,6 +273,7 @@ describe('parseProxyEnvConfig', () => {
 
     expect(Object.keys(config.serversConfig)).toEqual(['git']);
     expect(config.serversConfig.git).toEqual(servers.git);
+    expect(config.serverFilter).toBe('git');
   });
 
   it('calls process.exit(1) when MCP_SERVERS_CONFIG is missing', () => {
@@ -320,6 +324,24 @@ describe('parseProxyEnvConfig', () => {
 
     exitSpy.mockRestore();
     stderrSpy.mockRestore();
+  });
+});
+
+// ── proxyCanServe tests ────────────────────────────────────────────────
+
+describe('proxyCanServe', () => {
+  const stubConfig: MCPServerConfig = { command: 'node', args: [] };
+
+  it('returns true when no backends are configured (virtual-only proxy mode)', () => {
+    expect(proxyCanServe({}, 0)).toBe(true);
+  });
+
+  it('returns true when at least one configured backend connected', () => {
+    expect(proxyCanServe({ github: stubConfig, git: stubConfig }, 1)).toBe(true);
+  });
+
+  it('returns false when backends were configured but none connected', () => {
+    expect(proxyCanServe({ github: stubConfig }, 0)).toBe(false);
   });
 });
 
