@@ -341,13 +341,6 @@ describe('hasAtLeastOneConnectedBackend', () => {
   it('returns false when backends were configured but none connected', () => {
     expect(hasAtLeastOneConnectedBackend({ github: stubConfig }, 0)).toBe(false);
   });
-
-  it('returns false for the missing-env-var case (single backend skipped)', () => {
-    // Mirrors the exact failure mode from the bug report: github server
-    // configured, GITHUB_PERSONAL_ACCESS_TOKEN unset, loop continues past
-    // it, clientStates ends empty.
-    expect(hasAtLeastOneConnectedBackend({ github: stubConfig }, 0)).toBe(false);
-  });
 });
 
 // ── validateSandboxAvailability tests ──────────────────────────────────

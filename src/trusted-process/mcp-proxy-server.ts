@@ -166,6 +166,12 @@ export function hasAtLeastOneConnectedBackend(
   return Object.keys(serversConfig).length === 0 || connectedBackendCount > 0;
 }
 
+/** Writes a diagnostic line to stderr and (if configured) the proxy session log. */
+function emitProxyDiagnostic(level: 'WARNING' | 'ERROR', message: string, sessionLogPath: string | undefined): void {
+  process.stderr.write(`${level}: ${message}\n`);
+  if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${message}`);
+}
+
 /**
  * Reads and validates proxy environment variables.
  * Returns a typed config object or calls process.exit(1) on missing required vars.
@@ -405,9 +411,11 @@ async function main(): Promise<void> {
     // that aren't set — the server will fail to start without them.
     const missingEnvVars = getMissingEnvVars(config.args);
     if (missingEnvVars.length > 0) {
-      const warning = `Skipping MCP server "${serverName}": missing environment variable(s) ${missingEnvVars.join(', ')}`;
-      process.stderr.write(`WARNING: ${warning}\n`);
-      if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+      emitProxyDiagnostic(
+        'WARNING',
+        `Skipping MCP server "${serverName}": missing environment variable(s) ${missingEnvVars.join(', ')}`,
+        sessionLogPath,
+      );
       continue;
     }
 
@@ -417,17 +425,21 @@ async function main(): Promise<void> {
     if (oauthProvider) {
       const clientCreds = loadClientCredentials(oauthProvider);
       if (!clientCreds) {
-        const warning = `Skipping MCP server "${serverName}": no OAuth credentials. Run 'ironcurtain auth import ${oauthProvider.id} <file>'`;
-        process.stderr.write(`WARNING: ${warning}\n`);
-        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        emitProxyDiagnostic(
+          'WARNING',
+          `Skipping MCP server "${serverName}": no OAuth credentials. Run 'ironcurtain auth import ${oauthProvider.id} <file>'`,
+          sessionLogPath,
+        );
         continue;
       }
 
       const tokenProvider = new OAuthTokenProvider(oauthProvider, clientCreds);
       if (!tokenProvider.isAuthorized()) {
-        const warning = `Skipping MCP server "${serverName}": not authorized. Run 'ironcurtain auth ${oauthProvider.id}'`;
-        process.stderr.write(`WARNING: ${warning}\n`);
-        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        emitProxyDiagnostic(
+          'WARNING',
+          `Skipping MCP server "${serverName}": not authorized. Run 'ironcurtain auth ${oauthProvider.id}'`,
+          sessionLogPath,
+        );
         continue;
       }
 
@@ -495,9 +507,11 @@ async function main(): Promise<void> {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const warning = `Skipping MCP server "${serverName}": OAuth token error: ${message}. Run 'ironcurtain auth ${oauthProvider.id}'`;
-        process.stderr.write(`WARNING: ${warning}\n`);
-        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        emitProxyDiagnostic(
+          'WARNING',
+          `Skipping MCP server "${serverName}": OAuth token error: ${message}. Run 'ironcurtain auth ${oauthProvider.id}'`,
+          sessionLogPath,
+        );
         continue;
       }
     }
@@ -595,22 +609,19 @@ async function main(): Promise<void> {
     }
   }
 
-  // If every backend in this subprocess failed to start (missing env var,
-  // missing/unauthorized OAuth credentials, etc.), exit non-zero so the
-  // parent's `MCPClientManager.connect()` call throws on the broken MCP
-  // handshake. The parent already logs and skips, and -- critically --
-  // never reaches `registerTools(serverName, [], ...)`, which would
-  // otherwise emit a misleading "tools no longer exposed by the server"
-  // drift warning.
+  // Exit non-zero so the parent's `MCPClientManager.connect()` fails the
+  // handshake -- the existing try/catch in `connectBackendSubprocesses`
+  // skips the server without reaching `registerTools`.
   if (!hasAtLeastOneConnectedBackend(serversConfig, clientStates.size)) {
     const serverNames = Object.keys(serversConfig).join(', ');
-    const errMsg = `proxy subprocess for SERVER_FILTER="${process.env.SERVER_FILTER ?? '<unset>'}" has no connected backend (configured: ${serverNames}); exiting`;
-    process.stderr.write(`ERROR: ${errMsg}\n`);
-    if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${errMsg}`);
+    emitProxyDiagnostic(
+      'ERROR',
+      `proxy subprocess for SERVER_FILTER="${process.env.SERVER_FILTER ?? '<unset>'}" has no connected backend (configured: ${serverNames}); exiting`,
+      sessionLogPath,
+    );
     for (const refresher of tokenRefreshers.values()) {
       refresher.stop();
     }
-    tokenRefreshers.clear();
     cleanupSettingsFiles(settingsDir);
     process.exit(1);
   }
