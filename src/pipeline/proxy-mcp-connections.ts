@@ -130,9 +130,11 @@ export async function connectViaProxy(
     stderr: 'pipe',
   });
 
-  // Drain piped stderr to prevent backpressure
+  // Forward piped stderr to the parent so the proxy's actionable
+  // diagnostics (missing env vars, OAuth not authorized, etc.) reach
+  // the user instead of being silently dropped by a drain.
   if (transport.stderr) {
-    transport.stderr.on('data', () => {});
+    transport.stderr.on('data', (chunk: Buffer) => process.stderr.write(chunk));
   }
 
   const client = new Client(
