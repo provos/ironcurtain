@@ -44,7 +44,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, writeFileSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
@@ -168,9 +168,16 @@ export function hasAtLeastOneConnectedBackend(
   return Object.keys(serversConfig).length === 0 || connectedBackendCount > 0;
 }
 
-/** Writes a diagnostic line to stderr and (if configured) the proxy session log. */
+/**
+ * Writes a diagnostic line to stderr and (if configured) the proxy session log.
+ *
+ * Uses `fs.writeSync` so the bytes reach the OS before the function returns
+ * even when stderr is a pipe (parent-spawned subprocess). `process.stderr.write`
+ * is asynchronous in that case, which would let a follow-up `process.exit(1)`
+ * truncate the diagnostic before delivery.
+ */
 function emitProxyDiagnostic(level: 'WARNING' | 'ERROR', message: string, sessionLogPath: string | undefined): void {
-  process.stderr.write(`${level}: ${message}\n`);
+  writeSync(2, `${level}: ${message}\n`);
   if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${message}`);
 }
 
