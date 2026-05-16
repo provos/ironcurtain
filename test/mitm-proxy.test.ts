@@ -1191,7 +1191,9 @@ describe('MitmProxy', () => {
       const forwarded = JSON.parse(captured[0].toString()) as Record<string, unknown>;
       return forwarded.tools as unknown[];
     } finally {
-      server.close();
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
     }
   }
 
