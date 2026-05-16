@@ -245,6 +245,7 @@ describe('parseProxyEnvConfig', () => {
     expect(config.allowedDirectory).toBeUndefined();
     expect(config.sandboxPolicy).toBe('warn');
     expect(config.serverCredentials).toEqual({});
+    expect(config.serverFilter).toBeUndefined();
   });
 
   it('parses SERVER_CREDENTIALS and scrubs from process.env', () => {
@@ -272,6 +273,7 @@ describe('parseProxyEnvConfig', () => {
 
     expect(Object.keys(config.serversConfig)).toEqual(['git']);
     expect(config.serversConfig.git).toEqual(servers.git);
+    expect(config.serverFilter).toBe('git');
   });
 
   it('calls process.exit(1) when MCP_SERVERS_CONFIG is missing', () => {

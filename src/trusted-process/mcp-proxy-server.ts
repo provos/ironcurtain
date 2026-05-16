@@ -145,6 +145,8 @@ export interface ProxyEnvConfig {
   allowedDirectory: string | undefined;
   serverCredentials: Record<string, string>;
   sandboxPolicy: SandboxAvailabilityPolicy;
+  /** Raw `SERVER_FILTER` env value (e.g., backend name, "proxy", or undefined). */
+  serverFilter: string | undefined;
 }
 
 /** Result of sandbox availability validation. */
@@ -235,6 +237,7 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
     allowedDirectory,
     serverCredentials,
     sandboxPolicy,
+    serverFilter,
   };
 }
 
@@ -360,6 +363,7 @@ async function main(): Promise<void> {
     allowedDirectory,
     serverCredentials,
     sandboxPolicy,
+    serverFilter,
   } = envConfig;
 
   // Load compiled policy + annotations to derive MCP roots advertised
@@ -616,7 +620,7 @@ async function main(): Promise<void> {
     const serverNames = Object.keys(serversConfig).join(', ');
     emitProxyDiagnostic(
       'ERROR',
-      `proxy subprocess for SERVER_FILTER="${process.env.SERVER_FILTER ?? '<unset>'}" has no connected backend (configured: ${serverNames}); exiting`,
+      `proxy subprocess for SERVER_FILTER="${serverFilter ?? '<unset>'}" has no connected backend (configured: ${serverNames}); exiting`,
       sessionLogPath,
     );
     for (const refresher of tokenRefreshers.values()) {
@@ -628,7 +632,7 @@ async function main(): Promise<void> {
 
   // In virtual-only mode (SERVER_FILTER=proxy), register proxy tool definitions
   // and create the control API client for communicating with the MITM proxy.
-  const isVirtualOnlyMode = process.env.SERVER_FILTER === 'proxy' && Object.keys(serversConfig).length === 0;
+  const isVirtualOnlyMode = serverFilter === 'proxy' && Object.keys(serversConfig).length === 0;
   let controlApiClient: ControlApiClient | null = null;
 
   if (isVirtualOnlyMode) {
