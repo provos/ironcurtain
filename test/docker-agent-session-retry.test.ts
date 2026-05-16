@@ -219,6 +219,30 @@ describe('DockerAgentSession retry path', () => {
     expect(flagValue(calls[1], '--resume')).toBeUndefined();
   });
 
+  it('after a partial-failure turn (exit!=0 with non-empty stdout), the next call uses --resume', async () => {
+    // Regression: the Anthropic-API-400-mid-stream class produces exit=1 with
+    // partial assistant text already on stdout AND a session JSONL on disk.
+    // Previously the gate was `exit === 0` only, so the retry re-emitted
+    // `--session-id <same-uuid>` and Claude Code rejected it with
+    // "Session ID is already in use" (the flag is create-only). The current
+    // gate also flips on any non-empty stdout, so the retry uses `--resume`.
+    const { exec, calls } = scriptedExec([
+      { exitCode: 1, stdout: 'partial assistant output', stderr: '' },
+      { exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' },
+    ]);
+    const deps = buildDeps(tempDir, exec);
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await session.sendMessageDetailed('attempt 1');
+    await session.sendMessageDetailed('attempt 2');
+
+    expect(flagValue(calls[0], '--session-id')).toBe(deps.agentConversationId);
+    expect(flagValue(calls[0], '--resume')).toBeUndefined();
+    expect(flagValue(calls[1], '--resume')).toBe(deps.agentConversationId);
+    expect(flagValue(calls[1], '--session-id')).toBeUndefined();
+  });
+
   it('after a successful turn, subsequent calls use --resume with the same UUID', async () => {
     const { exec, calls } = scriptedExec([
       { exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' },
