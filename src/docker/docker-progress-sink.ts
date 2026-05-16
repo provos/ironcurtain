@@ -60,23 +60,13 @@ export function createDockerProgressSink(opts: CreateDockerProgressSinkOptions):
   const now = opts.now ?? Date.now;
 
   // Non-TTY fast path: behave like the pre-sink `process.stderr` so CI logs
-  // keep their full transcript and dumpRecent / finish are no-ops.
+  // keep their full transcript. finish/dumpRecent are no-ops because the
+  // raw transcript is already on screen.
   if (!isTTY) {
-    const passthroughBuffer: string[] = [];
-    const recordPassthroughLines = (text: string): void => {
-      for (const line of text.split('\n')) {
-        const trimmed = line.replace(/\r$/g, '').trimEnd();
-        if (!trimmed) continue;
-        passthroughBuffer.push(trimmed);
-        if (passthroughBuffer.length > bufferSize) passthroughBuffer.shift();
-      }
-    };
     const makeStream = (): NodeJS.WritableStream =>
       new Writable({
         write(chunk: Buffer | string, _encoding, cb) {
-          const text = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
-          recordPassthroughLines(text);
-          output.write(text);
+          output.write(typeof chunk === 'string' ? chunk : chunk.toString('utf-8'));
           cb();
         },
       });
@@ -84,9 +74,7 @@ export function createDockerProgressSink(opts: CreateDockerProgressSinkOptions):
       stdout: makeStream(),
       stderr: makeStream(),
       finish: () => {},
-      dumpRecent: () => {
-        /* raw lines are already on screen */
-      },
+      dumpRecent: () => {},
     };
   }
 
