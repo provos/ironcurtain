@@ -137,6 +137,21 @@ export async function main(args?: string[]): Promise<void> {
   checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
   checkAnnotationFreshness(toolAnnotations, config.mcpServers);
 
+  // Pre-flight the Docker image before starting the init spinner: the
+  // progress sink and the spinner both render to stderr, so they fight for
+  // the same line if they run concurrently. The inner ensureImage call
+  // during session init is content-hash cached, so it's a cheap no-op.
+  if (mode.kind === 'docker') {
+    const { ensureDockerImage } = await import('./docker/docker-infrastructure.js');
+    try {
+      await ensureDockerImage(mode.agent, config.userConfig);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`\n${chalk.red('Docker image setup failed:')} ${message}\n`);
+      process.exit(1);
+    }
+  }
+
   // PTY mode: attach terminal directly to Claude Code in a Docker container
   if (values.pty) {
     if (mode.kind !== 'docker') {
