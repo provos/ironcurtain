@@ -34,7 +34,7 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import type { DockerManager } from './types.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
-import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
+import { parseUpstreamBaseUrl, type AgentKind, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
@@ -199,15 +199,6 @@ export interface PreContainerInfrastructure {
    * wrapper over `MitmProxy.setTokenSessionId()`.
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
-
-  /**
-   * Sets (or clears) the kind of agent currently driving the infrastructure.
-   * Thin wrapper over `MitmProxy.setAgentKind()`. Flipped by callers around
-   * each agent run, parallel to `setTokenSessionId`. Used by request-body
-   * rewriters to apply agent-kind-conditional strips (currently: removing
-   * the schedule built-in skill's tools from workflow agent requests).
-   */
-  setAgentKind(kind: import('./provider-config.js').AgentKind | undefined): void;
 }
 
 /**
@@ -413,6 +404,9 @@ export async function prepareDockerInfrastructure(
   // so the bundleId default is only an initial placeholder. Double-cast
   // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
   const routingId = bundleId as unknown as SessionId;
+  // A workflow bundle serves only workflow agents for its entire lifetime,
+  // so agentKind is fixed at construction time.
+  const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,
@@ -422,6 +416,7 @@ export async function prepareDockerInfrastructure(
         packageValidation,
         controlPort: 0,
         sessionId: routingId,
+        agentKind,
       })
     : createMitmProxy({
         socketPath: getBundleMitmProxySocketPath(bundleId),
@@ -431,6 +426,7 @@ export async function prepareDockerInfrastructure(
         packageValidation,
         controlSocketPath: getBundleMitmControlSocketPath(bundleId),
         sessionId: routingId,
+        agentKind,
       });
 
   const docker = createDockerManager();
@@ -551,9 +547,6 @@ export async function prepareDockerInfrastructure(
       restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
-      },
-      setAgentKind: (kind) => {
-        mitmProxy.setAgentKind(kind);
       },
     };
   } catch (error) {

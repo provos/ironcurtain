@@ -323,7 +323,7 @@ describe('stripScheduleSkillTools', () => {
 });
 
 describe('anthropicRequestRewriter', () => {
-  const ctx = (agentKind?: 'workflow' | 'standalone') => ({
+  const ctx = (agentKind?: 'workflow') => ({
     method: 'POST',
     path: '/v1/messages',
     agentKind,
@@ -333,22 +333,12 @@ describe('anthropicRequestRewriter', () => {
     const body = {
       tools: [{ name: 'Read', input_schema: {} }, { type: 'web_search_20250305' }],
     };
-    for (const kind of ['workflow', 'standalone', undefined] as const) {
+    for (const kind of ['workflow', undefined] as const) {
       const result = anthropicRequestRewriter(body, ctx(kind));
       expect(result, `agentKind=${String(kind)}`).not.toBeNull();
       expect(result!.modified.tools).toEqual([{ name: 'Read', input_schema: {} }]);
       expect(result!.stripped).toEqual(['web_search_20250305']);
     }
-  });
-
-  it('does NOT strip schedule skill tools when agentKind is standalone', () => {
-    const body = {
-      tools: [
-        { name: 'Read', input_schema: {} },
-        { name: 'ScheduleWakeup', input_schema: {} },
-      ],
-    };
-    expect(anthropicRequestRewriter(body, ctx('standalone'))).toBeNull();
   });
 
   it('does NOT strip schedule skill tools when agentKind is undefined', () => {
@@ -1098,15 +1088,15 @@ describe('MitmProxy', () => {
     expect(statusCode).toBe(200);
   });
 
-  // --- End-to-end strip verification via setAgentKind ---
+  // --- End-to-end strip verification via MitmProxyOptions.agentKind ---
   //
   // Drives a real proxy with a local HTTP upstream, exercises the full
   // TLS-terminate / parse / rewrite / forward path, and asserts on what
-  // the upstream actually received. The previous unit tests on
+  // the upstream actually received. The unit tests on
   // anthropicRequestRewriter cover the strip logic itself; these tests
-  // cover the plumbing: that setAgentKind reaches the rewriter context,
-  // and that the rewritten body — not the original — is what flushes
-  // upstream.
+  // cover the plumbing: that `agentKind` from MitmProxyOptions reaches
+  // the rewriter context, and that the rewritten body — not the original —
+  // is what flushes upstream.
 
   /**
    * Stands up a localhost HTTP server that captures the body of each request
@@ -1172,7 +1162,7 @@ describe('MitmProxy', () => {
    * Runs the schedule-tool-strip scenario end-to-end. Returns the parsed
    * `tools` array that the upstream actually received.
    */
-  async function runScheduleStripScenario(agentKind: 'workflow' | 'standalone' | undefined): Promise<unknown[]> {
+  async function runScheduleStripScenario(agentKind: 'workflow' | undefined): Promise<unknown[]> {
     const { port, server, bodies } = await startCapturingUpstream();
     try {
       proxy = createMitmProxy({
@@ -1180,12 +1170,9 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: makeLocalRewriteProvider(port), fakeKey: rewriteFakeKey, realKey: rewriteRealKey }],
         dnsLookup: localhostDnsLookup,
+        agentKind,
       });
       await proxy.start();
-
-      if (agentKind !== undefined) {
-        proxy.setAgentKind(agentKind);
-      }
 
       const { socket, statusCode: connectStatus } = await sendConnect(socketPath, 'api.rewrite-test.com', 443);
       expect(connectStatus).toBe(200);
@@ -1212,16 +1199,6 @@ describe('MitmProxy', () => {
     const forwardedTools = await runScheduleStripScenario('workflow');
     expect(forwardedTools).toEqual([
       { name: 'Read', input_schema: {} },
-      { name: 'Bash', input_schema: {} },
-    ]);
-  });
-
-  it('preserves schedule-skill tools when agentKind=standalone', async () => {
-    const forwardedTools = await runScheduleStripScenario('standalone');
-    expect(forwardedTools).toEqual([
-      { name: 'Read', input_schema: {} },
-      { name: 'ScheduleWakeup', input_schema: {} },
-      { name: 'CronCreate', input_schema: {} },
       { name: 'Bash', input_schema: {} },
     ]);
   });

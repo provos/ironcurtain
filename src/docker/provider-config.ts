@@ -7,12 +7,14 @@
  */
 
 /**
- * Discriminator for the agent invoking the proxy. Flipped by callers around
- * each agent run via `MitmProxy.setAgentKind()`. Currently only used by the
- * request-body rewriter to scope strips that depend on agent context (e.g.
- * stripping the schedule built-in skill's tools only for workflow agents).
+ * Discriminator for the agent invoking the proxy. Set at proxy construction
+ * time via `MitmProxyOptions.agentKind`. Currently the only named kind is
+ * `'workflow'`, which opts the request-body rewriter into workflow-only
+ * strips (e.g. removing the schedule built-in skill's tools). `undefined`
+ * means standalone / interactive / unknown — no agent-kind-conditional
+ * rewrites apply.
  */
-export type AgentKind = 'workflow' | 'standalone';
+export type AgentKind = 'workflow';
 
 /**
  * Result from a RequestBodyRewriter when modifications were made.
@@ -171,27 +173,12 @@ export function isEndpointAllowed(
 // --- Request body rewriters ---
 
 /**
- * Returns the server-side tool type string if the tool entry is a
- * server-side tool, or null if it is a custom/MCP-bridged tool.
- *
- * Server-side tools have a `type` field that is not "custom".
- * Custom tools either have no `type` field or `type: "custom"`.
+ * Walks the Anthropic Messages API `tools` array, asking `classify` to
+ * label each entry. Entries with a non-null label are removed and their
+ * labels collected into `stripped`; entries returning `null` are kept.
+ * Returns `null` when nothing matched, so the caller can skip serialization.
  */
-function getServerSideToolType(tool: unknown): string | null {
-  if (typeof tool !== 'object' || tool === null || !('type' in tool)) return null;
-  const { type } = tool as Record<string, unknown>;
-  if (typeof type === 'string' && type !== 'custom') return type;
-  return null;
-}
-
-/**
- * Strips server-side tools from the Anthropic Messages API `tools` array.
- *
- * Server-side tools (e.g. web_search_20250305, computer_20250124) have a
- * `type` field that is not "custom". Custom/MCP-bridged tools either have
- * no `type` field or `type: "custom"`.
- */
-export function stripServerSideTools(body: Record<string, unknown>): RewriteResult | null {
+function stripToolsBy(body: Record<string, unknown>, classify: (tool: unknown) => string | null): RewriteResult | null {
   const tools = body.tools;
   if (!Array.isArray(tools) || tools.length === 0) return null;
 
@@ -199,20 +186,29 @@ export function stripServerSideTools(body: Record<string, unknown>): RewriteResu
   const kept: unknown[] = [];
 
   for (const tool of tools) {
-    const serverType = getServerSideToolType(tool);
-    if (serverType) {
-      stripped.push(serverType);
+    const label = classify(tool);
+    if (label !== null) {
+      stripped.push(label);
     } else {
       kept.push(tool);
     }
   }
 
   if (stripped.length === 0) return null;
+  return { modified: { ...body, tools: kept }, stripped };
+}
 
-  return {
-    modified: { ...body, tools: kept },
-    stripped,
-  };
+/**
+ * Server-side tools (e.g. web_search_20250305, computer_20250124) have a
+ * `type` field that is not "custom". Custom/MCP-bridged tools either have
+ * no `type` field or `type: "custom"`.
+ */
+export function stripServerSideTools(body: Record<string, unknown>): RewriteResult | null {
+  return stripToolsBy(body, (tool) => {
+    if (typeof tool !== 'object' || tool === null || !('type' in tool)) return null;
+    const { type } = tool as Record<string, unknown>;
+    return typeof type === 'string' && type !== 'custom' ? type : null;
+  });
 }
 
 /**
@@ -226,8 +222,7 @@ export function stripServerSideTools(body: Record<string, unknown>): RewriteResu
  * trips the workflow harness's missing-status guard.
  *
  * Upstream tracking: https://github.com/anthropics/claude-code/issues/53746
- * (open enhancement, no committed fix). Workflow-side reproduction logged
- * across runs `5cc70e67-...` and `c2e5473b-...`.
+ * (open enhancement, no committed fix).
  */
 const SCHEDULE_SKILL_TOOL_NAMES: ReadonlySet<string> = new Set([
   'ScheduleWakeup',
@@ -242,29 +237,11 @@ const SCHEDULE_SKILL_TOOL_NAMES: ReadonlySet<string> = new Set([
  * entries declared by the Claude Code CLI client, not as server-side tools).
  */
 export function stripScheduleSkillTools(body: Record<string, unknown>): RewriteResult | null {
-  const tools = body.tools;
-  if (!Array.isArray(tools) || tools.length === 0) return null;
-
-  const stripped: string[] = [];
-  const kept: unknown[] = [];
-
-  for (const tool of tools) {
-    if (typeof tool === 'object' && tool !== null && 'name' in tool) {
-      const { name } = tool as Record<string, unknown>;
-      if (typeof name === 'string' && SCHEDULE_SKILL_TOOL_NAMES.has(name)) {
-        stripped.push(name);
-        continue;
-      }
-    }
-    kept.push(tool);
-  }
-
-  if (stripped.length === 0) return null;
-
-  return {
-    modified: { ...body, tools: kept },
-    stripped,
-  };
+  return stripToolsBy(body, (tool) => {
+    if (typeof tool !== 'object' || tool === null || !('name' in tool)) return null;
+    const { name } = tool as Record<string, unknown>;
+    return typeof name === 'string' && SCHEDULE_SKILL_TOOL_NAMES.has(name) ? name : null;
+  });
 }
 
 /**

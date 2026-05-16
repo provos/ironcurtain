@@ -189,7 +189,6 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
             listHosts: () => ({ providers: [], dynamic: [] }),
           },
           setTokenSessionId: () => {},
-          setAgentKind: () => {},
         } as MitmProxy)
       : createMockMitmProxy());
   const proxy = opts.proxy ?? createMockProxy(join(opts.sessionDir, 'proxy.sock'), useTcp ? 9123 : undefined);
@@ -223,7 +222,6 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     sidecarContainerId: opts.sidecarContainerId,
     internalNetwork: opts.internalNetwork,
     setTokenSessionId: () => {},
-    setAgentKind: () => {},
   };
 }
 

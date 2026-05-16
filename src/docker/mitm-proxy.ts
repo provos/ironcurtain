@@ -103,20 +103,6 @@ export interface MitmProxy {
    * `bus.push()` entirely — no events are emitted under a sentinel value.
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
-
-  /**
-   * Set (or clear) the kind of agent currently driving requests through
-   * this proxy. Flipped by callers around each agent run, parallel to
-   * `setTokenSessionId`. Provided to request-body rewriters so they can
-   * apply agent-kind-specific transforms (e.g. stripping the schedule
-   * built-in skill's tools only for workflow agents — see
-   * `anthropicRequestRewriter` in `provider-config.ts`).
-   *
-   * `undefined` means "no agent-kind context available," which rewriters
-   * treat as the most conservative behavior (no agent-kind-conditional
-   * stripping).
-   */
-  setAgentKind(kind: AgentKind | undefined): void;
 }
 
 export interface MitmProxyOptions {
@@ -174,6 +160,15 @@ export interface MitmProxyOptions {
    * call), extraction sites skip publishing entirely.
    */
   readonly sessionId?: import('../session/types.js').SessionId;
+
+  /**
+   * Kind of agent driving this proxy, used by request-body rewriters to
+   * apply agent-kind-conditional transforms (currently: stripping the
+   * schedule built-in skill's tools when set to `'workflow'`). Immutable
+   * over the proxy's lifetime — a single bundle serves a single agent kind.
+   * `undefined` means rewriters fall back to the most conservative behavior.
+   */
+  readonly agentKind?: AgentKind;
 }
 
 export interface ProviderKeyMapping {
@@ -516,12 +511,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // tests is honored.
   let tokenSessionId: import('../session/types.js').SessionId | undefined = options.sessionId;
 
-  // Mutable per-proxy value flipped around each agent run via setAgentKind
-  // on the returned handle. Snapshotted into the request-body rewriter
-  // context so concurrent flips can't split a single request's strips
-  // across two kinds. `undefined` means rewriters fall back to the most
-  // conservative (non-stripping) behavior.
-  let agentKind: AgentKind | undefined = undefined;
+  const agentKind: AgentKind | undefined = options.agentKind;
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -979,17 +969,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
           const reqMethod = method as string;
           const reqPath = path as string;
-          // Snapshot agentKind here (alongside sidForToolResults above) so a
-          // concurrent setAgentKind flip can't split this request's strips
-          // across two kinds.
-          const kindForRewrite = agentKind;
           try {
             const parsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
-            const result = rewriter(parsed, {
-              method: reqMethod,
-              path: reqPath,
-              agentKind: kindForRewrite,
-            });
+            const result = rewriter(parsed, { method: reqMethod, path: reqPath, agentKind });
             if (result) {
               finalBody = Buffer.from(JSON.stringify(result.modified));
               logger.info(`[mitm-proxy] POST ${targetHost}${path} - stripped tools: ${result.stripped.join(', ')}`);
@@ -1653,10 +1635,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void {
       tokenSessionId = id;
-    },
-
-    setAgentKind(kind: AgentKind | undefined): void {
-      agentKind = kind;
     },
 
     async start() {

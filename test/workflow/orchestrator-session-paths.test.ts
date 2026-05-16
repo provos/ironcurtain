@@ -45,7 +45,6 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     workflowId,
     bundleId,
     setTokenSessionId: () => {},
-    setAgentKind: () => {},
   } as unknown as DockerInfrastructure;
 }
 

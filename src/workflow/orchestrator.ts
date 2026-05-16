@@ -1994,16 +1994,10 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       // Shared-container mode: the MITM is long-lived across agents. Flip
       // its routing id so this agent's events land under its own session id
-      // (matching what the bridge registers below). The paired agent-kind
-      // flip lets the proxy's request-body rewriter apply workflow-only
-      // strips (currently: the schedule built-in skill's tools, which
-      // would otherwise let the agent silently end its turn without
-      // emitting agent_status — see provider-config.ts:anthropicRequestRewriter).
-      // Optional-chain because builtin/per-state-container workflows have
-      // no shared `infra`.
+      // (matching what the bridge registers below). Optional-chain because
+      // builtin/per-state-container workflows have no shared `infra`.
       const agentSessionId = session.getInfo().id;
       bundle?.setTokenSessionId(agentSessionId);
-      bundle?.setAgentKind('workflow');
       instance.tokens.sessionIds.add(agentSessionId);
 
       this.emitLifecycleEvent({
@@ -2188,7 +2182,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       // until they finish, regardless of setTokenSessionId(undefined).
       // The clear here only governs future attachments.
       bundle?.setTokenSessionId(undefined);
-      bundle?.setAgentKind(undefined);
       instance.tokens.sessionIds.delete(endedSessionId);
       // Pairs 1:1 with agent_started; emitted unconditionally in finally
       // so success, failure, and abort paths all clean up the bridge.

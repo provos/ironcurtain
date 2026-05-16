@@ -124,7 +124,6 @@ function makeFakeBundle(skillsDir: string | undefined, bundleDir: string): Docke
     auditLogPath: resolve(bundleDir, 'audit.jsonl'),
     ...(skillsDir ? { skillsMount: { hostDir: skillsDir, target: '/home/codespace/skills/.claude/skills' } } : {}),
     setTokenSessionId: () => {},
-    setAgentKind: () => {},
     restageSkills: (skills: readonly ResolvedSkill[]) => {
       if (skillsDir) stageSkillsToBundle(skills, skillsDir);
     },
