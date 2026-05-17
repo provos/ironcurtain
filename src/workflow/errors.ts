@@ -1,4 +1,5 @@
 import type { AgentConversationId } from '../session/types.js';
+import type { TransientFailureKind } from '../docker/agent-adapter.js';
 
 /**
  * Wraps an error thrown from within `executeAgentState()` so the XState
@@ -80,13 +81,13 @@ export function isWorkflowQuotaExhaustedError(err: unknown): err is WorkflowQuot
  */
 export interface WorkflowTransientFailureOptions {
   readonly stateId: string;
-  readonly kind: 'degenerate_response';
+  readonly kind: TransientFailureKind;
   readonly rawMessage: string;
 }
 
 export class WorkflowTransientFailureError extends Error {
   readonly stateId: string;
-  readonly kind: 'degenerate_response';
+  readonly kind: TransientFailureKind;
   readonly rawMessage: string;
 
   constructor(options: WorkflowTransientFailureOptions) {

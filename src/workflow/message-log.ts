@@ -1,5 +1,6 @@
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { TransientFailureKind } from '../docker/agent-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Log entry types
@@ -86,7 +87,7 @@ export interface QuotaExhaustedEntry extends BaseEntry {
 export interface TransientFailureEntry extends BaseEntry {
   readonly type: 'transient_failure';
   readonly role: string;
-  readonly kind: 'degenerate_response';
+  readonly kind: TransientFailureKind;
   readonly rawMessage: string;
 }
 

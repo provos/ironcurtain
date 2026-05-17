@@ -288,6 +288,39 @@ describe('DockerAgentSession retry path', () => {
     expect(result.text).toBe('preamble only');
   });
 
+  it('forwards transientFailure from an upstream 5xx envelope (exit=1, api_error_status=500)', async () => {
+    // Mirrors the degenerate_response plumbing test above for the new
+    // upstream_5xx detection: after the SDK exhausts its 3 internal
+    // retries against a transient Anthropic 5xx, the CLI emits a
+    // `type: 'result'` envelope with `api_error_status: 500` and exits
+    // non-zero. The session must surface the structured signal through
+    // sendMessageDetailed so the orchestrator short-circuits instead of
+    // burning its retry budget against a still-broken upstream.
+    const upstream5xxEnvelope = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      api_error_status: 500,
+      result:
+        'API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.',
+      stop_reason: 'stop_sequence',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+    const { exec } = scriptedExec([{ exitCode: 1, stdout: upstream5xxEnvelope, stderr: '' }]);
+    const deps = buildDeps(tempDir, exec);
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const result = await session.sendMessageDetailed('do the thing');
+
+    expect(result.transientFailure).toBeDefined();
+    expect(result.transientFailure!.kind).toBe('upstream_5xx');
+    expect(result.transientFailure!.rawMessage).toContain('api_error_status');
+    expect(result.hardFailure).toBe(false);
+    expect(result.quotaExhausted).toBeUndefined();
+    expect(result.text).toContain('API Error: 500');
+  });
+
   it('sendMessage delegates to sendMessageDetailed and returns just the text', async () => {
     const { exec } = scriptedExec([{ exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' }]);
     const deps = buildDeps(tempDir, exec);

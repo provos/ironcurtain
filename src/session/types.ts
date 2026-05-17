@@ -3,7 +3,7 @@ import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
-import type { AgentId } from '../docker/agent-adapter.js';
+import type { AgentId, TransientFailureKind } from '../docker/agent-adapter.js';
 import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 
@@ -566,7 +566,7 @@ export interface AgentTurnResult {
    * checkpoint preserved.
    */
   readonly transientFailure?: {
-    readonly kind: 'degenerate_response';
+    readonly kind: TransientFailureKind;
     readonly rawMessage: string;
   };
 }

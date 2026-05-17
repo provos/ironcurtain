@@ -412,6 +412,85 @@ describe('Claude Code Adapter', () => {
     expect(nonStringResponse.transientFailure).toBeUndefined();
   });
 
+  /**
+   * Builds an api_error_status envelope matching Claude Code's
+   * post-SDK-retry shape. `extras` lets a test override any base field
+   * or omit one (set to `undefined`) for predicate-strictness checks.
+   */
+  function makeErrorStatusEnvelope(status: number, extras: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: 'result',
+      is_error: true,
+      api_error_status: status,
+      result: `API Error: ${status}`,
+      stop_reason: 'stop_sequence',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      ...extras,
+    });
+  }
+
+  it('surfaces transientFailure as upstream_5xx on the captured 500-after-SDK-retries envelope (exit=1)', () => {
+    // Ground-truth shape from a real Anthropic outage: must classify as
+    // resumable-abort (NOT hardFailure, NOT quotaExhausted) so the
+    // orchestrator preserves the checkpoint instead of burning its
+    // retry budget against an upstream that is currently 5xx-ing.
+    const envelope = makeErrorStatusEnvelope(500, {
+      subtype: 'success',
+      result:
+        'API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.transientFailure).toBeDefined();
+    expect(response.transientFailure!.kind).toBe('upstream_5xx');
+    expect(response.transientFailure!.rawMessage).toContain('api_error_status');
+    expect(response.text).toContain('API Error: 500');
+    expect(response.hardFailure).toBeUndefined();
+    expect(response.quotaExhausted).toBeUndefined();
+  });
+
+  it('classifies 502, 503, 504 as upstream_5xx (any 5xx status, not just 500)', () => {
+    for (const status of [502, 503, 504, 599]) {
+      const response = claudeCodeAdapter.extractResponse(1, makeErrorStatusEnvelope(status));
+      expect(response.transientFailure?.kind).toBe('upstream_5xx');
+    }
+  });
+
+  it('does NOT classify 4xx (400, 401, 403) as upstream_5xx — those must surface as errors, not resumable-aborts', () => {
+    // Misclassifying a 4xx as upstream_5xx would silently swallow real
+    // bugs (e.g. a poisoned tool-use history) into a checkpoint-
+    // preserving abort that would just re-hit the same 400 on resume.
+    for (const status of [400, 401, 403, 404, 499]) {
+      const response = claudeCodeAdapter.extractResponse(1, makeErrorStatusEnvelope(status));
+      expect(response.transientFailure).toBeUndefined();
+    }
+  });
+
+  it('does not flag upstream_5xx when api_error_status is missing or non-numeric (defensive)', () => {
+    const missing = makeErrorStatusEnvelope(500, { api_error_status: undefined });
+    expect(claudeCodeAdapter.extractResponse(1, missing).transientFailure).toBeUndefined();
+
+    const wrongType = makeErrorStatusEnvelope(500, { api_error_status: '500' });
+    expect(claudeCodeAdapter.extractResponse(1, wrongType).transientFailure).toBeUndefined();
+  });
+
+  it('does not flag upstream_5xx when is_error is missing or false (predicate strictness)', () => {
+    const noFlag = makeErrorStatusEnvelope(500, { is_error: undefined });
+    expect(claudeCodeAdapter.extractResponse(1, noFlag).transientFailure).toBeUndefined();
+  });
+
+  it('does not break the existing 429 (quota) path — 429 must still route to quotaExhausted', () => {
+    // Mutual-exclusion regression guard: the new 5xx detector must run
+    // AFTER the quota check so a 429 envelope (which would also pass
+    // `is_error: true` + numeric `api_error_status`) is still
+    // classified as quotaExhausted, not upstream_5xx.
+    const envelope = makeErrorStatusEnvelope(429, {
+      result: 'Usage limit reached for 5 hour. Your limit will reset at 2026-05-16 22:00:00',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.quotaExhausted).toBeDefined();
+    expect(response.transientFailure).toBeUndefined();
+  });
+
   it('returns conversation state config for session resume', () => {
     const config = claudeCodeAdapter.getConversationStateConfig!();
     expect(config.hostDirName).toBe('claude-state');

@@ -19,6 +19,7 @@ import type {
   AgentResponse,
   ConversationStateConfig,
   OrientationContext,
+  TransientFailureKind,
 } from '../agent-adapter.js';
 import type { DockerAuthKind, IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
@@ -278,24 +279,35 @@ exit $STATUS
 
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       if (exitCode !== 0) {
-        // The CLI exits non-zero on 429 (quota) and on the upstream-stall
-        // envelope (`type: 'result'`, `output_tokens=0`,
-        // `stop_reason=null`); both signals must survive the non-zero
-        // exit. Parse stdout once and dispatch to both detectors.
+        // The CLI exits non-zero on 429 (quota), on transient upstream
+        // 5xx (`api_error_status: 5xx`, after the SDK exhausts its
+        // internal retries), and on the upstream-stall envelope
+        // (`type: 'result'`, `output_tokens=0`, `stop_reason=null`); all
+        // three signals must survive the non-zero exit. Parse stdout once
+        // and dispatch to each detector.
         const parsed = tryParseJsonObject(stdout);
         const quotaExhausted = parsed ? extractClaudeCodeQuotaSignal(parsed, stdout) : undefined;
         if (quotaExhausted) {
           return { text: quotaExhausted.rawMessage, quotaExhausted };
         }
+        // Both transient-failure branches are resumable-aborts (NOT
+        // hardFailure): the orchestrator's hard-retry rotation cannot
+        // recover an upstream that's currently 5xx-ing or stalled — the
+        // SDK already exhausted its internal retries within the failed
+        // turn. Surface the synthetic `result` string as the agent's
+        // text so the message log records what happened.
+        const transientText = typeof parsed?.result === 'string' ? parsed.result : stdout.trim();
+        const asTransientFailure = (kind: TransientFailureKind, rawMessage: string): AgentResponse => ({
+          text: transientText,
+          transientFailure: { kind, rawMessage },
+        });
+        const upstream5xx = parsed ? detectUpstreamFiveXx(parsed, stdout) : undefined;
+        if (upstream5xx) {
+          return asTransientFailure('upstream_5xx', upstream5xx.rawMessage);
+        }
         const transient = parsed ? detectTransientFailure(parsed, stdout) : undefined;
         if (transient) {
-          // Treat as resumable-abort, NOT hardFailure: the orchestrator's
-          // hard-retry rotation cannot recover a stalled upstream.
-          const text = typeof parsed?.result === 'string' ? parsed.result : stdout.trim();
-          return {
-            text,
-            transientFailure: { kind: 'degenerate_response', rawMessage: transient.rawMessage },
-          };
+          return asTransientFailure('degenerate_response', transient.rawMessage);
         }
         // Zero output on non-zero exit indicates the claude process was
         // killed (SIGTERM) or crashed before producing any assistant text —
@@ -412,6 +424,28 @@ function detectTransientFailure(parsed: Record<string, unknown>, stdout: string)
 }
 
 /**
+ * Detects the synthetic "upstream 5xx" envelope: Claude Code's SDK
+ * retries transient provider 5xx responses three times internally; if
+ * all three fail (e.g. a sustained Anthropic outage with mid-SSE-stream
+ * aborts), the CLI emits a `type: 'result'` envelope with
+ * `api_error_status` in the 5xx range and exits non-zero.
+ *
+ * Mirrors the defensive intent of `detectTransientFailure`: false
+ * positives would silently swallow real errors, so the predicate is
+ * strict. Restricted to 5xx so that 4xx envelopes (400 poisoned-
+ * history, 401, 403) the SDK does NOT retry are NOT misclassified —
+ * those are real errors the agent should see unmodified.
+ */
+function detectUpstreamFiveXx(parsed: Record<string, unknown>, stdout: string): { rawMessage: string } | undefined {
+  if (parsed.type !== 'result') return undefined;
+  if (parsed.is_error !== true) return undefined;
+  const status = parsed.api_error_status;
+  if (typeof status !== 'number') return undefined;
+  if (status < 500 || status >= 600) return undefined;
+  return { rawMessage: stdout.trim() };
+}
+
+/**
  * Parses Claude Code's `--output-format json` response.
  * Falls back to raw stdout when the output is not valid JSON.
  */
@@ -419,9 +453,13 @@ function parseClaudeCodeJson(stdout: string): AgentResponse {
   const parsed = tryParseJsonObject(stdout);
   if (parsed && 'result' in parsed) {
     const text = typeof parsed.result === 'string' ? parsed.result : stdout.trim();
-    const transient = detectTransientFailure(parsed, stdout);
     const base: AgentResponse =
       typeof parsed.total_cost_usd === 'number' ? { text, costUsd: parsed.total_cost_usd } : { text };
+    // Quota and 5xx envelopes both arrive with exit ≠ 0 by design, so
+    // they're handled in the non-zero-exit branch of extractResponse.
+    // Only the degenerate-response shape (exit = 0 but empty completion)
+    // is reachable here.
+    const transient = detectTransientFailure(parsed, stdout);
     if (transient) {
       return { ...base, transientFailure: { kind: 'degenerate_response', rawMessage: transient.rawMessage } };
     }
