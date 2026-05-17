@@ -1,5 +1,5 @@
 import type { AgentConversationId } from '../session/types.js';
-import type { TransientFailureKind } from '../docker/agent-adapter.js';
+import { describeTransientFailureKind, type TransientFailureKind } from '../docker/agent-adapter.js';
 
 /**
  * Wraps an error thrown from within `executeAgentState()` so the XState
@@ -91,7 +91,7 @@ export class WorkflowTransientFailureError extends Error {
   readonly rawMessage: string;
 
   constructor(options: WorkflowTransientFailureOptions) {
-    super(`Agent turn aborted: upstream stall (kind=${options.kind})`);
+    super(`Agent turn aborted: transient upstream failure — ${describeTransientFailureKind(options.kind)}`);
     this.name = 'WorkflowTransientFailureError';
     this.stateId = options.stateId;
     this.kind = options.kind;

@@ -104,6 +104,21 @@ export interface AgentResponse {
 export type TransientFailureKind = 'degenerate_response' | 'upstream_5xx';
 
 /**
+ * Human-readable description of a transient-failure kind, used in
+ * user-facing terminal-status text and error messages. Centralized so
+ * adding a new kind forces an exhaustive switch update (TypeScript
+ * errors here if the kind is unhandled).
+ */
+export function describeTransientFailureKind(kind: TransientFailureKind): string {
+  switch (kind) {
+    case 'degenerate_response':
+      return 'agent returned no content (output_tokens=0, stop_reason=null)';
+    case 'upstream_5xx':
+      return 'upstream returned a 5xx error after SDK retries exhausted';
+  }
+}
+
+/**
  * Branded agent identifier to prevent mixing with other string types.
  */
 export type AgentId = string & { readonly __brand: 'AgentId' };

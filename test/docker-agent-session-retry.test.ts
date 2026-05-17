@@ -243,6 +243,32 @@ describe('DockerAgentSession retry path', () => {
     expect(flagValue(calls[1], '--session-id')).toBeUndefined();
   });
 
+  it('whitespace-only stdout on a hard failure does NOT flip firstTurnComplete', async () => {
+    // The gate uses `stdout.trim().length > 0` so the adapter's hard-failure
+    // definition (also `.trim().length === 0`) agrees: a CLI that prints only
+    // newlines/spaces before dying is still a hard failure that needs
+    // rotateAgentConversationId() to mint a fresh UUID. If the gate flipped
+    // on whitespace, the orchestrator's rotation would happen but the next
+    // call would have used --resume against a never-materialized JSONL.
+    const { exec, calls } = scriptedExec([
+      { exitCode: 143, stdout: '   \n  \t\n', stderr: '' },
+      { exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' },
+    ]);
+    const deps = buildDeps(tempDir, exec);
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const first = await session.sendMessageDetailed('attempt 1');
+    expect(first.hardFailure).toBe(true);
+
+    session.rotateAgentConversationId();
+    await session.sendMessageDetailed('attempt 2');
+
+    expect(flagValue(calls[1], '--session-id')).toBeDefined();
+    expect(flagValue(calls[1], '--session-id')).not.toBe(deps.agentConversationId);
+    expect(flagValue(calls[1], '--resume')).toBeUndefined();
+  });
+
   it('after a successful turn, subsequent calls use --resume with the same UUID', async () => {
     const { exec, calls } = scriptedExec([
       { exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' },

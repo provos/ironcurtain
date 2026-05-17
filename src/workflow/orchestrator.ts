@@ -66,7 +66,7 @@ import type {
   SessionMode,
 } from '../session/types.js';
 import { createAgentConversationId, createBundleId } from '../session/types.js';
-import type { AgentId, TransientFailureKind } from '../docker/agent-adapter.js';
+import { describeTransientFailureKind, type AgentId, type TransientFailureKind } from '../docker/agent-adapter.js';
 import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
@@ -2326,8 +2326,8 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.finalStatus = {
         phase: 'aborted',
         reason:
-          `Upstream stall: agent returned no content (kind=${instance.transientFailure.kind}; ` +
-          `resumable — run "ironcurtain workflow resume <baseDir>" once upstream is healthy)\n${excerpt}`,
+          `Transient upstream failure: ${describeTransientFailureKind(instance.transientFailure.kind)} ` +
+          `(resumable — run "ironcurtain workflow resume <baseDir>" once upstream is healthy)\n${excerpt}`,
       };
     } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {

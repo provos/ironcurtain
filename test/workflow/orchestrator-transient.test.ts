@@ -131,8 +131,8 @@ describe('WorkflowOrchestrator transient-failure short-circuit', () => {
     const status = orchestrator.getStatus(workflowId);
     expect(status?.phase).toBe('aborted');
     if (status?.phase === 'aborted') {
-      expect(status.reason).toContain('Upstream stall');
-      expect(status.reason).toContain('degenerate_response');
+      expect(status.reason).toContain('Transient upstream failure');
+      expect(status.reason).toContain('agent returned no content');
       expect(status.reason).toContain('resume');
     }
 

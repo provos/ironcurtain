@@ -1532,7 +1532,7 @@ describe('workflows.listResumable', () => {
     const cp = makeCheckpoint({
       machineState: 'plan',
       timestamp: '2026-04-23T15:00:00.000Z',
-      finalStatus: { phase: 'aborted', reason: 'Upstream stall: agent returned no content' },
+      finalStatus: { phase: 'aborted', reason: 'Transient upstream failure: agent returned no content' },
     });
     seedRunDirectory(baseDir, id, { definition: def, checkpoint: cp });
 
