@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -535,7 +535,7 @@ export function getBundleAuditLogPath(workflowId: string, bundleId: BundleId): s
  *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/states/
  *
  * Each agent state invocation (including re-entries) that borrows this
- * bundle gets its own subdirectory keyed by `{stateId}.{visitCount}`.
+ * bundle gets its own subdirectory keyed by `{stateId}.{N}`.
  */
 export function getBundleStatesDir(workflowId: string, bundleId: BundleId): string {
   return resolve(getBundleDir(workflowId, bundleId), 'states');
@@ -546,11 +546,32 @@ export function getBundleStatesDir(workflowId: string, bundleId: BundleId): stri
  *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/states/{stateSlug}/
  *
  * Holds this invocation's `session.log` and `session-metadata.json`.
- * `stateSlug` is `{stateId}.{visitCount}` (e.g., `fetch.1`, `plan.2`).
+ * `stateSlug` is `{stateId}.{N}` (e.g., `fetch.1`, `plan.2`).
  */
 export function getInvocationDir(workflowId: string, bundleId: BundleId, stateSlug: string): string {
   assertStateSlug(stateSlug);
   return resolve(getBundleStatesDir(workflowId, bundleId), stateSlug);
+}
+
+/**
+ * Picks the next available `{stateId}.{N}` slug in `statesDir`. Returns
+ * `${stateId}.1` when no matching dir exists; otherwise the max existing
+ * N plus 1. Used so every state entry (true logical re-visits AND resume
+ * legs of a single visit) gets its own forensic dir — `session.log` and
+ * `session-metadata.json` no longer interleave across resume attempts.
+ */
+export function nextStateSlug(statesDir: string, stateId: string): string {
+  assertPathSafeSlug('state ID', stateId);
+  let max = 0;
+  if (existsSync(statesDir)) {
+    const prefix = `${stateId}.`;
+    for (const entry of readdirSync(statesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+      const n = Number(entry.name.slice(prefix.length));
+      if (Number.isInteger(n) && n > max) max = n;
+    }
+  }
+  return `${stateId}.${max + 1}`;
 }
 
 /**

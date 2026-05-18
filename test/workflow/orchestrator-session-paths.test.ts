@@ -5,8 +5,10 @@
  *
  * Mocks `createSession` through deps to capture the options passed for
  * each state invocation and asserts:
- *   - `workflow.stateDir` paths follow `.../states/{stateId}.{visitCount}/`
- *   - `workflow.stateSlug` is `${stateId}.${visitCount}`
+ *   - `workflow.stateDir` paths follow `.../states/{stateId}.{N}/`
+ *   - `workflow.stateSlug` is `${stateId}.${N}` where N is the next
+ *     available leg number on disk (true re-visits and resume legs both
+ *     pick the next available, never reusing an existing dir).
  *   - Re-entering a state produces `{stateId}.2` etc.
  */
 

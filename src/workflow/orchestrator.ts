@@ -44,7 +44,9 @@ import {
   getBundleBundleDir,
   getBundleControlSocketPath,
   getBundleRuntimeRoot,
+  getBundleStatesDir,
   getInvocationDir,
+  nextStateSlug,
 } from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
@@ -1838,14 +1840,14 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     // In borrow mode, route this invocation's per-state artifacts
     // (session.log, session-metadata.json) under a slug-keyed directory
-    // inside the workflow run. The XState machine's `incrementVisitCount`
-    // entry action runs before `invoke`, so `context.visitCounts[stateId]`
-    // is already incremented by the time this factory runs (1 on first
-    // entry, 2 on re-entry, etc.).
-    const visitCountForSlug = context.visitCounts[stateId];
-    const stateSlug = `${stateId}.${visitCountForSlug}`;
-    const workflowStateDir = bundle ? getInvocationDir(instance.id, bundle.bundleId, stateSlug) : undefined;
-    if (workflowStateDir) {
+    // inside the workflow run. The slug is the next available `.N` in
+    // the bundle's states dir, so true logical re-visits AND resume legs
+    // both get their own dir — never appending into a prior leg's logs.
+    let stateSlug: string | undefined;
+    let workflowStateDir: string | undefined;
+    if (bundle) {
+      stateSlug = nextStateSlug(getBundleStatesDir(instance.id, bundle.bundleId), stateId);
+      workflowStateDir = getInvocationDir(instance.id, bundle.bundleId, stateSlug);
       mkdirSync(workflowStateDir, { recursive: true });
     }
 
