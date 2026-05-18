@@ -203,5 +203,9 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
  * SIGKILL the child).
  */
 function exitWithStatus(collected: CheckResult[]): never {
-  process.exit(collected.some((c) => c.status === 'fail') ? 1 : 0);
+  const code = collected.some((c) => c.status === 'fail') ? 1 : 0;
+  // Set exitCode first so any handler that swallows process.exit (test
+  // harnesses, signal handlers) still sees a non-zero status for CI to gate on.
+  process.exitCode = code;
+  process.exit(code);
 }

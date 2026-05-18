@@ -94,9 +94,24 @@ export async function checkSandboxViability(): Promise<PreflightCheckResult> {
 
 function runSandboxViabilityCheck(): Promise<PreflightCheckResult> {
   return new Promise((resolvePromise) => {
-    // The script simply attempts to import and instantiate the UTCP client.
+    // Resolve the absolute path here so the child's cwd doesn't affect lookup —
+    // a bare `@utcp/code-mode` specifier in `node -e` is resolved against
+    // `<process.cwd()>/[eval]`, which breaks when the user invokes ironcurtain
+    // from outside the installed package tree (e.g. global installs).
+    let utcpEntry: string;
+    try {
+      utcpEntry = createRequire(import.meta.url).resolve('@utcp/code-mode');
+    } catch (err) {
+      resolvePromise({
+        ok: false,
+        message: 'Missing required dependency: @utcp/code-mode',
+        details: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
     const script = `
-      import('@utcp/code-mode')
+      import(${JSON.stringify(utcpEntry)})
         .then((m) => m.CodeModeUtcpClient.create())
         .then(() => process.exit(0))
         .catch((e) => {
@@ -146,31 +161,29 @@ function runSandboxViabilityCheck(): Promise<PreflightCheckResult> {
         return;
       }
 
-      let details = stderrOutput.trim();
+      const stderr = stderrOutput.trim();
       let message = 'Failed to initialize the V8 sandbox (isolated-vm).';
+      let hint: string | undefined;
 
       if (signal) {
         message = `V8 sandbox crashed with signal ${signal}.`;
         if (signal === 'SIGSEGV' || signal === 'SIGILL') {
-          details =
+          hint =
             'This is often caused by an incompatible Node.js version (e.g., Node 25). ' +
             'Please use Node.js 22, 23, or 24.';
         }
-      } else if (details.includes('NODE_MODULE_VERSION')) {
+      } else if (stderr.includes('NODE_MODULE_VERSION')) {
         message = 'Native module ABI mismatch detected.';
-        details =
+        hint =
           'You likely changed Node.js versions without rebuilding dependencies. ' +
           'Run `npm rebuild` or `rm -rf node_modules && npm install` to fix this.';
-      } else if (details.includes('Cannot find package')) {
+      } else if (stderr.includes('Cannot find package')) {
         message = 'Missing required dependency: @utcp/code-mode';
-        details = 'Run `npm install` to ensure all dependencies are present.';
+        hint = 'Run `npm install` to ensure all dependencies are present.';
       }
 
-      settle({
-        ok: false,
-        message,
-        details: details || `Process exited with code ${code}`,
-      });
+      const details = [hint, stderr].filter(Boolean).join('\n') || `Process exited with code ${code}`;
+      settle({ ok: false, message, details });
     });
 
     child.on('error', (err) => {
