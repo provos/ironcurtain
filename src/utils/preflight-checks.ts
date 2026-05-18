@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getIronCurtainHome } from '../config/paths.js';
 
 export interface PreflightCheckResult {
@@ -97,10 +98,13 @@ function runSandboxViabilityCheck(): Promise<PreflightCheckResult> {
     // Resolve the absolute path here so the child's cwd doesn't affect lookup —
     // a bare `@utcp/code-mode` specifier in `node -e` is resolved against
     // `<process.cwd()>/[eval]`, which breaks when the user invokes ironcurtain
-    // from outside the installed package tree (e.g. global installs).
-    let utcpEntry: string;
+    // from outside the installed package tree (e.g. global installs). Convert
+    // to a file:// URL because ESM import() treats strings as URL-like, so a
+    // raw path containing `#` or `?` would be misparsed as fragment/query.
+    let utcpEntryUrl: string;
     try {
-      utcpEntry = createRequire(import.meta.url).resolve('@utcp/code-mode');
+      const utcpEntry = createRequire(import.meta.url).resolve('@utcp/code-mode');
+      utcpEntryUrl = pathToFileURL(utcpEntry).href;
     } catch (err) {
       resolvePromise({
         ok: false,
@@ -111,7 +115,7 @@ function runSandboxViabilityCheck(): Promise<PreflightCheckResult> {
     }
 
     const script = `
-      import(${JSON.stringify(utcpEntry)})
+      import(${JSON.stringify(utcpEntryUrl)})
         .then((m) => m.CodeModeUtcpClient.create())
         .then(() => process.exit(0))
         .catch((e) => {
