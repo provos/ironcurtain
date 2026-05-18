@@ -13,14 +13,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { BundleId, SessionOptions } from '../../src/session/types.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
 import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
 import { WorkflowOrchestrator, type CreateWorkflowInfrastructureInput } from '../../src/workflow/orchestrator.js';
-import { getInvocationDir, getSessionsDir } from '../../src/config/paths.js';
+import { getBundleStatesDir, getInvocationDir, getSessionsDir } from '../../src/config/paths.js';
 import {
   MockSession,
   approvedResponse,
@@ -245,6 +245,55 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     const plan2 = capturedOptions[3];
     expect(plan2.workflow?.stateSlug).toBe('plan.2');
     expect(plan2.workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'plan.2'));
+  });
+
+  it('allocates a fresh leg dir when a prior state dir already exists on disk', async () => {
+    // Regression: simulates a workflow resume where a prior leg's
+    // state dir (e.g. `fetch.1` from a crashed run) survives on disk.
+    // The orchestrator MUST scan the bundle's states dir and pick the
+    // next available `.N` slug rather than reusing the existing one.
+    //
+    // We exploit createInfra: it receives the lazy-minted bundleId
+    // BEFORE the orchestrator's state-entry factory computes the slug,
+    // so pre-creating `fetch.1` here is observed by `nextStateSlug`.
+    const defPath = writeDefinitionFile(tmpDir, twoStateDef);
+
+    const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
+      const statesDir = getBundleStatesDir(input.workflowId, input.bundleId);
+      mkdirSync(resolve(statesDir, 'fetch.1'), { recursive: true });
+      return makeStubInfrastructure(input.workflowId, input.bundleId);
+    });
+    const destroyInfra = vi.fn(async () => {});
+
+    const capturedOptions: SessionOptions[] = [];
+    const sessionFactory = vi.fn((opts: SessionOptions) => {
+      capturedOptions.push(opts);
+      return Promise.resolve(
+        createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['data', 'summary'] }], tmpDir),
+      );
+    });
+
+    const orchestrator = new WorkflowOrchestrator(
+      createDeps(tmpDir, {
+        createSession: sessionFactory,
+        createWorkflowInfrastructure: createInfra,
+        destroyWorkflowInfrastructure: destroyInfra,
+      }),
+    );
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    const mintedBundleId = createInfra.mock.calls[0][0].bundleId;
+    // First fetch entry, even though it's visit 1, picks `fetch.2` because
+    // `fetch.1` was already on disk when the factory ran.
+    expect(capturedOptions[0].workflow?.stateSlug).toBe('fetch.2');
+    expect(capturedOptions[0].workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'fetch.2'));
+    expect(existsSync(capturedOptions[0].workflow?.stateDir as string)).toBe(true);
+
+    // Summarize is unaffected — no pre-existing summarize dir.
+    expect(capturedOptions[1].workflow?.stateSlug).toBe('summarize.1');
   });
 
   it('non-shared-container workflows do NOT receive workflow.stateDir', async () => {

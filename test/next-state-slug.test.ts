@@ -65,6 +65,15 @@ describe('nextStateSlug', () => {
     expect(nextStateSlug(dir, 'fetch')).toBe('fetch.2');
   });
 
+  it('ignores non-canonical numeric suffixes (scientific, hex, leading zeros)', () => {
+    mkdirSync(join(dir, 'fetch.1'));
+    mkdirSync(join(dir, 'fetch.1e6'));
+    mkdirSync(join(dir, 'fetch.0x10'));
+    mkdirSync(join(dir, 'fetch.01'));
+    mkdirSync(join(dir, 'fetch.1.5'));
+    expect(nextStateSlug(dir, 'fetch')).toBe('fetch.2');
+  });
+
   it('ignores stray files (e.g., .DS_Store, editor swap files)', () => {
     writeFileSync(join(dir, 'fetch.1'), 'stray');
     writeFileSync(join(dir, 'fetch.99'), 'stray');

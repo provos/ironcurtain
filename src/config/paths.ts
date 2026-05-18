@@ -567,12 +567,18 @@ export function nextStateSlug(statesDir: string, stateId: string): string {
     const prefix = `${stateId}.`;
     for (const entry of readdirSync(statesDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
-      const n = Number(entry.name.slice(prefix.length));
-      if (Number.isInteger(n) && n > max) max = n;
+      // Decimal-digit-only suffix; reject "1e6", "0x10", " 1 ", "01",
+      // etc. so a stray dir name can't inflate the next slug.
+      const suffix = entry.name.slice(prefix.length);
+      if (!DECIMAL_SUFFIX_RE.test(suffix)) continue;
+      const n = Number(suffix);
+      if (n > max) max = n;
     }
   }
   return `${stateId}.${max + 1}`;
 }
+
+const DECIMAL_SUFFIX_RE = /^(?:0|[1-9]\d*)$/;
 
 /**
  * Returns the coordinator control socket path for a bundle:

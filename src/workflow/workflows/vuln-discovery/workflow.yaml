@@ -610,7 +610,7 @@ states:
       - **rejected**: The harness is insufficient — can't reach the target, missing protocol feature, broken infrastructure.
       - **blocked**: Hypothesis did not fire despite a completed search. You may only return `blocked` if (a) coverage shows the target code was executed, AND (b) you swept the input range relevant to the hypothesis — fuzzing for value-dependent claims (sizes, offsets, indices, counters), bounded enumeration for discrete claims (protocol states, flag combinations, auth paths). "I read the code and it looks mitigated" is not `blocked` — it's `rejected` with a request to redesign the harness. If neither fuzzing nor enumeration applies to this hypothesis, name the reason explicitly in your findings doc.
 
-      Write per-hypothesis findings to `.workflow/discoveries/findings.hN.md` (one file per hypothesis; `N` matches the orchestrator's hypothesis ID — `h1`, `h2`, ...). Do not collapse hypotheses into one file. Append after each experiment (hypothesis, input, harness command, result) before starting the next one — do not batch writes to the end, so a crash or rate-limit preserves the round's work. If a hypothesis's `findings.hN.md` already exists from a prior run, read it first and skip experiments whose results are already recorded; do not re-read other hypotheses' files unless the directive scopes you to them.
+      Write per-hypothesis findings to `.workflow/discoveries/findings.<id>.md` where `<id>` is the orchestrator's hypothesis ID — e.g. `findings.h1.md`, `findings.h2.md`. Do not collapse hypotheses into one file. Append after each experiment (hypothesis, input, harness command, result) before starting the next one — do not batch writes to the end, so a crash or rate-limit preserves the round's work. If a hypothesis's findings file already exists from a prior run, read it first and skip experiments whose results are already recorded; do not re-read other hypotheses' files unless the directive scopes you to them.
     inputs:
       - analysis
       - harness_build
@@ -676,7 +676,7 @@ states:
       - **insufficient**: Evidence does not support the severity the finding would warrant, OR `discover` has not demonstrated the attacker-visible effect at all. Notes MUST name the specific gap per the skill's insufficient-verdict discipline (parameter to sweep, mitigation to exercise, adjacency to verify, hardening profile to rebuild under, disqualifier label where applicable). The orchestrator needs a directive it can hand to `discover` verbatim.
       - **escalate**: Evidence is contradictory, scope is unclear, or severity requires human judgment (known class with possible in-flight CVE, policy question about threat model).
 
-      Write the per-hypothesis triage report to `.workflow/triage/triage.hN.md` (one file per hypothesis you triaged; `N` matches the `findings.hN.md` ID). Each file must present all eleven rubric items; the verdict must be traceable to them. Do not collapse hypotheses into one file.
+      Write the per-hypothesis triage report to `.workflow/triage/triage.<id>.md` where `<id>` matches the hypothesis ID from `findings.<id>.md` — e.g. `triage.h1.md`, `triage.h2.md`. Each file must present all eleven rubric items; the verdict must be traceable to them. Do not collapse hypotheses into one file.
     inputs:
       - discoveries
       - harness_build
