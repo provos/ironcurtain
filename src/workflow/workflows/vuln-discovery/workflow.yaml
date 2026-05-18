@@ -186,7 +186,7 @@ states:
 
       ### `triage` — verdict: `triage`
 
-      - **When:** `.workflow/discoveries/findings.md` exists AND contains at least one finding from an `approved` discover round. Tier-1 detector output from `harness_validate` — whether a C/C++ sanitizer, a fuzz crash, a static analyzer hit, a tainted-flow report, or an assertion failure — is NOT sufficient evidence to route here. That output proves the detector fired, not that the attacker sees an impact. Route to `discover` first to demonstrate the effect with attacker-maximal parameters.
+      - **When:** at least one `.workflow/discoveries/findings.hN.md` exists from an `approved` discover round. Tier-1 detector output from `harness_validate` — whether a C/C++ sanitizer, a fuzz crash, a static analyzer hit, a tainted-flow report, or an assertion failure — is NOT sufficient evidence to route here. That output proves the detector fired, not that the attacker sees an impact. Route to `discover` first to demonstrate the effect with attacker-maximal parameters.
       - **Directive must supply:** Nothing extra — reads findings.
       - **Audit on return** depends on the verdict triage produced:
 
@@ -610,7 +610,7 @@ states:
       - **rejected**: The harness is insufficient — can't reach the target, missing protocol feature, broken infrastructure.
       - **blocked**: Hypothesis did not fire despite a completed search. You may only return `blocked` if (a) coverage shows the target code was executed, AND (b) you swept the input range relevant to the hypothesis — fuzzing for value-dependent claims (sizes, offsets, indices, counters), bounded enumeration for discrete claims (protocol states, flag combinations, auth paths). "I read the code and it looks mitigated" is not `blocked` — it's `rejected` with a request to redesign the harness. If neither fuzzing nor enumeration applies to this hypothesis, name the reason explicitly in your findings doc.
 
-      Write findings to `.workflow/discoveries/findings.md`. Append after each experiment (hypothesis, input, harness command, result) before starting the next one — do not batch writes to the end, so a crash or rate-limit preserves the round's work. If the file already exists from a prior run, read it first and skip experiments whose results are already recorded.
+      Write per-hypothesis findings to `.workflow/discoveries/findings.hN.md` (one file per hypothesis; `N` matches the orchestrator's hypothesis ID — `h1`, `h2`, ...). Do not collapse hypotheses into one file. Append after each experiment (hypothesis, input, harness command, result) before starting the next one — do not batch writes to the end, so a crash or rate-limit preserves the round's work. If a hypothesis's `findings.hN.md` already exists from a prior run, read it first and skip experiments whose results are already recorded; do not re-read other hypotheses' files unless the directive scopes you to them.
     inputs:
       - analysis
       - harness_build
@@ -631,7 +631,7 @@ states:
 
       **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection tells you which divergence to diagnose and what hypothesis to test. If the scoping section is missing or the directive does not identify a specific divergence, STOP and report back with an `escalate`-style agent_status rather than picking a divergence to chase.
 
-      Read the investigation journal at `.workflow/journal/journal.md` and the discovery findings in `.workflow/discoveries/findings.md`.
+      Read the investigation journal at `.workflow/journal/journal.md` and the per-hypothesis discovery findings in `.workflow/discoveries/findings.h*.md`.
 
       Your job: determine WHY results diverge between tiers or between the harness and expected behavior.
 
@@ -664,9 +664,9 @@ states:
       - vulnerability-triage
       - memory-safety-c-cpp
     prompt: |
-      You are a senior vulnerability triager. Your job is to **interpret** what `discover` demonstrated and translate it into threat-model language. You do NOT run fresh experiments — you may reproduce discover's experiments to confirm them, but if evidence is too thin for the severity a finding would warrant, set verdict `insufficient` and name the specific gap for discover to close next. Read `.workflow/discoveries/findings.md` and `.workflow/journal/journal.md`.
+      You are a senior vulnerability triager. Your job is to **interpret** what `discover` demonstrated and translate it into threat-model language. You do NOT run fresh experiments — you may reproduce discover's experiments to confirm them, but if evidence is too thin for the severity a finding would warrant, set verdict `insufficient` and name the specific gap for discover to close next. Read the per-hypothesis `.workflow/discoveries/findings.h*.md` files (one per hypothesis) and `.workflow/journal/journal.md`. Read only the `findings.hN.md` files for the hypotheses you are triaging this round.
 
-      **First action**: read the "Scoping from the previous agent" section at the top of this message. If it is absent, triage every finding in `.workflow/discoveries/findings.md`. If it is present but vague, STOP and report back with an `escalate`-style agent_status.
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. If it is absent, triage every hypothesis with a `.workflow/discoveries/findings.hN.md` file. If it is present but vague, STOP and report back with an `escalate`-style agent_status.
 
       The methodology — the core anchoring rule, detector-vs-impact distinction, the eleven-item interpretation rubric, delegation transparency, primitive-extent scaling, the disqualifier taxonomy (D-0..D-4), CVSS Achievable / Environmental scoring conventions, hedging-language elimination, falsification asymmetry, common pitfalls, and the insufficient-verdict gap-statement bar — lives in the `vulnerability-triage` skill. Apply it.
 
@@ -676,7 +676,7 @@ states:
       - **insufficient**: Evidence does not support the severity the finding would warrant, OR `discover` has not demonstrated the attacker-visible effect at all. Notes MUST name the specific gap per the skill's insufficient-verdict discipline (parameter to sweep, mitigation to exercise, adjacency to verify, hardening profile to rebuild under, disqualifier label where applicable). The orchestrator needs a directive it can hand to `discover` verbatim.
       - **escalate**: Evidence is contradictory, scope is unclear, or severity requires human judgment (known class with possible in-flight CVE, policy question about threat model).
 
-      Write the triage report to `.workflow/triage/triage.md`. Each finding's section must present all eleven rubric items; the verdict must be traceable to them.
+      Write the per-hypothesis triage report to `.workflow/triage/triage.hN.md` (one file per hypothesis you triaged; `N` matches the `findings.hN.md` ID). Each file must present all eleven rubric items; the verdict must be traceable to them. Do not collapse hypotheses into one file.
     inputs:
       - discoveries
       - harness_build
@@ -703,9 +703,9 @@ states:
 
       ## Hard rules (read before writing)
 
-      **Severity fidelity.** Severity for each finding MUST match triage's assessment in `.workflow/triage/triage.md` verbatim — same CVSS vector, same numeric score, same justification. Do not re-score. Do not strengthen "Medium" into "Medium-High" for emphasis. Do not add confidentiality-impact claims triage did not make. If triage did not assign a severity (e.g., finding returned `insufficient` or escalate), the report does not assign one either.
+      **Severity fidelity.** Severity for each finding MUST match triage's assessment in the corresponding `.workflow/triage/triage.hN.md` verbatim — same CVSS vector, same numeric score, same justification. Do not re-score. Do not strengthen "Medium" into "Medium-High" for emphasis. Do not add confidentiality-impact claims triage did not make. If triage did not assign a severity (e.g., finding returned `insufficient` or escalate), the report does not assign one either.
 
-      **Exploitability requires demonstration.** A finding may be called "exploitable" only when `discoveries/findings.md` documents an observation of the attacker-visible effect AND triage confirmed it. Detector output from an isolated harness (sanitizer, fuzz crash, static analyzer hit, tainted-flow report, assertion failure) proves the detector caught an anomaly — not exploitability. Findings backed only by detector evidence go under "Findings without demonstrated impact," NOT "Confirmed findings."
+      **Exploitability requires demonstration.** A finding may be called "exploitable" only when the hypothesis's `discoveries/findings.hN.md` documents an observation of the attacker-visible effect AND triage confirmed it. Detector output from an isolated harness (sanitizer, fuzz crash, static analyzer hit, tainted-flow report, assertion failure) proves the detector caught an anomaly — not exploitability. Findings backed only by detector evidence go under "Findings without demonstrated impact," NOT "Confirmed findings."
 
       **Contradiction handling.** When evidence across rounds disagrees — a Tier-1 detector fires but the Tier-3 effect is absorbed by padding / a schema validator / a sanitizing middleware, or discover observed round-tripped attacker input rather than target state — call out the contradiction in the finding's "Evidence chain" subsection AND score at the **weaker** demonstrated level. Do not reconcile with "the vulnerability is real, the sanitizer confirmed it" — that is papering over. If the weaker observation is "no attacker-visible impact," the finding belongs under "Findings without demonstrated impact."
 
@@ -720,7 +720,7 @@ states:
       - `.workflow/report/report.md` — the index. Cross-cutting only: executive summary, ranked hypothesis table, cross-cutting recommendations, links to the per-hypothesis files. The index does NOT duplicate per-hypothesis evidence chains, CVSS justifications, or reproduction steps — those live in the hypothesis files.
       - `.workflow/report/report.hN.md` — one file per hypothesis, where `N` is the hypothesis ID that flowed through triage and the journal (`h1`, `h2`, ...). Each file is self-contained: a reader who opens only `report.h2.md` should be able to understand the finding without consulting `report.md` or other hypothesis files.
 
-      You MUST write the index AND every hypothesis file the artifacts cover (one `report.hN.md` per hypothesis named in `triage/triage.md` or `discoveries/findings.md`). Do not collapse multiple hypotheses into one file.
+      You MUST write the index AND every hypothesis file the artifacts cover (one `report.hN.md` per hypothesis with a `triage/triage.hN.md` or `discoveries/findings.hN.md`). Do not collapse multiple hypotheses into one file.
 
       ### Index file (`report.md`)
 
@@ -769,7 +769,7 @@ states:
       Hard rules apply per-file (severity fidelity, exploitability bar, contradiction handling, no invented framing — see the rules above). Section headings:
 
       - `Status:` line — `confirmed` | `no demonstrated impact` | `mitigated` | `insufficient`
-      - Triage verdict and rationale (verbatim from `triage/triage.md` for this hypothesis). For `mitigated` and `insufficient` files, triage may not have run at all — in that case state "Triage not invoked" and explain why (typically: discover returned `blocked` with execution evidence, so the orchestrator routed to `conclude` without dispatching `triage`).
+      - Triage verdict and rationale (verbatim from this hypothesis's `triage/triage.hN.md`). For `mitigated` and `insufficient` files, triage may not have run at all — in that case state "Triage not invoked" and explain why (typically: discover returned `blocked` with execution evidence, so the orchestrator routed to `conclude` without dispatching `triage`).
       - Evidence summary — what each round contributed for this hypothesis, what it demonstrated, contradictions across rounds (resolved at the weaker level)
       - Primitive characterization — what kind of primitive the bug yields, and the demonstrated extent along each axis discover exercised (per `discover`'s adversary-maximal-evidence requirement)
       - **Severity section — varies by status.** `confirmed` and `no demonstrated impact` files carry an *Achievable severity* subsection: the CVSS vector, score, and justification from triage, verbatim. `mitigated` and `insufficient` files OMIT *Achievable severity* entirely and instead carry a *Why no demonstrated severity* subsection explaining why the file does not anchor a score (mitigation absorbed the primitive before attacker-visible effect; evidence too thin for a severity assessment; etc.). Do NOT assign a severity for these statuses — they have not earned one. The hypothesis-ranking row in `report.md` shows `n/a` for severity in these cases.
@@ -778,7 +778,7 @@ states:
 
       The four status bars (apply per-hypothesis, in the file's `Status:` line):
 
-      - **confirmed** — `discoveries/findings.md` documents an attacker-visible-effect observation at the severity triage assigned, AND `triage.md` returned `approved`. Without both, the file is NOT confirmed.
+      - **confirmed** — this hypothesis's `discoveries/findings.hN.md` documents an attacker-visible-effect observation at the severity triage assigned, AND its `triage.hN.md` returned `approved`. Without both, the file is NOT confirmed.
       - **no demonstrated impact** — a detector flagged something (sanitizer, fuzz crash, static analyzer hit, tainted-flow report, assertion failure) but `discover` did not demonstrate an attacker-visible effect, or `triage` returned `insufficient`. The Mitigations section here describes the code-quality fix; the Achievable severity section names the gap that would need to be closed (parameter to sweep, mitigation to exercise, etc.) for this to become `confirmed`.
       - **mitigated** — `discover` returned `blocked` with execution evidence the mitigation holds: coverage of the mitigation code AND a completed input sweep over the hypothesis's value range. Mitigations section identifies the mitigation's location and call-site coverage. The file OMITS *Achievable severity* and instead carries *Why no demonstrated severity*. Triage may not have been invoked for `mitigated` hypotheses (the orchestrator routes blocked-with-evidence cases straight to `conclude`), so do not require triage output for these. Hypotheses whose mitigation rests on text-only reasoning are NOT `mitigated` — they are `no demonstrated impact` with the mitigation analysis flagged as unverified.
       - **insufficient** — triage returned `insufficient` or `escalate`, and the hypothesis is still open. The file OMITS *Achievable severity* and instead carries *Why no demonstrated severity*. Evidence summary names the specific gap.
@@ -815,7 +815,7 @@ states:
 
       ## What to read
 
-      Always read: `.workflow/report/report.md` (index), `.workflow/journal/journal.md`, `.workflow/analysis/analysis.md`, plus `.workflow/discoveries/findings.md`, `.workflow/differential/diagnosis.md`, and `.workflow/triage/triage.md` when present.
+      Always read: `.workflow/report/report.md` (index), `.workflow/journal/journal.md`, `.workflow/analysis/analysis.md`, plus the per-hypothesis `.workflow/discoveries/findings.h*.md` and `.workflow/triage/triage.h*.md` and `.workflow/differential/diagnosis.md` when present.
 
       Per-hypothesis file scoping:
 
@@ -837,13 +837,13 @@ states:
 
       Apply each item to the index file and to every hypothesis file in scope (full set on a fresh run, named subset on incremental review). Each item passes or fails on its own. ONE failure means the report is not ready.
 
-      1. **Headline matches the artifacts.** The Executive Summary's load-bearing claim and the hypothesis-ranking table agree with `discoveries/findings.md` and `triage/triage.md`. A hypothesis with execution evidence in `discoveries/` (POC, sanitizer trace, observed attacker-visible effect, runtime sink reached) whose `report.hN.md` carries `Status: no demonstrated impact` or whose row is omitted from the ranking table is a fail — the canonical "buried CVE" pattern. If the report narrows the threat model to exclude an in-`discoveries/` hypothesis, the narrowing must be stated explicitly in the index AND the excluded hypothesis must still appear in the ranking table, not buried.
+      1. **Headline matches the artifacts.** The Executive Summary's load-bearing claim and the hypothesis-ranking table agree with the per-hypothesis `discoveries/findings.h*.md` and `triage/triage.h*.md`. A hypothesis with execution evidence in `discoveries/` (POC, sanitizer trace, observed attacker-visible effect, runtime sink reached) whose `report.hN.md` carries `Status: no demonstrated impact` or whose row is omitted from the ranking table is a fail — the canonical "buried CVE" pattern. If the report narrows the threat model to exclude an in-`discoveries/` hypothesis, the narrowing must be stated explicitly in the index AND the excluded hypothesis must still appear in the ranking table, not buried.
 
       2. **No contradiction-papering.** When `discoveries/`, `differential/`, `triage/`, or earlier rounds disagree with a hypothesis file's claims, the file calls out the contradiction in its Evidence summary AND scores at the weaker demonstrated level (per `conclude`'s "Contradiction handling" hard rule). Reconciliation by rhetoric ("the vulnerability is real, the sanitizer confirmed it") is a fail.
 
-      3. **Severity matches triage verbatim.** Each `report.hN.md` with `Status: confirmed` or `Status: no demonstrated impact` must carry the CVSS vector, score, and justification from `triage/triage.md` for that hypothesis exactly. Files with `Status: mitigated` or `Status: insufficient` MUST NOT carry an *Achievable severity* subsection — they carry *Why no demonstrated severity* instead, and their hypothesis-ranking row in the index shows `n/a`. Triage may legitimately not have been invoked for `mitigated` files (orchestrator routes blocked-with-evidence cases straight to `conclude`); for those, "no triage" does not block the status. For `confirmed` and `no demonstrated impact` files, triage must have run — if `triage` was never invoked, those statuses cannot stand. Re-derived severity, rounded scores, or strengthened wording ("Medium-High" where triage said "Medium") is a fail. The index's Hypothesis ranking severity column must match the per-hypothesis files (with `n/a` for the `mitigated` / `insufficient` rows).
+      3. **Severity matches triage verbatim.** Each `report.hN.md` with `Status: confirmed` or `Status: no demonstrated impact` must carry the CVSS vector, score, and justification from the corresponding `triage/triage.hN.md` exactly. Files with `Status: mitigated` or `Status: insufficient` MUST NOT carry an *Achievable severity* subsection — they carry *Why no demonstrated severity* instead, and their hypothesis-ranking row in the index shows `n/a`. Triage may legitimately not have been invoked for `mitigated` files (orchestrator routes blocked-with-evidence cases straight to `conclude`); for those, "no triage" does not block the status. For `confirmed` and `no demonstrated impact` files, triage must have run — if `triage` was never invoked, those statuses cannot stand. Re-derived severity, rounded scores, or strengthened wording ("Medium-High" where triage said "Medium") is a fail. The index's Hypothesis ranking severity column must match the per-hypothesis files (with `n/a` for the `mitigated` / `insufficient` rows).
 
-      4. **Exploitability bar respected.** A hypothesis file may carry `Status: confirmed` only when BOTH a documented attacker-visible-effect observation in `discoveries/findings.md` AND an `approved` triage verdict apply to that hypothesis. Detector-only evidence — any tool that flagged something without a discover-demonstrated effect (sanitizer, fuzz crash, static analyzer, tainted-flow tracer, schema-validator alert, assertion failure, etc.) — must carry `Status: no demonstrated impact`; promoting it is a fail.
+      4. **Exploitability bar respected.** A hypothesis file may carry `Status: confirmed` only when BOTH a documented attacker-visible-effect observation in the corresponding `discoveries/findings.hN.md` AND an `approved` triage verdict apply to that hypothesis. Detector-only evidence — any tool that flagged something without a discover-demonstrated effect (sanitizer, fuzz crash, static analyzer, tainted-flow tracer, schema-validator alert, assertion failure, etc.) — must carry `Status: no demonstrated impact`; promoting it is a fail.
 
       5. **Out-of-scope side hypotheses stay honest.** Every hypothesis the report demotes (e.g., omitted from the ranking table, marked out-of-scope inside its file) is actually outside the task's scope as stated by the task description. A hypothesis moved out of the ranking purely to keep the headline clean — when the task description, threat model, or triage would treat it as in-scope — is a fail. When in doubt, lean toward in-scope: the human will rather see an extra hypothesis promoted than a real one demoted.
 
