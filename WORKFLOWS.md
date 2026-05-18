@@ -2,7 +2,28 @@
 
 IronCurtain workflows orchestrate multiple AI agents through a state machine to plan, design, implement, and review code autonomously. Each agent runs in its own Docker container with IronCurtain's policy engine mediating tool access.
 
-## Quick start
+**Workflows are designed to be driven from the web UI.** A discovery or design-and-code run produces many artifacts, streams hours of agent output, and pauses at human gates that need review — the CLI is not equipped to surface those interactions comfortably. The CLI commands documented later in this file exist for scripting, automation, and debugging; the web UI is the intended interface for interactive use.
+
+![Vuln-discovery state machine rendered in the web UI](packages/web-ui/docs/workflow-state-machine.png)
+
+## Quick start (web UI — recommended)
+
+Start the daemon with the web UI enabled and open the printed URL in a browser:
+
+```bash
+ironcurtain daemon --web-ui
+```
+
+The daemon prints an authenticated URL (e.g., `http://127.0.0.1:7400?token=<TOKEN>`). Open it, click **Workflows** in the sidebar, then **New run**:
+
+- Pick a workflow from the dropdown (bundled definitions plus anything in `~/.ironcurtain/workflows/`).
+- Enter a task description.
+- Optionally set a workspace path (otherwise the workflow runs in a fresh sandbox under `~/.ironcurtain/workflow-runs/<id>/workspace/`).
+- Optionally override the model.
+
+Follow the run as it progresses: the state-machine graph (shown above) highlights the current state, the agent-message timeline streams the conversation with markdown rendering, and gate panels appear when human input is needed. Past runs stay listed on the Workflows page once complete. See [Web UI](#web-ui) below for the full feature reference.
+
+## Quick start (CLI — for scripting and debugging)
 
 ```bash
 # Run the built-in design-and-code workflow on a new project
@@ -696,13 +717,7 @@ Artifacts and conversation state survive across resume. Docker sessions use `cla
 
 ## Web UI
 
-Workflows can also be managed from the browser using the daemon's web UI. Start the daemon with the `--web-ui` flag:
-
-```bash
-ironcurtain daemon --web-ui
-```
-
-The daemon prints an authenticated URL (e.g., `http://127.0.0.1:7400?token=<TOKEN>`). Open it in a browser and navigate to the Workflows page from the sidebar.
+The intended interface for interactive workflow runs (see [Quick start (web UI)](#quick-start-web-ui--recommended) above for the basic launch). This section is the feature reference for what the Workflows page exposes once the daemon is running.
 
 ### Starting and resuming workflows
 

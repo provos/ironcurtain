@@ -131,14 +131,26 @@ IronCurtain also supports PTY mode, session resume (`--resume <session-id>`), a 
 
 ### Multi-agent workflows
 
-IronCurtain can orchestrate multiple AI agents through structured workflows -- plan, design, implement, and review cycles with human gates for quality control at each stage. Each agent runs in its own Docker container with role-specific policy boundaries, and the workflow engine manages state transitions, artifact passing, and checkpointing automatically. Tools like Amazon Kiro and Google Jules offer similar multi-agent orchestration for coding tasks, but IronCurtain's workflow system is open source, runs entirely on your machine, enforces per-agent security policies via its constitution-based policy engine, and works with any Docker-containerized agent.
+IronCurtain orchestrates multiple AI agents through structured workflows. The bundled **vulnerability discovery** workflow hunts memory-safety and logic bugs in native code through a tiered harness pipeline (Tier 1 isolated function → Tier 2 multi-component → Tier 3 full build) with libFuzzer/AFL++ coverage gating, hypothesis-driven `discover`/`triage` states, and a final human report-review gate. The **design-and-code** workflow runs plan / design / implement / review cycles, also with human gates. Each agent runs in its own Docker container with role-specific policy boundaries; the engine manages state transitions, artifact passing, and crash-resume checkpointing automatically. Open source, runs entirely on your machine, enforces per-agent security policies via the constitution-based policy engine, and works with any Docker-containerized agent — comparable in scope to Amazon Kiro and Google Jules for coding tasks, but with first-class security and an extensible workflow definition format.
+
+![Vuln-discovery state machine in the IronCurtain web UI](packages/web-ui/docs/workflow-state-machine.png)
+
+**The web UI is the intended interface for workflow runs.** Start the daemon, open the printed URL, and drive runs from the Workflows page — the state-machine graph above is live, the agent-message timeline streams with markdown rendering, gate reviews include a workspace + artifact browser, and past runs stay listed.
 
 ```bash
-ironcurtain workflow start design-and-code \
-  "Build a REST API with authentication" --model anthropic:claude-haiku-4-5
+ironcurtain daemon --web-ui
 ```
 
-Workflows can also be started, monitored, and reviewed from the web UI (`ironcurtain daemon --web-ui`). See [WORKFLOWS.md](WORKFLOWS.md) for the full documentation.
+CLI access is available for scripting, automation, and debugging:
+
+```bash
+ironcurtain workflow start vuln-discovery \
+  "Find memory-safety bugs in libical" --workspace ~/src/libical
+ironcurtain workflow start design-and-code \
+  "Build a REST API with authentication"
+```
+
+See [WORKFLOWS.md](WORKFLOWS.md) for the full documentation.
 
 ## Customizing Your Policy
 

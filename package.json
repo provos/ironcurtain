@@ -1,6 +1,6 @@
 {
   "name": "@provos/ironcurtain",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
   "license": "Apache-2.0",
@@ -45,6 +45,7 @@
     "src/config/generated/tool-annotations.json",
     "src/config/generated/test-scenarios.json",
     "src/workflow/workflows/",
+    "packages/web-ui/docs/workflow-state-machine.png",
     "README.md",
     "LICENSE"
   ],
