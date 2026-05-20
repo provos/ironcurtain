@@ -68,6 +68,8 @@ The harness must FUZZ, not unit-test. For each swept variable (hypothesis inputs
 
 The design specifies input variables and ranges. The implementer drives the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
 
+**Per-input cost bound.** A coverage-guided fuzzer needs many iterations per second to work. The design must keep per-input cost bounded: cap input size (libFuzzer `-max_len`, AFL++ `-G`), and keep the fuzz entry point free of full re-initialization, process spawns, or multi-connection sweeps — move one-time setup behind a `call_once` / singleton. If an oracle genuinely needs a many-connection or many-iteration measurement (e.g. RSS amplification), that is a *separate* harness, not per-input work folded into the sweep.
+
 ### Multi-hypothesis bundling
 
 A trigger-driven design may scope a single hypothesis or a related set when they share input space and code region. Bundle when consolidating doesn't dilute the sweep (e.g., three integer-overflow hypotheses on the same allocator → one harness). Keep separate when input distributions conflict (one wants huge dimensions, another wants small) or observation points differ enough that one harness can't see both.
@@ -174,6 +176,7 @@ List every external dependency (sanitizer toolchain, fuzzer binary, coverage too
 - **Hand-picked positive scenarios masquerading as a sweep.** Five "boundary cases" are chosen by hand. The actual boundary in the target's arithmetic is not one of the five.
 - **Hardening stripped for "easier debugging."** ASLR off, canaries off, custom permissive allocator. The harness fires; production does not. Tells you nothing.
 - **Validator stubbed at link time.** A project-internal stub of a parser, validator, or decoder library is linked into the harness, omitting the upstream component's own validation. The harness fires; production rejects the trigger before the violation site is reached. Tells you nothing about reachability.
+- **Per-input heavyweight setup.** The harness does a full handshake, fixture rebuild, or N-connection sweep inside the fuzz entry point, so it runs at single-digit exec/s — an integration test in a loop, not a fuzzer. The feedback loop never gets enough iterations to reach boundary values. Move one-time setup to a singleton; split a measurement oracle that needs many connections into its own non-fuzzed harness.
 
 ## Design-document scope
 
