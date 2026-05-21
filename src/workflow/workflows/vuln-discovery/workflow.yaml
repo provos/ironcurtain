@@ -485,6 +485,8 @@ states:
 
       The harness should be invocable as a CLI tool or script. The discovery agent needs to: start a session, perform multiple steps, observe coverage, and reset cleanly.
 
+      **Bounded harness execution (required).** Every command that runs the built harness — reset check, smoke/baseline run, instrumentation probe, any burst — MUST be wrapped in a hard-kill wall-clock guard: `timeout -s KILL <seconds> <command>`. Plain `timeout` sends a catchable SIGTERM that a wedged harness can defer or ignore; only `-s KILL` (or `-k`) guarantees termination. This is tool-agnostic — it holds whether the harness is a fuzzer, a bounded enumerator, an analyzer, or a one-shot driver.
+
       **Instrumentation verification (required before approved).** Confirm fuzzer-feedback is present on the target, not only the harness. Method depends on the mechanism:
       - Compile-time (libFuzzer / sanitizer-coverage): `nm` / `readelf` the target archive and expect symbols like `__sanitizer_cov_trace_pc_guard` in the target's object files.
       - Compile-wrapper (AFL++): instrumented objects contain `__afl_area_ptr`; `afl-showmap` on a baseline reports non-trivial map density (≫100 edges).
