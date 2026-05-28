@@ -21,6 +21,18 @@ An alternative session type that runs external coding agents (Claude Code, Goose
 - `oauth-credentials.ts` - OAuth credential detection and macOS Keychain extraction. `detectAuthMethod()` determines whether to use OAuth or API key auth for Docker sessions.
 - `oauth-token-manager.ts` - Proactive/reactive OAuth token refresh. Coordinates with the host Claude Code process; on macOS operates read-only (re-reads Keychain, never refreshes itself to avoid invalidating the host's refresh token). Shares a single in-flight refresh promise across concurrent callers.
 
+## Token-trajectory capture (opt-in, training data)
+
+Verbatim, byte-faithful capture of the agent↔provider HTTP exchanges, written as per-session JSONL for SFT/RL training data. Off by default; enabled with `--capture-traces` (`start`, `workflow start`, `daemon`) or `capture.enabled` in config. Zero cost when disabled (no taps installed, no allocations). See the root [`TRAJECTORIES.md`](../../TRAJECTORIES.md) for usage and [`docs/designs/mitm-token-trajectory-capture.md`](../../docs/designs/mitm-token-trajectory-capture.md) for the design.
+
+- `trajectory-types.ts` - `ExchangeRecord` schema, manifest entry types, `PoisonReason`, `CaptureConfig`, and the `redactHeaders` helper (strips `authorization` / `x-api-key` / `cookie` defensively).
+- `trajectory-capture.ts` - `TrajectoryCaptureWriter` dispatcher: per-session file handles + a single append-only `manifest.jsonl`, single-flight `setImmediate` drain loop, watermark-defended unbounded queues, two-phase `endSession`, and the **binary session-poison model** (a flawed exchange poisons the whole session via `poisoned`/`poisonReason` on its `session-end` entry; never a partial record). Counters are bumped post-`appendFile` so manifest `exchanges` matches on-disk line count.
+- `trajectory-reassembler.ts` - SSE → final-message reassembly with strict byte fidelity (no `JSON.parse`→`stringify` round-trip; `thinking` signatures, block order, and `redacted_thinking` preserved). `SseLineSplitter` decodes through a `StringDecoder` so multibyte UTF-8 split across chunks isn't corrupted. Anthropic implemented; OpenAI stubbed for v0. `providerForHost()` is the host→provider classifier.
+- `trajectory-tap.ts` - Per-exchange capture tap: request-body tee, response-body fan-out, and `createResponseCaptureInlet` (decompresses per `content-encoding` — gzip/deflate/br — before the reassembler; unsupported encodings like zstd poison the session).
+- `mitm-proxy.ts` (capture role) - The inner request handler snapshots `captureSessionId`/`capturePersona` (decoupled from `tokenSessionId`), gates on `isCapturableEndpoint` (completion endpoints only — see `provider-config.ts` `captureEndpoints`), and **fans out** the upstream response into a forwarding branch (raw bytes → agent, unchanged) and a capture branch (decompress → tap). The capture branch never applies backpressure to forwarding. Credential boundary: captures the agent-facing side only (sentinel keys), verified by `test/docker/trajectory-credential-leakage.unit.test.ts`.
+
+Lifecycle is driven through `DockerInfrastructure.beginCaptureSession()` / `endCaptureSession()`; standalone sessions drive it in owns-infra mode, workflows from the orchestrator with `persona`/`fsmState`. The internal `MitmProxy.setCaptureSessionId` / `setCapturePersona` setters are wrapped by those bundle methods — orchestrators never call them directly.
+
 ## Proxy tools & package registry
 
 - `proxy-tools.ts` - Hardcoded MCP tool definitions, annotations, and policy rules for domain management. Injected into the ToolCallCoordinator during construction for policy evaluation and audit logging.

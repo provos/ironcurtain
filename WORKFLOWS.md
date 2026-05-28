@@ -87,6 +87,16 @@ Workflow runs live under `~/.ironcurtain/workflow-runs/<workflowId>/`:
 
 Nothing lands in `~/.ironcurtain/sessions/` for a workflow run. Single-session CLI (`ironcurtain start`, `mux`, PTY) continues to use `~/.ironcurtain/sessions/<sessionId>/` unchanged.
 
+When a run is started with `--capture-traces`, verbatim token trajectories are written under the run's container bundle:
+
+```
+~/.ironcurtain/workflow-runs/<workflowId>/containers/<bundleId>/captures/
+  <sessionId>.jsonl            # one file per agent (FSM-state) session
+  manifest.jsonl               # session ordering + per-session persona / fsmState / poison status
+```
+
+Each FSM-state session gets its own `<sessionId>.jsonl`; the `manifest.jsonl` is the canonical state→session map. Capture is off by default. See [`TRAJECTORIES.md`](TRAJECTORIES.md) for the format and SFT/RL usage.
+
 ## The design-and-code workflow
 
 The built-in `design-and-code` workflow follows this flow:

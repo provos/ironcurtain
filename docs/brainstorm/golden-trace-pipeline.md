@@ -59,6 +59,17 @@ Per scenario, the pipeline emits:
 
 ### 2. Verbatim Capture (new runtime code)
 
+> **Status: implemented and merged.** The MITM capture runtime landed in PR #273
+> (`src/docker/trajectory-{capture,tap,reassembler,types}.ts` + the `mitm-proxy.ts`
+> fan-out). Enable with `--capture-traces`. See [`TRAJECTORIES.md`](../../TRAJECTORIES.md)
+> for the on-disk format and the [design doc](../designs/mitm-token-trajectory-capture.md).
+> The bullets below are the original plan; the shipped implementation matches it,
+> with these deltas worth knowing downstream: capture is gated to completion
+> endpoints only (housekeeping traffic excluded); the response body is gzip-decompressed
+> on the capture branch and the reassembled message is stored in `bodyUtf8` (not raw
+> wire bytes); and the binary session-poison model means a flawed exchange poisons the
+> whole session rather than emitting a partial record.
+
 - **Primary capture point: the Docker MITM proxy** (`src/docker/`). Default workflow runs use Docker agent mode (Claude Code / Goose / etc. inside `--network=none` containers); the MITM already terminates TLS, performs sentinel-key swap, and sees every API call uniformly across harnesses. No SDK wrap needed for the default path.
 - **Code Mode fallback** (secondary path, only when a workflow runs the built-in agent): wrap the AI SDK v6 model client (`wrapLanguageModel`) in `src/agent/`. Same downstream format, different in-line tap.
 - **Capture format: append-only JSONL** at write time, one event per line. Keys: `(workflowRunId, sessionId, workflowState, turnIndex, eventSeq)`. JSONL chosen for crash-safety — line-atomic, partial last line discardable; Parquet writers buffer in memory and corrupt on mid-write death.
@@ -102,6 +113,16 @@ Per scenario, the pipeline emits:
 
 ### 3. Causal DAG Construction & Pruning (offline)
 
+> **Hard input constraint (verified against captured data).** Reconstruct each turn's
+> assistant action from that exchange's **`response.bodyUtf8`** (the source of truth — it
+> carries the `thinking` block with its signature), **not** from the echoed assistant
+> message in the *next* request's `messages` array. Claude Code strips thinking blocks
+> from the history it re-sends (thinking is single-turn-scoped), so a request-side stitch
+> yields actions with the reasoning silently removed — the DAG would then prune against
+> reasoning-free nodes and the SFT corpus would teach actions without thought. Build the
+> trajectory response-side-first; use the request-side `messages` only to confirm ordering
+> and tool_result continuity. See `TRAJECTORIES.md` §"The #1 trap".
+
 Nodes are `(tool_call, result)` pairs plus terminal goal-reaching action(s). Edge `r_i → a_j` if `a_j` depends on `r_i`. Three layered detectors:
 
 1. **Citation** — `a_j`'s JSON args contain substrings/identifiers (paths, symbols, line numbers, hashes, error strings) first appearing in `r_i`. Mechanical, cheap, high precision; probably catches the majority of edges in coding-agent traces.
@@ -139,6 +160,16 @@ Walk the DAG backward from goal-reaching nodes, mark ancestors, prune the rest. 
 *Recommendation:* Whole DAG construction, effect inventory, pruning, and restitching live in a sibling repo consuming a versioned trace-schema contract. No `argument-roles.ts` changes needed.
 
 ### 4. Plausible-CoT Synthesis (offline)
+
+> **Synthesize only where real thinking is absent.** Captured Claude Code traces already
+> carry genuine `thinking` blocks (with signatures) on a substantial fraction of turns —
+> empirically ~30% in early runs, and higher with `interleaved-thinking` enabled. For those
+> turns the model's *actual* reasoning is in `response.bodyUtf8`; prefer it over a synthesized
+> rationalization. Plausible-CoT synthesis is the fallback for the turns that thought silently
+> (no `thinking` block emitted), not a blanket pass over every turn. This both cuts annotator
+> cost and avoids overwriting authentic reasoning with a weaker reconstruction. (Frontier
+> drivers without exposed thinking still need synthesis on every turn — the split is
+> per-driver.)
 
 - Annotator: open reasoning model with visible thinking (DeepSeek R1, QwQ, Qwen3-thinking class).
 - Input: `(prior conversation, observed action) → synthesized CoT`.

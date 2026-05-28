@@ -31,3 +31,9 @@ Automated severity assessment directly addresses the bottleneck. A maintainer re
 The dual-use concern is real and is addressed directly rather than elided. The capability is useful to attackers as well as defenders. The argument for open release rests on three observations. First, the target users have no viable alternative access path — gating the model recreates the cost and access barriers that make the current situation broken. Second, the primary capability gap being closed is severity assessment for known reported vulnerabilities, not novel zero-day discovery. Third, the methodology, FSM framework, and training approach are being published simultaneously with the weights, so the research contribution is separable from the weights themselves. Defenders who understand the approach can adapt and extend it; the weights alone are not the ceiling.
 
 The release includes this rationale in full. Responsible release requires naming the tradeoffs, not assuming they will go unnoticed.
+
+---
+
+**Implementation status (where this stands)**
+
+This document is the vision; the concrete build has started. The foundation — byte-faithful capture of every agent↔provider exchange as training-ready trajectories — is now implemented in IronCurtain (PR #273): the supervised-phase data starts as verbatim per-turn `(system prompt + tools + history → completion-with-reasoning)` records produced by ordinary workflow runs. See [`../../TRAJECTORIES.md`](../../TRAJECTORIES.md) for what is captured and how to use it, and [`golden-trace-pipeline.md`](golden-trace-pipeline.md) for the downstream curation plan (causal pruning → CoT handling → flag schemas → export) that turns raw trajectories into the SFT and RL datasets described above. The exploitation FSM workflow that generates the memory-corruption traces, and the offline curation pipeline, remain to be built; the capture substrate they depend on does not.
