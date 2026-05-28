@@ -219,6 +219,22 @@ export class DockerAgentSession implements Session {
     this.auditTailer = new AuditLogTailer(this.infra.auditLogPath, (event) => this.emitDiagnostic(event));
     this.auditTailer.start();
 
+    // Trajectory capture is driven HERE only in standalone (owns-infra)
+    // mode: the session owns the bundle and runs exactly one Claude session
+    // through it, with no fsmState (not a workflow) and no persona, so
+    // `{ sessionId }` alone is correct. In borrow mode (workflow shared
+    // container) the orchestrator drives the capture lifecycle and supplies
+    // the full `{ sessionId, persona, fsmState }`; the session must NOT also
+    // call begin/end here, or the orchestrator's richer call would be
+    // silently dropped by the dispatcher's first-wins idempotency, losing
+    // persona/fsmState on the `session-start` manifest entry.
+    // No-op when capture is disabled (writer absent). Method-existence guard
+    // tolerates test infrastructures that don't implement the capture
+    // surface. See docs/designs/mitm-token-trajectory-capture.md §11.
+    if (this.ownsInfra && this.infra.beginCaptureSession) {
+      this.infra.beginCaptureSession({ sessionId: this.sessionId });
+    }
+
     this.status = 'ready';
   }
 
@@ -432,6 +448,20 @@ export class DockerAgentSession implements Session {
 
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
+
+    // Trajectory capture: end the capture session BEFORE infrastructure
+    // teardown so the `session-end` manifest entry is durable. The
+    // infrastructure-teardown safety net inside destroyDockerInfrastructure
+    // would otherwise emit a synthetic poisoned end. Pre-empting it keeps
+    // the manifest clean for normal exits. Gated on `ownsInfra` to stay
+    // symmetric with the begin call above: in borrow mode the orchestrator
+    // owns begin/end, so the session calling end alone would terminate a
+    // capture session the orchestrator is still using.
+    if (this.ownsInfra && this.infra.endCaptureSession) {
+      await this.infra.endCaptureSession(this.sessionId).catch((err: unknown) => {
+        logger.warn(`endCaptureSession failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }
 
     if (this.ownsInfra) {
       await destroyDockerInfrastructure(this.infra);

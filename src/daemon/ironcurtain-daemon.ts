@@ -48,6 +48,14 @@ export interface IronCurtainDaemonOptions {
 
   /** When set, starts the web UI server. */
   readonly webUi?: { port?: number; host?: string; devMode?: boolean };
+
+  /**
+   * Process-wide default for trajectory capture. Set via the daemon CLI
+   * `--capture-traces` flag. Becomes the fallback for every session the
+   * daemon launches; per-session JSON-RPC overrides win when present.
+   * See docs/designs/mitm-token-trajectory-capture.md §10.
+   */
+  readonly captureTracesDefault?: boolean;
 }
 
 /**
@@ -100,6 +108,9 @@ export class IronCurtainDaemon {
   /** Web UI options from constructor. */
   private readonly webUiOptions: IronCurtainDaemonOptions['webUi'];
 
+  /** Daemon-process-wide capture-traces default (set via CLI). */
+  private readonly captureTracesDefault: boolean;
+
   /** Control request handler (saved for web UI reuse). */
   private controlRequestHandler: ControlRequestHandler | null = null;
 
@@ -125,6 +136,7 @@ export class IronCurtainDaemon {
     this.mode = options.mode;
     this.noSignal = options.noSignal ?? false;
     this.webUiOptions = options.webUi;
+    this.captureTracesDefault = options.captureTracesDefault ?? false;
     this.scheduler = createCronScheduler();
   }
 
@@ -518,6 +530,7 @@ export class IronCurtainDaemon {
       jobId: job.id,
       systemPromptAugmentation: augmentation,
       disableAutoApprove: true,
+      ...(this.captureTracesDefault ? { captureTracesOverride: true } : {}),
       onEscalation: (request: EscalationRequest) => {
         escalationsEncountered++;
         this.handleCronEscalation(request, job);
@@ -735,6 +748,7 @@ export class IronCurtainDaemon {
       mode: this.mode,
       maxConcurrentWebSessions: 5,
       devMode: this.webUiOptions?.devMode,
+      captureTracesDefault: this.captureTracesDefault,
     });
     server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
 

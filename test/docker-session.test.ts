@@ -758,6 +758,42 @@ describe('DockerAgentSession', () => {
       expect(spies.counts.proxyStops).toBe(0);
     });
 
+    it('drives the capture lifecycle ONLY when ownsInfra=true', async () => {
+      // In standalone (owns-infra) mode the session owns the single Claude
+      // session and must call begin/endCaptureSession with `{ sessionId }`.
+      // In borrow mode (workflow shared container) the orchestrator owns the
+      // capture lifecycle and passes the full `{ sessionId, persona, fsmState }`;
+      // the session must NOT also call begin/end, or the dispatcher's
+      // first-wins idempotency would silently drop the orchestrator's richer
+      // begin and lose persona/fsmState on the manifest.
+      for (const ownsInfra of [true, false] as const) {
+        const beginCalls: Array<{ sessionId: string; persona?: string; fsmState?: string }> = [];
+        let endCalls = 0;
+        const localDeps = createTestDeps(mkdtempSync(join(tmpdir(), 'owns-infra-capture-')));
+        const local = new DockerAgentSession({
+          ...localDeps,
+          ownsInfra,
+          infra: {
+            ...localDeps.infra,
+            beginCaptureSession: (opts) => beginCalls.push(opts),
+            endCaptureSession: async () => {
+              endCalls++;
+            },
+          },
+        });
+        await local.initialize();
+        await local.close();
+
+        if (ownsInfra) {
+          expect(beginCalls).toEqual([{ sessionId: 'test-session-id' }]);
+          expect(endCalls).toBe(1);
+        } else {
+          expect(beginCalls).toEqual([]);
+          expect(endCalls).toBe(0);
+        }
+      }
+    });
+
     it('close() stops escalation watcher and audit tailer regardless of ownsInfra value', async () => {
       // Both ownsInfra branches must tear down the escalation watcher and
       // audit tailer, since those lifecycles are session-owned (not

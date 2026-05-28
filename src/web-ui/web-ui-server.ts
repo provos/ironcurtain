@@ -56,6 +56,12 @@ export interface WebUiServerOptions {
   readonly devMode?: boolean;
   /** Optional WorkflowManager for workflow RPC methods. */
   readonly workflowManager?: WorkflowManager;
+  /**
+   * Process-wide capture-traces default inherited from the daemon CLI
+   * flag. Per-session JSON-RPC `captureTraces` field overrides this when
+   * present. See docs/designs/mitm-token-trajectory-capture.md §10.
+   */
+  readonly captureTracesDefault?: boolean;
 }
 
 export class WebUiServer {
@@ -95,6 +101,7 @@ export class WebUiServer {
       maxConcurrentWebSessions: options.maxConcurrentWebSessions,
       sessionQueues: new Map(),
       workflowManager: options.workflowManager,
+      captureTracesDefault: options.captureTracesDefault ?? false,
     };
 
     // Subscribe to own event bus and broadcast to WS clients

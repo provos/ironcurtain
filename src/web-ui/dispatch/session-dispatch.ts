@@ -29,7 +29,16 @@ import * as logger from '../../logger.js';
 // Param validation schemas
 // ---------------------------------------------------------------------------
 
-const sessionCreateSchema = z.object({ persona: z.string().min(1).optional() });
+const sessionCreateSchema = z.object({
+  persona: z.string().min(1).optional(),
+  /**
+   * Per-session trajectory-capture override. Wins over the
+   * daemon-process default set via `--capture-traces`. When undefined,
+   * the daemon-process default (or `false`) is used. See
+   * docs/designs/mitm-token-trajectory-capture.md §10.
+   */
+  captureTraces: z.boolean().optional(),
+});
 const sessionSendSchema = z.object({ label: z.number().int().positive(), text: z.string().min(1) });
 
 // ---------------------------------------------------------------------------
@@ -58,8 +67,8 @@ export async function sessionDispatch(
       return getSession(ctx, label);
     }
     case 'sessions.create': {
-      const { persona } = validateParams(sessionCreateSchema, params);
-      return createWebSession(ctx, persona);
+      const { persona, captureTraces } = validateParams(sessionCreateSchema, params);
+      return createWebSession(ctx, persona, captureTraces);
     }
     case 'sessions.end': {
       const { label } = validateParams(labelSchema, params);
@@ -121,7 +130,11 @@ function getSession(ctx: DispatchContext, label: number): SessionDetailDto {
   };
 }
 
-async function createWebSession(ctx: DispatchContext, persona?: string): Promise<{ label: number }> {
+async function createWebSession(
+  ctx: DispatchContext,
+  persona?: string,
+  captureTracesOverride?: boolean,
+): Promise<{ label: number }> {
   const webCount = ctx.sessionManager.byKind('web').length;
   if (webCount >= ctx.maxConcurrentWebSessions) {
     throw new RpcError('RATE_LIMITED', `Web session limit reached (max ${ctx.maxConcurrentWebSessions})`);
@@ -135,10 +148,21 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
     dockerMode: ctx.mode.kind === 'docker',
   });
 
+  // Capture precedence: JSON-RPC field > daemon CLI flag > userConfig.
+  // The session factory then resolves vs `userConfig.capture?.enabled`
+  // as the final fallback (§10).
+  const effectiveCapture =
+    captureTracesOverride !== undefined
+      ? captureTracesOverride
+      : (ctx.captureTracesDefault ?? false)
+        ? true
+        : undefined;
+
   const session = await createStandaloneSession({
     config,
     mode: ctx.mode,
     persona,
+    ...(effectiveCapture !== undefined ? { captureTracesOverride: effectiveCapture } : {}),
     onEscalation: transport.createEscalationHandler(),
     onEscalationExpired: transport.createEscalationExpiredHandler(),
     onEscalationResolved: transport.createEscalationResolvedHandler(),

@@ -37,6 +37,7 @@ import {
 import type { ResolvedUserConfig } from '../config/user-config.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
+import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import type { CertificateAuthority } from './ca.js';
 import type { DockerManager } from './types.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
@@ -205,6 +206,47 @@ export interface PreContainerInfrastructure {
    * wrapper over `MitmProxy.setTokenSessionId()`.
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
+
+  /**
+   * Begin trajectory capture for a session. Atomically:
+   *   1. sets the proxy's captureSessionId (`MitmProxy.setCaptureSessionId`)
+   *   2. sets the proxy's capturePersona (`MitmProxy.setCapturePersona`)
+   *   3. opens the per-session trajectory file and appends a `session-start`
+   *      manifest entry (`TrajectoryCaptureWriter.beginSession`)
+   *
+   * No-op when capture is disabled (writer is undefined). MUST be called
+   * before the agent process is unblocked, so the first exchange the
+   * agent emits is already tagged with the right session. See
+   * docs/designs/mitm-token-trajectory-capture.md §11.
+   *
+   * Marked optional (undefined when omitted on test mocks); production
+   * bundles always implement it.
+   */
+  beginCaptureSession?: (opts: {
+    sessionId: import('../session/types.js').SessionId;
+    persona?: string;
+    fsmState?: string;
+  }) => void;
+
+  /**
+   * End trajectory capture for a session. Drives the dispatcher's two-phase
+   * endSession (§9: flip endRequested, drain in-flight reassembly, enqueue
+   * `session-end` with counter snapshot). MUST be awaited BEFORE
+   * `session.close()` so the manifest entry is durable even if `session.close()`
+   * throws.
+   *
+   * No-op when capture is disabled. Marked optional (undefined when
+   * omitted on test mocks); production bundles always implement it.
+   */
+  endCaptureSession?: (sessionId: import('../session/types.js').SessionId) => Promise<void>;
+
+  /**
+   * Internal: trajectory-capture writer reference, exposed so
+   * `destroyDockerInfrastructure` / `destroyWorkflowInfrastructure` can
+   * call `writer.close()` as the infrastructure-teardown safety net
+   * (§9). Undefined when capture is disabled. Not for orchestrator use.
+   */
+  readonly captureWriter?: TrajectoryCaptureWriter;
 }
 
 /**
@@ -255,6 +297,27 @@ const BUNDLE_SKILLS_SUBDIR = 'skills';
  * alongside the always-present `ironcurtain.bundle=<bundleId>`. When
  * unset, only `ironcurtain.bundle` is emitted (standalone CLI / PTY).
  */
+/**
+ * Optional trajectory-capture inputs threaded through to the MITM
+ * proxy. When `enabled` is false (or this object is absent), no writer
+ * is constructed and no taps are installed — zero cost on the
+ * forwarding path. See docs/designs/mitm-token-trajectory-capture.md.
+ */
+export interface CaptureSetupOptions {
+  /**
+   * When true, construct a TrajectoryCaptureWriter and pass it through
+   * to the MITM proxy. The writer's captures directory is
+   * `capturesDir` below.
+   */
+  readonly enabled: boolean;
+  /** Absolute path where `{sessionId}.jsonl` and `manifest.jsonl` are written. */
+  readonly capturesDir: string;
+  /** Human-readable agent name (e.g. `'claude-code'`). */
+  readonly recordedAgentName?: string;
+  /** Workflow run ID, when this bundle belongs to a workflow run. */
+  readonly workflowRunId?: string;
+}
+
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
   mode: SessionMode & { kind: 'docker' },
@@ -265,6 +328,7 @@ export async function prepareDockerInfrastructure(
   workflowId?: WorkflowId,
   scope?: string,
   resolvedSkills?: readonly ResolvedSkill[],
+  captureOptions?: CaptureSetupOptions,
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -413,6 +477,26 @@ export async function prepareDockerInfrastructure(
   // A workflow bundle serves only workflow agents for its entire lifetime,
   // so agentKind is fixed at construction time.
   const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
+
+  // Construct the trajectory-capture writer when capture is enabled.
+  // When disabled, no writer is created, no taps are installed, and the
+  // forwarding path is byte-identical to today (per §10 "zero cost when
+  // disabled").
+  let captureWriter: TrajectoryCaptureWriter | undefined;
+  if (captureOptions?.enabled) {
+    const { createTrajectoryCaptureWriter } = await import('./trajectory-capture.js');
+    captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureOptions.capturesDir });
+  }
+
+  const captureProxyOptions = captureWriter
+    ? {
+        capture: captureWriter,
+        recordedAgentName: captureOptions?.recordedAgentName,
+        workflowRunId: captureOptions?.workflowRunId,
+        bundleId: String(bundleId),
+      }
+    : {};
+
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,
@@ -421,8 +505,9 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlPort: 0,
-        sessionId: routingId,
+        initialTokenSessionId: routingId,
         agentKind,
+        ...captureProxyOptions,
       })
     : createMitmProxy({
         socketPath: getBundleMitmProxySocketPath(bundleId),
@@ -431,8 +516,9 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlSocketPath: getBundleMitmControlSocketPath(bundleId),
-        sessionId: routingId,
+        initialTokenSessionId: routingId,
         agentKind,
+        ...captureProxyOptions,
       });
 
   const docker = createDockerManager();
@@ -554,6 +640,31 @@ export async function prepareDockerInfrastructure(
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
       },
+      // Trajectory-capture lifecycle. When captureWriter is undefined
+      // (capture disabled, the common case), every method is a cheap
+      // no-op — zero cost on the forwarding path. When set, the bundle
+      // owns the three-step atomic begin (setCaptureSessionId →
+      // setCapturePersona → writer.beginSession) and the two-phase end
+      // (writer.endSession → null out proxy attribution).
+      beginCaptureSession: (opts) => {
+        if (!captureWriter) return;
+        mitmProxy.setCaptureSessionId(opts.sessionId);
+        mitmProxy.setCapturePersona(opts.persona);
+        captureWriter.beginSession(opts);
+      },
+      endCaptureSession: async (sessionId) => {
+        if (!captureWriter) return;
+        try {
+          await captureWriter.endSession(sessionId);
+        } finally {
+          // Clear proxy attribution AFTER the drain settles so any
+          // late-arriving response chunks already in flight are still
+          // attributed to the correct session.
+          mitmProxy.setCaptureSessionId(undefined);
+          mitmProxy.setCapturePersona(undefined);
+        }
+      },
+      captureWriter,
     };
   } catch (error) {
     // Best-effort cleanup of proxies started above
@@ -582,6 +693,7 @@ export async function createDockerInfrastructure(
   workflowId?: WorkflowId,
   scope?: string,
   resolvedSkills?: readonly ResolvedSkill[],
+  captureOptions?: CaptureSetupOptions,
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -593,6 +705,7 @@ export async function createDockerInfrastructure(
     workflowId,
     scope,
     resolvedSkills,
+    captureOptions,
   );
 
   try {
@@ -648,6 +761,20 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
       .stop()
       .catch((err: unknown) => logger.warn(`destroyDockerInfrastructure: proxy.stop() failed: ${errorMessage(err)}`)),
   ]);
+
+  // Trajectory-capture safety net (§9): close the writer AFTER the proxies
+  // have stopped, so no more records arrive mid-close. The writer emits
+  // synthetic `session-end` entries (with `closedReason:
+  // 'infrastructure-teardown'`) for any session whose explicit
+  // endCaptureSession was not called — covering Ctrl-C / abort / crash
+  // paths where the orchestrator's `finally` did not run.
+  if (infra.captureWriter) {
+    await infra.captureWriter
+      .close()
+      .catch((err: unknown) =>
+        logger.warn(`destroyDockerInfrastructure: captureWriter.close() failed: ${errorMessage(err)}`),
+      );
+  }
 
   // CA and fake keys are intentionally absent: neither owns any
   // process-level resources. CA material is persisted in ~/.ironcurtain/ca/

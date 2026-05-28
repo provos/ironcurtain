@@ -158,6 +158,18 @@ const memorySchema = z
   })
   .optional();
 
+/**
+ * Trajectory-capture config (MITM HTTP exchange recording). Opt-in
+ * only; absent in USER_CONFIG_DEFAULTS so the `?? false` in the
+ * resolver is authoritative. See
+ * docs/designs/mitm-token-trajectory-capture.md §10.
+ */
+const captureSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .optional();
+
 export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi'] as const;
 export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
@@ -261,6 +273,7 @@ export const userConfigSchema = z.object({
   preferredMode: z.enum(SESSION_MODES).optional(),
   packageInstall: packageInstallSchema,
   dockerResources: dockerResourcesSchema,
+  capture: captureSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -368,6 +381,13 @@ export interface ResolvedUserConfig {
   readonly packageInstall: ResolvedPackageInstallConfig;
   /** Docker container resource ceilings (pre-clamp). */
   readonly dockerResources: ResolvedDockerResourcesConfig;
+  /**
+   * Trajectory-capture config. Optional — absent from
+   * USER_CONFIG_DEFAULTS so the `?? false` at the session-factory
+   * resolution point is authoritative. See
+   * docs/designs/mitm-token-trajectory-capture.md §10.
+   */
+  readonly capture?: { readonly enabled: boolean };
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -705,6 +725,10 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       } = config.dockerResources ?? {};
       return { memoryMb, cpus };
     })(),
+    // Capture is left undefined unless the user explicitly set
+    // `capture.enabled` in the config file. The session-factory
+    // resolver applies the `?? false` default (§10).
+    ...(config.capture?.enabled !== undefined ? { capture: { enabled: config.capture.enabled } } : {}),
   };
 }
 

@@ -153,6 +153,35 @@ export function getSessionLlmLogPath(sessionId: string): string {
 }
 
 /**
+ * Returns the trajectory-capture directory for a single-session
+ * standalone run:
+ *   {home}/sessions/{sessionId}/captures/
+ *
+ * Holds `{sessionId}.jsonl` and `manifest.jsonl` per
+ * docs/designs/mitm-token-trajectory-capture.md §7.
+ */
+export function getSessionCapturesDir(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'captures');
+}
+
+/**
+ * Returns the JSONL file path for a single session's captured
+ * exchanges within `capturesDir`. Filename is `{sessionId}.jsonl`.
+ */
+export function getSessionCaptureFile(capturesDir: string, sessionId: string): string {
+  assertPathSafeSlug('session ID', sessionId);
+  return resolve(capturesDir, `${sessionId}.jsonl`);
+}
+
+/**
+ * Returns the manifest path within a captures directory:
+ *   {capturesDir}/manifest.jsonl
+ */
+export function getCaptureManifestFile(capturesDir: string): string {
+  return resolve(capturesDir, 'manifest.jsonl');
+}
+
+/**
  * Returns the auto-approver LLM interaction log path for a given session:
  *   {home}/sessions/{sessionId}/auto-approve-llm.jsonl
  */
@@ -528,6 +557,18 @@ export function getBundleBundleDir(workflowId: string, bundleId: BundleId): stri
  */
 export function getBundleAuditLogPath(workflowId: string, bundleId: BundleId): string {
   return resolve(getBundleDir(workflowId, bundleId), 'audit.jsonl');
+}
+
+/**
+ * Returns the trajectory-capture directory for a workflow bundle:
+ *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/captures/
+ *
+ * Sits alongside the bundle's audit log; holds one `{sessionId}.jsonl`
+ * per state visit plus a shared `manifest.jsonl`. See
+ * docs/designs/mitm-token-trajectory-capture.md §7.
+ */
+export function getBundleCapturesDir(workflowId: string, bundleId: BundleId): string {
+  return resolve(getBundleDir(workflowId, bundleId), 'captures');
 }
 
 /**

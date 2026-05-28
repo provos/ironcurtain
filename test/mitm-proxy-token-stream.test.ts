@@ -220,7 +220,7 @@ describe('MitmProxy token stream integration', () => {
         socketPath,
         ca,
         providers: [],
-        sessionId: 'test-session' as SessionId,
+        initialTokenSessionId: 'test-session' as SessionId,
       }),
     ).not.toThrow();
   });
@@ -260,7 +260,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId,
+        initialTokenSessionId: sessionId,
       });
       await proxy.start();
 
@@ -317,7 +317,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId,
+        initialTokenSessionId: sessionId,
       });
       await proxy.start();
 
@@ -437,7 +437,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId,
+        initialTokenSessionId: sessionId,
       });
       await proxy.start();
 
@@ -499,7 +499,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId,
+        initialTokenSessionId: sessionId,
       });
       await proxy.start();
 
@@ -682,7 +682,7 @@ describe('MitmProxy.setTokenSessionId dynamic routing', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        sessionId: 'initial-sid',
+        initialTokenSessionId: 'initial-sid' as SessionId,
       });
       await proxy.start();
 

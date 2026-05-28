@@ -34,6 +34,12 @@ export interface DispatchContext {
   readonly sessionQueues: Map<number, Promise<void>>;
   /** Bridge for per-client token stream subscriptions. */
   tokenStreamBridge?: TokenStreamBridge;
+  /**
+   * Daemon-process capture-traces default. Used by `sessions.create`
+   * when the JSON-RPC payload does not include `captureTraces`. See
+   * docs/designs/mitm-token-trajectory-capture.md §10.
+   */
+  readonly captureTracesDefault?: boolean;
 }
 
 // ---------------------------------------------------------------------------

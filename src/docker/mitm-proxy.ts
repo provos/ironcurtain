@@ -22,6 +22,7 @@ import { existsSync, unlinkSync } from 'node:fs';
 import forge from 'node-forge';
 import { randomSerialNumber, type CertificateAuthority } from './ca.js';
 import {
+  isCapturableEndpoint,
   isEndpointAllowed,
   shouldRewriteBody,
   type AgentKind,
@@ -37,6 +38,8 @@ import { getTokenStreamBus } from './token-stream-bus.js';
 import type { SseProvider } from './token-stream-types.js';
 import { SseExtractorTransform } from './sse-extractor.js';
 import * as logger from '../logger.js';
+import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
+import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 
 /**
  * Runtime control surface for the MITM proxy's host allowlist.
@@ -103,6 +106,28 @@ export interface MitmProxy {
    * `bus.push()` entirely — no events are emitted under a sentinel value.
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
+
+  /**
+   * Internal capture-attribution setter. Sets the session ID stamped on
+   * subsequent captured ExchangeRecords. Decoupled from
+   * `setTokenSessionId` because token-stream-bus and capture are
+   * different code paths that must not corrupt each other.
+   *
+   * Not called directly by orchestrator code — wrapped by
+   * `DockerInfrastructure.beginCaptureSession()` / `endCaptureSession()`.
+   * Exposed for unit-testing the proxy in isolation.
+   *
+   * When `undefined`, no capture record is produced for incoming
+   * exchanges (the per-handler snapshot is `undefined`).
+   */
+  setCaptureSessionId(id: import('../session/types.js').SessionId | undefined): void;
+
+  /**
+   * Internal capture-attribution setter. Sets the persona stamped on
+   * subsequent captured ExchangeRecords. Wrapped by
+   * `DockerInfrastructure.beginCaptureSession()`.
+   */
+  setCapturePersona(persona: string | undefined): void;
 }
 
 export interface MitmProxyOptions {
@@ -158,8 +183,12 @@ export interface MitmProxyOptions {
    * agent so the active agent's session ID is used. When no session ID
    * is set (initial value `undefined` AND no subsequent `setTokenSessionId`
    * call), extraction sites skip publishing entirely.
+   *
+   * Routinely stale in workflow shared-container mode where the
+   * orchestrator overrides via `setTokenSessionId`; the seed is only
+   * meaningful in single-session standalone mode.
    */
-  readonly sessionId?: import('../session/types.js').SessionId;
+  readonly initialTokenSessionId?: import('../session/types.js').SessionId;
 
   /**
    * Kind of agent driving this proxy, used by request-body rewriters to
@@ -169,6 +198,28 @@ export interface MitmProxyOptions {
    * `undefined` means rewriters fall back to the most conservative behavior.
    */
   readonly agentKind?: AgentKind;
+
+  /**
+   * Trajectory-capture dispatcher. When set, the proxy taps decrypted
+   * request and response bytes on allowed LLM API endpoints and hands
+   * complete `ExchangeRecord`s to the writer. When `undefined`, no taps
+   * are installed and capture is zero-cost. See
+   * docs/designs/mitm-token-trajectory-capture.md.
+   */
+  readonly capture?: TrajectoryCaptureWriter;
+
+  /**
+   * Human-readable agent name (e.g. `'claude-code'`) stamped onto every
+   * captured ExchangeRecord. Distinct from `agentKind` (which is the
+   * closed `'workflow' | undefined` enum used by the request rewriter).
+   */
+  readonly recordedAgentName?: string;
+
+  /** Workflow-run ID stamped onto every captured ExchangeRecord (when present). */
+  readonly workflowRunId?: string;
+
+  /** Bundle ID stamped onto every captured ExchangeRecord (when present). */
+  readonly bundleId?: string;
 }
 
 export interface ProviderKeyMapping {
@@ -509,9 +560,22 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // — no sentinel value is published. The module-scoped singleton bus is
   // fetched lazily at each push site so `resetTokenStreamBus()` between
   // tests is honored.
-  let tokenSessionId: import('../session/types.js').SessionId | undefined = options.sessionId;
+  let tokenSessionId: import('../session/types.js').SessionId | undefined = options.initialTokenSessionId;
+
+  /**
+   * Capture-attribution session ID. Decoupled from `tokenSessionId` so
+   * a future extractor-related flip cannot reattribute in-flight
+   * captured exchanges. See §11 in the capture design.
+   */
+  let captureSessionId: import('../session/types.js').SessionId | undefined;
+  /** Persona stamped onto subsequent captured ExchangeRecords. */
+  let capturePersona: string | undefined;
 
   const agentKind: AgentKind | undefined = options.agentKind;
+  const captureWriter = options.capture;
+  const captureRecordedAgentName = options.recordedAgentName;
+  const captureWorkflowRunId = options.workflowRunId;
+  const captureBundleId = options.bundleId;
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -720,6 +784,46 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const provider = meta.provider;
     const { method, url: path, headers } = clientReq;
 
+    // Per-handler capture-attribution snapshot. Reading once at handler
+    // entry keeps every captured byte tied to the session active when
+    // the request arrived, even if `setCaptureSessionId(...)` flips
+    // mid-exchange. The snapshot is per-closure so HTTP keep-alive
+    // concurrent exchanges on the same TLS socket get independent
+    // attribution (§11 parallel-keep-alive correctness).
+    const sidAtCapture = captureSessionId;
+    let captureHandle: CaptureExchangeHandle | undefined;
+    // Capture-endpoint gate: only training-relevant completion endpoints are
+    // recorded. Host-shared housekeeping traffic (registry pagination,
+    // telemetry batches, settings/eval pings) is excluded so it never
+    // pollutes the corpus. Strictly subtractive — when capture is off or the
+    // endpoint isn't capturable, `captureHandle` stays undefined and
+    // `attachCaptureBranch` is a no-op; forwarding, key swap, and the
+    // 401-retry path are unaffected. The `captureWriter` short-circuit keeps
+    // a disabled proxy at zero per-request cost (no header clone, no glob
+    // match). See §3 integration point 4 of the capture design doc.
+    if (captureWriter && sidAtCapture && isCapturableEndpoint(provider.config, method, path)) {
+      // Snapshot the original (pre-key-swap) headers for the capture
+      // record. `modifiedHeaders` (below) gets the real key injected by
+      // `validateAndSwapApiKey` — we must capture from `headers`, not
+      // `modifiedHeaders`. The writer applies a second redaction pass
+      // defensively.
+      const captureRequestHeaders = { ...headers };
+      captureHandle = beginCaptureExchange({
+        writer: captureWriter,
+        sessionId: sidAtCapture,
+        persona: capturePersona,
+        workflowRunId: captureWorkflowRunId,
+        bundleId: captureBundleId,
+        recordedAgentName: captureRecordedAgentName,
+        host: targetHost,
+        path: String(path),
+        method: String(method),
+        requestHeaders: captureRequestHeaders,
+        requestContentEncoding: clientReq.headers['content-encoding']?.toLowerCase(),
+        requestStartedAt: Date.now(),
+      });
+    }
+
     // 1. Endpoint filtering
     if (!isEndpointAllowed(provider.config, method, path)) {
       logger.info(`[mitm-proxy] BLOCKED ${method} ${targetHost}${path}`);
@@ -834,6 +938,23 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           // Pin this response's events to the id active when it started,
           // so an orchestrator mid-flight flip can't split one stream.
           const sidAtAttach = tokenSessionId;
+
+          // Trajectory-capture response branch. The 401 refresh-retry
+          // path above already returned before reaching here, so the
+          // captureTap is bound only to the SUCCESSFUL upstream
+          // response — never the drained 401 (§5 "401 refresh-retry
+          // semantics").
+          //
+          // The capture branch is FANNED OUT from the upstream response
+          // (it does NOT sit in-series on the forwarding pipeline).
+          // Anthropic serves `/v1/messages` SSE with `content-encoding:
+          // gzip` by default; the forwarding path must continue to
+          // deliver the raw compressed bytes to the agent (its SDK
+          // decompresses transparently), while the capture path needs
+          // decompressed bytes so the reassembler can parse SSE events.
+          // See §3 and §6 invariant 6 of the design doc.
+          attachCaptureBranch(upstreamRes, captureHandle, sidAtCapture);
+
           if (sidAtAttach && contentType.includes('text/event-stream')) {
             const tokenBus = getTokenStreamBus();
             const sseProvider = resolveSseProvider(targetHost);
@@ -861,10 +982,70 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
                 }
               });
             });
-            upstreamRes.pipe(passthrough);
-            passthrough.pipe(clientRes);
+            upstreamRes.pipe(passthrough).pipe(clientRes);
           } else {
             upstreamRes.pipe(clientRes);
+          }
+
+          /**
+           * Attach the trajectory capture branch to `upstreamRes` via a
+           * fan-out tee. Bytes the agent receives are unaffected. When
+           * `content-encoding` is supported we decompress before feeding
+           * the captureTap; unsupported encodings poison the session
+           * with `unsupported-encoding`.
+           */
+          function attachCaptureBranch(
+            upstream: http.IncomingMessage,
+            handle: CaptureExchangeHandle | undefined,
+            sessionId: import('../session/types.js').SessionId | undefined,
+          ): void {
+            if (!handle || !sessionId) return;
+            const captureTap = handle.attachResponse({
+              statusCode: upstream.statusCode ?? 502,
+              headers: upstream.headers,
+            });
+            const inlet = createResponseCaptureInlet({
+              captureTap,
+              contentEncoding: upstream.headers['content-encoding'],
+              captureHandle: handle,
+              onPoison: (reason) => {
+                try {
+                  captureWriter?.markSessionPoisoned(sessionId, reason);
+                } catch {
+                  /* swallow — capture must never disturb forwarding */
+                }
+              },
+            });
+            // Tee upstream bytes into the capture inlet via data
+            // listeners. This pattern coexists with the sibling
+            // `upstreamRes.pipe(...)` for forwarding because Node
+            // broadcasts `data` events to all listeners, and pipe is
+            // implemented on top of the same event. Errors / aborts on
+            // the upstream stream are propagated to the inlet so the
+            // captureTap can settle cleanly (or surface a poison).
+            upstream.on('data', (chunk: Buffer) => {
+              if (!inlet.writableEnded && !inlet.destroyed) {
+                inlet.write(chunk);
+              }
+            });
+            upstream.on('end', () => {
+              if (!inlet.writableEnded && !inlet.destroyed) {
+                inlet.end();
+              }
+            });
+            upstream.on('error', (err) => {
+              if (!inlet.destroyed) {
+                inlet.destroy(err);
+              }
+            });
+            upstream.on('close', () => {
+              // If `end` already fired, the inlet has been ended. If we
+              // got here without `end`, treat it as an abort so the
+              // captureTap surfaces a mid-stream-abort poison.
+              if (!inlet.writableEnded && !inlet.destroyed) {
+                inlet.destroy(new Error('upstream closed before end'));
+              }
+            });
           }
         },
       );
@@ -898,7 +1079,22 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           log(`[mitm-proxy] client request error: ${err.message}`);
           upstreamReq.destroy();
         });
-        clientReq.pipe(upstreamReq);
+        // Trajectory-capture tee: when capture is active and we are NOT
+        // buffering for rewrite/retry, install a PassThrough between
+        // clientReq and upstreamReq so we can observe each request chunk
+        // on the way through. The tap's data listener never modifies
+        // bytes; the forwarding pipe stays line-rate. Adding a 'data'
+        // listener directly to clientReq would flip it to flowing mode
+        // and race the upstream pipe — the PassThrough avoids that.
+        if (captureHandle) {
+          const reqTap = new PassThrough();
+          const handle = captureHandle;
+          reqTap.on('data', (chunk: Buffer) => handle.pushRequestChunk(chunk));
+          reqTap.on('end', () => handle.finishRequest());
+          clientReq.pipe(reqTap).pipe(upstreamReq);
+        } else {
+          clientReq.pipe(upstreamReq);
+        }
       }
     }
 
@@ -949,6 +1145,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           }
           return;
         }
+
+        // Trajectory-capture: feed the buffered raw body into the
+        // capture record. This is the pre-rewrite, pre-key-swap body —
+        // exactly what the agent emitted. See §3 / §6 invariant #2.
+        captureHandle?.setRequestBody(rawBody);
 
         let finalBody = rawBody;
 
@@ -1635,6 +1836,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void {
       tokenSessionId = id;
+    },
+
+    setCaptureSessionId(id: import('../session/types.js').SessionId | undefined): void {
+      captureSessionId = id;
+    },
+
+    setCapturePersona(persona: string | undefined): void {
+      capturePersona = persona;
     },
 
     async start() {
