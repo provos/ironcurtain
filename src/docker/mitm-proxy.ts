@@ -791,27 +791,27 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // concurrent exchanges on the same TLS socket get independent
     // attribution (§11 parallel-keep-alive correctness).
     const sidAtCapture = captureSessionId;
-    const personaAtCapture = capturePersona;
-    // Snapshot the original (pre-key-swap) headers for the capture
-    // record. `modifiedHeaders` (below) gets the real key injected by
-    // `validateAndSwapApiKey` — we must capture from `headers`, not
-    // `modifiedHeaders`. The writer applies a second redaction pass
-    // defensively.
-    const captureRequestHeaders = { ...headers };
+    let captureHandle: CaptureExchangeHandle | undefined;
     // Capture-endpoint gate: only training-relevant completion endpoints are
     // recorded. Host-shared housekeeping traffic (registry pagination,
     // telemetry batches, settings/eval pings) is excluded so it never
-    // pollutes the corpus. Strictly subtractive — when this is false,
-    // `captureHandle` stays undefined and `attachCaptureBranch` is a no-op;
-    // forwarding, key swap, and the 401-retry path are unaffected. See §3
-    // integration point 4 of docs/designs/mitm-token-trajectory-capture.md.
-    const capturable = isCapturableEndpoint(provider.config, method, path);
-    let captureHandle: CaptureExchangeHandle | undefined;
-    if (captureWriter && sidAtCapture && capturable) {
+    // pollutes the corpus. Strictly subtractive — when capture is off or the
+    // endpoint isn't capturable, `captureHandle` stays undefined and
+    // `attachCaptureBranch` is a no-op; forwarding, key swap, and the
+    // 401-retry path are unaffected. The `captureWriter` short-circuit keeps
+    // a disabled proxy at zero per-request cost (no header clone, no glob
+    // match). See §3 integration point 4 of the capture design doc.
+    if (captureWriter && sidAtCapture && isCapturableEndpoint(provider.config, method, path)) {
+      // Snapshot the original (pre-key-swap) headers for the capture
+      // record. `modifiedHeaders` (below) gets the real key injected by
+      // `validateAndSwapApiKey` — we must capture from `headers`, not
+      // `modifiedHeaders`. The writer applies a second redaction pass
+      // defensively.
+      const captureRequestHeaders = { ...headers };
       captureHandle = beginCaptureExchange({
         writer: captureWriter,
         sessionId: sidAtCapture,
-        persona: personaAtCapture,
+        persona: capturePersona,
         workflowRunId: captureWorkflowRunId,
         bundleId: captureBundleId,
         recordedAgentName: captureRecordedAgentName,

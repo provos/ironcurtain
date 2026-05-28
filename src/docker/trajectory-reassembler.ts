@@ -15,6 +15,7 @@
  * content.
  */
 
+import { StringDecoder } from 'node:string_decoder';
 import type { CaptureProvider, Reassembler, ReassemblyResult } from './trajectory-types.js';
 
 /** Errors thrown by the reassemblers when the stream is unrecoverable. */
@@ -36,15 +37,22 @@ interface RawEvent {
  * `sse-extractor.ts` (CRLF or LF treated as a single break) but emits
  * `(eventType, dataPayload)` tuples instead of parsed events. The data
  * payload is the exact bytes after `data: ` — no trim, no parse.
+ *
+ * Bytes are decoded through a `StringDecoder` so a multibyte UTF-8
+ * sequence split across two `feed()` chunks (zlib emits chunks on
+ * arbitrary boundaries) is held back until its continuation arrives,
+ * rather than each chunk decoding independently to a `U+FFFD`
+ * replacement and corrupting the captured body.
  */
 class SseLineSplitter {
+  private readonly decoder = new StringDecoder('utf8');
   private buffer = '';
   private currentEventType = '';
   /** Pending `data:` payload for the in-flight event (multi-line dataspec). */
   private currentData: string | null = null;
 
-  feed(text: string, sink: (event: string, data: string) => void): void {
-    this.buffer += text;
+  feed(chunk: Buffer, sink: (event: string, data: string) => void): void {
+    this.buffer += this.decoder.write(chunk);
     let pos = 0;
     while (pos < this.buffer.length) {
       const nextLf = this.buffer.indexOf('\n', pos);
@@ -67,6 +75,11 @@ class SseLineSplitter {
 
   /** Force-flush a trailing line buffer (no terminator). */
   flush(sink: (event: string, data: string) => void): void {
+    // Drain any bytes the decoder is still holding. For a complete stream
+    // this is empty; for one truncated mid-multibyte it yields the U+FFFD
+    // replacement — acceptable, since a truncated stream fails reassembly
+    // anyway (the binary-session model discards it).
+    this.buffer += this.decoder.end();
     if (this.buffer.length > 0) {
       this.processLine(this.buffer, sink);
       this.buffer = '';
@@ -286,8 +299,7 @@ export class AnthropicReassembler implements Reassembler {
 
   push(chunk: Buffer): void {
     if (this.failed) return;
-    const text = chunk.toString('utf-8');
-    this.splitter.feed(text, (eventType, data) => this.onEvent(eventType, data));
+    this.splitter.feed(chunk, (eventType, data) => this.onEvent(eventType, data));
   }
 
   finalize(): ReassemblyResult {

@@ -271,6 +271,46 @@ describe('Trajectory streaming fidelity (Anthropic SSE)', () => {
     expect(assembled).toContain('🎉');
   });
 
+  it('multibyte UTF-8 split across feed() chunks survives (StringDecoder)', () => {
+    // zlib emits chunks on arbitrary byte boundaries, so a multibyte
+    // sequence can land split across two reassembler.push() calls. Without
+    // a StringDecoder, each half decodes independently to U+FFFD and
+    // corrupts the captured body. Deliberately split a 4-byte emoji
+    // (🎉 = F0 9F 8E 89) down the middle and assert it survives intact.
+    const messageEnvelope =
+      '{"id":"msg_split","type":"message","role":"assistant","model":"claude","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":5}}';
+    const sse =
+      sseEvent('message_start', `{"type":"message_start","message":${messageEnvelope}}`) +
+      sseEvent(
+        'content_block_start',
+        '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+      ) +
+      sseEvent(
+        'content_block_delta',
+        '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi 🎉 there"}}',
+      ) +
+      sseEvent('content_block_stop', '{"type":"content_block_stop","index":0}') +
+      sseEvent(
+        'message_delta',
+        '{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}',
+      ) +
+      sseEvent('message_stop', '{"type":"message_stop"}');
+
+    const full = Buffer.from(sse, 'utf-8');
+    const emojiStart = full.indexOf(Buffer.from('🎉', 'utf-8'));
+    expect(emojiStart).toBeGreaterThan(0);
+    const splitAt = emojiStart + 2; // mid-sequence: first push ends F0 9F, second starts 8E 89
+
+    const r = new AnthropicReassembler();
+    r.push(full.subarray(0, splitAt));
+    r.push(full.subarray(splitAt));
+    const assembled = r.finalize().bodyUtf8;
+
+    expect(assembled).toContain('🎉');
+    expect(assembled).not.toContain('�');
+    expect(assembled).toContain(`"text":${JSON.stringify('hi 🎉 there')}`);
+  });
+
   it('redacted_thinking survives reassembly opaquely (content_block payload preserved)', () => {
     // A redacted_thinking block carries only a base64 `data` field; no
     // deltas. The reassembler must emit it as-is. We assert the assembled
