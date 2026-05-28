@@ -32,6 +32,7 @@ const startSpec: CommandSpec = {
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
     { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
+    { flag: 'capture-traces', description: 'Capture LLM API traces for this run (overrides config; Docker mode only)' },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
   examples: [
@@ -57,6 +58,7 @@ export async function main(args?: string[]): Promise<void> {
       persona: { type: 'string', short: 'p' },
       pty: { type: 'boolean' },
       model: { type: 'string', short: 'm' },
+      'capture-traces': { type: 'boolean' },
       'list-agents': { type: 'boolean' },
     },
     allowPositionals: true,
@@ -88,6 +90,7 @@ export async function main(args?: string[]): Promise<void> {
   const rawWorkspace = values.workspace as string | undefined;
   const personaName = values.persona as string | undefined;
   const modelOverride = values.model as string | undefined;
+  const captureTracesOverride = (values['capture-traces'] as boolean | undefined) ? true : undefined;
   const config = loadConfig();
 
   // Apply --model override to both Code Mode and Docker agent model IDs
@@ -201,6 +204,7 @@ export async function main(args?: string[]): Promise<void> {
       // workspacePath is already undefined when resuming (validation skipped above)
       workspacePath,
       persona: resumeSessionId ? undefined : personaName,
+      captureTracesOverride,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),

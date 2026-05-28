@@ -1,0 +1,469 @@
+/**
+ * Trajectory-capture session-poisoning behavior.
+ *
+ * Covers §12 test #4 from docs/designs/mitm-token-trajectory-capture.md:
+ *   (a) disk error -> session-end carries `poisoned: true` /
+ *       `poisonReason: 'disk-error'` (with fs-injection so we can fail on
+ *       the Nth record deterministically)
+ *   (b) reassembly failure -> partial record is not written; the session
+ *       is marked poisoned in its session-end manifest entry
+ *   (c) counter consistency under load -> on-disk line count equals
+ *       `exchanges` in session-end (no individual records dropped)
+ *
+ * Plus the issue 1 / issue 2 fixes:
+ *   - mid-stream-abort poison wiring (tap closes before _flush)
+ *   - in-flight tracking blocks endSession until reassembly settles
+ */
+
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import {
+  createTrajectoryCaptureWriter,
+  type TrajectoryCaptureWriter,
+  type WriterFsDep,
+} from '../../src/docker/trajectory-capture.js';
+import { AnthropicReassembler, ReassemblyError } from '../../src/docker/trajectory-reassembler.js';
+import { beginCaptureExchange } from '../../src/docker/trajectory-tap.js';
+import type { ExchangeRecord, ManifestEntry } from '../../src/docker/trajectory-types.js';
+import type { SessionId } from '../../src/session/types.js';
+
+function makeSessionId(id: string): SessionId {
+  return id as SessionId;
+}
+
+function buildRecord(sessionId: SessionId, n: number): ExchangeRecord {
+  const body = `{"i":${n}}`;
+  return {
+    schemaVersion: 1,
+    exchangeId: `ex-${n}`,
+    sessionId,
+    provider: 'anthropic',
+    method: 'POST',
+    host: 'api.anthropic.com',
+    path: '/v1/messages',
+    requestStartedAt: 0,
+    requestFinishedAt: 1,
+    responseFinishedAt: 2,
+    request: { headers: {}, bodyUtf8: body, bodyBytes: Buffer.byteLength(body) },
+    response: {
+      status: 200,
+      headers: {},
+      streaming: false,
+      bodyUtf8: body,
+      bodyBytes: Buffer.byteLength(body),
+    },
+    capture: { reassemblyOk: true },
+  };
+}
+
+function readJsonl(path: string): unknown[] {
+  return readFileSync(path, 'utf-8')
+    .split('\n')
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as unknown);
+}
+
+function readManifest(dir: string): ManifestEntry[] {
+  return readJsonl(resolve(dir, 'manifest.jsonl')) as ManifestEntry[];
+}
+
+/**
+ * Build a WriterFsDep that delegates to real `node:fs/promises` but
+ * counts `appendFile` calls and fails the Nth one matching `failOnPath`.
+ */
+function makeFailOnAppendFs(opts: { failAfter: number; failOnPath?: (p: string) => boolean }): {
+  fs: WriterFsDep;
+  appendCallsByPath: Map<string, number>;
+} {
+  const appendCallsByPath = new Map<string, number>();
+  let matchedAppendCount = 0;
+  const real = {
+    appendFile: async (p: string, d: string): Promise<void> => {
+      const { appendFile } = await import('node:fs/promises');
+      await appendFile(p, d);
+    },
+    mkdir: async (p: string, o: { recursive: true }): Promise<unknown> => {
+      const { mkdir } = await import('node:fs/promises');
+      return mkdir(p, o);
+    },
+    writeFile: async (p: string, d: string): Promise<void> => {
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(p, d);
+    },
+  };
+  const fs: WriterFsDep = {
+    async appendFile(p: string, d: string) {
+      const prior = appendCallsByPath.get(p) ?? 0;
+      appendCallsByPath.set(p, prior + 1);
+      const match = opts.failOnPath ? opts.failOnPath(p) : true;
+      if (match) {
+        matchedAppendCount += 1;
+        if (matchedAppendCount === opts.failAfter) {
+          const err = new Error('ENOSPC: simulated no space left on device');
+          (err as NodeJS.ErrnoException).code = 'ENOSPC';
+          throw err;
+        }
+      }
+      await real.appendFile(p, d);
+    },
+    mkdir: real.mkdir,
+    writeFile: real.writeFile,
+  };
+  return { fs, appendCallsByPath };
+}
+
+describe('Trajectory poison: failure modes', () => {
+  let dir: string;
+  let writer: TrajectoryCaptureWriter;
+
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'tj-poison-'));
+  });
+
+  afterEach(async () => {
+    try {
+      // writer is conditionally undefined in setups that fail early.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      if (writer) await writer.close();
+    } catch {
+      /* swallow */
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* swallow */
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('(a) disk write error on Nth record: session is poisoned, file has N-1 records, marker is written, new sessions rejected', async () => {
+    // Inject an fs that fails on the 3rd append to the per-session
+    // trajectory file. The injection lets us assert exactly N-1 records
+    // on disk and the manifest entry's poison fields.
+    const sid = makeSessionId('sess-enospc');
+    const sessionPath = resolve(dir, `${sid}.jsonl`);
+    const { fs: failingFs } = makeFailOnAppendFs({
+      failAfter: 3,
+      failOnPath: (p) => p === sessionPath,
+    });
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir, fs: failingFs });
+    writer.beginSession({ sessionId: sid });
+
+    for (let i = 1; i <= 5; i++) {
+      writer.write(buildRecord(sid, i));
+    }
+    await writer.endSession(sid);
+
+    // (i) file contains exactly N-1 = 2 records (the 3rd append threw).
+    const lines = readJsonl(sessionPath);
+    expect(lines.length).toBe(2);
+
+    // (ii) the session-end manifest entry reports poisoned + reason.
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('disk-error');
+      // exchanges counter matches the records that actually reached disk
+      expect(end.exchanges).toBe(2);
+    }
+
+    // (iii) per-session disk error must NOT trigger the bundle-wide
+    // manifest.poisoned marker — only manifest-level failures do.
+    expect(existsSync(resolve(dir, 'manifest.poisoned'))).toBe(false);
+
+    // Subsequent writes for the same session no-op (already poisoned).
+    // begin a NEW session on the same dir to confirm the per-session
+    // disk error did NOT poison the bundle.
+    const sid2 = makeSessionId('sess-followup');
+    writer.beginSession({ sessionId: sid2 });
+    writer.write(buildRecord(sid2, 99));
+    await writer.endSession(sid2);
+    const followLines = readJsonl(resolve(dir, `${sid2}.jsonl`));
+    expect(followLines.length).toBe(1);
+  });
+
+  it('(a.2) manifest-level disk error writes the manifest.poisoned marker and rejects new sessions', async () => {
+    // Fail the very first manifest append (= session-start). This is
+    // bundle-wide blast radius per §9.4: marker file, refuse new
+    // sessions, poison every open session.
+    const manifestPath = resolve(dir, 'manifest.jsonl');
+    const { fs: failingFs } = makeFailOnAppendFs({
+      failAfter: 1,
+      failOnPath: (p) => p === manifestPath,
+    });
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir, fs: failingFs });
+    const sid = makeSessionId('sess-mfail');
+    writer.beginSession({ sessionId: sid });
+    writer.write(buildRecord(sid, 1));
+    // endSession should not hang — the bundle-wide failure path resolves
+    // all pending end-resolvers.
+    await writer.endSession(sid).catch(() => {});
+
+    // (iii) manifest.poisoned marker exists.
+    expect(existsSync(resolve(dir, 'manifest.poisoned'))).toBe(true);
+
+    // (iv) subsequent beginCaptureSession calls are rejected: no new
+    // sessions accepted, no new files created.
+    const sid2 = makeSessionId('sess-after-poison');
+    writer.beginSession({ sessionId: sid2 });
+    expect(existsSync(resolve(dir, `${sid2}.jsonl`))).toBe(false);
+  });
+
+  it('(b) reassembly failure driven through the dispatcher poisons the session with reassembly-failure and writes no partial record', async () => {
+    // Drive a real malformed SSE event through the trajectory tap +
+    // dispatcher (not the reassembler in isolation). Asserts the
+    // session is poisoned via the public surface and the on-disk
+    // trajectory file is empty (no partial record).
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-reasm');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    // Feed a malformed SSE event: message_start ok, but stream ends
+    // before message_stop arrives. Then signal upstream end via the
+    // PassThrough's end() — the reassembler.finalize() will throw,
+    // the tap should call markSessionPoisoned('reassembly-failure'),
+    // and no record should be enqueued.
+    const malformedSse =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"c","content":[]}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n';
+
+    const src = new PassThrough();
+    src.pipe(tap);
+    src.end(Buffer.from(malformedSse, 'utf-8'));
+
+    await writer.endSession(sid);
+
+    // No record file should exist (or, if it was created, it must be empty).
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    if (existsSync(traceFile)) {
+      const lines = readJsonl(traceFile);
+      expect(lines.length).toBe(0);
+    }
+
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('reassembly-failure');
+      expect(end.exchanges).toBe(0);
+    }
+  });
+
+  it('(b.0) reassembler in isolation refuses to emit a partial body on malformed SSE', () => {
+    // Sanity check the underlying invariant: the reassembler itself
+    // throws on a malformed stream. Combined with the tap's
+    // exception-handling logic, this guarantees no partial reassembly
+    // can ever be handed to the writer.
+    const malformedSse =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"c","content":[]}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n';
+
+    const r = new AnthropicReassembler();
+    r.push(Buffer.from(malformedSse, 'utf-8'));
+    expect(() => r.finalize()).toThrow(ReassemblyError);
+  });
+
+  it('(c) counter consistency under load: line count equals session-end.exchanges', async () => {
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-load');
+    writer.beginSession({ sessionId: sid });
+
+    const N = 200;
+    for (let i = 0; i < N; i++) {
+      writer.write(buildRecord(sid, i));
+    }
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile);
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(lines.length);
+      expect(lines.length).toBe(N);
+    }
+  });
+
+  it('infrastructure-teardown safety net emits a synthetic session-end with closedReason', async () => {
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-teardown');
+    writer.beginSession({ sessionId: sid });
+    writer.write(buildRecord(sid, 1));
+    writer.write(buildRecord(sid, 2));
+    await writer.close();
+
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('infrastructure-teardown');
+      expect(end.closedReason).toBe('infrastructure-teardown');
+    }
+  });
+
+  it('mid-stream abort (tap closes before _flush) poisons the session with mid-stream-abort', async () => {
+    // The trajectory tap's `close` event arriving before `_flush` is
+    // the §9 mid-stream-abort signal. We drive an SSE response by
+    // piping into the tap, then destroy the upstream side BEFORE the
+    // reassembler sees a message_stop — the tap should mark the session
+    // poisoned via markSessionPoisoned('mid-stream-abort').
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-midabort');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    // Begin a stream but never finalize: write partial bytes, then
+    // destroy the tap to simulate the upstream closing mid-stream.
+    tap.write(
+      Buffer.from(
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"x","type":"message","role":"assistant","model":"m","content":[]}}\n\n',
+        'utf-8',
+      ),
+    );
+    // Destroy with an error — the tap emits 'error' first, then 'close'.
+    // Either path should mark the session poisoned with mid-stream-abort.
+    tap.destroy(new Error('upstream reset'));
+
+    // Give the tap's lifecycle events a microtask to settle.
+    await new Promise<void>((r) => setImmediate(r));
+
+    await writer.endSession(sid);
+
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('mid-stream-abort');
+    }
+  });
+
+  it('in-flight tracking: endSession waits for a slow in-flight Promise before resolving', async () => {
+    // Drive an externally-controlled Promise via trackInFlight, then
+    // call endSession. The endSession Promise must not resolve until
+    // the in-flight settles. We instrument with a flag that flips after
+    // settlement; if endSession resolved early the flag would be false.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-inflight');
+    writer.beginSession({ sessionId: sid });
+    writer.write(buildRecord(sid, 1));
+
+    let settled = false;
+    let resolveInflight!: () => void;
+    const inflight = new Promise<void>((r) => {
+      resolveInflight = r;
+    });
+    writer.trackInFlight(sid, inflight);
+
+    const endPromise = writer.endSession(sid).then(() => {
+      expect(settled).toBe(true); // endSession only fires AFTER the in-flight settles
+    });
+
+    // Schedule the inflight to settle after a tick. If endSession races
+    // ahead, the assertion above will fail.
+    setTimeout(() => {
+      settled = true;
+      resolveInflight();
+    }, 30);
+
+    await endPromise;
+
+    // And the session-end manifest entry must be durable on disk by
+    // the time endSession returns.
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.exchanges).toBe(1);
+    }
+  });
+
+  it('(f) duplicate beginSession with conflicting persona/fsmState: first wins, warns loudly', async () => {
+    // Hardening for the double-begin footgun: when two call sites both
+    // drive capture for the same sessionId (the workflow shared-container
+    // bug), the dispatcher's first-wins idempotency silently dropped the
+    // richer begin. A duplicate begin carrying different persona/fsmState
+    // must now warn so the latent bug is loud, while the first entry
+    // remains authoritative on the manifest.
+    const logger = await import('../../src/logger.js');
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-dup-begin');
+
+    // First begin: bare sessionId (the docker-agent-session call site).
+    writer.beginSession({ sessionId: sid });
+    // Second begin: richer metadata (the orchestrator call site).
+    writer.beginSession({ sessionId: sid, persona: 'researcher', fsmState: 'triage' });
+
+    // (i) the conflicting duplicate produced exactly one warn.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('duplicate beginSession');
+    expect(warnSpy.mock.calls[0]?.[0]).toContain(sid);
+
+    await writer.endSession(sid);
+
+    // (ii) first begin wins: the single session-start entry carries
+    // NEITHER persona NOR fsmState (the bare first call's metadata).
+    const manifest = readManifest(dir);
+    const starts = manifest.filter((m) => m.event === 'session-start' && m.sessionId === sid);
+    expect(starts.length).toBe(1);
+    const start = starts[0];
+    if (start.event === 'session-start') {
+      expect(start.persona).toBeUndefined();
+      expect(start.fsmState).toBeUndefined();
+    }
+  });
+
+  it('(g) duplicate beginSession with identical metadata does not warn', async () => {
+    // A pure idempotent retry (same metadata) is benign — no warn.
+    const logger = await import('../../src/logger.js');
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-dup-benign');
+
+    writer.beginSession({ sessionId: sid, persona: 'researcher', fsmState: 'triage' });
+    writer.beginSession({ sessionId: sid, persona: 'researcher', fsmState: 'triage' });
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});

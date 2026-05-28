@@ -44,6 +44,7 @@ const daemonSpec: CommandSpec = {
     { flag: 'web-ui', description: 'Enable web UI server' },
     { flag: 'web-port', description: 'Web UI port (default: 7400)', placeholder: '<port>' },
     { flag: 'web-ui-dev', description: 'Skip Origin validation (for Vite dev server)' },
+    { flag: 'capture-traces', description: 'Capture LLM API traces for every session this daemon launches' },
     { flag: 'runs', description: 'Number of recent runs to show (for logs)', placeholder: '<N>' },
   ],
 };
@@ -94,6 +95,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       'web-ui': { type: 'boolean' },
       'web-port': { type: 'string' },
       'web-ui-dev': { type: 'boolean' },
+      'capture-traces': { type: 'boolean' },
       force: { type: 'boolean', short: 'f' },
       runs: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
@@ -128,10 +130,12 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     }
     const webUiDev = values['web-ui-dev'] as boolean | undefined;
 
+    const captureTracesDefault = (values['capture-traces'] as boolean | undefined) ?? false;
     const daemon = new IronCurtainDaemon({
       mode,
       noSignal: values['no-signal'] as boolean | undefined,
       webUi: webUiEnabled ? { port: webPort, devMode: webUiDev } : undefined,
+      captureTracesDefault,
     });
 
     // Handle shutdown signals

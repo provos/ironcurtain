@@ -95,6 +95,22 @@ export interface ProviderConfig {
   readonly allowedEndpoints: readonly EndpointPattern[];
 
   /**
+   * Endpoints whose exchanges are training-relevant and may be recorded by
+   * the trajectory-capture pipeline. Same matcher shape as
+   * `allowedEndpoints` (method + path glob, query string stripped before
+   * matching). This is an ALLOWLIST: only completion endpoints belong here
+   * (e.g. Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`). The
+   * large volume of host-shared housekeeping traffic (MCP-registry
+   * pagination, telemetry batches, settings/eval pings) is deliberately
+   * excluded so it never pollutes the captured corpus.
+   *
+   * Absent or empty means "capture nothing" — custom/unlisted providers do
+   * not accidentally capture. See `isCapturableEndpoint` and §3 integration
+   * point 4 of docs/designs/mitm-token-trajectory-capture.md.
+   */
+  readonly captureEndpoints?: readonly EndpointPattern[];
+
+  /**
    * How the API key is transmitted in requests.
    * Determines where the proxy looks for the fake key and injects the real one.
    */
@@ -146,17 +162,20 @@ export interface EndpointPattern {
 export type KeyInjection = { readonly type: 'header'; readonly headerName: string } | { readonly type: 'bearer' };
 
 /**
- * Checks whether a request method+path is in the provider's allowlist.
+ * Returns true if `method`+`path` matches any pattern in `patterns`.
+ * Path is normalized by stripping the query string; glob patterns ('*')
+ * match exactly one path segment. Shared by `isEndpointAllowed` (forwarding
+ * allowlist) and `isCapturableEndpoint` (capture allowlist).
  */
-export function isEndpointAllowed(
-  config: ProviderConfig,
+function matchesEndpoint(
+  patterns: readonly EndpointPattern[],
   method: string | undefined,
   path: string | undefined,
 ): boolean {
   if (!method || !path) return false;
   const cleanPath = path.split('?')[0]; // strip query string
 
-  return config.allowedEndpoints.some((ep) => {
+  return patterns.some((ep) => {
     if (ep.method !== method.toUpperCase()) return false;
     if (ep.path.includes('*')) {
       // Escape regex metacharacters in non-glob segments, then replace
@@ -170,6 +189,36 @@ export function isEndpointAllowed(
     }
     return cleanPath === ep.path;
   });
+}
+
+/**
+ * Checks whether a request method+path is in the provider's forwarding
+ * allowlist. Requests not matching any pattern get a 403.
+ */
+export function isEndpointAllowed(
+  config: ProviderConfig,
+  method: string | undefined,
+  path: string | undefined,
+): boolean {
+  return matchesEndpoint(config.allowedEndpoints, method, path);
+}
+
+/**
+ * Checks whether a request method+path is training-relevant and therefore
+ * eligible for trajectory capture. Gated on the provider's `captureEndpoints`
+ * allowlist (completion paths only). Returns false when `captureEndpoints` is
+ * absent or empty, so capture is opt-in per provider and unlisted/custom
+ * providers never record. Strictly subtractive — a false result skips the
+ * capture branch and leaves the forwarding path untouched. See §3 integration
+ * point 4 of docs/designs/mitm-token-trajectory-capture.md.
+ */
+export function isCapturableEndpoint(
+  config: ProviderConfig,
+  method: string | undefined,
+  path: string | undefined,
+): boolean {
+  if (!config.captureEndpoints || config.captureEndpoints.length === 0) return false;
+  return matchesEndpoint(config.captureEndpoints, method, path);
 }
 
 // --- Request body rewriters ---
@@ -446,6 +495,9 @@ export const anthropicProvider: ProviderConfig = {
     // MCP marketplace
     { method: 'GET', path: '/mcp-registry/v0/servers' },
   ],
+  // Capture only the completion endpoint; the housekeeping paths above
+  // (settings, telemetry, eval, registry) carry no model-emitted content.
+  captureEndpoints: [{ method: 'POST', path: '/v1/messages' }],
   keyInjection: { type: 'header', headerName: 'x-api-key' },
   fakeKeyPrefix: 'sk-ant-api03-ironcurtain-',
   requestRewriter: anthropicRequestRewriter,
@@ -467,6 +519,7 @@ export const openaiProvider: ProviderConfig = {
     { method: 'POST', path: '/v1/chat/completions' },
     { method: 'GET', path: '/v1/models' },
   ],
+  captureEndpoints: [{ method: 'POST', path: '/v1/chat/completions' }],
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ironcurtain-',
 };
@@ -479,6 +532,7 @@ export const anthropicOAuthProvider: ProviderConfig = {
     // OAuth-only: usage data requires an OAuth session
     { method: 'GET' as const, path: '/api/oauth/usage' },
   ],
+  captureEndpoints: anthropicProvider.captureEndpoints,
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
   requestRewriter: anthropicRequestRewriter,
@@ -497,6 +551,10 @@ export const googleProvider: ProviderConfig = {
   host: 'generativelanguage.googleapis.com',
   displayName: 'Google',
   allowedEndpoints: [
+    { method: 'POST', path: '/v1beta/models/*/generateContent' },
+    { method: 'POST', path: '/v1beta/models/*/streamGenerateContent' },
+  ],
+  captureEndpoints: [
     { method: 'POST', path: '/v1beta/models/*/generateContent' },
     { method: 'POST', path: '/v1beta/models/*/streamGenerateContent' },
   ],

@@ -88,6 +88,7 @@ const workflowSpec: CommandSpec = {
     { flag: 'no-lint', description: 'Skip pre-flight linting (start, resume)' },
     { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume)' },
     { flag: 'strict', description: 'Treat lint warnings as errors (lint only)' },
+    { flag: 'capture-traces', description: 'Capture LLM API traces for this run (start only)' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
@@ -209,6 +210,7 @@ async function runStart(args: string[]): Promise<void> {
       workspace: { type: 'string' },
       'no-lint': { type: 'boolean' },
       'strict-lint': { type: 'boolean' },
+      'capture-traces': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
@@ -250,6 +252,7 @@ async function runStart(args: string[]): Promise<void> {
   }
 
   const modelOverride = values.model as string | undefined;
+  const captureTracesFlag = values['capture-traces'] as boolean | undefined;
   const baseDir = resolve(getIronCurtainHome(), 'workflow-runs');
   mkdirSync(baseDir, { recursive: true });
 
@@ -257,6 +260,9 @@ async function runStart(args: string[]): Promise<void> {
   const gateHandler = createGateHandler();
   const sessionFactory = createWorkflowSessionFactory(modelOverride);
   const config = loadConfig();
+  // Capture precedence: CLI flag > userConfig > false. Resolved once
+  // for the workflow run and applied uniformly to every bundle.
+  const captureEnabled = captureTracesFlag ?? config.userConfig.capture?.enabled ?? false;
 
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
@@ -266,6 +272,7 @@ async function runStart(args: string[]): Promise<void> {
     baseDir,
     checkpointStore,
     userConfig: config.userConfig,
+    captureEnabled,
   };
 
   const orchestrator = new WorkflowOrchestrator(deps);

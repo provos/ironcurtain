@@ -499,6 +499,16 @@ export interface SessionOptions {
    * See `docs/designs/workflow-session-identity.md` §2.2 / §3 / §8.5.
    */
   readonly agentConversationId?: AgentConversationId;
+
+  /**
+   * Per-invocation override for the trajectory-capture toggle. CLI flag
+   * `--capture-traces` sets this to `true`; daemon JSON-RPC clients can
+   * set this per session. Precedence: `captureTracesOverride > userConfig.capture?.enabled > false`.
+   * Honored only in Docker mode (capture is MITM-proxy bound).
+   *
+   * See docs/designs/mitm-token-trajectory-capture.md §10.
+   */
+  readonly captureTracesOverride?: boolean;
 }
 
 /**
