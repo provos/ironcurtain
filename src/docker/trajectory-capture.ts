@@ -19,6 +19,7 @@
 import { appendFile as fsAppendFile, mkdir as fsMkdir, writeFile as fsWriteFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { SessionId } from '../session/types.js';
+import { getCaptureManifestFile, getSessionCaptureFile } from '../config/paths.js';
 import * as logger from '../logger.js';
 import {
   type BeginCaptureSessionOptions,
@@ -126,7 +127,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     mkdir: (p, o) => fsMkdir(p, o),
     writeFile: (p, d) => fsWriteFile(p, d),
   };
-  const manifestPath = resolve(capturesDir, 'manifest.jsonl');
+  const manifestPath = getCaptureManifestFile(capturesDir);
   const poisonMarkerPath = resolve(capturesDir, 'manifest.poisoned');
   const sessions = new Map<SessionId, SessionFileState>();
   /** Records queue (unbounded; watermark-defended). */
@@ -190,40 +191,42 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     return drainInflight;
   }
 
-  async function drain(): Promise<void> {
-    try {
-      await ensureDirectory();
-    } catch (err) {
-      logger.warn(`[trajectory-capture] failed to create captures dir: ${errorMessage(err)}`);
-      // Treat as bundle-wide disk failure.
-      poisonAllOpenSessions('disk-error');
-      directoryPoisoned = true;
-      acceptingNewSessions = false;
-      // Clear queues — we cannot proceed. Fire any resolvers attached
-      // to manifest entries so callers do not hang on an unwritable
-      // directory.
-      recordsQueue.length = 0;
-      for (const entry of manifestQueue) {
-        entry.onFlushed?.();
-      }
-      manifestQueue.length = 0;
-      // Resolve every pending endSession promise so callers don't hang.
-      // The session's poisoned state is preserved on the in-memory
-      // SessionFileState; there is no on-disk manifest entry to emit
-      // because the directory itself is unreachable.
-      for (const [sid, resolver] of endResolvers) {
-        endResolvers.delete(sid);
-        sessions.delete(sid);
-        resolver();
-      }
-      return;
+  /**
+   * Bundle-wide disk-failure teardown. Poisons every open session,
+   * fires `onFlushed` on every queued manifest entry (plus an optional
+   * already-shifted `firstEntry`), clears the queues, and resolves every
+   * pending `endSession` so no caller hangs on an unwritable directory.
+   * Shared by the dir-create failure and manifest-append failure paths.
+   */
+  async function failBundleDisk(opts: {
+    writeMarker: boolean;
+    clearRecords?: boolean;
+    firstEntry?: PendingManifest;
+  }): Promise<void> {
+    if (opts.writeMarker) await writePoisonMarker();
+    directoryPoisoned = true;
+    acceptingNewSessions = false;
+    poisonAllOpenSessions('disk-error');
+    if (opts.clearRecords) recordsQueue.length = 0;
+    opts.firstEntry?.onFlushed?.();
+    for (const remaining of manifestQueue) {
+      remaining.onFlushed?.();
     }
+    manifestQueue.length = 0;
+    for (const [sid, resolver] of endResolvers) {
+      endResolvers.delete(sid);
+      sessions.delete(sid);
+      resolver();
+    }
+  }
 
-    // Drain manifest entries first so session-start / session-end
-    // markers appear in order with respect to records that already
-    // flushed. (Per-session counters are bumped on record writes, so
-    // a session-end that was enqueued AFTER its records is guaranteed
-    // to observe the full count.)
+  /**
+   * Append every queued manifest entry to disk in order, firing each
+   * entry's `onFlushed` once durable. Returns `false` (and tears the
+   * bundle down via `failBundleDisk`) if an append fails; `true` when the
+   * queue drains cleanly.
+   */
+  async function flushManifestQueue(): Promise<boolean> {
     while (manifestQueue.length > 0) {
       const entry = manifestQueue.shift();
       if (!entry) break;
@@ -234,28 +237,29 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         entry.onFlushed?.();
       } catch (err) {
         logger.warn(`[trajectory-capture] manifest appendFile failed: ${errorMessage(err)}`);
-        await writePoisonMarker();
-        directoryPoisoned = true;
-        acceptingNewSessions = false;
-        poisonAllOpenSessions('disk-error');
-        // Fire the resolver attached to this entry plus every remaining
-        // queued manifest entry, so endSession callers don't hang on
-        // bundle-wide disk failure.
-        entry.onFlushed?.();
-        for (const remaining of manifestQueue) {
-          remaining.onFlushed?.();
-        }
-        manifestQueue.length = 0;
-        // Also resolve any standalone endSession resolvers (e.g. from
-        // sessions whose manifest entry was not yet enqueued).
-        for (const [sid, resolver] of endResolvers) {
-          endResolvers.delete(sid);
-          sessions.delete(sid);
-          resolver();
-        }
-        return;
+        await failBundleDisk({ writeMarker: true, firstEntry: entry });
+        return false;
       }
     }
+    return true;
+  }
+
+  async function drain(): Promise<void> {
+    try {
+      await ensureDirectory();
+    } catch (err) {
+      logger.warn(`[trajectory-capture] failed to create captures dir: ${errorMessage(err)}`);
+      // Treat as bundle-wide disk failure. No poison marker — the
+      // directory itself is unreachable, so there is nowhere to write it.
+      await failBundleDisk({ writeMarker: false, clearRecords: true });
+      return;
+    }
+
+    // Drain manifest entries first so session-start / session-end markers
+    // appear in order with respect to records that already flushed.
+    // (Per-session counters are bumped on record writes, so a session-end
+    // enqueued AFTER its records is guaranteed to observe the full count.)
+    if (!(await flushManifestQueue())) return;
 
     while (recordsQueue.length > 0) {
       const item = recordsQueue.shift();
@@ -300,31 +304,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     // drain them this pass so the end-marker is on disk before the
     // single-flight loop unwinds.
     if (manifestQueue.length > 0) {
-      while (manifestQueue.length > 0) {
-        const entry = manifestQueue.shift();
-        if (!entry) break;
-        try {
-          await fs.appendFile(manifestPath, entry.line);
-          entry.onFlushed?.();
-        } catch (err) {
-          logger.warn(`[trajectory-capture] manifest appendFile failed: ${errorMessage(err)}`);
-          await writePoisonMarker();
-          directoryPoisoned = true;
-          acceptingNewSessions = false;
-          poisonAllOpenSessions('disk-error');
-          entry.onFlushed?.();
-          for (const remaining of manifestQueue) {
-            remaining.onFlushed?.();
-          }
-          manifestQueue.length = 0;
-          for (const [sid, resolver] of endResolvers) {
-            endResolvers.delete(sid);
-            sessions.delete(sid);
-            resolver();
-          }
-          return;
-        }
-      }
+      await flushManifestQueue();
     }
   }
 
@@ -352,7 +332,29 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     if (hasQueued || hasInFlight) return;
 
     session.ended = true;
-    const entry: ManifestEntry = {
+    const entry = buildSessionEndEntry(session);
+    const resolver = endResolvers.get(sessionId);
+    endResolvers.delete(sessionId);
+    manifestQueue.push({
+      line: serializeJsonl(entry),
+      onFlushed: () => {
+        sessions.delete(sessionId);
+        resolver?.();
+      },
+    });
+  }
+
+  /**
+   * Build a `session-end` manifest entry from the session's current
+   * counters and poison state. Shared by the two-phase `maybeEnqueueEnd`
+   * path and the synthetic teardown emitted by `close()`. Pass
+   * `closedReason` only for the teardown path.
+   */
+  function buildSessionEndEntry(
+    session: SessionFileState,
+    opts?: { closedReason: 'infrastructure-teardown' },
+  ): ManifestEntry {
+    return {
       schemaVersion: 1,
       event: 'session-end',
       seq: session.seq,
@@ -364,16 +366,8 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       bytesWritten: session.bytesWritten,
       poisoned: session.poisoned,
       ...(session.poisonReason !== undefined ? { poisonReason: session.poisonReason } : {}),
+      ...(opts?.closedReason !== undefined ? { closedReason: opts.closedReason } : {}),
     };
-    const resolver = endResolvers.get(sessionId);
-    endResolvers.delete(sessionId);
-    manifestQueue.push({
-      line: serializeJsonl(entry),
-      onFlushed: () => {
-        sessions.delete(sessionId);
-        resolver?.();
-      },
-    });
   }
 
   function markSessionPoisonedInternal(session: SessionFileState, reason: PoisonReason): void {
@@ -448,7 +442,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         return;
       }
       seqCounter += 1;
-      const filePath = resolve(capturesDir, `${opts.sessionId}.jsonl`);
+      const filePath = getSessionCaptureFile(capturesDir, opts.sessionId);
       const state: SessionFileState = {
         sessionId: opts.sessionId,
         filePath,
@@ -546,23 +540,11 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
           markSessionPoisonedInternal(session, 'infrastructure-teardown');
         }
         // Synthesize the session-end now (skip the two-phase wait;
-        // teardown is best-effort).
+        // teardown is best-effort). The session was just poisoned above,
+        // so `buildSessionEndEntry` records poisoned:true with the reason.
         if (!session.ended) {
           session.ended = true;
-          const entry: ManifestEntry = {
-            schemaVersion: 1,
-            event: 'session-end',
-            seq: session.seq,
-            sessionId: session.sessionId,
-            ...(session.persona !== undefined ? { persona: session.persona } : {}),
-            ...(session.fsmState !== undefined ? { fsmState: session.fsmState } : {}),
-            ts: new Date().toISOString(),
-            exchanges: session.exchanges,
-            bytesWritten: session.bytesWritten,
-            poisoned: true,
-            poisonReason: session.poisonReason ?? 'infrastructure-teardown',
-            closedReason: 'infrastructure-teardown',
-          };
+          const entry = buildSessionEndEntry(session, { closedReason: 'infrastructure-teardown' });
           manifestQueue.push({ line: serializeJsonl(entry) });
         }
       }

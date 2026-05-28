@@ -22,18 +22,13 @@ import * as zlib from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { type Reassembler, redactHeaders } from './trajectory-types.js';
-import type { CaptureProvider, ExchangeRecord, PoisonReason } from './trajectory-types.js';
-import { createReassembler, ReassemblyError } from './trajectory-reassembler.js';
+import type { ExchangeRecord, PoisonReason } from './trajectory-types.js';
+import { createReassembler, providerForHost, ReassemblyError } from './trajectory-reassembler.js';
 import type { SessionId } from '../session/types.js';
 import * as logger from '../logger.js';
 
-/** Hosts we know how to classify for the `provider` field. */
-function classifyProvider(host: string): CaptureProvider {
-  const normalized = host.toLowerCase();
-  if (normalized === 'api.anthropic.com') return 'anthropic';
-  if (normalized === 'api.openai.com') return 'openai';
-  return 'unknown';
-}
+/** Reused for the (ignored) responseBody arg on the reassembler path. */
+const EMPTY_BODY = Buffer.alloc(0);
 
 /**
  * Decode a Buffer as UTF-8 if it round-trips losslessly, otherwise
@@ -155,7 +150,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       ...(inputs.workflowRunId !== undefined ? { workflowRunId: inputs.workflowRunId } : {}),
       ...(inputs.bundleId !== undefined ? { bundleId: inputs.bundleId } : {}),
       ...(inputs.recordedAgentName !== undefined ? { recordedAgentName: inputs.recordedAgentName } : {}),
-      provider: classifyProvider(inputs.host),
+      provider: providerForHost(inputs.host),
       method: inputs.method,
       host: inputs.host,
       path: inputs.path,
@@ -258,17 +253,33 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         completionReject = undefined;
       };
 
+      // Poison the session and reject the in-flight completion. Shared by
+      // the reassembly-failure, mid-stream-abort (close), and error paths.
+      const poisonAndAbort = (reason: PoisonReason, err: Error): void => {
+        aborted = true;
+        try {
+          inputs.writer.markSessionPoisoned(inputs.sessionId, reason);
+        } catch {
+          /* swallow — poisoning is best-effort */
+        }
+        finishCompletion(false, err);
+      };
+
       tap.on('data', (chunk: Buffer) => {
         if (aborted) return;
-        responseChunks.push(chunk);
-        responseBytes += chunk.length;
         if (reassembler) {
+          // On the streaming path the reassembled message is the captured
+          // body, so the raw chunks are never used (see maybeWriteRecord).
+          // Skip buffering them to avoid holding the full response twice.
           try {
             reassembler.push(chunk);
           } catch {
             /* reassembler accumulates; failures surface at finalize */
           }
+          return;
         }
+        responseChunks.push(chunk);
+        responseBytes += chunk.length;
       });
 
       // Tracks whether `finalize` already ran (cleanly OR with a
@@ -283,7 +294,6 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         }
         finalized = true;
         const responseFinishedAt = Date.now();
-        const fullBody = Buffer.concat(responseChunks, responseBytes);
         if (reassembler) {
           try {
             const result = reassembler.finalize();
@@ -291,7 +301,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
               statusCode: args.statusCode,
               responseHeaders: args.headers,
               streaming: true,
-              responseBody: fullBody,
+              responseBody: EMPTY_BODY, // ignored on the reassembly-ok path
               responseFinishedAt,
               reassembly: {
                 ok: true,
@@ -306,19 +316,11 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             finishCompletion(true);
           } catch (err) {
             // Reassembly failure: do NOT emit a partial record. Per §5
-            // and §9, the session is poisoned. Mark the session
-            // poisoned with `reassembly-failure` via the dispatcher's
-            // public surface so the eventual `session-end` carries the
-            // reason.
+            // and §9, the session is poisoned with `reassembly-failure`
+            // so the eventual `session-end` carries the reason.
             const msg = err instanceof ReassemblyError ? err.message : String(err);
             logger.warn(`[trajectory-tap] reassembly failed (${inputs.host}): ${msg}`);
-            aborted = true;
-            try {
-              inputs.writer.markSessionPoisoned(inputs.sessionId, 'reassembly-failure');
-            } catch {
-              /* swallow */
-            }
-            finishCompletion(false, err instanceof Error ? err : new Error(msg));
+            poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(msg));
           }
         } else {
           // Non-streaming or compressed: capture the raw bytes verbatim.
@@ -326,7 +328,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             statusCode: args.statusCode,
             responseHeaders: args.headers,
             streaming: false,
-            responseBody: fullBody,
+            responseBody: Buffer.concat(responseChunks, responseBytes),
             responseFinishedAt,
           });
           finishCompletion(true);
@@ -341,18 +343,10 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         }
         if (reassembler) {
           // Mid-stream abort: the captureTap closed before the
-          // reassembler ran `_flush`. Per §9, this is the
-          // `mid-stream-abort` poison source: mark the session
-          // poisoned via the dispatcher's public surface so the
-          // eventual `session-end` carries the reason. Drop the
-          // in-flight record without writing.
-          aborted = true;
-          try {
-            inputs.writer.markSessionPoisoned(inputs.sessionId, 'mid-stream-abort');
-          } catch {
-            /* swallow */
-          }
-          finishCompletion(false, new Error('mid-stream-abort'));
+          // reassembler ran `_flush`. Per §9 this is the
+          // `mid-stream-abort` poison source; drop the in-flight record
+          // without writing.
+          poisonAndAbort('mid-stream-abort', new Error('mid-stream-abort'));
         }
       });
       tap.on('error', (err) => {
@@ -360,13 +354,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
           finishCompletion(false);
           return;
         }
-        aborted = true;
-        try {
-          inputs.writer.markSessionPoisoned(inputs.sessionId, 'mid-stream-abort');
-        } catch {
-          /* swallow */
-        }
-        finishCompletion(false, err instanceof Error ? err : new Error(String(err)));
+        poisonAndAbort('mid-stream-abort', err instanceof Error ? err : new Error(String(err)));
       });
 
       return tap;

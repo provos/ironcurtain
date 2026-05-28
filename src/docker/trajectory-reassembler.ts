@@ -15,7 +15,7 @@
  * content.
  */
 
-import type { Reassembler, ReassemblyResult } from './trajectory-types.js';
+import type { CaptureProvider, Reassembler, ReassemblyResult } from './trajectory-types.js';
 
 /** Errors thrown by the reassemblers when the stream is unrecoverable. */
 export class ReassemblyError extends Error {
@@ -622,13 +622,29 @@ export class OpenAIReassembler implements Reassembler {
 }
 
 /**
+ * Classify an upstream host into a capture provider. Single source of
+ * truth for host → provider mapping across the capture pipeline (the
+ * `ExchangeRecord.provider` field and reassembler selection).
+ */
+export function providerForHost(host: string): CaptureProvider {
+  const normalized = host.toLowerCase();
+  if (normalized === 'api.anthropic.com') return 'anthropic';
+  if (normalized === 'api.openai.com') return 'openai';
+  return 'unknown';
+}
+
+/**
  * Pick a reassembler by upstream host. Hosts the caller cannot classify
  * yield `undefined`; the caller should fall back to capturing raw bytes
  * verbatim.
  */
 export function createReassembler(host: string): Reassembler | undefined {
-  const normalized = host.toLowerCase();
-  if (normalized === 'api.anthropic.com') return new AnthropicReassembler();
-  if (normalized === 'api.openai.com') return new OpenAIReassembler();
-  return undefined;
+  switch (providerForHost(host)) {
+    case 'anthropic':
+      return new AnthropicReassembler();
+    case 'openai':
+      return new OpenAIReassembler();
+    default:
+      return undefined;
+  }
 }
