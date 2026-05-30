@@ -16,7 +16,7 @@ import { buildAgentCommand } from './prompt-builder.js';
 import { parseAgentStatus, AgentStatusParseError } from './status-parser.js';
 import { parseArtifactRef } from './validate.js';
 import { stageWorkflowSkillsAtStart } from './orchestrator.js';
-import { parseArgsStrict, runCliPreflightLint } from './workflow-command.js';
+import { parseArgsStrict, runCliPreflightLint } from './cli-shared.js';
 import type { AgentStateDefinition, WorkflowContext, WorkflowDefinition, WorkflowStateDefinition } from './types.js';
 import { WORKFLOW_ARTIFACT_DIR, resolveWorkflowSkillsOptions } from './types.js';
 

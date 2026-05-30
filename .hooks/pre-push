@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-push hook: fails the push if any runtime circular dependency exists in src/.
+# Type-only import cycles are excluded via .madgerc (skipTypeImports).
+# Install: cp .hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# Or:      npm run setup-hooks
+
+set -euo pipefail
+
+npm run check:cycles
+
+echo "Circular dependency check passed."
