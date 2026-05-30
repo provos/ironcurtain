@@ -178,6 +178,36 @@ describe('ironcurtain mux preflight integration', () => {
     expect(stderrText).toMatch(/Mode: docker \/ claude-code \(API key\)/);
   });
 
+  it('--capture-traces forwards captureTraces: true to the MuxApp', async () => {
+    const resolveSessionMode = vi.fn().mockResolvedValue(makePreflightSuccess('claude-code'));
+    const createMuxApp = vi.fn(() => makeFakeMuxApp());
+
+    await muxMain(['--capture-traces'], {
+      resolveSessionMode,
+      createMuxApp,
+      skipNativeProbes: true,
+    });
+
+    expect(createMuxApp).toHaveBeenCalledOnce();
+    const appOptions = createMuxApp.mock.calls[0][0] as MuxAppOptions;
+    expect(appOptions.captureTraces).toBe(true);
+  });
+
+  it('without --capture-traces, captureTraces is undefined (child falls through to config)', async () => {
+    const resolveSessionMode = vi.fn().mockResolvedValue(makePreflightSuccess('claude-code'));
+    const createMuxApp = vi.fn(() => makeFakeMuxApp());
+
+    await muxMain([], {
+      resolveSessionMode,
+      createMuxApp,
+      skipNativeProbes: true,
+    });
+
+    expect(createMuxApp).toHaveBeenCalledOnce();
+    const appOptions = createMuxApp.mock.calls[0][0] as MuxAppOptions;
+    expect(appOptions.captureTraces).toBeUndefined();
+  });
+
   it('PreflightError is printed in red and exits with code 1; MuxApp is NOT constructed', async () => {
     const resolveSessionMode = vi.fn().mockRejectedValue(new PreflightError('Docker is not available'));
     const createMuxApp = vi.fn(() => makeFakeMuxApp());

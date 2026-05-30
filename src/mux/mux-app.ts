@@ -33,6 +33,8 @@ export interface MuxAppOptions {
   readonly agent?: string;
   /** Optional model ID override (passed as --model to child sessions). */
   readonly model?: string;
+  /** When true, spawned child sessions capture LLM API traces (`--capture-traces`). */
+  readonly captureTraces?: boolean;
   /** Whether to auto-spawn an initial session. Default: true. */
   readonly autoSpawn?: boolean;
   /** Protected paths for workspace validation. */
@@ -118,6 +120,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       resumeSessionId: opts?.resumeSessionId,
       persona: opts?.persona,
       model: options.model,
+      captureTraces: options.captureTraces,
       muxId: options.muxId,
       muxPid: options.muxPid,
     });

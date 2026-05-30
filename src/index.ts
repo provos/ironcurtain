@@ -178,6 +178,7 @@ export async function main(args?: string[]): Promise<void> {
       workspacePath,
       resumeSessionId,
       persona: resumeSessionId ? undefined : personaName,
+      captureTracesOverride,
     });
     process.exit(0);
   }

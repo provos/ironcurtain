@@ -96,6 +96,8 @@ export interface PtyBridgeOptions {
   readonly persona?: string;
   /** Optional model ID override (passed as --model to the child). */
   readonly model?: string;
+  /** When true, pass `--capture-traces` to the child `ironcurtain start --pty`. */
+  readonly captureTraces?: boolean;
   /** Mux instance ID to propagate to child sessions via env var. */
   readonly muxId?: string;
   /** Mux process PID to propagate to child sessions via env var. */
@@ -132,6 +134,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   }
   if (options.model) {
     spawnArgs.push('--model', options.model);
+  }
+  if (options.captureTraces) {
+    spawnArgs.push('--capture-traces');
   }
   // Create a copy of process.env so we don't mutate the shared object
   const childEnv: Record<string, string> = { ...(process.env as Record<string, string>) };

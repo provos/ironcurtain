@@ -32,6 +32,10 @@ const muxSpec: CommandSpec = {
   options: [
     { flag: 'agent', short: 'a', description: 'Agent mode (default: from config)', placeholder: '<name>' },
     { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
+    {
+      flag: 'capture-traces',
+      description: 'Capture LLM API traces for sessions spawned by this mux (overrides config)',
+    },
   ],
 };
 
@@ -124,6 +128,7 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
       help: { type: 'boolean', short: 'h' },
       agent: { type: 'string', short: 'a' },
       model: { type: 'string', short: 'm' },
+      'capture-traces': { type: 'boolean' },
     },
     allowPositionals: true,
     strict: false,
@@ -133,6 +138,9 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
 
   const requestedAgentRaw = values.agent as string | undefined;
   const model = values.model as string | undefined;
+  // CLI flag forces capture on for spawned sessions; absence falls through to
+  // each child's config resolution (so we pass the flag, never an explicit off).
+  const captureTraces = (values['capture-traces'] as boolean | undefined) ? true : undefined;
 
   const config = loadConfig();
 
@@ -183,6 +191,7 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
   const app = createApp({
     agent: resolvedAgent,
     model,
+    captureTraces,
     autoSpawn: false,
     protectedPaths: config.protectedPaths,
     muxId,
