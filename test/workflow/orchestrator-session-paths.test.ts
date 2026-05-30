@@ -47,6 +47,8 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     workflowId,
     bundleId,
     setTokenSessionId: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   } as unknown as DockerInfrastructure;
 }
 

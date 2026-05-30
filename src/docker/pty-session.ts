@@ -288,17 +288,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // this keeps the deterministic `ironcurtain-pty-<id[0:12]>` container
     // name that prior-crash recovery depends on.
     const bundleId = effectiveSessionId as BundleId;
-    // Trajectory-capture resolution: CLI override > userConfig > false. The
-    // writer is constructed only when enabled — zero cost when disabled.
-    const captureEnabled = options.captureTracesOverride ?? options.config.userConfig.capture?.enabled ?? false;
+    // Trajectory-capture: pass the RAW override; the infra layer is the
+    // single place that resolves it against userConfig. The writer is
+    // constructed only when enabled — zero cost when disabled.
     const { getSessionCapturesDir } = await import('../config/paths.js');
-    const captureOptions = captureEnabled
-      ? {
-          enabled: true as const,
-          capturesDir: getSessionCapturesDir(effectiveSessionId),
-          recordedAgentName: options.mode.agent,
-        }
-      : undefined;
     const infra = await prepareDockerInfrastructure(
       sessionConfig,
       options.mode,
@@ -309,7 +302,11 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       undefined,
       undefined,
       dirConfig.resolvedSkills,
-      captureOptions,
+      {
+        override: options.captureTracesOverride,
+        capturesDir: getSessionCapturesDir(effectiveSessionId),
+        recordedAgentName: options.mode.agent,
+      },
     );
     // PTY sessions are standalone: pin the MITM proxy's token-stream
     // routing ID to this session's ID for the session's lifetime.
@@ -322,11 +319,11 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // session-end manifest entry is durable. PTY mode does not call
     // destroyDockerInfrastructure, so we both end the session (clean,
     // non-poisoned end) and close the writer here.
-    infra.beginCaptureSession?.({ sessionId: captureSessionId });
+    infra.beginCaptureSession({ sessionId: captureSessionId });
     if (infra.captureWriter) {
       flushCapture = async () => {
         await infra
-          .endCaptureSession?.(captureSessionId)
+          .endCaptureSession(captureSessionId)
           .catch((err: unknown) =>
             logger.warn(`PTY capture endSession failed: ${err instanceof Error ? err.message : String(err)}`),
           );

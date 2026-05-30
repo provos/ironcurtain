@@ -219,10 +219,12 @@ export interface PreContainerInfrastructure {
    * agent emits is already tagged with the right session. See
    * docs/designs/mitm-token-trajectory-capture.md §11.
    *
-   * Marked optional (undefined when omitted on test mocks); production
-   * bundles always implement it.
+   * Always present (never optional): the method is inert when the writer
+   * is undefined, so "always present, sometimes a no-op" is correct.
+   * Making it required turns "forgot to wire capture" into a compile
+   * error instead of a silent no-op.
    */
-  beginCaptureSession?: (opts: {
+  beginCaptureSession: (opts: {
     sessionId: import('../session/types.js').SessionId;
     persona?: string;
     fsmState?: string;
@@ -235,10 +237,12 @@ export interface PreContainerInfrastructure {
    * `session.close()` so the manifest entry is durable even if `session.close()`
    * throws.
    *
-   * No-op when capture is disabled. Marked optional (undefined when
-   * omitted on test mocks); production bundles always implement it.
+   * No-op when capture is disabled. Always present (never optional): the
+   * method is inert when the writer is undefined, so "always present,
+   * sometimes a no-op" is correct, and a consumer that forgets to wire
+   * capture now fails to compile rather than silently dropping it.
    */
-  endCaptureSession?: (sessionId: import('../session/types.js').SessionId) => Promise<void>;
+  endCaptureSession: (sessionId: import('../session/types.js').SessionId) => Promise<void>;
 
   /**
    * Internal: trajectory-capture writer reference, exposed so
@@ -299,23 +303,30 @@ const BUNDLE_SKILLS_SUBDIR = 'skills';
  */
 /**
  * Optional trajectory-capture inputs threaded through to the MITM
- * proxy. When `enabled` is false (or this object is absent), no writer
- * is constructed and no taps are installed — zero cost on the
+ * proxy. Carries the RAW CLI/RPC override — this function is the single
+ * place that resolves enablement against config (`override ?? config >
+ * false`), so consumers never duplicate the `?? userConfig.capture?.enabled`
+ * precedence. When this object is absent, or resolution yields false, no
+ * writer is constructed and no taps are installed — zero cost on the
  * forwarding path. See docs/designs/mitm-token-trajectory-capture.md.
  */
-export interface CaptureSetupOptions {
+export interface CaptureSetupInput {
   /**
-   * When true, construct a TrajectoryCaptureWriter and pass it through
-   * to the MITM proxy. The writer's captures directory is
-   * `capturesDir` below.
+   * Raw CLI/RPC override (boolean | undefined); undefined falls through
+   * to `config.userConfig.capture?.enabled`, then to false. The single
+   * resolution point lives in `prepareDockerInfrastructure`.
    */
-  readonly enabled: boolean;
-  /** Absolute path where `{sessionId}.jsonl` and `manifest.jsonl` are written. */
+  readonly override?: boolean;
+  /**
+   * Absolute path where `{sessionId}.jsonl` and `manifest.jsonl` are
+   * written. A real per-path difference (session dir vs bundle dir), so
+   * the caller supplies it rather than the infra layer deriving it.
+   */
   readonly capturesDir: string;
   /** Human-readable agent name (e.g. `'claude-code'`). */
   readonly recordedAgentName?: string;
   /** Workflow run ID, when this bundle belongs to a workflow run. */
-  readonly workflowRunId?: string;
+  readonly workflowRunId?: WorkflowId;
 }
 
 export async function prepareDockerInfrastructure(
@@ -328,7 +339,7 @@ export async function prepareDockerInfrastructure(
   workflowId?: WorkflowId,
   scope?: string,
   resolvedSkills?: readonly ResolvedSkill[],
-  captureOptions?: CaptureSetupOptions,
+  captureInput?: CaptureSetupInput,
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -478,21 +489,27 @@ export async function prepareDockerInfrastructure(
   // so agentKind is fixed at construction time.
   const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
 
+  // Single resolution point for trajectory-capture enablement. The raw
+  // CLI/RPC override wins; otherwise fall through to config; otherwise
+  // off. Consumers pass the raw override only — they never re-resolve
+  // against `userConfig.capture?.enabled`.
+  const captureEnabled = captureInput ? (captureInput.override ?? config.userConfig.capture?.enabled ?? false) : false;
+
   // Construct the trajectory-capture writer when capture is enabled.
   // When disabled, no writer is created, no taps are installed, and the
   // forwarding path is byte-identical to today (per §10 "zero cost when
   // disabled").
   let captureWriter: TrajectoryCaptureWriter | undefined;
-  if (captureOptions?.enabled) {
+  if (captureEnabled && captureInput) {
     const { createTrajectoryCaptureWriter } = await import('./trajectory-capture.js');
-    captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureOptions.capturesDir });
+    captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureInput.capturesDir });
   }
 
   const captureProxyOptions = captureWriter
     ? {
         capture: captureWriter,
-        recordedAgentName: captureOptions?.recordedAgentName,
-        workflowRunId: captureOptions?.workflowRunId,
+        recordedAgentName: captureInput?.recordedAgentName,
+        workflowRunId: captureInput?.workflowRunId,
         bundleId: String(bundleId),
       }
     : {};
@@ -693,7 +710,7 @@ export async function createDockerInfrastructure(
   workflowId?: WorkflowId,
   scope?: string,
   resolvedSkills?: readonly ResolvedSkill[],
-  captureOptions?: CaptureSetupOptions,
+  captureInput?: CaptureSetupInput,
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -705,7 +722,7 @@ export async function createDockerInfrastructure(
     workflowId,
     scope,
     resolvedSkills,
-    captureOptions,
+    captureInput,
   );
 
   try {

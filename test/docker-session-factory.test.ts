@@ -181,6 +181,8 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     internalNetwork: undefined,
     setTokenSessionId: () => {},
     restageSkills: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   };
 }
 

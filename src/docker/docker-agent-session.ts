@@ -228,10 +228,11 @@ export class DockerAgentSession implements Session {
     // call begin/end here, or the orchestrator's richer call would be
     // silently dropped by the dispatcher's first-wins idempotency, losing
     // persona/fsmState on the `session-start` manifest entry.
-    // No-op when capture is disabled (writer absent). Method-existence guard
-    // tolerates test infrastructures that don't implement the capture
-    // surface. See docs/designs/mitm-token-trajectory-capture.md §11.
-    if (this.ownsInfra && this.infra.beginCaptureSession) {
+    // No-op when capture is disabled (writer absent). The `ownsInfra` gate
+    // is a real lifecycle decision (borrow mode lets the orchestrator drive
+    // begin/end); the method is always present.
+    // See docs/designs/mitm-token-trajectory-capture.md §11.
+    if (this.ownsInfra) {
       this.infra.beginCaptureSession({ sessionId: this.sessionId });
     }
 
@@ -457,7 +458,7 @@ export class DockerAgentSession implements Session {
     // symmetric with the begin call above: in borrow mode the orchestrator
     // owns begin/end, so the session calling end alone would terminate a
     // capture session the orchestrator is still using.
-    if (this.ownsInfra && this.infra.endCaptureSession) {
+    if (this.ownsInfra) {
       await this.infra.endCaptureSession(this.sessionId).catch((err: unknown) => {
         logger.warn(`endCaptureSession failed: ${err instanceof Error ? err.message : String(err)}`);
       });

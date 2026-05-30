@@ -404,13 +404,16 @@ export interface WorkflowOrchestratorDeps {
   readonly loadPolicyRpc?: (input: LoadPolicyRpcInput) => Promise<void>;
 
   /**
-   * Resolved trajectory-capture enablement for this workflow run. When
-   * true, the default infrastructure factory constructs a writer for
-   * each bundle, and `executeAgentState` brackets each agent's session
-   * with `bundle.beginCaptureSession` / `bundle.endCaptureSession`.
-   * Defaults to false. See docs/designs/mitm-token-trajectory-capture.md §10.
+   * Raw trajectory-capture override for this workflow run (CLI
+   * `--capture-traces` flag). Passed UNRESOLVED to the infrastructure
+   * factory, which is the single place that resolves it against
+   * `userConfig.capture?.enabled`. When resolution yields true, the
+   * factory constructs a writer for each bundle and `executeAgentState`
+   * brackets each agent's session with `bundle.beginCaptureSession` /
+   * `bundle.endCaptureSession`. Undefined falls through to config.
+   * See docs/designs/mitm-token-trajectory-capture.md §10.
    */
-  readonly captureEnabled?: boolean;
+  readonly captureTracesOverride?: boolean;
 }
 
 /** Lifecycle events emitted by the orchestrator. */
@@ -1021,11 +1024,11 @@ export class WorkflowOrchestrator implements WorkflowController {
     const { filterMcpServersByPolicy } = await import('../persona/resolve.js');
     const { getBundleCapturesDir } = await import('../config/paths.js');
 
-    // Resolve capture enablement once for the entire workflow run.
-    // Precedence: orchestrator dep flag (set by CLI) > userConfig > false.
-    // The same value is applied to every scope's bundle.
-    const baseUserConfig = loadConfig().userConfig;
-    const captureEnabled = this.deps.captureEnabled ?? baseUserConfig.capture?.enabled ?? false;
+    // The raw `--capture-traces` override is threaded through unresolved;
+    // the infrastructure factory is the single place that resolves it
+    // against `userConfig.capture?.enabled`. The same raw override is
+    // applied to every scope's bundle.
+    const captureTracesOverride = this.deps.captureTracesOverride;
 
     return async (input) => {
       const config = loadConfig();
@@ -1056,14 +1059,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       config.auditLogPath = getBundleAuditLogPath(input.workflowId, input.bundleId);
       config.mcpServers = filterMcpServersByPolicy(config.mcpServers, input.requiredServers);
       applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
-      const captureOptions = captureEnabled
-        ? {
-            enabled: true,
-            capturesDir: getBundleCapturesDir(input.workflowId, input.bundleId),
-            recordedAgentName: input.agentId,
-            workflowRunId: input.workflowId,
-          }
-        : undefined;
       return createDockerInfrastructure(
         config,
         { kind: 'docker', agent: input.agentId },
@@ -1077,7 +1072,12 @@ export class WorkflowOrchestrator implements WorkflowController {
         input.workflowId,
         input.scope,
         input.resolvedSkills,
-        captureOptions,
+        {
+          override: captureTracesOverride,
+          capturesDir: getBundleCapturesDir(input.workflowId, input.bundleId),
+          recordedAgentName: input.agentId,
+          workflowRunId: input.workflowId,
+        },
       );
     };
   }
@@ -2029,10 +2029,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       // begin/end pair on the bundle. The matching `endCaptureSession`
       // is in the finally block, awaited BEFORE session.close() per §11
       // so the manifest entry is durable even if close() throws.
-      // Method-existence check (not just `bundle?.`) tolerates test
-      // bundles that satisfy `DockerInfrastructure` structurally without
-      // implementing the new capture surface.
-      if (bundle?.beginCaptureSession) {
+      // `bundle` is genuinely optional (builtin / per-state-container
+      // workflows have no shared bundle); the method is always present.
+      if (bundle) {
         bundle.beginCaptureSession({
           sessionId: agentSessionId,
           persona: stateConfig.persona,
@@ -2220,9 +2219,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       // session.close() throws. The two-phase drain inside
       // endCaptureSession waits for in-flight reassembly to settle
       // before enqueuing the manifest end-marker (§9 / §11).
-      // Method-existence check tolerates test bundles that satisfy
-      // `DockerInfrastructure` structurally without implementing capture.
-      if (bundle?.endCaptureSession) {
+      // `bundle` is genuinely optional (builtin / per-state-container
+      // workflows); the method is always present when the bundle is.
+      if (bundle) {
         await bundle.endCaptureSession(endedSessionId).catch((err: unknown) => {
           writeStderr(`[workflow] endCaptureSession failed for "${stateId}": ${toErrorMessage(err)}`);
         });

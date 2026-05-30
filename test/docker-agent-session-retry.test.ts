@@ -86,6 +86,8 @@ function buildDeps(
     authKind: 'apikey',
     containerId: 'container-abc123',
     containerName: 'ironcurtain-test',
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   };
 
   return {

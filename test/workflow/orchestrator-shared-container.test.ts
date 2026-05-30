@@ -42,6 +42,8 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     workflowId,
     bundleId,
     setTokenSessionId: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   } as unknown as DockerInfrastructure;
   return bundle;
 }
@@ -574,6 +576,8 @@ describe('WorkflowOrchestrator shared-container mode', () => {
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
+          beginCaptureSession: () => {},
+          endCaptureSession: async () => {},
         } as unknown as DockerInfrastructure;
         return bundle;
       });
@@ -654,6 +658,8 @@ describe('WorkflowOrchestrator shared-container mode', () => {
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
+          beginCaptureSession: () => {},
+          endCaptureSession: async () => {},
         } as unknown as DockerInfrastructure;
       });
       const destroyInfra = vi.fn(async () => {});

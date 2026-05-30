@@ -55,6 +55,8 @@ function makeStubInfrastructure(
     bundleId,
     scope,
     setTokenSessionId: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   } as unknown as DockerInfrastructure & { readonly __scope: string };
 }
 
@@ -404,6 +406,9 @@ describe('WorkflowOrchestrator bifurcated workflow (containerScope)', () => {
       workflowId,
       bundleId: factoryInput?.bundleId ?? ('fake' as BundleId),
       scope: factoryInput?.scope,
+      setTokenSessionId: () => {},
+      beginCaptureSession: () => {},
+      endCaptureSession: async () => {},
     } as unknown as DockerInfrastructure;
     releaseFactory(mintedBundle);
 

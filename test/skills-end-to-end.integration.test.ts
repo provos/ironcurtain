@@ -121,6 +121,8 @@ function makeBundleStub(workflowId: string, bundleId: BundleId, bundleDir: strin
     restageSkills: (skills: readonly ResolvedSkill[]) => {
       stageSkillsToBundle(skills, skillsDir);
     },
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   } as unknown as DockerInfrastructure;
 }
 

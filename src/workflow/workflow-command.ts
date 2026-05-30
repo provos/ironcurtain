@@ -260,9 +260,6 @@ async function runStart(args: string[]): Promise<void> {
   const gateHandler = createGateHandler();
   const sessionFactory = createWorkflowSessionFactory(modelOverride);
   const config = loadConfig();
-  // Capture precedence: CLI flag > userConfig > false. Resolved once
-  // for the workflow run and applied uniformly to every bundle.
-  const captureEnabled = captureTracesFlag ?? config.userConfig.capture?.enabled ?? false;
 
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
@@ -272,7 +269,9 @@ async function runStart(args: string[]): Promise<void> {
     baseDir,
     checkpointStore,
     userConfig: config.userConfig,
-    captureEnabled,
+    // Pass the RAW --capture-traces flag; the infrastructure factory
+    // resolves it against userConfig (single resolution point).
+    captureTracesOverride: captureTracesFlag,
   };
 
   const orchestrator = new WorkflowOrchestrator(deps);

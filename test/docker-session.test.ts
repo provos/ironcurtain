@@ -222,6 +222,8 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     sidecarContainerId: opts.sidecarContainerId,
     internalNetwork: opts.internalNetwork,
     setTokenSessionId: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   };
 }
 

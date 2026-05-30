@@ -406,6 +406,8 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     authKind: 'apikey',
     setTokenSessionId: () => {},
     restageSkills: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
   };
 }
 
