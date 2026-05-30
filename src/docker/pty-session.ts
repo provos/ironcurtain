@@ -29,7 +29,7 @@ import { PTY_SOCK_NAME, DEFAULT_PTY_PORT } from './pty-types.js';
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
-import { getSessionDir, getPtyRegistryDir, SESSION_STATE_FILENAME } from '../config/paths.js';
+import { getSessionDir, getSessionCapturesDir, getPtyRegistryDir, SESSION_STATE_FILENAME } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
@@ -291,7 +291,6 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // Trajectory-capture: pass the RAW override; the infra layer is the
     // single place that resolves it against userConfig. The writer is
     // constructed only when enabled — zero cost when disabled.
-    const { getSessionCapturesDir } = await import('../config/paths.js');
     const infra = await prepareDockerInfrastructure(
       sessionConfig,
       options.mode,

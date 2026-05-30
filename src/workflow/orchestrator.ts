@@ -50,6 +50,7 @@ import {
 } from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig, loadPersonaPolicyArtifacts } from '../config/index.js';
+import { getBundleCapturesDir } from '../config/paths.js';
 import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
 import { getTokenStreamBus } from '../docker/token-stream-bus.js';
@@ -1022,7 +1023,6 @@ export class WorkflowOrchestrator implements WorkflowController {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
     const { filterMcpServersByPolicy } = await import('../persona/resolve.js');
-    const { getBundleCapturesDir } = await import('../config/paths.js');
 
     // The raw `--capture-traces` override is threaded through unresolved;
     // the infrastructure factory is the single place that resolves it

@@ -27,6 +27,7 @@ import {
   SESSION_METADATA_FILENAME,
 } from '../config/paths.js';
 import { validatePolicyDir as sharedValidatePolicyDir } from '../config/validate-policy-dir.js';
+import { getSessionCapturesDir } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { resolvePersona, applyServerAllowlist, filterMcpServersByPolicy } from '../persona/resolve.js';
@@ -287,7 +288,6 @@ async function createDockerSession(
       // single place that resolves it against userConfig. Writer is only
       // constructed when enabled — zero cost when disabled. See
       // docs/designs/mitm-token-trajectory-capture.md §10.
-      const { getSessionCapturesDir } = await import('../config/paths.js');
       infra = await createDockerInfrastructure(
         sessionConfig.config,
         { kind: 'docker', agent: agentId },
