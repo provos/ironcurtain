@@ -65,10 +65,11 @@
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",
+    "check:cycles": "madge --circular --extensions ts --ts-config tsconfig.json src",
     "format": "prettier --log-level=warn --write 'src/**/*.ts' 'test/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",
     "pre-commit": "lint-staged",
-    "setup-hooks": "cp .hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo 'Pre-commit hook installed.'"
+    "setup-hooks": "cp .hooks/pre-commit .git/hooks/pre-commit && cp .hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-commit .git/hooks/pre-push && echo 'Pre-commit and pre-push hooks installed.'"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.49",
@@ -134,6 +135,7 @@
     "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
     "lint-staged": "^16.2.7",
+    "madge": "^8.0.0",
     "prettier": "^3.8.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

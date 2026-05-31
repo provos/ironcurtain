@@ -35,5 +35,6 @@ jobs:
       - run: npm run build --workspace=packages/memory-mcp-server
       - run: npm run format:check
       - run: npm run lint
+      - run: npm run check:cycles
       - run: npm run build
       - run: npm test
