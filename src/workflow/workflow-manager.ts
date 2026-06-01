@@ -102,6 +102,14 @@ export interface WorkflowManagerOptions {
    * directories without mutating `IRONCURTAIN_HOME`.
    */
   readonly baseDirOverride?: string;
+  /**
+   * Raw `--capture-traces` opt-in forwarded from the daemon. Threaded into the
+   * orchestrator's deps as `captureTracesOverride` so daemon/web-UI-launched
+   * workflows honour the flag the same way the CLI `workflow start` path does.
+   * The infrastructure factory resolves it against `userConfig` (single
+   * resolution point); leaving it `undefined` falls back to config.
+   */
+  readonly captureTraces?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,10 +120,12 @@ export class WorkflowManager {
   private orchestrator: WorkflowOrchestrator | null = null;
   private readonly eventBus: TypedEventBus<WebEventMap>;
   private readonly baseDirOverride: string | undefined;
+  private readonly captureTraces: boolean | undefined;
 
   constructor(options: WorkflowManagerOptions) {
     this.eventBus = options.eventBus;
     this.baseDirOverride = options.baseDirOverride;
+    this.captureTraces = options.captureTraces;
   }
 
   /** Lazily creates the orchestrator on first use. */
@@ -332,6 +342,9 @@ export class WorkflowManager {
       baseDir,
       checkpointStore,
       userConfig: config.userConfig,
+      // Forward the raw `--capture-traces` daemon flag; the infrastructure
+      // factory resolves it against userConfig (single resolution point).
+      captureTracesOverride: this.captureTraces,
     };
 
     const orchestrator = new WorkflowOrchestrator(deps);

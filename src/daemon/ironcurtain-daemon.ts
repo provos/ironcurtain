@@ -750,7 +750,12 @@ export class IronCurtainDaemon {
       devMode: this.webUiOptions?.devMode,
       captureTracesDefault: this.captureTracesDefault,
     });
-    server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
+    server.setWorkflowManager(
+      new WorkflowManager({
+        eventBus: server.getEventBus(),
+        captureTraces: this.captureTracesDefault,
+      }),
+    );
 
     const bridge = new TokenStreamBridge(server);
     server.setTokenStreamBridge(bridge);
