@@ -47,12 +47,16 @@ export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): 
       server: { type: 'string' },
       'no-mcp': { type: 'boolean' },
     },
-    strict: false,
+    // Strict so unknown flags are rejected; allowPositionals keeps the
+    // `compile-policy` subcommand token (present in process.argv.slice(2))
+    // from being treated as an unexpected argument.
+    allowPositionals: true,
+    strict: true,
   });
   const constitution = typeof values.constitution === 'string' ? values.constitution : undefined;
   const outputDir = typeof values['output-dir'] === 'string' ? values['output-dir'] : undefined;
   const server = typeof values.server === 'string' ? values.server : undefined;
-  const noMcp = (values['no-mcp'] as boolean | undefined) ?? false;
+  const noMcp = values['no-mcp'] ?? false;
   return {
     constitution: constitution ? resolve(constitution) : undefined,
     outputDir: outputDir ? resolve(outputDir) : undefined,
@@ -66,7 +70,14 @@ export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): 
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
-  const cliArgs = parseCompilePolicyArgs();
+  let cliArgs;
+  try {
+    cliArgs = parseCompilePolicyArgs();
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write('Run `ironcurtain compile-policy --help` for usage.\n');
+    process.exit(1);
+  }
   const config = loadPipelineConfig(cliArgs);
 
   // Load tool annotations early to validate they exist before printing the banner

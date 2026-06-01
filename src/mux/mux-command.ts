@@ -10,12 +10,11 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, constants, mkdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
 import { getPtyRegistryDir } from '../config/paths.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 import { loadConfig } from '../config/index.js';
-import { checkHelp, type CommandSpec } from '../cli-help.js';
+import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
 import {
   resolveSessionMode as defaultResolveSessionMode,
   formatModeLine,
@@ -122,17 +121,19 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
   }
 
   // Parse args
-  const { values } = parseArgs({
-    args: args ?? [],
-    options: {
-      help: { type: 'boolean', short: 'h' },
-      agent: { type: 'string', short: 'a' },
-      model: { type: 'string', short: 'm' },
-      'capture-traces': { type: 'boolean' },
+  const { values } = parseArgsStrict(
+    {
+      args: args ?? [],
+      options: {
+        help: { type: 'boolean', short: 'h' },
+        agent: { type: 'string', short: 'a' },
+        model: { type: 'string', short: 'm' },
+        'capture-traces': { type: 'boolean' },
+      },
+      allowPositionals: true,
     },
-    allowPositionals: true,
-    strict: false,
-  });
+    muxSpec.name,
+  );
 
   if (checkHelp(values as { help?: boolean }, muxSpec)) return;
 

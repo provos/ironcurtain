@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import ora from 'ora';
 import {
@@ -12,7 +11,7 @@ import {
   getPackageGeneratedDir,
 } from './config/index.js';
 import { getUserConfigPath } from './config/paths.js';
-import { checkHelp, type CommandSpec } from './cli-help.js';
+import { checkHelp, parseArgsStrict, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createStandaloneSession } from './session/index.js';
@@ -48,22 +47,24 @@ const startSpec: CommandSpec = {
 };
 
 export async function main(args?: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: args ?? process.argv.slice(2),
-    options: {
-      help: { type: 'boolean', short: 'h' },
-      resume: { type: 'string', short: 'r' },
-      agent: { type: 'string', short: 'a' },
-      workspace: { type: 'string', short: 'w' },
-      persona: { type: 'string', short: 'p' },
-      pty: { type: 'boolean' },
-      model: { type: 'string', short: 'm' },
-      'capture-traces': { type: 'boolean' },
-      'list-agents': { type: 'boolean' },
+  const { values, positionals } = parseArgsStrict(
+    {
+      args: args ?? process.argv.slice(2),
+      options: {
+        help: { type: 'boolean', short: 'h' },
+        resume: { type: 'string', short: 'r' },
+        agent: { type: 'string', short: 'a' },
+        workspace: { type: 'string', short: 'w' },
+        persona: { type: 'string', short: 'p' },
+        pty: { type: 'boolean' },
+        model: { type: 'string', short: 'm' },
+        'capture-traces': { type: 'boolean' },
+        'list-agents': { type: 'boolean' },
+      },
+      allowPositionals: true,
     },
-    allowPositionals: true,
-    strict: false,
-  });
+    startSpec.name,
+  );
 
   if (checkHelp(values as { help?: boolean }, startSpec)) return;
 

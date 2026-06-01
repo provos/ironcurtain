@@ -11,9 +11,8 @@
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
 import chalk from 'chalk';
-import { checkHelp, type CommandSpec } from '../cli-help.js';
+import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
 import { resolveAllLists } from './list-resolver.js';
 import { connectViaProxy, type ProxyConnection } from './proxy-mcp-connections.js';
 import {
@@ -56,17 +55,19 @@ interface RefreshListsOptions {
 }
 
 function parseRefreshArgs(args: string[]): RefreshListsOptions | null {
-  const { values } = parseArgs({
-    args,
-    options: {
-      help: { type: 'boolean', short: 'h' },
-      list: { type: 'string' },
-      'with-mcp': { type: 'boolean' },
-      'no-mcp': { type: 'boolean' },
+  const { values } = parseArgsStrict(
+    {
+      args,
+      options: {
+        help: { type: 'boolean', short: 'h' },
+        list: { type: 'string' },
+        'with-mcp': { type: 'boolean' },
+        'no-mcp': { type: 'boolean' },
+      },
+      allowPositionals: true,
     },
-    allowPositionals: true,
-    strict: false,
-  });
+    refreshListsSpec.name,
+  );
 
   if (checkHelp(values as { help?: boolean }, refreshListsSpec)) return null;
 

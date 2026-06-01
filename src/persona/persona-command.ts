@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
-import { checkHelp, printHelp, type CommandSpec } from '../cli-help.js';
+import { checkHelp, parseArgsStrict, printHelp, type CommandSpec } from '../cli-help.js';
 import { loadConfig } from '../config/index.js';
 import { openEditor, openEditorForMultiline } from '../utils/editor.js';
 import { createPersonaName, type PersonaDefinition, type PersonaName } from './types.js';
@@ -157,15 +157,18 @@ async function compileWithSpinner(name: PersonaName, p: typeof import('@clack/pr
 // ---------------------------------------------------------------------------
 
 async function runCreate(nameStr: string, args: string[]): Promise<void> {
-  const { values: createValues } = parseArgs({
-    args,
-    options: {
-      description: { type: 'string' },
-      servers: { type: 'string' },
-      'no-generate': { type: 'boolean' },
+  const { values: createValues } = parseArgsStrict(
+    {
+      args,
+      options: {
+        description: { type: 'string' },
+        servers: { type: 'string' },
+        'no-generate': { type: 'boolean' },
+      },
+      allowPositionals: true,
     },
-    strict: false,
-  });
+    'ironcurtain persona create',
+  );
 
   const name = createPersonaName(nameStr);
   const personaDir = getPersonaDir(name);

@@ -5,6 +5,8 @@
  * so every subcommand produces consistent, aligned help output.
  */
 
+import { parseArgs } from 'node:util';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -140,4 +142,27 @@ export function checkHelp(values: { help?: boolean }, spec: CommandSpec): boolea
   if (!values.help) return false;
   printHelp(spec);
   return true;
+}
+
+/**
+ * Strict `parseArgs` for leaf subcommands. Forces `strict: true` so an unknown
+ * option (or a missing value for a string option) is rejected rather than
+ * silently swallowed. On a parse error, prints the message plus a usage hint
+ * referencing `commandName` (e.g. `ironcurtain daemon`) and exits 1.
+ *
+ * Routers that forward unrecognized flags to a deeper parser must keep using
+ * `parseArgs({ strict: false })` directly — this helper is for leaves that
+ * actually consume their flags.
+ */
+export function parseArgsStrict(
+  config: Omit<Parameters<typeof parseArgs>[0], 'strict'>,
+  commandName: string,
+): ReturnType<typeof parseArgs> {
+  try {
+    return parseArgs({ ...config, strict: true });
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`Run \`${commandName} --help\` for usage.\n`);
+    process.exit(1);
+  }
 }

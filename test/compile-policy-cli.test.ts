@@ -36,17 +36,17 @@ describe('parseCompilePolicyArgs', () => {
     expect(result.outputDir).toBe('/tmp/output');
   });
 
-  it('ignores flags without values', () => {
-    const result = parseCompilePolicyArgs(['--constitution']);
-    expect(result.constitution).toBeUndefined();
+  it('rejects a known flag given without its value', () => {
+    expect(() => parseCompilePolicyArgs(['--constitution'])).toThrow();
   });
 
-  it('ignores unknown flags', () => {
-    const result = parseCompilePolicyArgs(['--unknown', 'value']);
-    expect(result.constitution).toBeUndefined();
-    expect(result.outputDir).toBeUndefined();
-    expect(result.server).toBeUndefined();
-    expect(result.noMcp).toBe(false);
+  it('rejects unknown flags', () => {
+    expect(() => parseCompilePolicyArgs(['--unknown', 'value'])).toThrow(/unknown/i);
+  });
+
+  it('tolerates the subcommand-name positional (process.argv.slice(2) form)', () => {
+    const result = parseCompilePolicyArgs(['compile-policy', '--no-mcp']);
+    expect(result.noMcp).toBe(true);
   });
 
   it('resolves relative constitution paths to absolute', () => {

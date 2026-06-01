@@ -11,12 +11,11 @@
  * Otherwise, the command operates directly on the filesystem.
  */
 
-import { parseArgs } from 'node:util';
 import { IronCurtainDaemon } from './ironcurtain-daemon.js';
 import { sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import { formatDuration } from '../cron/format-utils.js';
-import { checkHelp, type CommandSpec } from '../cli-help.js';
+import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
 
 const daemonSpec: CommandSpec = {
   name: 'ironcurtain daemon',
@@ -87,22 +86,24 @@ function handleForwardedResponse(response: ControlResponse | null, successMessag
 }
 
 export async function runDaemonCommand(argv: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    options: {
-      agent: { type: 'string', short: 'a' },
-      'no-signal': { type: 'boolean' },
-      'web-ui': { type: 'boolean' },
-      'web-port': { type: 'string' },
-      'web-ui-dev': { type: 'boolean' },
-      'capture-traces': { type: 'boolean' },
-      force: { type: 'boolean', short: 'f' },
-      runs: { type: 'string' },
-      help: { type: 'boolean', short: 'h' },
+  const { values, positionals } = parseArgsStrict(
+    {
+      args: argv,
+      options: {
+        agent: { type: 'string', short: 'a' },
+        'no-signal': { type: 'boolean' },
+        'web-ui': { type: 'boolean' },
+        'web-port': { type: 'string' },
+        'web-ui-dev': { type: 'boolean' },
+        'capture-traces': { type: 'boolean' },
+        force: { type: 'boolean', short: 'f' },
+        runs: { type: 'string' },
+        help: { type: 'boolean', short: 'h' },
+      },
+      allowPositionals: true,
     },
-    allowPositionals: true,
-    strict: false,
-  });
+    daemonSpec.name,
+  );
 
   if (checkHelp(values as { help?: boolean }, daemonSpec)) {
     return;

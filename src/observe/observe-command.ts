@@ -10,12 +10,11 @@
  * line-oriented renderer.
  */
 
-import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import chalk from 'chalk';
 import { WebSocket } from 'ws';
 
-import { checkHelp, type CommandSpec } from '../cli-help.js';
+import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
 import { getWebUiStatePath } from '../config/paths.js';
 import { renderEventBatch, renderConnected, renderSessionEnded, type RenderOptions } from './observe-renderer.js';
 import { wsDataToString } from '../web-ui/ws-utils.js';
@@ -151,19 +150,21 @@ function handlePushEvent(
 // ---------------------------------------------------------------------------
 
 export async function runObserveCommand(argv: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    options: {
-      all: { type: 'boolean' },
-      raw: { type: 'boolean' },
-      debug: { type: 'boolean' },
-      json: { type: 'boolean' },
-      'no-tui': { type: 'boolean' },
-      help: { type: 'boolean', short: 'h' },
+  const { values, positionals } = parseArgsStrict(
+    {
+      args: argv,
+      options: {
+        all: { type: 'boolean' },
+        raw: { type: 'boolean' },
+        debug: { type: 'boolean' },
+        json: { type: 'boolean' },
+        'no-tui': { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+      },
+      allowPositionals: true,
     },
-    allowPositionals: true,
-    strict: false,
-  });
+    observeSpec.name,
+  );
 
   if (checkHelp(values as { help?: boolean }, observeSpec)) return;
 
