@@ -750,7 +750,16 @@ export class IronCurtainDaemon {
       devMode: this.webUiOptions?.devMode,
       captureTracesDefault: this.captureTracesDefault,
     });
-    server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
+    server.setWorkflowManager(
+      new WorkflowManager({
+        eventBus: server.getEventBus(),
+        // Opt-in only, matching the cron-session path above: set the override
+        // solely when the daemon flag is present. Passing `false` here would
+        // override (and disable) a user's `capture.enabled` config, since the
+        // infrastructure factory resolves `override ?? userConfig.capture`.
+        ...(this.captureTracesDefault ? { captureTraces: true } : {}),
+      }),
+    );
 
     const bridge = new TokenStreamBridge(server);
     server.setTokenStreamBridge(bridge);
