@@ -6,7 +6,7 @@ settings:
   mode: docker
   dockerAgent: claude-code
   sharedContainer: true
-  model: anthropic:claude-opus-4-7
+  model: anthropic:claude-opus-4-8
   maxRounds: 12
   maxSessionSeconds: 10800
   unversionedArtifacts:
@@ -162,11 +162,12 @@ states:
 
         **If discover returned `approved` (confirmed):** route to `triage` if the evidence is solid, or back to `discover` for more evidence if it is thin.
 
-        **If discover returned `blocked` (mitigated or exhausted):** the "mitigated" claim is authoritative only when BOTH of:
+        **If discover returned `blocked` (mitigated or exhausted):** the "mitigated" claim is authoritative only when ALL of:
         - The tier matched the hypothesis scope — cross-component hypotheses require Tier 2+.
         - Evidence shows execution, not reasoning: coverage of the mitigation code AND a completed input sweep over the hypothesis's value range (fuzzing for value-dependent claims, bounded enumeration for discrete claims).
+        - The mitigation was exercised, not just present. If non-impact is attributed to an invariant the harness had to disable to reach the site (a concurrency/serialization contract, an upstream guard, a runtime/allocator check, or a first-abort that shadows a later sink), the claim holds only if discover ran the trigger under a configuration where that invariant is present and showed the effect absorbed there. An invariant-only mitigation backed by source reading is the masked-finding pattern — non-terminal.
 
-        If the evidence is text-only ("the code looks safe"), re-route to `discover` to exercise the mitigation, or to `harness_design` at a higher tier if the harness cannot exercise it.
+        If the evidence is text-only ("the code looks safe") or the mitigation rests on an un-exercised invariant, re-route to `discover` to exercise it under an invariant-present config, or to `harness_design` at a higher tier if the harness cannot. If no invariant-present config that still reaches the site can be built, the verdict is `insufficient` (keep the hypothesis open), not a terminal rejection.
 
         **If discover returned `rejected` (couldn't run):**
         - Coverage shows the target function IS reached but the condition doesn't fire → `differential_validate` (values need adjustment for the live context: protocol encoding, byte order, framing).
@@ -330,7 +331,7 @@ states:
 
       Do NOT include:
       - Full C/Python/etc. source code for the harness
-      - Build scripts or compile commands with full flag lists (reference them abstractly: "compile with ASAN+UBSAN")
+      - Build scripts or compile commands with full flag lists (reference them abstractly: "compile with ASAN+UBSAN, integer checks in recover/warn-only mode")
       - Test execution results or tables of "expected outcomes" — you haven't run anything yet
 
       DO include:
@@ -600,7 +601,7 @@ states:
       The orchestrator's directive tells you what to test. Use the harness to:
 
       1. **Design an input sequence** that exercises the hypothesized code path. Use the analysis's function catalog for guidance on types, boundaries, and assumptions.
-      2. **Send it through the harness** and observe results. Read coverage to see which lines and branches were hit. Check for sanitizer output, crashes, and invariant violations.
+      2. **Send it through the harness** and observe results. Read coverage to see which lines and branches were hit. Check for sanitizer output, crashes, and invariant violations. If you run a campaign in the background, wait on the launched PID (`cmd & PID=$!; wait "$PID"`), never a `pgrep -f <name>`/`sleep` poll loop — `pgrep -f` also matches your own prompt-bearing agent process, so the loop never exits.
       3. **Refine or pivot.** If coverage shows you missed the target path, adjust inputs to hit the right branch. If you reached it with no violation, try variations before moving to a new hypothesis.
       4. **Repeat systematically.** Work through the hypotheses in the orchestrator's directive.
 
@@ -612,7 +613,7 @@ states:
 
       - **approved**: An exploitable condition fired — sanitizer error, controlled crash, invariant violation, or direct evidence the hypothesized bug triggered. Document the reproduction input, coverage proof, and severity.
       - **rejected**: The harness is insufficient — can't reach the target, missing protocol feature, broken infrastructure.
-      - **blocked**: Hypothesis did not fire despite a completed search. You may only return `blocked` if (a) coverage shows the target code was executed, AND (b) you swept the input range relevant to the hypothesis — fuzzing for value-dependent claims (sizes, offsets, indices, counters), bounded enumeration for discrete claims (protocol states, flag combinations, auth paths). "I read the code and it looks mitigated" is not `blocked` — it's `rejected` with a request to redesign the harness. If neither fuzzing nor enumeration applies to this hypothesis, name the reason explicitly in your findings doc.
+      - **blocked**: Hypothesis did not fire despite a completed search. You may only return `blocked` if (a) coverage shows the target code was executed, AND (b) you swept the input range relevant to the hypothesis — fuzzing for value-dependent claims (sizes, offsets, indices, counters), bounded enumeration for discrete claims (protocol states, flag combinations, auth paths). "I read the code and it looks mitigated" is not `blocked` — it's `rejected` with a request to redesign the harness. If neither fuzzing nor enumeration applies to this hypothesis, name the reason explicitly in your findings doc. **Invariant-only mitigations are not `blocked`.** If you attribute non-impact to an invariant your harness had to disable to reach the site — a lock/serialization or single-threaded dispatch contract, an upstream guard, a runtime/allocator check, or an earlier sanitizer abort that prevents reaching a downstream sink — you may return `blocked` only if you ALSO ran the trigger under a configuration where that invariant is present and showed the effect absorbed there. Disabling the invariant to reach the site and then citing it as the mitigation is circular; if you cannot build an invariant-present config that still reaches the site, return `blocked` only for the part you exercised and name the un-exercised invariant explicitly.
 
       Write per-hypothesis findings to `.workflow/discoveries/findings.<id>.md` where `<id>` is the orchestrator's hypothesis ID — e.g. `findings.h1.md`, `findings.h2.md`. Do not collapse hypotheses into one file. Append after each experiment (hypothesis, input, harness command, result) before starting the next one — do not batch writes to the end, so a crash or rate-limit preserves the round's work. If a hypothesis's findings file already exists from a prior run, read it first and skip experiments whose results are already recorded; do not re-read other hypotheses' files unless the directive scopes you to them.
     inputs:
