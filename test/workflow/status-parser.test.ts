@@ -266,6 +266,84 @@ describe('parseAgentStatus', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Flush-left misformat tolerance
+//
+// A common model error leaves `agent_status:` empty and emits `verdict`/`notes`
+// as SIBLINGS at the same (flush-left) indentation. YAML then parses the block
+// as { agent_status: null, verdict, notes }. The parser recovers this when a
+// sibling `verdict` is present, but must NOT mask genuinely malformed blocks.
+// ---------------------------------------------------------------------------
+
+describe('parseAgentStatus — flush-left misformat tolerance', () => {
+  // -- Recoverable: verdict present as a sibling of the empty agent_status key --
+
+  it('recovers a flush-left block (verdict + notes as siblings)', () => {
+    const yaml = ['agent_status:', 'verdict: completed', 'notes: "did the thing"', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result).toEqual({
+      completed: true,
+      verdict: 'completed',
+      confidence: 'high',
+      escalation: null,
+      testCount: null,
+      notes: 'did the thing',
+    });
+  });
+
+  it('recovers a flush-left block with only verdict (notes defaulted to null)', () => {
+    const yaml = ['agent_status:', 'verdict: blocked', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result?.verdict).toBe('blocked');
+    expect(result?.notes).toBeNull();
+  });
+
+  it('recovers the real-world flush-left block from the NVMe discover abort', () => {
+    // Faithful (notes-trimmed) reproduction of the block that aborted a
+    // multi-hour run purely because of the missing two-space indentation.
+    const yaml = [
+      'agent_status:',
+      'verdict: completed',
+      'notes: "h7 (nvme_get_log leaf off/len OOB read) BLOCKED -> terminal harness-tested-and-rejected. ~98,900 ASAN/UBSAN runs, zero OOB."',
+      '',
+    ].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result?.verdict).toBe('completed');
+    expect(result?.notes).toContain('harness-tested-and-rejected');
+  });
+
+  // -- Irrecoverable: tolerance must not swallow these --
+
+  it('throws on a flush-left block with no verdict anywhere (only notes sibling)', () => {
+    const yaml = ['agent_status:', 'notes: "no verdict here"', ''].join('\n');
+    expect(() => parseAgentStatus(wrapInFence(yaml))).toThrow(AgentStatusParseError);
+  });
+
+  it('throws when the sibling is a wrong field name instead of verdict', () => {
+    // e.g. `status:` instead of `verdict:` — no recoverable verdict present
+    const yaml = ['agent_status:', 'status: completed', 'notes: "x"', ''].join('\n');
+    expect(() => parseAgentStatus(wrapInFence(yaml))).toThrow(AgentStatusParseError);
+  });
+
+  it('throws on a flush-left block with an empty verdict string', () => {
+    const yaml = ['agent_status:', 'verdict: ""', 'notes: "x"', ''].join('\n');
+    expect(() => parseAgentStatus(wrapInFence(yaml))).toThrow(AgentStatusParseError);
+  });
+
+  it('throws on unparseable YAML inside the block (does not silently recover)', () => {
+    // Unterminated quote → YAML.parse throws → AgentStatusParseError.
+    const yaml = ['agent_status:', 'verdict: "unterminated', ''].join('\n');
+    expect(() => parseAgentStatus(wrapInFence(yaml))).toThrow(AgentStatusParseError);
+  });
+
+  it('still parses a correctly-indented block (no regression)', () => {
+    const yaml = ['agent_status:', '  verdict: completed', '  notes: "indented correctly"', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result?.verdict).toBe('completed');
+    expect(result?.notes).toBe('indented correctly');
+  });
+});
+
 describe('buildStatusBlockReprompt', () => {
   it('returns a non-empty string', () => {
     const prompt = buildStatusBlockReprompt();

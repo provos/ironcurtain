@@ -61,7 +61,7 @@ Use Tier 3 when the bug depends on initialization sequences, global state, runti
 
 The harness must FUZZ, not unit-test. For each swept variable (hypothesis inputs for trigger-driven, dispatch axes for coverage-driven), the design must specify:
 
-- **Sweep range.** The full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere. For coverage-driven dispatch axes, the range is the full set of dispatch values plus their realistic combinations.
+- **Sweep range.** The full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere. When the variable feeds an allocation size through a product or other multi-term arithmetic, also sample values whose wrapped result is *small but positive*: these keep the consumer's loop/index bound large while the undersized allocation succeeds, whereas the value that wraps exactly to zero is usually intercepted by a separate zero-size guard. For coverage-driven dispatch axes, the range is the full set of dispatch values plus their realistic combinations.
 - **Search strategy.** Exhaustive enumeration if the space is < 100M combinations; boundary-dense + random sampling otherwise; coverage-guided fuzzer for large or structured input spaces.
 - **Observables.** At each input value, what does the harness record? Stored value in the target buffer, result of the bounds check at `<file>:<line>`, return value of the target function, sanitizer error, canary state, dispatch arm hit. Be specific by site.
 - **Positive-finding condition.** What pattern in the observables confirms the design's claim? For trigger-driven: be specific — not "a crash happens" but "the bounds check at `<file>:<line>` evaluates true when the input value exceeds the buffer's allocated size." For coverage-driven: "any sanitizer error within the named code region" is acceptable, but the region must be concrete.
@@ -146,6 +146,8 @@ Every design must specify three verification steps that the implementer can exec
 The harness MUST test against UNMODIFIED source code. Stripping a guard, weakening a check, or replacing a sanitizer-armed allocator with a permissive one tells you nothing about the production binary's behavior. If the hypothesized condition doesn't trigger within the swept range, document which code intercepts it and whether that code covers ALL relevant paths.
 
 A Tier-1 harness with hardening stripped tells you nothing about production outcomes. Triage anchors on what the harness demonstrated under production-equivalent conditions.
+
+Default the value-producing integer checks (overflow, shift, truncation) to **recover / warn-only mode**: aborting at the arithmetic site stops execution before any downstream undersized-allocation or out-of-bounds sink, masking the real impact and inviting a false "mitigated" verdict. Recover mode lets execution continue with the wrapped value (production behavior), so one run surfaces both the root-cause diagnostic and the sink.
 
 ## Delegate library realism
 

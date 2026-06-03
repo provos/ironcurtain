@@ -65,11 +65,25 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
     );
   }
 
-  // YAML.parse returns { agent_status: { ... } } — unwrap the outer key
-  const inner =
-    parsed != null && typeof parsed === 'object' && 'agent_status' in parsed
-      ? (parsed as Record<string, unknown>).agent_status
-      : parsed;
+  // YAML.parse returns { agent_status: { ... } } — unwrap the outer key.
+  //
+  // Tolerate the common flush-left misformat where the agent leaves
+  // `agent_status:` empty and emits `verdict`/`notes` as siblings at the same
+  // indentation, so YAML parses the block as { agent_status: null, verdict,
+  // notes }. When the nested value is empty (null/undefined) but a sibling
+  // `verdict` is present, fall back to the parent object — the schema is
+  // non-strict, so the leftover `agent_status: null` key is ignored. Blocks
+  // with no `verdict` anywhere remain malformed (irrecoverable).
+  let inner: unknown = parsed;
+  if (parsed != null && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    // Object.hasOwn (not `in`): agent-supplied YAML is untrusted, so check own
+    // properties only and avoid the prototype chain / prototype-pollution edge cases.
+    if (Object.hasOwn(obj, 'agent_status')) {
+      const nested = obj.agent_status;
+      inner = nested != null && typeof nested === 'object' ? nested : Object.hasOwn(obj, 'verdict') ? obj : nested;
+    }
+  }
 
   const result = agentOutputSchema.safeParse(inner);
   if (!result.success) {
