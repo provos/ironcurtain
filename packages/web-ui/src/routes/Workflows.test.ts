@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import type { PastRunDto, WorkflowDefinitionDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
 
@@ -313,6 +313,110 @@ describe('Workflows route', () => {
       // Expanded: full text, aria-expanded="true".
       expect(toggle.getAttribute('aria-expanded')).toBe('true');
       expect(toggle.textContent).toContain('something to reveal');
+    });
+  });
+
+  // ── Copy instructions to clipboard ────────────────────────────────
+  describe('Copy instructions button', () => {
+    const longTask =
+      'Investigate the flaky integration test and produce a minimal reproduction so the root cause can be triaged.';
+
+    // These tests vi.stubGlobal('navigator', ...); restore the real jsdom
+    // navigator after each one so the stub never leaks into later tests or
+    // other files in the same worker. Restore navigator specifically rather
+    // than vi.unstubAllGlobals(), which would also drop the module-level
+    // ResizeObserver stub that render() depends on.
+    const realNavigator = globalThis.navigator;
+    afterEach(() => {
+      vi.stubGlobal('navigator', realNavigator);
+    });
+
+    function mockClipboard(): { writeText: ReturnType<typeof vi.fn> } {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      return { writeText };
+    }
+
+    it('appears only when the task is expanded and copies the full instructions text', async () => {
+      const { writeText } = mockClipboard();
+      mockListResumable.mockResolvedValue([
+        makePastRun({ workflowId: 'p-copy', phase: 'completed', taskDescription: longTask }),
+      ]);
+      render(Workflows);
+
+      // Copy button is hidden while collapsed.
+      const toggle = (await screen.findByTestId('task-toggle-p-copy')) as HTMLButtonElement;
+      expect(screen.queryByTestId('task-copy-p-copy')).toBeNull();
+
+      // Expand, then the copy button appears.
+      await fireEvent.click(toggle);
+      const copyBtn = (await screen.findByTestId('task-copy-p-copy')) as HTMLButtonElement;
+      expect(copyBtn).toBeTruthy();
+
+      await fireEvent.click(copyBtn);
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith(longTask);
+    });
+
+    it('shows "Copied" feedback after a successful copy', async () => {
+      mockClipboard();
+      mockListResumable.mockResolvedValue([
+        makePastRun({ workflowId: 'p-fb', phase: 'completed', taskDescription: longTask }),
+      ]);
+      render(Workflows);
+
+      await fireEvent.click((await screen.findByTestId('task-toggle-p-fb')) as HTMLButtonElement);
+      const copyBtn = (await screen.findByTestId('task-copy-p-fb')) as HTMLButtonElement;
+      expect(copyBtn.textContent).toContain('Copy');
+      expect(copyBtn.textContent).not.toContain('Copied');
+
+      await fireEvent.click(copyBtn);
+      expect((await screen.findByTestId('task-copy-p-fb')).textContent).toContain('Copied');
+    });
+
+    it('clicking copy does NOT collapse the expanded task (propagation stopped)', async () => {
+      mockClipboard();
+      mockListResumable.mockResolvedValue([
+        makePastRun({ workflowId: 'p-prop', phase: 'completed', taskDescription: longTask }),
+      ]);
+      render(Workflows);
+
+      const toggle = (await screen.findByTestId('task-toggle-p-prop')) as HTMLButtonElement;
+      await fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+      // Clicking copy must not re-trigger the toggle handler.
+      await fireEvent.click((await screen.findByTestId('task-copy-p-prop')) as HTMLButtonElement);
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(toggle.textContent).toContain('triaged');
+    });
+
+    it('clicking copy in the active table does NOT select the workflow (row click suppressed)', async () => {
+      mockClipboard();
+      mockAppState.workflows = new Map([
+        ['wf-row', makeSummary({ workflowId: 'wf-row', phase: 'running', taskDescription: longTask })],
+      ]);
+      render(Workflows);
+
+      await fireEvent.click((await screen.findByTestId('task-toggle-wf-row')) as HTMLButtonElement);
+      await fireEvent.click((await screen.findByTestId('task-copy-wf-row')) as HTMLButtonElement);
+
+      // The row's onclick (selectWorkflow) must not have fired.
+      expect(mockAppState.selectedWorkflowId).toBeNull();
+    });
+
+    it('guards gracefully when navigator.clipboard is unavailable', async () => {
+      vi.stubGlobal('navigator', {});
+      mockListResumable.mockResolvedValue([
+        makePastRun({ workflowId: 'p-noclip', phase: 'completed', taskDescription: longTask }),
+      ]);
+      render(Workflows);
+
+      await fireEvent.click((await screen.findByTestId('task-toggle-p-noclip')) as HTMLButtonElement);
+      const copyBtn = (await screen.findByTestId('task-copy-p-noclip')) as HTMLButtonElement;
+      // No throw, and no "Copied" feedback since the write was a no-op.
+      await fireEvent.click(copyBtn);
+      expect(copyBtn.textContent).not.toContain('Copied');
     });
   });
 });

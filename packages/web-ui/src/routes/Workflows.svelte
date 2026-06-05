@@ -33,6 +33,8 @@
   import { Alert } from '$lib/components/ui/alert/index.js';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
   import WorkflowDetail from './WorkflowDetail.svelte';
+  import Copy from 'phosphor-svelte/lib/Copy';
+  import Check from 'phosphor-svelte/lib/Check';
 
   const CUSTOM_PATH_SENTINEL = '__custom__';
 
@@ -69,6 +71,51 @@
     }
     expandedTasks = next;
   }
+
+  // Per-row "just copied" feedback for the instructions copy button. Keyed by
+  // workflowId; the entry briefly flips to true after a successful copy and
+  // reverts after COPY_FEEDBACK_MS. Timeouts are tracked so they can be cleared
+  // on unmount to avoid leaks / state updates after teardown.
+  const COPY_FEEDBACK_MS = 2000;
+  let copiedTasks = $state<Set<string>>(new Set());
+  const copyTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function setCopied(id: string, value: boolean): void {
+    const next = new Set(copiedTasks);
+    if (value) {
+      next.add(id);
+    } else {
+      next.delete(id);
+    }
+    copiedTasks = next;
+  }
+
+  async function copyInstructions(id: string, text: string): Promise<void> {
+    try {
+      if (!navigator.clipboard?.writeText) return;
+      await navigator.clipboard.writeText(text);
+      setCopied(id, true);
+      const existing = copyTimeouts.get(id);
+      if (existing) clearTimeout(existing);
+      copyTimeouts.set(
+        id,
+        setTimeout(() => {
+          setCopied(id, false);
+          copyTimeouts.delete(id);
+        }, COPY_FEEDBACK_MS),
+      );
+    } catch {
+      // Clipboard write can reject (e.g. permission denied). Fail silently;
+      // the user simply sees no "Copied" confirmation.
+    }
+  }
+
+  $effect(() => {
+    return () => {
+      for (const t of copyTimeouts.values()) clearTimeout(t);
+      copyTimeouts.clear();
+    };
+  });
 
   const isCustomPath = $derived(selectedDefinition === CUSTOM_PATH_SENTINEL);
   const effectivePath = $derived(isCustomPath ? customPath.trim() : selectedDefinition);
@@ -363,6 +410,7 @@
 
     {#snippet taskCell(workflowId: string, taskDescription: string | undefined, maxLen: number)}
       {@const isOpen = expandedTasks.has(workflowId)}
+      {@const isCopied = copiedTasks.has(workflowId)}
       {#if taskDescription}
         <button
           type="button"
@@ -379,6 +427,29 @@
         >
           {isOpen ? taskDescription : truncate(taskDescription, maxLen)}
         </button>
+        {#if isOpen}
+          <Button
+            variant="ghost"
+            size="sm"
+            class="mt-1 h-6 px-1.5 text-xs text-muted-foreground hover:text-foreground"
+            aria-label="Copy instructions to clipboard"
+            title="Copy instructions to clipboard"
+            data-testid={`task-copy-${workflowId}`}
+            onclick={(e: MouseEvent) => {
+              e.stopPropagation();
+              e.preventDefault();
+              copyInstructions(workflowId, taskDescription);
+            }}
+          >
+            {#if isCopied}
+              <Check size={13} weight="bold" class="text-success" />
+              Copied
+            {:else}
+              <Copy size={13} />
+              Copy
+            {/if}
+          </Button>
+        {/if}
       {:else}
         <span class="text-muted-foreground">--</span>
       {/if}
