@@ -601,7 +601,7 @@ states:
       The orchestrator's directive tells you what to test. Use the harness to:
 
       1. **Design an input sequence** that exercises the hypothesized code path. Use the analysis's function catalog for guidance on types, boundaries, and assumptions.
-      2. **Send it through the harness** and observe results. Read coverage to see which lines and branches were hit. Check for sanitizer output, crashes, and invariant violations. If you run a campaign in the background, wait on the launched PID (`cmd & PID=$!; wait "$PID"`), never a `pgrep -f <name>`/`sleep` poll loop — `pgrep -f` also matches your own prompt-bearing agent process, so the loop never exits.
+      2. **Send it through the harness** and observe results. Read coverage to see which lines and branches were hit. Check for sanitizer output, crashes, and invariant violations. If you run ANY work in the background (fuzz campaign, build, etc.), wait on the launched PID (`cmd & PID=$!; wait "$PID"`); never poll with a `pgrep -f <name>`/`sleep` loop (`pgrep -f` matches the waiter's own command line and your prompt-bearing agent process, so the loop never exits) and never poll a hardcoded log/output path you did not capture from that same launch.
       3. **Refine or pivot.** If coverage shows you missed the target path, adjust inputs to hit the right branch. If you reached it with no violation, try variations before moving to a new hypothesis.
       4. **Repeat systematically.** Work through the hypotheses in the orchestrator's directive.
 
