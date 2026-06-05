@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import type { PastRunDto, WorkflowDefinitionDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
 
@@ -320,6 +320,16 @@ describe('Workflows route', () => {
   describe('Copy instructions button', () => {
     const longTask =
       'Investigate the flaky integration test and produce a minimal reproduction so the root cause can be triaged.';
+
+    // These tests vi.stubGlobal('navigator', ...); restore the real jsdom
+    // navigator after each one so the stub never leaks into later tests or
+    // other files in the same worker. Restore navigator specifically rather
+    // than vi.unstubAllGlobals(), which would also drop the module-level
+    // ResizeObserver stub that render() depends on.
+    const realNavigator = globalThis.navigator;
+    afterEach(() => {
+      vi.stubGlobal('navigator', realNavigator);
+    });
 
     function mockClipboard(): { writeText: ReturnType<typeof vi.fn> } {
       const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
