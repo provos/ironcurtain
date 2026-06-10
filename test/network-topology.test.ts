@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   resolveNetworkTopology,
   gatewayForSubnet,
@@ -6,7 +6,8 @@ import {
   makeSourceAddressGuard,
   HOST_ONLY_SUBNET_POOL,
 } from '../src/docker/network-topology.js';
-import { resolveContainerRuntimeKind } from '../src/docker/container-runtime.js';
+import { resolveRuntimeKind, resetRuntimeKindResolutionForTests } from '../src/docker/container-runtime.js';
+import type { DockerAvailability } from '../src/session/preflight.js';
 import type { ContainerRuntime } from '../src/docker/types.js';
 
 function overlapError(subnet: string): Error {
@@ -151,18 +152,55 @@ describe('makeSourceAddressGuard', () => {
   });
 });
 
-describe('resolveContainerRuntimeKind', () => {
-  it('defaults to docker', () => {
-    expect(resolveContainerRuntimeKind({})).toBe('docker');
-    expect(resolveContainerRuntimeKind({ IRONCURTAIN_CONTAINER_RUNTIME: '' })).toBe('docker');
+describe('resolveRuntimeKind', () => {
+  const available = async (): Promise<DockerAvailability> => ({ available: true });
+  const unavailable = async (): Promise<DockerAvailability> => ({
+    available: false,
+    reason: 'container CLI not installed',
+    detailedMessage: 'not installed',
+  });
+  const neverProbe = async (): Promise<DockerAvailability> => {
+    throw new Error('probe must not run for explicit settings');
+  };
+
+  beforeEach(() => {
+    resetRuntimeKindResolutionForTests();
   });
 
-  it('honors apple-container', () => {
-    expect(resolveContainerRuntimeKind({ IRONCURTAIN_CONTAINER_RUNTIME: 'apple-container' })).toBe('apple-container');
-    expect(resolveContainerRuntimeKind({ IRONCURTAIN_CONTAINER_RUNTIME: 'docker' })).toBe('docker');
+  it('honors explicit config without probing', async () => {
+    expect(await resolveRuntimeKind('docker', {}, neverProbe)).toBe('docker');
+    expect(await resolveRuntimeKind('apple-container', {}, neverProbe)).toBe('apple-container');
   });
 
-  it('fails loudly on unknown values', () => {
-    expect(() => resolveContainerRuntimeKind({ IRONCURTAIN_CONTAINER_RUNTIME: 'podman' })).toThrow(/Unknown/);
+  it('lets the env override beat the config field', async () => {
+    expect(await resolveRuntimeKind('docker', { IRONCURTAIN_CONTAINER_RUNTIME: 'apple-container' }, neverProbe)).toBe(
+      'apple-container',
+    );
+    expect(await resolveRuntimeKind('auto', { IRONCURTAIN_CONTAINER_RUNTIME: 'docker' }, neverProbe)).toBe('docker');
+    // Empty env value falls through to the config field.
+    expect(await resolveRuntimeKind('docker', { IRONCURTAIN_CONTAINER_RUNTIME: '' }, neverProbe)).toBe('docker');
+  });
+
+  it('fails loudly on unknown env values', async () => {
+    await expect(resolveRuntimeKind('auto', { IRONCURTAIN_CONTAINER_RUNTIME: 'podman' }, neverProbe)).rejects.toThrow(
+      /Unknown/,
+    );
+  });
+
+  it('auto picks apple-container when the probe passes, docker otherwise', async () => {
+    expect(await resolveRuntimeKind('auto', {}, available)).toBe('apple-container');
+    resetRuntimeKindResolutionForTests();
+    expect(await resolveRuntimeKind('auto', {}, unavailable)).toBe('docker');
+  });
+
+  it('memoizes the auto probe across resolution sites', async () => {
+    let probes = 0;
+    const counting = async (): Promise<DockerAvailability> => {
+      probes++;
+      return { available: true };
+    };
+    expect(await resolveRuntimeKind('auto', {}, counting)).toBe('apple-container');
+    expect(await resolveRuntimeKind('auto', {}, counting)).toBe('apple-container');
+    expect(probes).toBe(1);
   });
 });

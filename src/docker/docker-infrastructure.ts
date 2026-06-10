@@ -370,7 +370,7 @@ export async function prepareDockerInfrastructure(
   const { createMitmProxy } = await import('./mitm-proxy.js');
   const { loadOrCreateCA } = await import('./ca.js');
   const { generateFakeKey } = await import('./fake-keys.js');
-  const { createContainerRuntime, resolveContainerRuntimeKind } = await import('./container-runtime.js');
+  const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
   const { resolveNetworkTopology, createHostOnlyNetwork, makeSourceAddressGuard } =
     await import('./network-topology.js');
   const { getIronCurtainHome } = await import('../config/paths.js');
@@ -388,7 +388,7 @@ export async function prepareDockerInfrastructure(
 
   await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
-  const runtimeKind = resolveContainerRuntimeKind();
+  const runtimeKind = await resolveRuntimeKind(config.userConfig.containerRuntime);
   const topology = resolveNetworkTopology(runtimeKind);
   const useTcp = topology !== 'uds';
 
@@ -1166,25 +1166,8 @@ export async function createSessionContainers(
 
     // tcp-hostonly: write the apt proxy config inside the container (the
     // Docker topologies bind-mount it; see hostOnlyAptProxyUrl above).
-    // The URL is built from our own gateway address and OS-assigned port
-    // — runtime-generated values, not untrusted input — so embedding it
-    // in the sh script is safe.
     if (hostOnlyAptProxyUrl !== undefined) {
-      const aptWrite = await core.docker.exec(
-        mainContainerId,
-        [
-          'sh',
-          '-c',
-          `printf 'Acquire::http::Proxy "%s";\\nAcquire::https::Proxy "%s";\\n' '${hostOnlyAptProxyUrl}' '${hostOnlyAptProxyUrl}' > /etc/apt/apt.conf.d/90-ironcurtain-proxy`,
-        ],
-        10_000,
-        'root',
-      );
-      if (aptWrite.exitCode !== 0) {
-        throw new Error(
-          `Failed to write apt proxy config in container (exit=${aptWrite.exitCode}): ${aptWrite.stderr}`,
-        );
-      }
+      await writeHostOnlyAptProxyConfig(core.docker, mainContainerId, hostOnlyAptProxyUrl);
     }
 
     // Connectivity check: verify the container can reach host proxies
@@ -1243,6 +1226,35 @@ async function checkInternalNetworkConnectivity(
 }
 
 /**
+ * Writes /etc/apt/apt.conf.d/90-ironcurtain-proxy inside a running
+ * container via exec (as root). Used by the tcp-hostonly topology in
+ * both batch and PTY modes — Apple container's virtiofs shares
+ * directories only, so the single-file bind mount the Docker topologies
+ * use is rejected. The URL is built from our own gateway address and
+ * OS-assigned port — runtime-generated values, not untrusted input — so
+ * embedding it in the sh script is safe.
+ */
+export async function writeHostOnlyAptProxyConfig(
+  docker: ContainerRuntime,
+  containerId: string,
+  proxyUrl: string,
+): Promise<void> {
+  const aptWrite = await docker.exec(
+    containerId,
+    [
+      'sh',
+      '-c',
+      `printf 'Acquire::http::Proxy "%s";\\nAcquire::https::Proxy "%s";\\n' '${proxyUrl}' '${proxyUrl}' > /etc/apt/apt.conf.d/90-ironcurtain-proxy`,
+    ],
+    10_000,
+    'root',
+  );
+  if (aptWrite.exitCode !== 0) {
+    throw new Error(`Failed to write apt proxy config in container (exit=${aptWrite.exitCode}): ${aptWrite.stderr}`);
+  }
+}
+
+/**
  * External address used to probe that internet egress is blocked. Any
  * globally-routable address works; the check asserts the connection
  * FAILS, so the probe never carries data off the machine on a healthy
@@ -1256,9 +1268,10 @@ const EGRESS_PROBE_ADDRESS = '1.1.1.1:443';
  * from inside the container that (a) the host-side proxies are reachable
  * at the vmnet gateway and (b) internet egress is blocked by the
  * host-only network. Either failure aborts session initialization —
- * never a silent fallback to a weaker network configuration.
+ * never a silent fallback to a weaker network configuration. Shared by
+ * batch (`createSessionContainers`) and PTY (`runPtySession`) modes.
  */
-async function checkHostOnlyConnectivity(
+export async function checkHostOnlyConnectivity(
   docker: ContainerRuntime,
   containerId: string,
   gateway: string,
@@ -1385,13 +1398,13 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
 export async function ensureDockerImage(agentId: AgentId, userConfig: ResolvedUserConfig): Promise<void> {
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { loadOrCreateCA } = await import('./ca.js');
-  const { createContainerRuntime, resolveContainerRuntimeKind } = await import('./container-runtime.js');
+  const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
   const { getIronCurtainHome } = await import('../config/paths.js');
 
   await registerBuiltinAdapters(userConfig);
   const adapter = getAgent(agentId);
   const image = await adapter.getImage();
-  const docker = createContainerRuntime(resolveContainerRuntimeKind());
+  const docker = createContainerRuntime(await resolveRuntimeKind(userConfig.containerRuntime));
   const ca = loadOrCreateCA(resolve(getIronCurtainHome(), 'ca'));
   await ensureImage(image, docker, ca);
 }

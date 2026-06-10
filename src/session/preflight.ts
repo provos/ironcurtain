@@ -378,7 +378,7 @@ async function resolveDockerAgent(
  */
 export async function resolveSessionMode(options: PreflightOptions): Promise<PreflightResult> {
   const { config, requestedAgent, credentialSources } = options;
-  const isDockerAvailable = options.isDockerAvailable ?? (await resolveDefaultAvailabilityProbe());
+  const isDockerAvailable = options.isDockerAvailable ?? (await resolveDefaultAvailabilityProbe(config));
 
   if (requestedAgent !== undefined) {
     return resolveExplicit(requestedAgent, config, isDockerAvailable, credentialSources);
@@ -389,14 +389,14 @@ export async function resolveSessionMode(options: PreflightOptions): Promise<Pre
 
 /**
  * Picks the container-runtime availability probe matching the selected
- * backend: `IRONCURTAIN_CONTAINER_RUNTIME=apple-container` sessions must
- * probe the Apple `container` services, not Docker (the machine may not
- * have Docker at all). Lazily imported to avoid a module cycle —
- * docker-manager.ts imports `checkDockerAvailable` from this file.
+ * backend: apple-container sessions must probe the Apple `container`
+ * services, not Docker (the machine may not have Docker at all).
+ * Lazily imported to avoid a module cycle — docker-manager.ts imports
+ * `checkDockerAvailable` from this file.
  */
-async function resolveDefaultAvailabilityProbe(): Promise<() => Promise<DockerAvailability>> {
-  const { resolveContainerRuntimeKind } = await import('../docker/container-runtime.js');
-  if (resolveContainerRuntimeKind() === 'apple-container') {
+async function resolveDefaultAvailabilityProbe(config: IronCurtainConfig): Promise<() => Promise<DockerAvailability>> {
+  const { resolveRuntimeKind } = await import('../docker/container-runtime.js');
+  if ((await resolveRuntimeKind(config.userConfig.containerRuntime)) === 'apple-container') {
     const { checkAppleContainerAvailable } = await import('../docker/apple-container-manager.js');
     return () => checkAppleContainerAvailable();
   }
