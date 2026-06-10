@@ -20,7 +20,7 @@ From the apple/container [command reference](https://github.com/apple/container/
 | resource limits                                    | `--memory`, `--cpus`                      | `--memory`, `--cpus` (VM-level)                                                                   |
 | capability drop                                    | `--cap-drop=ALL` + re-adds                | `--cap-add` / `--cap-drop` (less load-bearing -- the VM is the boundary)                          |
 | entrypoint / env / TTY                             | yes                                       | `--entrypoint`, `-e`, `-t`                                                                        |
-| init process                                       | `--init` (tini)                           | not needed -- `vminitd` is the VM's init                                                          |
+| init process                                       | `--init` (tini)                           | `--init` (in-VM reaper init; `vminitd` is the VM's PID 1)                                         |
 | network create / delete                            | `docker network ...`                      | `container network create/delete` with `--subnet`, `--internal` ("restrict to host-only network") |
 | UDS bind mounts                                    | Linux only (VirtioFS limitation on macOS) | not supported (virtiofs) -- TCP transport stays                                                   |
 | `--network=none`                                   | yes (Linux path)                          | not available -- host-only `--internal` network instead                                           |
@@ -74,9 +74,14 @@ Platform floor: Apple silicon, macOS 26 (the `container network` commands do not
 
 ## Implementation Plan
 
-- **Phase 0 -- spike (manual, half a day).** On a macOS 26 machine verify the four assumptions docs alone cannot: `--internal` containers have zero egress; the host can bind and serve on the gateway IP; host→container TCP works (PTY); `container build` accepts the existing Dockerfile unmodified.
-- **Phase 1 -- seam extraction (pure refactor, this PR).** Rename `DockerManager` → `ContainerRuntime`, add `ContainerRuntimeKind` + `createContainerRuntime()` factory with `docker` as the only implemented kind. No behavior change.
-- **Phase 2 -- `AppleContainerManager`.** Implement `ContainerRuntime` over the `container` CLI with preflight checks; unit tests mirror `test/docker-manager.test.ts` with a mocked `execFile`.
+- **Phase 0 -- spike. DONE** (verified live against `container` 1.0.0 on macOS 26.5, 2026-06-10):
+  - `container network create --internal` works without sudo, reports `mode: "hostOnly"`, and `network inspect` exposes `status.ipv4Gateway` directly -- no `.1` assumption needed.
+  - Egress from an `--internal` container is fully blocked (TCP to 1.1.1.1:443 fails); a host listener bound to the gateway IP **is** reachable from the container. The `tcp-hostonly` topology is confirmed viable.
+  - `--init` and `--cap-drop ALL` exist and work; inspect confirms `useInit: true` and `capDrop: ["ALL"]`.
+  - `container build` syntax works, but the BuildKit builder VM requires **Rosetta**; on hosts without it the build fails with `VZErrorDomain ... Rosetta is not installed`. `buildImage()` surfaces the `softwareupdate --install-rosetta` remediation.
+  - `--publish-socket host_path:container_path` exists (container-to-host UDS publishing) -- a candidate transport for the PTY listener in phase 4.
+- **Phase 1 -- seam extraction (pure refactor). DONE.** Rename `DockerManager` → `ContainerRuntime`, add `ContainerRuntimeKind` + `createContainerRuntime()` factory with `docker` as the only implemented kind. No behavior change.
+- **Phase 2 -- `AppleContainerManager`. DONE.** `src/docker/apple-container-manager.ts` implements `ContainerRuntime` over the `container` CLI with `checkAppleContainerAvailable()` preflight (Apple silicon + Darwin ≥ 25 + CLI ≥ 1.0 + apiserver running); unit tests in `test/apple-container-manager.test.ts` mirror `test/docker-manager.test.ts` with a mocked `execFile`. Unsupported Docker mechanisms (`extraHosts`, `restartPolicy`, `network: 'none'`, `connectNetwork`, explicit network gateways) throw instead of degrading silently. Validated end-to-end against the real CLI: create/start/exec/stop/delete, label reads, IP lookup, digest-based staleness IDs (image and container digests normalize to the same value), idempotent network create, stale-container removal.
 - **Phase 3 -- `tcp-hostonly` topology.** Extract the topology strategy from `docker-infrastructure.ts` / `pty-session.ts`; implement gateway-IP binding, subnet pool, and the extended fail-closed connectivity check.
 - **Phase 4 -- PTY path + config.** Direct host→container PTY connection; `containerRuntime` config field, config editor + first-start integration, `auto` detection.
 - **Phase 5 -- docs + tests.** Update `SANDBOXING.md` Layer 1 and `SECURITY_CONCERNS.md`; integration tests gated on `container` binary presence (graceful skip, matching the Docker tests' pattern).
@@ -86,5 +91,6 @@ Platform floor: Apple silicon, macOS 26 (the `container network` commands do not
 - **macOS 26 + Apple silicon floor.** Hard requirement; `auto` handles fallback. macOS 15 is explicitly unsupported for this backend.
 - **vmnet subnet collisions** with the user's LAN. Mitigated by the configurable pool + collision detection; same class of problem Docker's address pools already have.
 - **Pre-1.0 API drift is no longer a concern** (1.0.0 shipped 2026-06-09 with stability guarantees), but the preflight pins a minimum version.
-- **No `network connect` equivalent confirmed.** Irrelevant to this design (no sidecar), but it rules out porting the sidecar pattern as-is if `tcp-hostonly` hits a wall in the spike.
-- **Resource-limit probing** (`resource-limits.ts`) assumes `docker run --rm`; the equivalent `container run --rm` probe needs verifying in phase 2.
+- **No `network connect` equivalent.** Confirmed absent in 1.0.0 (`connectNetwork` throws). Irrelevant to this design (no sidecar), but it rules out porting the sidecar pattern as-is if `tcp-hostonly` hits a wall.
+- **Rosetta required for `container build`.** The BuildKit builder VM needs Rosetta installed; preflight messaging covers it, and `ironcurtain doctor` should eventually check for it.
+- **Resource-limit probing** (`resource-limits.ts`) assumes `docker run --rm`; the equivalent `container run --rm` probe is phase 3 work alongside the topology extraction.

@@ -12,6 +12,7 @@
 
 import type { ContainerRuntime } from './types.js';
 import { createDockerManager } from './docker-manager.js';
+import { createAppleContainerManager } from './apple-container-manager.js';
 
 export const CONTAINER_RUNTIME_KINDS = ['docker', 'apple-container'] as const;
 export type ContainerRuntimeKind = (typeof CONTAINER_RUNTIME_KINDS)[number];
@@ -21,8 +22,6 @@ export function createContainerRuntime(kind: ContainerRuntimeKind = 'docker'): C
     case 'docker':
       return createDockerManager();
     case 'apple-container':
-      throw new Error(
-        'The apple-container runtime is not implemented yet (see docs/designs/apple-container-runtime.md)',
-      );
+      return createAppleContainerManager();
   }
 }
