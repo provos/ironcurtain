@@ -987,6 +987,12 @@ export async function createSessionContainers(
     };
     let network: string | null;
     let extraHosts: string[] | undefined;
+    // tcp-hostonly only: apt proxy config to write into the container via
+    // exec after start. Apple container's virtiofs shares directories
+    // only — the single-file bind mount the Docker topologies use for
+    // /etc/apt/apt.conf.d/90-ironcurtain-proxy is rejected with
+    // "path ... is not a directory".
+    let hostOnlyAptProxyUrl: string | undefined;
 
     if (core.topology === 'tcp-hostonly') {
       // Apple container host-only mode: the agent VM reaches the host
@@ -1003,11 +1009,7 @@ export async function createSessionContainers(
         HTTPS_PROXY: proxyUrl,
         HTTP_PROXY: proxyUrl,
       };
-
-      // Write apt proxy config so sudo apt-get routes through the MITM proxy
-      const aptProxyPath = resolve(core.orientationDir, 'apt-proxy.conf');
-      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
-      mounts.push({ source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
+      hostOnlyAptProxyUrl = proxyUrl;
 
       network = core.hostOnlyNetwork.name;
       // Report the host-only network as `internalNetwork` so the standard
@@ -1161,6 +1163,29 @@ export async function createSessionContainers(
 
     await core.docker.start(mainContainerId);
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
+
+    // tcp-hostonly: write the apt proxy config inside the container (the
+    // Docker topologies bind-mount it; see hostOnlyAptProxyUrl above).
+    // The URL is built from our own gateway address and OS-assigned port
+    // — runtime-generated values, not untrusted input — so embedding it
+    // in the sh script is safe.
+    if (hostOnlyAptProxyUrl !== undefined) {
+      const aptWrite = await core.docker.exec(
+        mainContainerId,
+        [
+          'sh',
+          '-c',
+          `printf 'Acquire::http::Proxy "%s";\\nAcquire::https::Proxy "%s";\\n' '${hostOnlyAptProxyUrl}' '${hostOnlyAptProxyUrl}' > /etc/apt/apt.conf.d/90-ironcurtain-proxy`,
+        ],
+        10_000,
+        'root',
+      );
+      if (aptWrite.exitCode !== 0) {
+        throw new Error(
+          `Failed to write apt proxy config in container (exit=${aptWrite.exitCode}): ${aptWrite.stderr}`,
+        );
+      }
+    }
 
     // Connectivity check: verify the container can reach host proxies
     // through the internal network. Abort if unreachable. Host-only

@@ -603,6 +603,9 @@ describe('createSessionContainers', () => {
     // Proxy env points at the vmnet gateway, not host.docker.internal.
     expect(main.env.HTTPS_PROXY).toBe(`http://${HOST_ONLY.gateway}:8443`);
     expect(main.env.HTTP_PROXY).toBe(`http://${HOST_ONLY.gateway}:8443`);
+    // No single-file bind mounts: apple container virtiofs shares
+    // directories only, so the apt proxy config is written via exec.
+    expect(main.mounts.every((m) => !m.target.startsWith('/etc/apt/'))).toBe(true);
 
     expect(result.sidecarContainerId).toBeUndefined();
     // The prepare-phase network is reported as internalNetwork so the
@@ -612,7 +615,7 @@ describe('createSessionContainers', () => {
     expect(createdNetworks).toHaveLength(0);
   });
 
-  it('hostonly: probes the gateway for proxy reachability and 1.1.1.1 for egress', async () => {
+  it('hostonly: writes the apt proxy config via exec, then probes gateway reachability and egress', async () => {
     const execTargets: string[] = [];
     const { docker } = makeMockDocker({
       exec: async (container, cmd) => {
@@ -624,14 +627,21 @@ describe('createSessionContainers', () => {
 
     await createSessionContainers(core, makeMockConfig());
 
+    const aptWrite = execTargets.find((t) => t.includes('/etc/apt/apt.conf.d/90-ironcurtain-proxy'));
+    expect(aptWrite).toBeDefined();
+    expect(aptWrite).toContain(`http://${HOST_ONLY.gateway}:8443`);
     expect(execTargets.some((t) => t.includes(`TCP:${HOST_ONLY.gateway}:9123`))).toBe(true);
     expect(execTargets.some((t) => t.includes('TCP:1.1.1.1:443'))).toBe(true);
   });
 
   it('hostonly: aborts and cleans up when the gateway proxies are unreachable', async () => {
     const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker({
-      async exec() {
-        return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
+      async exec(_container, cmd) {
+        // Fail the socat connectivity probes; let the apt config write pass.
+        if (cmd.some((c) => c.startsWith('TCP:'))) {
+          return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
       },
     });
     const core = makeMockCore({ tempDir, useTcp: true, topology: 'tcp-hostonly', hostOnlyNetwork: HOST_ONLY, docker });

@@ -23,6 +23,7 @@ From the apple/container [command reference](https://github.com/apple/container/
 | init process                                       | `--init` (tini)                           | `--init` (in-VM reaper init; `vminitd` is the VM's PID 1)                                         |
 | network create / delete                            | `docker network ...`                      | `container network create/delete` with `--subnet`, `--internal` ("restrict to host-only network") |
 | UDS bind mounts                                    | Linux only (VirtioFS limitation on macOS) | not supported (virtiofs) -- TCP transport stays                                                   |
+| single-file bind mounts                            | yes                                       | not supported -- virtiofs shares directories only; apt proxy config is written via exec instead   |
 | `--network=none`                                   | yes (Linux path)                          | not available -- host-only `--internal` network instead                                           |
 | `--add-host`                                       | yes                                       | not available -- not needed (deterministic gateway IP, below)                                     |
 
