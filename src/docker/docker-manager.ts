@@ -438,6 +438,22 @@ export function createDockerManager(
       await exec('docker', ['network', 'connect', networkName, containerId], { timeout: 10_000 });
     },
 
+    async getNetworkGateway(name: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec(
+          'docker',
+          ['network', 'inspect', '-f', '{{(index .IPAM.Config 0).Gateway}}', name],
+          {
+            timeout: 10_000,
+          },
+        );
+        const value = stdout.trim();
+        return value && value !== '<no value>' ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
     async getContainerIp(containerId: string, network: string): Promise<string> {
       // Docker may not assign the IP immediately after `network connect`.
       // Retry a few times with a short delay.

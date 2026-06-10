@@ -505,6 +505,16 @@ export function createAppleContainerManager(
       }
     },
 
+    async getNetworkGateway(name: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec('container', ['network', 'inspect', name], { timeout: 10_000 });
+        const entry = firstInspectEntry(stdout) as { status?: { ipv4Gateway?: string } } | undefined;
+        return entry?.status?.ipv4Gateway;
+      } catch {
+        return undefined;
+      }
+    },
+
     connectNetwork(): Promise<void> {
       // Only the Docker tcp-sidecar topology attaches a running container
       // to a second network; the host-only topology never needs it.

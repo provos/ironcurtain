@@ -40,6 +40,8 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import type { CertificateAuthority } from './ca.js';
 import type { ContainerRuntime } from './types.js';
+import type { ContainerRuntimeKind } from './container-runtime.js';
+import type { HostOnlyNetwork, NetworkTopology } from './network-topology.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
 import { parseUpstreamBaseUrl, type AgentKind, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import { getInternalNetworkName } from './platform.js';
@@ -164,7 +166,23 @@ export interface PreContainerInfrastructure {
   readonly orientationDir: string;
   readonly systemPrompt: string;
   readonly image: string;
+  /** Container runtime backend this bundle was built for. */
+  readonly runtimeKind: ContainerRuntimeKind;
+  /**
+   * Proxy-transport topology (see network-topology.ts). `useTcp` is the
+   * legacy projection `topology !== 'uds'`, kept for existing consumers.
+   */
+  readonly topology: NetworkTopology;
   readonly useTcp: boolean;
+  /**
+   * Per-bundle host-only network, present only on `tcp-hostonly`
+   * bundles. Created during the prepare phase (the gateway address is
+   * needed for orientation and container env before any container
+   * exists); `createSessionContainers` attaches the agent container to
+   * it and reports it as `internalNetwork` so the standard teardown
+   * paths remove it.
+   */
+  readonly hostOnlyNetwork?: HostOnlyNetwork;
   readonly socketsDir: string;
   /** MITM proxy listen address (port for TCP mode, socketPath for UDS mode). */
   readonly mitmAddr: { socketPath?: string; port?: number };
@@ -352,8 +370,9 @@ export async function prepareDockerInfrastructure(
   const { createMitmProxy } = await import('./mitm-proxy.js');
   const { loadOrCreateCA } = await import('./ca.js');
   const { generateFakeKey } = await import('./fake-keys.js');
-  const { createContainerRuntime } = await import('./container-runtime.js');
-  const { useTcpTransport } = await import('./platform.js');
+  const { createContainerRuntime, resolveContainerRuntimeKind } = await import('./container-runtime.js');
+  const { resolveNetworkTopology, createHostOnlyNetwork, makeSourceAddressGuard } =
+    await import('./network-topology.js');
   const { getIronCurtainHome } = await import('../config/paths.js');
   const { prepareSession } = await import('./orientation.js');
 
@@ -369,7 +388,9 @@ export async function prepareDockerInfrastructure(
 
   await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
-  const useTcp = useTcpTransport();
+  const runtimeKind = resolveContainerRuntimeKind();
+  const topology = resolveNetworkTopology(runtimeKind);
+  const useTcp = topology !== 'uds';
 
   // Detect authentication method. Adapters with detectCredential() handle
   // their own credential detection (e.g., Goose checks provider-specific keys).
@@ -411,10 +432,30 @@ export async function prepareDockerInfrastructure(
 
   const socketPath = getBundleProxySocketPath(bundleId);
 
+  const docker = createContainerRuntime(runtimeKind);
+
+  // tcp-hostonly: create the per-bundle host-only network BEFORE the
+  // proxies are constructed. The gateway address feeds the container env,
+  // the orientation proxy address, and the connection-source guard both
+  // proxies use while listening on 0.0.0.0 (the vmnet gateway interface
+  // only materializes once the first container attaches, so binding the
+  // gateway address directly is not possible at this point).
+  let hostOnlyNetwork: HostOnlyNetwork | undefined;
+  let allowRemoteAddress: ((remoteAddress: string | undefined) => boolean) | undefined;
+  if (topology === 'tcp-hostonly') {
+    hostOnlyNetwork = await createHostOnlyNetwork(docker, getInternalNetworkName(getBundleShortId(bundleId)));
+    allowRemoteAddress = makeSourceAddressGuard(hostOnlyNetwork.subnet);
+    logger.info(
+      `Host-only network ${hostOnlyNetwork.name} (${hostOnlyNetwork.subnet}, gateway ${hostOnlyNetwork.gateway})`,
+    );
+  }
+
   const proxy = createCodeModeProxy({
     socketPath,
     config,
     listenMode: useTcp ? 'tcp' : 'uds',
+    bindHost: topology === 'tcp-hostonly' ? '0.0.0.0' : undefined,
+    allowRemoteAddress,
   });
 
   // Load or generate the IronCurtain CA for TLS termination
@@ -524,6 +565,7 @@ export async function prepareDockerInfrastructure(
         controlPort: 0,
         initialTokenSessionId: routingId,
         agentKind,
+        allowRemoteAddress,
         ...captureProxyOptions,
       })
     : createMitmProxy({
@@ -538,14 +580,16 @@ export async function prepareDockerInfrastructure(
         ...captureProxyOptions,
       });
 
-  const docker = createContainerRuntime('docker');
-
   // Start MITM proxy FIRST so config.mitmControlAddr is set before proxy.start().
   // proxy.start() initializes the UTCP sandbox, which checks config.mitmControlAddr
   // to decide whether to register the proxy virtual MCP server for domain management.
   const mitmAddr = await mitmProxy.start();
   if (mitmAddr.port !== undefined) {
-    logger.info(`MITM proxy listening on 127.0.0.1:${mitmAddr.port}`);
+    logger.info(
+      hostOnlyNetwork
+        ? `MITM proxy listening on ${hostOnlyNetwork.gateway}:${mitmAddr.port} (0.0.0.0, subnet-guarded)`
+        : `MITM proxy listening on 127.0.0.1:${mitmAddr.port}`,
+    );
   } else {
     logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
   }
@@ -566,7 +610,11 @@ export async function prepareDockerInfrastructure(
   // registers the proxy virtual server for network domain management.
   await proxy.start();
   if (useTcp && proxy.port !== undefined) {
-    logger.info(`Code Mode proxy listening on 127.0.0.1:${proxy.port}`);
+    logger.info(
+      hostOnlyNetwork
+        ? `Code Mode proxy listening on ${hostOnlyNetwork.gateway}:${proxy.port} (0.0.0.0, subnet-guarded)`
+        : `Code Mode proxy listening on 127.0.0.1:${proxy.port}`,
+    );
   } else {
     logger.info(`Code Mode proxy listening on ${proxy.socketPath}`);
   }
@@ -590,7 +638,10 @@ export async function prepareDockerInfrastructure(
     }
     logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
 
-    const proxyAddress = useTcp && proxy.port !== undefined ? `${DOCKER_HOST_GATEWAY}:${proxy.port}` : undefined;
+    // The address the agent uses to reach the Code Mode proxy: the vmnet
+    // gateway on host-only networks, the Docker host alias otherwise.
+    const proxyHost = hostOnlyNetwork ? hostOnlyNetwork.gateway : DOCKER_HOST_GATEWAY;
+    const proxyAddress = useTcp && proxy.port !== undefined ? `${proxyHost}:${proxy.port}` : undefined;
     const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, workspaceDir, proxyAddress);
 
     // Ensure Docker image is built and up-to-date
@@ -646,7 +697,10 @@ export async function prepareDockerInfrastructure(
       orientationDir,
       systemPrompt,
       image,
+      runtimeKind,
+      topology,
       useTcp,
+      hostOnlyNetwork,
       socketsDir,
       mitmAddr,
       authKind,
@@ -687,6 +741,12 @@ export async function prepareDockerInfrastructure(
     // Best-effort cleanup of proxies started above
     await mitmProxy.stop().catch(() => {});
     await proxy.stop().catch(() => {});
+    // Host-only network was created before the proxies; remove it too.
+    // (A leak through the narrow window before this catch is self-healing:
+    // createHostOnlyNetwork removes the stale same-named network first.)
+    if (hostOnlyNetwork) {
+      await docker.removeNetwork(hostOnlyNetwork.name).catch(() => {});
+    }
     throw error;
   }
 }
@@ -928,7 +988,33 @@ export async function createSessionContainers(
     let network: string | null;
     let extraHosts: string[] | undefined;
 
-    if (core.useTcp && core.mitmAddr.port !== undefined && core.proxy.port !== undefined) {
+    if (core.topology === 'tcp-hostonly') {
+      // Apple container host-only mode: the agent VM reaches the host
+      // proxies directly at the vmnet gateway address. No sidecar, no
+      // extra host mappings — egress is blocked at the network layer
+      // (`--internal`) and verified by the connectivity check below.
+      if (core.hostOnlyNetwork === undefined || core.mitmAddr.port === undefined || core.proxy.port === undefined) {
+        throw new Error('tcp-hostonly bundle is missing its host-only network or proxy ports');
+      }
+      const proxyUrl = `http://${core.hostOnlyNetwork.gateway}:${core.mitmAddr.port}`;
+
+      env = {
+        ...env,
+        HTTPS_PROXY: proxyUrl,
+        HTTP_PROXY: proxyUrl,
+      };
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPath = resolve(core.orientationDir, 'apt-proxy.conf');
+      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
+      mounts.push({ source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
+
+      network = core.hostOnlyNetwork.name;
+      // Report the host-only network as `internalNetwork` so the standard
+      // teardown paths (destroyDockerInfrastructure, rollback below)
+      // remove it with the containers.
+      internalNetwork = core.hostOnlyNetwork.name;
+    } else if (core.topology === 'tcp-sidecar' && core.mitmAddr.port !== undefined && core.proxy.port !== undefined) {
       // macOS TCP mode: internal bridge network blocks egress.
       // A socat sidecar bridges the internal network to the host
       // because Docker Desktop VMs don't forward gateway traffic.
@@ -1077,8 +1163,12 @@ export async function createSessionContainers(
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
 
     // Connectivity check: verify the container can reach host proxies
-    // through the internal network. Abort if unreachable.
-    if (core.useTcp && internalNetwork !== undefined && core.proxy.port !== undefined) {
+    // through the internal network. Abort if unreachable. Host-only
+    // bundles additionally assert the inverse — internet egress must be
+    // blocked — and never fall back to a weaker configuration.
+    if (core.topology === 'tcp-hostonly' && core.hostOnlyNetwork !== undefined && core.proxy.port !== undefined) {
+      await checkHostOnlyConnectivity(core.docker, mainContainerId, core.hostOnlyNetwork.gateway, core.proxy.port);
+    } else if (core.useTcp && internalNetwork !== undefined && core.proxy.port !== undefined) {
       await checkInternalNetworkConnectivity(core.docker, mainContainerId, core.proxy.port);
     }
 
@@ -1123,6 +1213,54 @@ async function checkInternalNetworkConnectivity(
       `Internal network connectivity check failed (exit=${result.exitCode}). ` +
         `The container cannot reach host-side proxies via the socat sidecar on the --internal Docker network. ` +
         `Check that the sidecar container is running and connected to the internal network.`,
+    );
+  }
+}
+
+/**
+ * External address used to probe that internet egress is blocked. Any
+ * globally-routable address works; the check asserts the connection
+ * FAILS, so the probe never carries data off the machine on a healthy
+ * setup.
+ */
+const EGRESS_PROBE_ADDRESS = '1.1.1.1:443';
+
+/**
+ * Fail-closed startup gate for the tcp-hostonly topology
+ * (docs/designs/apple-container-runtime.md, design decision 4). Asserts
+ * from inside the container that (a) the host-side proxies are reachable
+ * at the vmnet gateway and (b) internet egress is blocked by the
+ * host-only network. Either failure aborts session initialization —
+ * never a silent fallback to a weaker network configuration.
+ */
+async function checkHostOnlyConnectivity(
+  docker: ContainerRuntime,
+  containerId: string,
+  gateway: string,
+  mcpPort: number,
+): Promise<void> {
+  const reach = await docker.exec(
+    containerId,
+    ['socat', '-u', '/dev/null', `TCP:${gateway}:${mcpPort},connect-timeout=5`],
+    6_000,
+  );
+  if (reach.exitCode !== 0) {
+    throw new Error(
+      `Host-only network connectivity check failed (exit=${reach.exitCode}). ` +
+        `The container cannot reach host-side proxies at gateway ${gateway}:${mcpPort}. ` +
+        `Check that the host-only network exists and the proxies are listening.`,
+    );
+  }
+
+  const egress = await docker.exec(
+    containerId,
+    ['socat', '-u', '/dev/null', `TCP:${EGRESS_PROBE_ADDRESS},connect-timeout=3`],
+    5_000,
+  );
+  if (egress.exitCode === 0) {
+    throw new Error(
+      `Host-only network egress check failed: the container reached ${EGRESS_PROBE_ADDRESS}. ` +
+        `The network is not blocking internet egress as required; refusing to start the session.`,
     );
   }
 }
@@ -1222,13 +1360,13 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
 export async function ensureDockerImage(agentId: AgentId, userConfig: ResolvedUserConfig): Promise<void> {
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { loadOrCreateCA } = await import('./ca.js');
-  const { createContainerRuntime } = await import('./container-runtime.js');
+  const { createContainerRuntime, resolveContainerRuntimeKind } = await import('./container-runtime.js');
   const { getIronCurtainHome } = await import('../config/paths.js');
 
   await registerBuiltinAdapters(userConfig);
   const adapter = getAgent(agentId);
   const image = await adapter.getImage();
-  const docker = createContainerRuntime('docker');
+  const docker = createContainerRuntime(resolveContainerRuntimeKind());
   const ca = loadOrCreateCA(resolve(getIronCurtainHome(), 'ca'));
   await ensureImage(image, docker, ca);
 }

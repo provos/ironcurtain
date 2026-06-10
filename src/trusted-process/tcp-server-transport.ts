@@ -20,9 +20,21 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport, TransportSendOptions } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
 
+export interface TcpServerTransportOptions {
+  /**
+   * Connection-source filter. When set, an incoming connection whose
+   * `socket.remoteAddress` fails the predicate is destroyed before any
+   * data is read. Used when binding 0.0.0.0 for a host-only container
+   * network (tcp-hostonly topology) so only the agent VM's subnet can
+   * reach the unauthenticated MCP endpoint.
+   */
+  readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+}
+
 export class TcpServerTransport implements Transport {
   private readonly host: string;
   private readonly requestedPort: number;
+  private readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
   private server: NetServer | null = null;
   private activeSocket: Socket | null = null;
   private readBuffer = new ReadBuffer();
@@ -32,9 +44,10 @@ export class TcpServerTransport implements Transport {
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage) => void;
 
-  constructor(host: string, port: number) {
+  constructor(host: string, port: number, options?: TcpServerTransportOptions) {
     this.host = host;
     this.requestedPort = port;
+    this.allowRemoteAddress = options?.allowRemoteAddress;
   }
 
   /** The actual port the server is listening on. Only valid after start(). */
@@ -103,6 +116,13 @@ export class TcpServerTransport implements Transport {
   }
 
   private handleConnection(socket: Socket): void {
+    // Drop connections from disallowed sources before touching the
+    // active-socket slot, so a rejected peer can't evict the agent.
+    if (this.allowRemoteAddress && !this.allowRemoteAddress(socket.remoteAddress)) {
+      socket.destroy();
+      return;
+    }
+
     // Close any existing connection -- only one client expected
     if (this.activeSocket && !this.activeSocket.destroyed) {
       this.activeSocket.destroy();

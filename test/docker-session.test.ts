@@ -211,6 +211,8 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     orientationDir: join(opts.sessionDir, 'orientation'),
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
+    runtimeKind: 'docker',
+    topology: useTcp ? 'tcp-sidecar' : 'uds',
     useTcp,
     socketsDir: join(opts.sessionDir, 'sockets'),
     mitmAddr,

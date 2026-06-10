@@ -193,6 +193,19 @@ function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): vo
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const { prepareDockerInfrastructure } = await import('./docker-infrastructure.js');
+  const { resolveContainerRuntimeKind } = await import('./container-runtime.js');
+  const { resolveNetworkTopology } = await import('./network-topology.js');
+
+  // PTY mode still assembles its containers with the Docker-specific
+  // sidecar/UDS branches below; fail fast rather than half-build a
+  // bundle on the host-only topology. Phase 4 of
+  // docs/designs/apple-container-runtime.md lifts this.
+  if (resolveNetworkTopology(resolveContainerRuntimeKind()) === 'tcp-hostonly') {
+    throw new Error(
+      'PTY mode is not yet supported with the apple-container runtime. ' +
+        'Unset IRONCURTAIN_CONTAINER_RUNTIME or use batch mode (`ironcurtain start`).',
+    );
+  }
 
   // When resuming, validate the snapshot and reuse the existing session directory
   const resumeSnapshot = options.resumeSessionId

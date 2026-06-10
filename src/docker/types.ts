@@ -230,6 +230,14 @@ export interface ContainerRuntime {
   /** Connect an existing container to a Docker network. */
   connectNetwork(networkName: string, containerId: string): Promise<void>;
 
+  /**
+   * Returns the host-side IPv4 gateway address of a network, or undefined
+   * if the network does not exist or has no gateway. Optional: only the
+   * tcp-hostonly topology consumes it (see network-topology.ts), and it
+   * falls back to deriving the gateway from the subnet when absent.
+   */
+  getNetworkGateway?(name: string): Promise<string | undefined>;
+
   /** Get a container's IP address on a specific network. */
   getContainerIp(containerId: string, network: string): Promise<string>;
 }
