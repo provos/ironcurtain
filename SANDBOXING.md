@@ -150,6 +150,18 @@ The agent cannot reach the host gateway or any host service directly — it can 
 
 If the connectivity check fails at startup, IronCurtain aborts session initialization rather than falling back to a less secure network configuration.
 
+#### macOS: Apple `container` Backend (VM per Container)
+
+On macOS 26+ (Apple silicon), IronCurtain can run the agent under [Apple `container`](https://github.com/apple/container) instead of Docker — selected by the `containerRuntime` config field (`auto`, the default, prefers it when its services are available) or `IRONCURTAIN_CONTAINER_RUNTIME`. Each container is a dedicated lightweight VM, upgrading Layer 1 from shared-kernel namespaces to a hardware-virtualization boundary.
+
+The network topology is simpler than the Docker sidecar arrangement:
+
+1. Each session gets its own host-only (`--internal`) vmnet network from a reserved subnet pool — internet egress is blocked at the network layer, and the host is natively reachable at the network's gateway IP.
+2. The agent reaches the MCP and MITM proxies directly at the gateway address; no sidecar is needed. The proxies listen on 0.0.0.0 (the vmnet interface does not exist until the first container attaches) guarded by a connection-source filter that only admits the bundle's subnet plus loopback.
+3. A fail-closed startup gate asserts, from inside the container, that the gateway proxies are reachable AND that a probe to the internet fails. Either failure aborts session initialization.
+
+The residual difference from the sidecar model — the agent VM can reach host services bound to `0.0.0.0`, not just the two proxy ports — is documented in [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) §2b and traded against the VM isolation upgrade. See [docs/designs/apple-container-runtime.md](docs/designs/apple-container-runtime.md) for the full design.
+
 ### Layer 2: TLS-Terminating MITM Proxy _(Docker Agent Mode only)_
 
 The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`). Since the container has no network, these requests go through a MITM proxy running on the host.
