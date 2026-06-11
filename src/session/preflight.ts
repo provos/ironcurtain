@@ -19,7 +19,7 @@ import {
   readOnlyCredentialSources,
   type CredentialSources,
 } from '../docker/oauth-credentials.js';
-import { resolveApiKeyForProvider } from '../config/model-provider.js';
+import { resolveApiKeyForProvider, parseModelId, type ProviderId } from '../config/model-provider.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 
 const execFile = promisify(execFileCb);
@@ -310,15 +310,21 @@ function dockerUnavailableMessage(detailedMessage: string): string {
   ].join('\n');
 }
 
-function builtinNeedsApiKeyMessage(): string {
+function builtinNeedsApiKeyMessage(provider: ProviderId): string {
+  const envVarMap: Record<ProviderId, string> = {
+    anthropic: 'ANTHROPIC_API_KEY',
+    openai: 'OPENAI_API_KEY',
+    google: 'GOOGLE_GENERATIVE_AI_API_KEY',
+  };
+  const envVar = envVarMap[provider];
   return [
     'Cannot start IronCurtain.',
-    'preferredMode is "builtin" but no ANTHROPIC_API_KEY is configured.',
-    'Builtin mode talks to Anthropic directly using an API key — Claude OAuth credentials are not usable in builtin mode.',
+    `preferredMode is "builtin" but no ${envVar} is configured.`,
+    `Builtin mode requires an API key for provider "${provider}".`,
     '',
     ...formatModeRemediation('docker'),
     '',
-    'Set ANTHROPIC_API_KEY in your environment, or run `ironcurtain config`.',
+    `Set ${envVar} in your environment, or run \`ironcurtain config\`.`,
   ].join('\n');
 }
 
@@ -418,9 +424,10 @@ async function resolveDefaultMode(
 
   if (preferredMode === 'builtin') {
     // Fail before the Docker probe — fast feedback for missing keys.
-    const apiKey = resolveApiKeyForProvider('anthropic', config.userConfig);
+    const { provider } = parseModelId(config.userConfig.agentModelId);
+    const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
     if (apiKey.length === 0) {
-      throw new PreflightError(builtinNeedsApiKeyMessage());
+      throw new PreflightError(builtinNeedsApiKeyMessage(provider));
     }
     return { mode: { kind: 'builtin' }, reason: 'preferredMode = builtin' };
   }
