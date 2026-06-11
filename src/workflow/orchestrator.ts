@@ -564,6 +564,18 @@ interface WorkflowInstance {
    */
   readonly bundlesByScope: Map<string, DockerInfrastructure>;
   /**
+   * In-flight (or settled) bundle-teardown promise. Set by the first
+   * `destroyWorkflowInfrastructure` caller; later callers join it
+   * instead of seeing the already-cleared `bundlesByScope` and bailing.
+   * Without this, `shutdownAll()` racing the fire-and-forget destroy in
+   * `handleWorkflowComplete` returned immediately while containers,
+   * networks, and MCP relay subprocesses were still being torn down —
+   * and the CLI's subsequent `process.exit()` orphaned them all
+   * (observed on the apple-container backend, whose VM shutdown is
+   * slow enough to lose the race every time).
+   */
+  teardownPromise?: Promise<void>;
+  /**
    * Memoized compiled-policy directory per persona. Populated on first
    * use by `cyclePolicy` to avoid re-reading `persona.json` / running
    * `loadConfig()` on every state transition.
@@ -960,11 +972,25 @@ export class WorkflowOrchestrator implements WorkflowController {
    * `abort()` / `shutdownAll()` will propagate to their own caller (the
    * test or CLI layer), which is the intended signal.
    */
-  private async destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+  private destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
     // Set BEFORE any short-circuit: an in-flight `ensureBundleForScope`
     // that resumes from its `await factory(...)` must observe this flag
     // and tear down its own orphan rather than publishing into the map.
     instance.aborted = true;
+
+    // Join semantics: the first caller starts the teardown; concurrent
+    // and later callers await the SAME promise. This is what lets the
+    // CLI's shutdownAll() block until the fire-and-forget destroy from
+    // handleWorkflowComplete has actually finished, instead of bailing
+    // on the already-cleared map and letting process.exit() kill the
+    // teardown mid-flight (leaking the container, its network, and the
+    // MCP relay subprocesses).
+    instance.teardownPromise ??= this.runBundleTeardown(instance);
+    return instance.teardownPromise;
+  }
+
+  /** Body of the bundle teardown; only ever started once per instance. */
+  private async runBundleTeardown(instance: WorkflowInstance): Promise<void> {
     if (instance.bundlesByScope.size === 0) return;
 
     // Snapshot and clear BEFORE the awaits so a concurrent caller sees
