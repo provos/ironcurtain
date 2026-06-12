@@ -1,5 +1,5 @@
 /**
- * Docker CLI wrapper implementing the DockerManager interface.
+ * Docker CLI wrapper implementing the ContainerRuntime interface.
  *
  * Uses child_process.execFile for all Docker CLI commands.
  * This keeps the implementation simple and avoids a dependency
@@ -8,7 +8,7 @@
 
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { DockerContainerConfig, DockerExecResult, DockerManager } from './types.js';
+import type { ContainerRuntime, DockerContainerConfig, DockerExecResult } from './types.js';
 import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
@@ -174,7 +174,7 @@ export function createDockerManager(
   execFileFn?: ExecFileFn,
   dockerAvailabilityProbe: () => Promise<DockerAvailability> = checkDockerAvailable,
   spawnOpts?: CreateDockerManagerOptions,
-): DockerManager {
+): ContainerRuntime {
   const exec = execFileFn ?? defaultExecFile;
   const streamOpts = {
     spawn: spawnOpts?.spawn,
@@ -246,7 +246,7 @@ export function createDockerManager(
       execUser?: string | null,
     ): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-      // Resolve the `--user` flag (see DockerManager.exec JSDoc):
+      // Resolve the `--user` flag (see ContainerRuntime.exec JSDoc):
       //   undefined → 'codespace' (default for agent containers)
       //   string    → override
       //   null      → skip the flag entirely (non-agent containers
@@ -436,6 +436,22 @@ export function createDockerManager(
 
     async connectNetwork(networkName: string, containerId: string): Promise<void> {
       await exec('docker', ['network', 'connect', networkName, containerId], { timeout: 10_000 });
+    },
+
+    async getNetworkGateway(name: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec(
+          'docker',
+          ['network', 'inspect', '-f', '{{(index .IPAM.Config 0).Gateway}}', name],
+          {
+            timeout: 10_000,
+          },
+        );
+        const value = stdout.trim();
+        return value && value !== '<no value>' ? value : undefined;
+      } catch {
+        return undefined;
+      }
     },
 
     async getContainerIp(containerId: string, network: string): Promise<string> {

@@ -34,6 +34,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { UdsServerTransport } from './uds-server-transport.js';
 import { TcpServerTransport } from './tcp-server-transport.js';
+import { resolveContainerSpawnCommand } from './container-command.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   CallToolRequestSchema,
@@ -537,7 +538,18 @@ async function main(): Promise<void> {
       }
     }
 
-    const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
+    // Docker-based servers (e.g. github) run under the Apple `container`
+    // CLI on machines that have that runtime instead of Docker.
+    const spawnSpec = resolveContainerSpawnCommand(config.command, config.args);
+    if (spawnSpec.translated) {
+      emitProxyDiagnostic(
+        'WARNING',
+        `MCP server "${serverName}": docker not found; running via the Apple container CLI instead`,
+        sessionLogPath,
+      );
+    }
+
+    const wrapped = wrapServerCommand(serverName, spawnSpec.command, spawnSpec.args, resolved, settingsDir);
 
     const transport = new StdioClientTransport({
       command: wrapped.command,
@@ -598,12 +610,21 @@ async function main(): Promise<void> {
     try {
       await client.connect(transport);
     } catch (err) {
+      // Per-server graceful degradation: an unconnectable backend (binary
+      // missing, container runtime down, server crash on startup) is
+      // skipped with a diagnostic, like the missing-env-var and OAuth
+      // paths above. When this leaves the relay with zero backends, the
+      // proxyCanServe guard below exits non-zero and the parent skips
+      // the relay — a startup failure never silently widens or narrows
+      // policy, since unregistered tools are denied by default.
       const cmd = `${wrapped.command} ${wrapped.args.join(' ')}`;
-      const stderrSnippet = serverStderr ? `\nServer stderr: ${serverStderr.substring(0, 1000)}` : '';
-      throw new Error(
-        `Failed to connect to MCP server "${serverName}" (${cmd}): ${err instanceof Error ? err.message : String(err)}${stderrSnippet}`,
-        { cause: err },
+      const stderrSnippet = serverStderr ? ` Server stderr: ${serverStderr.substring(0, 1000)}` : '';
+      emitProxyDiagnostic(
+        'WARNING',
+        `Skipping MCP server "${serverName}": failed to connect (${cmd}): ${err instanceof Error ? err.message : String(err)}${stderrSnippet}`,
+        sessionLogPath,
       );
+      continue;
     }
     clientStates.set(serverName, state);
 

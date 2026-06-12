@@ -243,6 +243,17 @@ export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 export const SESSION_MODES = ['docker', 'builtin'] as const;
 export type SessionModeKind = (typeof SESSION_MODES)[number];
 
+/**
+ * Container runtime backend for Docker Agent Mode sessions. 'auto'
+ * prefers the Apple container runtime when its preflight passes
+ * (Apple silicon, macOS 26+, container CLI >= 1.0 with services
+ * running) and falls back to Docker otherwise. The
+ * IRONCURTAIN_CONTAINER_RUNTIME env var overrides this setting.
+ * See docs/designs/apple-container-runtime.md.
+ */
+export const CONTAINER_RUNTIMES = ['auto', 'docker', 'apple-container'] as const;
+export type ContainerRuntimeSetting = (typeof CONTAINER_RUNTIMES)[number];
+
 export const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
@@ -271,6 +282,7 @@ export const userConfigSchema = z.object({
   gooseModel: z.string().min(1).optional(),
   preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
   preferredMode: z.enum(SESSION_MODES).optional(),
+  containerRuntime: z.enum(CONTAINER_RUNTIMES).optional(),
   packageInstall: packageInstallSchema,
   dockerResources: dockerResourcesSchema,
   capture: captureSchema,
@@ -377,6 +389,8 @@ export interface ResolvedUserConfig {
   readonly preferredDockerAgent: DockerAgent;
   /** Preferred session mode: 'docker' (default) or 'builtin'. */
   readonly preferredMode: SessionModeKind;
+  /** Container runtime backend: 'auto' (default), 'docker', or 'apple-container'. */
+  readonly containerRuntime: ContainerRuntimeSetting;
   /** Package installation proxy configuration. */
   readonly packageInstall: ResolvedPackageInstallConfig;
   /** Docker container resource ceilings (pre-clamp). */
@@ -710,6 +724,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     gooseModel: config.gooseModel ?? 'claude-sonnet-4-20250514',
     preferredDockerAgent: config.preferredDockerAgent ?? 'claude-code',
     preferredMode: config.preferredMode ?? USER_CONFIG_DEFAULTS.preferredMode,
+    containerRuntime: config.containerRuntime ?? 'auto',
     packageInstall: {
       enabled: config.packageInstall?.enabled ?? true,
       quarantineDays: config.packageInstall?.quarantineDays ?? 2,

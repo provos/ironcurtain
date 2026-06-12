@@ -7,8 +7,12 @@
  * can call check functions directly without short-circuits.
  */
 
+import { spawnSync } from 'node:child_process';
+import { arch, platform } from 'node:os';
 import { checkSandboxViability } from '../utils/preflight-checks.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
+import { checkAppleContainerAvailable } from '../docker/apple-container-manager.js';
+import { resolveRuntimeKind, type ContainerRuntimeKind } from '../docker/container-runtime.js';
 import { detectAuthMethod, readOnlyCredentialSources } from '../docker/oauth-credentials.js';
 import {
   clampDockerResources,
@@ -18,6 +22,7 @@ import {
   type ExecFileFn,
   type HostResources,
   type ProbeResult as ResourceProbeResult,
+  type ResourceProbeBin,
 } from '../docker/resource-limits.js';
 import { getAgent, registerBuiltinAdapters } from '../docker/agent-registry.js';
 import type { AgentId } from '../docker/agent-adapter.js';
@@ -109,6 +114,109 @@ export async function checkDocker(
 }
 
 /**
+ * Reports Apple `container` runtime status. `skip` on platforms where the
+ * backend is structurally unavailable (non-macOS, Intel, pre-macOS-26);
+ * `warn` when the platform qualifies but the CLI/services are not ready —
+ * `checkActiveRuntime` upgrades that to a fail when this backend is the
+ * one sessions will actually use.
+ */
+export async function checkAppleContainer(
+  probe: () => Promise<DockerAvailability> = checkAppleContainerAvailable,
+  hostPlatform: string = platform(),
+  hostArch: string = arch(),
+): Promise<CheckResult> {
+  if (hostPlatform !== 'darwin' || hostArch !== 'arm64') {
+    return { name: 'Apple container', status: 'skip', message: 'not applicable (requires macOS on Apple silicon)' };
+  }
+  const status = await probe();
+  if (status.available) {
+    return { name: 'Apple container', status: 'ok', message: 'running' };
+  }
+  return {
+    name: 'Apple container',
+    status: status.reason.includes('macOS 26') ? 'skip' : 'warn',
+    message: status.reason,
+    hint: status.detailedMessage,
+  };
+}
+
+/**
+ * Reports whether Rosetta is installed. Only meaningful when the Apple
+ * container backend is in play: its BuildKit builder VM requires Rosetta,
+ * so agent-image builds fail without it. Probed by running an x86_64
+ * binary under `arch` — exits 0 iff Rosetta can translate it.
+ */
+export function checkRosetta(
+  runX86: () => boolean = () =>
+    spawnSync('arch', ['-x86_64', '/usr/bin/true'], { stdio: 'ignore', timeout: 10_000 }).status === 0,
+): CheckResult {
+  if (runX86()) {
+    return { name: 'Rosetta', status: 'ok', message: 'installed' };
+  }
+  return {
+    name: 'Rosetta',
+    status: 'warn',
+    message: 'not installed — `container build` (agent images) will fail',
+    hint: 'Install it with `softwareupdate --install-rosetta --agree-to-license`.',
+  };
+}
+
+/** Output of checkActiveRuntime: the resolved backend plus its availability. */
+export interface ActiveRuntime {
+  readonly result: CheckResult;
+  readonly kind: ContainerRuntimeKind;
+  /** Human label for messages ("Docker" / "Apple container"). */
+  readonly label: string;
+  /** The availability CheckResult of the backend sessions will use. */
+  readonly availability: CheckResult;
+}
+
+/**
+ * Resolves which container runtime sessions will use (env override >
+ * `containerRuntime` config > auto probe) and pairs it with the matching
+ * availability result from the Environment section, so downstream checks
+ * (preferred mode, resource limits) evaluate the backend that actually
+ * runs — not unconditionally Docker.
+ */
+export async function checkActiveRuntime(
+  config: IronCurtainConfig,
+  dockerResult: CheckResult,
+  appleResult: CheckResult,
+): Promise<ActiveRuntime> {
+  const configured = config.userConfig.containerRuntime;
+  let kind: ContainerRuntimeKind;
+  try {
+    kind = await resolveRuntimeKind(configured);
+  } catch (err) {
+    // Invalid IRONCURTAIN_CONTAINER_RUNTIME value — sessions will throw too.
+    return {
+      result: {
+        name: 'Container runtime',
+        status: 'fail',
+        message: err instanceof Error ? err.message : String(err),
+        hint: 'Unset IRONCURTAIN_CONTAINER_RUNTIME or set it to "docker" / "apple-container".',
+      },
+      kind: 'docker',
+      label: 'Docker',
+      availability: dockerResult,
+    };
+  }
+  const label = kind === 'apple-container' ? 'Apple container' : 'Docker';
+  const availability = kind === 'apple-container' ? appleResult : dockerResult;
+  const source = process.env.IRONCURTAIN_CONTAINER_RUNTIME
+    ? 'env override'
+    : configured === 'auto'
+      ? 'auto-detected'
+      : 'config';
+  return {
+    result: { name: 'Container runtime', status: 'ok', message: `${kind} (${source})` },
+    kind,
+    label,
+    availability,
+  };
+}
+
+/**
  * Reports whether the user's `preferredMode` is satisfiable on this host.
  *
  * Reuses the prior `dockerResult` from `checkDocker` so Docker is probed
@@ -120,7 +228,11 @@ export async function checkDocker(
  *   - preferredMode: 'builtin' + API key present   -> ok
  *   - preferredMode: 'builtin' + no API key        -> warn (sessions will fail to start by default)
  */
-export function checkPreferredMode(config: IronCurtainConfig, dockerResult: CheckResult): CheckResult {
+export function checkPreferredMode(
+  config: IronCurtainConfig,
+  dockerResult: CheckResult,
+  runtimeLabel = 'Docker',
+): CheckResult {
   const preferredMode = config.userConfig.preferredMode;
 
   if (preferredMode === 'docker') {
@@ -130,8 +242,8 @@ export function checkPreferredMode(config: IronCurtainConfig, dockerResult: Chec
     return {
       name: 'Preferred mode',
       status: 'fail',
-      message: 'docker, but Docker is unavailable. Sessions will refuse to start.',
-      hint: 'Start Docker, or run `ironcurtain config` and set Session Mode > Preferred mode to "builtin".',
+      message: `docker, but ${runtimeLabel} is unavailable. Sessions will refuse to start.`,
+      hint: `Start ${runtimeLabel}, or run \`ironcurtain config\` and set Session Mode > Preferred mode to "builtin".`,
     };
   }
 
@@ -173,7 +285,10 @@ export interface CheckDockerResourcesDeps {
 export async function checkDockerResources(
   config: IronCurtainConfig,
   deps: CheckDockerResourcesDeps = {},
+  runtimeKind: ContainerRuntimeKind = 'docker',
 ): Promise<CheckResult> {
+  const bin: ResourceProbeBin = runtimeKind === 'apple-container' ? 'container' : 'docker';
+  const name = runtimeKind === 'apple-container' ? 'Container resource limits' : 'Docker resource limits';
   const clamp = clampDockerResources(config.userConfig.dockerResources);
   const summary = describeClamp(clamp);
 
@@ -182,7 +297,7 @@ export async function checkDockerResources(
     image = await resolveAgentImage(config.userConfig.preferredDockerAgent, deps.resolveImage);
   } catch (err) {
     return {
-      name: 'Docker resource limits',
+      name,
       status: 'warn',
       message: `${summary}; could not resolve preferred-agent image`,
       hint: err instanceof Error ? err.message : String(err),
@@ -192,16 +307,17 @@ export async function checkDockerResources(
   // We deliberately do not pull images during a doctor run; if the image
   // isn't already on the host, the user hasn't started a session yet, so a
   // resource probe would just push work into the wrong command.
-  if (!(await isImagePresent(image, deps.execFile))) {
+  if (!(await isImagePresent(image, deps.execFile, bin))) {
     return {
-      name: 'Docker resource limits',
+      name,
       status: 'ok',
       message: `${summary}; image ${image} not yet pulled — skipping probe`,
     };
   }
 
-  const probe = await probeDockerResources(image, clamp.effective, deps.execFile);
-  return renderProbeResult(probe, summary, clamp.host);
+  const probe = await probeDockerResources(image, clamp.effective, deps.execFile, bin);
+  const rejecter = runtimeKind === 'apple-container' ? 'Apple container' : 'Docker';
+  return renderProbeResult(probe, summary, clamp.host, name, rejecter);
 }
 
 function describeClamp(clamp: ClampedDockerResources): string {
@@ -225,9 +341,15 @@ async function resolveAgentImage(
   return getAgent(agentId as AgentId).getImage();
 }
 
-function renderProbeResult(probe: ResourceProbeResult, summary: string, host: HostResources): CheckResult {
+function renderProbeResult(
+  probe: ResourceProbeResult,
+  summary: string,
+  host: HostResources,
+  name = 'Docker resource limits',
+  rejecter = 'Docker',
+): CheckResult {
   if (probe.ok) {
-    return { name: 'Docker resource limits', status: 'ok', message: summary };
+    return { name, status: 'ok', message: summary };
   }
   const suggested = probe.suggested ?? {};
   const hintParts: string[] = ['Run `ironcurtain config` and adjust Docker Agent > Container resources.'];
@@ -242,9 +364,9 @@ function renderProbeResult(probe: ResourceProbeResult, summary: string, host: Ho
   // allocation.
   hintParts.push(`(Host: ${host.cpus} cpus, ${host.memoryMb} MB.)`);
   return {
-    name: 'Docker resource limits',
+    name,
     status: 'fail',
-    message: `Docker rejected ${summary}: ${truncateForMessage(probe.stderr)}`,
+    message: `${rejecter} rejected ${summary}: ${truncateForMessage(probe.stderr)}`,
     hint: hintParts.join(' '),
   };
 }
@@ -500,7 +622,7 @@ export async function checkMcpServerLiveness(
     if (checkServerCredentials(name, serverConfig, config).status === 'warn') {
       return { name, status: 'skip', message: 'skipped — missing creds' };
     }
-    const result = await probe(name, serverConfig);
+    const result = await probe(name, serverConfig, config.userConfig.serverCredentials[name] ?? {});
     return formatProbeResult(name, result);
   });
 

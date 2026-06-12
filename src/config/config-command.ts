@@ -22,12 +22,14 @@ import {
   GOOSE_PROVIDERS,
   DOCKER_AGENTS,
   SESSION_MODES,
+  CONTAINER_RUNTIMES,
   type UserConfig,
   type ResolvedUserConfig,
   type WebSearchProvider,
   type GooseProvider,
   type DockerAgent,
   type SessionModeKind,
+  type ContainerRuntimeSetting,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
 import type { MCPServerConfig } from './types.js';
@@ -111,6 +113,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     'gooseModel',
     'preferredDockerAgent',
     'preferredMode',
+    'containerRuntime',
   ] as const;
   for (const key of topLevelKeys) {
     if (key in pending && pending[key] !== undefined && pending[key] !== resolved[key]) {
@@ -738,10 +741,18 @@ const SESSION_MODE_SHORT_LABELS: Readonly<Record<SessionModeKind, string>> = {
   builtin: 'Builtin',
 };
 
+/** Human-readable labels for container runtime backends. */
+const CONTAINER_RUNTIME_LABELS: Readonly<Record<ContainerRuntimeSetting, string>> = {
+  auto: 'Auto (prefer Apple container when available)',
+  docker: 'Docker',
+  'apple-container': 'Apple container (macOS 26+, Apple silicon)',
+};
+
 async function handleSessionMode(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const currentMode = pending.preferredMode ?? resolved.preferredMode;
+    const currentRuntime = pending.containerRuntime ?? resolved.containerRuntime;
 
     const field = await p.select({
       message: 'Session Mode',
@@ -751,10 +762,35 @@ async function handleSessionMode(resolved: ResolvedUserConfig, pending: UserConf
           label: 'Preferred mode',
           hint: SESSION_MODE_LABELS[currentMode],
         },
+        {
+          value: 'containerRuntime',
+          label: 'Container runtime',
+          hint: CONTAINER_RUNTIME_LABELS[currentRuntime],
+        },
         { value: 'back', label: 'Back' },
       ],
     });
     if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'containerRuntime') {
+      const runtimeOptions = CONTAINER_RUNTIMES.map((runtime) => ({
+        value: runtime,
+        label: CONTAINER_RUNTIME_LABELS[runtime],
+        hint: runtime === currentRuntime ? '(current)' : undefined,
+      }));
+
+      const selected = await p.select({
+        message: 'Select container runtime backend:',
+        options: runtimeOptions,
+        initialValue: currentRuntime,
+      });
+      if (isCancelled(selected)) continue;
+      const runtime = selected as ContainerRuntimeSetting;
+      if (runtime !== currentRuntime) {
+        pending.containerRuntime = runtime;
+      }
+      continue;
+    }
 
     if (field === 'preferredMode') {
       const modeOptions = SESSION_MODES.map((mode) => ({

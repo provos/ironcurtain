@@ -378,13 +378,29 @@ async function resolveDockerAgent(
  */
 export async function resolveSessionMode(options: PreflightOptions): Promise<PreflightResult> {
   const { config, requestedAgent, credentialSources } = options;
-  const isDockerAvailable = options.isDockerAvailable ?? checkDockerAvailable;
+  const isDockerAvailable = options.isDockerAvailable ?? (await resolveDefaultAvailabilityProbe(config));
 
   if (requestedAgent !== undefined) {
     return resolveExplicit(requestedAgent, config, isDockerAvailable, credentialSources);
   }
 
   return resolveDefaultMode(config, isDockerAvailable, credentialSources);
+}
+
+/**
+ * Picks the container-runtime availability probe matching the selected
+ * backend: apple-container sessions must probe the Apple `container`
+ * services, not Docker (the machine may not have Docker at all).
+ * Lazily imported to avoid a module cycle — docker-manager.ts imports
+ * `checkDockerAvailable` from this file.
+ */
+async function resolveDefaultAvailabilityProbe(config: IronCurtainConfig): Promise<() => Promise<DockerAvailability>> {
+  const { resolveRuntimeKind } = await import('../docker/container-runtime.js');
+  if ((await resolveRuntimeKind(config.userConfig.containerRuntime)) === 'apple-container') {
+    const { checkAppleContainerAvailable } = await import('../docker/apple-container-manager.js');
+    return () => checkAppleContainerAvailable();
+  }
+  return checkDockerAvailable;
 }
 
 async function resolveExplicit(

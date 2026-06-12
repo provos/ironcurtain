@@ -8,7 +8,7 @@ import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.j
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { AgentAdapter, AgentResponse, ConversationStateConfig } from '../src/docker/agent-adapter.js';
-import type { DockerManager } from '../src/docker/types.js';
+import type { ContainerRuntime } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
@@ -154,7 +154,7 @@ interface MockInfraOptions {
   readonly auditLogPath: string;
   readonly tempDir: string;
   readonly adapter?: AgentAdapter;
-  readonly docker?: DockerManager;
+  readonly docker?: ContainerRuntime;
   readonly proxy?: DockerProxy;
   readonly mitmProxy?: MitmProxy;
   readonly useTcp?: boolean;
@@ -211,6 +211,8 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     orientationDir: join(opts.sessionDir, 'orientation'),
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
+    runtimeKind: 'docker',
+    topology: useTcp ? 'tcp-sidecar' : 'uds',
     useTcp,
     socketsDir: join(opts.sessionDir, 'sockets'),
     mitmAddr,
@@ -624,7 +626,7 @@ describe('DockerAgentSession', () => {
       const stoppedContainers: string[] = [];
       const removedContainers: string[] = [];
 
-      const docker: DockerManager = {
+      const docker: ContainerRuntime = {
         ...createMockDocker(),
         async stop(id: string) {
           stoppedContainers.push(id);
@@ -667,7 +669,7 @@ describe('DockerAgentSession', () => {
     // `ownsInfra=false`, close() leaves them untouched for the external
     // owner to invoke later via destroyDockerInfrastructure().
     interface TeardownSpies {
-      readonly docker: DockerManager;
+      readonly docker: ContainerRuntime;
       readonly mitmProxy: MitmProxy;
       readonly proxy: DockerProxy;
       readonly counts: {
@@ -686,7 +688,7 @@ describe('DockerAgentSession', () => {
         proxyStops: 0,
       };
 
-      const docker: DockerManager = {
+      const docker: ContainerRuntime = {
         ...createMockDocker(),
         async stop() {
           counts.containerStops++;

@@ -37,13 +37,16 @@ vi.mock('../src/config/model-provider.js', async (importOriginal) => {
 });
 
 import {
+  checkActiveRuntime,
   checkAnnotationDrift,
+  checkAppleContainer,
   checkConstitutionDrift,
   checkDocker,
   checkDockerResources,
   checkMcpServerLiveness,
   checkNodeVersion,
   checkPreferredMode,
+  checkRosetta,
   checkServerCredentials,
   collectDeclaredEnvVars,
   type CheckResult,
@@ -200,6 +203,99 @@ describe('checkDocker', () => {
     }));
     expect(result.status).toBe('warn');
     expect(result.hint).toBe('docker: command not found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit: checkAppleContainer / checkRosetta / checkActiveRuntime
+// ---------------------------------------------------------------------------
+
+describe('checkAppleContainer', () => {
+  it('skips on non-applicable platforms without probing', async () => {
+    const probe = vi.fn();
+    const r = await checkAppleContainer(probe, 'linux', 'arm64');
+    expect(r.status).toBe('skip');
+    expect(probe).not.toHaveBeenCalled();
+
+    const r2 = await checkAppleContainer(probe, 'darwin', 'x64');
+    expect(r2.status).toBe('skip');
+  });
+
+  it('returns ok when the runtime is available', async () => {
+    const r = await checkAppleContainer(async () => ({ available: true }), 'darwin', 'arm64');
+    expect(r.status).toBe('ok');
+    expect(r.message).toBe('running');
+  });
+
+  it('warns with the remediation hint when the CLI/services are not ready', async () => {
+    const r = await checkAppleContainer(
+      async () => ({
+        available: false,
+        reason: 'container services not running',
+        detailedMessage: 'Start it with `container system start`.',
+      }),
+      'darwin',
+      'arm64',
+    );
+    expect(r.status).toBe('warn');
+    expect(r.hint).toContain('container system start');
+  });
+});
+
+describe('checkRosetta', () => {
+  it('ok when the x86_64 probe runs', () => {
+    expect(checkRosetta(() => true).status).toBe('ok');
+  });
+
+  it('warns with the softwareupdate hint when it does not', () => {
+    const r = checkRosetta(() => false);
+    expect(r.status).toBe('warn');
+    expect(r.hint).toContain('softwareupdate --install-rosetta');
+  });
+});
+
+describe('checkActiveRuntime', () => {
+  const dockerAvail: CheckResult = { name: 'Docker', status: 'ok', message: 'running' };
+  const appleAvail: CheckResult = { name: 'Apple container', status: 'ok', message: 'running' };
+
+  function configWithRuntime(containerRuntime: 'docker' | 'apple-container' | 'auto') {
+    return buildConfig({
+      userConfig: { ...buildConfig().userConfig, containerRuntime },
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.IRONCURTAIN_CONTAINER_RUNTIME;
+  });
+
+  it('pairs an explicit docker config with the Docker availability result', async () => {
+    const r = await checkActiveRuntime(configWithRuntime('docker'), dockerAvail, appleAvail);
+    expect(r.kind).toBe('docker');
+    expect(r.label).toBe('Docker');
+    expect(r.availability).toBe(dockerAvail);
+    expect(r.result.status).toBe('ok');
+    expect(r.result.message).toContain('docker (config)');
+  });
+
+  it('pairs an explicit apple-container config with the Apple availability result', async () => {
+    const r = await checkActiveRuntime(configWithRuntime('apple-container'), dockerAvail, appleAvail);
+    expect(r.kind).toBe('apple-container');
+    expect(r.label).toBe('Apple container');
+    expect(r.availability).toBe(appleAvail);
+  });
+
+  it('reports the env override as the source', async () => {
+    process.env.IRONCURTAIN_CONTAINER_RUNTIME = 'docker';
+    const r = await checkActiveRuntime(configWithRuntime('apple-container'), dockerAvail, appleAvail);
+    expect(r.kind).toBe('docker');
+    expect(r.result.message).toContain('env override');
+  });
+
+  it('fails (without throwing) on an invalid env override', async () => {
+    process.env.IRONCURTAIN_CONTAINER_RUNTIME = 'podman';
+    const r = await checkActiveRuntime(configWithRuntime('auto'), dockerAvail, appleAvail);
+    expect(r.result.status).toBe('fail');
+    expect(r.result.hint).toContain('IRONCURTAIN_CONTAINER_RUNTIME');
   });
 });
 

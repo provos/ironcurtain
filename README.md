@@ -56,7 +56,7 @@ See [SANDBOXING.md](SANDBOXING.md) for the full architecture with diagrams, laye
 ### Prerequisites
 
 - Node.js 22+ (required by `isolated-vm`; maximum Node 25)
-- Docker — not required but **strongly recommended** for Docker Agent Mode, which provides the strongest isolation
+- Docker — not required but **strongly recommended** for Docker Agent Mode, which provides the strongest isolation. On macOS 26+ (Apple silicon), [Apple `container`](https://github.com/apple/container) works as an alternative backend (VM per container; used automatically when its services are running — see `containerRuntime` in `ironcurtain config`)
 - An API key for at least one LLM provider (Anthropic, Google, or OpenAI)
 
 ### Install

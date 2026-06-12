@@ -192,7 +192,8 @@ function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): vo
  * Claude Code, attaches the terminal, and blocks until the session ends.
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
-  const { prepareDockerInfrastructure } = await import('./docker-infrastructure.js');
+  const { prepareDockerInfrastructure, writeHostOnlyAptProxyConfig, checkHostOnlyConnectivity } =
+    await import('./docker-infrastructure.js');
 
   // When resuming, validate the snapshot and reuse the existing session directory
   const resumeSnapshot = options.resumeSessionId
@@ -400,6 +401,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
     let hostPtyPort: number | undefined;
+    // tcp-hostonly only: apt proxy config written into the container via
+    // exec after start (apple container cannot bind-mount single files).
+    let hostOnlyAptProxyUrl: string | undefined;
     const mainContainerName = `ironcurtain-pty-${shortId}`;
 
     // Remove stale main container from a crashed previous session (same session
@@ -408,7 +412,33 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // deterministic in both modes.
     await docker.removeStaleContainer(mainContainerName);
 
-    if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
+    if (infra.topology === 'tcp-hostonly') {
+      // Apple container host-only mode: the agent VM reaches the host
+      // proxies directly at the vmnet gateway, and the host connects
+      // straight to the container's IP for the PTY — no sidecar, no
+      // port publishing. Mirrors the batch branch in
+      // docker-infrastructure.ts::createSessionContainers.
+      if (infra.hostOnlyNetwork === undefined || proxy.port === undefined || mitmAddr.port === undefined) {
+        throw new Error('tcp-hostonly bundle is missing its host-only network or proxy ports');
+      }
+      const proxyUrl = `http://${infra.hostOnlyNetwork.gateway}:${mitmAddr.port}`;
+      env = {
+        ...adapter.buildEnv(sessionConfig, fakeKeys),
+        HTTPS_PROXY: proxyUrl,
+        HTTP_PROXY: proxyUrl,
+      };
+      hostOnlyAptProxyUrl = proxyUrl;
+
+      network = infra.hostOnlyNetwork.name;
+      // Report the prepare-phase network as networkName so the finally
+      // block's cleanupContainers removes it with the container.
+      networkName = infra.hostOnlyNetwork.name;
+
+      mounts = [
+        { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+        { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
+      ];
+    } else if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
       // macOS TCP mode
       const mcpPort = proxy.port;
       const mitmPort = mitmAddr.port;
@@ -585,6 +615,16 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
 
+    // tcp-hostonly: write the apt proxy config inside the container and
+    // run the fail-closed connectivity gate (gateway proxies reachable,
+    // internet egress blocked) before attaching.
+    if (infra.topology === 'tcp-hostonly' && infra.hostOnlyNetwork !== undefined && proxy.port !== undefined) {
+      if (hostOnlyAptProxyUrl !== undefined) {
+        await writeHostOnlyAptProxyConfig(docker, containerId, hostOnlyAptProxyUrl);
+      }
+      await checkHostOnlyConnectivity(docker, containerId, infra.hostOnlyNetwork.gateway, proxy.port);
+    }
+
     // Write session registration for the escalation listener
     registrationPath = writeRegistration(effectiveSessionId, escalationDir, adapter.displayName);
 
@@ -603,7 +643,17 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // would consume that slot and cause the real attachPty connection to fail.
     // Instead, attachPty retries internally for TCP targets.
     let ptyTarget: PtyTarget;
-    if (useTcp) {
+    if (infra.topology === 'tcp-hostonly') {
+      // The host-only network routes host→container traffic natively:
+      // connect straight to the container's IP at the fixed PTY port.
+      // attachPty retries TCP targets, covering the window before the
+      // container-side socat is listening.
+      if (infra.hostOnlyNetwork === undefined) {
+        throw new Error('PTY session misconfiguration: tcp-hostonly without a host-only network');
+      }
+      const containerIp = await docker.getContainerIp(containerId, infra.hostOnlyNetwork.name);
+      ptyTarget = { host: containerIp, port: DEFAULT_PTY_PORT };
+    } else if (useTcp) {
       if (hostPtyPort === undefined) {
         throw new Error('PTY session misconfiguration: useTcp is true but hostPtyPort was not assigned');
       }
@@ -961,7 +1011,7 @@ function checkPtySize(containerId: string): Promise<{ rows: number; cols: number
   return new Promise((resolve) => {
     execFile(
       'docker',
-      // `--user codespace` mirrors DockerManager.exec; see the resize
+      // `--user codespace` mirrors ContainerRuntime.exec; see the resize
       // callsite above for the issue #232 rationale.
       ['exec', '--user', 'codespace', containerId, '/etc/ironcurtain/check-pty-size.sh'],
       { timeout: 5000 },
@@ -1012,7 +1062,7 @@ async function verifyInitialPtySize(
     await new Promise<void>((resolve) => {
       execFile(
         'docker',
-        // `--user codespace` mirrors DockerManager.exec; see issue #232.
+        // `--user codespace` mirrors ContainerRuntime.exec; see issue #232.
         [
           'exec',
           '--user',

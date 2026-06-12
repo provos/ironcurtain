@@ -166,14 +166,26 @@ const PROBE_TIMEOUT_MS = 30_000;
 const IMAGE_INSPECT_TIMEOUT_MS = 10_000;
 
 /**
- * Returns true iff `docker image inspect <image>` exits 0 — i.e. the image
+ * CLI binary the probes exec. The `docker` and Apple `container` CLIs
+ * share the `image inspect` / `run --rm --cpus --memory` surface these
+ * probes need (verified against container 1.0.0); only the memory-suffix
+ * case differs.
+ */
+export type ResourceProbeBin = 'docker' | 'container';
+
+/**
+ * Returns true iff `<bin> image inspect <image>` exits 0 — i.e. the image
  * is present locally and the probe can run without pulling.
  *
  * Doctor MUST NOT pull images during diagnostics; this is the gate.
  */
-export async function isImagePresent(image: string, execFile: ExecFileFn = defaultExecFile): Promise<boolean> {
+export async function isImagePresent(
+  image: string,
+  execFile: ExecFileFn = defaultExecFile,
+  bin: ResourceProbeBin = 'docker',
+): Promise<boolean> {
   try {
-    await execFile('docker', ['image', 'inspect', image], { timeout: IMAGE_INSPECT_TIMEOUT_MS });
+    await execFile(bin, ['image', 'inspect', image], { timeout: IMAGE_INSPECT_TIMEOUT_MS });
     return true;
   } catch {
     return false;
@@ -181,10 +193,12 @@ export async function isImagePresent(image: string, execFile: ExecFileFn = defau
 }
 
 /**
- * Runs `docker run --rm [--cpus N] [--memory Nm] <image> /usr/bin/true`
+ * Runs `<bin> run --rm [--cpus N] [--memory Nm] <image> /usr/bin/true`
  * with the supplied effective resource limits. Returns `{ ok: true }` if
  * the container created and exited cleanly; otherwise returns the captured
- * stderr along with any value suggestions parsed from it.
+ * stderr along with any value suggestions parsed from it (the suggestion
+ * parser knows Docker's error phrasing; Apple container failures fall
+ * through to the generic stderr rendering).
  *
  * NOTE on `/usr/bin/true`: every Linux base image we ship (including
  * `alpine/socat`) has this at this path. We prefer the absolute path over
@@ -195,18 +209,20 @@ export async function probeDockerResources(
   image: string,
   resources: EffectiveDockerResources,
   execFile: ExecFileFn = defaultExecFile,
+  bin: ResourceProbeBin = 'docker',
 ): Promise<ProbeResult> {
   const args: string[] = ['run', '--rm'];
   if (resources.cpus !== undefined) {
     args.push('--cpus', String(resources.cpus));
   }
   if (resources.memoryMb !== undefined) {
-    args.push('--memory', `${resources.memoryMb}m`);
+    // The Apple container CLI documents uppercase suffixes (K/M/G/...).
+    args.push('--memory', `${resources.memoryMb}${bin === 'container' ? 'M' : 'm'}`);
   }
   args.push(image, '/usr/bin/true');
 
   try {
-    await execFile('docker', args, { timeout: PROBE_TIMEOUT_MS });
+    await execFile(bin, args, { timeout: PROBE_TIMEOUT_MS });
     return { ok: true };
   } catch (err) {
     const stderr = extractStderr(err);

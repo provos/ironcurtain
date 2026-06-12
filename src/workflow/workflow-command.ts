@@ -206,6 +206,14 @@ async function runStart(args: string[]): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
+  // The exit happens AFTER the finally block: a process.exit() inside the
+  // try skips the finally entirely, so on the success path shutdownAll()
+  // never ran and the fire-and-forget infrastructure teardown from
+  // handleWorkflowComplete was killed mid-flight — stranding the
+  // container, its network, and the MCP relay subprocesses (observed on
+  // the apple-container backend, whose slower VM shutdown loses the race
+  // every time).
+  let exitCode: number;
   try {
     writeStdout(`${BOLD}${MAGENTA}Starting workflow${RESET}`);
     writeStdout(`${DIM}Task: ${taskDescription}${RESET}`);
@@ -221,13 +229,15 @@ async function runStart(args: string[]): Promise<void> {
 
     printSummary(orchestrator, workflowId, artifactDir);
 
-    const exitCode = computeExitCode(orchestrator, workflowId, controller.signal);
-    process.exit(exitCode);
+    exitCode = computeExitCode(orchestrator, workflowId, controller.signal);
   } finally {
     rl.close();
+    // Joins any in-flight teardown (see WorkflowInstance.teardownPromise)
+    // so the process.exit below never strands infrastructure.
     await orchestrator.shutdownAll().catch(() => {});
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
+  process.exit(exitCode);
 }
 
 async function runResume(args: string[]): Promise<void> {
@@ -310,6 +320,9 @@ async function runResume(args: string[]): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
+  // Exit after the finally block — see runStart for why a process.exit()
+  // inside the try strands in-flight infrastructure teardown.
+  let exitCode: number;
   try {
     writeStdout(`${BOLD}${MAGENTA}Resuming...${RESET}`);
     writeStdout('');
@@ -323,13 +336,13 @@ async function runResume(args: string[]): Promise<void> {
 
     printSummary(orchestrator, selected.workflowId, artifactDir);
 
-    const exitCode = computeExitCode(orchestrator, selected.workflowId, controller.signal);
-    process.exit(exitCode);
+    exitCode = computeExitCode(orchestrator, selected.workflowId, controller.signal);
   } finally {
     rl.close();
     await orchestrator.shutdownAll().catch(() => {});
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
+  process.exit(exitCode);
 }
 
 function runInspect(args: string[]): void {

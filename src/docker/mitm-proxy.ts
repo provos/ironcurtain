@@ -174,6 +174,14 @@ export interface MitmProxyOptions {
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
   /**
+   * Connection-source filter for TCP mode. When set, sockets whose
+   * remote address fails the predicate are destroyed before any request
+   * parsing. Used by the tcp-hostonly topology, where the proxy listens
+   * on 0.0.0.0 and only the agent VM's host-only subnet may connect
+   * (see src/docker/network-topology.ts). No effect in UDS mode.
+   */
+  readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+  /**
    * Initial session ID for token stream routing. When provided, token
    * events extracted from LLM API endpoints are published into the
    * module-scoped singleton bus (see `getTokenStreamBus`) under this ID.
@@ -1315,7 +1323,22 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   }
 
   // Outer server - UDS listener, handles CONNECT and plain HTTP proxy requests
-  const outerServer = http.createServer((req, res) => {
+  const outerServer = http.createServer();
+
+  // Connection-source guard (tcp-hostonly topology): destroy sockets from
+  // outside the allowed subnet before any HTTP parsing happens. Covers
+  // plain requests, CONNECT, and WebSocket upgrades alike since all ride
+  // on the same TCP connections.
+  if (options.allowRemoteAddress) {
+    const allowRemoteAddress = options.allowRemoteAddress;
+    outerServer.on('connection', (socket) => {
+      if (!allowRemoteAddress(socket.remoteAddress)) {
+        socket.destroy();
+      }
+    });
+  }
+
+  outerServer.on('request', (req, res) => {
     // Handle plain HTTP proxy requests for passthrough and Debian registry domains.
     // HTTP proxy clients send absolute URLs: "GET http://host:port/path".
     // Only Debian registries are included here because apt uses plain HTTP

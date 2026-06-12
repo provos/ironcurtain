@@ -66,6 +66,17 @@ export interface CodeModeProxyOptions {
   readonly config: IronCurtainConfig;
   /** Listen mode: 'uds' (default) or 'tcp'. TCP mode uses OS-assigned port. */
   readonly listenMode?: 'uds' | 'tcp';
+  /**
+   * TCP bind address. Defaults to 127.0.0.1 (the tcp-sidecar topology,
+   * where Docker Desktop forwards `host.docker.internal` to loopback).
+   * The tcp-hostonly topology binds 0.0.0.0 — the vmnet gateway interface
+   * does not exist until the first container attaches — and MUST pair
+   * that with `allowRemoteAddress` to keep the unauthenticated MCP
+   * endpoint off the LAN. Ignored in UDS mode.
+   */
+  readonly bindHost?: string;
+  /** Connection-source filter forwarded to the TCP transport. Ignored in UDS mode. */
+  readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
 }
 
 export function createCodeModeProxy(options: CodeModeProxyOptions): DockerProxy {
@@ -174,7 +185,9 @@ export function createCodeModeProxy(options: CodeModeProxyOptions): DockerProxy 
 
       // 3. Start the transport
       if (useTcp) {
-        transport = new TcpServerTransport('127.0.0.1', 0);
+        transport = new TcpServerTransport(options.bindHost ?? '127.0.0.1', 0, {
+          allowRemoteAddress: options.allowRemoteAddress,
+        });
       } else {
         transport = new UdsServerTransport(options.socketPath);
       }

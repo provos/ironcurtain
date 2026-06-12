@@ -24,14 +24,69 @@ settings:
     IMPORTANT: The investigation journal at `.workflow/journal/journal.md` is the source of truth for what has been tried, what worked, and what failed. Read it before starting any work. Only the orchestrator updates it.
 
 states:
+  threat_model:
+    type: agent
+    description: 'Top-down attack-surface mapping — produces the threat-model artifact that scopes the rest of the investigation'
+    persona: global
+    skills:
+      - threat-model
+    prompt: |
+      You are a threat modeler producing the top-down map of this system's attack surface. The map you write tells `analyze` which entry points to trace and which bug classes each surface admits, tells the orchestrator when the hypothesis ledger has actually covered the surface, and tells `triage` which actor and asset a finding's CVSS vector anchors on. Read the task description first — it names the scope and the attacker, but it is NOT the system's only trust boundary; map every entry point the source tree shows and mark the ones outside task scope as deprioritized rather than omitting them.
+
+      **First action**: if a "Scoping from the previous agent" section is present at the top of this message, read its Directive subsection — it tells you whether this is a fresh build or a refinement (e.g., "discover found an entry point at X that §3 doesn't have — add it and re-run gap-fill"). On cold start the section is absent; that is expected.
+
+      ## Static analysis only
+
+      You read source, git history, build manifests, and docs. You do NOT build, execute, fuzz, or modify the target, and you do NOT make network requests against the target's infrastructure. If you need to confirm a surface is reachable, that is `analyze`'s job — record it as a §6 open question instead.
+
+      ## What to gather
+
+      Collect, then synthesize. The collection is sized to the target — for a small target (<50 source files) read the tree directly; for a large one, sample by surface and read selectively.
+
+      - **What it is.** README, SECURITY.md, CHANGELOG, top-level docs/, build manifest (package.json / Cargo.toml / setup.py / CMakeLists.txt / go.mod). Produces §1 system context.
+      - **What it protects.** Sensitive data the code reads/writes (secrets, keys, user records), process integrity (always present for native code), service availability (always present for servers), downstream-embedder integrity (libraries). Produces §2 assets.
+      - **Where untrusted input enters.** Grep the source tree against the entry-point surface taxonomy in the `threat-model` skill (network, file/format parsing, CLI/env, deserialization, DB/query, IPC/plugins, supply chain, infra/IAM). Record file:function for each hit. Produces §3 entry points.
+      - **What has gone wrong before.** `git -C <workspace> log --all -i --grep='CVE-\|security\|vuln\|exploit\|overflow\|injection\|traversal' --oneline` (extend keywords with stack-specific terms once you know the language/domain). Read the diff of each hit. Any in-tree `SECURITY.md` advisories or `issues/` exports. Produces §4 `evidence` cells.
+
+      ## Synthesize §1–§3
+
+      Write §1 from the docs read. Write §2 from the asset findings; assign sensitivity per the skill's enum. Write §3 from the surface hits: for each, name the trust boundary it crosses ("untrusted file → process memory", "unauth HTTP → application logic") and which §2 assets are reachable from it.
+
+      ## Populate §4 — cluster, then gap-fill
+
+      **Cluster the evidence.** Group git-log / advisory hits by `(entry point, bug class, asset reached)`. Each cluster becomes ONE §4 row at the abstraction level where it survives a patch (apply the litmus test in the `threat-model` skill). The CVE/commit IDs go in the `evidence` cell; they are not the threat statement.
+
+      **Gap-fill with STRIDE.** For every §3 entry point — including the ones evidence already covered — walk the STRIDE prompts (or the infra/IAM prompts for infra surfaces) in the `threat-model` skill and add a §4 row for each plausible category. Gap-fill rows have empty `evidence`; that is expected. Score `actor` from the entry point, `impact` from the asset and bug class, `likelihood` from technique prevalence + surface reachability + evidence count − controls, per the skill's scoring guide.
+
+      **Coverage check before emit.** For every §3 row, the `entry_point` name MUST appear verbatim in at least one §4 `surface` cell, OR a §5 row MUST say "<entry_point>: out of scope because …". If any §3 row fails this check, gap-fill was incomplete — go back and add the missing §4 row before writing the file. Sort §4 by (impact desc, likelihood desc) and assign `T1`, `T2`, … in sorted order.
+
+      ## §5, §6, §7
+
+      Populate §5 with every entry point and STRIDE category you considered and ruled out, with a reason ("Repudiation: not applicable, no multi-user actions"; "<entry_point>: outside task scope per task description"). Populate §6 with everything the code could not tell you (deployment context, intended actors, upstream controls, risk appetite). Populate §7 provenance per the skill's schema.
+
+      Write the artifact to `.workflow/threat_model/threat_model.md`. The schema, table columns, and enum values are a contract — keep them exactly as specified in the `threat-model` skill so downstream states can parse them.
+
+      ## Hand-back
+
+      After writing the file, your response body (before the `agent_status` block) should list: (1) the top 5 §4 threats by impact × likelihood (id + one-line description), (2) the count of §4 rows with evidence vs without (shows gap-fill ran), (3) which §3 entry points fall inside vs outside the task's stated scope. The orchestrator uses this to write its first `analyze` directive.
+    inputs:
+      - journal?
+    outputs:
+      - threat_model
+    transitions:
+      - to: orchestrator
+
   analyze:
     type: agent
     description: 'Structural code analysis — maps call chains, entry points, and build system'
     persona: global
     skills:
       - memory-safety-c-cpp
+      - threat-model
     prompt: |
       You are a code analyst mapping the structure of code in scope for a vulnerability investigation. Read the task description first — it defines the scope (file, directory, module, subsystem) and the threat model (who can reach this code and how). You have access to a source tree at the workspace root.
+
+      **Threat-model anchoring.** If `.workflow/threat_model/threat_model.md` exists, read it before anything else. Its §3 entry-points table is the starting set for the backward call-graph trace in item 2 — every §3 row whose `entry_point` falls inside the task's scope MUST be traced. Its §4 threats table names which bug-class vocabulary each surface admits; consult the relevant surface skill (e.g. `memory-safety-c-cpp`) for the concrete patterns within each class, but let the §4 row decide WHICH classes to apply to each entry point. When the threat-model artifact is absent (legacy run), fall back to deriving entry points from the task description alone.
 
       **First action**: if a "Scoping from the previous agent" section is present at the top of this message, read its Directive and Notes subsections — they tell you what specifically to focus on this round (e.g., "prior analysis missed X, look deeper at Y"). If the scoping section is absent on cold start that is expected; otherwise, if it is missing or vague, STOP and report back with an `escalate`-style agent_status rather than improvising from the task description alone.
 
@@ -58,12 +113,17 @@ states:
 
          Apply every pattern from the surface skill that plausibly fits the code — do not stop at the first match. Surfaces that admit multiple bug classes deserve documented findings across each. Tunnel-visioning on one bug class is the most common failure mode of this state; if the skill names five patterns and you only walked the code for one, the analysis is incomplete.
 
-         For each pattern instance found, document: the source location (file:line), the data flow path, the types involved, the boundary value where the pattern activates, the bug-class identifier from the surface skill's taxonomy, and a **Reachability sketch** — a short trace from attacker-controlled input to the pattern site naming each guard between (file:line of the guard, what it checks, what value range it admits). If prior journal rounds have evidence that a guard along the path is impassable or has been bypassed, note that. Reachability is structural, not dynamic — do not validate by execution; just document what the code shows. Do not assess exploitability beyond reachability; that is downstream agents' job.
+         For each pattern instance found, document: the source location (file:line), the data flow path, the types involved, the boundary value where the pattern activates, the bug-class identifier from the surface skill's taxonomy, a **`Threat:` line** listing the §4 threat ID(s) from `.workflow/threat_model/threat_model.md` that this pattern instantiates (e.g. `Threat: T1, T3`), and a **Reachability sketch** — a short trace from attacker-controlled input to the pattern site naming each guard between (file:line of the guard, what it checks, what value range it admits). If prior journal rounds have evidence that a guard along the path is impassable or has been bypassed, note that. Reachability is structural, not dynamic — do not validate by execution; just document what the code shows. Do not assess exploitability beyond reachability; that is downstream agents' job.
+
+         A pattern instance whose bug class does not map to any existing §4 threat means the threat table is missing a row — note `Threat: (unmapped — §4 needs a row for <bug-class> via <entry_point>)` so the orchestrator can route a `threat_model` refinement; do NOT leave the `Threat:` line absent.
+
+      8. **Threat-coverage note.** After completing the cross-cutting analysis, emit one line per in-scope §4 threat with `likelihood` ∈ {`possible`, `likely`, `almost_certain`}: either `T<n>: instantiated by <pattern-instance refs>` or `T<n>: no concrete pattern instance found in this scope`. The orchestrator uses these lines to decide whether an uncovered threat needs a coverage-driven harness directive or a §5 deprioritization.
 
       The function catalog and cross-cutting analysis are the most important outputs. They give downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
 
       Write your analysis to `.workflow/analysis/analysis.md`.
-    inputs: []
+    inputs:
+      - threat_model?
     outputs:
       - analysis
     transitions:
@@ -83,7 +143,7 @@ states:
 
       ## Cold start
 
-      If the journal at `.workflow/journal/journal.md` does not exist, this is a cold start: create the journal with the initial header and set verdict to `reanalyze`. Your directive to analyze should be minimal — just name the target code from the task description. Don't re-specify what analysis to do; analyze's prompt covers that.
+      If the journal at `.workflow/journal/journal.md` does not exist, this is a cold start: create the journal with the initial header and set verdict to `threat_model`. Your directive to `threat_model` should be minimal — just name the target tree from the task description. Don't re-specify what to map; threat_model's prompt covers that. After threat_model returns, your next routing is `reanalyze` with a directive that names which §4 threats (by ID) and §3 entry points the structural analysis should cover first — use threat_model's hand-back (top-5 threats by impact × likelihood, in-scope vs out-of-scope entry points) to pick.
 
       ## Output format
 
@@ -141,6 +201,12 @@ states:
       ## Routing decisions
 
       One subsection per state the orchestrator can dispatch to. `harness_build` and `harness_validate` are NOT listed — the orchestrator does not route to them directly; they run inside the harness pipeline and hand control back to the orchestrator only after `harness_validate` approves.
+
+      ### `threat_model` — verdict: `threat_model`
+
+      - **When:** Cold start (always first), OR mid-investigation when the threat-model artifact is stale: `discover`/`analyze` found an entry point not in §3, a hypothesis is tagged `Threat: (unmapped …)`, or the §4 table has zero in-scope rows with `likelihood ≥ possible` (the model under-scoped).
+      - **Directive must supply:** On cold start, just the target tree. On refinement, the specific gap — the missing entry point, the unmapped bug-class/surface pair, or the §4 rows whose scoring needs revision.
+      - **Audit on return:** Read `.workflow/threat_model/threat_model.md`. Confirm the entry-point→threat coverage invariant from the `threat-model` skill holds (every §3 row appears verbatim in some §4 `surface` cell or has a §5 reason). Confirm §4 has at least one empty-evidence row (gap-fill ran). If either fails, re-route to `threat_model` with a directive naming the gap. If both hold, route to `reanalyze`.
 
       ### `analyze` — verdict: `reanalyze`
 
@@ -241,6 +307,8 @@ states:
 
       Use stable hypothesis IDs (`h1`, `h2`, ...) — assign them on first ledger emission by walking the analyze artifact's cross-cutting pattern instances in order, then keep those IDs stable across rounds (they are the same IDs that flow into `report.hN.md` filenames at `conclude`). Every hypothesis the analysis enumerates MUST appear in the ledger; silent omission is forbidden.
 
+      Immediately after the per-hypothesis lines, emit a **threat-coverage line** of the form `Threat coverage: T1 → h1,h3; T2 → h2; T4 → uncovered; T5 → deprioritized (§5)`. Populate it from the `Threat:` tags in `.workflow/analysis/analysis.md` cross-referenced against `.workflow/threat_model/threat_model.md` §4 (in-scope rows with `likelihood` ∈ {`possible`, `likely`, `almost_certain`} only) and §5. A threat is `uncovered` when no hypothesis is tagged with it AND it is not in §5.
+
       Terminal states:
       - **confirmed** — `discover` returned `approved` for this hypothesis AND `triage` produced a verdict (approved, insufficient, or escalate). Confirmed-but-insufficient counts as terminal because triage made the call.
       - **harness-tested-and-rejected** — `discover` returned `blocked` with execution evidence per the `discover` audit rules above, OR `differential_validate` concluded the hypothesis is not exploitable. Text-only "looks safe" is NOT terminal — that hypothesis is still open and you must route to `harness_design` / `discover`, not defer. "Execution evidence" requires the harness corpus to have actually hit the hypothesis's named code site (function/file/line) — `discover`'s coverage report or `harness_validate`'s per-function coverage must cite per-site hits. A sanitizer-clean run where the targeted site received zero coverage is NOT terminal evidence; the corpus did not exercise the hypothesis. Extend the corpus through `harness_design` / `harness_build` and re-run `discover`, or defer with reason (a) if the surface is genuinely out of task scope. Do not mark `harness-tested-and-rejected` on aggregate-corpus statistics ("N rounds, no fire") that bypass the named site.
@@ -249,12 +317,14 @@ states:
       `complete` is FORBIDDEN when:
       - any hypothesis is unaccounted-for in the ledger, OR
       - any `deferred` entry omits a reason or names a reason outside the (a)–(c) list, OR
-      - any `deferred (b)` entry's underlying issue is a fixable harness-build problem (missing apt/pip dependency, missing build flag, missing codec library that exists as a package) rather than an intrinsic limitation — route through `harness_design` with an environment-fix directive instead.
+      - any `deferred (b)` entry's underlying issue is a fixable harness-build problem (missing apt/pip dependency, missing build flag, missing codec library that exists as a package) rather than an intrinsic limitation — route through `harness_design` with an environment-fix directive instead, OR
+      - the threat-coverage line shows any in-scope §4 threat as `uncovered`. For each uncovered threat, route to `reanalyze` (directive: "produce pattern instances for T<n> on <surface>") when the surface is in scope but analyze missed it, OR route to `harness_design` with a coverage-driven directive when analyze noted "no concrete pattern instance found" but the surface is under-exercised, OR route to `threat_model` (directive: "move T<n> to §5 with reason …") when the threat is genuinely out of the task's scope. Do NOT silently drop an uncovered threat to reach `complete`.
 
       When the ledger is fully terminal — every hypothesis is `confirmed`, `harness-tested-and-rejected`, or `deferred` with a valid reason — set verdict to `complete`. Escalation is for being stuck; completion is for being done. "No exploitable vulnerability found" is a valid and valuable outcome, but it must be backed by a ledger showing every hypothesis was actually tested or explicitly deferred — not merely by the absence of a confirmed finding.
 
       **Stall detection.** If the same state has been visited 3+ times without progress, results contradict across layers, or you are uncertain about strategy, set verdict `escalate` rather than continuing.
     inputs:
+      - threat_model?
       - analysis?
       - harness_design?
       - harness_build?
@@ -266,6 +336,9 @@ states:
     outputs:
       - journal
     transitions:
+      - to: threat_model
+        when:
+          verdict: threat_model
       - to: harness_design
         when:
           verdict: harness_design
@@ -303,6 +376,7 @@ states:
     present:
       - journal
       - analysis
+      - threat_model?
       - discoveries?
     transitions:
       - to: orchestrator
@@ -668,8 +742,9 @@ states:
     skills:
       - vulnerability-triage
       - memory-safety-c-cpp
+      - threat-model
     prompt: |
-      You are a senior vulnerability triager. Your job is to **interpret** what `discover` demonstrated and translate it into threat-model language. You do NOT run fresh experiments — you may reproduce discover's experiments to confirm them, but if evidence is too thin for the severity a finding would warrant, set verdict `insufficient` and name the specific gap for discover to close next. Read the per-hypothesis `.workflow/discoveries/findings.h*.md` files (one per hypothesis) and `.workflow/journal/journal.md`. Read only the `findings.hN.md` files for the hypotheses you are triaging this round.
+      You are a senior vulnerability triager. Your job is to **interpret** what `discover` demonstrated and translate it into threat-model language. When `.workflow/threat_model/threat_model.md` is present, anchor each finding on its tagged §4 threat row: rubric item 7 (external exploitability trace) names the §3 `trust_boundary` of that threat's `surface`; rubric item 4 (adjacency / payload model) names the §2 `reachable_assets`; CVSS Attack Vector maps from the threat's `actor` enum per the `threat-model` skill. You do NOT run fresh experiments — you may reproduce discover's experiments to confirm them, but if evidence is too thin for the severity a finding would warrant, set verdict `insufficient` and name the specific gap for discover to close next. Read the per-hypothesis `.workflow/discoveries/findings.h*.md` files (one per hypothesis) and `.workflow/journal/journal.md`. Read only the `findings.hN.md` files for the hypotheses you are triaging this round.
 
       **First action**: read the "Scoping from the previous agent" section at the top of this message. If it is absent, triage every hypothesis with a `.workflow/discoveries/findings.hN.md` file. If it is present but vague, STOP and report back with an `escalate`-style agent_status.
 
@@ -686,6 +761,7 @@ states:
       - discoveries
       - harness_build
       - journal
+      - threat_model?
     outputs:
       - triage
     transitions:
@@ -761,6 +837,10 @@ states:
       - A `deferred (b)` entry whose underlying issue was a missing apt-installable dependency, missing pip package, missing build flag, missing codec library that exists as a package, or any other fixable harness-build problem is a fail (incoherent — should have routed through `harness_design` for the environment fix instead of deferring).
       - Every hypothesis the analysis enumerates MUST appear in the ledger; silent omission is forbidden.
 
+      ##### Threat coverage
+
+      When `.workflow/threat_model/threat_model.md` is present, render one row per §4 threat with `likelihood` ∈ {`possible`, `likely`, `almost_certain`}: `id | threat | hypotheses (hN,…) | status (covered / deprioritized §5 / uncovered)`. Populate from the `Threat:` tags in `analysis.md` and the orchestrator's threat-coverage ledger line. An `uncovered` row here is a coherence failure with the orchestrator's `complete` gate — it means the gate was bypassed; flag it explicitly rather than omitting the row.
+
       ##### Supporting coverage notes
 
       - Code paths exercised via harness, including coverage percentages as reported
@@ -800,6 +880,7 @@ states:
     inputs:
       - journal
       - analysis
+      - threat_model?
       - discoveries?
       - differential?
       - triage?
@@ -875,6 +956,7 @@ states:
       - triage?
       - journal
       - analysis
+      - threat_model?
     outputs:
       - report_review
     transitions:
@@ -918,6 +1000,7 @@ states:
       - report
       - triage
       - discoveries
+      - threat_model
       - journal
 
   aborted:

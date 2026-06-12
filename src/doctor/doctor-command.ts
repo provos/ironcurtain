@@ -11,10 +11,13 @@
  */
 
 import { parseArgs } from 'node:util';
+import { mkdirSync } from 'node:fs';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
 import {
+  checkActiveRuntime,
   checkAgentApiRoundtrip,
   checkAnnotationDrift,
+  checkAppleContainer,
   checkConfigLoad,
   checkConstitutionDrift,
   checkDocker,
@@ -23,6 +26,7 @@ import {
   checkNodeVersion,
   checkPolicyArtifacts,
   checkPreferredMode,
+  checkRosetta,
   checkSandbox,
   checkServerCredentials,
   collectDeclaredEnvVars,
@@ -98,6 +102,7 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
 
   const sandboxPromise = checkSandbox();
   const dockerPromise = checkDocker();
+  const applePromise = checkAppleContainer();
 
   const sandboxResult = await sandboxPromise;
   printCheck(sandboxResult);
@@ -106,6 +111,18 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
   const dockerResult = await dockerPromise;
   printCheck(dockerResult);
   collected.push(dockerResult);
+
+  const appleResult = await applePromise;
+  printCheck(appleResult);
+  collected.push(appleResult);
+
+  // Rosetta only matters when the Apple backend is usable: its BuildKit
+  // builder VM cannot build agent images without it.
+  if (appleResult.status === 'ok') {
+    const rosettaResult = checkRosetta();
+    printCheck(rosettaResult);
+    collected.push(rosettaResult);
+  }
 
   // Configuration — gates everything that needs the resolved config.
   printSection('Configuration');
@@ -120,18 +137,28 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
   }
   const config = configCheck.config;
 
-  // Reuse the dockerResult from the Environment section so Docker is
-  // probed at most once per doctor run. checkPreferredMode upgrades the
-  // earlier warn to a fail when preferredMode is "docker", because in that
-  // configuration Docker unavailability means sessions refuse to start.
-  const preferredModeResult = checkPreferredMode(config, dockerResult);
+  // Resolve which container backend sessions will actually use (env
+  // override > containerRuntime config > auto probe) and evaluate the
+  // remaining container checks against THAT backend — a Docker-less
+  // machine on the Apple runtime is a healthy setup, not a broken one.
+  const runtime = await checkActiveRuntime(config, dockerResult, appleResult);
+  printCheck(runtime.result);
+  collected.push(runtime.result);
+
+  // Reuse the availability result from the Environment section so each
+  // runtime is probed at most once per doctor run. checkPreferredMode
+  // upgrades the earlier warn to a fail when preferredMode is "docker",
+  // because in that configuration runtime unavailability means sessions
+  // refuse to start.
+  const preferredModeResult = checkPreferredMode(config, runtime.availability, runtime.label);
   printCheck(preferredModeResult);
   collected.push(preferredModeResult);
 
   // The resource probe is the slow part of this section (can take up to ~30s
-  // worst case waiting on `docker run`). Kick it off in parallel with the
+  // worst case waiting on a container run). Kick it off in parallel with the
   // synchronous policy-artifact checks below and await before printing.
-  const resourcePromise = dockerResult.status === 'ok' ? checkDockerResources(config) : undefined;
+  const resourcePromise =
+    runtime.availability.status === 'ok' ? checkDockerResources(config, {}, runtime.kind) : undefined;
 
   const policyCheck = checkPolicyArtifacts(config);
   for (const r of policyCheck.results) {
@@ -171,7 +198,16 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     collected.push(r);
   }
 
-  // MCP servers — parallel probes.
+  // MCP servers — parallel probes. The filesystem server's args point at
+  // the resolved allowedDirectory (default ~/.ironcurtain/sandbox); on a
+  // fresh install the directory doesn't exist yet and the server exits at
+  // startup, producing a false ✗. Sessions create their own sandbox dirs,
+  // so pre-creating the default here matches what a first session would do.
+  try {
+    mkdirSync(config.allowedDirectory, { recursive: true });
+  } catch {
+    // Non-fatal: the probe will report the failure with the real reason.
+  }
   printSection('MCP servers');
   const livenessResults = await checkMcpServerLiveness(config, { probe: deps.probeMcpServer });
   for (const r of livenessResults) {

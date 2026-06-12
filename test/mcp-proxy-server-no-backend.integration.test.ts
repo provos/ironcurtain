@@ -63,4 +63,48 @@ describe('mcp-proxy-server no-backend exit', { timeout: 30_000 }, () => {
     expect(stderr).toContain(MISSING_VAR);
     expect(stderr).toContain('ERROR: proxy subprocess for SERVER_FILTER="testserver" has no connected backend');
   });
+
+  it('warn-skips a backend whose binary is missing instead of dying with a fatal error', async () => {
+    const generatedDir = resolve(__dirname, '..', 'src', 'config', 'generated');
+
+    const mcpServersConfig = {
+      testserver: {
+        command: 'ironcurtain-definitely-not-a-binary-xyz',
+        args: ['--stdio'],
+        sandbox: false,
+      },
+    };
+
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      MCP_SERVERS_CONFIG: JSON.stringify(mcpServersConfig),
+      SERVER_FILTER: 'testserver',
+      GENERATED_DIR: generatedDir,
+      PROTECTED_PATHS: '[]',
+      SANDBOX_POLICY: 'warn',
+    };
+
+    const child = spawn('npx', ['tsx', 'src/trusted-process/mcp-proxy-server.ts'], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8');
+    });
+
+    const exitCode: number = await new Promise((resolveExit, rejectExit) => {
+      child.once('close', (code) => resolveExit(code ?? -1));
+      child.once('error', rejectExit);
+    });
+
+    // The relay still exits non-zero (no connected backend), but via the
+    // graceful per-server skip — never the "fatal error" path that used
+    // to surface in `ironcurtain mux` when docker was absent.
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('WARNING: Skipping MCP server "testserver": failed to connect');
+    expect(stderr).toContain('ERROR: proxy subprocess for SERVER_FILTER="testserver" has no connected backend');
+    expect(stderr).not.toContain('MCP Proxy Server fatal error');
+  });
 });

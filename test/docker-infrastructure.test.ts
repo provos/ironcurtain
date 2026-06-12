@@ -12,7 +12,7 @@ import {
 import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
-import type { DockerManager } from '../src/docker/types.js';
+import type { ContainerRuntime } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
@@ -285,7 +285,7 @@ describe('prepareConversationStateDir', () => {
 //
 // These tests exercise the container-creation helper used by
 // createDockerInfrastructure(). They drive a scripted PreContainerInfrastructure
-// with a mock DockerManager to verify:
+// with a mock ContainerRuntime to verify:
 //   - the main container's mount configuration (security: only sockets subdir
 //     in UDS mode, never the full session dir with escalation/audit files)
 //   - rollback semantics when a downstream step (connectivity check) fails
@@ -297,10 +297,10 @@ type MockDockerOverrides = Pick<CreateMockDockerOptions, 'exec' | 'create'>;
 /**
  * Thin wrapper around the shared createMockDocker that bundles a
  * DockerCallTracker for test assertions. The shared helper returns just
- * the DockerManager; this wrapper flattens the tracker into the same
+ * the ContainerRuntime; this wrapper flattens the tracker into the same
  * return shape the tests already use.
  */
-function makeMockDocker(overrides: MockDockerOverrides = {}): { docker: DockerManager } & DockerCallTracker {
+function makeMockDocker(overrides: MockDockerOverrides = {}): { docker: ContainerRuntime } & DockerCallTracker {
   const tracker = createDockerCallTracker();
   const docker = createMockDocker({ tracker, ...overrides });
   return { docker, ...tracker };
@@ -355,8 +355,11 @@ function makeMockConfig(): IronCurtainConfig {
 interface MockCoreOptions {
   readonly tempDir: string;
   readonly useTcp: boolean;
-  readonly docker: DockerManager;
+  readonly docker: ContainerRuntime;
   readonly adapter?: AgentAdapter;
+  /** Defaults to 'tcp-sidecar' when useTcp, else 'uds'. */
+  readonly topology?: PreContainerInfrastructure['topology'];
+  readonly hostOnlyNetwork?: PreContainerInfrastructure['hostOnlyNetwork'];
 }
 
 /**
@@ -400,7 +403,10 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
+    runtimeKind: opts.topology === 'tcp-hostonly' ? 'apple-container' : 'docker',
+    topology: opts.topology ?? (opts.useTcp ? 'tcp-sidecar' : 'uds'),
     useTcp: opts.useTcp,
+    hostOnlyNetwork: opts.hostOnlyNetwork,
     socketsDir,
     mitmAddr,
     authKind: 'apikey',
@@ -568,12 +574,118 @@ describe('createSessionContainers', () => {
     const expectedNetworkName = getInternalNetworkName(TEST_SHORT_ID);
     expect(removedNetworks).toContain(expectedNetworkName);
   });
+
+  // --- tcp-hostonly topology (apple-container) ---
+
+  const HOST_ONLY = { name: 'ironcurtain-hostonly-net', subnet: '192.168.205.0/24', gateway: '192.168.205.1' };
+
+  /** exec mock: proxy reachable at the gateway, egress probe blocked. */
+  const healthyHostOnlyExec = async (
+    _container: string,
+    cmd: readonly string[],
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
+    const target = cmd.join(' ');
+    if (target.includes('1.1.1.1')) return { exitCode: 1, stdout: '', stderr: 'Connection timed out' };
+    return { exitCode: 0, stdout: '', stderr: '' };
+  };
+
+  it('hostonly: attaches the main container to the host-only network with no sidecar', async () => {
+    const { docker, createCalls, createdNetworks } = makeMockDocker({ exec: healthyHostOnlyExec });
+    const core = makeMockCore({ tempDir, useTcp: true, topology: 'tcp-hostonly', hostOnlyNetwork: HOST_ONLY, docker });
+
+    const result = await createSessionContainers(core, makeMockConfig());
+
+    // Exactly one create: the main container. No socat sidecar.
+    expect(createCalls).toHaveLength(1);
+    const main = createCalls[0];
+    expect(main.network).toBe(HOST_ONLY.name);
+    expect(main.extraHosts).toBeUndefined();
+    // Proxy env points at the vmnet gateway, not host.docker.internal.
+    expect(main.env.HTTPS_PROXY).toBe(`http://${HOST_ONLY.gateway}:8443`);
+    expect(main.env.HTTP_PROXY).toBe(`http://${HOST_ONLY.gateway}:8443`);
+    // No single-file bind mounts: apple container virtiofs shares
+    // directories only, so the apt proxy config is written via exec.
+    expect(main.mounts.every((m) => !m.target.startsWith('/etc/apt/'))).toBe(true);
+
+    expect(result.sidecarContainerId).toBeUndefined();
+    // The prepare-phase network is reported as internalNetwork so the
+    // standard teardown paths remove it.
+    expect(result.internalNetwork).toBe(HOST_ONLY.name);
+    // The network is created during the prepare phase, never here.
+    expect(createdNetworks).toHaveLength(0);
+  });
+
+  it('hostonly: writes the apt proxy config via exec, then probes gateway reachability and egress', async () => {
+    const execTargets: string[] = [];
+    const { docker } = makeMockDocker({
+      exec: async (container, cmd) => {
+        execTargets.push(cmd.join(' '));
+        return healthyHostOnlyExec(container, cmd);
+      },
+    });
+    const core = makeMockCore({ tempDir, useTcp: true, topology: 'tcp-hostonly', hostOnlyNetwork: HOST_ONLY, docker });
+
+    await createSessionContainers(core, makeMockConfig());
+
+    const aptWrite = execTargets.find((t) => t.includes('/etc/apt/apt.conf.d/90-ironcurtain-proxy'));
+    expect(aptWrite).toBeDefined();
+    expect(aptWrite).toContain(`http://${HOST_ONLY.gateway}:8443`);
+    expect(execTargets.some((t) => t.includes(`TCP:${HOST_ONLY.gateway}:9123`))).toBe(true);
+    expect(execTargets.some((t) => t.includes('TCP:1.1.1.1:443'))).toBe(true);
+  });
+
+  it('hostonly: aborts and cleans up when the gateway proxies are unreachable', async () => {
+    const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker({
+      async exec(_container, cmd) {
+        // Fail the socat connectivity probes; let the apt config write pass.
+        if (cmd.some((c) => c.startsWith('TCP:'))) {
+          return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    const core = makeMockCore({ tempDir, useTcp: true, topology: 'tcp-hostonly', hostOnlyNetwork: HOST_ONLY, docker });
+
+    await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(
+      /cannot reach host-side proxies at gateway/,
+    );
+
+    expect(stoppedContainers).toContain('container-1');
+    expect(removedContainers).toContain('container-1');
+    expect(removedNetworks).toContain(HOST_ONLY.name);
+  });
+
+  it('hostonly: aborts and cleans up when internet egress is NOT blocked', async () => {
+    // Every probe succeeds — including the egress probe, meaning the
+    // "host-only" network can reach the internet. Must fail closed.
+    const { docker, removedContainers, removedNetworks } = makeMockDocker({
+      async exec() {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    const core = makeMockCore({ tempDir, useTcp: true, topology: 'tcp-hostonly', hostOnlyNetwork: HOST_ONLY, docker });
+
+    await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(/egress check failed/);
+
+    expect(removedContainers).toContain('container-1');
+    expect(removedNetworks).toContain(HOST_ONLY.name);
+  });
+
+  it('hostonly: throws when the bundle is missing its host-only network', async () => {
+    const { docker, createCalls } = makeMockDocker({ exec: healthyHostOnlyExec });
+    const core = makeMockCore({ tempDir, useTcp: true, topology: 'tcp-hostonly', docker });
+
+    await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(
+      /missing its host-only network or proxy ports/,
+    );
+    expect(createCalls).toHaveLength(0);
+  });
 });
 
 // --- destroyDockerInfrastructure tests ---
 //
 // These tests exercise the teardown counterpart to createDockerInfrastructure().
-// They drive a scripted DockerInfrastructure bundle with a mock DockerManager
+// They drive a scripted DockerInfrastructure bundle with a mock ContainerRuntime
 // and mock proxies to verify:
 //   - all teardown steps run, in the right order
 //   - UDS mode skips sidecar + network steps (those fields are undefined in
@@ -631,7 +743,7 @@ function makeTrackedDockerProxy(opts: { throwOnStop?: boolean } = {}): DockerPro
 interface MakeBundleOptions {
   readonly tempDir: string;
   readonly useTcp: boolean;
-  readonly docker: DockerManager;
+  readonly docker: ContainerRuntime;
   readonly mitmProxy: MitmProxy;
   readonly proxy: DockerProxy;
 }
@@ -738,7 +850,7 @@ describe('destroyDockerInfrastructure', () => {
     // failures internally, so downstream proxy stops should still run.
     const stoppedContainers: string[] = [];
     const removedContainers: string[] = [];
-    const docker: DockerManager = {
+    const docker: ContainerRuntime = {
       ...makeMockDocker().docker,
       async stop(id: string) {
         stoppedContainers.push(id);
