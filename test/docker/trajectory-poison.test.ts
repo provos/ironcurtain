@@ -241,14 +241,16 @@ describe('Trajectory poison: failure modes', () => {
       headers: { 'content-type': 'text/event-stream' },
     });
 
-    // Feed a malformed SSE event: message_start ok, but stream ends
-    // before message_stop arrives. Then signal upstream end via the
-    // PassThrough's end() — the reassembler.finalize() will throw,
-    // the tap should call markSessionPoisoned('reassembly-failure'),
-    // and no record should be enqueued.
+    // Feed a genuinely malformed event sequence: message_start (ok) followed
+    // by a content_block_delta for an index with NO preceding
+    // content_block_start. The dispatcher throws ("content_block_delta for
+    // unknown index 0"), latching the reassembler as failed — a real parse
+    // failure, distinct from a transport truncation. finalize() rethrows it
+    // (NOT a TruncatedStreamError), so the tap poisons 'reassembly-failure'
+    // and no record is enqueued.
     const malformedSse =
       'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"c","content":[]}}\n\n' +
-      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n';
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}\n\n';
 
     const src = new PassThrough();
     src.pipe(tap);
@@ -498,6 +500,55 @@ describe('Trajectory poison: failure modes', () => {
     );
     await new Promise<void>((r) => setImmediate(r));
     tap.destroy(new Error('socket reset before message_stop'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    if (existsSync(traceFile)) {
+      expect(readJsonl(traceFile).length).toBe(0);
+    }
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('mid-stream-abort');
+    }
+  });
+
+  it('lifecycle: clean end() with no terminal event poisons mid-stream-abort, NOT reassembly-failure', async () => {
+    // The gzip-tail recovery path turns an upstream reset into a graceful
+    // inlet.end() → a clean tap 'end' with no terminal event parsed. That is a
+    // transport truncation, not a reassembly bug, so it must poison
+    // mid-stream-abort. (Before the TruncatedStreamError fix this clean-end
+    // path mislabeled truncations as reassembly-failure.)
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-clean-end-no-terminal');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    // Well-formed partial stream (message_start, no message_stop), ended
+    // CLEANLY — mirrors an upstream reset flushed gracefully via inlet.end().
+    tap.end(
+      Buffer.from(
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"c","content":[]}}\n\n',
+        'utf-8',
+      ),
+    );
 
     await new Promise<void>((r) => setImmediate(r));
     await writer.endSession(sid);
