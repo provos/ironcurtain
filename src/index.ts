@@ -11,6 +11,7 @@ import {
   getPackageGeneratedDir,
 } from './config/index.js';
 import { getUserConfigPath } from './config/paths.js';
+import { modelFlagMisusedAsAgent } from './config/agent-model-guard.js';
 import { checkHelp, parseArgsStrict, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
@@ -97,6 +98,11 @@ export async function main(args?: string[]): Promise<void> {
   const rawWorkspace = values.workspace as string | undefined;
   const personaName = values.persona as string | undefined;
   const modelOverride = values.model as string | undefined;
+  const modelMisuse = modelFlagMisusedAsAgent(modelOverride);
+  if (modelMisuse) {
+    process.stderr.write(chalk.red(`${modelMisuse}\n`));
+    process.exit(1);
+  }
   const captureTracesOverride = (values['capture-traces'] as boolean | undefined) ? true : undefined;
   const config = loadConfig();
 

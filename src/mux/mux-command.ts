@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { getPtyRegistryDir } from '../config/paths.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
+import { modelFlagMisusedAsAgent } from '../config/agent-model-guard.js';
 import { loadConfig } from '../config/index.js';
 import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
 import {
@@ -139,6 +140,11 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
 
   const requestedAgentRaw = values.agent as string | undefined;
   const model = values.model as string | undefined;
+  const modelMisuse = modelFlagMisusedAsAgent(model);
+  if (modelMisuse) {
+    process.stderr.write(chalk.red(`${modelMisuse}\n`));
+    process.exit(1);
+  }
   // CLI flag forces capture on for spawned sessions; absence falls through to
   // each child's config resolution (so we pass the flag, never an explicit off).
   const captureTraces = (values['capture-traces'] as boolean | undefined) ? true : undefined;
