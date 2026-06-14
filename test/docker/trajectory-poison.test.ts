@@ -614,6 +614,50 @@ describe('Trajectory poison: failure modes', () => {
     }
   });
 
+  it('NON-STREAMING JSON on a reassembler host is captured raw, NOT poisoned', async () => {
+    // A capturable completion endpoint can answer stream:false with a single
+    // JSON object (content-type: application/json). It must be captured
+    // verbatim, NOT routed to the SSE reassembler — which would never see a
+    // terminal event and would falsely poison the session reassembly-failure.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-nonstreaming-json');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{"stream":false}', 'utf-8'));
+    const jsonBody =
+      '{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}';
+    // content-type: application/json (present, non-SSE) → reassembler must NOT engage.
+    const tap = handle.attachResponse({ statusCode: 200, headers: { 'content-type': 'application/json' } });
+    tap.end(Buffer.from(jsonBody, 'utf-8'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const lines = readJsonl(resolve(dir, `${sid}.jsonl`)) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    const rec = lines[0];
+    // Reassembler did NOT engage: raw verbatim capture, no structured fields.
+    expect(rec.response.streaming).toBe(false);
+    expect(rec.response.providerRequestId).toBeUndefined();
+    expect(rec.response.bodyUtf8).toBe(jsonBody);
+
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(1);
+    }
+  });
+
   it('HEADERLESS LIFECYCLE: codex completed-then-close with empty headers writes a record (canFinalize, not poison)', async () => {
     // The real codex header shape (no content-type) on the
     // completed-then-socket-close lifecycle: canFinalize() must recover a

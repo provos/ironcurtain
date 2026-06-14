@@ -215,23 +215,27 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       const tap = new PassThrough();
       const responseChunks: Buffer[] = [];
       let responseBytes = 0;
-      // Engagement is driven by HOST classification, OR'd with a
-      // content-type sniff. Codex's chatgpt.com Responses stream carries
-      // NO content-type header (verified via live --capture-traces), so a
-      // content-type-only gate never engages the reassembler on the real
-      // codex path. `createReassembler` returns a reassembler for known
-      // completion hosts and `undefined` for unknown ones; combined with
-      // the `isCapturableEndpoint` gate (only completion POST endpoints
-      // reach attachResponse), host classification is the authoritative
-      // streaming signal. A non-SSE body that ever reached a reassembler
-      // would fail to see a terminal event and poison `reassembly-failure`
-      // (loud) rather than silently corrupt.
-      const reassembler: Reassembler | undefined = createReassembler(inputs.host);
-      const streaming =
-        reassembler !== undefined ||
-        String(args.headers['content-type'] ?? '')
-          .toLowerCase()
-          .includes('text/event-stream');
+      // Decide whether to engage an SSE reassembler. A capturable completion
+      // endpoint (the only thing reaching attachResponse) can answer either
+      // as an SSE stream OR — when the client sets stream:false — as a single
+      // JSON object. Feeding a non-streaming JSON body into the reassembler
+      // would never yield a terminal event and would falsely poison the
+      // session `reassembly-failure`, so engage ONLY when the response is
+      // actually SSE:
+      //   - content-type contains `text/event-stream`, OR
+      //   - content-type is ABSENT on a host we have a reassembler for —
+      //     Codex's chatgpt.com Responses stream is SSE but sends no
+      //     content-type header (verified via live --capture-traces). A
+      //     non-streaming completion always sets `content-type:
+      //     application/json`, so an absent content-type unambiguously means
+      //     the headerless-SSE case.
+      // `createReassembler` returns `undefined` for unknown hosts, so those
+      // fall back to verbatim raw capture either way.
+      const contentType = String(args.headers['content-type'] ?? '').toLowerCase();
+      const isSse = contentType.includes('text/event-stream');
+      const reassembler: Reassembler | undefined =
+        isSse || contentType === '' ? createReassembler(inputs.host) : undefined;
+      const streaming = reassembler !== undefined || isSse;
       // The caller is responsible for wiring a decompressor in front of
       // this tap (see `createResponseCaptureInlet`). The bytes reaching
       // `tap.on('data')` are therefore always uncompressed; the
