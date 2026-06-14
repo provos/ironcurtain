@@ -12,11 +12,8 @@ import type { SessionId } from '../session/types.js';
 
 /**
  * Provider identity. `unknown` is reserved for hosts the capture sees but
- * cannot classify. Note: `'openai'` spans two wire formats —
- * `api.openai.com` Chat Completions and `chatgpt.com` Responses —
- * disambiguated downstream by the record's `host` field. A future schema
- * bump should prefer a dedicated `apiSurface` field over overloading
- * `provider` if the distinction needs to be first-class.
+ * cannot classify (and is captured raw). `'openai'` is the OpenAI Responses
+ * API stream Codex emits on `chatgpt.com`.
  */
 export type CaptureProvider = 'anthropic' | 'openai' | 'unknown';
 
