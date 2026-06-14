@@ -10,7 +10,14 @@
 
 import type { SessionId } from '../session/types.js';
 
-/** Provider identity. `unknown` is reserved for hosts the capture sees but cannot classify. */
+/**
+ * Provider identity. `unknown` is reserved for hosts the capture sees but
+ * cannot classify. Note: `'openai'` spans two wire formats —
+ * `api.openai.com` Chat Completions and `chatgpt.com` Responses —
+ * disambiguated downstream by the record's `host` field. A future schema
+ * bump should prefer a dedicated `apiSurface` field over overloading
+ * `provider` if the distinction needs to be first-class.
+ */
 export type CaptureProvider = 'anthropic' | 'openai' | 'unknown';
 
 /** Reason a session was poisoned. See §9 for the full taxonomy. */
@@ -159,6 +166,14 @@ export interface Reassembler {
    * state. After `finalize()`, the reassembler MUST NOT be reused.
    */
   finalize(): ReassemblyResult;
+  /**
+   * True once the provider's terminal event has been parsed
+   * (`message_stop` / `[DONE]` / `response.completed`). Lets the tap
+   * finalize a complete-but-socket-aborted stream (write a faithful
+   * record) instead of poisoning it as a mid-stream abort. When false,
+   * a close/error before the terminal event is a genuine truncation.
+   */
+  canFinalize(): boolean;
 }
 
 /**

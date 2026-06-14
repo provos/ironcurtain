@@ -18,6 +18,7 @@
 import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PassThrough } from 'node:stream';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
@@ -29,6 +30,8 @@ import { AnthropicReassembler, ReassemblyError } from '../../src/docker/trajecto
 import { beginCaptureExchange } from '../../src/docker/trajectory-tap.js';
 import type { ExchangeRecord, ManifestEntry } from '../../src/docker/trajectory-types.js';
 import type { SessionId } from '../../src/session/types.js';
+
+const FIXTURES = resolve(fileURLToPath(import.meta.url), '..', 'fixtures');
 
 function makeSessionId(id: string): SessionId {
   return id as SessionId;
@@ -413,6 +416,373 @@ describe('Trajectory poison: failure modes', () => {
     expect(end).toBeDefined();
     if (end?.event === 'session-end') {
       expect(end.exchanges).toBe(1);
+    }
+  });
+
+  it('lifecycle: Anthropic message_stop-then-close writes a record and does NOT poison', async () => {
+    // canFinalize() hardening: a socket abort AFTER the terminal event
+    // (message_stop) must finalize a faithful record, not poison.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-anth-stop-then-close');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    const completeSse =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"c","content":[],"stop_reason":null,"stop_sequence":null,"usage":{}}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n' +
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+
+    // Write the complete stream, then destroy WITHOUT a clean end.
+    tap.write(Buffer.from(completeSse, 'utf-8'));
+    await new Promise<void>((r) => setImmediate(r));
+    tap.destroy(new Error('socket reset after message_stop'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(1);
+    }
+  });
+
+  it('lifecycle: Anthropic close BEFORE message_stop still poisons mid-stream-abort (no record)', async () => {
+    // Genuinely-truncated stream: abort before the terminal event. The
+    // canFinalize() path must NOT rescue this.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-anth-truncated');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    tap.write(
+      Buffer.from(
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"c","content":[]}}\n\n',
+        'utf-8',
+      ),
+    );
+    await new Promise<void>((r) => setImmediate(r));
+    tap.destroy(new Error('socket reset before message_stop'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    if (existsSync(traceFile)) {
+      expect(readJsonl(traceFile).length).toBe(0);
+    }
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('mid-stream-abort');
+    }
+  });
+
+  it('lifecycle: Responses response.completed-then-close-without-end writes a record (not poisoned)', async () => {
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-resp-completed-then-close');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'chatgpt.com',
+      path: '/backend-api/codex/responses',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    const sse = readFileSync(resolve(FIXTURES, 'codex-responses-stream.sse'), 'utf-8');
+    tap.write(Buffer.from(sse, 'utf-8'));
+    await new Promise<void>((r) => setImmediate(r));
+    // Close WITHOUT a clean end after response.completed already landed.
+    tap.destroy(new Error('socket teardown at session end'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    expect(lines[0].response.bodyUtf8).toContain('17 * 23 = 17 * (20 + 3) = 340 + 51 = 391');
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(1);
+    }
+  });
+
+  it('HEADERLESS ENGAGEMENT: codex chatgpt.com with NO content-type still engages the reassembler (streaming:true + structured fields)', async () => {
+    // The live codex chatgpt.com response carries NO content-type header
+    // (only transfer-encoding:chunked + x-oai-request-id). This is the
+    // exact shape the content-type-only gate dropped to raw bytes. After
+    // the host-driven engagement fix the reassembler MUST engage.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-headerless-engagement');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'chatgpt.com',
+      path: '/backend-api/codex/responses',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    // NO content-type — mirrors the real codex upstream response headers.
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'transfer-encoding': 'chunked', 'x-oai-request-id': 'req_test' },
+    });
+
+    const sse = readFileSync(resolve(FIXTURES, 'codex-responses-stream.sse'), 'utf-8');
+    tap.end(Buffer.from(sse, 'utf-8'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    const rec = lines[0];
+    // Reassembler engaged: streaming flag + structured fields populated.
+    expect(rec.response.streaming).toBe(true);
+    expect(rec.response.providerRequestId).toBe('resp_044409b8234111cf016a2e059444e481998de5fc1941e9ce57');
+    expect(rec.response.stopReason).toBe('completed');
+    expect(rec.response.usage).toEqual({
+      input_tokens: 12047,
+      input_tokens_details: { cached_tokens: 11648 },
+      output_tokens: 27,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 12074,
+    });
+    // bodyUtf8 is the reassembled `"object":"response"` envelope, NOT raw SSE.
+    expect(rec.response.bodyUtf8).toContain('"object":"response"');
+    expect(rec.response.bodyUtf8).not.toContain('event: response.completed');
+    expect(rec.response.bodyUtf8).toContain('17 * 23 = 17 * (20 + 3) = 340 + 51 = 391');
+
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(1);
+    }
+  });
+
+  it('HEADERLESS LIFECYCLE: codex completed-then-close with empty headers writes a record (canFinalize, not poison)', async () => {
+    // The real codex header shape (no content-type) on the
+    // completed-then-socket-close lifecycle: canFinalize() must recover a
+    // faithful record rather than poison mid-stream-abort.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-headerless-completed-then-close');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'chatgpt.com',
+      path: '/backend-api/codex/responses',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({ statusCode: 200, headers: {} });
+
+    const sse = readFileSync(resolve(FIXTURES, 'codex-responses-stream.sse'), 'utf-8');
+    tap.write(Buffer.from(sse, 'utf-8'));
+    await new Promise<void>((r) => setImmediate(r));
+    // Close WITHOUT a clean end after response.completed already landed.
+    tap.destroy(new Error('socket teardown at session end'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    expect(lines[0].response.streaming).toBe(true);
+    expect(lines[0].response.bodyUtf8).toContain('17 * 23 = 17 * (20 + 3) = 340 + 51 = 391');
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(1);
+    }
+  });
+
+  it('lifecycle: GZIP path — terminal-bearing compressed stream then close-without-end still writes a record', async () => {
+    // The genuine gzip-path fix: on a graceful close-without-end, the
+    // proxy calls inlet.end() so zlib _flush emits the buffered tail and
+    // the reassembler sees response.completed. We exercise the decompressor
+    // inlet directly: write the full gzip then inlet.end() (mirroring the
+    // mitm-proxy upstream-close path), and assert a faithful record.
+    const { createResponseCaptureInlet } = await import('../../src/docker/trajectory-tap.js');
+    const zlib = await import('node:zlib');
+
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-resp-gzip-terminal');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'chatgpt.com',
+      path: '/backend-api/codex/responses',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const captureTap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' },
+    });
+    const tapSettled = new Promise<void>((settle) => {
+      captureTap.once('close', () => settle());
+      captureTap.once('error', () => settle());
+    });
+
+    const inlet = createResponseCaptureInlet({
+      captureTap,
+      contentEncoding: 'gzip',
+      captureHandle: handle,
+      onPoison: (reason) => writer.markSessionPoisoned(sid, reason),
+    });
+
+    const sse = readFileSync(resolve(FIXTURES, 'codex-responses-stream.sse'), 'utf-8');
+    const gz = zlib.gzipSync(Buffer.from(sse, 'utf-8'));
+    inlet.write(gz);
+    // Graceful close-without-end: end() (NOT destroy) so zlib flushes its
+    // tail through to the tap and the reassembler sees response.completed.
+    inlet.end();
+
+    await tapSettled;
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    expect(lines[0].response.bodyUtf8).toContain('17 * 23 = 17 * (20 + 3) = 340 + 51 = 391');
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+    }
+  });
+
+  it('lifecycle: error-then-close pair finalizes exactly once (one record, zero extra poison)', async () => {
+    // tap.destroy(err) emits 'error' then 'close'. With a terminal event
+    // already seen, the FIRST event must finalize and the SECOND must
+    // short-circuit via the finalized guard — exactly one record, no poison.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-error-then-close');
+    writer.beginSession({ sessionId: sid });
+
+    const handle = beginCaptureExchange({
+      writer,
+      sessionId: sid,
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      requestHeaders: { 'content-type': 'application/json' },
+      requestStartedAt: Date.now(),
+    });
+    handle.setRequestBody(Buffer.from('{}', 'utf-8'));
+    const tap = handle.attachResponse({
+      statusCode: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    const completeSse =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"c","content":[],"stop_reason":null,"stop_sequence":null,"usage":{}}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n' +
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    tap.write(Buffer.from(completeSse, 'utf-8'));
+    await new Promise<void>((r) => setImmediate(r));
+    // destroy(err) → 'error' then 'close'.
+    tap.destroy(new Error('reset'));
+
+    await new Promise<void>((r) => setImmediate(r));
+    await writer.endSession(sid);
+
+    const traceFile = resolve(dir, `${sid}.jsonl`);
+    const lines = readJsonl(traceFile) as ExchangeRecord[];
+    expect(lines.length).toBe(1);
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(false);
+      expect(end.poisonReason).toBeUndefined();
+    }
+  });
+
+  it('lifecycle: endSession teardown timeout poisons a never-settling in-flight tap', async () => {
+    // A stream that never terminates and never aborts would hang teardown.
+    // endSession must bound the in-flight wait and poison mid-stream-abort.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir, teardownTimeoutMs: 20 });
+    const sid = makeSessionId('sess-hung-teardown');
+    writer.beginSession({ sessionId: sid });
+
+    // A promise that never settles, registered as in-flight.
+    writer.trackInFlight(sid, new Promise<void>(() => {}));
+
+    await writer.endSession(sid);
+
+    const manifest = readManifest(dir);
+    const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
+    expect(end).toBeDefined();
+    if (end?.event === 'session-end') {
+      expect(end.poisoned).toBe(true);
+      expect(end.poisonReason).toBe('mid-stream-abort');
     }
   });
 

@@ -26,7 +26,7 @@ export class ReassemblyError extends Error {
   }
 }
 
-interface RawEvent {
+export interface RawEvent {
   readonly eventType: string;
   readonly dataUtf8: string;
   readonly offsetMs: number;
@@ -44,7 +44,7 @@ interface RawEvent {
  * rather than each chunk decoding independently to a `U+FFFD`
  * replacement and corrupting the captured body.
  */
-class SseLineSplitter {
+export class SseLineSplitter {
   private readonly decoder = new StringDecoder('utf8');
   private buffer = '';
   private currentEventType = '';
@@ -138,7 +138,7 @@ class SseLineSplitter {
  * makes up the value. Tracks brace depth while respecting string escapes
  * — we never need the parsed value, only the raw substring.
  */
-function readJsonValueSubstring(data: string, start: number): string | undefined {
+export function readJsonValueSubstring(data: string, start: number): string | undefined {
   // Skip leading whitespace
   let i = start;
   while (i < data.length && /\s/.test(data[i] ?? '')) i++;
@@ -178,7 +178,7 @@ function readJsonValueSubstring(data: string, start: number): string | undefined
 }
 
 /** Returns the index of the closing `"` of a JSON string starting at `start`. */
-function findJsonStringEnd(data: string, start: number): number {
+export function findJsonStringEnd(data: string, start: number): number {
   if (data[start] !== '"') return -1;
   let i = start + 1;
   while (i < data.length) {
@@ -200,7 +200,7 @@ function findJsonStringEnd(data: string, start: number): number {
  * Naïve scan that respects string escapes; sufficient for the
  * well-formed Anthropic/OpenAI envelopes we capture.
  */
-function findFieldValueSubstring(data: string, fieldName: string): string | undefined {
+export function findFieldValueSubstring(data: string, fieldName: string): string | undefined {
   const needle = `"${fieldName}"`;
   let i = 0;
   while (i < data.length) {
@@ -230,12 +230,51 @@ function findFieldValueSubstring(data: string, fieldName: string): string | unde
 }
 
 /**
+ * Replaces the value of a top-level field by substring. Locates
+ * `"fieldName"` followed by `:`, finds the existing value's substring,
+ * and splices in the new value. The new value MUST already be a valid
+ * JSON expression (string-with-quotes, object, array, primitive).
+ *
+ * A generic top-level-field splice — not provider-specific. Shared by
+ * the Anthropic envelope-splice (`content`/`stop_reason`/`usage`) and the
+ * Responses envelope-splice (`output`). Returns `body` unchanged if the
+ * field is absent.
+ */
+export function replaceTopLevelField(body: string, fieldName: string, newValue: string): string {
+  const needle = `"${fieldName}"`;
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"') {
+      const end = findJsonStringEnd(body, i);
+      if (end < 0) return body;
+      if (body.slice(i, end + 1) === needle) {
+        let j = end + 1;
+        while (j < body.length && /\s/.test(body[j] ?? '')) j++;
+        if (body[j] === ':') {
+          j++;
+          while (j < body.length && /\s/.test(body[j] ?? '')) j++;
+          const existing = readJsonValueSubstring(body, j);
+          if (existing !== undefined) {
+            return body.slice(0, j) + newValue + body.slice(j + existing.length);
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return body;
+}
+
+/**
  * Decodes a JSON string literal (the substring including surrounding
  * quotes) into the raw string it represents. Used for `text` /
  * `thinking` / `signature` payloads where the wire bytes carry escapes
  * we must decode before appending to our concatenation buffer.
  */
-function decodeJsonString(literal: string): string {
+export function decodeJsonString(literal: string): string {
   try {
     return JSON.parse(literal) as string;
   } catch {
@@ -255,8 +294,108 @@ function decodeJsonString(literal: string): string {
  * `tool_use.input` and `tool_calls[].function.arguments` are NEVER
  * encoded this way — they're spliced as raw wire substrings.
  */
-function encodeJsonString(value: string): string {
+export function encodeJsonString(value: string): string {
   return JSON.stringify(value);
+}
+
+// =====================================================================
+// Scalar-peek helpers (provider-neutral, pure substring readers)
+// =====================================================================
+
+/**
+ * Reads the `type` discriminator of an SSE data payload. The `type`
+ * field in `data` is the authoritative event identifier across both the
+ * Anthropic typed-event and OpenAI named-event streams; the SSE
+ * `event:` line is advisory.
+ */
+export function peekTypeField(data: string): string | undefined {
+  return peekStringField(data, 'type');
+}
+
+/** Reads a top-level JSON string field, decoded. Returns `undefined` if absent or not a string. */
+export function peekStringField(data: string, name: string): string | undefined {
+  const raw = findFieldValueSubstring(data, name);
+  if (raw === undefined || !raw.startsWith('"')) return undefined;
+  return decodeJsonString(raw);
+}
+
+/** Reads a top-level JSON number field. Returns `undefined` if absent or non-finite. */
+export function peekNumberField(data: string, name: string): number | undefined {
+  const raw = findFieldValueSubstring(data, name);
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// =====================================================================
+// Abstract SSE reassembler base
+// =====================================================================
+
+/**
+ * Shared SSE reassembler skeleton. Owns the boilerplate every provider's
+ * state machine needs — splitter feeding, event log, started-at clock,
+ * fail latching, and the finalize gating — and exposes three seams the
+ * subclasses implement:
+ *
+ *   - `dispatch(eventType, data)`: route a single SSE event into provider
+ *     state. May throw to latch a fatal reassembly failure.
+ *   - `terminalSeen()`: true once the provider's terminal event was
+ *     parsed (`message_stop`, `[DONE]`, or `response.completed`). Gates
+ *     both finalize success and the `canFinalize()` lifecycle signal.
+ *   - `assembleResult()`: build the final body + structured fields. May
+ *     throw `ReassemblyError`; the base does NOT catch it so the tap can
+ *     distinguish a reassembly failure from success.
+ *
+ * The base intentionally holds NO envelope-splice machinery — the three
+ * providers assemble differently (Anthropic splices a message envelope,
+ * ChatCompletions synthesizes, Responses assembles from item-done
+ * payloads), so that logic stays subclass-private.
+ */
+export abstract class AbstractSseReassembler implements Reassembler {
+  protected readonly splitter = new SseLineSplitter();
+  protected readonly events: RawEvent[] = [];
+  protected readonly startedAt: number = Date.now();
+  protected failed = false;
+  protected failureReason?: string;
+
+  push(chunk: Buffer): void {
+    if (this.failed) return;
+    this.splitter.feed(chunk, (eventType, data) => this.onEvent(eventType, data));
+  }
+
+  finalize(): ReassemblyResult {
+    this.splitter.flush((eventType, data) => this.onEvent(eventType, data));
+    if (this.failed) {
+      throw new ReassemblyError(this.failureReason ?? 'reassembly failed');
+    }
+    if (!this.terminalSeen()) {
+      throw new ReassemblyError('stream ended without terminal event');
+    }
+    return this.assembleResult();
+  }
+
+  /**
+   * True once the terminal event has been parsed. Lets the tap finalize a
+   * complete-but-socket-aborted stream instead of poisoning it.
+   */
+  canFinalize(): boolean {
+    return this.terminalSeen();
+  }
+
+  private onEvent(eventType: string, data: string): void {
+    this.events.push({ eventType, dataUtf8: data, offsetMs: Date.now() - this.startedAt });
+    if (this.failed) return;
+    try {
+      this.dispatch(eventType, data);
+    } catch (err) {
+      this.failed = true;
+      this.failureReason = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  protected abstract dispatch(eventType: string, data: string): void;
+  protected abstract terminalSeen(): boolean;
+  protected abstract assembleResult(): ReassemblyResult;
 }
 
 // =====================================================================
@@ -270,11 +409,7 @@ type AnthropicBlockState =
   | { kind: 'redacted_thinking'; openRaw: string }
   | { kind: 'other'; openRaw: string; rawDeltas: string[] };
 
-export class AnthropicReassembler implements Reassembler {
-  private readonly splitter = new SseLineSplitter();
-  private readonly events: RawEvent[] = [];
-  private readonly startedAt: number;
-
+export class AnthropicReassembler extends AbstractSseReassembler {
   /**
    * Envelope captured from `message_start.message` — used to extract
    * top-level fields (id, type, role, model, etc.). We splice the
@@ -290,33 +425,17 @@ export class AnthropicReassembler implements Reassembler {
   private providerRequestId?: string;
   private modelFingerprint?: string;
   private receivedMessageStop = false;
-  private failed = false;
-  private failureReason?: string;
 
-  constructor() {
-    this.startedAt = Date.now();
+  protected terminalSeen(): boolean {
+    return this.receivedMessageStop;
   }
 
-  push(chunk: Buffer): void {
-    if (this.failed) return;
-    this.splitter.feed(chunk, (eventType, data) => this.onEvent(eventType, data));
-  }
-
-  finalize(): ReassemblyResult {
-    this.splitter.flush((eventType, data) => this.onEvent(eventType, data));
-    if (this.failed) {
-      throw new ReassemblyError(this.failureReason ?? 'anthropic reassembly failed');
-    }
-    if (!this.receivedMessageStop) {
-      throw new ReassemblyError('anthropic stream ended without message_stop');
-    }
+  protected assembleResult(): ReassemblyResult {
     if (!this.messageEnvelope) {
       throw new ReassemblyError('anthropic stream missing message_start envelope');
     }
-
     const bodyUtf8 = this.assembleBody();
     const usage = this.parseUsage();
-
     return {
       bodyUtf8,
       providerRequestId: this.providerRequestId,
@@ -327,21 +446,10 @@ export class AnthropicReassembler implements Reassembler {
     };
   }
 
-  private onEvent(eventType: string, data: string): void {
-    this.events.push({ eventType, dataUtf8: data, offsetMs: Date.now() - this.startedAt });
-    if (this.failed) return;
-    try {
-      this.dispatch(eventType, data);
-    } catch (err) {
-      this.failed = true;
-      this.failureReason = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  private dispatch(eventType: string, data: string): void {
+  protected dispatch(eventType: string, data: string): void {
     // The `type` field in `data` is the authoritative event identifier;
     // SSE `event:` lines are advisory.
-    const type = this.peekTypeField(data) ?? eventType;
+    const type = peekTypeField(data) ?? eventType;
     switch (type) {
       case 'message_start':
         this.onMessageStart(data);
@@ -371,32 +479,23 @@ export class AnthropicReassembler implements Reassembler {
     }
   }
 
-  private peekTypeField(data: string): string | undefined {
-    const raw = findFieldValueSubstring(data, 'type');
-    if (!raw) return undefined;
-    if (raw.startsWith('"') && raw.endsWith('"')) {
-      return decodeJsonString(raw);
-    }
-    return undefined;
-  }
-
   private onMessageStart(data: string): void {
     const messageRaw = findFieldValueSubstring(data, 'message');
     if (!messageRaw) {
       throw new ReassemblyError('message_start missing `message` field');
     }
     this.messageEnvelope = messageRaw;
-    const id = this.peekStringField(messageRaw, 'id');
+    const id = peekStringField(messageRaw, 'id');
     if (id) this.providerRequestId = id;
   }
 
   private onContentBlockStart(data: string): void {
-    const index = this.peekNumberField(data, 'index');
+    const index = peekNumberField(data, 'index');
     const blockRaw = findFieldValueSubstring(data, 'content_block');
     if (index === undefined || blockRaw === undefined) {
       throw new ReassemblyError('content_block_start missing index or content_block');
     }
-    const kind = this.peekStringField(blockRaw, 'type');
+    const kind = peekStringField(blockRaw, 'type');
     let state: AnthropicBlockState;
     if (kind === 'text') {
       state = { kind: 'text', openRaw: blockRaw, textChunks: [] };
@@ -415,7 +514,7 @@ export class AnthropicReassembler implements Reassembler {
   }
 
   private onContentBlockDelta(data: string): void {
-    const index = this.peekNumberField(data, 'index');
+    const index = peekNumberField(data, 'index');
     const deltaRaw = findFieldValueSubstring(data, 'delta');
     if (index === undefined || deltaRaw === undefined) {
       throw new ReassemblyError('content_block_delta missing index or delta');
@@ -424,7 +523,7 @@ export class AnthropicReassembler implements Reassembler {
     if (!block) {
       throw new ReassemblyError(`content_block_delta for unknown index ${index}`);
     }
-    const deltaType = this.peekStringField(deltaRaw, 'type');
+    const deltaType = peekStringField(deltaRaw, 'type');
     if (block.kind === 'text' && deltaType === 'text_delta') {
       const literal = findFieldValueSubstring(deltaRaw, 'text');
       if (literal) block.textChunks.push(decodeJsonString(literal));
@@ -462,7 +561,7 @@ export class AnthropicReassembler implements Reassembler {
   }
 
   private onContentBlockStop(data: string): void {
-    const index = this.peekNumberField(data, 'index');
+    const index = peekNumberField(data, 'index');
     if (index === undefined) {
       throw new ReassemblyError('content_block_stop missing index');
     }
@@ -489,19 +588,6 @@ export class AnthropicReassembler implements Reassembler {
     if (usageRaw) this.usageRaw = usageRaw;
   }
 
-  private peekStringField(data: string, name: string): string | undefined {
-    const raw = findFieldValueSubstring(data, name);
-    if (!raw || !raw.startsWith('"')) return undefined;
-    return decodeJsonString(raw);
-  }
-
-  private peekNumberField(data: string, name: string): number | undefined {
-    const raw = findFieldValueSubstring(data, name);
-    if (!raw) return undefined;
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : undefined;
-  }
-
   /**
    * Assembles the final non-streaming message body from the captured
    * state. Constructed via raw substring concatenation — see §6 invariant
@@ -521,15 +607,15 @@ export class AnthropicReassembler implements Reassembler {
       throw new ReassemblyError('cannot assemble: missing envelope');
     }
     let body = this.messageEnvelope;
-    body = this.replaceField(body, 'content', this.assembleContentArray());
+    body = replaceTopLevelField(body, 'content', this.assembleContentArray());
     if (this.stopReason !== undefined) {
-      body = this.replaceField(body, 'stop_reason', encodeJsonString(this.stopReason));
+      body = replaceTopLevelField(body, 'stop_reason', encodeJsonString(this.stopReason));
     }
     if (this.stopSequence !== undefined) {
-      body = this.replaceField(body, 'stop_sequence', this.stopSequence);
+      body = replaceTopLevelField(body, 'stop_sequence', this.stopSequence);
     }
     if (this.usageRaw !== undefined) {
-      body = this.replaceField(body, 'usage', this.usageRaw);
+      body = replaceTopLevelField(body, 'usage', this.usageRaw);
     }
     return body;
   }
@@ -578,85 +664,612 @@ export class AnthropicReassembler implements Reassembler {
       return undefined;
     }
   }
+}
 
-  /**
-   * Replaces the value of a top-level field by substring. Locates
-   * `"fieldName"` followed by `:`, finds the existing value's
-   * substring, and splices in the new value. The new value MUST already
-   * be a valid JSON expression (string-with-quotes, object, array,
-   * primitive).
-   */
-  private replaceField(body: string, fieldName: string, newValue: string): string {
-    const needle = `"${fieldName}"`;
-    let i = 0;
-    while (i < body.length) {
-      const ch = body[i];
-      if (ch === '"') {
-        const end = findJsonStringEnd(body, i);
-        if (end < 0) return body;
-        if (body.slice(i, end + 1) === needle) {
-          let j = end + 1;
-          while (j < body.length && /\s/.test(body[j] ?? '')) j++;
-          if (body[j] === ':') {
-            j++;
-            while (j < body.length && /\s/.test(body[j] ?? '')) j++;
-            const existing = readJsonValueSubstring(body, j);
-            if (existing !== undefined) {
-              return body.slice(0, j) + newValue + body.slice(j + existing.length);
-            }
-          }
-        }
-        i = end + 1;
-        continue;
-      }
-      i++;
+// =====================================================================
+// OpenAI Chat Completions (api.openai.com /v1/chat/completions)
+// =====================================================================
+
+interface ChoiceState {
+  roleRaw?: string;
+  /** True once any chunk's delta carried a `content` key (regardless of value). */
+  sawContentKey: boolean;
+  contentChunks: string[];
+  /** True once any chunk's delta carried a `refusal` key. */
+  sawRefusalKey: boolean;
+  refusalChunks: string[];
+  finishReasonRaw?: string;
+}
+
+interface ToolCallState {
+  idRaw?: string;
+  nameRaw?: string;
+  typeRaw?: string;
+  argChunks: string[];
+}
+
+/**
+ * Reassembler for OpenAI Chat Completions streaming responses. Untyped
+ * `data:` chunks (`object:"chat.completion.chunk"`) terminated by a
+ * `[DONE]` sentinel. There is no `message_start` envelope, so the final
+ * `chat.completion` body is SYNTHESIZED from accumulated per-choice and
+ * per-tool-call state.
+ *
+ * Byte-fidelity note: `message.content` / `refusal` text leaves are
+ * decoded from the wire delta fragments, joined, and re-encoded once via
+ * the sanctioned `encodeJsonString`. `tool_calls[].function.arguments`
+ * is itself a JSON-STRING field in the non-streaming response, so the
+ * joined raw argument fragments are ALSO `encodeJsonString`'d when
+ * spliced — diverging from Anthropic `tool_use.input` (a raw object).
+ */
+export class ChatCompletionsReassembler extends AbstractSseReassembler {
+  private sawDone = false;
+  private envelopeCaptured = false;
+  private idRaw?: string;
+  private createdRaw?: string;
+  private modelRaw?: string;
+  private systemFingerprintRaw?: string;
+  private usageRaw?: string;
+  private providerRequestId?: string;
+  private modelFingerprint?: string;
+  private readonly choices = new Map<number, ChoiceState>();
+  private readonly toolCalls = new Map<number, Map<number, ToolCallState>>();
+
+  protected terminalSeen(): boolean {
+    return this.sawDone;
+  }
+
+  protected dispatch(_eventType: string, data: string): void {
+    const trimmed = data.trim();
+    if (trimmed === '[DONE]') {
+      this.sawDone = true;
+      return;
     }
-    return body;
+    if (trimmed.length === 0) return;
+    this.onChunk(data);
+  }
+
+  private onChunk(data: string): void {
+    if (!this.envelopeCaptured) {
+      this.idRaw = findFieldValueSubstring(data, 'id');
+      this.createdRaw = findFieldValueSubstring(data, 'created');
+      this.modelRaw = findFieldValueSubstring(data, 'model');
+      this.systemFingerprintRaw = findFieldValueSubstring(data, 'system_fingerprint');
+      const id = this.idRaw && this.idRaw.startsWith('"') ? decodeJsonString(this.idRaw) : undefined;
+      if (id) this.providerRequestId = id;
+      const fp =
+        this.systemFingerprintRaw && this.systemFingerprintRaw.startsWith('"')
+          ? decodeJsonString(this.systemFingerprintRaw)
+          : undefined;
+      if (fp) this.modelFingerprint = fp;
+      this.envelopeCaptured = true;
+    }
+
+    const usageRaw = findFieldValueSubstring(data, 'usage');
+    if (usageRaw !== undefined && usageRaw !== 'null') {
+      this.usageRaw = usageRaw;
+    }
+
+    const choicesRaw = findFieldValueSubstring(data, 'choices');
+    if (choicesRaw === undefined || !choicesRaw.startsWith('[')) return;
+    for (const choiceRaw of splitJsonArrayElements(choicesRaw)) {
+      this.onChoice(choiceRaw);
+    }
+  }
+
+  private onChoice(choiceRaw: string): void {
+    const index = peekNumberField(choiceRaw, 'index');
+    if (index === undefined) return;
+    let choice = this.choices.get(index);
+    if (!choice) {
+      choice = { sawContentKey: false, contentChunks: [], sawRefusalKey: false, refusalChunks: [] };
+      this.choices.set(index, choice);
+    }
+
+    const finishRaw = findFieldValueSubstring(choiceRaw, 'finish_reason');
+    if (finishRaw !== undefined && finishRaw !== 'null') {
+      choice.finishReasonRaw = finishRaw;
+    }
+
+    const logprobsRaw = findFieldValueSubstring(choiceRaw, 'logprobs');
+    if (logprobsRaw !== undefined && logprobsRaw !== 'null') {
+      throw new ReassemblyError('chat.completions logprobs are not supported (non-null logprobs in chunk)');
+    }
+
+    const deltaRaw = findFieldValueSubstring(choiceRaw, 'delta');
+    if (deltaRaw === undefined) return;
+
+    const roleRaw = findFieldValueSubstring(deltaRaw, 'role');
+    if (roleRaw !== undefined && roleRaw !== 'null' && choice.roleRaw === undefined) {
+      choice.roleRaw = roleRaw;
+    }
+
+    const contentRaw = findFieldValueSubstring(deltaRaw, 'content');
+    if (contentRaw !== undefined) {
+      choice.sawContentKey = true;
+      if (contentRaw.startsWith('"')) choice.contentChunks.push(decodeJsonString(contentRaw));
+    }
+
+    const refusalRaw = findFieldValueSubstring(deltaRaw, 'refusal');
+    if (refusalRaw !== undefined) {
+      choice.sawRefusalKey = true;
+      if (refusalRaw.startsWith('"')) choice.refusalChunks.push(decodeJsonString(refusalRaw));
+    }
+
+    const toolCallsRaw = findFieldValueSubstring(deltaRaw, 'tool_calls');
+    if (toolCallsRaw !== undefined && toolCallsRaw.startsWith('[')) {
+      for (const tcRaw of splitJsonArrayElements(toolCallsRaw)) {
+        this.onToolCall(index, tcRaw);
+      }
+    }
+  }
+
+  private onToolCall(choiceIndex: number, tcRaw: string): void {
+    // tool_calls deltas are keyed by their OWN index, not the choice index.
+    const tcIndex = peekNumberField(tcRaw, 'index');
+    if (tcIndex === undefined) return;
+    let perChoice = this.toolCalls.get(choiceIndex);
+    if (!perChoice) {
+      perChoice = new Map<number, ToolCallState>();
+      this.toolCalls.set(choiceIndex, perChoice);
+    }
+    let tc = perChoice.get(tcIndex);
+    if (!tc) {
+      tc = { argChunks: [] };
+      perChoice.set(tcIndex, tc);
+    }
+    const idRaw = findFieldValueSubstring(tcRaw, 'id');
+    if (idRaw !== undefined && tc.idRaw === undefined) tc.idRaw = idRaw;
+    const typeRaw = findFieldValueSubstring(tcRaw, 'type');
+    if (typeRaw !== undefined && tc.typeRaw === undefined) tc.typeRaw = typeRaw;
+    const funcRaw = findFieldValueSubstring(tcRaw, 'function');
+    if (funcRaw !== undefined) {
+      const nameRaw = findFieldValueSubstring(funcRaw, 'name');
+      if (nameRaw !== undefined && tc.nameRaw === undefined) tc.nameRaw = nameRaw;
+      const argsRaw = findFieldValueSubstring(funcRaw, 'arguments');
+      // arguments is a JSON STRING literal on the wire whose decoded value
+      // is a fragment of the final arguments JSON string. Decode and join
+      // verbatim; re-encode once at assembly time (see assembleToolCall).
+      if (argsRaw !== undefined && argsRaw.startsWith('"')) tc.argChunks.push(decodeJsonString(argsRaw));
+    }
+  }
+
+  protected assembleResult(): ReassemblyResult {
+    const bodyUtf8 = this.assembleBody();
+    return {
+      bodyUtf8,
+      providerRequestId: this.providerRequestId,
+      stopReason: this.stopReason(),
+      modelFingerprint: this.modelFingerprint,
+      usage: this.parseUsage(),
+      events: this.events,
+    };
+  }
+
+  private stopReason(): string | undefined {
+    const choice0 = this.choices.get(0);
+    if (!choice0?.finishReasonRaw || !choice0.finishReasonRaw.startsWith('"')) return undefined;
+    return decodeJsonString(choice0.finishReasonRaw);
+  }
+
+  private assembleBody(): string {
+    const parts: string[] = [];
+    parts.push(`"id":${this.idRaw ?? '""'}`);
+    parts.push('"object":"chat.completion"');
+    parts.push(`"created":${this.createdRaw ?? '0'}`);
+    parts.push(`"model":${this.modelRaw ?? '""'}`);
+    if (this.systemFingerprintRaw !== undefined) {
+      parts.push(`"system_fingerprint":${this.systemFingerprintRaw}`);
+    }
+    const sortedChoices = [...this.choices.keys()].sort((a, b) => a - b);
+    const choiceParts = sortedChoices.map((idx) => this.assembleChoice(idx));
+    parts.push(`"choices":[${choiceParts.join(',')}]`);
+    parts.push(`"usage":${this.usageRaw ?? 'null'}`);
+    return `{${parts.join(',')}}`;
+  }
+
+  private assembleChoice(index: number): string {
+    const choice = this.choices.get(index);
+    if (!choice) return '';
+    const perChoiceToolCalls = this.toolCalls.get(index);
+    const hasToolCalls = perChoiceToolCalls !== undefined && perChoiceToolCalls.size > 0;
+
+    const msgParts: string[] = [];
+    const role = choice.roleRaw ?? '"assistant"';
+    msgParts.push(`"role":${role}`);
+
+    // content/refusal/null decision table (§5 medium finding). The
+    // discriminator between a pure tool-call turn (content → null) and an
+    // empty-string text turn (content → "") is whether tool_calls or a
+    // refusal are present, NOT the content key's value:
+    //  - tool_calls present OR refusal present → content = null
+    //  - else sawContentKey (a content key arrived, regardless of value)
+    //    → content = encode(join) (covers the empty-string text turn → "")
+    //  - else (no content key at all) → content = null
+    if (hasToolCalls || choice.sawRefusalKey) {
+      msgParts.push('"content":null');
+    } else if (choice.sawContentKey) {
+      msgParts.push(`"content":${encodeJsonString(choice.contentChunks.join(''))}`);
+    } else {
+      msgParts.push('"content":null');
+    }
+
+    if (choice.sawRefusalKey) {
+      msgParts.push(`"refusal":${encodeJsonString(choice.refusalChunks.join(''))}`);
+    }
+
+    if (perChoiceToolCalls !== undefined && perChoiceToolCalls.size > 0) {
+      const sortedTc = [...perChoiceToolCalls.keys()].sort((a, b) => a - b);
+      const tcParts = sortedTc.map((tcIdx) => this.assembleToolCall(perChoiceToolCalls.get(tcIdx)));
+      msgParts.push(`"tool_calls":[${tcParts.join(',')}]`);
+    }
+
+    const message = `{${msgParts.join(',')}}`;
+    const finishReason = choice.finishReasonRaw ?? 'null';
+    return `{"index":${index},"message":${message},"finish_reason":${finishReason}}`;
+  }
+
+  private assembleToolCall(tc: ToolCallState | undefined): string {
+    if (!tc) return '';
+    const id = tc.idRaw ?? '""';
+    const type = tc.typeRaw ?? '"function"';
+    const name = tc.nameRaw ?? '""';
+    // OpenAI stores function.arguments as a JSON-STRING-encoded field, so
+    // the joined raw argument string is re-encoded once (decode-of-same-
+    // encoding → re-encode is byte-faithful). DIVERGES from Anthropic
+    // tool_use.input which splices a raw object un-re-encoded.
+    const args = encodeJsonString(tc.argChunks.join(''));
+    return `{"id":${id},"type":${type},"function":{"name":${name},"arguments":${args}}}`;
+  }
+
+  private parseUsage(): Readonly<Record<string, unknown>> | undefined {
+    if (!this.usageRaw) return undefined;
+    try {
+      return JSON.parse(this.usageRaw) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
   }
 }
 
 // =====================================================================
-// OpenAI (stub — not implemented in v0)
+// OpenAI Responses API (chatgpt.com /backend-api/codex/responses)
 // =====================================================================
 
+interface ResponsesItemState {
+  outputIndex: number;
+  /** Complete item JSON spliced verbatim from response.output_item.done. */
+  doneRaw?: string;
+  /** Per-content-index accumulated output_text fragments (cross-check). */
+  readonly textChunksByContentIndex: Map<number, string[]>;
+  /**
+   * Per-content-index `text` from `response.output_text.done` (the
+   * provider's own delta-join). Cross-checked against our delta-join.
+   */
+  readonly doneTextByContentIndex: Map<number, string>;
+}
+
 /**
- * OpenAI SSE reassembler is intentionally deferred for v0. The Anthropic
- * variant is the target of the acceptance test; OpenAI capture is shaped
- * but not implemented. Calling `finalize()` throws.
+ * Reassembler for the OpenAI Responses API stream that Codex emits on
+ * chatgpt.com. Named `response.*` events; an item tree addressed by
+ * `output_index` (and content parts by `content_index`).
+ *
+ * The terminal `response.completed` carries the FULL response envelope
+ * (~35 fields: status, usage, instructions, tools, ...) but with its
+ * `output` array EMPTY. So the final body is the VERBATIM terminal
+ * envelope (zero re-encode, all fields preserved) with its empty
+ * `"output":[]` spliced to the assembled `response.output_item.done`
+ * payloads (each a COMPLETE item JSON object on the wire, spliced
+ * VERBATIM, in output_index order). providerRequestId/stopReason/usage
+ * derive from that same envelope. The accumulated `output_text` deltas
+ * are cross-checked against the item-done text (delta-join must equal
+ * the item text) — a mismatch throws so the binary-session model poisons
+ * `reassembly-failure` rather than silently trusting item.done.
  */
-export class OpenAIReassembler implements Reassembler {
-  push(): void {
-    /* no-op until OpenAI is implemented */
+export class ResponsesReassembler extends AbstractSseReassembler {
+  private completedSeen = false;
+  private status?: string;
+  private usageRaw?: string;
+  private providerRequestId?: string;
+  private modelFingerprint?: string;
+  /** Verbatim `response` envelope from the terminal event (output[] empty). */
+  private responseEnvelopeRaw?: string;
+  /**
+   * Stop reason for the record. Equals `status` for a completed response;
+   * for `incomplete`/`failed` prefers the more specific
+   * `incomplete_details.reason` / `error` reason when present (FIX 4).
+   */
+  private stopReasonValue?: string;
+  private readonly items = new Map<number, ResponsesItemState>();
+
+  protected terminalSeen(): boolean {
+    return this.completedSeen;
   }
-  finalize(): ReassemblyResult {
-    throw new Error('OpenAI reassembler not implemented for v0');
+
+  protected dispatch(eventType: string, data: string): void {
+    const type = peekTypeField(data) ?? eventType;
+    switch (type) {
+      case 'response.created':
+        this.onResponseCreated(data);
+        return;
+      case 'response.output_item.added':
+        this.onOutputItemAdded(data);
+        return;
+      case 'response.output_text.delta':
+        this.onOutputTextDelta(data);
+        return;
+      case 'response.output_text.done':
+        this.onOutputTextDone(data);
+        return;
+      case 'response.output_item.done':
+        this.onOutputItemDone(data);
+        return;
+      case 'response.completed':
+      case 'response.failed':
+      case 'response.incomplete':
+        this.onTerminal(data);
+        return;
+      default:
+        // response.in_progress, response.content_part.added/.done, and any
+        // future events are recorded in this.events but don't change
+        // assembly state.
+        return;
+    }
   }
+
+  private onResponseCreated(data: string): void {
+    const responseRaw = findFieldValueSubstring(data, 'response');
+    if (!responseRaw) return;
+    const id = peekStringField(responseRaw, 'id');
+    if (id) this.providerRequestId = id;
+    const model = peekStringField(responseRaw, 'model');
+    if (model) this.modelFingerprint = model;
+  }
+
+  private getItem(outputIndex: number): ResponsesItemState {
+    let item = this.items.get(outputIndex);
+    if (!item) {
+      item = {
+        outputIndex,
+        textChunksByContentIndex: new Map<number, string[]>(),
+        doneTextByContentIndex: new Map<number, string>(),
+      };
+      this.items.set(outputIndex, item);
+    }
+    return item;
+  }
+
+  private onOutputItemAdded(data: string): void {
+    const outputIndex = peekNumberField(data, 'output_index');
+    if (outputIndex === undefined) {
+      throw new ReassemblyError('response.output_item.added missing output_index');
+    }
+    this.getItem(outputIndex);
+  }
+
+  private onOutputTextDelta(data: string): void {
+    const outputIndex = peekNumberField(data, 'output_index');
+    const contentIndex = peekNumberField(data, 'content_index') ?? 0;
+    if (outputIndex === undefined) return;
+    const item = this.getItem(outputIndex);
+    const literal = findFieldValueSubstring(data, 'delta');
+    if (literal === undefined || !literal.startsWith('"')) return;
+    let chunks = item.textChunksByContentIndex.get(contentIndex);
+    if (!chunks) {
+      chunks = [];
+      item.textChunksByContentIndex.set(contentIndex, chunks);
+    }
+    chunks.push(decodeJsonString(literal));
+  }
+
+  private onOutputTextDone(data: string): void {
+    const outputIndex = peekNumberField(data, 'output_index');
+    const contentIndex = peekNumberField(data, 'content_index') ?? 0;
+    if (outputIndex === undefined) return;
+    const text = peekStringField(data, 'text');
+    if (text === undefined) return;
+    this.getItem(outputIndex).doneTextByContentIndex.set(contentIndex, text);
+  }
+
+  private onOutputItemDone(data: string): void {
+    const outputIndex = peekNumberField(data, 'output_index');
+    const itemRaw = findFieldValueSubstring(data, 'item');
+    if (outputIndex === undefined || itemRaw === undefined) {
+      throw new ReassemblyError('response.output_item.done missing output_index or item');
+    }
+    this.getItem(outputIndex).doneRaw = itemRaw;
+  }
+
+  private onTerminal(data: string): void {
+    const responseRaw = findFieldValueSubstring(data, 'response');
+    if (responseRaw) {
+      // Capture the FULL envelope verbatim — assembleBody splices the
+      // assembled item array into its empty output[] (zero re-encode).
+      this.responseEnvelopeRaw = responseRaw;
+      const status = peekStringField(responseRaw, 'status');
+      if (status) this.status = status;
+      this.stopReasonValue = deriveResponsesStopReason(responseRaw, status);
+      const usageRaw = findFieldValueSubstring(responseRaw, 'usage');
+      if (usageRaw !== undefined && usageRaw !== 'null') this.usageRaw = usageRaw;
+    }
+    this.completedSeen = true;
+  }
+
+  protected assembleResult(): ReassemblyResult {
+    this.crossCheckDeltasAgainstItems();
+    const bodyUtf8 = this.assembleBody();
+    return {
+      bodyUtf8,
+      providerRequestId: this.providerRequestId,
+      stopReason: this.stopReasonValue,
+      modelFingerprint: this.modelFingerprint,
+      usage: this.parseUsage(),
+      events: this.events,
+    };
+  }
+
+  /**
+   * Cross-check (FIX 3): the per-content-index delta-join must equal the
+   * text the provider reported in `response.output_text.done` and/or the
+   * `output_item.done` message content. The verbatim-item-splice strategy
+   * trusts `output_item.done` as self-contained; this guard fails LOUD
+   * (throws → the binary-session model poisons `reassembly-failure`)
+   * rather than silently emitting a body whose final text disagrees with
+   * the streamed deltas.
+   */
+  private crossCheckDeltasAgainstItems(): void {
+    for (const item of this.items.values()) {
+      for (const [contentIndex, chunks] of item.textChunksByContentIndex) {
+        const deltaJoin = chunks.join('');
+        const doneText = item.doneTextByContentIndex.get(contentIndex);
+        if (doneText !== undefined && doneText !== deltaJoin) {
+          throw new ReassemblyError(
+            `responses delta/done mismatch at output_index ${item.outputIndex} ` +
+              `content_index ${contentIndex} (output_text.done)`,
+          );
+        }
+        const itemText = item.doneRaw !== undefined ? extractItemContentText(item.doneRaw, contentIndex) : undefined;
+        if (itemText !== undefined && itemText !== deltaJoin) {
+          throw new ReassemblyError(
+            `responses delta/item mismatch at output_index ${item.outputIndex} ` +
+              `content_index ${contentIndex} (output_item.done)`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Byte-faithful body (FIX 2): the verbatim terminal `response` envelope
+   * with its empty `"output":[]` spliced to the assembled item array.
+   * Falls back to a minimal synthesized envelope only if the terminal
+   * event carried no `response` (defensive; the stream-without-terminal
+   * case is already gated by `terminalSeen()` before assembly).
+   */
+  private assembleBody(): string {
+    const sorted = [...this.items.keys()].sort((a, b) => a - b);
+    const itemParts: string[] = [];
+    for (const idx of sorted) {
+      const item = this.items.get(idx);
+      if (!item?.doneRaw) continue;
+      itemParts.push(item.doneRaw);
+    }
+    const outputArray = `[${itemParts.join(',')}]`;
+    if (this.responseEnvelopeRaw !== undefined) {
+      return replaceTopLevelField(this.responseEnvelopeRaw, 'output', outputArray);
+    }
+    // Defensive fallback: terminal lacked a `response` envelope. Synthesize
+    // a minimal one from the captured leaves.
+    const parts: string[] = [];
+    if (this.providerRequestId !== undefined) {
+      parts.push(`"id":${encodeJsonString(this.providerRequestId)}`);
+    }
+    parts.push('"object":"response"');
+    parts.push(`"status":${this.status !== undefined ? encodeJsonString(this.status) : 'null'}`);
+    parts.push(`"output":${outputArray}`);
+    parts.push(`"usage":${this.usageRaw ?? 'null'}`);
+    return `{${parts.join(',')}}`;
+  }
+
+  private parseUsage(): Readonly<Record<string, unknown>> | undefined {
+    if (!this.usageRaw) return undefined;
+    try {
+      return JSON.parse(this.usageRaw) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Derive the Responses stop reason (FIX 4). For a `completed` response
+ * the status IS the stop reason. For `incomplete` / `failed` the status
+ * alone is uninformative, so prefer the more specific
+ * `incomplete_details.reason` (incomplete) or the `error` reason/code
+ * (failed) when the envelope carries one. Falls back to status.
+ */
+function deriveResponsesStopReason(responseRaw: string, status: string | undefined): string | undefined {
+  if (status === 'incomplete') {
+    const details = findFieldValueSubstring(responseRaw, 'incomplete_details');
+    if (details !== undefined && details !== 'null') {
+      const reason = peekStringField(details, 'reason');
+      if (reason !== undefined) return reason;
+    }
+  }
+  if (status === 'failed') {
+    const error = findFieldValueSubstring(responseRaw, 'error');
+    if (error !== undefined && error !== 'null') {
+      const reason = peekStringField(error, 'code') ?? peekStringField(error, 'type');
+      if (reason !== undefined) return reason;
+    }
+  }
+  return status;
+}
+
+/**
+ * Extract the `text` of the `output_text` content part at `contentIndex`
+ * from a verbatim `output_item.done` item substring, decoded. Returns
+ * `undefined` if the item has no `content` array or no matching part —
+ * the cross-check skips items it cannot read (e.g. non-message items).
+ */
+function extractItemContentText(itemRaw: string, contentIndex: number): string | undefined {
+  const contentRaw = findFieldValueSubstring(itemRaw, 'content');
+  if (contentRaw === undefined || !contentRaw.startsWith('[')) return undefined;
+  const parts = splitJsonArrayElements(contentRaw);
+  if (contentIndex < 0 || contentIndex >= parts.length) return undefined;
+  return peekStringField(parts[contentIndex], 'text');
+}
+
+/**
+ * Split a raw JSON array substring (including the surrounding brackets)
+ * into its top-level element substrings, verbatim. Respects nested
+ * objects/arrays and string escapes. Returns `[]` for an empty array.
+ */
+function splitJsonArrayElements(arrayRaw: string): string[] {
+  const elements: string[] = [];
+  let i = 1; // skip leading '['
+  while (i < arrayRaw.length) {
+    while (i < arrayRaw.length && /[\s,]/.test(arrayRaw[i] ?? '')) i++;
+    if (i >= arrayRaw.length || arrayRaw[i] === ']') break;
+    const element = readJsonValueSubstring(arrayRaw, i);
+    if (element === undefined) break;
+    elements.push(element);
+    i += element.length;
+  }
+  return elements;
 }
 
 /**
  * Classify an upstream host into a capture provider. Single source of
  * truth for host → provider mapping across the capture pipeline (the
  * `ExchangeRecord.provider` field and reassembler selection).
+ *
+ * Note: `provider:'openai'` spans two wire formats — `api.openai.com`
+ * Chat Completions and `chatgpt.com` Responses — disambiguated by the
+ * record's `host` field. `auth.openai.com` intentionally stays
+ * `'unknown'`: it is an OAuth/identity host, not a completion host, so
+ * do NOT broaden this to map all `*.openai.com` to `'openai'` (that would
+ * route a non-completion host to a reassembler).
  */
 export function providerForHost(host: string): CaptureProvider {
   const normalized = host.toLowerCase();
   if (normalized === 'api.anthropic.com') return 'anthropic';
   if (normalized === 'api.openai.com') return 'openai';
+  if (normalized === 'chatgpt.com') return 'openai';
   return 'unknown';
 }
 
 /**
- * Pick a reassembler by upstream host. Hosts the caller cannot classify
- * yield `undefined`; the caller should fall back to capturing raw bytes
- * verbatim.
+ * Pick a reassembler by upstream host. Routing is BY HOST (not by the
+ * coarse `providerForHost` result) because `provider:'openai'` cannot
+ * distinguish the two OpenAI wire formats. Hosts the caller cannot
+ * classify yield `undefined`; the caller falls back to capturing raw
+ * bytes verbatim.
  */
 export function createReassembler(host: string): Reassembler | undefined {
-  switch (providerForHost(host)) {
-    case 'anthropic':
-      return new AnthropicReassembler();
-    case 'openai':
-      return new OpenAIReassembler();
-    default:
-      return undefined;
-  }
+  const h = host.toLowerCase();
+  if (h === 'api.anthropic.com') return new AnthropicReassembler();
+  if (h === 'api.openai.com') return new ChatCompletionsReassembler();
+  if (h === 'chatgpt.com') return new ResponsesReassembler();
+  return undefined;
 }
