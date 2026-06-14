@@ -237,7 +237,7 @@ export const GOOSE_PROVIDERS = ['anthropic', 'openai', 'google'] as const;
 /** Goose provider — structurally identical to ProviderId from model-provider.ts. */
 export type GooseProvider = (typeof GOOSE_PROVIDERS)[number];
 
-export const DOCKER_AGENTS = ['claude-code', 'goose'] as const;
+export const DOCKER_AGENTS = ['claude-code', 'goose', 'codex'] as const;
 export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 
 export const SESSION_MODES = ['docker', 'builtin'] as const;

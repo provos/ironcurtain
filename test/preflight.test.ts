@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   resolveSessionMode,
   checkDockerAvailable,
@@ -154,6 +157,55 @@ describe('resolveSessionMode', () => {
       expect(result.reason).toBe('Explicit --agent selection (OAuth)');
     });
 
+    it('selects codex with Codex ChatGPT OAuth and no OpenAI API key', async () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'ironcurtain-codex-preflight-'));
+      const oldCodexHome = process.env.CODEX_HOME;
+      try {
+        process.env.CODEX_HOME = tmp;
+        writeFileSync(
+          join(tmp, 'auth.json'),
+          JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'codex-token' } }),
+        );
+
+        const config = createTestConfig({ anthropicApiKey: '' });
+        config.userConfig.openaiApiKey = '';
+        const result = await resolveSessionMode({
+          config,
+          requestedAgent: 'codex' as AgentId,
+          isDockerAvailable: dockerAvailable,
+          credentialSources: noOAuthSources,
+        });
+
+        expect(result.mode).toEqual({ kind: 'docker', agent: 'codex', authKind: 'oauth' });
+        expect(result.reason).toBe('Explicit --agent selection (OAuth)');
+      } finally {
+        if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = oldCodexHome;
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('--agent codex reports Codex login guidance when auth is missing', async () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'ironcurtain-codex-preflight-empty-'));
+      const oldCodexHome = process.env.CODEX_HOME;
+      try {
+        process.env.CODEX_HOME = tmp;
+        const promise = resolveSessionMode({
+          config: createTestConfig({ anthropicApiKey: '' }),
+          requestedAgent: 'codex' as AgentId,
+          isDockerAvailable: dockerAvailable,
+          credentialSources: noOAuthSources,
+        });
+
+        await expect(promise).rejects.toThrow(/codex login/);
+        await expect(promise).rejects.toThrow(/OPENAI_API_KEY is not required/);
+      } finally {
+        if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = oldCodexHome;
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
     it('--agent goose surfaces the OAuth-not-usable-with-goose addendum on OAuth-only', async () => {
       const config = createTestConfig({ anthropicApiKey: '' });
       config.userConfig.preferredDockerAgent = 'goose';
@@ -207,6 +259,33 @@ describe('resolveSessionMode', () => {
 
         expect(result.mode).toEqual({ kind: 'docker', agent: 'goose', authKind: 'apikey' });
         expect(result.reason).toBe('goose (API key)');
+      });
+
+      it('selects Docker (codex) when preferredDockerAgent=codex and Codex OAuth is present', async () => {
+        const tmp = mkdtempSync(join(tmpdir(), 'ironcurtain-codex-preferred-'));
+        const oldCodexHome = process.env.CODEX_HOME;
+        try {
+          process.env.CODEX_HOME = tmp;
+          writeFileSync(
+            join(tmp, 'auth.json'),
+            JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'codex-token' } }),
+          );
+          const config = createTestConfig({ anthropicApiKey: '' });
+          config.userConfig.preferredDockerAgent = 'codex';
+
+          const result = await resolveSessionMode({
+            config,
+            isDockerAvailable: dockerAvailable,
+            credentialSources: noOAuthSources,
+          });
+
+          expect(result.mode).toEqual({ kind: 'docker', agent: 'codex', authKind: 'oauth' });
+          expect(result.reason).toBe('codex (OAuth)');
+        } finally {
+          if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+          else process.env.CODEX_HOME = oldCodexHome;
+          rmSync(tmp, { recursive: true, force: true });
+        }
       });
 
       it('throws with goose+OAuth-only and includes the goose-OAuth-not-usable addendum', async () => {

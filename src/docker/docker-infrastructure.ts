@@ -275,6 +275,8 @@ export interface DockerInfrastructure extends PreContainerInfrastructure {
 
 /** Hosts that use Anthropic OAuth credentials when available. */
 const ANTHROPIC_HOSTS = new Set(['api.anthropic.com', 'platform.claude.com']);
+/** Hosts that use Codex ChatGPT OAuth credentials when available. */
+const CODEX_CHATGPT_HOSTS = new Set(['chatgpt.com', 'auth.openai.com']);
 
 /** Prefix for container/sidecar names. Keep in sync with `docker ps` filters. */
 const CONTAINER_NAME_PREFIX = 'ironcurtain-';
@@ -357,7 +359,15 @@ export async function prepareDockerInfrastructure(
   const { getIronCurtainHome } = await import('../config/paths.js');
   const { prepareSession } = await import('./orientation.js');
 
-  const { detectAuthMethod, writeToKeychain } = await import('./oauth-credentials.js');
+  const {
+    detectAuthMethod,
+    writeToKeychain,
+    getCodexAuthFilePath,
+    loadCodexOAuthCredentials,
+    refreshCodexOAuthToken,
+    refreshResultToCreds,
+    saveCodexOAuthCredentials,
+  } = await import('./oauth-credentials.js');
   const { OAuthTokenManager } = await import('./oauth-token-manager.js');
   const {
     getBundleSocketsDir,
@@ -430,9 +440,25 @@ export async function prepareDockerInfrastructure(
     authMethod.kind === 'oauth' && authMethod.source === 'keychain'
       ? { writeToKeychain, keychainServiceName: authMethod.keychainServiceName }
       : undefined;
+  const tokenManagerCodexDeps =
+    authMethod.kind === 'oauth' && adapter.id === 'codex'
+      ? {
+          loadCredentials: loadCodexOAuthCredentials,
+          refreshToken: async (rt: string) => refreshResultToCreds(await refreshCodexOAuthToken(rt)),
+          saveCredentials: saveCodexOAuthCredentials,
+          credentialsFilePath: getCodexAuthFilePath(),
+        }
+      : undefined;
   const tokenManager =
     authMethod.kind === 'oauth'
-      ? new OAuthTokenManager(authMethod.credentials, { canRefresh: true }, tokenManagerKeychainDeps)
+      ? new OAuthTokenManager(
+          authMethod.credentials,
+          { canRefresh: canRefreshOAuth(authMethod.credentials.refreshToken) },
+          {
+            ...tokenManagerKeychainDeps,
+            ...tokenManagerCodexDeps,
+          },
+        )
       : undefined;
   const providers = adapter.getProviders(authKind);
 
@@ -454,8 +480,10 @@ export async function prepareDockerInfrastructure(
     fakeKeys.set(providerConfig.host, fakeKey);
 
     const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);
-    // Attach the token manager only to Anthropic hosts (the ones using OAuth)
-    const hostTokenManager = tokenManager && ANTHROPIC_HOSTS.has(providerConfig.host) ? tokenManager : undefined;
+    const isManagedOAuthHost =
+      ANTHROPIC_HOSTS.has(providerConfig.host) ||
+      (adapter.id === 'codex' && CODEX_CHATGPT_HOSTS.has(providerConfig.host));
+    const hostTokenManager = tokenManager && isManagedOAuthHost ? tokenManager : undefined;
     providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
   }
 
@@ -1128,13 +1156,26 @@ async function checkInternalNetworkConnectivity(
 }
 
 /**
+ * Whether an OAuth credential set can be refreshed: true only when a
+ * non-empty refresh token is present. Externally-managed Codex tokens
+ * (`auth_mode: 'chatgptAuthTokens'`) carry an empty refresh token and must
+ * NOT be refreshed by IronCurtain. Pure helper, exported for testability.
+ */
+export function canRefreshOAuth(refreshToken: string): boolean {
+  return refreshToken.length > 0;
+}
+
+/**
  * Resolves the real credential for a provider host.
  *
  * For Anthropic hosts in OAuth mode, uses the OAuth access token.
  * For all other cases, falls back to the API key from config.
  */
-function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToken: string | undefined): string {
+export function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToken: string | undefined): string {
   if (oauthAccessToken && ANTHROPIC_HOSTS.has(host)) {
+    return oauthAccessToken;
+  }
+  if (oauthAccessToken && CODEX_CHATGPT_HOSTS.has(host)) {
     return oauthAccessToken;
   }
 
@@ -1146,6 +1187,10 @@ function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToke
       break;
     case 'api.openai.com':
       key = config.userConfig.openaiApiKey;
+      break;
+    case 'chatgpt.com':
+    case 'auth.openai.com':
+      key = '';
       break;
     case 'generativelanguage.googleapis.com':
       key = config.userConfig.googleApiKey;
@@ -1165,9 +1210,13 @@ function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToke
  * support session resume. Idempotent: skips seeding if the directory
  * already exists (resume case).
  *
- * As a defense-in-depth measure, always deletes `.credentials.json`
- * from the state directory — the MITM proxy handles auth independently,
- * so any credentials file left by the agent is stale.
+ * As a defense-in-depth measure, always deletes stale credential files
+ * (`.credentials.json` for Claude Code, `auth.json` for Codex) from the
+ * state directory — the MITM proxy handles auth independently, and each
+ * agent's entrypoint recreates its credential file from env on every
+ * start, so any credential file lingering across resumes is stale. The
+ * unlinks are no-ops for adapters whose state dir has neither file (e.g.
+ * Goose), since a missing file is swallowed.
  */
 export function prepareConversationStateDir(sessionDir: string, config: ConversationStateConfig): string {
   const stateDir = resolve(sessionDir, config.hostDirName);
@@ -1196,12 +1245,15 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
     }
   }
 
-  // Defense-in-depth: remove stale credentials on every start
-  const credentialsPath = resolve(stateDir, '.credentials.json');
-  try {
-    unlinkSync(credentialsPath);
-  } catch {
-    // File doesn't exist — expected on first run
+  // Defense-in-depth: remove stale credential files on every start. The
+  // entrypoint recreates them from env each start, so scrubbing host-side
+  // is safe. Both unlinks are no-ops when the file is absent.
+  for (const fileName of ['.credentials.json', 'auth.json']) {
+    try {
+      unlinkSync(resolve(stateDir, fileName));
+    } catch {
+      // File doesn't exist — expected on first run / other adapters
+    }
   }
 
   return stateDir;

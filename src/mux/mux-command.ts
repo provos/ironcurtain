@@ -169,7 +169,7 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
     process.stderr.write(
       chalk.red(
         'ironcurtain mux requires Docker agent mode.\n' +
-          'Pass --agent claude-code, or set Session Mode > Preferred mode to "docker" in `ironcurtain config`.\n',
+          'Pass --agent claude-code, --agent goose, or --agent codex; or set Session Mode > Preferred mode to "docker" in `ironcurtain config`.\n',
       ),
     );
     process.exit(1);

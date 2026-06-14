@@ -26,7 +26,12 @@ const startSpec: CommandSpec = {
   usage: ['ironcurtain start [options] [task]'],
   options: [
     { flag: 'resume', short: 'r', description: 'Resume a previous session', placeholder: '<id>' },
-    { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },
+    {
+      flag: 'agent',
+      short: 'a',
+      description: 'Agent mode: builtin, claude-code, goose, or codex',
+      placeholder: '<name>',
+    },
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
@@ -40,6 +45,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --resume <session-id>        # Resume a session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
     'ironcurtain start --pty                        # PTY mode: interactive Docker terminal',
     'ironcurtain start --list-agents                # List available agents',

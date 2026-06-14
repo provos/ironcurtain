@@ -5,6 +5,8 @@ import { tmpdir, platform } from 'node:os';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import {
   parseCredentialsJson,
+  parseCodexAuthJson,
+  loadCodexOAuthCredentials,
   loadCredentialsFromFile,
   isTokenExpired,
   detectAuthMethod,
@@ -12,7 +14,9 @@ import {
   extractFromKeychainWithService,
   writeToKeychain,
   refreshOAuthToken,
+  refreshCodexOAuthToken,
   saveOAuthCredentials,
+  saveCodexOAuthCredentials,
   type OAuthCredentials,
   type CredentialSources,
 } from '../src/docker/oauth-credentials.js';
@@ -84,6 +88,12 @@ function expiredCreds(overrides?: Partial<OAuthCredentials>): OAuthCredentials {
     expiresAt: Date.now() - 1000,
     ...overrides,
   };
+}
+
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const encode = (value: string | Record<string, unknown>) =>
+    Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.${encode('sig')}`;
 }
 
 function makeSources(overrides: Partial<CredentialSources>): CredentialSources {
@@ -189,6 +199,61 @@ describe('parseCredentialsJson', () => {
   });
 });
 
+describe('parseCodexAuthJson', () => {
+  it('parses Codex ChatGPT auth.json credentials', () => {
+    const accessToken = unsignedJwt({ exp: 4_102_444_800, sub: 'codex-test' });
+    const idToken = unsignedJwt({ email: 'test@example.com' });
+    const result = parseCodexAuthJson(
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        OPENAI_API_KEY: null,
+        tokens: {
+          id_token: idToken,
+          access_token: accessToken,
+          refresh_token: 'codex-refresh-token',
+          account_id: 'acct_123',
+        },
+      }),
+    );
+
+    expect(result).toEqual({
+      accessToken,
+      refreshToken: 'codex-refresh-token',
+      expiresAt: 4_102_444_800_000,
+      idToken,
+      accountId: 'acct_123',
+    });
+  });
+
+  it('parses externally managed Codex ChatGPT token auth.json credentials', () => {
+    const accessToken = unsignedJwt({ exp: 4_102_444_800, sub: 'codex-test' });
+    const result = parseCodexAuthJson(
+      JSON.stringify({
+        auth_mode: 'chatgptAuthTokens',
+        tokens: {
+          access_token: accessToken,
+          refresh_token: '',
+          account_id: 'acct_external',
+        },
+      }),
+    );
+
+    expect(result).toEqual({
+      accessToken,
+      refreshToken: '',
+      expiresAt: 4_102_444_800_000,
+      idToken: undefined,
+      accountId: 'acct_external',
+    });
+  });
+
+  it('rejects API-key auth and malformed token shapes', () => {
+    expect(parseCodexAuthJson(JSON.stringify({ auth_mode: 'apikey', tokens: { access_token: 'token' } }))).toBeNull();
+    expect(parseCodexAuthJson(JSON.stringify({ auth_mode: 'chatgpt', tokens: {} }))).toBeNull();
+    expect(parseCodexAuthJson('not json')).toBeNull();
+  });
+});
+
 // --- loadCredentialsFromFile ---
 
 describe('loadCredentialsFromFile', () => {
@@ -230,6 +295,40 @@ describe('loadCredentialsFromFile', () => {
 
     const result = loadCredentialsFromFile(filePath);
     expect(result).toBeNull();
+  });
+});
+
+describe('loadCodexOAuthCredentials', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'codex-oauth-creds-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('loads valid Codex credentials from a file', () => {
+    const filePath = resolve(tmpDir, 'auth.json');
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { access_token: 'codex-access-token', refresh_token: 'codex-refresh-token' },
+      }),
+    );
+
+    const result = loadCodexOAuthCredentials(filePath);
+    expect(result?.accessToken).toBe('codex-access-token');
+  });
+
+  it('returns null when the file is missing or not ChatGPT auth', () => {
+    expect(loadCodexOAuthCredentials(resolve(tmpDir, 'missing.json'))).toBeNull();
+
+    const filePath = resolve(tmpDir, 'auth.json');
+    writeFileSync(filePath, JSON.stringify({ auth_mode: 'apikey', tokens: { access_token: 'codex-access-token' } }));
+    expect(loadCodexOAuthCredentials(filePath)).toBeNull();
   });
 });
 
@@ -728,6 +827,53 @@ describe('refreshOAuthToken', () => {
   });
 });
 
+describe('refreshCodexOAuthToken', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns ok with new Codex credentials on successful refresh', async () => {
+    const accessToken = unsignedJwt({ exp: 4_102_444_800, sub: 'codex-test' });
+    const idToken = unsignedJwt({ email: 'test@example.com' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: accessToken,
+        refresh_token: 'new-refresh-token',
+        id_token: idToken,
+      }),
+    } as Response);
+
+    const result = await refreshCodexOAuthToken('old-refresh-token');
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('expected ok');
+    expect(result.credentials.accessToken).toBe(accessToken);
+    expect(result.credentials.refreshToken).toBe('new-refresh-token');
+    expect(result.credentials.expiresAt).toBe(4_102_444_800_000);
+
+    const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(fetchCall[0]).toBe('https://auth.openai.com/oauth/token');
+    const opts = fetchCall[1] as RequestInit;
+    expect(opts.headers).toEqual({ 'Content-Type': 'application/json' });
+    const body = JSON.parse(opts.body as string) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+      grant_type: 'refresh_token',
+      refresh_token: 'old-refresh-token',
+    });
+  });
+
+  it('returns parse-error when Codex refresh response lacks access_token', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ refresh_token: 'rt' }),
+    } as Response);
+
+    const result = await refreshCodexOAuthToken('any-token');
+    expect(result.kind).toBe('parse-error');
+  });
+});
+
 describe('refreshResultToCreds', () => {
   it('flattens ok to credentials', async () => {
     const { refreshResultToCreds } = await import('../src/docker/oauth-credentials.js');
@@ -810,5 +956,52 @@ describe('saveOAuthCredentials', () => {
 
     const saved = JSON.parse(readFileSync(filePath, 'utf-8'));
     expect(saved.claudeAiOauth.accessToken).toBe(creds.accessToken);
+  });
+});
+
+describe('saveCodexOAuthCredentials', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'codex-oauth-save-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('updates Codex auth.json tokens while preserving existing token metadata', () => {
+    const filePath = resolve(tmpDir, 'auth.json');
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: {
+          id_token: 'old-id-token',
+          access_token: 'old-access',
+          refresh_token: 'old-refresh',
+          account_id: 'acct_123',
+        },
+      }),
+    );
+
+    saveCodexOAuthCredentials(
+      {
+        accessToken: unsignedJwt({ exp: 4_102_444_800 }),
+        refreshToken: 'new-refresh',
+        expiresAt: 4_102_444_800_000,
+      },
+      filePath,
+    );
+
+    const saved = JSON.parse(readFileSync(filePath, 'utf-8')) as {
+      auth_mode?: string;
+      tokens?: Record<string, unknown>;
+    };
+    expect(saved.auth_mode).toBe('chatgpt');
+    expect(saved.tokens?.access_token).toBe(unsignedJwt({ exp: 4_102_444_800 }));
+    expect(saved.tokens?.refresh_token).toBe('new-refresh');
+    expect(saved.tokens?.id_token).toBe('old-id-token');
+    expect(saved.tokens?.account_id).toBe('acct_123');
   });
 });

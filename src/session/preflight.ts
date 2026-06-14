@@ -170,6 +170,12 @@ async function detectCredentialState(
     };
   }
 
+  if (agentId === 'codex') {
+    const { loadCodexOAuthCredentials } = await import('../docker/oauth-credentials.js');
+    if (loadCodexOAuthCredentials()) return { credKind: 'oauth', anthropicOAuthOnly: false };
+    return { credKind: null, anthropicOAuthOnly: false };
+  }
+
   const auth = await detectAuthMethod(config, sources);
   if (auth.kind === 'none') return { credKind: null, anthropicOAuthOnly: false };
   return { credKind: auth.kind, anthropicOAuthOnly: false };
@@ -257,6 +263,12 @@ function credentialErrorMessageForExplicit(agentId: AgentId, config: IronCurtain
     }
     return parts.join('\n\n');
   }
+  if (agentId === 'codex') {
+    return (
+      '--agent codex requires Codex ChatGPT authentication. Run `codex login` on the host, ' +
+      'or provide a Codex access token with `codex login --with-access-token`. OPENAI_API_KEY is not required.'
+    );
+  }
   return `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`;
 }
 
@@ -291,7 +303,9 @@ function credentialErrorMessageForPreferredMode(
     }
   } else {
     lines.push(
-      `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`,
+      agentId === 'codex'
+        ? 'Codex ChatGPT authentication is required. Run `codex login` on the host; OPENAI_API_KEY is not required.'
+        : `Authentication is required for "${agentId}". Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`,
     );
   }
   lines.push('');

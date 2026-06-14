@@ -8,6 +8,8 @@ import {
   prepareConversationStateDir,
   createSessionContainers,
   destroyDockerInfrastructure,
+  resolveRealKey,
+  canRefreshOAuth,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
@@ -168,6 +170,49 @@ describe('buildAgentUidRemap (issue #232)', () => {
   });
 });
 
+describe('canRefreshOAuth', () => {
+  it('is false for an empty refresh token (externally-managed Codex tokens)', () => {
+    expect(canRefreshOAuth('')).toBe(false);
+  });
+
+  it('is true for a non-empty refresh token', () => {
+    expect(canRefreshOAuth('codex-refresh-token')).toBe(true);
+  });
+});
+
+describe('resolveRealKey', () => {
+  // Minimal config: only the userConfig key fields resolveRealKey reads.
+  function configWithKeys(keys: Partial<IronCurtainConfig['userConfig']>): IronCurtainConfig {
+    return { userConfig: { ...keys } } as unknown as IronCurtainConfig;
+  }
+
+  it('returns the OAuth access token for Codex ChatGPT hosts when a token is provided', () => {
+    const config = configWithKeys({});
+    expect(resolveRealKey('chatgpt.com', config, 'oauth-access-token')).toBe('oauth-access-token');
+    expect(resolveRealKey('auth.openai.com', config, 'oauth-access-token')).toBe('oauth-access-token');
+  });
+
+  it('returns the OAuth access token for Anthropic hosts when a token is provided', () => {
+    const config = configWithKeys({ anthropicApiKey: 'sk-ant-api03-configured' });
+    expect(resolveRealKey('api.anthropic.com', config, 'oauth-access-token')).toBe('oauth-access-token');
+    expect(resolveRealKey('platform.claude.com', config, 'oauth-access-token')).toBe('oauth-access-token');
+  });
+
+  it('returns empty string for Codex ChatGPT hosts when no OAuth token is provided', () => {
+    // Without OAuth, Codex hosts have no API-key fallback — the MITM proxy
+    // would have nothing to swap in, which is the intended "OAuth required"
+    // posture for Codex.
+    const config = configWithKeys({});
+    expect(resolveRealKey('chatgpt.com', config, undefined)).toBe('');
+    expect(resolveRealKey('auth.openai.com', config, undefined)).toBe('');
+  });
+
+  it('falls back to the configured API key for Anthropic hosts when no OAuth token', () => {
+    const config = configWithKeys({ anthropicApiKey: 'sk-ant-api03-configured' });
+    expect(resolveRealKey('api.anthropic.com', config, undefined)).toBe('sk-ant-api03-configured');
+  });
+});
+
 describe('prepareConversationStateDir', () => {
   let sessionDir: string;
 
@@ -254,6 +299,25 @@ describe('prepareConversationStateDir', () => {
     // Second run should delete it
     prepareConversationStateDir(sessionDir, config);
     expect(existsSync(join(stateDir, '.credentials.json'))).toBe(false);
+  });
+
+  it('deletes auth.json on every run (Codex defense-in-depth)', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'codex-state',
+      containerMountPath: '/home/codespace/.codex/',
+      seed: [],
+      resumeFlags: [],
+    };
+
+    const stateDir = prepareConversationStateDir(sessionDir, config);
+
+    // Simulate a stale fake-token auth.json left by a prior container start.
+    writeFileSync(join(stateDir, 'auth.json'), '{"auth_mode":"chatgptAuthTokens","tokens":{}}');
+    expect(existsSync(join(stateDir, 'auth.json'))).toBe(true);
+
+    // Second run should scrub it so no stale credential lingers across resumes.
+    prepareConversationStateDir(sessionDir, config);
+    expect(existsSync(join(stateDir, 'auth.json'))).toBe(false);
   });
 
   it('handles missing .credentials.json gracefully', () => {

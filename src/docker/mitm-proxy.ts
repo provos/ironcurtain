@@ -854,11 +854,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
     // 401 retry only makes sense when we swapped our own managed credential
     const canRetryAuth = keyResult.swapped && !!provider.tokenManager;
-    // Only buffer for retry when the body is small enough (known Content-Length
-    // under 1MB). Large or chunked bodies stream through without retry support
-    // to avoid memory overhead and 413 rejections on large payloads.
+    // Only buffer for retry when the body is absent or small enough (known
+    // Content-Length under 1MB). Large or chunked bodies stream through without
+    // retry support to avoid memory overhead and 413 rejections on large
+    // payloads. Bodyless requests (notably Codex's model-list GET) still need
+    // the OAuth 401 refresh path.
     const contentLength = parseInt(clientReq.headers['content-length'] ?? '', 10);
-    const retryBufferOk = canRetryAuth && Number.isFinite(contentLength) && contentLength <= MAX_RETRY_BODY_BYTES;
+    const hasNoRequestBody =
+      clientReq.headers['content-length'] === undefined && clientReq.headers['transfer-encoding'] === undefined;
+    const retryBufferOk =
+      canRetryAuth && (hasNoRequestBody || (Number.isFinite(contentLength) && contentLength <= MAX_RETRY_BODY_BYTES));
     const needsBuffer = needsRewrite || retryBufferOk;
 
     /**
