@@ -245,9 +245,10 @@ describe('Trajectory poison: failure modes', () => {
     // by a content_block_delta for an index with NO preceding
     // content_block_start. The dispatcher throws ("content_block_delta for
     // unknown index 0"), latching the reassembler as failed — a real parse
-    // failure, distinct from a transport truncation. finalize() rethrows it
-    // (NOT a TruncatedStreamError), so the tap poisons 'reassembly-failure'
-    // and no record is enqueued.
+    // failure, distinct from a transport truncation. finalize() then throws a
+    // plain ReassemblyError carrying the latched failure message (NOT a
+    // TruncatedStreamError), so the tap poisons 'reassembly-failure' and no
+    // record is enqueued.
     const malformedSse =
       'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"c","content":[]}}\n\n' +
       'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}\n\n';
