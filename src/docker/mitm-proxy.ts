@@ -854,11 +854,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
     // 401 retry only makes sense when we swapped our own managed credential
     const canRetryAuth = keyResult.swapped && !!provider.tokenManager;
-    // Only buffer for retry when the body is small enough (known Content-Length
-    // under 1MB). Large or chunked bodies stream through without retry support
-    // to avoid memory overhead and 413 rejections on large payloads.
+    // Only buffer for retry when the body is absent or small enough (known
+    // Content-Length under 1MB). Large or chunked bodies stream through without
+    // retry support to avoid memory overhead and 413 rejections on large
+    // payloads. Bodyless requests (notably Codex's model-list GET) still need
+    // the OAuth 401 refresh path.
     const contentLength = parseInt(clientReq.headers['content-length'] ?? '', 10);
-    const retryBufferOk = canRetryAuth && Number.isFinite(contentLength) && contentLength <= MAX_RETRY_BODY_BYTES;
+    const hasNoRequestBody =
+      clientReq.headers['content-length'] === undefined && clientReq.headers['transfer-encoding'] === undefined;
+    const retryBufferOk =
+      canRetryAuth && (hasNoRequestBody || (Number.isFinite(contentLength) && contentLength <= MAX_RETRY_BODY_BYTES));
     const needsBuffer = needsRewrite || retryBufferOk;
 
     /**
@@ -1033,17 +1038,39 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
                 inlet.end();
               }
             });
-            upstream.on('error', (err) => {
-              if (!inlet.destroyed) {
-                inlet.destroy(err);
+            upstream.on('error', () => {
+              // On upstream 'error'/'aborted' a terminal event may already
+              // be buffered in a decompressor inlet. Prefer a graceful
+              // `inlet.end()` flush (NOT destroy) so zlib `_flush` emits the
+              // buffered tail and the tap's `canFinalize()` can recover a
+              // complete-but-aborted stream; `canFinalize()` is the primary
+              // recovery mechanism (codex is uncompressed, so the inlet is
+              // the captureTap itself and `end()` simply triggers finalize).
+              // Genuine decompressor corruption surfaces as a zlib 'error'
+              // on the inlet, which poisons `reassembly-failure` via
+              // `createResponseCaptureInlet`'s own handler. Reserve
+              // `inlet.destroy()` for the case where the inlet cannot be
+              // ended (already errored).
+              if (!inlet.writableEnded && !inlet.destroyed) {
+                inlet.end();
               }
             });
             upstream.on('close', () => {
               // If `end` already fired, the inlet has been ended. If we
-              // got here without `end`, treat it as an abort so the
-              // captureTap surfaces a mid-stream-abort poison.
+              // got here without `end` and without an `error`, this is a
+              // graceful close-after-data (e.g. the client disconnected
+              // after the completion). Call `inlet.end()` — NOT
+              // `inlet.destroy()` — so a decompressor inlet runs zlib
+              // `_flush`, emits its buffered tail + `end` to the
+              // captureTap, and the reassembler sees its terminal event.
+              // `inlet.destroy(err)` is reserved for genuine upstream
+              // `error` (handled above), which would discard the
+              // decompressor's pending tail. The tap's `canFinalize()`
+              // lifecycle then writes a faithful record for a
+              // complete-but-socket-aborted stream, or poisons
+              // mid-stream-abort only if the terminal event never landed.
               if (!inlet.writableEnded && !inlet.destroyed) {
-                inlet.destroy(new Error('upstream closed before end'));
+                inlet.end();
               }
             });
           }

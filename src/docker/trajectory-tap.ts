@@ -215,14 +215,32 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       const tap = new PassThrough();
       const responseChunks: Buffer[] = [];
       let responseBytes = 0;
-      const streaming = String(args.headers['content-type'] ?? '').includes('text/event-stream');
+      // Decide whether to engage an SSE reassembler. A capturable completion
+      // endpoint (the only thing reaching attachResponse) can answer either
+      // as an SSE stream OR — when the client sets stream:false — as a single
+      // JSON object. Feeding a non-streaming JSON body into the reassembler
+      // would never yield a terminal event and would falsely poison the
+      // session `reassembly-failure`, so engage ONLY when the response is
+      // actually SSE:
+      //   - content-type contains `text/event-stream`, OR
+      //   - content-type is ABSENT on a host we have a reassembler for —
+      //     Codex's chatgpt.com Responses stream is SSE but sends no
+      //     content-type header (verified via live --capture-traces). A
+      //     non-streaming completion always sets `content-type:
+      //     application/json`, so an absent content-type unambiguously means
+      //     the headerless-SSE case.
+      // `createReassembler` returns `undefined` for unknown hosts, so those
+      // fall back to verbatim raw capture either way.
+      const contentType = String(args.headers['content-type'] ?? '').toLowerCase();
+      const isSse = contentType.includes('text/event-stream');
+      const reassembler: Reassembler | undefined =
+        isSse || contentType === '' ? createReassembler(inputs.host) : undefined;
+      const streaming = reassembler !== undefined || isSse;
       // The caller is responsible for wiring a decompressor in front of
       // this tap (see `createResponseCaptureInlet`). The bytes reaching
       // `tap.on('data')` are therefore always uncompressed; the
       // `content-encoding` header is preserved on the captured record
-      // as metadata via `args.headers`. We create a reassembler on every
-      // streaming response.
-      const reassembler: Reassembler | undefined = streaming ? createReassembler(inputs.host) : undefined;
+      // as metadata via `args.headers`.
 
       // Per §9 Phase B condition 2: a completion Promise is registered
       // with the dispatcher so `endSession` can await this tap's
@@ -323,11 +341,14 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(msg));
           }
         } else {
-          // Non-streaming or compressed: capture the raw bytes verbatim.
+          // No reassembler: capture the raw bytes verbatim. `streaming`
+          // reflects the content-type sniff — true only for a known SSE
+          // content-type on a host without a reassembler (no structured
+          // fields available), false otherwise.
           maybeWriteRecord({
             statusCode: args.statusCode,
             responseHeaders: args.headers,
-            streaming: false,
+            streaming,
             responseBody: Buffer.concat(responseChunks, responseBytes),
             responseFinishedAt,
           });
@@ -335,26 +356,35 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         }
       };
 
+      // Shared by the close/error paths. The captureTap was torn down
+      // before a clean `end` (`_flush`). The bytes already pushed into
+      // the reassembler are retained in its state independent of the tap
+      // being destroyed, so a teardown is the SIGNAL to decide: if the
+      // reassembler already parsed its terminal event (`canFinalize()`),
+      // the stream is COMPLETE-but-socket-aborted — run the SAME
+      // `finalize` closure to write a faithful record (it guards
+      // `aborted || finalized`, and sets `finalized=true` synchronously
+      // before any throw, so an error-then-close pair finalizes exactly
+      // once). Only when the terminal event was never seen is this a
+      // GENUINELY-PARTIAL stream that poisons `mid-stream-abort`.
+      const finalizeOrPoisonOnTeardown = (err: Error): void => {
+        if (aborted || finalized) {
+          finishCompletion(false);
+          return;
+        }
+        if (reassembler?.canFinalize()) {
+          finalize();
+          return;
+        }
+        poisonAndAbort('mid-stream-abort', err);
+      };
+
       tap.on('end', finalize);
       tap.on('close', () => {
-        if (aborted || finalized) {
-          finishCompletion(false);
-          return;
-        }
-        if (reassembler) {
-          // Mid-stream abort: the captureTap closed before the
-          // reassembler ran `_flush`. Per §9 this is the
-          // `mid-stream-abort` poison source; drop the in-flight record
-          // without writing.
-          poisonAndAbort('mid-stream-abort', new Error('mid-stream-abort'));
-        }
+        finalizeOrPoisonOnTeardown(new Error('mid-stream-abort'));
       });
       tap.on('error', (err) => {
-        if (aborted || finalized) {
-          finishCompletion(false);
-          return;
-        }
-        poisonAndAbort('mid-stream-abort', err instanceof Error ? err : new Error(String(err)));
+        finalizeOrPoisonOnTeardown(err instanceof Error ? err : new Error(String(err)));
       });
 
       return tap;

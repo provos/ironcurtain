@@ -304,7 +304,7 @@ export class DockerAgentSession implements Session {
 
       this.cumulativeActiveMs += Date.now() - turnStartMs;
 
-      const response = this.infra.adapter.extractResponse(exitCode, stdout);
+      const response = this.infra.adapter.extractResponse(exitCode, stdout, stderr);
 
       if (response.costUsd !== undefined) {
         this.cumulativeCostUsd = response.costUsd;

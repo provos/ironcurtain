@@ -1,0 +1,14 @@
+FROM ironcurtain-base:latest
+
+# Install OpenAI Codex CLI (Node.js is already in the base image).
+# Unpinned (latest), matching Dockerfile.claude-code's `npm install -g`.
+USER root
+RUN npm install -g @openai/codex
+
+COPY entrypoint-codex.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER codespace
+RUN mkdir -p /home/codespace/.codex
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

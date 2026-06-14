@@ -49,6 +49,7 @@ const topLevelSpec: CommandSpec = {
     'ironcurtain start --resume <session-id>        # Resume a session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start --pty                        # PTY mode',
     'ironcurtain daemon                             # Start the daemon',
     'ironcurtain daemon list-jobs                   # List scheduled jobs',

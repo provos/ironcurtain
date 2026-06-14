@@ -11,6 +11,7 @@ import {
   getPackageGeneratedDir,
 } from './config/index.js';
 import { getUserConfigPath } from './config/paths.js';
+import { modelFlagMisusedAsAgent } from './config/agent-model-guard.js';
 import { checkHelp, parseArgsStrict, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
@@ -26,7 +27,12 @@ const startSpec: CommandSpec = {
   usage: ['ironcurtain start [options] [task]'],
   options: [
     { flag: 'resume', short: 'r', description: 'Resume a previous session', placeholder: '<id>' },
-    { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },
+    {
+      flag: 'agent',
+      short: 'a',
+      description: 'Agent mode: builtin, claude-code, goose, or codex',
+      placeholder: '<name>',
+    },
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
@@ -40,6 +46,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --resume <session-id>        # Resume a session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
     'ironcurtain start --pty                        # PTY mode: interactive Docker terminal',
     'ironcurtain start --list-agents                # List available agents',
@@ -91,6 +98,11 @@ export async function main(args?: string[]): Promise<void> {
   const rawWorkspace = values.workspace as string | undefined;
   const personaName = values.persona as string | undefined;
   const modelOverride = values.model as string | undefined;
+  const modelMisuse = modelFlagMisusedAsAgent(modelOverride);
+  if (modelMisuse) {
+    process.stderr.write(chalk.red(`${modelMisuse}\n`));
+    process.exit(1);
+  }
   const captureTracesOverride = (values['capture-traces'] as boolean | undefined) ? true : undefined;
   const config = loadConfig();
 

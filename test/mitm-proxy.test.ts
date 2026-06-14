@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadOrCreateCA, type CertificateAuthority } from '../src/docker/ca.js';
 import { createMitmProxy, type MitmProxy, type MitmProxyOptions } from '../src/docker/mitm-proxy.js';
+import type { OAuthTokenManager } from '../src/docker/oauth-token-manager.js';
 import {
   anthropicRequestRewriter,
   isEndpointAllowed,
@@ -1076,6 +1077,120 @@ describe('MitmProxy', () => {
     // No API key header → treated as unauthenticated, forwarded upstream
     // (502 because no real upstream exists in the test)
     expect(response.statusCode).toBe(502);
+  });
+
+  it('refreshes OAuth tokens and retries bodyless authenticated requests after upstream 401', async () => {
+    const seenKeys: string[] = [];
+    const upstream = http.createServer((req, res) => {
+      seenKeys.push(String(req.headers['x-api-key'] ?? ''));
+      if (seenKeys.length === 1) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('expired');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        resolve((upstream.address() as import('node:net').AddressInfo).port);
+      });
+    });
+    const oauthProvider: ProviderConfig = {
+      ...testProvider,
+      upstreamTarget: { hostname: '127.0.0.1', port: upstreamPort, pathPrefix: '', useTls: false },
+    };
+    const tokenManager = {
+      getValidAccessToken: async () => 'old-real-token',
+      handleAuthFailure: async () => 'new-real-token',
+    } as OAuthTokenManager;
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: oauthProvider, fakeKey, realKey: 'old-real-token', tokenManager }],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+      expect(socket).not.toBeNull();
+
+      const response = await makeHttpsRequest(socket!, ca, 'api.test.com', {
+        method: 'GET',
+        path: '/v1/models',
+        headers: { 'x-api-key': fakeKey },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(seenKeys).toEqual(['old-real-token', 'new-real-token']);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        upstream.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+  });
+
+  it('refreshes OAuth tokens and retries bodyless bearer requests after upstream 401', async () => {
+    // Codex's real providers use { type: 'bearer' } key injection, so the
+    // bearer + bodyless GET + 401-retry path it actually traverses needs
+    // its own coverage (the header-based sibling above does not exercise
+    // injectRealKey's bearer branch).
+    const seenAuth: string[] = [];
+    const upstream = http.createServer((req, res) => {
+      seenAuth.push(req.headers['authorization'] ?? '');
+      if (seenAuth.length === 1) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('expired');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        resolve((upstream.address() as import('node:net').AddressInfo).port);
+      });
+    });
+    const bearerProvider: ProviderConfig = {
+      ...testProvider,
+      keyInjection: { type: 'bearer' },
+      upstreamTarget: { hostname: '127.0.0.1', port: upstreamPort, pathPrefix: '', useTls: false },
+    };
+    const tokenManager = {
+      getValidAccessToken: async () => 'old-real-token',
+      handleAuthFailure: async () => 'new-real-token',
+    } as OAuthTokenManager;
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [{ config: bearerProvider, fakeKey, realKey: 'old-real-token', tokenManager }],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+      expect(socket).not.toBeNull();
+
+      const response = await makeHttpsRequest(socket!, ca, 'api.test.com', {
+        method: 'GET',
+        path: '/v1/models',
+        headers: { authorization: `Bearer ${fakeKey}` },
+      });
+
+      expect(response.statusCode).toBe(200);
+      // First attempt carries the swapped real token; after the upstream
+      // 401, the proxy refreshes and retries with the new real token — both
+      // arrive in the Authorization: Bearer header.
+      expect(seenAuth).toEqual(['Bearer old-real-token', 'Bearer new-real-token']);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        upstream.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
   });
 
   it('stop() cleans up socket file', async () => {

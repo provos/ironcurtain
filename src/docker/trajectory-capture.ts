@@ -33,6 +33,15 @@ import {
 const HIGH_WATERMARK = 1024;
 /** Low watermark after queue-overflow poisoning, before new sessions are accepted. */
 const LOW_WATERMARK = 256;
+/**
+ * Upper bound on how long `endSession` waits for a session's in-flight
+ * reassemblies to settle before forcibly poisoning them as
+ * `mid-stream-abort`. A never-terminating stream that also never aborts
+ * would otherwise hang teardown forever. `endSession` is only called
+ * after the agent process (and its client socket) has terminated, so a
+ * still-pending tap at that point is genuinely stuck.
+ */
+const DEFAULT_TEARDOWN_TIMEOUT_MS = 30_000;
 
 interface SessionFileState {
   readonly sessionId: SessionId;
@@ -82,6 +91,12 @@ export interface TrajectoryCaptureWriterOptions {
   readonly capturesDir: string;
   /** Override the filesystem API. Defaults to `node:fs/promises`. */
   readonly fs?: WriterFsDep;
+  /**
+   * Bound on the `endSession` in-flight wait before still-pending taps
+   * are poisoned `mid-stream-abort`. Defaults to
+   * {@link DEFAULT_TEARDOWN_TIMEOUT_MS}. Tests override it to a few ms.
+   */
+  readonly teardownTimeoutMs?: number;
 }
 
 /**
@@ -127,6 +142,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     mkdir: (p, o) => fsMkdir(p, o),
     writeFile: (p, d) => fsWriteFile(p, d),
   };
+  const teardownTimeoutMs = options.teardownTimeoutMs ?? DEFAULT_TEARDOWN_TIMEOUT_MS;
   const manifestPath = getCaptureManifestFile(capturesDir);
   const poisonMarkerPath = resolve(capturesDir, 'manifest.poisoned');
   const sessions = new Map<SessionId, SessionFileState>();
@@ -413,6 +429,16 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     promise.then(cleanup, cleanup);
   }
 
+  /**
+   * Forcibly drop a session's in-flight gate so a hung tap cannot block
+   * `endSession` past the teardown timeout. The promises' own
+   * `then(cleanup)` may still fire later; `cleanup` tolerates a missing
+   * set, so this is safe to race with settlement.
+   */
+  function forceClearInFlight(sessionId: SessionId): void {
+    inFlight.delete(sessionId);
+  }
+
   return {
     beginSession(opts: BeginCaptureSessionOptions): void {
       if (closed || closing) return;
@@ -513,10 +539,29 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         endResolvers.set(sessionId, resolveOuter);
       });
       void scheduleDrain();
-      // Wait for inflight reassemblies to settle (Phase B condition 2).
+      // Wait for inflight reassemblies to settle (Phase B condition 2),
+      // but bound the wait: a never-terminating stream that also never
+      // aborts would otherwise hang teardown forever. On timeout, poison
+      // the session `mid-stream-abort` and force the still-pending taps
+      // to settle so the drain can emit the session-end marker.
       const inflightSet = inFlight.get(sessionId);
       if (inflightSet && inflightSet.size > 0) {
-        await Promise.allSettled([...inflightSet]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<'timeout'>((res) => {
+          timer = setTimeout(() => res('timeout'), teardownTimeoutMs);
+        });
+        const settled = Promise.allSettled([...inflightSet]).then(() => 'settled' as const);
+        const outcome = await Promise.race([settled, timeout]);
+        if (timer) clearTimeout(timer);
+        if (outcome === 'timeout') {
+          const session2 = sessions.get(sessionId);
+          if (session2 && !session2.poisoned) {
+            markSessionPoisonedInternal(session2, 'mid-stream-abort');
+          }
+          // Release the in-flight gate so the drain can emit session-end;
+          // the hung tap's promise may settle later but no longer blocks.
+          forceClearInFlight(sessionId);
+        }
       }
       // Nudge the drain so the just-settled in-flights are picked up.
       void scheduleDrain();

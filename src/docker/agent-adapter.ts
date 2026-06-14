@@ -291,8 +291,10 @@ export interface AgentAdapter {
    *
    * @param exitCode - the container's exit code
    * @param stdout - captured stdout from the container
+   * @param stderr - captured stderr from the container, useful for CLIs that
+   *   report non-zero errors there instead of stdout
    */
-  extractResponse(exitCode: number, stdout: string): AgentResponse;
+  extractResponse(exitCode: number, stdout: string, stderr?: string): AgentResponse;
 
   /**
    * Returns the Docker container command for PTY mode.

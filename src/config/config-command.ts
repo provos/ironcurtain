@@ -790,6 +790,7 @@ const GOOSE_PROVIDER_LABELS: Readonly<Record<GooseProvider, string>> = {
 const DOCKER_AGENT_LABELS: Readonly<Record<DockerAgent, string>> = {
   'claude-code': 'Claude Code',
   goose: 'Goose',
+  codex: 'Codex CLI',
 };
 
 async function handleDockerAgent(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {

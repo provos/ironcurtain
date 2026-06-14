@@ -19,6 +19,7 @@ import {
   anthropicProvider,
   anthropicOAuthProvider,
   claudePlatformProvider,
+  codexChatGptProvider,
   googleProvider,
   isCapturableEndpoint,
   openaiProvider,
@@ -54,9 +55,25 @@ describe('isCapturableEndpoint: capture-endpoint allowlist', () => {
     expect(isCapturableEndpoint(anthropicOAuthProvider, 'POST', '/api/event_logging/v2/batch')).toBe(false);
   });
 
-  it('captures OpenAI POST /v1/chat/completions only', () => {
-    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/chat/completions')).toBe(true);
+  it('captures OpenAI POST /v1/responses only (not chat/completions or models)', () => {
+    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/responses')).toBe(true);
+    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/responses?stream=true')).toBe(true);
+    // /v1/chat/completions is forwardable (goose) but NOT captured.
+    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/chat/completions')).toBe(false);
     expect(isCapturableEndpoint(openaiProvider, 'GET', '/v1/models')).toBe(false);
+  });
+
+  it('captures Codex POST /backend-api/codex/responses only', () => {
+    // The completion stream Codex sends is POST /backend-api/codex/responses
+    // (verified against a live codex exec run) — NOT the bare /backend-api/codex.
+    expect(isCapturableEndpoint(codexChatGptProvider, 'POST', '/backend-api/codex/responses')).toBe(true);
+    expect(isCapturableEndpoint(codexChatGptProvider, 'POST', '/backend-api/codex/responses?stream=true')).toBe(true);
+    expect(isCapturableEndpoint(codexChatGptProvider, 'post', '/backend-api/codex/responses')).toBe(true);
+    // The bare path (the old, never-matching capture target) and the GET poll /
+    // model-list housekeeping calls must NOT be captured.
+    expect(isCapturableEndpoint(codexChatGptProvider, 'POST', '/backend-api/codex')).toBe(false);
+    expect(isCapturableEndpoint(codexChatGptProvider, 'GET', '/backend-api/codex/responses')).toBe(false);
+    expect(isCapturableEndpoint(codexChatGptProvider, 'GET', '/backend-api/codex/models')).toBe(false);
   });
 
   it('captures Google generateContent / streamGenerateContent globs', () => {

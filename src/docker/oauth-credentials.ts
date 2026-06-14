@@ -26,6 +26,12 @@ export interface OAuthCredentials {
   readonly expiresAt: number;
 }
 
+/** OAuth credentials from Codex CLI's ChatGPT auth cache. */
+export interface CodexOAuthCredentials extends OAuthCredentials {
+  readonly idToken?: string;
+  readonly accountId?: string;
+}
+
 /** Where OAuth credentials were loaded from. */
 export type OAuthCredentialSource = 'file' | 'keychain';
 
@@ -49,6 +55,7 @@ export type AuthMethod =
 
 /** Minimum remaining token lifetime (5 minutes) to consider a token usable. */
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+const DEFAULT_CODEX_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -67,6 +74,11 @@ const KEYCHAIN_SERVICE_NAMES = ['Claude Code-credentials', 'Claude Code'] as con
  */
 export function getCredentialsFilePath(): string {
   return resolve(homedir(), '.claude', '.credentials.json');
+}
+
+/** Returns Codex's auth cache path, honoring CODEX_HOME when set. */
+export function getCodexAuthFilePath(): string {
+  return resolve(process.env.CODEX_HOME ?? resolve(homedir(), '.codex'), 'auth.json');
 }
 
 /**
@@ -101,6 +113,19 @@ export function loadCredentialsFromFile(filePath: string): OAuthCredentials | nu
   }
 }
 
+/** Loads Codex CLI ChatGPT OAuth credentials from CODEX_HOME/auth.json. */
+export function loadCodexOAuthCredentials(filePath = getCodexAuthFilePath()): CodexOAuthCredentials | null {
+  if (!existsSync(filePath)) return null;
+
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    return parseCodexAuthJson(raw);
+  } catch {
+    logger.warn(`Failed to read Codex OAuth credentials from ${filePath}`);
+    return null;
+  }
+}
+
 /**
  * Parses the claudeAiOauth section from a credentials JSON string.
  * Returns null if parsing fails or required fields are missing.
@@ -124,6 +149,46 @@ export function parseCredentialsJson(json: string): OAuthCredentials | null {
       refreshToken: creds.refreshToken,
       expiresAt: creds.expiresAt,
     };
+  } catch {
+    return null;
+  }
+}
+
+/** Parses Codex CLI's auth.json shape for ChatGPT-backed OAuth sessions. */
+export function parseCodexAuthJson(json: string): CodexOAuthCredentials | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+
+    const obj = parsed as Record<string, unknown>;
+    if (obj.auth_mode !== 'chatgpt' && obj.auth_mode !== 'chatgptAuthTokens') return null;
+
+    const tokens = obj.tokens;
+    if (typeof tokens !== 'object' || tokens === null) return null;
+    const tokenObj = tokens as Record<string, unknown>;
+    if (!isNonEmptyString(tokenObj.access_token)) return null;
+
+    return {
+      accessToken: tokenObj.access_token,
+      refreshToken: isNonEmptyString(tokenObj.refresh_token) ? tokenObj.refresh_token : '',
+      expiresAt: parseJwtExpirationMs(tokenObj.access_token) ?? Date.now() + DEFAULT_CODEX_TOKEN_LIFETIME_MS,
+      idToken: isNonEmptyString(tokenObj.id_token) ? tokenObj.id_token : undefined,
+      accountId: isNonEmptyString(tokenObj.account_id) ? tokenObj.account_id : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseJwtExpirationMs(jwt: string): number | null {
+  const parts = jwt.split('.');
+  if (parts.length !== 3 || !parts[1]) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as unknown;
+    if (typeof payload !== 'object' || payload === null) return null;
+    const exp = (payload as Record<string, unknown>).exp;
+    return isPositiveFiniteNumber(exp) ? exp * 1000 : null;
   } catch {
     return null;
   }
@@ -227,6 +292,8 @@ const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
 /** Anthropic's OAuth token endpoint (platform.claude.com since mid-2025). */
 const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 
 /**
  * Discriminated result of a refresh attempt.
@@ -287,6 +354,34 @@ export function refreshResultToCreds(result: RefreshResult): OAuthCredentials | 
   return result.kind === 'ok' ? result.credentials : null;
 }
 
+export async function refreshCodexOAuthToken(refreshToken: string): Promise<RefreshResult> {
+  const REFRESH_TIMEOUT_MS = 30_000;
+  try {
+    const response = await fetch(CODEX_OAUTH_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: CODEX_OAUTH_CLIENT_ID,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+      }),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      logger.warn(`Codex OAuth token refresh failed: HTTP ${response.status}`);
+      return { kind: 'http-error', status: response.status };
+    }
+
+    const data = (await response.json()) as Record<string, unknown>;
+    return parseCodexTokenResponse(data, refreshToken);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn(`Codex OAuth token refresh error: ${message}`);
+    return { kind: 'network-error', message };
+  }
+}
+
 /**
  * Validates and extracts credentials from an OAuth token endpoint response.
  * Returns parse-error if access_token or expires_in are missing/invalid.
@@ -309,6 +404,24 @@ function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken:
       accessToken,
       refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
+    },
+  };
+}
+
+function parseCodexTokenResponse(data: Record<string, unknown>, fallbackRefreshToken: string): RefreshResult {
+  const { access_token: accessToken, refresh_token: refreshToken, id_token: idToken } = data;
+
+  if (!isNonEmptyString(accessToken)) {
+    return { kind: 'parse-error', detail: 'response missing access_token' };
+  }
+
+  return {
+    kind: 'ok',
+    credentials: {
+      accessToken,
+      refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
+      expiresAt: parseJwtExpirationMs(accessToken) ?? Date.now() + DEFAULT_CODEX_TOKEN_LIFETIME_MS,
+      ...(isNonEmptyString(idToken) ? { idToken } : {}),
     },
   };
 }
@@ -345,6 +458,32 @@ export function saveOAuthCredentials(credentials: OAuthCredentials, filePath?: s
   // chmod after write — writeFileSync's mode only applies when creating new files;
   // existing files with broader permissions need an explicit chmod.
   chmodSync(credPath, 0o600);
+}
+
+export function saveCodexOAuthCredentials(credentials: OAuthCredentials, filePath = getCodexAuthFilePath()): void {
+  let existing: Record<string, unknown> = {};
+  try {
+    if (existsSync(filePath)) {
+      existing = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+    }
+  } catch {
+    // Start fresh if the file is unreadable.
+  }
+
+  const existingTokens =
+    typeof existing.tokens === 'object' && existing.tokens !== null ? (existing.tokens as Record<string, unknown>) : {};
+  const codexCredentials = credentials as CodexOAuthCredentials;
+
+  existing.auth_mode = 'chatgpt';
+  existing.tokens = {
+    ...existingTokens,
+    access_token: credentials.accessToken,
+    refresh_token: credentials.refreshToken,
+    ...(codexCredentials.idToken ? { id_token: codexCredentials.idToken } : {}),
+  };
+
+  writeFileSync(filePath, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 });
+  chmodSync(filePath, 0o600);
 }
 
 /**

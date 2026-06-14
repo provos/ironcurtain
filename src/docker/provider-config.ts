@@ -99,7 +99,7 @@ export interface ProviderConfig {
    * the trajectory-capture pipeline. Same matcher shape as
    * `allowedEndpoints` (method + path glob, query string stripped before
    * matching). This is an ALLOWLIST: only completion endpoints belong here
-   * (e.g. Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`). The
+   * (e.g. Anthropic `/v1/messages`, OpenAI Responses `/v1/responses`). The
    * large volume of host-shared housekeeping traffic (MCP-registry
    * pagination, telemetry batches, settings/eval pings) is deliberately
    * excluded so it never pollutes the captured corpus.
@@ -516,12 +516,72 @@ export const openaiProvider: ProviderConfig = {
   host: 'api.openai.com',
   displayName: 'OpenAI',
   allowedEndpoints: [
+    // The Responses API is the path modern OpenAI agents (incl. Codex with an
+    // API key) use; /v1/chat/completions is kept for goose's OpenAI provider.
+    { method: 'POST', path: '/v1/responses' },
     { method: 'POST', path: '/v1/chat/completions' },
     { method: 'GET', path: '/v1/models' },
   ],
-  captureEndpoints: [{ method: 'POST', path: '/v1/chat/completions' }],
+  // Capture only the Responses API: it shares the chatgpt.com wire format and
+  // is reassembled by ResponsesReassembler (createReassembler routes
+  // api.openai.com → ResponsesReassembler). /v1/chat/completions is NOT
+  // captured — no harness uses it and there is no chat-completions reassembler.
+  captureEndpoints: [{ method: 'POST', path: '/v1/responses' }],
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ironcurtain-',
+};
+
+export const codexChatGptProvider: ProviderConfig = {
+  host: 'chatgpt.com',
+  displayName: 'ChatGPT Codex',
+  allowedEndpoints: [
+    { method: 'GET', path: '/agent-identities/jwks' },
+    { method: 'GET', path: '/wham/agent-identities/jwks' },
+    { method: 'GET', path: '/codex-backend/agent-identity' },
+    { method: 'POST', path: '/codex-backend/agent-identity' },
+    // backend-api allowlist — least-privilege, enumerated from live Codex CLI
+    // 0.139.0 runs (a simple completion and a file-edit-plus-shell task) through
+    // this proxy. Exact paths only (no wildcard) so the real ChatGPT OAuth token
+    // is forwarded to exactly the endpoints Codex needs and nothing else.
+    //
+    // (a) The only functionally required backend-api calls observed are
+    //     GET /backend-api/codex/models and GET+POST /backend-api/codex/responses
+    //     (the completion stream); sessions complete with these alone.
+    // (b) REPLACES a prior `/backend-api/codex/*` single-segment wildcard, which
+    //     would also have forwarded the token to unrelated future sub-surfaces.
+    // (c) Intentionally still blocked (Codex attempts them; runs are unaffected):
+    //     POST /backend-api/codex/analytics-events/events (telemetry),
+    //     GET /backend-api/plugins/*, GET /backend-api/ps/plugins/installed,
+    //     POST /backend-api/wham/apps (plugin/app marketplace). None are needed
+    //     for headless exec; blocking them keeps egress minimal.
+    // (d) If a future Codex version 403s on a path it genuinely needs, add that
+    //     specific exact path here — do NOT re-introduce a wildcard.
+    { method: 'GET', path: '/backend-api/codex/models' },
+    { method: 'GET', path: '/backend-api/codex/responses' },
+    { method: 'POST', path: '/backend-api/codex/responses' },
+  ],
+  // The completion call Codex streams is POST /backend-api/codex/responses
+  // (verified against a live codex exec run). chatgpt.com classifies as the
+  // 'openai' capture provider and is reassembled by ResponsesReassembler
+  // against the named-event Responses stream (response.* events; terminal
+  // response.completed). The ~7 GET /backend-api/codex/responses calls are
+  // polling/resume that return application/json state, not a fresh
+  // generation, and are GETs — so they never match this POST capture gate.
+  captureEndpoints: [{ method: 'POST', path: '/backend-api/codex/responses' }],
+  keyInjection: { type: 'bearer' },
+  // Codex expects ChatGPT access tokens to be JWT-shaped in auth.json.
+  // Keep the fake credential structurally valid so local parsing passes,
+  // then swap it host-side before forwarding upstream.
+  fakeKeyPrefix:
+    'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsImlzcyI6Imlyb25jdXJ0YWluIiwic3ViIjoiY29kZXgtZmFrZSJ9.',
+};
+
+export const codexAuthProvider: ProviderConfig = {
+  host: 'auth.openai.com',
+  displayName: 'OpenAI Auth',
+  allowedEndpoints: [{ method: 'GET', path: '/api/accounts/v1/user-auth-credential/whoami' }],
+  keyInjection: { type: 'bearer' },
+  fakeKeyPrefix: codexChatGptProvider.fakeKeyPrefix,
 };
 
 export const anthropicOAuthProvider: ProviderConfig = {
