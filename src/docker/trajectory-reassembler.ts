@@ -995,14 +995,18 @@ export function providerForHost(host: string): CaptureProvider {
 
 /**
  * Pick a reassembler by upstream host. Routing is BY HOST so a specific
- * wire format maps to its state machine. Hosts the caller cannot classify
- * (including `api.openai.com` — the classic Chat Completions API is not a
- * path any IronCurtain harness uses) yield `undefined`; the caller falls
- * back to capturing raw bytes verbatim.
+ * wire format maps to its state machine. Both OpenAI Responses surfaces —
+ * `chatgpt.com/backend-api/codex/responses` (Codex via ChatGPT OAuth) and
+ * `api.openai.com/v1/responses` (the platform Responses API, e.g. Codex
+ * authenticated with an API key) — share the same wire format, so both use
+ * `ResponsesReassembler`. Note: the classic Chat Completions API
+ * (`/v1/chat/completions`) is NOT a path any IronCurtain harness uses, so
+ * `openaiProvider` does not capture it. Unclassifiable hosts yield
+ * `undefined`; the caller falls back to capturing raw bytes verbatim.
  */
 export function createReassembler(host: string): Reassembler | undefined {
   const h = host.toLowerCase();
   if (h === 'api.anthropic.com') return new AnthropicReassembler();
-  if (h === 'chatgpt.com') return new ResponsesReassembler();
+  if (h === 'chatgpt.com' || h === 'api.openai.com') return new ResponsesReassembler();
   return undefined;
 }

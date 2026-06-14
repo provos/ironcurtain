@@ -99,7 +99,7 @@ export interface ProviderConfig {
    * the trajectory-capture pipeline. Same matcher shape as
    * `allowedEndpoints` (method + path glob, query string stripped before
    * matching). This is an ALLOWLIST: only completion endpoints belong here
-   * (e.g. Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`). The
+   * (e.g. Anthropic `/v1/messages`, OpenAI Responses `/v1/responses`). The
    * large volume of host-shared housekeeping traffic (MCP-registry
    * pagination, telemetry batches, settings/eval pings) is deliberately
    * excluded so it never pollutes the captured corpus.
@@ -516,10 +516,17 @@ export const openaiProvider: ProviderConfig = {
   host: 'api.openai.com',
   displayName: 'OpenAI',
   allowedEndpoints: [
+    // The Responses API is the path modern OpenAI agents (incl. Codex with an
+    // API key) use; /v1/chat/completions is kept for goose's OpenAI provider.
+    { method: 'POST', path: '/v1/responses' },
     { method: 'POST', path: '/v1/chat/completions' },
     { method: 'GET', path: '/v1/models' },
   ],
-  captureEndpoints: [{ method: 'POST', path: '/v1/chat/completions' }],
+  // Capture only the Responses API: it shares the chatgpt.com wire format and
+  // is reassembled by ResponsesReassembler (createReassembler routes
+  // api.openai.com → ResponsesReassembler). /v1/chat/completions is NOT
+  // captured — no harness uses it and there is no chat-completions reassembler.
+  captureEndpoints: [{ method: 'POST', path: '/v1/responses' }],
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ironcurtain-',
 };

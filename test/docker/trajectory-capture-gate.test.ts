@@ -55,8 +55,11 @@ describe('isCapturableEndpoint: capture-endpoint allowlist', () => {
     expect(isCapturableEndpoint(anthropicOAuthProvider, 'POST', '/api/event_logging/v2/batch')).toBe(false);
   });
 
-  it('captures OpenAI POST /v1/chat/completions only', () => {
-    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/chat/completions')).toBe(true);
+  it('captures OpenAI POST /v1/responses only (not chat/completions or models)', () => {
+    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/responses')).toBe(true);
+    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/responses?stream=true')).toBe(true);
+    // /v1/chat/completions is forwardable (goose) but NOT captured.
+    expect(isCapturableEndpoint(openaiProvider, 'POST', '/v1/chat/completions')).toBe(false);
     expect(isCapturableEndpoint(openaiProvider, 'GET', '/v1/models')).toBe(false);
   });
 

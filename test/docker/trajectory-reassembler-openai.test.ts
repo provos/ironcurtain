@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
-import { ResponsesReassembler } from '../../src/docker/trajectory-reassembler.js';
+import { ResponsesReassembler, createReassembler } from '../../src/docker/trajectory-reassembler.js';
 
 const here = resolve(fileURLToPath(import.meta.url), '..');
 const FIXTURE = resolve(here, 'fixtures', 'codex-responses-stream.sse');
@@ -218,5 +218,31 @@ describe('ResponsesReassembler byte fidelity (real codex stream)', () => {
       ),
     );
     expect(() => r.finalize()).toThrow();
+  });
+});
+
+describe('createReassembler host routing', () => {
+  function reassembleVia(host: string): ReturnType<ResponsesReassembler['finalize']> {
+    const r = createReassembler(host);
+    if (!r) throw new Error(`no reassembler for ${host}`);
+    r.push(readFileSync(FIXTURE));
+    return r.finalize();
+  }
+
+  it('routes both OpenAI Responses hosts to ResponsesReassembler with identical output', () => {
+    // Codex via ChatGPT OAuth (chatgpt.com) and the platform Responses API
+    // (api.openai.com, e.g. Codex with an API key) share the same wire format.
+    const viaChatGpt = reassembleVia('chatgpt.com');
+    const viaPlatform = reassembleVia('api.openai.com');
+    expect(viaPlatform.bodyUtf8).toBe(viaChatGpt.bodyUtf8);
+    expect(viaPlatform.bodyUtf8).toContain('17 * 23 = 17 * (20 + 3) = 340 + 51 = 391');
+    expect(viaPlatform.providerRequestId).toBe(viaChatGpt.providerRequestId);
+  });
+
+  it('routes api.anthropic.com to a distinct reassembler and leaves unknown hosts unrouted', () => {
+    expect(createReassembler('api.anthropic.com')).toBeDefined();
+    expect(createReassembler('chatgpt.com')).toBeDefined();
+    expect(createReassembler('api.openai.com')).toBeDefined();
+    expect(createReassembler('example.com')).toBeUndefined();
   });
 });
