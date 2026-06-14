@@ -532,32 +532,26 @@ export const codexChatGptProvider: ProviderConfig = {
     { method: 'GET', path: '/wham/agent-identities/jwks' },
     { method: 'GET', path: '/codex-backend/agent-identity' },
     { method: 'POST', path: '/codex-backend/agent-identity' },
-    // backend-api allowlist — least-privilege scoping, validated against a
-    // live Codex CLI 0.139.0 `exec` run through this proxy.
+    // backend-api allowlist — least-privilege, enumerated from live Codex CLI
+    // 0.139.0 runs (a simple completion and a file-edit-plus-shell task) through
+    // this proxy. Exact paths only (no wildcard) so the real ChatGPT OAuth token
+    // is forwarded to exactly the endpoints Codex needs and nothing else.
     //
-    // (a) Scoped to the Codex backend surface rooted at `/backend-api/codex`
-    //     rather than forwarding the ChatGPT token to arbitrary backend-api
-    //     paths. REPLACES a prior blanket allowlist of `/backend-api/*`,
-    //     `/backend-api/*/*`, `/backend-api/*/*/*` (each `*` = one segment),
-    //     which forwarded the real token to essentially all 1–3 segment
-    //     backend-api paths.
-    // (b) Observed traffic from a real `codex exec` session: the only
-    //     functionally required calls are GET /backend-api/codex/models and
-    //     GET+POST /backend-api/codex/responses — all covered below; the
-    //     session completed successfully with these alone.
-    // (c) Intentionally still blocked (Codex attempted them; the run was
-    //     unaffected): POST /backend-api/codex/analytics-events/events
-    //     (telemetry), GET /backend-api/plugins/*, GET
-    //     /backend-api/ps/plugins/installed, POST /backend-api/wham/apps
-    //     (plugin/app marketplace discovery). None are needed for headless
-    //     exec; blocking them keeps egress minimal.
-    // (d) If a future Codex version 403s on a path it genuinely needs, add
-    //     that specific path here (prefer an exact or single-segment-wildcard
-    //     pattern over re-introducing the depth-wildcard blanket).
-    { method: 'GET', path: '/backend-api/codex' },
-    { method: 'POST', path: '/backend-api/codex' },
-    { method: 'GET', path: '/backend-api/codex/*' },
-    { method: 'POST', path: '/backend-api/codex/*' },
+    // (a) The only functionally required backend-api calls observed are
+    //     GET /backend-api/codex/models and GET+POST /backend-api/codex/responses
+    //     (the completion stream); sessions complete with these alone.
+    // (b) REPLACES a prior `/backend-api/codex/*` single-segment wildcard, which
+    //     would also have forwarded the token to unrelated future sub-surfaces.
+    // (c) Intentionally still blocked (Codex attempts them; runs are unaffected):
+    //     POST /backend-api/codex/analytics-events/events (telemetry),
+    //     GET /backend-api/plugins/*, GET /backend-api/ps/plugins/installed,
+    //     POST /backend-api/wham/apps (plugin/app marketplace). None are needed
+    //     for headless exec; blocking them keeps egress minimal.
+    // (d) If a future Codex version 403s on a path it genuinely needs, add that
+    //     specific exact path here — do NOT re-introduce a wildcard.
+    { method: 'GET', path: '/backend-api/codex/models' },
+    { method: 'GET', path: '/backend-api/codex/responses' },
+    { method: 'POST', path: '/backend-api/codex/responses' },
   ],
   // The completion call Codex streams is POST /backend-api/codex/responses
   // (verified against a live codex exec run). chatgpt.com classifies as the
