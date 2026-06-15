@@ -113,7 +113,7 @@ The built-in `design-and-code` workflow follows this flow:
 plan --> [plan_review] --> design --> [design_review] --> implement --> review
   ^          |               ^            |                  ^          |
   |          |               |            |                  |          |
-  +-- revision               +-- revision                   +-- rejected
+  +-- revision               +-- revision                    +-- rejected
                                                              |
                                                         [escalate_gate] --> done
 ```

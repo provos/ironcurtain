@@ -200,20 +200,31 @@ const STAGED_WORKFLOW_SCRIPTS_SUBDIR = 'workflow-scripts';
  * location.
  */
 export function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: string): string | undefined {
-  const sourceSkillsDir = resolve(packageDir, 'skills');
-  if (!existsSync(sourceSkillsDir)) return undefined;
-
-  const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SKILLS_SUBDIR);
-  cpSync(sourceSkillsDir, stagedDir, { recursive: true });
-  return stagedDir;
+  return stageWorkflowSubdir(packageDir, runMetaDir, 'skills', STAGED_WORKFLOW_SKILLS_SUBDIR);
 }
 
 export function stageWorkflowScriptsAtStart(packageDir: string, runMetaDir: string): string | undefined {
-  const sourceScriptsDir = resolve(packageDir, 'scripts');
-  if (!existsSync(sourceScriptsDir)) return undefined;
+  return stageWorkflowSubdir(packageDir, runMetaDir, 'scripts', STAGED_WORKFLOW_SCRIPTS_SUBDIR);
+}
 
-  const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SCRIPTS_SUBDIR);
-  cpSync(sourceScriptsDir, stagedDir, { recursive: true });
+/**
+ * Shallow-recursive copy of a workflow package subdir (`skills` / `scripts`) into
+ * the run dir. Returns the staged path, or `undefined` when the source subdir is
+ * absent (the workflow ships none — not an error). Throws only on copy I/O
+ * failure (a half-copied tree is worse than a missing one). See
+ * `stageWorkflowSkillsAtStart` above for why we copy rather than symlink.
+ */
+function stageWorkflowSubdir(
+  packageDir: string,
+  runMetaDir: string,
+  sourceSubdir: string,
+  stagedSubdir: string,
+): string | undefined {
+  const source = resolve(packageDir, sourceSubdir);
+  if (!existsSync(source)) return undefined;
+
+  const stagedDir = resolve(runMetaDir, stagedSubdir);
+  cpSync(source, stagedDir, { recursive: true });
   return stagedDir;
 }
 
@@ -298,7 +309,11 @@ function resolveWorkflowScriptsDirOnResume(opts: {
     return undefined;
   }
 
-  if (checkpointedStagedDir === undefined && !existsSync(resolve(packageDir, 'scripts'))) {
+  // Both paths gone. Only warn if scripts were previously staged
+  // (`checkpointedStagedDir` set): a workflow that never shipped scripts must not
+  // warn about "missing" scripts on every resume. `stageWorkflowScriptsAtStart`
+  // already proved `scripts/` is absent here, so no source re-stat is needed.
+  if (checkpointedStagedDir === undefined) {
     return undefined;
   }
 
@@ -2351,57 +2366,29 @@ export class WorkflowOrchestrator implements WorkflowController {
     return this.runDeterministicInContainer(bundle, input, warning);
   }
 
-  private async runDeterministicHost(commands: readonly (readonly string[])[]): Promise<DeterministicInvokeResult> {
+  /**
+   * Shared reduction for both deterministic execution paths: skip empty command
+   * arrays, mine the `N tests pass` heuristic from stdout, accumulate per-command
+   * failures, and shape the `{ passed, testCount, errors }` result. Host vs.
+   * container execution differ only in `runCommand` — keep that the only fork so
+   * the pass/fail and test-count semantics cannot drift between the two paths.
+   */
+  private async reduceDeterministicCommands(
+    commands: readonly (readonly string[])[],
+    runCommand: (cmd: readonly string[]) => Promise<{ stdout: string; error?: string }>,
+  ): Promise<DeterministicInvokeResult> {
     let totalTestCount = 0;
     const allErrors: string[] = [];
 
     for (const cmdArray of commands) {
       if (cmdArray.length === 0) continue;
-      const [binary, ...args] = cmdArray;
-      try {
-        const { stdout } = await execFileAsync(binary, args);
-        // Try to extract test count from stdout (simple heuristic)
-        const testMatch = /(\d+)\s+(?:tests?|specs?)\s+pass/i.exec(stdout);
-        if (testMatch) {
-          totalTestCount += parseInt(testMatch[1], 10);
-        }
-      } catch (err) {
-        const execErr = err as { code?: number; stderr?: string; stdout?: string };
-        allErrors.push(execErr.stderr ?? execErr.stdout ?? String(err));
-      }
-    }
-
-    return {
-      passed: allErrors.length === 0,
-      testCount: totalTestCount > 0 ? totalTestCount : undefined,
-      errors: allErrors.length > 0 ? allErrors.join('\n') : undefined,
-    };
-  }
-
-  private async runDeterministicInContainer(
-    bundle: DockerInfrastructure,
-    input: DeterministicInvokeInput,
-    warning?: string,
-  ): Promise<DeterministicInvokeResult> {
-    let totalTestCount = 0;
-    const allErrors: string[] = [];
-
-    if (warning) writeStderr(`[workflow] ${warning}`);
-
-    for (const cmdArray of input.commands) {
-      if (cmdArray.length === 0) continue;
-      const result = await bundle.docker.exec(
-        bundle.containerId,
-        cmdArray,
-        input.timeoutMs,
-        'codespace',
-        CONTAINER_WORKSPACE_DIR,
-      );
-      if (result.exitCode !== 0) {
-        allErrors.push(result.stderr || result.stdout || `exit ${result.exitCode}`);
+      const { stdout, error } = await runCommand(cmdArray);
+      if (error !== undefined) {
+        allErrors.push(error);
         continue;
       }
-      const testMatch = /(\d+)\s+(?:tests?|specs?)\s+pass/i.exec(result.stdout);
+      // Try to extract test count from stdout (simple heuristic)
+      const testMatch = /(\d+)\s+(?:tests?|specs?)\s+pass/i.exec(stdout);
       if (testMatch) {
         totalTestCount += parseInt(testMatch[1], 10);
       }
@@ -2412,6 +2399,41 @@ export class WorkflowOrchestrator implements WorkflowController {
       testCount: totalTestCount > 0 ? totalTestCount : undefined,
       errors: allErrors.length > 0 ? allErrors.join('\n') : undefined,
     };
+  }
+
+  private async runDeterministicHost(commands: readonly (readonly string[])[]): Promise<DeterministicInvokeResult> {
+    return this.reduceDeterministicCommands(commands, async (cmdArray) => {
+      const [binary, ...args] = cmdArray;
+      try {
+        const { stdout } = await execFileAsync(binary, args);
+        return { stdout };
+      } catch (err) {
+        const execErr = err as { code?: number; stderr?: string; stdout?: string };
+        return { stdout: '', error: execErr.stderr ?? execErr.stdout ?? String(err) };
+      }
+    });
+  }
+
+  private async runDeterministicInContainer(
+    bundle: DockerInfrastructure,
+    input: DeterministicInvokeInput,
+    warning?: string,
+  ): Promise<DeterministicInvokeResult> {
+    if (warning) writeStderr(`[workflow] ${warning}`);
+
+    return this.reduceDeterministicCommands(input.commands, async (cmdArray) => {
+      const result = await bundle.docker.exec(
+        bundle.containerId,
+        cmdArray,
+        input.timeoutMs,
+        'codespace',
+        CONTAINER_WORKSPACE_DIR,
+      );
+      if (result.exitCode !== 0) {
+        return { stdout: '', error: result.stderr || result.stdout || `exit ${result.exitCode}` };
+      }
+      return { stdout: result.stdout };
+    });
   }
 
   // -----------------------------------------------------------------------
