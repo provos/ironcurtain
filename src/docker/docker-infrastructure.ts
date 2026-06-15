@@ -1349,7 +1349,7 @@ async function ensureImage(image: string, docker: DockerManager, ca: Certificate
   return agentBuildHash;
 }
 
-async function ensureWorkflowImage(
+export async function ensureWorkflowImage(
   agentImage: string,
   scriptsDir: string | undefined,
   docker: DockerManager,
@@ -1402,7 +1402,7 @@ async function ensureWorkflowImage(
   return workflowImage;
 }
 
-function computeWorkflowImageHash(agentBuildHash: string, scriptsDir: string): string {
+export function computeWorkflowImageHash(agentBuildHash: string, scriptsDir: string): string {
   const hash = createHash('sha256');
   hash.update(`agent:${agentBuildHash}\n`);
   for (const manifest of ['requirements.txt', 'package.json', 'package-lock.json']) {

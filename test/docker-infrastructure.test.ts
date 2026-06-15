@@ -10,6 +10,8 @@ import {
   destroyDockerInfrastructure,
   resolveRealKey,
   canRefreshOAuth,
+  computeWorkflowImageHash,
+  ensureWorkflowImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
@@ -875,5 +877,123 @@ describe('destroyDockerInfrastructure', () => {
 
     expect(mitmProxy.stopped).toBe(true);
     expect(proxy.stopped).toBe(true); // attempted, error swallowed
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-workflow dependency image hashing (design §6.3, test plan §11 #5)
+// ---------------------------------------------------------------------------
+
+describe('computeWorkflowImageHash', () => {
+  let scriptsDir: string;
+
+  beforeEach(() => {
+    scriptsDir = mkdtempSync(join(tmpdir(), 'wf-image-hash-'));
+  });
+
+  afterEach(() => {
+    rmSync(scriptsDir, { recursive: true, force: true });
+  });
+
+  it('produces the same hash for the same agent hash and identical manifests', () => {
+    writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==1.26.0\n');
+    writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^8" } }\n');
+
+    const first = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const second = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    expect(first).toBe(second);
+    // sha256 hex digest
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('changes the hash when requirements.txt content changes', () => {
+    writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==1.26.0\n');
+    const before = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==2.0.0\n');
+    const after = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    expect(after).not.toBe(before);
+  });
+
+  it('changes the hash when package.json content changes', () => {
+    writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^8" } }\n');
+    const before = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^9" } }\n');
+    const after = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    expect(after).not.toBe(before);
+  });
+
+  it('changes the hash when the parent agent hash changes (parent chaining)', () => {
+    writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==1.26.0\n');
+
+    const withAgentA = computeWorkflowImageHash('agent-hash-A', scriptsDir);
+    const withAgentB = computeWorkflowImageHash('agent-hash-B', scriptsDir);
+
+    expect(withAgentA).not.toBe(withAgentB);
+  });
+
+  it('folds package-lock.json into the hash when present', () => {
+    writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^8" } }\n');
+    const withoutLock = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    writeFileSync(join(scriptsDir, 'package-lock.json'), '{ "lockfileVersion": 3 }\n');
+    const withLock = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+
+    expect(withLock).not.toBe(withoutLock);
+  });
+});
+
+describe('ensureWorkflowImage no-manifest fast path', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'wf-image-fastpath-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // The mock Docker stamps build labels per tag; we assert no per-workflow
+  // image tag (`ironcurtain-wf-*`) is ever built on the fast path.
+  function builtWorkflowImageTags(docker: DockerManager): string[] {
+    const built: string[] = [];
+    const original = docker.buildImage.bind(docker);
+    docker.buildImage = async (tag, df, ctx, labels) => {
+      if (tag.startsWith('ironcurtain-wf-')) built.push(tag);
+      return original(tag, df, ctx, labels);
+    };
+    return built;
+  }
+
+  it('returns the shared agent image unchanged when scriptsDir is undefined', async () => {
+    const docker = createMockDocker();
+    const ca = createMockCA(tempDir);
+    const built = builtWorkflowImageTags(docker);
+
+    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', undefined, docker, ca);
+
+    expect(image).toBe('ironcurtain-claude-code:latest');
+    expect(built).toEqual([]);
+  });
+
+  it('returns the shared agent image when scripts/ has no dependency manifest', async () => {
+    const scriptsDir = join(tempDir, 'scripts');
+    mkdirSync(scriptsDir);
+    // A helper script but no requirements.txt / package.json.
+    writeFileSync(join(scriptsDir, 'run_eval.py'), 'print("hi")\n');
+
+    const docker = createMockDocker();
+    const ca = createMockCA(tempDir);
+    const built = builtWorkflowImageTags(docker);
+
+    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', scriptsDir, docker, ca);
+
+    expect(image).toBe('ironcurtain-claude-code:latest');
+    expect(built).toEqual([]);
   });
 });

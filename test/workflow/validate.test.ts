@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import {
   validateDefinition,
   validateWorkflowSkillReferences,
@@ -864,6 +865,26 @@ describe('validateDefinition', () => {
       }
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// No-regression — shipped workflows still validate after the schema additions
+// (deterministic `container` / `containerScope` / `timeoutMs`). None of these
+// ship a deterministic state, so this is a pure backward-compat gate on the
+// schema changes: every bundled workflow.yaml must still parse + validate with
+// zero errors. (Test plan §11 #1, backward-compat clause.)
+// ---------------------------------------------------------------------------
+
+describe('shipped workflows validate unchanged', () => {
+  const workflowsDir = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows');
+
+  for (const name of ['vuln-discovery', 'design-and-code', 'test-email-summary']) {
+    it(`${name}: workflow.yaml validates without errors`, () => {
+      const manifestPath = resolve(workflowsDir, name, 'workflow.yaml');
+      const raw = parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 });
+      expect(() => validateDefinition(raw)).not.toThrow();
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
