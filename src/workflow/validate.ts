@@ -196,7 +196,7 @@ export class WorkflowValidationError extends Error {
 // Semantic validation
 // ---------------------------------------------------------------------------
 
-function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
+export function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
   switch (state.type) {
     case 'agent':
     case 'deterministic':

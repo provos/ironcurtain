@@ -14,8 +14,8 @@ import type {
   AgentStateDefinition,
   AgentTransitionDefinition,
 } from './types.js';
-import { GLOBAL_PERSONA } from './types.js';
-import { findReachableStates, iterateSkillRefIssues, parseArtifactRef } from './validate.js';
+import { GLOBAL_PERSONA, DEFAULT_CONTAINER_SCOPE } from './types.js';
+import { collectTransitionTargets, findReachableStates, iterateSkillRefIssues, parseArtifactRef } from './validate.js';
 import { getWorkflowPackageDir } from './discovery.js';
 import { ACTIONABLE_DISCOVERY_REASONS, discoverSkillsWithErrors } from '../skills/discovery.js';
 import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
@@ -52,7 +52,7 @@ import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
  * supply a `workflowFilePath` (the package dir is the only place skill
  * manifests can live).
  */
-export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008' | 'WF010';
+export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008' | 'WF010' | 'WF011';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -104,6 +104,7 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkMaxRoundsHasGuard(def),
     ...checkPersonaExists(def, ctx),
     ...checkVisitCapTransitionOrder(def),
+    ...checkContainerScopePopulatedByAgent(def),
     ...checkSkillReferencesAndManifests(def, ctx),
   ];
 }
@@ -406,6 +407,74 @@ function describeTransition(t: AgentTransitionDefinition): string {
     return `when { ${parts.join(', ')} } -> ${t.to}`;
   }
   return `unconditional -> ${t.to}`;
+}
+
+// ---------------------------------------------------------------------------
+// WF011 — container deterministic state may run before its scope is minted
+// ---------------------------------------------------------------------------
+
+/**
+ * A `container: true` deterministic state execs into the shared-container
+ * bundle for its `containerScope`. That bundle is minted lazily by the first
+ * state that needs the scope, and on a fresh run only *agent* states populate
+ * it (a deterministic state is a helper that runs after an agent has worked in
+ * the scope — there is no valid FSM of only deterministic states; the runtime
+ * exists to mediate agent runs). If such a state is reachable from `initial`
+ * without first passing through an agent state in the same scope, then on a
+ * fresh run it may exec against a scope whose `/workspace` was never populated
+ * — a graph-ordering smell. Resume is unaffected (the bundle is re-minted with
+ * the persisted workspace); the runtime keeps a soft-warning backstop, and this
+ * surfaces the fresh-run case at author time.
+ */
+function checkContainerScopePopulatedByAgent(def: WorkflowDefinition): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if (state.type !== 'deterministic' || state.container !== true) continue;
+    const scope = state.containerScope ?? DEFAULT_CONTAINER_SCOPE;
+    if (!isReachableWithoutScopeAgent(def, stateId, scope)) continue;
+
+    diagnostics.push({
+      code: 'WF011',
+      severity: 'warning',
+      stateId,
+      message:
+        `Deterministic state "${stateId}" runs in container scope "${scope}" but is reachable from ` +
+        `"${def.initial}" without first passing through an agent state in that scope — on a fresh run ` +
+        `its container may not be minted yet.`,
+      hint:
+        `Place a "${scope}"-scope agent state before "${stateId}" (a deterministic state is a helper ` +
+        `that runs after an agent populates the scope), or move it onto a path that such an agent ` +
+        `state precedes.`,
+    });
+  }
+  return diagnostics;
+}
+
+/**
+ * BFS from `initial` over the transition graph, treating agent states in
+ * `scope` as absorbing — their successors are not expanded, because reaching
+ * one means the scope's container is minted on that path. Returns true iff
+ * `target` is reachable via at least one path that never passes through such an
+ * agent state, i.e. an unsafe fresh-run path exists.
+ */
+function isReachableWithoutScopeAgent(def: WorkflowDefinition, target: string, scope: string): boolean {
+  const seen = new Set<string>();
+  const queue: string[] = [def.initial];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (id === undefined || seen.has(id)) continue;
+    seen.add(id);
+    if (id === target) return true;
+    const state = def.states[id] as WorkflowStateDefinition | undefined;
+    if (!state) continue;
+    // An agent state in the target scope populates it; any continuation is
+    // safe, so stop expanding this path.
+    if (state.type === 'agent' && (state.containerScope ?? DEFAULT_CONTAINER_SCOPE) === scope) continue;
+    for (const next of collectTransitionTargets(state)) {
+      if (!seen.has(next)) queue.push(next);
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
