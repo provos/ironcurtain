@@ -70,6 +70,14 @@ Opt in by setting `settings.sharedContainer: true` in the workflow definition. I
 
 Before each agent state runs, the orchestrator hot-swaps the coordinator's active `PolicyEngine` to match the incoming state's `persona`. The swap is a `POST /__ironcurtain/policy/load` over the workflow's Unix domain control socket; the coordinator reloads `compiled-policy.json` / `tool-annotations.json` / `dynamic-lists.json` from the persona's policy directory under `callMutex` then `policyMutex`, so in-flight tool calls finish against the old engine and new calls use the new engine. The audit log is a single `audit.jsonl` for the whole run; each entry carries a `persona` field so per-state slices can be reconstructed by scanning.
 
+Deterministic states can opt into this shared bundle with `container: true`.
+Those commands run via `docker exec` inside the state's `containerScope`
+(default: `primary`) instead of host-side `execFile`. Workflow packages may
+ship a sibling `scripts/` directory; it is staged into the run directory and
+mounted read-only at `/workflow-scripts`. If `scripts/requirements.txt` or
+`scripts/package.json` exists, dependencies are baked into a per-workflow child
+image at build time so runtime still runs without network access.
+
 ### Workflow run layout
 
 Workflow runs live under `~/.ironcurtain/workflow-runs/<workflowId>/`:
@@ -518,6 +526,29 @@ validate:
 ```
 
 Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard for success transitions.
+
+By default, deterministic commands execute on the host for backward
+compatibility. To run them inside the workflow's shared Docker container, set
+`container: true` and enable `settings.sharedContainer: true` with Docker mode:
+
+```yaml
+evaluate:
+  type: deterministic
+  description: Run packaged evaluator in the workflow container
+  container: true
+  containerScope: primary # optional; defaults to primary
+  run:
+    - - /opt/workflow-venv/bin/python
+      - /workflow-scripts/run_eval.py
+  transitions:
+    - to: next
+      guard: isPassed
+    - to: failed
+```
+
+Container deterministic commands run with `/workspace` as their working
+directory, see the same workspace as the agent states in that scope, and can
+read workflow helper code from `/workflow-scripts`.
 
 When a deterministic state fails (any command exited non-zero) and routes to an agent state, the failed commands' captured output (stderr per command, falling back to stdout when stderr is empty, joined across all failing commands) is forwarded as the agent's prior-state context, rendered under `## Output from <det-state> / Directive: ...` in the agent's prompt. Successful deterministic results update only `previousTestCount`; the agent's own prior-state context fields (`previousAgentOutput`, `previousAgentNotes`, `previousStateName`) are left untouched, so the next agent still sees the last agent state's output.
 

@@ -559,6 +559,22 @@ describe('createSessionContainers', () => {
     expect(mounts.some((m) => m.target === TEST_SKILLS_CONTAINER_PATH)).toBe(false);
   });
 
+  it('mounts workflow scripts read-only when scriptsMount is set', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+    const scriptsDir = join(tempDir, 'workflow-scripts');
+    mkdirSync(scriptsDir, { recursive: true });
+
+    await createSessionContainers(
+      { ...core, scriptsMount: { hostDir: scriptsDir, target: '/workflow-scripts' } },
+      makeMockConfig(),
+    );
+
+    expect(createCalls).toHaveLength(1);
+    const scriptsMount = createCalls[0].mounts.find((m) => m.target === '/workflow-scripts');
+    expect(scriptsMount).toEqual({ source: scriptsDir, target: '/workflow-scripts', readonly: true });
+  });
+
   // --- UID remap (issue #232) ---
   it('does NOT pass --user 0:0 or UID env in TCP (macOS) mode', async () => {
     // On macOS, VirtioFS handles UID translation and `--user 0:0` would

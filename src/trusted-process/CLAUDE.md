@@ -14,6 +14,14 @@ The security kernel of IronCurtain. Every tool call from the agent passes throug
 
 **`ControlServer`** (`control-server.ts`) — small HTTP server bound to a Unix domain socket (or loopback TCP) that exposes `POST /__ironcurtain/policy/load`. The workflow orchestrator hits this endpoint between agent states to hot-swap the coordinator's active `PolicyEngine` and `currentPersona` via `ToolCallCoordinator.loadPolicy({persona, policyDir})`. The control server only runs in workflow shared-container mode; `DockerProxy.getPolicySwapTarget()` is the narrow seam that exposes `startControlServer(opts)` without leaking the rest of the coordinator. Single-session CLI / daemon / cron paths never construct it. See [`docs/designs/workflow-container-lifecycle.md`](../../docs/designs/workflow-container-lifecycle.md).
 
+**Deterministic container exec** — workflow deterministic states with
+`container: true` are run by the host orchestrator via `docker exec` into the
+workflow's shared container. This is intentionally not a `ToolCallCoordinator`
+tool call: the command argv comes from trusted workflow YAML, not from the
+agent. The boundary is the workflow container (`/workspace` read-write,
+`/workflow-scripts` read-only, no runtime network), and the result is reduced
+to the deterministic state result contract by the orchestrator.
+
 ## Policy Engine
 
 **PolicyEngine** (`policy-engine.ts`) - two-phase evaluation with default-deny:

@@ -625,6 +625,45 @@ describe('buildWorkflowMachine', () => {
       expect(capturedInput!.stateId).toBe('test');
       expect(capturedInput!.commands).toEqual([['npm', 'test']]);
       expect(capturedInput!.context.taskDescription).toBe('my task');
+      expect(capturedInput!.container).toBe(false);
+      expect(capturedInput!.containerScope).toBeUndefined();
+      expect(capturedInput!.timeoutMs).toBeUndefined();
+    });
+
+    it('passes container execution options to deterministic service', async () => {
+      const definition = structuredClone(deterministicLoopDefinition);
+      const testState = definition.states.test;
+      if (testState.type !== 'deterministic') throw new Error('fixture drift');
+      definition.states.test = {
+        ...testState,
+        container: true,
+        containerScope: 'eval',
+        timeoutMs: 1234,
+      };
+      const result = buildWorkflowMachine(definition, 'my task');
+      let capturedInput: DeterministicInvokeInput | undefined;
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+          deterministicService: fromPromise(async ({ input }: { input: DeterministicInvokeInput }) => {
+            capturedInput = input;
+            return makeDeterministicResult({ passed: true });
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      expect(capturedInput).toMatchObject({
+        stateId: 'test',
+        container: true,
+        containerScope: 'eval',
+        timeoutMs: 1234,
+      });
     });
   });
 

@@ -61,6 +61,9 @@ export interface DeterministicInvokeInput {
   readonly stateId: string;
   readonly commands: readonly (readonly string[])[];
   readonly context: WorkflowContext;
+  readonly container?: boolean;
+  readonly containerScope?: string;
+  readonly timeoutMs?: number;
 }
 
 /** Result from a deterministic (test/lint) state. */
@@ -284,6 +287,9 @@ function buildDeterministicState(
         stateId,
         commands: config.run,
         context,
+        container: config.container ?? false,
+        containerScope: config.containerScope,
+        timeoutMs: config.timeoutMs,
       }),
       onDone: onDoneTransitions,
       onError: {

@@ -256,6 +256,21 @@ export interface DeterministicStateDefinition {
    * Never a shell string -- per CLAUDE.md safe coding rules.
    */
   readonly run: readonly (readonly string[])[];
+  /**
+   * When true, execute the command arrays inside the workflow's shared
+   * Docker container via docker exec instead of on the host.
+   */
+  readonly container?: boolean;
+  /**
+   * Shared-container scope to exec into when `container` is true. Defaults
+   * to DEFAULT_CONTAINER_SCOPE.
+   */
+  readonly containerScope?: string;
+  /**
+   * Per-command timeout in milliseconds for deterministic execution.
+   * Undefined uses the runner default.
+   */
+  readonly timeoutMs?: number;
   readonly transitions: readonly AgentTransitionDefinition[];
 }
 
@@ -549,6 +564,12 @@ export interface WorkflowCheckpoint {
    * from `definitionPath`'s package dir).
    */
   readonly workflowSkillsDir?: string;
+  /**
+   * Per-run staged copy of the workflow package's `scripts/` tree (when
+   * the package shipped one). Mounted read-only at /workflow-scripts for
+   * shared-container deterministic states.
+   */
+  readonly workflowScriptsDir?: string;
   /**
    * Terminal-phase status, populated only when the workflow has reached a terminal
    * phase (completed / aborted / failed / waiting_human). Absent for mid-run

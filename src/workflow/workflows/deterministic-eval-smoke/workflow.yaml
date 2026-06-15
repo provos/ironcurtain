@@ -1,0 +1,56 @@
+name: deterministic-eval-smoke
+description: 'TESTING ONLY - minimal agent plus deterministic in-container helper execution.'
+initial: author
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  sharedContainer: true
+  model: anthropic:claude-haiku-4-5
+
+states:
+  author:
+    type: agent
+    description: Write the candidate program that deterministic helpers will evaluate.
+    persona: global
+    prompt: |
+      Create exactly one file at /workspace/candidate.py. It must contain:
+
+      def solve(xs):
+          return sum(xs)
+
+      Do not create additional files. Finish with the required agent_status block.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: evaluate
+
+  evaluate:
+    type: deterministic
+    description: Run the packaged Python evaluator inside the same shared container.
+    container: true
+    run:
+      - ['/opt/workflow-venv/bin/python', '/workflow-scripts/run_eval.py']
+    transitions:
+      - to: report
+        guard: isPassed
+      - to: failed
+
+  report:
+    type: deterministic
+    description: Format the evaluation result with the packaged Node helper.
+    container: true
+    run:
+      - ['node', '/workflow-scripts/format_report.js']
+    transitions:
+      - to: done
+        guard: isPassed
+      - to: failed
+
+  done:
+    type: terminal
+    description: Candidate evaluated and report written.
+
+  failed:
+    type: terminal
+    description: Evaluation failed.

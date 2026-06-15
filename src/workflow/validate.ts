@@ -79,6 +79,9 @@ const deterministicStateSchema = z.object({
   type: z.literal('deterministic'),
   description: z.string().min(1),
   run: z.array(z.array(z.string())),
+  container: z.boolean().optional(),
+  containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
+  timeoutMs: z.number().int().positive().optional(),
   transitions: z.array(agentTransitionSchema).min(1),
 });
 
@@ -127,7 +130,7 @@ const workflowDefinitionSchema = z.object({
  * dotted-path state-node semantics (e.g., `xstate.done.actor.<stateId>`). */
 const STATE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const AGENT_ONLY_STATE_FIELDS = ['maxVisits', 'containerScope'] as const;
+const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
 
 /**
  * Validates raw-level invariants that would otherwise be lost by Zod's default
@@ -163,6 +166,12 @@ function validateRawInput(raw: unknown): string[] {
           `State "${stateId}" (type: ${stateType}) has "${field}" but that field is only valid on agent states.`,
         );
       }
+    }
+
+    if ('containerScope' in stateValue && stateType !== 'deterministic') {
+      issues.push(
+        `State "${stateId}" (type: ${stateType}) has "containerScope" but that field is only valid on agent states and containerized deterministic states.`,
+      );
     }
   }
 
@@ -456,15 +465,29 @@ function validateSemantics(definition: WorkflowDefinition): void {
  */
 function validateContainerScopes(definition: WorkflowDefinition, issues: string[]): void {
   const sharedContainer = definition.settings?.sharedContainer === true;
+  const mode = definition.settings?.mode ?? 'docker';
 
   for (const [stateId, state] of Object.entries(definition.states)) {
-    if (state.type !== 'agent') continue;
+    if (state.type === 'agent') {
+      if (state.containerScope !== undefined && !sharedContainer) {
+        issues.push(
+          `State "${stateId}" declares containerScope "${state.containerScope}" but the workflow does not have sharedContainer: true. ` +
+            `containerScope is only valid when sharedContainer is true.`,
+        );
+      }
+      continue;
+    }
 
-    if (state.containerScope !== undefined && !sharedContainer) {
-      issues.push(
-        `State "${stateId}" declares containerScope "${state.containerScope}" but the workflow does not have sharedContainer: true. ` +
-          `containerScope is only valid when sharedContainer is true.`,
-      );
+    if (state.type !== 'deterministic') continue;
+
+    if (state.containerScope !== undefined && state.container !== true) {
+      issues.push(`State "${stateId}" declares containerScope but is not container: true`);
+    }
+    if (state.container === true && !sharedContainer) {
+      issues.push(`State "${stateId}" has container: true but the workflow does not have sharedContainer: true.`);
+    }
+    if (state.container === true && mode !== 'docker') {
+      issues.push(`State "${stateId}" has container: true but settings.mode is not "docker".`);
     }
   }
 }

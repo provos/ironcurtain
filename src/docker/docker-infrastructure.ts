@@ -13,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   copyFileSync,
+  cpSync,
   mkdtempSync,
   rmSync,
   mkdirSync,
@@ -29,6 +30,7 @@ import { getBundleRuntimeRoot } from '../config/paths.js';
 import { getBundleShortId, type BundleId, type SessionId, type SessionMode } from '../session/types.js';
 import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
 import {
+  CONTAINER_SCRIPTS_DIR,
   CONTAINER_WORKSPACE_DIR,
   type AgentAdapter,
   type AgentId,
@@ -187,6 +189,11 @@ export interface PreContainerInfrastructure {
     /** Container target path; copied verbatim from `adapter.skills.containerPath`. */
     readonly target: string;
   };
+  /** Host-side workflow scripts dir mounted read-only into the container. */
+  readonly scriptsMount?: {
+    readonly hostDir: string;
+    readonly target: string;
+  };
   /**
    * Re-stages the bundle's skills with the given resolved set.
    * No-op when `skillsMount` is undefined or when the set is byte-identical
@@ -342,6 +349,7 @@ export async function prepareDockerInfrastructure(
   scope?: string,
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
+  scriptsDir?: string,
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -622,8 +630,8 @@ export async function prepareDockerInfrastructure(
     const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, workspaceDir, proxyAddress);
 
     // Ensure Docker image is built and up-to-date
-    const image = await adapter.getImage();
-    await ensureImage(image, docker, ca);
+    const agentImage = await adapter.getImage();
+    const image = await ensureWorkflowImage(agentImage, scriptsDir, docker, ca);
 
     const orientationDir = resolve(bundleDir, 'orientation');
 
@@ -657,6 +665,12 @@ export async function prepareDockerInfrastructure(
       }
     };
 
+    let scriptsMount: PreContainerInfrastructure['scriptsMount'];
+    if (scriptsDir !== undefined && existsSync(scriptsDir)) {
+      scriptsMount = { hostDir: scriptsDir, target: CONTAINER_SCRIPTS_DIR };
+      logger.info(`Staged workflow scripts available at ${scriptsDir}`);
+    }
+
     return {
       bundleId,
       workflowId,
@@ -681,6 +695,7 @@ export async function prepareDockerInfrastructure(
       conversationStateDir,
       conversationStateConfig,
       skillsMount,
+      scriptsMount,
       restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
@@ -739,6 +754,7 @@ export async function createDockerInfrastructure(
   scope?: string,
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
+  scriptsDir?: string,
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -751,6 +767,7 @@ export async function createDockerInfrastructure(
     scope,
     resolvedSkills,
     captureInput,
+    scriptsDir,
   );
 
   try {
@@ -1066,6 +1083,10 @@ export async function createSessionContainers(
       mounts.push({ source: core.skillsMount.hostDir, target: core.skillsMount.target, readonly: true });
     }
 
+    if (core.scriptsMount) {
+      mounts.push({ source: core.scriptsMount.hostDir, target: core.scriptsMount.target, readonly: true });
+    }
+
     // Linux-only UID-remap wiring (issue #232). On Linux, run the
     // container as root and pass the host UID/GID via env so the
     // entrypoint can renumber codespace before dropping privileges.
@@ -1291,7 +1312,7 @@ export async function ensureDockerImage(agentId: AgentId, userConfig: ResolvedUs
  * agent-specific image. Content-hash labels on each image drive staleness
  * detection so repeated calls skip rebuilds when nothing has changed.
  */
-async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<void> {
+async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<string> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const dockerDir = resolve(packageRoot, 'docker');
 
@@ -1324,6 +1345,74 @@ async function ensureImage(image: string, docker: DockerManager, ca: Certificate
     });
     logger.info(`Docker image ${image} built successfully`);
   }
+
+  return agentBuildHash;
+}
+
+async function ensureWorkflowImage(
+  agentImage: string,
+  scriptsDir: string | undefined,
+  docker: DockerManager,
+  ca: CertificateAuthority,
+): Promise<string> {
+  const agentBuildHash = await ensureImage(agentImage, docker, ca);
+  if (scriptsDir === undefined || !existsSync(scriptsDir)) return agentImage;
+
+  const requirementsPath = resolve(scriptsDir, 'requirements.txt');
+  const packageJsonPath = resolve(scriptsDir, 'package.json');
+  const hasPythonManifest = existsSync(requirementsPath);
+  const hasNodeManifest = existsSync(packageJsonPath);
+  if (!hasPythonManifest && !hasNodeManifest) return agentImage;
+
+  const workflowHash = computeWorkflowImageHash(agentBuildHash, scriptsDir);
+  const workflowImage = `ironcurtain-wf-${workflowHash.slice(0, 12)}:latest`;
+  if (!(await isImageStale(workflowImage, docker, workflowHash))) return workflowImage;
+
+  logger.info(`Building workflow dependency image ${workflowImage}...`);
+  const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-workflow-build-'));
+  try {
+    cpSync(scriptsDir, tmpContext, { recursive: true });
+    const dockerfile = [
+      `FROM ${agentImage}`,
+      'USER root',
+      'COPY . /opt/workflow-scripts-build',
+      'RUN if [ -f /opt/workflow-scripts-build/requirements.txt ]; then ' +
+        'uv venv /opt/workflow-venv && ' +
+        'VIRTUAL_ENV=/opt/workflow-venv uv pip install -r /opt/workflow-scripts-build/requirements.txt; ' +
+        'fi',
+      'RUN if [ -f /opt/workflow-scripts-build/package.json ]; then ' +
+        'cd /opt/workflow-scripts-build && ' +
+        'if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi && ' +
+        'mv node_modules /opt/workflow-node_modules; ' +
+        'fi',
+      'ENV PATH=/opt/workflow-venv/bin:${PATH}',
+      'ENV NODE_PATH=/opt/workflow-node_modules',
+      'USER codespace',
+      '',
+    ].join('\n');
+    const dockerfilePath = resolve(tmpContext, 'Dockerfile');
+    writeFileSync(dockerfilePath, dockerfile);
+    await docker.buildImage(workflowImage, dockerfilePath, tmpContext, {
+      'ironcurtain.build-hash': workflowHash,
+    });
+  } finally {
+    rmSync(tmpContext, { recursive: true, force: true });
+  }
+  logger.info(`Workflow dependency image ${workflowImage} built successfully`);
+  return workflowImage;
+}
+
+function computeWorkflowImageHash(agentBuildHash: string, scriptsDir: string): string {
+  const hash = createHash('sha256');
+  hash.update(`agent:${agentBuildHash}\n`);
+  for (const manifest of ['requirements.txt', 'package.json', 'package-lock.json']) {
+    const manifestPath = resolve(scriptsDir, manifest);
+    if (!existsSync(manifestPath)) continue;
+    hash.update(`file:${manifest}\n`);
+    hash.update(readFileSync(manifestPath));
+    hash.update('\n');
+  }
+  return hash.digest('hex');
 }
 
 async function ensureBaseImage(

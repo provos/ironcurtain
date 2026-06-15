@@ -789,6 +789,80 @@ describe('validateDefinition', () => {
       };
       expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
     });
+
+    it('accepts containerized deterministic states in docker shared-container mode', () => {
+      const def = sharedContainerDef({});
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Run container helper',
+        container: true,
+        containerScope: 'primary',
+        timeoutMs: 1000,
+        run: [['python', '/workflow-scripts/check.py']],
+        transitions: [{ to: 'done', guard: 'isPassed' }, { to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('rejects deterministic containerScope without container true', () => {
+      const def = sharedContainerDef({});
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Bad scope',
+        containerScope: 'primary',
+        run: [['true']],
+        transitions: [{ to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('containerScope but is not container: true'))).toBe(true);
+      }
+    });
+
+    it('rejects deterministic container true without sharedContainer true', () => {
+      const def = sharedContainerDef({});
+      (def.settings as Record<string, unknown>) = { mode: 'docker', dockerAgent: 'claude-code' };
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'No shared container',
+        container: true,
+        run: [['true']],
+        transitions: [{ to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('container: true'))).toBe(true);
+      }
+    });
+
+    it('rejects deterministic container true in builtin mode', () => {
+      const def = sharedContainerDef({});
+      (def.settings as Record<string, unknown>) = { mode: 'builtin', sharedContainer: true };
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Builtin cannot exec in container',
+        container: true,
+        run: [['true']],
+        transitions: [{ to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('settings.mode is not "docker"'))).toBe(true);
+      }
+    });
   });
 });
 

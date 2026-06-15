@@ -462,6 +462,22 @@ describe('DockerManager', () => {
       expect(args[2]).toBe('root');
     });
 
+    it('passes an optional working directory to docker exec', async () => {
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('container-id', ['cmd'], undefined, 'codespace', '/workspace');
+      expect(mock.calls[0].args).toEqual([
+        'exec',
+        '--user',
+        'codespace',
+        '--workdir',
+        '/workspace',
+        'container-id',
+        'cmd',
+      ]);
+    });
+
     it('returns non-zero exit code without throwing', async () => {
       mock.setError(1, 'error output', 'stderr output');
       const manager = createDockerManager(mock.mockExec);

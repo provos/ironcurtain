@@ -18,6 +18,9 @@ import type { AuthMethod } from './oauth-credentials.js';
  */
 export const CONTAINER_WORKSPACE_DIR = '/workspace';
 
+/** Workflow package helper scripts are mounted read-only at this path. */
+export const CONTAINER_SCRIPTS_DIR = '/workflow-scripts';
+
 /**
  * Structured response from an agent adapter, carrying both the
  * text response and optional cost/usage metadata reported by the agent.

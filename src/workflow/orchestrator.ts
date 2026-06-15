@@ -69,7 +69,12 @@ import type {
   SessionMode,
 } from '../session/types.js';
 import { createAgentConversationId, createBundleId } from '../session/types.js';
-import { describeTransientFailureKind, type AgentId, type TransientFailureKind } from '../docker/agent-adapter.js';
+import {
+  CONTAINER_WORKSPACE_DIR,
+  describeTransientFailureKind,
+  type AgentId,
+  type TransientFailureKind,
+} from '../docker/agent-adapter.js';
 import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
@@ -170,6 +175,8 @@ function writeStderr(message: string): void {
 
 /** Per-run subdirectory name for the staged copy of the workflow's bundled `skills/` tree. */
 const STAGED_WORKFLOW_SKILLS_SUBDIR = 'workflow-skills';
+/** Per-run subdirectory name for the staged copy of workflow helper scripts. */
+const STAGED_WORKFLOW_SCRIPTS_SUBDIR = 'workflow-scripts';
 
 /**
  * Stages the workflow package's `skills/` tree into the run directory
@@ -198,6 +205,15 @@ export function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: strin
 
   const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SKILLS_SUBDIR);
   cpSync(sourceSkillsDir, stagedDir, { recursive: true });
+  return stagedDir;
+}
+
+export function stageWorkflowScriptsAtStart(packageDir: string, runMetaDir: string): string | undefined {
+  const sourceScriptsDir = resolve(packageDir, 'scripts');
+  if (!existsSync(sourceScriptsDir)) return undefined;
+
+  const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SCRIPTS_SUBDIR);
+  cpSync(sourceScriptsDir, stagedDir, { recursive: true });
   return stagedDir;
 }
 
@@ -251,6 +267,43 @@ function resolveWorkflowSkillsDirOnResume(opts: {
   // function was added to prevent.
   writeStderr(
     `[workflow] Resume ${workflowId}: no workflow-skills available (staged copy and ${packageDir}/skills both missing). Workflow-bundled skills will not be available in this run.`,
+  );
+  return undefined;
+}
+
+function resolveWorkflowScriptsDirOnResume(opts: {
+  workflowId: WorkflowId;
+  checkpointedStagedDir: string | undefined;
+  packageDir: string;
+  runMetaDir: string;
+}): string | undefined {
+  const { workflowId, checkpointedStagedDir, packageDir, runMetaDir } = opts;
+
+  if (checkpointedStagedDir !== undefined && existsSync(checkpointedStagedDir)) {
+    return checkpointedStagedDir;
+  }
+
+  try {
+    const restaged = stageWorkflowScriptsAtStart(packageDir, runMetaDir);
+    if (restaged !== undefined) {
+      writeStderr(
+        `[workflow] Resume ${workflowId}: workflow-scripts staged copy missing, re-staged from ${packageDir}.`,
+      );
+      return restaged;
+    }
+  } catch (err) {
+    writeStderr(
+      `[workflow] Resume ${workflowId}: failed to re-stage workflow scripts from ${packageDir}: ${toErrorMessage(err)}`,
+    );
+    return undefined;
+  }
+
+  if (checkpointedStagedDir === undefined && !existsSync(resolve(packageDir, 'scripts'))) {
+    return undefined;
+  }
+
+  writeStderr(
+    `[workflow] Resume ${workflowId}: no workflow-scripts available (staged copy and ${packageDir}/scripts both missing). Container deterministic helpers will not be available in this run.`,
   );
   return undefined;
 }
@@ -321,6 +374,8 @@ export interface CreateWorkflowInfrastructureInput {
    * Persona skills are layered in per-state via `bundle.restageSkills`.
    */
   readonly resolvedSkills?: readonly ResolvedSkill[];
+  /** Per-run staged workflow scripts directory to mount read-only in the bundle. */
+  readonly workflowScriptsDir?: string;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -517,6 +572,7 @@ interface WorkflowInstance {
    * lost on resume — see `resolveWorkflowSkillsDirOnResume`).
    */
   readonly workflowSkillsDir: string | undefined;
+  readonly workflowScriptsDir: string | undefined;
   readonly actor: AnyActorRef;
   readonly gateStateNames: ReadonlySet<string>;
   readonly terminalStateNames: ReadonlySet<string>;
@@ -768,6 +824,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       scope,
       requiredServers,
       resolvedSkills,
+      workflowScriptsDir: instance.workflowScriptsDir,
     });
 
     // Abort may have landed while `factory()` was suspended. Publishing
@@ -1078,6 +1135,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           recordedAgentName: input.agentId,
           workflowRunId: input.workflowId,
         },
+        input.workflowScriptsDir,
       );
     };
   }
@@ -1183,6 +1241,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // exists. Cached on the instance and persisted in every checkpoint
     // so all subsequent reads point at this stable per-run copy.
     const workflowSkillsDir = stageWorkflowSkillsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
+    const workflowScriptsDir = stageWorkflowScriptsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
 
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
 
@@ -1196,6 +1255,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       definition,
       definitionPath,
       workflowSkillsDir,
+      workflowScriptsDir,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1284,12 +1344,19 @@ export class WorkflowOrchestrator implements WorkflowController {
       packageDir: getWorkflowPackageDir(checkpoint.definitionPath),
       runMetaDir,
     });
+    const workflowScriptsDir = resolveWorkflowScriptsDirOnResume({
+      workflowId,
+      checkpointedStagedDir: checkpoint.workflowScriptsDir,
+      packageDir: getWorkflowPackageDir(checkpoint.definitionPath),
+      runMetaDir,
+    });
 
     const instance: WorkflowInstance = {
       id: workflowId,
       definition,
       definitionPath: checkpoint.definitionPath,
       workflowSkillsDir,
+      workflowScriptsDir,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1372,7 +1439,14 @@ export class WorkflowOrchestrator implements WorkflowController {
     const servicePromise: Promise<unknown> =
       stateDef.type === 'agent'
         ? this.executeAgentState(workflowId, { stateId, stateConfig: stateDef, context }, definition)
-        : this.executeDeterministicState({ stateId, commands: stateDef.run, context });
+        : this.executeDeterministicState(workflowId, {
+            stateId,
+            commands: stateDef.run,
+            context,
+            container: stateDef.container ?? false,
+            containerScope: stateDef.containerScope,
+            timeoutMs: stateDef.timeoutMs,
+          });
 
     // Feed the result back to the actor as an XState internal invoke event.
     // These event types don't exist in our WorkflowEvent union, so we cast
@@ -1595,7 +1669,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         }),
         deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(async ({ input }) => {
           try {
-            return await this.executeDeterministicState(input);
+            return await this.executeDeterministicState(workflowId, input);
           } catch (err) {
             writeStderr(
               `[workflow] deterministicService invoke rejected for "${input.stateId}": ${toErrorMessage(err)}`,
@@ -1737,6 +1811,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // package path. Skipped when the workflow shipped no skills, to
       // keep the checkpoint shape tight for the common case.
       ...(instance.workflowSkillsDir !== undefined ? { workflowSkillsDir: instance.workflowSkillsDir } : {}),
+      ...(instance.workflowScriptsDir !== undefined ? { workflowScriptsDir: instance.workflowScriptsDir } : {}),
       ...(finalStatus !== undefined ? { finalStatus } : {}),
     };
   }
@@ -2250,8 +2325,33 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Deterministic state execution
   // -----------------------------------------------------------------------
 
-  private async executeDeterministicState(input: DeterministicInvokeInput): Promise<DeterministicInvokeResult> {
-    const { commands } = input;
+  private async executeDeterministicState(
+    workflowId: WorkflowId,
+    input: DeterministicInvokeInput,
+  ): Promise<DeterministicInvokeResult> {
+    if (!input.container) {
+      return this.runDeterministicHost(input.commands);
+    }
+
+    const instance = this.workflows.get(workflowId);
+    if (!instance) {
+      return { passed: false, errors: `workflow ${workflowId} not found` };
+    }
+    if (!this.shouldUseSharedContainer(instance.definition)) {
+      return { passed: false, errors: `State "${input.stateId}" requires shared-container Docker execution.` };
+    }
+
+    const scope = input.containerScope ?? DEFAULT_CONTAINER_SCOPE;
+    const bundleWasLive = instance.bundlesByScope.has(scope);
+    const bundle = await this.ensureBundleForScope(instance, scope);
+    const warning = bundleWasLive
+      ? undefined
+      : `container: true state "${input.stateId}": scope "${scope}" had no live container before this state. ` +
+        `On a fresh run this likely means no prior state populated it; on resume this can be expected.`;
+    return this.runDeterministicInContainer(bundle, input, warning);
+  }
+
+  private async runDeterministicHost(commands: readonly (readonly string[])[]): Promise<DeterministicInvokeResult> {
     let totalTestCount = 0;
     const allErrors: string[] = [];
 
@@ -2268,6 +2368,42 @@ export class WorkflowOrchestrator implements WorkflowController {
       } catch (err) {
         const execErr = err as { code?: number; stderr?: string; stdout?: string };
         allErrors.push(execErr.stderr ?? execErr.stdout ?? String(err));
+      }
+    }
+
+    return {
+      passed: allErrors.length === 0,
+      testCount: totalTestCount > 0 ? totalTestCount : undefined,
+      errors: allErrors.length > 0 ? allErrors.join('\n') : undefined,
+    };
+  }
+
+  private async runDeterministicInContainer(
+    bundle: DockerInfrastructure,
+    input: DeterministicInvokeInput,
+    warning?: string,
+  ): Promise<DeterministicInvokeResult> {
+    let totalTestCount = 0;
+    const allErrors: string[] = [];
+
+    if (warning) writeStderr(`[workflow] ${warning}`);
+
+    for (const cmdArray of input.commands) {
+      if (cmdArray.length === 0) continue;
+      const result = await bundle.docker.exec(
+        bundle.containerId,
+        cmdArray,
+        input.timeoutMs,
+        'codespace',
+        CONTAINER_WORKSPACE_DIR,
+      );
+      if (result.exitCode !== 0) {
+        allErrors.push(result.stderr || result.stdout || `exit ${result.exitCode}`);
+        continue;
+      }
+      const testMatch = /(\d+)\s+(?:tests?|specs?)\s+pass/i.exec(result.stdout);
+      if (testMatch) {
+        totalTestCount += parseInt(testMatch[1], 10);
       }
     }
 
