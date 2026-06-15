@@ -452,10 +452,16 @@ function validateSemantics(definition: WorkflowDefinition): void {
 /**
  * Validates `containerScope` usage across a workflow definition.
  *
- * `containerScope` is meaningful only under `sharedContainer: true`.
- * If the flag is absent or false, any state declaring a scope is a
- * hard error (silent no-ops are footguns). The charset check runs at
- * the Zod layer (see `CONTAINER_SCOPE_PATTERN`).
+ * `containerScope` is meaningful only when a shared container is
+ * actually active — i.e. `sharedContainer: true` AND `mode: docker`.
+ * Builtin mode ignores `sharedContainer` (see the orchestrator's
+ * `shouldUseSharedContainer`), so a scope declared under
+ * `mode: builtin` is a silent no-op. Either condition missing is a
+ * hard error (silent no-ops are footguns). For deterministic states
+ * this is reached transitively (`containerScope` requires
+ * `container: true`, which requires `mode: docker`); agent states are
+ * checked directly. The charset check runs at the Zod layer (see
+ * `CONTAINER_SCOPE_PATTERN`).
  *
  * Note: scope governs container lifecycle (which bundle a state runs
  * in); persona governs the active policy. They are orthogonal —
@@ -473,6 +479,12 @@ function validateContainerScopes(definition: WorkflowDefinition, issues: string[
         issues.push(
           `State "${stateId}" declares containerScope "${state.containerScope}" but the workflow does not have sharedContainer: true. ` +
             `containerScope is only valid when sharedContainer is true.`,
+        );
+      }
+      if (state.containerScope !== undefined && mode !== 'docker') {
+        issues.push(
+          `State "${stateId}" declares containerScope "${state.containerScope}" but settings.mode is "${mode}", not "docker". ` +
+            `Builtin mode ignores sharedContainer, so the scope would be a silent no-op.`,
         );
       }
       continue;

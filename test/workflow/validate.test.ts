@@ -734,6 +734,20 @@ describe('validateDefinition', () => {
       }
     });
 
+    it('rejects an agent containerScope in builtin mode (sharedContainer is ignored there)', () => {
+      const def = sharedContainerDef({ stateContainerScopes: { plan: 'env-a' } });
+      // sharedContainer stays true, isolating the mode check: builtin mode
+      // ignores sharedContainer, so the scope would be a silent no-op.
+      (def.settings as Record<string, unknown>) = { mode: 'builtin', sharedContainer: true };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => /containerScope.*mode.*not "docker"/.test(i))).toBe(true);
+      }
+    });
+
     it('rejects containerScope values that violate the charset', () => {
       const def = sharedContainerDef({ stateContainerScopes: { plan: 'env a' } });
       expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
