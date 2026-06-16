@@ -65,7 +65,6 @@ This slice = `eval-smoke`'s packaging + `verdict-smoke`'s verdict routing, with 
 ```text
 src/workflow/workflows/evolve/
   workflow.yaml                       # the FSM (§4)
-  requirements.txt                    # numpy + pyyaml (§10) — triggers the per-workflow image
   scripts/                            # staged read-only at /workflow-scripts (whole run)
     evolve_core/                      # the packaged engine, copied verbatim from the skill
       __init__.py
@@ -82,6 +81,9 @@ src/workflow/workflows/evolve/
     evolve-files                      # wrapper: main_for("files")  (unused this slice; ship for parity)
     evolve-cognition                  # wrapper: main_for("cognition") (unused this slice; ship for parity)
     evolve_result.py                  # NEW thin bridge: engine JSON -> result.json (§8.3)
+    requirements.txt                  # numpy + pyyaml (§10) — triggers the per-workflow image
+    LICENSE                           # upstream ASI-Evolve license (Apache 2.0)
+    README.md                         # upstream ASI-Evolve README (attribution)
   skills/                             # OPTIONAL this slice — see §4.7. Prompts may live inline in workflow.yaml.
 ```
 
@@ -472,7 +474,7 @@ This is the parent design's transactional, idempotent durable write — the atom
 
 ## 10. Dependencies / image (Tier 0)
 
-`src/workflow/workflows/evolve/requirements.txt`:
+`src/workflow/workflows/evolve/scripts/requirements.txt`:
 
 ```
 numpy
@@ -547,8 +549,10 @@ tsx src/cli.ts workflow inspect <baseDir>   # confirm final state = done
 | File                                                     | Purpose                                                                                                                                                                                                                               |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/workflow/workflows/evolve/workflow.yaml`            | The FSM (§4). New workflow definition.                                                                                                                                                                                                |
-| `src/workflow/workflows/evolve/requirements.txt`         | `numpy` + `pyyaml` (§10). Triggers the per-workflow image.                                                                                                                                                                            |
+| `src/workflow/workflows/evolve/scripts/requirements.txt` | `numpy` + `pyyaml` (§10). Triggers the per-workflow image. Resolved from `scriptsDir` by `ensureWorkflowImage`.                                                                                                                       |
 | `src/workflow/workflows/evolve/scripts/evolve_core/**`   | The packaged engine, copied verbatim from `donotcommit/ASI-Evolve/skills/evolve/scripts/evolve_core/` (all modules + `algorithms/`).                                                                                                  |
+| `src/workflow/workflows/evolve/scripts/LICENSE`          | Upstream ASI-Evolve license (Apache 2.0), copied verbatim for attribution.                                                                                                                                                            |
+| `src/workflow/workflows/evolve/scripts/README.md`        | Upstream ASI-Evolve `README.md`, copied verbatim next to the LICENSE for attribution.                                                                                                                                                 |
 | `src/workflow/workflows/evolve/scripts/evolve-brief`     | Wrapper `main_for("brief")`, copied verbatim.                                                                                                                                                                                         |
 | `src/workflow/workflows/evolve/scripts/evolve-eval`      | Wrapper `main_for("eval")`, copied verbatim.                                                                                                                                                                                          |
 | `src/workflow/workflows/evolve/scripts/evolve-db`        | Wrapper `main_for("db")`, copied verbatim.                                                                                                                                                                                            |
