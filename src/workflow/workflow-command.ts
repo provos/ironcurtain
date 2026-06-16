@@ -426,6 +426,17 @@ function runInspect(args: string[]): void {
         ? `${BOLD}${stateStr}${RESET} ${DIM}\u2014 "${desc}"${RESET}`
         : `${BOLD}${stateStr}${RESET}`;
       writeStdout(`  State: ${stateLabel}`);
+      if (checkpoint.finalStatus) {
+        writeStdout(`  Final: ${BOLD}${checkpoint.finalStatus.phase}${RESET}`);
+        const terminalState = checkpoint.transitionHistory.at(-1)?.to;
+        if (terminalState && terminalState !== stateStr) {
+          const terminalDesc = stateDescriptions?.get(terminalState);
+          const terminalLabel = terminalDesc
+            ? `${BOLD}${terminalState}${RESET} ${DIM}\u2014 "${terminalDesc}"${RESET}`
+            : `${BOLD}${terminalState}${RESET}`;
+          writeStdout(`  Terminal state: ${terminalLabel}`);
+        }
+      }
       writeStdout(`  Timestamp: ${checkpoint.timestamp}`);
       if (checkpoint.context.lastError) {
         writeStdout(`  Error: ${RED}${checkpoint.context.lastError}${RESET}`);

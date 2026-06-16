@@ -120,6 +120,14 @@ def command_context(
     return {**raw, **quoted}
 
 
+def evaluator_code_path(step_code_path: Path) -> Path:
+    if step_code_path.suffix:
+        return step_code_path
+    importable_path = step_code_path.with_name("candidate.py")
+    shutil.copyfile(step_code_path, importable_path)
+    return importable_path
+
+
 def cmd_brief_normalize(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root or Path.cwd()).resolve()
     run_dir = build_run_dir(workspace_root, args.run_name)
@@ -248,7 +256,8 @@ def cmd_eval_run(args: argparse.Namespace) -> int:
 
     source_code = Path(args.code_path)
     if not source_code.is_absolute():
-        source_code = (workspace_root / source_code).resolve()
+        source_code = workspace_root / source_code
+    source_code = source_code.resolve()
     ensure_path_allowed(run_dir, source_code)
 
     step_name = args.step_name or "manual_step"
@@ -276,7 +285,7 @@ def cmd_eval_run(args: argparse.Namespace) -> int:
             workspace_root=workspace_root,
             run_dir=run_dir,
             step_dir=step_dir,
-            code_path=step_code_path,
+            code_path=evaluator_code_path(step_code_path),
             results_path=results_path,
             script_path=script_path,
             timeout_secs=evaluation_timeout,
@@ -423,7 +432,8 @@ def cmd_db_record(args: argparse.Namespace) -> int:
 
     source_code = Path(args.code_path)
     if not source_code.is_absolute():
-        source_code = (workspace_root / source_code).resolve()
+        source_code = workspace_root / source_code
+    source_code = source_code.resolve()
     ensure_path_allowed(run_dir, source_code)
 
     step_name = args.step_name

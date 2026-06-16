@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { REAL_TMP, testCompiledPolicy, testToolAnnotations } from '../fixtures/test-policy.js';
@@ -19,10 +19,25 @@ import type { SessionOptions } from '../../src/session/types.js';
 import { approvedResponse, createDeps, MockSession, statusBlock, waitForCompletion } from './test-helpers.js';
 
 const IMAGE = 'ironcurtain-claude-code:latest';
-const TEST_HOME = `${REAL_TMP}/ironcurtain-evolve-single-round-${process.pid}`;
-const TASK = 'write solve(xs) returning the sum; the evaluator scores solve([1,2,3]) == 6';
+const TEST_HOME = `${REAL_TMP}/ironcurtain-evolve-multi-round-${process.pid}`;
+const ROUND_COUNT = 3;
+const TASK = 'write solve(xs) scoring higher the closer solve([1,2,3]) is to 6 over 3 rounds';
 
-type CandidateKind = 'sum' | 'low-score' | 'crash';
+type RunMode = 'positive' | 'crash-round-2';
+
+interface EvolveNode {
+  readonly id: number;
+  readonly parent: readonly number[];
+  readonly score: number;
+  readonly analysis: string;
+  readonly created_at?: string;
+}
+
+interface NodesFile {
+  readonly next_id: number;
+  readonly nodes: Record<string, EvolveNode>;
+  readonly best?: EvolveNode | null;
+}
 
 function findHostCaDir(): string | null {
   const home = process.env.IRONCURTAIN_HOME ?? join(homedir(), '.ironcurtain');
@@ -53,7 +68,7 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
       escalationTimeoutSeconds: 300,
       resourceBudget: {
         maxTotalTokens: 1_000_000,
-        maxSteps: 200,
+        maxSteps: 300,
         maxSessionSeconds: 1800,
         maxEstimatedCostUsd: 5.0,
         warnThresholdPercent: 80,
@@ -79,7 +94,7 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
   } as unknown as IronCurtainConfig;
 }
 
-function writePreflightRunSpec(workspacePath: string): void {
+function writePreflightRunSpec(workspacePath: string, rounds: number): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
   mkdirSync(resolve(runDir, 'steps'), { recursive: true });
   mkdirSync(resolve(runDir, 'database_data'), { recursive: true });
@@ -93,7 +108,8 @@ function writePreflightRunSpec(workspacePath: string): void {
     'ns={{}};',
     'exec(open({quoted_code_path}).read(), ns);',
     's=ns["solve"]([1,2,3]);',
-    'json.dump({{"eval_score": float(s), "success": s == 6}}, open({quoted_results_path}, "w"))',
+    'score=max(0.0, 6.0 - abs(float(s) - 6.0));',
+    'json.dump({{"eval_score": score, "success": score >= 6.0}}, open({quoted_results_path}, "w"))',
     "'",
   ].join('');
   const runSpec = {
@@ -106,7 +122,7 @@ function writePreflightRunSpec(workspacePath: string): void {
       timeout_secs: 30,
       success_criteria: ['eval_score >= 1.0'],
     },
-    budget: { max_rounds: 1, patience: 1 },
+    budget: { max_rounds: rounds, patience: 2 },
     stop_conditions: ['max_rounds'],
     mutation_scope: {
       writable_paths: ['.evolve_runs'],
@@ -120,38 +136,80 @@ function writePreflightRunSpec(workspacePath: string): void {
       custom_sampler_path: '',
       custom_sampler_class: '',
     },
-    cognition: { source_mode: 'none', seed_files: [], seed_notes: [] },
+    cognition: { source_mode: 'seed', seed_files: [], seed_notes: [] },
     approval: { confirmed: true },
   };
   writeFileSync(resolve(runDir, 'run_spec.yaml'), JSON.stringify(runSpec, null, 2) + '\n');
   writeFileSync(resolve(runDir, 'preflight_summary.md'), '# Preflight Summary\n\n- Status: `READY`\n');
-  writeFileSync(resolve(runDir, 'cognition_seed.md'), '# Cognition Seed Draft\n');
-}
-
-function writeCandidate(workspacePath: string, kind: CandidateKind): void {
-  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
-  const context = readJson(resolve(runDir, 'current', 'context.json')) as { step_name: string };
-  const stepDir = resolve(runDir, 'steps', context.step_name);
-  mkdirSync(stepDir, { recursive: true });
-  const candidates: Record<CandidateKind, string> = {
-    sum: 'def solve(xs):\n    return sum(xs)\n',
-    'low-score': 'def solve(xs):\n    return 0\n',
-    crash: 'x = 1\n',
-  };
-  writeFileSync(resolve(stepDir, 'code'), candidates[kind]);
-}
-
-function writeAnalysis(workspacePath: string): void {
-  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
-  mkdirSync(resolve(runDir, 'current'), { recursive: true });
-  writeFileSync(resolve(runDir, 'current', 'analysis.md'), 'Single-round lesson.\n');
+  writeFileSync(
+    resolve(runDir, 'cognition_seed.md'),
+    [
+      '```json',
+      '[',
+      '  {',
+      '    "content": "solve xs sum target evolve toward six by improving the candidate return value",',
+      '    "source": "test",',
+      '    "metadata": {"kind": "heuristic"}',
+      '  }',
+      ']',
+      '```',
+      '',
+    ].join('\n'),
+  );
 }
 
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
 }
 
-describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker container', () => {
+function writeCandidate(workspacePath: string, mode: RunMode, researcherTurn: number): void {
+  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
+  const context = readJson(resolve(runDir, 'current', 'context.json')) as { step_name: string };
+  const stepDir = resolve(runDir, 'steps', context.step_name);
+  mkdirSync(stepDir, { recursive: true });
+
+  if (mode === 'crash-round-2' && researcherTurn === 2) {
+    writeFileSync(resolve(stepDir, 'code'), 'x = 1\n');
+    return;
+  }
+
+  const returnValues = [2, 5, 6];
+  const value = returnValues[Math.min(researcherTurn - 1, returnValues.length - 1)];
+  writeFileSync(resolve(stepDir, 'code'), `def solve(xs):\n    return ${value}\n`);
+}
+
+function writeAnalysis(workspacePath: string, analyzerTurn: number): void {
+  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
+  mkdirSync(resolve(runDir, 'current'), { recursive: true });
+  writeFileSync(
+    resolve(runDir, 'current', 'analysis.md'),
+    `Round ${analyzerTurn} lesson: move solve(xs) closer to the sum target while preserving a simple deterministic function.\n`,
+  );
+}
+
+function stripCreatedAt(nodes: NodesFile): unknown {
+  const best = nodes.best ? { ...nodes.best } : nodes.best;
+  if (best) {
+    delete best.created_at;
+  }
+  return {
+    ...nodes,
+    best,
+    nodes: Object.fromEntries(
+      Object.entries(nodes.nodes).map(([id, node]) => {
+        const rest = { ...node };
+        delete rest.created_at;
+        return [id, rest];
+      }),
+    ),
+  };
+}
+
+function countStates(states: readonly string[], state: string): number {
+  return states.filter((s) => s === state).length;
+}
+
+describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker container', () => {
   let tmpDir: string;
   let originalHome: string | undefined;
   let originalAuth: string | undefined;
@@ -186,17 +244,17 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
   });
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'evolve-single-round-'));
+    tmpDir = mkdtempSync(join(tmpdir(), 'evolve-multi-round-'));
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  async function runEvolve(kind: CandidateKind): Promise<{ states: readonly string[]; workspaceDir: string }> {
-    const runDir = resolve(tmpDir, `run-${kind}`);
-    const workspaceDir = resolve(tmpDir, `workspace-${kind}`);
-    const generatedDir = resolve(TEST_HOME, `generated-${kind}`);
+  async function runEvolve(label: string, mode: RunMode): Promise<{ states: readonly string[]; workspaceDir: string }> {
+    const runDir = resolve(tmpDir, `run-${label}`);
+    const workspaceDir = resolve(tmpDir, `workspace-${label}`);
+    const generatedDir = resolve(TEST_HOME, `generated-${label}`);
     mkdirSync(runDir, { recursive: true });
     mkdirSync(workspaceDir, { recursive: true });
     mkdirSync(generatedDir, { recursive: true });
@@ -232,36 +290,53 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
     });
 
     const orchestratorScript =
-      kind === 'crash' ? ['design', 'evaluate'] : ['design', 'evaluate', 'analyze', 'record', 'complete'];
-    let preflightCount = 0;
-    let orchestratorCount = 0;
-    let researcherCount = 0;
-    let analyzerCount = 0;
+      mode === 'positive'
+        ? [
+            'design',
+            'evaluate',
+            'analyze',
+            'record',
+            'design',
+            'evaluate',
+            'analyze',
+            'record',
+            'design',
+            'evaluate',
+            'analyze',
+            'record',
+            'complete',
+          ]
+        : ['design', 'evaluate', 'analyze', 'record', 'design', 'evaluate'];
+
+    let preflightTurns = 0;
+    let orchestratorTurns = 0;
+    let researcherTurns = 0;
+    let analyzerTurns = 0;
     const createSession = vi.fn(async (options: SessionOptions) => {
       const workspacePath = options.workspacePath;
       if (!workspacePath) throw new Error('workflow agent session missing workspacePath');
       return new MockSession({
         responses: (msg: string) => {
           if (msg.includes('configuring a multi-round Evolve experiment')) {
-            preflightCount += 1;
-            writePreflightRunSpec(workspacePath);
+            preflightTurns += 1;
+            writePreflightRunSpec(workspacePath, ROUND_COUNT);
             return statusBlock('ready', 'preflight confirmed');
           }
           if (msg.includes('You are the Evolve orchestrator')) {
-            const verdict = orchestratorScript[orchestratorCount];
-            orchestratorCount += 1;
-            if (!verdict) throw new Error(`orchestrator script exhausted at turn ${orchestratorCount}`);
-            return statusBlock(verdict, `orchestrator turn ${orchestratorCount}`);
+            const verdict = orchestratorScript[orchestratorTurns];
+            orchestratorTurns += 1;
+            if (!verdict) throw new Error(`orchestrator script exhausted at turn ${orchestratorTurns}`);
+            return statusBlock(verdict, `orchestrator turn ${orchestratorTurns}`);
           }
           if (msg.includes('Write exactly one candidate program for this round')) {
-            researcherCount += 1;
-            writeCandidate(workspacePath, kind);
-            return approvedResponse('candidate written');
+            researcherTurns += 1;
+            writeCandidate(workspacePath, mode, researcherTurns);
+            return approvedResponse(`candidate ${researcherTurns} written`);
           }
           if (msg.includes('write a SHORT transferable lesson')) {
-            analyzerCount += 1;
-            writeAnalysis(workspacePath);
-            return approvedResponse('analysis written');
+            analyzerTurns += 1;
+            writeAnalysis(workspacePath, analyzerTurns);
+            return approvedResponse(`analysis ${analyzerTurns} written`);
           }
           throw new Error(`unexpected agent prompt: ${msg.slice(0, 200)}`);
         },
@@ -282,67 +357,87 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     const manifestPath = resolve(process.cwd(), 'src', 'workflow', 'workflows', 'evolve', 'workflow.yaml');
     const workflowId = await orchestrator.start(manifestPath, TASK, workspaceDir);
-    await waitForCompletion(orchestrator, workflowId, 150_000);
+    await waitForCompletion(orchestrator, workflowId, 180_000);
     await orchestrator.shutdownAll();
-    expect(preflightCount).toBe(1);
-    expect(researcherCount).toBe(1);
-    expect(analyzerCount).toBe(kind === 'crash' ? 0 : 1);
+
+    expect(preflightTurns).toBe(1);
+    if (mode === 'positive') {
+      expect(orchestratorTurns).toBe(4 * ROUND_COUNT + 1);
+      expect(researcherTurns).toBe(ROUND_COUNT);
+      expect(analyzerTurns).toBe(ROUND_COUNT);
+    } else {
+      expect(orchestratorTurns).toBe(6);
+      expect(researcherTurns).toBe(2);
+      expect(analyzerTurns).toBe(1);
+    }
+
     return { states, workspaceDir };
   }
 
-  it('records a correct candidate and reaches done', async () => {
-    const { states, workspaceDir } = await runEvolve('sum');
-    const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
-    const candidate = 'def solve(xs):\n    return sum(xs)\n';
+  it('runs three rounds to done with parents, analyses, cognition, best, and deterministic vectors', async () => {
+    const first = await runEvolve('positive-a', 'positive');
+    const second = await runEvolve('positive-b', 'positive');
+    const runDir = resolve(first.workspaceDir, '.evolve_runs', 'main');
+    const secondRunDir = resolve(second.workspaceDir, '.evolve_runs', 'main');
 
-    expect(states.at(-1)).toBe('done');
-    expect(states).not.toContain('failed');
-    expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe('evaluated');
-    expect((readJson(resolve(runDir, 'current', 'analysis_record.json')) as { verdict: string }).verdict).toBe(
-      'recorded',
-    );
+    expect(first.states.at(-1)).toBe('done');
+    expect(first.states).not.toContain('failed');
+    for (const state of ['sample', 'evaluate', 'analyzer', 'analysis_record', 'researcher']) {
+      expect(countStates(first.states, state)).toBe(ROUND_COUNT);
+    }
+    expect(countStates(first.states, 'orchestrator')).toBe(4 * ROUND_COUNT + 1);
 
-    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as {
-      next_id: number;
-      nodes: Record<string, { score: number }>;
+    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
+    expect(nodes.next_id).toBe(ROUND_COUNT);
+    expect(Object.keys(nodes.nodes)).toEqual(['0', '1', '2']);
+    expect(nodes.nodes['0'].parent).toEqual([]);
+    expect(nodes.nodes['1'].parent.length).toBeGreaterThan(0);
+    expect(nodes.nodes['1'].parent[0]).toBeLessThan(1);
+    expect(nodes.nodes['2'].parent.length).toBeGreaterThan(0);
+    expect(nodes.nodes['2'].parent[0]).toBeLessThan(2);
+    expect(Object.values(nodes.nodes).every((node) => node.analysis.trim().length > 0)).toBe(true);
+
+    const scores = Object.keys(nodes.nodes)
+      .sort()
+      .map((id) => nodes.nodes[id].score);
+    expect(scores).toEqual([2, 5, 6]);
+    expect(scores[0]).toBeLessThanOrEqual(scores[1]);
+    expect(scores[1]).toBeLessThanOrEqual(scores[2]);
+    expect(nodes.best?.score).toBe(Math.max(...scores));
+
+    const cognition = readJson(resolve(runDir, 'cognition_data', 'cognition.json')) as {
+      items: Record<string, unknown>;
     };
-    expect(nodes.next_id).toBe(1);
-    expect(Object.keys(nodes.nodes)).toEqual(['0']);
-    expect(nodes.nodes['0'].score).toBe(6);
-
-    expect(readFileSync(resolve(runDir, 'best', 'step_0001', 'code'), 'utf-8')).toBe(candidate);
-    expect((readJson(resolve(runDir, 'best', 'step_0001', 'results.json')) as { eval_score: number }).eval_score).toBe(
-      6,
-    );
-  }, 240_000);
-
-  it('records a low-score candidate and still reaches done', async () => {
-    const { states, workspaceDir } = await runEvolve('low-score');
-    const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
-
-    expect(states.at(-1)).toBe('done');
-    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as {
-      nodes: Record<string, { score: number }>;
+    expect(Object.keys(cognition.items).length).toBeGreaterThanOrEqual(1);
+    const finalContext = readJson(resolve(runDir, 'current', 'context.json')) as {
+      cognition: { matches: readonly unknown[] };
     };
-    expect(Object.keys(nodes.nodes)).toEqual(['0']);
-    expect(nodes.nodes['0'].score).toBe(0);
-    expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe('evaluated');
-  }, 240_000);
+    expect(finalContext.cognition.matches.length).toBeGreaterThanOrEqual(1);
 
-  it('routes evaluator crashes to failed without recording a node', async () => {
-    const { states, workspaceDir } = await runEvolve('crash');
+    const bestScores = readdirSync(resolve(runDir, 'best'))
+      .map((entry) => readJson(resolve(runDir, 'best', entry, 'results.json')) as { eval_score: number })
+      .map((result) => result.eval_score);
+    expect(Math.max(...bestScores)).toBe(Math.max(...scores));
+
+    const firstVectorStore = readFileSync(resolve(runDir, 'database_data', 'faiss', 'vector_store.pkl'));
+    const secondVectorStore = readFileSync(resolve(secondRunDir, 'database_data', 'faiss', 'vector_store.pkl'));
+    expect(firstVectorStore.equals(secondVectorStore)).toBe(true);
+
+    const secondNodes = readJson(resolve(secondRunDir, 'database_data', 'nodes.json')) as NodesFile;
+    expect(stripCreatedAt(nodes)).toEqual(stripCreatedAt(secondNodes));
+  }, 300_000);
+
+  it('routes a mid-loop evaluator crash to failed without a partial second node', async () => {
+    const { states, workspaceDir } = await runEvolve('crash', 'crash-round-2');
     const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
 
     expect(states.at(-1)).toBe('failed');
-    expect(states).toContain('evaluate');
-    expect(states).not.toContain('analysis_record');
+    expect(countStates(states, 'evaluate')).toBe(2);
+    expect(countStates(states, 'analysis_record')).toBe(1);
+    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
+    expect(Object.keys(nodes.nodes)).toEqual(['0']);
     expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe(
       'evaluator_blocked',
     );
-    const nodesPath = resolve(runDir, 'database_data', 'nodes.json');
-    if (existsSync(nodesPath)) {
-      const nodes = readJson(nodesPath) as { nodes: Record<string, unknown> };
-      expect(Object.keys(nodes.nodes)).toEqual([]);
-    }
-  }, 240_000);
+  }, 300_000);
 });
