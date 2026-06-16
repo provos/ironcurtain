@@ -9,7 +9,9 @@ import {
   unlinkSync,
   cpSync,
 } from 'node:fs';
-import { relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
+import { isWithinDirectory } from '../types/argument-roles.js';
+import { errorMessage } from '../utils/error-message.js';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -2393,10 +2395,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       return appendError(`result file ${input.resultFile} is not a safe workspace-relative path`);
     }
 
-    const workspace = resolve(instance.workspacePath);
-    const resultPath = resolve(workspace, input.resultFile);
-    const pathFromWorkspace = relative(workspace, resultPath);
-    if (pathFromWorkspace === '' || pathFromWorkspace.startsWith('..')) {
+    const resultPath = resolve(instance.workspacePath, input.resultFile);
+    // Symlink-safe containment: a container can plant a symlink inside the shared
+    // workspace, and this read happens host-side — so resolve both sides to their
+    // canonical real paths before comparing (same posture as the policy engine,
+    // see resolveRealPath / CLAUDE.md). A lexical resolve()/relative() check would
+    // follow such a symlink and read off-workspace on the host.
+    if (!isWithinDirectory(resultPath, instance.workspacePath)) {
       return appendError(`result file ${input.resultFile} escapes the workspace`);
     }
 
@@ -2404,9 +2409,18 @@ export class WorkflowOrchestrator implements WorkflowController {
       return appendError(`result file ${input.resultFile} not found`);
     }
 
+    // Split read vs parse so a read failure (EISDIR/EPERM/...) is not mislabeled
+    // as a JSON syntax error.
+    let raw: string;
+    try {
+      raw = readFileSync(resultPath, 'utf8');
+    } catch (err) {
+      return appendError(`result file ${input.resultFile} could not be read: ${errorMessage(err)}`);
+    }
+
     let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(resultPath, 'utf8'));
+      parsed = JSON.parse(raw);
     } catch {
       return appendError(`result file ${input.resultFile} is not valid JSON`);
     }

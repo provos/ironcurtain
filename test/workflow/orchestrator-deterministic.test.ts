@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -512,6 +512,61 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
       expect(missingVerdict.passed).toBe(false);
       expect(missingVerdict.verdict).toBe(DETERMINISTIC_RESULT_ERROR_VERDICT);
       expect(missingVerdict.errors).toContain('missing verdict');
+    });
+
+    it('rejects a result file that escapes the workspace via a symlink (security)', () => {
+      // A container can plant a symlink in the shared workspace; the host-side read
+      // must not follow it off-workspace. The symlink points to a sibling of the
+      // workspace, so canonical-path containment must reject it.
+      const wsDir = join(tmpDir, 'ws');
+      const secret = join(tmpDir, 'outside-secret.json');
+      writeFileSync(secret, JSON.stringify({ verdict: 'leak' }));
+      mkdirSync(join(wsDir, '.workflow'), { recursive: true });
+      symlinkSync(secret, join(wsDir, '.workflow', 'result.json'));
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+
+      const result = callApplyResultFile(
+        orchestrator,
+        wsDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+          resultFile: '.workflow/result.json',
+        },
+        { passed: true },
+      );
+
+      expect(result.passed).toBe(false);
+      expect(result.verdict).toBe(DETERMINISTIC_RESULT_ERROR_VERDICT);
+      expect(result.errors).toContain('escapes the workspace');
+      expect(result.verdict).not.toBe('leak'); // never surfaced the symlinked-out verdict
+    });
+
+    it('reports a read error (not "not valid JSON") when resultFile is a directory', () => {
+      // resultFile points at a directory -> readFileSync throws EISDIR, which must be
+      // reported as a read failure rather than conflated with a JSON parse error.
+      mkdirSync(join(tmpDir, '.workflow', 'result.json'), { recursive: true });
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+
+      const result = callApplyResultFile(
+        orchestrator,
+        tmpDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+          resultFile: '.workflow/result.json',
+        },
+        { passed: true },
+      );
+
+      expect(result.passed).toBe(false);
+      expect(result.verdict).toBe(DETERMINISTIC_RESULT_ERROR_VERDICT);
+      expect(result.errors).toContain('could not be read');
+      expect(result.errors).not.toContain('not valid JSON');
     });
 
     it('does not read resultFile when command reduction already failed', () => {
