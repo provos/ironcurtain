@@ -1,0 +1,148 @@
+name: evolve
+description: 'Evolve - single-round evaluator-driven candidate search (first vertical slice).'
+initial: preflight
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  sharedContainer: true
+  model: anthropic:claude-sonnet-4-6
+
+states:
+  preflight:
+    type: agent
+    description: Define the run spec and initialize the evolve run.
+    persona: global
+    prompt: |
+      You are configuring a single-round Evolve experiment. The task describes a
+      program-search objective with an evaluator that prints a score.
+
+      Do BOTH of these, in order, then finish with the required agent_status block:
+
+      1. Initialize the run by executing the evolve-brief helper. The run lives under
+         /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE and EVAL_CMD
+         from the task:
+
+         /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
+           --workspace-root /workspace \
+           --run-name main \
+           --objective "OBJECTIVE" \
+           --core-score eval_score \
+           --evaluation-command "EVAL_CMD" \
+           --evaluation-timeout-secs 30 \
+           --success-criterion "eval_score >= 1.0" \
+           --max-rounds 1 \
+           --patience 1 \
+           --stop-condition "max_rounds" \
+           --writable-path .evolve_runs \
+           --primary-target candidate.py \
+           --sampling-algorithm greedy \
+           --sample-n 1 \
+           --cognition-source-mode none \
+           --confirmed true
+
+         EVAL_CMD must be a shell command that reads the candidate at {quoted_code_path},
+         runs it, and writes a JSON file at {quoted_results_path} containing an
+         "eval_score" number. The helper substitutes {quoted_code_path} and
+         {quoted_results_path} at eval time.
+
+      2. Confirm the command exited 0 and that /workspace/.evolve_runs/main/run_spec.yaml exists.
+
+      If the task is missing an objective or an evaluator you cannot construct, set verdict: blocked.
+      Otherwise set verdict: ready.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: researcher
+        when: { verdict: ready }
+      - to: failed
+        when: { verdict: blocked }
+
+  researcher:
+    type: agent
+    description: Materialize one candidate program at the step code path.
+    persona: global
+    prompt: |
+      Write exactly one candidate program for this round.
+
+      Write the COMPLETE candidate file to:
+        /workspace/.evolve_runs/main/steps/step_0001/code
+
+      Create the directory if needed. Write only that one file, with no extra files
+      and no commentary in the file. The candidate must satisfy the objective in
+      /workspace/.evolve_runs/main/run_spec.yaml.
+
+      Finish with the required agent_status block.
+    inputs: []
+    outputs: []
+    maxVisits: 3
+    transitions:
+      - to: evaluate
+
+  evaluate:
+    type: deterministic
+    description: Run the configured evaluator on the candidate inside the shared container.
+    container: true
+    resultFile: .evolve_runs/main/steps/step_0001/result.json
+    run:
+      - [
+          '/opt/workflow-venv/bin/python',
+          '/workflow-scripts/evolve_result.py',
+          'evaluate',
+          '--run-dir',
+          '/workspace/.evolve_runs/main',
+          '--step-name',
+          'step_0001',
+          '--code-path',
+          '.evolve_runs/main/steps/step_0001/code',
+          '--result-file',
+          '/workspace/.evolve_runs/main/steps/step_0001/result.json',
+        ]
+    transitions:
+      - to: record_node
+        when: { verdict: evaluated }
+      - to: failed
+        when: { verdict: evaluator_blocked }
+      - to: failed
+        when: { verdict: result_file_error }
+      - to: failed
+
+  record_node:
+    type: deterministic
+    description: Commit the scored candidate as a node and update the best snapshot.
+    container: true
+    resultFile: .evolve_runs/main/steps/step_0001/record_result.json
+    run:
+      - [
+          '/opt/workflow-venv/bin/python',
+          '/workflow-scripts/evolve_result.py',
+          'record',
+          '--run-dir',
+          '/workspace/.evolve_runs/main',
+          '--step-name',
+          'step_0001',
+          '--name',
+          'round-1',
+          '--code-path',
+          '.evolve_runs/main/steps/step_0001/code',
+          '--results-file',
+          '.evolve_runs/main/steps/step_0001/results.json',
+          '--result-file',
+          '/workspace/.evolve_runs/main/steps/step_0001/record_result.json',
+        ]
+    transitions:
+      - to: done
+        when: { verdict: recorded }
+      - to: failed
+        when: { verdict: needs_repair }
+      - to: failed
+        when: { verdict: result_file_error }
+      - to: failed
+
+  done:
+    type: terminal
+    description: One candidate scored and recorded; best snapshot updated.
+
+  failed:
+    type: terminal
+    description: Preflight blocked, evaluator failed, or record failed.

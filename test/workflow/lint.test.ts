@@ -829,6 +829,7 @@ describe('bundled workflows lint clean', () => {
     'test-email-summary',
     'deterministic-eval-smoke',
     'deterministic-verdict-smoke',
+    'evolve',
   ]) {
     it(`${name}: zero errors`, () => {
       const manifestPath = resolve(workflowsDir, name, 'workflow.yaml');
