@@ -15,7 +15,13 @@ import type {
   AgentTransitionDefinition,
 } from './types.js';
 import { GLOBAL_PERSONA, DEFAULT_CONTAINER_SCOPE } from './types.js';
-import { collectTransitionTargets, findReachableStates, iterateSkillRefIssues, parseArtifactRef } from './validate.js';
+import {
+  collectTransitionTargets,
+  findReachableStates,
+  iterateSkillRefIssues,
+  parseArtifactRef,
+  usesVerdictEdges,
+} from './validate.js';
 import { getWorkflowPackageDir } from './discovery.js';
 import { ACTIONABLE_DISCOVERY_REASONS, discoverSkillsWithErrors } from '../skills/discovery.js';
 import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
@@ -499,8 +505,7 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
     if (state.type !== 'deterministic') continue;
     if (state.resultFile !== undefined) continue;
 
-    const hasVerdictWhen = state.transitions.some((t) => t.when !== undefined && 'verdict' in t.when);
-    if (!hasVerdictWhen) continue;
+    if (!usesVerdictEdges(state.transitions)) continue;
 
     diagnostics.push({
       code: 'WF012',

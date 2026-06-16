@@ -234,7 +234,13 @@ function compileAction(action: WorkflowTransitionAction): XStateActionEntry {
   return { type: 'resetVisitCounts', params: { stateIds: action.stateIds } };
 }
 
-function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefinition[]): readonly object[] {
+// Shared onDone-transition builder for agent and deterministic states: both map a
+// `when:` clause to the __matchesWhen guard, else a bare `guard:`, and run a
+// per-state-type context-update action. Only the update action differs.
+function buildOnDoneTransitions(
+  transitions: readonly AgentTransitionDefinition[],
+  updateAction: string,
+): readonly object[] {
   return transitions.map((t) => {
     let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
     if (t.when) {
@@ -246,7 +252,7 @@ function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefini
     return {
       target: t.to,
       ...(guard ? { guard } : {}),
-      actions: collectTransitionActions(t, 'updateContextFromAgentResult'),
+      actions: collectTransitionActions(t, updateAction),
     };
   });
 }
@@ -262,7 +268,7 @@ function buildAgentState(stateId: string, config: AgentStateDefinition, definiti
         stateConfig: config,
         context,
       }),
-      onDone: buildAgentOnDoneTransitions(config.transitions),
+      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromAgentResult'),
       onError: {
         target: findErrorTarget(config, definition),
         actions: ['storeError', 'updateContextFromAgentInvocationError'],
@@ -276,20 +282,7 @@ function buildDeterministicState(
   config: DeterministicStateDefinition,
   definition: WorkflowDefinition,
 ): object {
-  const onDoneTransitions = config.transitions.map((t) => {
-    let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
-    if (t.when) {
-      guard = { type: '__matchesWhen', params: { when: t.when } };
-    } else if (t.guard) {
-      guard = t.guard;
-    }
-
-    return {
-      target: t.to,
-      ...(guard ? { guard } : {}),
-      actions: collectTransitionActions(t, 'updateContextFromDeterministicResult'),
-    };
-  });
+  const onDoneTransitions = buildOnDoneTransitions(config.transitions, 'updateContextFromDeterministicResult');
 
   return {
     invoke: {

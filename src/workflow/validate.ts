@@ -218,6 +218,15 @@ export function collectTransitionTargets(state: WorkflowStateDefinition): string
 }
 
 /**
+ * True if any transition routes on a `when: { verdict: ... }` clause. Shared by
+ * the container-only validation rule (`validateContainerScopes`) and the WF012
+ * lint (which requires such states to declare a `resultFile`).
+ */
+export function usesVerdictEdges(transitions: readonly AgentTransitionDefinition[]): boolean {
+  return transitions.some((t) => t.when !== undefined && 'verdict' in t.when);
+}
+
+/**
  * Parses a workflow input artifact reference. A trailing `?` marks the
  * input as optional — the consumer may skip it if the artifact isn't
  * produced.
@@ -505,12 +514,10 @@ function validateContainerScopes(definition: WorkflowDefinition, issues: string[
 
     if (state.type !== 'deterministic') continue;
 
-    const usesVerdictEdges = state.transitions.some((t) => t.when !== undefined && 'verdict' in t.when);
-
     if (state.containerScope !== undefined && state.container !== true) {
       issues.push(`State "${stateId}" declares containerScope but is not container: true`);
     }
-    if ((state.resultFile !== undefined || usesVerdictEdges) && state.container !== true) {
+    if ((state.resultFile !== undefined || usesVerdictEdges(state.transitions)) && state.container !== true) {
       issues.push(
         `State "${stateId}" uses resultFile / when:{verdict} routing but is not container: true. ` +
           `Structured deterministic result routing is container-only.`,
