@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { toCallableName } from '../src/sandbox/index.js';
+import vm from 'node:vm';
+import { toCallableName, toUtcpCallable, buildInterfacePatchSnippet } from '../src/sandbox/index.js';
 
 describe('toCallableName', () => {
   it('returns simple names unchanged after sanitization', () => {
@@ -158,5 +159,88 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
     const rawName = 'tools.read_file';
     const callableName = toCallableName(rawName);
     expect(callableName).toBe(rawName);
+  });
+});
+
+describe('buildInterfacePatchSnippet (real generated snippet)', () => {
+  // These tests run the ACTUAL string produced by buildInterfacePatchSnippet
+  // inside a vm context, against a mock __getToolInterface, instead of
+  // reimplementing the logic. The manual name deliberately uses the
+  // UUID-style form to prove that the per-sandbox manual prefix never leaks
+  // into the agent-facing surface.
+  const MANUAL = 'tools_0b89f22a_e76e_417e_8369_71668b24627c';
+  const PREFIX = `${MANUAL}.`;
+
+  // Raw UTCP tool names as the IronCurtain protocol produces them:
+  // "<manual>.<server>.<tool>".
+  const rawNames = [`${PREFIX}git.git_add`, `${PREFIX}git.git_status`, `${PREFIX}filesystem.read_file`];
+
+  const interfaceMap: Record<string, string> = {
+    [`${PREFIX}git.git_add`]: 'function git_add(args: { pathspec: string[] }): void',
+    [`${PREFIX}git.git_status`]: 'function git_status(): string',
+    [`${PREFIX}filesystem.read_file`]: 'function read_file(args: { path: string }): string',
+  };
+
+  // Build callableToRaw exactly the way buildToolCatalogAndPatch does.
+  function buildCallableToRaw(): Record<string, string> {
+    const callableToRaw: Record<string, string> = {};
+    for (const raw of rawNames) {
+      const callableName = toCallableName(raw);
+      const utcpCallable = toUtcpCallable(raw);
+      if (callableName !== raw) callableToRaw[callableName] = raw;
+      if (utcpCallable !== raw && utcpCallable !== callableName) callableToRaw[utcpCallable] = raw;
+    }
+    return callableToRaw;
+  }
+
+  // Compiles the real snippet and returns the patched __getToolInterface.
+  function makePatchedFn(): (toolName: string) => string | null {
+    const callableToRaw = buildCallableToRaw();
+    const utcpGlobalName = MANUAL; // sanitize() is a no-op on this name
+    const snippet = buildInterfacePatchSnippet(callableToRaw, MANUAL, utcpGlobalName);
+
+    const g: { __getToolInterface: (name: string) => string | null } = {
+      __getToolInterface: (name: string) => interfaceMap[name] ?? null,
+    };
+    const context: { global: typeof g } = { global: g };
+    vm.createContext(context);
+    vm.runInContext(snippet, context);
+    return g.__getToolInterface;
+  }
+
+  it('resolves raw, friendly, and old-UTCP callable names', () => {
+    const fn = makePatchedFn();
+    // Raw names still resolve.
+    expect(fn(`${PREFIX}git.git_add`)).toBe(interfaceMap[`${PREFIX}git.git_add`]);
+    // Friendly callable names resolve.
+    expect(fn('git.add')).toBe(interfaceMap[`${PREFIX}git.git_add`]);
+    expect(fn('filesystem.read_file')).toBe(interfaceMap[`${PREFIX}filesystem.read_file`]);
+    // Old UTCP underscore form resolves (backward compat).
+    expect(fn(`${PREFIX}git_git_add`)).toBe(interfaceMap[`${PREFIX}git.git_add`]);
+  });
+
+  it('suggests the friendly name on a near-miss', () => {
+    const fn = makePatchedFn();
+    const msg = fn('git.ad');
+    expect(msg).toContain('Did you mean:');
+    expect(msg).toContain('git.add');
+  });
+
+  it('never leaks the manual prefix in suggestions (regression)', () => {
+    const fn = makePatchedFn();
+    // A typo that fuzzy-matches multiple tools. Before the fix, the raw
+    // "tools_<uuid>.git_git_add" key was offered as a suggestion.
+    for (const typo of ['git.ad', 'git', 'read_fil', 'fileystem.read_file']) {
+      const msg = fn(typo);
+      expect(msg).not.toContain(MANUAL);
+      expect(msg).not.toContain(PREFIX);
+    }
+  });
+
+  it('falls back to the catalog hint when nothing matches', () => {
+    const fn = makePatchedFn();
+    const msg = fn('totally_unknown_xyz');
+    expect(msg).toContain('Use the callable name format');
+    expect(msg).not.toContain(MANUAL);
   });
 });
