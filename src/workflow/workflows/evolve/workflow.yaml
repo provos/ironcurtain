@@ -1,5 +1,5 @@
 name: evolve
-description: 'Evolve - single-round evaluator-driven candidate search (first vertical slice).'
+description: 'Evolve - multi-round evaluator-driven candidate search via an orchestrator hub: sampling, cognition, and per-round analysis.'
 initial: preflight
 
 settings:
@@ -7,21 +7,28 @@ settings:
   dockerAgent: claude-code
   sharedContainer: true
   model: anthropic:claude-sonnet-4-6
+  # Safety backstop for a wedged orchestrator hub, NOT the round budget.
+  # isRoundLimitReached trips when the most-visited state (the orchestrator,
+  # entered ~4 times per evolution round) reaches this count. Set well above
+  # 4 * run_spec.budget.max_rounds + 1 so a legitimate long run is never capped
+  # before the orchestrator emits `complete`; the real round budget is enforced
+  # by the orchestrator against run_spec.budget.max_rounds.
+  maxRounds: 200
 
 states:
   preflight:
     type: agent
-    description: Define the run spec and initialize the evolve run.
+    description: Define the run spec, initialize the run, and author the cognition seed.
     persona: global
     prompt: |
-      You are configuring a single-round Evolve experiment. The task describes a
+      You are configuring a multi-round Evolve experiment. The task describes a
       program-search objective with an evaluator that prints a score.
 
-      Do BOTH of these, in order, then finish with the required agent_status block:
+      Do ALL of these, in order, then finish with the required agent_status block:
 
       1. Initialize the run by executing the evolve-brief helper. The run lives under
          /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE and EVAL_CMD
-         from the task:
+         from the task (set --max-rounds to the requested number of rounds, default 3):
 
          /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
            --workspace-root /workspace \
@@ -31,59 +38,146 @@ states:
            --evaluation-command "EVAL_CMD" \
            --evaluation-timeout-secs 30 \
            --success-criterion "eval_score >= 1.0" \
-           --max-rounds 1 \
-           --patience 1 \
+           --max-rounds 3 \
+           --patience 2 \
            --stop-condition "max_rounds" \
            --writable-path .evolve_runs \
            --primary-target candidate.py \
            --sampling-algorithm greedy \
            --sample-n 1 \
-           --cognition-source-mode none \
+           --cognition-source-mode seed \
            --confirmed true
 
-         EVAL_CMD must be a shell command that reads the candidate at {quoted_code_path},
-         runs it, and writes a JSON file at {quoted_results_path} containing an
-         "eval_score" number. The helper substitutes {quoted_code_path} and
-         {quoted_results_path} at eval time.
+         EVAL_CMD must read the candidate at {quoted_code_path}, run it, and write a JSON
+         file at {quoted_results_path} containing an "eval_score" number. Candidate files
+         may be extensionless, so Python evaluators must load them with runpy.run_path or
+         exec(compile(...)); do not rely on importlib.util.spec_from_file_location for
+         {quoted_code_path}.
 
-      2. Confirm the command exited 0 and that /workspace/.evolve_runs/main/run_spec.yaml exists.
+      2. Write a cognition seed file at /workspace/.evolve_runs/main/cognition_seed.md
+         containing one or more ```json fenced blocks of reusable domain heuristics for
+         this objective. Do not put round-by-round results here; only durable knowledge.
 
-      If the task is missing an objective or an evaluator you cannot construct, set verdict: blocked.
+      3. Confirm evolve-brief exited 0 and run_spec.yaml exists.
+
+      If the task lacks an objective or an evaluator you cannot construct, set verdict: blocked.
       Otherwise set verdict: ready.
     inputs: []
     outputs: []
     transitions:
-      - to: researcher
+      - to: orchestrator
         when: { verdict: ready }
       - to: failed
         when: { verdict: blocked }
 
+  orchestrator:
+    type: agent
+    description: Central router. Reads the durable run state and routes the next phase.
+    persona: global
+    prompt: |
+      You are the Evolve orchestrator - the central router for a bounded multi-round
+      search. On every turn you read the durable run state and emit exactly ONE routing
+      verdict in your agent_status block. You do not write candidates, run evaluators,
+      or record nodes; you only decide what happens next.
+
+      Read these two files first:
+        - /workspace/.evolve_runs/main/run_spec.yaml - budget.max_rounds is N.
+        - /workspace/.evolve_runs/main/database_data/nodes.json - count its "nodes" map.
+          The file is absent before round 1, which means done_rounds = 0.
+
+      Also inspect /workspace/.evolve_runs/main/current/. It is overwritten each round:
+        - context.json means sampling for the in-flight round is done.
+        - result.json means evaluation for the in-flight round is done.
+        - analysis.md means analysis for the in-flight round is done.
+        - analysis_record.json means the round was recorded.
+
+      Decide and emit one verdict:
+        - complete  - if done_rounds >= max_rounds.
+        - design    - if done_rounds < max_rounds and no round is in-flight.
+        - evaluate  - if the in-flight round has a candidate written but no result.json yet.
+        - analyze   - if the in-flight round has a result.json but no analysis.md yet.
+        - record    - if the in-flight round has an analysis.md but is not yet committed.
+        - escalate  - only if the run is unrecoverable.
+
+      Finish with the required agent_status block carrying exactly one of those verdicts.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: failed
+        guard: isRoundLimitReached
+      - to: sample
+        when: { verdict: design }
+      - to: evaluate
+        when: { verdict: evaluate }
+      - to: analyzer
+        when: { verdict: analyze }
+      - to: analysis_record
+        when: { verdict: record }
+      - to: done
+        when: { verdict: complete }
+      - to: failed
+        when: { verdict: escalate }
+
+  sample:
+    type: deterministic
+    description: Sample a parent node and retrieve cognition; seed cognition on first entry.
+    container: true
+    resultFile: .evolve_runs/main/current/sample.json
+    run:
+      - [
+          '/opt/workflow-venv/bin/python',
+          '/workflow-scripts/evolve_result.py',
+          'sample',
+          '--run-dir',
+          '/workspace/.evolve_runs/main',
+          '--query-from-spec',
+          '--context-file',
+          '/workspace/.evolve_runs/main/current/context.json',
+          '--result-file',
+          '/workspace/.evolve_runs/main/current/sample.json',
+        ]
+    transitions:
+      - to: researcher
+        when: { verdict: sampled }
+      - to: failed
+        when: { verdict: sample_error }
+      - to: failed
+        when: { verdict: result_file_error }
+      - to: failed
+
   researcher:
     type: agent
-    description: Materialize one candidate program at the step code path.
+    description: Evolve one candidate from the sampled parent and retrieved cognition.
     persona: global
     prompt: |
       Write exactly one candidate program for this round.
 
+      Read the round context at /workspace/.evolve_runs/main/current/context.json. It
+      contains:
+        - step_name: the directory you must write the candidate into
+        - parent: the sampled parent node, or null on round 1
+        - cognition.matches: retrieved durable heuristics relevant to this objective
+
+      If a parent is present, evolve it: improve on the parent's code using the cognition
+      hints. If parent is null, write a full candidate from scratch.
+
       Write the COMPLETE candidate file to:
-        /workspace/.evolve_runs/main/steps/step_0001/code
+        /workspace/.evolve_runs/main/steps/<step_name>/code
+      substituting <step_name> from context.json. Create the directory if needed. Write
+      only that one file, no commentary in the file.
 
-      Create the directory if needed. Write only that one file, with no extra files
-      and no commentary in the file. The candidate must satisfy the objective in
-      /workspace/.evolve_runs/main/run_spec.yaml.
-
-      Finish with the required agent_status block.
+      Finish with the required agent_status block; your verdict is informational.
     inputs: []
     outputs: []
     maxVisits: 3
     transitions:
-      - to: evaluate
+      - to: orchestrator
 
   evaluate:
     type: deterministic
-    description: Run the configured evaluator on the candidate inside the shared container.
+    description: Run the configured evaluator on this round's candidate.
     container: true
-    resultFile: .evolve_runs/main/steps/step_0001/result.json
+    resultFile: .evolve_runs/main/current/result.json
     run:
       - [
           '/opt/workflow-venv/bin/python',
@@ -91,15 +185,13 @@ states:
           'evaluate',
           '--run-dir',
           '/workspace/.evolve_runs/main',
-          '--step-name',
-          'step_0001',
-          '--code-path',
-          '.evolve_runs/main/steps/step_0001/code',
+          '--step-from-current',
+          '--code-from-current',
           '--result-file',
-          '/workspace/.evolve_runs/main/steps/step_0001/result.json',
+          '/workspace/.evolve_runs/main/current/result.json',
         ]
     transitions:
-      - to: record_node
+      - to: orchestrator
         when: { verdict: evaluated }
       - to: failed
         when: { verdict: evaluator_blocked }
@@ -107,31 +199,52 @@ states:
         when: { verdict: result_file_error }
       - to: failed
 
-  record_node:
+  analyzer:
+    type: agent
+    description: Write a transferable lesson for the round.
+    persona: global
+    prompt: |
+      Analyze the round that just completed and write a SHORT transferable lesson.
+
+      Read /workspace/.evolve_runs/main/current/context.json, the just-evaluated
+      result at /workspace/.evolve_runs/main/current/result.json, and this round's
+      candidate at the step path named in context.json.
+
+      Write a concise markdown lesson to:
+        /workspace/.evolve_runs/main/current/analysis.md
+      Keep it to a few sentences. Do not restate the score; capture the transferable insight.
+
+      Finish with the required agent_status block; your verdict is informational.
+    inputs: []
+    outputs: []
+    maxVisits: 3
+    transitions:
+      - to: orchestrator
+
+  analysis_record:
     type: deterministic
-    description: Commit the scored candidate as a node and update the best snapshot.
+    description: The single durable engine node-write; commit the round with its lesson and parent.
     container: true
-    resultFile: .evolve_runs/main/steps/step_0001/record_result.json
+    resultFile: .evolve_runs/main/current/analysis_record.json
     run:
       - [
           '/opt/workflow-venv/bin/python',
           '/workflow-scripts/evolve_result.py',
-          'record',
+          'attach_analysis',
           '--run-dir',
           '/workspace/.evolve_runs/main',
-          '--step-name',
-          'step_0001',
-          '--name',
-          'round-1',
-          '--code-path',
-          '.evolve_runs/main/steps/step_0001/code',
-          '--results-file',
-          '.evolve_runs/main/steps/step_0001/results.json',
+          '--step-from-current',
+          '--name-from-current',
+          '--parent-from-current',
+          '--code-from-current',
+          '--results-from-current',
+          '--analysis-file',
+          '/workspace/.evolve_runs/main/current/analysis.md',
           '--result-file',
-          '/workspace/.evolve_runs/main/steps/step_0001/record_result.json',
+          '/workspace/.evolve_runs/main/current/analysis_record.json',
         ]
     transitions:
-      - to: done
+      - to: orchestrator
         when: { verdict: recorded }
       - to: failed
         when: { verdict: needs_repair }
@@ -141,8 +254,8 @@ states:
 
   done:
     type: terminal
-    description: One candidate scored and recorded; best snapshot updated.
+    description: Round budget reached; candidates scored and recorded.
 
   failed:
     type: terminal
-    description: Preflight blocked, evaluator failed, or record failed.
+    description: Preflight blocked, sampling failed, evaluator failed, record failed, or round-limit wedge.
