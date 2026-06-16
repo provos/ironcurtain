@@ -36,7 +36,6 @@ interface EvolveNode {
 interface NodesFile {
   readonly next_id: number;
   readonly nodes: Record<string, EvolveNode>;
-  readonly best?: EvolveNode | null;
 }
 
 function findHostCaDir(): string | null {
@@ -188,13 +187,8 @@ function writeAnalysis(workspacePath: string, analyzerTurn: number): void {
 }
 
 function stripCreatedAt(nodes: NodesFile): unknown {
-  const best = nodes.best ? { ...nodes.best } : nodes.best;
-  if (best) {
-    delete best.created_at;
-  }
   return {
     ...nodes,
-    best,
     nodes: Object.fromEntries(
       Object.entries(nodes.nodes).map(([id, node]) => {
         const rest = { ...node };
@@ -403,7 +397,6 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
     expect(scores).toEqual([2, 5, 6]);
     expect(scores[0]).toBeLessThanOrEqual(scores[1]);
     expect(scores[1]).toBeLessThanOrEqual(scores[2]);
-    expect(nodes.best?.score).toBe(Math.max(...scores));
 
     const cognition = readJson(resolve(runDir, 'cognition_data', 'cognition.json')) as {
       items: Record<string, unknown>;

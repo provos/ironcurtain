@@ -137,11 +137,9 @@ class Database:
         self.faiss.remove(worst_id)
 
     def _save_locked(self) -> None:
-        best_node = max(self.nodes.values(), key=lambda node: node.score) if self.nodes else None
         payload = {
             "next_id": self.next_id,
             "nodes": {str(node_id): node.to_dict() for node_id, node in self.nodes.items()},
-            "best": best_node.to_dict() if best_node is not None else None,
         }
         if hasattr(self.default_sampler, "get_state"):
             payload["sampler_state"] = self.default_sampler.get_state()

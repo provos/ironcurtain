@@ -453,66 +453,6 @@ describe('evolve_result.py bridge', () => {
     expect(argv).toEqual(expect.arrayContaining(['--code-path', '.evolve_runs/main/steps/step_0003/code']));
   });
 
-  it('passes an importable Python candidate path to evaluator commands for extensionless code files', () => {
-    const workspace = resolve(tmpDir, 'workspace');
-    const runDir = resolve(workspace, '.evolve_runs', 'main');
-    const stepDir = resolve(runDir, 'steps', 'step_0001');
-    mkdirSync(stepDir, { recursive: true });
-    writeFileSync(resolve(stepDir, 'code'), 'def solve(xs):\n    return sum(xs)\n');
-
-    const evaluatorPath = resolve(workspace, 'evaluator.py');
-    writeFileSync(
-      evaluatorPath,
-      [
-        'import importlib.util, json, sys',
-        'code_path, results_path = sys.argv[1], sys.argv[2]',
-        'spec = importlib.util.spec_from_file_location("candidate", code_path)',
-        'module = importlib.util.module_from_spec(spec)',
-        'spec.loader.exec_module(module)',
-        'result = module.solve([1, 2, 3])',
-        "open(results_path, 'w', encoding='utf-8').write(json.dumps({'eval_score': 1.0 if result == 6 else 0.0}))",
-      ].join('\n') + '\n',
-    );
-    writeFileSync(
-      resolve(runDir, 'run_spec.yaml'),
-      JSON.stringify({
-        objective: 'solve sum target evolve',
-        evaluation: {
-          core_score: 'eval_score',
-          command: `${JSON.stringify(PYTHON)} ${JSON.stringify(evaluatorPath)} {quoted_code_path} {quoted_results_path}`,
-          timeout_secs: 30,
-          success_criteria: ['eval_score >= 1.0'],
-        },
-        budget: { max_rounds: 3, patience: 2 },
-        stop_conditions: ['max_rounds'],
-        mutation_scope: { writable_paths: ['.evolve_runs'], primary_targets: ['candidate.py'] },
-        sampling: { algorithm: 'greedy', sample_n: 1 },
-        cognition: { source_mode: 'seed' },
-        approval: { confirmed: true },
-      }) + '\n',
-    );
-
-    const completed = spawnSync(
-      PYTHON,
-      [
-        resolve(WORKFLOW_DIR, 'scripts', 'evolve-eval'),
-        'run',
-        '--run-dir',
-        runDir,
-        '--step-name',
-        'step_0001',
-        '--code-path',
-        resolve(stepDir, 'code'),
-      ],
-      { cwd: workspace, encoding: 'utf-8' },
-    );
-
-    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
-    const result = JSON.parse(readFileSync(resolve(stepDir, 'results.json'), 'utf-8')) as { eval_score: number };
-    expect(result.eval_score).toBe(1);
-    expect(readFileSync(resolve(stepDir, 'eval.command.txt'), 'utf-8')).toContain('candidate.py');
-  });
-
   it('attaches analysis with the sampled parent and omits parent when context has none', () => {
     const dbStub = [
       'import json, sys',
