@@ -52,7 +52,17 @@ import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
  * supply a `workflowFilePath` (the package dir is the only place skill
  * manifests can live).
  */
-export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008' | 'WF010' | 'WF011';
+export type DiagnosticCode =
+  | 'WF001'
+  | 'WF002'
+  | 'WF003'
+  | 'WF004'
+  | 'WF006'
+  | 'WF007'
+  | 'WF008'
+  | 'WF010'
+  | 'WF011'
+  | 'WF012';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -105,6 +115,7 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkPersonaExists(def, ctx),
     ...checkVisitCapTransitionOrder(def),
     ...checkContainerScopePopulatedByAgent(def),
+    ...checkVerdictEdgesHaveResultFile(def),
     ...checkSkillReferencesAndManifests(def, ctx),
   ];
 }
@@ -475,6 +486,34 @@ function isReachableWithoutScopeAgent(def: WorkflowDefinition, target: string, s
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// WF012 — deterministic verdict edges need a resultFile source
+// ---------------------------------------------------------------------------
+
+function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if (state.type !== 'deterministic') continue;
+    if (state.resultFile !== undefined) continue;
+
+    const hasVerdictWhen = state.transitions.some((t) => t.when !== undefined && 'verdict' in t.when);
+    if (!hasVerdictWhen) continue;
+
+    diagnostics.push({
+      code: 'WF012',
+      severity: 'warning',
+      stateId,
+      message:
+        `Deterministic state "${stateId}" routes on when:{verdict} but declares no resultFile; ` +
+        `the verdict will always be undefined and these edges are dead.`,
+      hint: `Add resultFile: <path> and have the helper write { "verdict": ... } there.`,
+    });
+  }
+
+  return diagnostics;
 }
 
 // ---------------------------------------------------------------------------

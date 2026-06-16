@@ -9,7 +9,7 @@ import {
   unlinkSync,
   cpSync,
 } from 'node:fs';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -37,6 +37,7 @@ import {
   WORKFLOW_ARTIFACT_DIR,
   GLOBAL_PERSONA,
   DEFAULT_CONTAINER_SCOPE,
+  DETERMINISTIC_RESULT_ERROR_VERDICT,
   resolveWorkflowSkillsOptions,
 } from './types.js';
 import {
@@ -93,7 +94,12 @@ import {
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
-import { parseArtifactRef, validateDefinition, validateWorkflowSkillReferences } from './validate.js';
+import {
+  isSafeWorkspaceRelativePath,
+  parseArtifactRef,
+  validateDefinition,
+  validateWorkflowSkillReferences,
+} from './validate.js';
 import { parseDefinitionFile, getWorkflowPackageDir } from './discovery.js';
 import { resolveSkillsForSession } from '../skills/discovery.js';
 import type { ResolvedSkill } from '../skills/types.js';
@@ -1461,6 +1467,7 @@ export class WorkflowOrchestrator implements WorkflowController {
             container: stateDef.container ?? false,
             containerScope: stateDef.containerScope,
             timeoutMs: stateDef.timeoutMs,
+            resultFile: stateDef.resultFile,
           });
 
     // Feed the result back to the actor as an XState internal invoke event.
@@ -2363,7 +2370,67 @@ export class WorkflowOrchestrator implements WorkflowController {
       ? undefined
       : `container: true state "${input.stateId}": scope "${scope}" had no live container before this state. ` +
         `On a fresh run this likely means no prior state populated it; on resume this can be expected.`;
-    return this.runDeterministicInContainer(bundle, input, warning);
+    const base = await this.runDeterministicInContainer(bundle, input, warning);
+    return this.applyResultFile(instance, input, base);
+  }
+
+  private applyResultFile(
+    instance: WorkflowInstance,
+    input: DeterministicInvokeInput,
+    base: DeterministicInvokeResult,
+  ): DeterministicInvokeResult {
+    if (input.resultFile === undefined) return base;
+    if (!base.passed) return base;
+
+    const appendError = (message: string): DeterministicInvokeResult => ({
+      ...base,
+      passed: false,
+      verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
+      errors: base.errors ? `${base.errors}\n${message}` : message,
+    });
+
+    if (!isSafeWorkspaceRelativePath(input.resultFile)) {
+      return appendError(`result file ${input.resultFile} is not a safe workspace-relative path`);
+    }
+
+    const workspace = resolve(instance.workspacePath);
+    const resultPath = resolve(workspace, input.resultFile);
+    const pathFromWorkspace = relative(workspace, resultPath);
+    if (pathFromWorkspace === '' || pathFromWorkspace.startsWith('..')) {
+      return appendError(`result file ${input.resultFile} escapes the workspace`);
+    }
+
+    if (!existsSync(resultPath)) {
+      return appendError(`result file ${input.resultFile} not found`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(resultPath, 'utf8'));
+    } catch {
+      return appendError(`result file ${input.resultFile} is not valid JSON`);
+    }
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return appendError(`result file ${input.resultFile} is not a JSON object`);
+    }
+
+    const resultObject = parsed as Record<string, unknown>;
+    if (typeof resultObject.verdict !== 'string' || resultObject.verdict.length === 0) {
+      return appendError(`result file ${input.resultFile} missing verdict`);
+    }
+
+    const payload =
+      typeof resultObject.payload === 'object' && resultObject.payload !== null && !Array.isArray(resultObject.payload)
+        ? (resultObject.payload as Record<string, unknown>)
+        : undefined;
+
+    return {
+      ...base,
+      verdict: resultObject.verdict,
+      passed: typeof resultObject.passed === 'boolean' ? resultObject.passed : base.passed,
+      ...(payload !== undefined ? { payload } : {}),
+    };
   }
 
   /**

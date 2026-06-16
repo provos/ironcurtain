@@ -819,11 +819,17 @@ describe('WF010 — skill references', () => {
 describe('bundled workflows lint clean', () => {
   const workflowsDir = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows');
 
-  // personaExists returns false unconditionally — both bundled workflows use
+  // personaExists returns false unconditionally — bundled workflows use
   // GLOBAL_PERSONA throughout, so WF007 must skip via the alias, not the stub.
   const bundledCtx: LintContext = { personaExists: () => false };
 
-  for (const name of ['vuln-discovery', 'design-and-code']) {
+  for (const name of [
+    'vuln-discovery',
+    'design-and-code',
+    'test-email-summary',
+    'deterministic-eval-smoke',
+    'deterministic-verdict-smoke',
+  ]) {
     it(`${name}: zero errors`, () => {
       const manifestPath = resolve(workflowsDir, name, 'workflow.yaml');
       const raw = parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 });
@@ -917,5 +923,69 @@ describe('WF011 — container scope not populated by a prior agent', () => {
     const result = lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath });
     expect(codes(result)).not.toContain('WF011');
     expect(result.filter((d) => d.severity === 'error').length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WF012 — deterministic verdict edges need a resultFile source
+// ---------------------------------------------------------------------------
+
+describe('WF012 — deterministic verdict edges without resultFile', () => {
+  function verdictWorkflow(withResultFile: boolean): WorkflowDefinition {
+    return validateDefinition({
+      name: 'wf012',
+      description: 'd',
+      initial: 'prep',
+      settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+      states: {
+        prep: {
+          type: 'agent',
+          description: 'prep',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: [],
+          transitions: [{ to: 'classify' }],
+        },
+        classify: {
+          type: 'deterministic',
+          description: 'classify',
+          container: true,
+          ...(withResultFile ? { resultFile: '.workflow/result.json' } : {}),
+          run: [['python3', '/workflow-scripts/classify.py']],
+          transitions: [{ to: 'passed', when: { verdict: 'pass' } }, { to: 'failed' }],
+        },
+        passed: { type: 'terminal', description: 'passed' },
+        failed: { type: 'terminal', description: 'failed' },
+      },
+    });
+  }
+
+  it('warns when a deterministic state routes on verdict but declares no resultFile', () => {
+    const result = lintWorkflow(verdictWorkflow(false), stubCtx);
+    expect(codes(result)).toContain('WF012');
+    const d = result.find((x) => x.code === 'WF012');
+    expect(d?.severity).toBe('warning');
+    expect(d?.stateId).toBe('classify');
+    expect(d?.message).toContain('when:{verdict}');
+  });
+
+  it('does not warn when the deterministic verdict source is declared', () => {
+    expect(codes(lintWorkflow(verdictWorkflow(true), stubCtx))).not.toContain('WF012');
+  });
+
+  it('the bundled deterministic-verdict-smoke fixture lints clean for WF012', () => {
+    const manifestPath = resolve(
+      __dirname,
+      '..',
+      '..',
+      'src',
+      'workflow',
+      'workflows',
+      'deterministic-verdict-smoke',
+      'workflow.yaml',
+    );
+    const def = validateDefinition(parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }));
+    expect(codes(lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath }))).not.toContain('WF012');
   });
 });

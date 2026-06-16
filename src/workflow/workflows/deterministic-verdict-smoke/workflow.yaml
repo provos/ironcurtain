@@ -1,0 +1,50 @@
+name: deterministic-verdict-smoke
+description: 'TESTING ONLY - deterministic state routes on a helper-written verdict file.'
+initial: author
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  sharedContainer: true
+  model: anthropic:claude-haiku-4-5
+
+states:
+  author:
+    type: agent
+    description: Record the task verbatim so the deterministic helper can read it.
+    persona: global
+    prompt: |
+      Write the EXACT task text you were given to the file /workspace/task.txt and nothing else.
+      Create no other files. Finish with the required agent_status block.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: classify
+
+  classify:
+    type: deterministic
+    description: Read the task and emit a verdict file the machine routes on.
+    container: true
+    resultFile: .workflow/result.json
+    run:
+      - ['python3', '/workflow-scripts/classify.py']
+    transitions:
+      - to: passed_terminal
+        when: { verdict: pass }
+      - to: blocked_terminal
+        when: { verdict: block }
+      - to: error_terminal
+        when: { verdict: result_file_error }
+      - to: error_terminal
+
+  passed_terminal:
+    type: terminal
+    description: Helper emitted verdict=pass.
+
+  blocked_terminal:
+    type: terminal
+    description: Helper emitted verdict=block.
+
+  error_terminal:
+    type: terminal
+    description: Verdict file missing/malformed or unexpected verdict.

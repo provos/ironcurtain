@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { posix as pathPosix, resolve } from 'node:path';
 import { z } from 'zod';
 import { validateSkillName } from '../skills/staging.js';
 import { discoverSkills } from '../skills/discovery.js';
@@ -82,6 +82,7 @@ const deterministicStateSchema = z.object({
   container: z.boolean().optional(),
   containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
   timeoutMs: z.number().int().positive().optional(),
+  resultFile: z.string().min(1).optional(),
   transitions: z.array(agentTransitionSchema).min(1),
 });
 
@@ -158,7 +159,15 @@ function validateRawInput(raw: unknown): string[] {
 
     if (!isPlainObject(stateValue)) continue;
     const stateType = stateValue.type;
-    if (typeof stateType !== 'string' || stateType === 'agent') continue;
+    if (typeof stateType !== 'string') continue;
+
+    if ('resultFile' in stateValue && stateType !== 'deterministic') {
+      issues.push(
+        `State "${stateId}" (type: ${stateType}) has "resultFile" but that field is only valid on deterministic states.`,
+      );
+    }
+
+    if (stateType === 'agent') continue;
 
     for (const field of AGENT_ONLY_STATE_FIELDS) {
       if (field in stateValue) {
@@ -259,6 +268,15 @@ export function findReachableStates(initial: string, states: Record<string, Work
 const AGENT_OUTPUT_FIELD_SET: ReadonlySet<string> = new Set(AGENT_OUTPUT_FIELDS);
 const CONFIDENCE_VALUE_SET: ReadonlySet<string> = new Set(CONFIDENCE_VALUES);
 
+export function isSafeWorkspaceRelativePath(path: string): boolean {
+  if (path.length === 0) return false;
+  if (path.includes('\0')) return false;
+  if (path.startsWith('/')) return false;
+  if (path === '.') return false;
+  if (path.split('/').some((part) => part === '..')) return false;
+  return pathPosix.normalize(path) === path;
+}
+
 /**
  * Expected runtime type for each AgentOutput field used in `when` clauses.
  * `expected` is the human-readable error label; `check` is the runtime test.
@@ -330,11 +348,6 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
       issues.push(
         `State "${stateId}" has transition to "${t.to}" with both "guard" and "when" — they are mutually exclusive`,
       );
-    }
-
-    // Agent-only scope: when on deterministic state
-    if (state.type === 'deterministic' && t.when) {
-      issues.push(`State "${stateId}" is deterministic and cannot use "when" (agent output not available)`);
     }
 
     if (!t.when) continue;
@@ -492,8 +505,21 @@ function validateContainerScopes(definition: WorkflowDefinition, issues: string[
 
     if (state.type !== 'deterministic') continue;
 
+    const usesVerdictEdges = state.transitions.some((t) => t.when !== undefined && 'verdict' in t.when);
+
     if (state.containerScope !== undefined && state.container !== true) {
       issues.push(`State "${stateId}" declares containerScope but is not container: true`);
+    }
+    if ((state.resultFile !== undefined || usesVerdictEdges) && state.container !== true) {
+      issues.push(
+        `State "${stateId}" uses resultFile / when:{verdict} routing but is not container: true. ` +
+          `Structured deterministic result routing is container-only.`,
+      );
+    }
+    if (state.resultFile !== undefined && !isSafeWorkspaceRelativePath(state.resultFile)) {
+      issues.push(
+        `State "${stateId}" has resultFile "${state.resultFile}" — must be a workspace-relative path (no leading "/", no "..").`,
+      );
     }
     if (state.container === true && !sharedContainer) {
       issues.push(`State "${stateId}" has container: true but the workflow does not have sharedContainer: true.`);

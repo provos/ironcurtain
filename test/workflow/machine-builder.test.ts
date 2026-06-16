@@ -628,6 +628,7 @@ describe('buildWorkflowMachine', () => {
       expect(capturedInput!.container).toBe(false);
       expect(capturedInput!.containerScope).toBeUndefined();
       expect(capturedInput!.timeoutMs).toBeUndefined();
+      expect(capturedInput!.resultFile).toBeUndefined();
     });
 
     it('passes container execution options to deterministic service', async () => {
@@ -639,6 +640,7 @@ describe('buildWorkflowMachine', () => {
         container: true,
         containerScope: 'eval',
         timeoutMs: 1234,
+        resultFile: '.workflow/result.json',
       };
       const result = buildWorkflowMachine(definition, 'my task');
       let capturedInput: DeterministicInvokeInput | undefined;
@@ -663,7 +665,86 @@ describe('buildWorkflowMachine', () => {
         container: true,
         containerScope: 'eval',
         timeoutMs: 1234,
+        resultFile: '.workflow/result.json',
       });
+    });
+
+    it('routes deterministic when:{verdict} transitions via __matchesWhen', async () => {
+      const definition: WorkflowDefinition = {
+        name: 'deterministic-verdict-routing-test',
+        description: 'Routes deterministic verdicts',
+        initial: 'classify',
+        states: {
+          classify: {
+            type: 'deterministic',
+            description: 'Classifies',
+            run: [['classify']],
+            container: true,
+            resultFile: '.workflow/result.json',
+            transitions: [
+              { to: 'passed_terminal', when: { verdict: 'pass' } },
+              { to: 'blocked_terminal', when: { verdict: 'block' } },
+              { to: 'error_terminal' },
+            ],
+          },
+          passed_terminal: { type: 'terminal', description: 'pass' },
+          blocked_terminal: { type: 'terminal', description: 'block' },
+          error_terminal: { type: 'terminal', description: 'error' },
+        },
+      };
+      const result = buildWorkflowMachine(definition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          deterministicService: fromPromise(async () => makeDeterministicResult({ verdict: 'block' })),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      const visited = trackStates(actor);
+      actor.start();
+
+      await settle();
+
+      expect(visited).toContain('blocked_terminal');
+      expect(visited).not.toContain('passed_terminal');
+      expect(actor.getSnapshot().status).toBe('done');
+    });
+
+    it('falls through when deterministic verdict is undefined or mismatched', async () => {
+      const definition: WorkflowDefinition = {
+        name: 'deterministic-verdict-fallthrough-test',
+        description: 'Routes unmatched deterministic verdicts',
+        initial: 'classify',
+        states: {
+          classify: {
+            type: 'deterministic',
+            description: 'Classifies',
+            run: [['classify']],
+            container: true,
+            resultFile: '.workflow/result.json',
+            transitions: [{ to: 'passed_terminal', when: { verdict: 'pass' } }, { to: 'error_terminal' }],
+          },
+          passed_terminal: { type: 'terminal', description: 'pass' },
+          error_terminal: { type: 'terminal', description: 'error' },
+        },
+      };
+      const result = buildWorkflowMachine(definition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          deterministicService: fromPromise(async () => makeDeterministicResult({ verdict: 'other' })),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      const visited = trackStates(actor);
+      actor.start();
+
+      await settle();
+
+      expect(visited).toContain('error_terminal');
+      expect(visited).not.toContain('passed_terminal');
     });
   });
 

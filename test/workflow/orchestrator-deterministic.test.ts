@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { WorkflowDefinition, WorkflowId } from '../../src/workflow/types.js';
+import {
+  DETERMINISTIC_RESULT_ERROR_VERDICT,
+  type WorkflowDefinition,
+  type WorkflowId,
+} from '../../src/workflow/types.js';
 import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
 import type { DockerExecResult } from '../../src/docker/types.js';
 import type { DeterministicInvokeInput, DeterministicInvokeResult } from '../../src/workflow/machine-builder.js';
@@ -75,15 +79,34 @@ function registerInstance(
   orchestrator: WorkflowOrchestrator,
   definition: WorkflowDefinition,
   bundlesByScope: Map<string, DockerInfrastructure>,
+  workspacePath: string,
 ): void {
   const instance = {
     id: WF_ID,
     definition,
     bundlesByScope,
+    workspacePath,
     aborted: false,
   };
   // Private map; bracket access is the focused-unit-test seam.
   (orchestrator as unknown as { workflows: Map<WorkflowId, unknown> }).workflows.set(WF_ID, instance);
+}
+
+function callApplyResultFile(
+  orchestrator: WorkflowOrchestrator,
+  workspacePath: string,
+  input: DeterministicInvokeInput,
+  base: DeterministicInvokeResult,
+): DeterministicInvokeResult {
+  return (
+    orchestrator as unknown as {
+      applyResultFile: (
+        instance: { workspacePath: string },
+        input: DeterministicInvokeInput,
+        base: DeterministicInvokeResult,
+      ) => DeterministicInvokeResult;
+    }
+  ).applyResultFile({ workspacePath }, input, base);
 }
 
 /** Invokes the private executeDeterministicState through bracket access. */
@@ -122,7 +145,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
       const exec = vi.fn(async (): Promise<DockerExecResult> => ({ exitCode: 0, stdout: '', stderr: '' }));
       const bundles = new Map<string, DockerInfrastructure>([['primary', makeStubBundle('cid', exec).bundle]]);
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, bundles);
+      registerInstance(orchestrator, sharedContainerDef, bundles, tmpDir);
 
       // A real host command that prints a stdout test-count line. `node -e`
       // exercises the actual execFileAsync path (no execFile mocking).
@@ -139,7 +162,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
 
     it('host success path: passed true, no testCount when stdout lacks the regex', async () => {
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map());
+      registerInstance(orchestrator, sharedContainerDef, new Map(), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -153,7 +176,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
 
     it('host failure path: non-zero exit captures stderr into errors and flips passed', async () => {
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map());
+      registerInstance(orchestrator, sharedContainerDef, new Map(), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -169,7 +192,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
 
     it('host test-count regex sums across commands', async () => {
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map());
+      registerInstance(orchestrator, sharedContainerDef, new Map(), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -198,7 +221,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
       }));
       const bundles = new Map<string, DockerInfrastructure>([['primary', bundle]]);
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, bundles);
+      registerInstance(orchestrator, sharedContainerDef, bundles, tmpDir);
 
       await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -227,7 +250,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
     it('exit code 0 => passed true', async () => {
       const { bundle } = makeStubBundle('cid', async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }));
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]));
+      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -246,7 +269,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
         stderr: 'something failed',
       }));
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]));
+      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -267,7 +290,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
         stderr: '',
       }));
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]));
+      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -287,7 +310,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
         stderr: '',
       }));
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]));
+      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -302,7 +325,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
     it('skips empty [] commands without calling docker.exec', async () => {
       const { bundle, exec } = makeStubBundle('cid', async () => ({ exitCode: 0, stdout: '', stderr: '' }));
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]));
+      registerInstance(orchestrator, sharedContainerDef, new Map([['primary', bundle]]), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -325,7 +348,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
         ['coder', coder.bundle],
       ]);
       const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
-      registerInstance(orchestrator, sharedContainerDef, bundles);
+      registerInstance(orchestrator, sharedContainerDef, bundles, tmpDir);
 
       await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -345,7 +368,7 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
         ...sharedContainerDef,
         settings: { mode: 'docker', dockerAgent: 'claude-code' },
       };
-      registerInstance(orchestrator, nonShared, new Map());
+      registerInstance(orchestrator, nonShared, new Map(), tmpDir);
 
       const result = await callExecuteDeterministicState(orchestrator, WF_ID, {
         stateId: 'check',
@@ -371,6 +394,144 @@ describe('WorkflowOrchestrator deterministic execution dispatch', () => {
 
       expect(result.passed).toBe(false);
       expect(result.errors).toContain('not found');
+    });
+  });
+
+  describe('resultFile contract', () => {
+    it('returns the reducer result unchanged when resultFile is absent', () => {
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+      const base: DeterministicInvokeResult = { passed: true, testCount: 3, errors: undefined };
+
+      const result = callApplyResultFile(
+        orchestrator,
+        tmpDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+        },
+        base,
+      );
+
+      expect(result).toBe(base);
+    });
+
+    it('reads verdict and payload from a well-formed result file after successful commands', () => {
+      mkdirSync(join(tmpDir, '.workflow'), { recursive: true });
+      writeFileSync(
+        join(tmpDir, '.workflow', 'result.json'),
+        JSON.stringify({ verdict: 'block', payload: { reason: 'policy' } }),
+      );
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+
+      const result = callApplyResultFile(
+        orchestrator,
+        tmpDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+          resultFile: '.workflow/result.json',
+        },
+        { passed: true, testCount: 2 },
+      );
+
+      expect(result).toEqual({
+        passed: true,
+        testCount: 2,
+        verdict: 'block',
+        payload: { reason: 'policy' },
+      });
+    });
+
+    it('lets a boolean result-file passed field override command success', () => {
+      mkdirSync(join(tmpDir, '.workflow'), { recursive: true });
+      writeFileSync(join(tmpDir, '.workflow', 'result.json'), JSON.stringify({ verdict: 'failed', passed: false }));
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+
+      const result = callApplyResultFile(
+        orchestrator,
+        tmpDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+          resultFile: '.workflow/result.json',
+        },
+        { passed: true },
+      );
+
+      expect(result.passed).toBe(false);
+      expect(result.verdict).toBe('failed');
+    });
+
+    it('maps a missing result file to the reserved routable verdict', () => {
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+
+      const result = callApplyResultFile(
+        orchestrator,
+        tmpDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+          resultFile: '.workflow/result.json',
+        },
+        { passed: true, errors: 'prior warning' },
+      );
+
+      expect(result.passed).toBe(false);
+      expect(result.verdict).toBe(DETERMINISTIC_RESULT_ERROR_VERDICT);
+      expect(result.errors).toContain('prior warning');
+      expect(result.errors).toContain('not found');
+    });
+
+    it('maps malformed JSON and missing verdict to the reserved routable verdict', () => {
+      mkdirSync(join(tmpDir, '.workflow'), { recursive: true });
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+      const input: DeterministicInvokeInput = {
+        stateId: 'check',
+        commands: [['node', 'check.js']],
+        context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+        container: true,
+        resultFile: '.workflow/result.json',
+      };
+
+      writeFileSync(join(tmpDir, '.workflow', 'result.json'), '{');
+      const malformed = callApplyResultFile(orchestrator, tmpDir, input, { passed: true });
+      expect(malformed.passed).toBe(false);
+      expect(malformed.verdict).toBe(DETERMINISTIC_RESULT_ERROR_VERDICT);
+      expect(malformed.errors).toContain('not valid JSON');
+
+      writeFileSync(join(tmpDir, '.workflow', 'result.json'), JSON.stringify({ payload: { ok: true } }));
+      const missingVerdict = callApplyResultFile(orchestrator, tmpDir, input, { passed: true });
+      expect(missingVerdict.passed).toBe(false);
+      expect(missingVerdict.verdict).toBe(DETERMINISTIC_RESULT_ERROR_VERDICT);
+      expect(missingVerdict.errors).toContain('missing verdict');
+    });
+
+    it('does not read resultFile when command reduction already failed', () => {
+      const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+      const base: DeterministicInvokeResult = { passed: false, errors: 'command failed' };
+
+      const result = callApplyResultFile(
+        orchestrator,
+        tmpDir,
+        {
+          stateId: 'check',
+          commands: [['node', 'check.js']],
+          context: { taskDescription: 'task' } as DeterministicInvokeInput['context'],
+          container: true,
+          resultFile: '.workflow/result.json',
+        },
+        base,
+      );
+
+      expect(result).toBe(base);
     });
   });
 });

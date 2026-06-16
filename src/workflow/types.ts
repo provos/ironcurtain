@@ -65,6 +65,9 @@ export function resolveWorkflowSkillsOptions(
  */
 export const DEFAULT_CONTAINER_SCOPE = 'primary';
 
+/** Reserved deterministic result verdict emitted when a declared result file cannot be read or parsed. */
+export const DETERMINISTIC_RESULT_ERROR_VERDICT = 'result_file_error';
+
 // ---------------------------------------------------------------------------
 // Branded identifiers
 // ---------------------------------------------------------------------------
@@ -271,6 +274,11 @@ export interface DeterministicStateDefinition {
    * Undefined uses the runner default.
    */
   readonly timeoutMs?: number;
+  /**
+   * Workspace-relative JSON result file written by a containerized helper.
+   * Container-only; see validate.ts for path and routing constraints.
+   */
+  readonly resultFile?: string;
   readonly transitions: readonly AgentTransitionDefinition[];
 }
 
@@ -428,6 +436,10 @@ export interface WorkflowContext {
   /** Per-role output hash for stall detection. */
   readonly previousOutputHashes: Record<string, string>;
   readonly previousTestCount: number | null;
+  readonly lastDeterministicResult?: {
+    readonly verdict?: string;
+    readonly payload?: Record<string, unknown>;
+  };
   readonly humanPrompt: string | null;
   readonly reviewHistory: readonly string[];
   readonly parallelResults: Record<string, ParallelSlotResult>;
