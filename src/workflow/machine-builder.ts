@@ -532,12 +532,21 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         const result = doneEvent.output;
         if (!result) return {};
 
+        // Only attach lastDeterministicResult when the state actually produced a
+        // verdict/payload (a result-file state). Guard-only deterministic states
+        // leave context byte-identical to the legacy path (the field stays absent).
+        const verdictUpdate =
+          result.verdict !== undefined || result.payload !== undefined
+            ? {
+                lastDeterministicResult: {
+                  ...(result.verdict !== undefined ? { verdict: result.verdict } : {}),
+                  ...(result.payload !== undefined ? { payload: result.payload } : {}),
+                },
+              }
+            : {};
         const baseUpdate = {
           previousTestCount: result.testCount ?? context.previousTestCount,
-          lastDeterministicResult: {
-            ...(result.verdict !== undefined ? { verdict: result.verdict } : {}),
-            ...(result.payload !== undefined ? { payload: result.payload } : {}),
-          },
+          ...verdictUpdate,
         };
         if (result.passed) return baseUpdate;
 

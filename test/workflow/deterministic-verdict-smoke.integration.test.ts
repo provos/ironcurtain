@@ -118,7 +118,7 @@ describe.skipIf(!dockerReady)('deterministic-verdict-smoke with real Docker cont
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  async function runSmoke(task: 'pass' | 'block'): Promise<readonly string[]> {
+  async function runSmoke(task: 'pass' | 'block' | 'error'): Promise<readonly string[]> {
     const runDir = resolve(tmpDir, `run-${task}`);
     const workspaceDir = resolve(tmpDir, `workspace-${task}`);
     const generatedDir = resolve(TEST_HOME, `generated-${task}`);
@@ -197,5 +197,15 @@ describe.skipIf(!dockerReady)('deterministic-verdict-smoke with real Docker cont
     expect(blockStates.at(-1)).toBe('blocked_terminal');
     expect(passStates).not.toContain('error_terminal');
     expect(blockStates).not.toContain('error_terminal');
+  }, 240_000);
+
+  it('routes a missing result file to the error terminal (result_file_error)', async () => {
+    // The helper exits 0 but writes no result.json, so applyResultFile must yield
+    // the reserved result_file_error verdict and the machine must route to error_terminal.
+    const errorStates = await runSmoke('error');
+
+    expect(errorStates.at(-1)).toBe('error_terminal');
+    expect(errorStates).not.toContain('passed_terminal');
+    expect(errorStates).not.toContain('blocked_terminal');
   }, 240_000);
 });
