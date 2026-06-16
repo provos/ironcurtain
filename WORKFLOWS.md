@@ -241,7 +241,7 @@ Exit codes:
 | `WF006` | warning  | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored)    |
 | `WF007` | warning  | Agent state references a persona not installed locally (runtime failure)                                |
 | `WF008` | error    | `maxVisits` state has a cap-guarded transition positioned after a non-approval `when` (cap never fires) |
-| `WF011` | warning  | Container deterministic state can run before an agent has populated its container scope                  |
+| `WF011` | warning  | Container deterministic state can run before an agent has populated its container scope                 |
 | `WF012` | warning  | Deterministic state routes on `when:{verdict}` but declares no `resultFile`                             |
 
 Example:
@@ -578,7 +578,10 @@ classify:
 
 The result file is read only after all commands exit successfully. If a command
 fails, legacy `isPassed`/`isFailed` behavior is unchanged and the file is not
-read. If the file is missing, malformed, not a JSON object, or lacks a non-empty
+read. When the file sets `passed`, it overrides the exit-code-derived pass/fail
+(an evaluator can exit 0 yet report `passed: false` — e.g. a candidate that ran
+cleanly but failed its checks), and `isPassed`/`isFailed` then see that
+overridden value. If the file is missing, malformed, not a JSON object, or lacks a non-empty
 string `verdict`, the deterministic result becomes `passed: false` with the
 reserved verdict `result_file_error`, which can be routed with
 `when: { verdict: result_file_error }`. `resultFile` and deterministic
