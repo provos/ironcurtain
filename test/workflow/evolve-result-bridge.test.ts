@@ -37,7 +37,7 @@ describe('evolve workflow manifest', () => {
     };
     const prompt = raw.states.preflight.prompt;
 
-    expect(raw.settings.maxRounds).toBe(24);
+    expect(raw.settings.maxRounds).toBe(200);
     expect(raw.states.orchestrator.transitions[0]).toEqual({ to: 'failed', guard: 'isRoundLimitReached' });
     expect(raw.states.orchestrator.transitions.map((t) => t.when?.verdict).filter(Boolean)).toEqual([
       'design',
@@ -316,6 +316,28 @@ describe('evolve_result.py bridge', () => {
     const first = runBridge(scriptsDir, evalArgs(resolve(tmpDir, 'hash-run-1'))).result;
     const second = runBridge(scriptsDir, evalArgs(resolve(tmpDir, 'hash-run-2'))).result;
     expect((first.payload as { score: number }).score).toBe((second.payload as { score: number }).score);
+  });
+
+  it('fails loudly when neither flag of a resolver pair is supplied', () => {
+    const scriptsDir = writeHarness({});
+    // `evaluate` without --step-name and without --step-from-current: the resolver
+    // must reject the misconfiguration with a clear message instead of dereferencing None.
+    const completed = spawnSync(
+      PYTHON,
+      [
+        resolve(scriptsDir, 'evolve_result.py'),
+        'evaluate',
+        '--run-dir',
+        resolve(tmpDir, 'guard-run'),
+        '--code-path',
+        'candidate.py',
+        '--result-file',
+        resolve(tmpDir, 'guard-result.json'),
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(completed.status).not.toBe(0);
+    expect(completed.stderr).toContain('--step-name or --step-from-current is required');
   });
 
   it('samples a parent, seeds cognition on first entry, and writes current context', () => {

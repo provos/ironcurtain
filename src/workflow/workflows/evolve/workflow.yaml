@@ -7,7 +7,13 @@ settings:
   dockerAgent: claude-code
   sharedContainer: true
   model: anthropic:claude-sonnet-4-6
-  maxRounds: 24
+  # Safety backstop for a wedged orchestrator hub, NOT the round budget.
+  # isRoundLimitReached trips when the most-visited state (the orchestrator,
+  # entered ~4 times per evolution round) reaches this count. Set well above
+  # 4 * run_spec.budget.max_rounds + 1 so a legitimate long run is never capped
+  # before the orchestrator emits `complete`; the real round budget is enforced
+  # by the orchestrator against run_spec.budget.max_rounds.
+  maxRounds: 200
 
 states:
   preflight:

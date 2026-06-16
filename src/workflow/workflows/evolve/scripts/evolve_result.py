@@ -76,6 +76,8 @@ def _load_current_context(run_dir: Path) -> dict[str, Any]:
 def _resolve_step_name(args: argparse.Namespace) -> str:
     if getattr(args, "step_from_current", False):
         return _step_name_from_current(_run_dir(args))
+    if args.step_name is None:
+        raise SystemExit("evolve_result: one of --step-name or --step-from-current is required")
     return args.step_name
 
 
@@ -83,6 +85,8 @@ def _resolve_code_path(args: argparse.Namespace, step_name: str) -> str:
     if getattr(args, "code_from_current", False):
         run_dir = _run_dir(args)
         return _workspace_relative_for(run_dir, run_dir / "steps" / step_name / "code")
+    if args.code_path is None:
+        raise SystemExit("evolve_result: one of --code-path or --code-from-current is required")
     return args.code_path
 
 
@@ -90,6 +94,8 @@ def _resolve_results_file(args: argparse.Namespace, step_name: str) -> str:
     if getattr(args, "results_from_current", False):
         run_dir = _run_dir(args)
         return _workspace_relative_for(run_dir, run_dir / "steps" / step_name / "results.json")
+    if args.results_file is None:
+        raise SystemExit("evolve_result: one of --results-file or --results-from-current is required")
     return args.results_file
 
 
@@ -100,6 +106,8 @@ def _resolve_round_name(args: argparse.Namespace, step_name: str) -> str:
         except ValueError:
             return step_name
         return f"round-{round_num}"
+    if args.name is None:
+        raise SystemExit("evolve_result: one of --name or --name-from-current is required")
     return args.name
 
 
