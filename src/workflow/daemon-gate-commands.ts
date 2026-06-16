@@ -1,0 +1,609 @@
+/**
+ * Non-interactive, machine-readable CLI surface for driving gated workflows on
+ * a running daemon: `run` / `status` / `await` / `gate` / `show`.
+ *
+ * These commands talk to the daemon's existing WebSocket JSON-RPC interface via
+ * the leaf {@link DaemonClient}; they never import the orchestrator/manager
+ * runtime. An autonomous agent uses them as run-to-completion tool calls:
+ *
+ *   run -> await -> (show -> gate -> await)* -> terminal
+ *
+ * Output convention: a single newline-terminated JSON object to **stdout** when
+ * `--json` is set (the agent parses stdout); human-readable text to **stderr**.
+ * Exit codes are derived from the authoritative workflow `phase`, never from a
+ * lifecycle event name (a gate-ABORT fires a `completed` event but reports
+ * `phase:'aborted'`).
+ */
+
+import { spawn } from 'node:child_process';
+
+import { resolveWorkflowPath } from './discovery.js';
+import {
+  createDaemonClient,
+  discoverDaemon,
+  type DaemonClient,
+  type DaemonEvent,
+  type RpcResult,
+} from '../daemon-client/daemon-client.js';
+import { parseArgsStrict } from './cli-shared.js';
+import type { WorkflowDetailDto } from '../web-ui/web-ui-types.js';
+import type { HumanGateRequestDto } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Exit codes (stable contract for shell-only agents)
+// ---------------------------------------------------------------------------
+
+const EXIT_OK = 0;
+const EXIT_USAGE = 2;
+/** Terminal failure phase: `failed` or `aborted`. */
+const EXIT_TERMINAL_FAILURE = 3;
+/** `await` timed out before a decision point or terminal. */
+const EXIT_AWAIT_TIMEOUT = 4;
+/** Generic operational failure (RPC error, no daemon, etc.). */
+const EXIT_ERROR = 1;
+
+const DEFAULT_AWAIT_TIMEOUT_SEC = 600;
+const ENSURE_DAEMON_TIMEOUT_MS = 15_000;
+const ENSURE_DAEMON_POLL_INTERVAL_MS = 250;
+
+// ---------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------
+
+interface OutputMode {
+  readonly json: boolean;
+}
+
+/** Emits a machine-readable JSON object to stdout (when `--json`). */
+function emitJson(mode: OutputMode, obj: Record<string, unknown>): void {
+  if (mode.json) {
+    process.stdout.write(`${JSON.stringify(obj)}\n`);
+  }
+}
+
+/** Emits a human-readable line to stderr (never stdout). */
+function emitText(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
+/** Prints a CLI-level error in both channels and returns the exit code. */
+function fail(mode: OutputMode, error: string, extra: Record<string, unknown> = {}, exitCode = EXIT_ERROR): number {
+  emitJson(mode, { ok: false, error, ...extra });
+  emitText(formatErrorText(error, extra));
+  return exitCode;
+}
+
+function formatErrorText(error: string, extra: Record<string, unknown>): string {
+  const message = typeof extra.message === 'string' ? extra.message : undefined;
+  return message ? `Error: ${error}: ${message}` : `Error: ${error}`;
+}
+
+// ---------------------------------------------------------------------------
+// Status projection (shared by `status` and `await`)
+// ---------------------------------------------------------------------------
+
+type WorkflowPhase = WorkflowDetailDto['phase'];
+
+/**
+ * The stable machine-readable status object emitted by `status` and `await`.
+ *
+ * `ok: true` reports that the STATUS QUERY succeeded, NOT that the workflow
+ * outcome was favorable: a `failed`/`aborted` workflow is still reported with
+ * `ok: true`. Agents branch on `phase` (and the process exit code from
+ * {@link exitCodeForPhase}), never on this `ok`.
+ */
+interface StatusProjection {
+  readonly ok: true;
+  readonly workflowId: string;
+  readonly phase: WorkflowPhase;
+  readonly currentState: string;
+  readonly round: number;
+  readonly gate?: HumanGateRequestDto;
+}
+
+/** Projects a `workflows.get` DTO into the stable status shape. */
+function projectStatus(detail: WorkflowDetailDto): StatusProjection {
+  return {
+    ok: true,
+    workflowId: detail.workflowId,
+    phase: detail.phase,
+    currentState: detail.currentState,
+    round: detail.round,
+    ...(detail.phase === 'waiting_human' && detail.gate ? { gate: detail.gate } : {}),
+  };
+}
+
+/** Exit code derived from the authoritative phase (never an event name). */
+function exitCodeForPhase(phase: WorkflowPhase): number {
+  switch (phase) {
+    case 'waiting_human':
+    case 'completed':
+      return EXIT_OK;
+    case 'failed':
+    case 'aborted':
+      return EXIT_TERMINAL_FAILURE;
+    default:
+      // `running` / `interrupted`: not a resting point for this projection, but
+      // surfaced as a non-failure so the agent re-issues `await`.
+      return EXIT_OK;
+  }
+}
+
+function isTerminalPhase(phase: WorkflowPhase): boolean {
+  return phase === 'completed' || phase === 'failed' || phase === 'aborted';
+}
+
+// ---------------------------------------------------------------------------
+// Client lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates and connects a {@link DaemonClient}, ensuring a daemon exists first
+ * when `--ensure-daemon` is set. Returns `undefined` (after printing an error)
+ * when no daemon can be reached.
+ */
+async function openClient(mode: OutputMode, ensureDaemon: boolean): Promise<DaemonClient | undefined> {
+  if (ensureDaemon && !discoverDaemon()) {
+    const started = await ensureDaemonRunning();
+    if (!started) {
+      fail(mode, 'DAEMON_START_TIMEOUT', {
+        hint: `Timed out waiting for a daemon to come up after ${ENSURE_DAEMON_TIMEOUT_MS}ms`,
+      });
+      return undefined;
+    }
+  }
+
+  let client: DaemonClient;
+  try {
+    client = createDaemonClient();
+  } catch (err) {
+    // Cross-module catch: branch on the `code` discriminant rather than only
+    // `instanceof` (per CLAUDE.md), so this stays robust if the error crosses a
+    // module boundary that defeats `instanceof`.
+    if (isDaemonNotRunning(err)) {
+      fail(mode, 'DAEMON_NOT_RUNNING', { hint: 'Start the daemon with: ironcurtain daemon --web-ui' });
+      return undefined;
+    }
+    throw err;
+  }
+
+  try {
+    await client.connect();
+  } catch (err) {
+    await client.close().catch(() => {});
+    fail(mode, 'DAEMON_CONNECT_FAILED', { message: err instanceof Error ? err.message : String(err) });
+    return undefined;
+  }
+
+  return client;
+}
+
+/** Discriminant check for the "no daemon running" error (no `instanceof`). */
+function isDaemonNotRunning(err: unknown): boolean {
+  return err !== null && typeof err === 'object' && (err as { code?: unknown }).code === 'DAEMON_NOT_RUNNING';
+}
+
+/**
+ * Spawns a detached `ironcurtain daemon --web-ui` and polls discovery until the
+ * endpoint appears or a bounded timeout elapses. Arg-array spawn — no shell
+ * string concatenation (CLAUDE.md Safe Coding).
+ */
+async function ensureDaemonRunning(): Promise<boolean> {
+  const cliEntry = process.argv[1];
+  if (!cliEntry) return false;
+
+  const child = spawn(process.execPath, [cliEntry, 'daemon', '--web-ui'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+
+  const deadline = Date.now() + ENSURE_DAEMON_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (discoverDaemon()) return true;
+    await delay(ENSURE_DAEMON_POLL_INTERVAL_MS);
+  }
+  return discoverDaemon() !== undefined;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// RPC error mapping
+// ---------------------------------------------------------------------------
+
+/** Reports an `{ok:false}` RPC result and returns the chosen exit code. */
+function reportRpcError(mode: OutputMode, result: Extract<RpcResult<unknown>, { ok: false }>): number {
+  const extra: Record<string, unknown> = { message: result.message };
+  // LINT_FAILED carries structured diagnostics under `error.data.diagnostics`.
+  if (result.code === 'LINT_FAILED') {
+    const diagnostics = extractDiagnostics(result.data);
+    if (diagnostics) extra.diagnostics = diagnostics;
+  }
+  return fail(mode, result.code, extra);
+}
+
+function extractDiagnostics(data: unknown): unknown[] | undefined {
+  if (data !== null && typeof data === 'object' && 'diagnostics' in data) {
+    const diagnostics: unknown = (data as { diagnostics: unknown }).diagnostics;
+    if (Array.isArray(diagnostics)) return diagnostics as unknown[];
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// `workflow run`
+// ---------------------------------------------------------------------------
+
+async function runRun(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgsStrict({
+    args,
+    options: {
+      json: { type: 'boolean' },
+      workspace: { type: 'string' },
+      'ensure-daemon': { type: 'boolean' },
+    },
+    allowPositionals: true,
+  });
+  const mode: OutputMode = { json: values.json === true };
+
+  const definitionRef = positionals[0];
+  const taskDescription = positionals[1];
+  if (!definitionRef || !taskDescription) {
+    emitText('Usage: ironcurtain workflow run <name-or-path> "task" [--workspace <path>] [--json] [--ensure-daemon]');
+    return EXIT_USAGE;
+  }
+
+  // Resolve the definition path client-side: the daemon does not resolve names.
+  const definitionPath = resolveWorkflowPath(definitionRef);
+  if (!definitionPath) {
+    return fail(mode, 'WORKFLOW_DEFINITION_NOT_FOUND', {
+      ref: definitionRef,
+      hint: "Run 'ironcurtain workflow list' to see available workflows.",
+    });
+  }
+
+  const client = await openClient(mode, values['ensure-daemon'] === true);
+  if (!client) return EXIT_ERROR;
+
+  try {
+    const params: Record<string, unknown> = { definitionPath, taskDescription };
+    if (typeof values.workspace === 'string') params.workspacePath = values.workspace;
+
+    const result = await client.call<{ workflowId: string }>('workflows.start', params);
+    if (!result.ok) return reportRpcError(mode, result);
+
+    const { workflowId } = result.payload;
+    emitJson(mode, { ok: true, workflowId, phase: 'running' });
+    emitText(`Started workflow ${workflowId} (use: ironcurtain workflow await ${workflowId})`);
+    return EXIT_OK;
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `workflow status`
+// ---------------------------------------------------------------------------
+
+async function runStatus(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgsStrict({
+    args,
+    options: {
+      json: { type: 'boolean' },
+      'ensure-daemon': { type: 'boolean' },
+    },
+    allowPositionals: true,
+  });
+  const mode: OutputMode = { json: values.json === true };
+
+  const workflowId = positionals[0];
+  if (!workflowId) {
+    emitText('Usage: ironcurtain workflow status <workflowId> [--json]');
+    return EXIT_USAGE;
+  }
+
+  const client = await openClient(mode, values['ensure-daemon'] === true);
+  if (!client) return EXIT_ERROR;
+
+  try {
+    const result = await client.call<WorkflowDetailDto>('workflows.get', { workflowId });
+    if (!result.ok) return reportRpcError(mode, result);
+    return emitStatus(mode, result.payload);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+/** Emits a status projection and returns the phase-derived exit code. */
+function emitStatus(mode: OutputMode, detail: WorkflowDetailDto): number {
+  const projection = projectStatus(detail);
+  emitJson(mode, { ...projection });
+  emitText(formatStatusText(projection));
+  return exitCodeForPhase(projection.phase);
+}
+
+function formatStatusText(p: StatusProjection): string {
+  if (p.phase === 'waiting_human' && p.gate) {
+    return `Workflow ${p.workflowId} is waiting at gate "${p.gate.stateName}" (events: ${p.gate.acceptedEvents.join(', ')}; artifacts: ${p.gate.presentedArtifacts.join(', ') || 'none'})`;
+  }
+  return `Workflow ${p.workflowId} phase: ${p.phase} (state: ${p.currentState})`;
+}
+
+// ---------------------------------------------------------------------------
+// `workflow await`
+// ---------------------------------------------------------------------------
+
+async function runAwait(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgsStrict({
+    args,
+    options: {
+      json: { type: 'boolean' },
+      timeout: { type: 'string' },
+      'ensure-daemon': { type: 'boolean' },
+    },
+    allowPositionals: true,
+  });
+  const mode: OutputMode = { json: values.json === true };
+
+  const workflowId = positionals[0];
+  if (!workflowId) {
+    emitText('Usage: ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]');
+    return EXIT_USAGE;
+  }
+
+  const timeoutSec = parseTimeout(values.timeout);
+  if (timeoutSec === undefined) {
+    emitText('Error: --timeout must be a positive number of seconds');
+    return EXIT_USAGE;
+  }
+
+  const client = await openClient(mode, values['ensure-daemon'] === true);
+  if (!client) return EXIT_ERROR;
+
+  try {
+    return await awaitDecisionPoint(client, mode, workflowId, timeoutSec * 1000);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+/**
+ * Blocks until the workflow reaches a gate (`waiting_human`) or a terminal,
+ * then makes one authoritative `workflows.get` and reports/branches on its
+ * `phase`.
+ *
+ * Resolution triggers: the initial `get` already at a gate/terminal; a
+ * `workflow.gate_raised` event; or a terminal *event*
+ * (`workflow.completed` / `workflow.failed`). Because a gate-ABORT emits a
+ * `completed` event while reporting `phase:'aborted'`, the event name is never
+ * trusted — the follow-up `get` is authoritative.
+ */
+async function awaitDecisionPoint(
+  client: DaemonClient,
+  mode: OutputMode,
+  workflowId: string,
+  timeoutMs: number,
+): Promise<number> {
+  const settled = createSettlePromise();
+  // The timeout timer rejects `settled.promise`. The early-return branches below
+  // (initial get errored, or already at a resting phase) return WITHOUT awaiting
+  // it, so if the timer fires during a slow initial get that rejection would go
+  // unhandled. Attach a no-op catch as a permanent handler; the explicit
+  // `await settled.promise` further down still observes the rejection itself.
+  void settled.promise.catch(() => {});
+
+  // Subscribe BEFORE the initial get so we never miss an event that fires in
+  // the window between the get returning and the subscription attaching.
+  const unsubscribe = client.onEvent((event) => {
+    if (eventTargetsWorkflow(event, workflowId) && isResolvingEvent(event.event)) {
+      settled.resolve();
+    }
+  });
+
+  const timer = setTimeout(() => settled.reject(new AwaitTimeoutError()), timeoutMs);
+
+  try {
+    // Race-closer: a gate/terminal reached before subscription is caught here.
+    const initial = await client.call<WorkflowDetailDto>('workflows.get', { workflowId });
+    if (!initial.ok) return reportRpcError(mode, initial);
+    if (isRestingPhase(initial.payload.phase)) {
+      return emitStatus(mode, initial.payload);
+    }
+
+    await settled.promise;
+
+    const authoritative = await client.call<WorkflowDetailDto>('workflows.get', { workflowId });
+    if (!authoritative.ok) return reportRpcError(mode, authoritative);
+    return emitStatus(mode, authoritative.payload);
+  } catch (err) {
+    if (err instanceof AwaitTimeoutError) {
+      emitJson(mode, { ok: false, error: 'AWAIT_TIMEOUT', phase: 'running' });
+      emitText(`Workflow ${workflowId} did not reach a decision point before the timeout`);
+      return EXIT_AWAIT_TIMEOUT;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+  }
+}
+
+/** A phase at which `await` stops: a gate or any terminal. */
+function isRestingPhase(phase: WorkflowPhase): boolean {
+  return phase === 'waiting_human' || isTerminalPhase(phase);
+}
+
+function isResolvingEvent(eventName: string): boolean {
+  return eventName === 'workflow.gate_raised' || eventName === 'workflow.completed' || eventName === 'workflow.failed';
+}
+
+function eventTargetsWorkflow(event: DaemonEvent, workflowId: string): boolean {
+  const payload = event.payload;
+  return (
+    payload !== null && typeof payload === 'object' && (payload as { workflowId?: unknown }).workflowId === workflowId
+  );
+}
+
+class AwaitTimeoutError extends Error {}
+
+interface SettlePromise {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (err: Error) => void;
+}
+
+function createSettlePromise(): SettlePromise {
+  let resolve!: () => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function parseTimeout(raw: unknown): number | undefined {
+  if (raw === undefined) return DEFAULT_AWAIT_TIMEOUT_SEC;
+  if (typeof raw !== 'string') return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// `workflow gate`
+// ---------------------------------------------------------------------------
+
+const GATE_EVENTS = ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'] as const;
+type GateEvent = (typeof GATE_EVENTS)[number];
+
+function isGateEvent(value: unknown): value is GateEvent {
+  return typeof value === 'string' && (GATE_EVENTS as readonly string[]).includes(value);
+}
+
+/** Events whose semantics require non-empty operator feedback. */
+function requiresPrompt(event: GateEvent): boolean {
+  return event === 'FORCE_REVISION' || event === 'REPLAN';
+}
+
+async function runGate(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgsStrict({
+    args,
+    options: {
+      json: { type: 'boolean' },
+      event: { type: 'string' },
+      prompt: { type: 'string' },
+      'ensure-daemon': { type: 'boolean' },
+    },
+    allowPositionals: true,
+  });
+  const mode: OutputMode = { json: values.json === true };
+
+  const workflowId = positionals[0];
+  if (!workflowId) {
+    emitText('Usage: ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]');
+    return EXIT_USAGE;
+  }
+
+  const event = values.event;
+  if (!isGateEvent(event)) {
+    return fail(mode, 'INVALID_EVENT', { hint: `--event must be one of: ${GATE_EVENTS.join(', ')}` }, EXIT_USAGE);
+  }
+
+  const prompt = typeof values.prompt === 'string' ? values.prompt : undefined;
+  // Local fast-fail (the daemon re-validates and is authoritative).
+  if (requiresPrompt(event) && (prompt === undefined || prompt.trim().length === 0)) {
+    return fail(mode, 'INVALID_PARAMS', { message: `Feedback is required for ${event} events` }, EXIT_USAGE);
+  }
+
+  const client = await openClient(mode, values['ensure-daemon'] === true);
+  if (!client) return EXIT_ERROR;
+
+  try {
+    const params: Record<string, unknown> = { workflowId, event };
+    if (prompt !== undefined) params.prompt = prompt;
+
+    const result = await client.call('workflows.resolveGate', params);
+    if (!result.ok) return reportRpcError(mode, result);
+
+    emitJson(mode, { ok: true, workflowId, event });
+    emitText(`Resolved gate for ${workflowId} with ${event}`);
+    return EXIT_OK;
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `workflow show`
+// ---------------------------------------------------------------------------
+
+interface ArtifactContent {
+  readonly files: readonly { readonly path: string; readonly content: string }[];
+}
+
+async function runShow(args: string[]): Promise<number> {
+  const { values, positionals } = parseArgsStrict({
+    args,
+    options: {
+      json: { type: 'boolean' },
+      artifact: { type: 'string' },
+      'ensure-daemon': { type: 'boolean' },
+    },
+    allowPositionals: true,
+  });
+  const mode: OutputMode = { json: values.json === true };
+
+  const workflowId = positionals[0];
+  const artifactName = values.artifact;
+  if (!workflowId || typeof artifactName !== 'string') {
+    emitText('Usage: ironcurtain workflow show <workflowId> --artifact <name> [--json]');
+    return EXIT_USAGE;
+  }
+
+  const client = await openClient(mode, values['ensure-daemon'] === true);
+  if (!client) return EXIT_ERROR;
+
+  try {
+    const result = await client.call<ArtifactContent>('workflows.artifacts', { workflowId, artifactName });
+    if (!result.ok) return reportRpcError(mode, result);
+
+    emitJson(mode, { ok: true, files: result.payload.files });
+    for (const file of result.payload.files) {
+      emitText(`--- ${file.path} ---`);
+      emitText(file.content);
+    }
+    return EXIT_OK;
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Routes a daemon-backed gate subcommand. Returns the process exit code; the
+ * caller (`workflow-command.ts`) is responsible for `process.exit`.
+ */
+export async function runDaemonGateCommand(subcommand: string, args: string[]): Promise<number> {
+  switch (subcommand) {
+    case 'run':
+      return runRun(args);
+    case 'status':
+      return runStatus(args);
+    case 'await':
+      return runAwait(args);
+    case 'gate':
+      return runGate(args);
+    case 'show':
+      return runShow(args);
+    default:
+      emitText(`Unknown daemon-backed workflow subcommand: ${subcommand}`);
+      return EXIT_USAGE;
+  }
+}

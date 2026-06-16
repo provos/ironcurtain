@@ -31,6 +31,7 @@ import { findLatestResumableCheckpoint } from './checkpoint-selection.js';
 import { loadDefinition } from './definition-loader.js';
 import type { TypedEventBus } from '../event-bus/typed-event-bus.js';
 import type { WebEventMap } from '../web-ui/web-event-bus.js';
+import type { Session, SessionOptions } from '../session/types.js';
 import { getIronCurtainHome } from '../config/paths.js';
 import { loadConfig } from '../config/index.js';
 import {
@@ -110,6 +111,16 @@ export interface WorkflowManagerOptions {
    * resolution point); leaving it `undefined` falls back to config.
    */
   readonly captureTraces?: boolean;
+  /**
+   * Optional override for the session factory wired into the orchestrator's
+   * `deps.createSession`. Defaults to {@link createWorkflowSessionFactory}.
+   *
+   * This is a narrow dependency-injection seam: it lets tests drive the full
+   * daemon → dispatch → orchestrator path with a deterministic stub session
+   * (no real LLM / Docker), while production callers leave it unset and get the
+   * real session factory. The type matches `WorkflowOrchestratorDeps.createSession`.
+   */
+  readonly sessionFactoryOverride?: (options: SessionOptions) => Promise<Session>;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,11 +132,13 @@ export class WorkflowManager {
   private readonly eventBus: TypedEventBus<WebEventMap>;
   private readonly baseDirOverride: string | undefined;
   private readonly captureTraces: boolean | undefined;
+  private readonly sessionFactoryOverride: ((options: SessionOptions) => Promise<Session>) | undefined;
 
   constructor(options: WorkflowManagerOptions) {
     this.eventBus = options.eventBus;
     this.baseDirOverride = options.baseDirOverride;
     this.captureTraces = options.captureTraces;
+    this.sessionFactoryOverride = options.sessionFactoryOverride;
   }
 
   /** Lazily creates the orchestrator on first use. */
@@ -323,7 +336,7 @@ export class WorkflowManager {
     const baseDir = this.getBaseDir();
     const checkpointStore = new FileCheckpointStore(baseDir);
     this._checkpointStore = checkpointStore;
-    const sessionFactory = createWorkflowSessionFactory();
+    const sessionFactory = this.sessionFactoryOverride ?? createWorkflowSessionFactory();
     const config = loadConfig();
 
     const deps: WorkflowOrchestratorDeps = {
