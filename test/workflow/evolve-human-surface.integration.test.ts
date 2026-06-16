@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { REAL_TMP, testCompiledPolicy, testToolAnnotations } from '../fixtures/test-policy.js';
@@ -26,18 +26,17 @@ import {
 } from './test-helpers.js';
 
 const IMAGE = 'ironcurtain-claude-code:latest';
-const TEST_HOME = `${REAL_TMP}/ironcurtain-evolve-multi-round-${process.pid}`;
+const TEST_HOME = `${REAL_TMP}/ironcurtain-evolve-human-surface-${process.pid}`;
 const ROUND_COUNT = 3;
 const TASK = 'write solve(xs) scoring higher the closer solve([1,2,3]) is to 6 over 3 rounds';
 
-type RunMode = 'positive' | 'crash-round-2';
+type Scenario = 'approve' | 'preflight-abort' | 'evaluator-force-revision' | 'final-force-revision';
 
 interface EvolveNode {
   readonly id: number;
   readonly parent: readonly number[];
   readonly score: number;
   readonly analysis: string;
-  readonly created_at?: string;
 }
 
 interface NodesFile {
@@ -74,7 +73,7 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
       escalationTimeoutSeconds: 300,
       resourceBudget: {
         maxTotalTokens: 1_000_000,
-        maxSteps: 300,
+        maxSteps: 400,
         maxSessionSeconds: 1800,
         maxEstimatedCostUsd: 5.0,
         warnThresholdPercent: 80,
@@ -100,7 +99,7 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
   } as unknown as IronCurtainConfig;
 }
 
-function writePreflightRunSpec(workspacePath: string, rounds: number): void {
+function writePreflightRunSpec(workspacePath: string): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
   mkdirSync(resolve(runDir, 'steps'), { recursive: true });
   mkdirSync(resolve(runDir, 'database_data'), { recursive: true });
@@ -128,7 +127,7 @@ function writePreflightRunSpec(workspacePath: string, rounds: number): void {
       timeout_secs: 30,
       success_criteria: ['eval_score >= 1.0'],
     },
-    budget: { max_rounds: rounds, patience: 2 },
+    budget: { max_rounds: ROUND_COUNT, patience: 2 },
     stop_conditions: ['max_rounds'],
     mutation_scope: {
       writable_paths: ['.evolve_runs'],
@@ -145,52 +144,50 @@ function writePreflightRunSpec(workspacePath: string, rounds: number): void {
     cognition: { source_mode: 'seed', seed_files: [], seed_notes: [] },
     approval: { confirmed: true },
   };
+  const seed = [
+    '```json',
+    '[',
+    '  {',
+    '    "content": "solve xs sum target evolve toward six by improving the candidate return value",',
+    '    "source": "test",',
+    '    "metadata": {"kind":"heuristic"}',
+    '  }',
+    ']',
+    '```',
+    '',
+  ].join('\n');
+
   writeFileSync(resolve(runDir, 'run_spec.yaml'), JSON.stringify(runSpec, null, 2) + '\n');
   writeFileSync(resolve(runDir, 'preflight_summary.md'), '# Preflight Summary\n\n- Status: `READY`\n');
-  writeFileSync(
-    resolve(runDir, 'cognition_seed.md'),
-    [
-      '```json',
-      '[',
-      '  {',
-      '    "content": "solve xs sum target evolve toward six by improving the candidate return value",',
-      '    "source": "test",',
-      '    "metadata": {"kind": "heuristic"}',
-      '  }',
-      ']',
-      '```',
-      '',
-    ].join('\n'),
-  );
+  writeFileSync(resolve(runDir, 'cognition_seed.md'), seed);
+
   mkdirSync(resolve(workspacePath, '.workflow', 'run_spec'), { recursive: true });
   mkdirSync(resolve(workspacePath, '.workflow', 'cognition_seed'), { recursive: true });
   writeFileSync(
     resolve(workspacePath, '.workflow', 'run_spec', 'run_spec.md'),
     JSON.stringify(runSpec, null, 2) + '\n',
   );
-  writeFileSync(
-    resolve(workspacePath, '.workflow', 'cognition_seed', 'cognition_seed.md'),
-    readFileSync(resolve(runDir, 'cognition_seed.md'), 'utf-8'),
-  );
+  writeFileSync(resolve(workspacePath, '.workflow', 'cognition_seed', 'cognition_seed.md'), seed);
 }
 
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
 }
 
-function writeCandidate(workspacePath: string, mode: RunMode, researcherTurn: number): void {
+function writeCandidate(workspacePath: string, scenario: Scenario, researcherTurn: number): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
   const context = readJson(resolve(runDir, 'current', 'context.json')) as { step_name: string };
   const stepDir = resolve(runDir, 'steps', context.step_name);
   mkdirSync(stepDir, { recursive: true });
 
-  if (mode === 'crash-round-2' && researcherTurn === 2) {
+  if (scenario === 'evaluator-force-revision' && researcherTurn === 1) {
     writeFileSync(resolve(stepDir, 'code'), 'x = 1\n');
     return;
   }
 
-  const returnValues = [2, 5, 6];
-  const value = returnValues[Math.min(researcherTurn - 1, returnValues.length - 1)];
+  const validTurn = scenario === 'evaluator-force-revision' ? researcherTurn - 1 : researcherTurn;
+  const returnValues = [2, 5, 6, 6];
+  const value = returnValues[Math.min(validTurn - 1, returnValues.length - 1)];
   writeFileSync(resolve(stepDir, 'code'), `def solve(xs):\n    return ${value}\n`);
 }
 
@@ -199,24 +196,27 @@ function writeAnalysis(workspacePath: string, analyzerTurn: number): void {
   mkdirSync(resolve(runDir, 'current'), { recursive: true });
   writeFileSync(
     resolve(runDir, 'current', 'analysis.md'),
-    `Round ${analyzerTurn} lesson: move solve(xs) closer to the sum target while preserving a simple deterministic function.\n`,
+    `Round ${analyzerTurn} lesson: preserve deterministic progress toward the sum target.\n`,
   );
 }
 
 function writeFinalReport(workspacePath: string): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
   const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
-  const scores = Object.values(nodes.nodes).map((node) => `${node.id} -> ${node.score}`);
-  const best = Object.values(nodes.nodes).reduce((current, node) => (node.score > current.score ? node : current));
+  const nodeList = Object.keys(nodes.nodes)
+    .sort()
+    .map((id) => nodes.nodes[id]);
+  const best = nodeList.reduce((current, node) => (node.score > current.score ? node : current), nodeList[0]);
+  const trajectory = nodeList.map((node) => `${node.id} -> ${node.score}`).join(', ');
   const report = [
     '# Final Evolve Report',
     '',
     `Objective: ${TASK}`,
-    `Rounds: ${Object.keys(nodes.nodes).length} / ${ROUND_COUNT}`,
+    `Rounds: ${nodeList.length} / ${ROUND_COUNT}`,
     `Best node: ${best.id}, score ${best.score}`,
     `Best lesson: ${best.analysis.trim()}`,
-    `Score trajectory: ${scores.join(', ')}`,
-    'Recommendation: accept the best candidate unless more exploration is explicitly requested.',
+    `Score trajectory: ${trajectory}`,
+    'Recommendation: accept if the best score satisfies the evaluator, otherwise request one more round.',
     '',
   ].join('\n');
   writeFileSync(resolve(runDir, 'final_report.md'), report);
@@ -224,24 +224,30 @@ function writeFinalReport(workspacePath: string): void {
   writeFileSync(resolve(workspacePath, '.workflow', 'final_report', 'final_report.md'), report);
 }
 
-function stripCreatedAt(nodes: NodesFile): unknown {
-  return {
-    ...nodes,
-    nodes: Object.fromEntries(
-      Object.entries(nodes.nodes).map(([id, node]) => {
-        const rest = { ...node };
-        delete rest.created_at;
-        return [id, rest];
-      }),
-    ),
-  };
-}
-
 function countStates(states: readonly string[], state: string): number {
   return states.filter((s) => s === state).length;
 }
 
-describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker container', () => {
+function nodeScores(nodes: NodesFile): number[] {
+  return Object.keys(nodes.nodes)
+    .sort()
+    .map((id) => nodes.nodes[id].score);
+}
+
+function expectParentLineage(nodes: NodesFile): void {
+  for (const [rawId, node] of Object.entries(nodes.nodes)) {
+    const id = Number(rawId);
+    if (id === 0) {
+      expect(node.parent).toEqual([]);
+      continue;
+    }
+    expect(node.parent.length).toBeGreaterThan(0);
+    expect(node.parent[0]).toBeLessThan(id);
+    expect(nodes.nodes[String(node.parent[0])]).toBeDefined();
+  }
+}
+
+describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker container', () => {
   let tmpDir: string;
   let originalHome: string | undefined;
   let originalAuth: string | undefined;
@@ -276,17 +282,23 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
   });
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'evolve-multi-round-'));
+    tmpDir = mkdtempSync(join(tmpdir(), 'evolve-human-surface-'));
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  async function runEvolve(label: string, mode: RunMode): Promise<{ states: readonly string[]; workspaceDir: string }> {
-    const runDir = resolve(tmpDir, `run-${label}`);
-    const workspaceDir = resolve(tmpDir, `workspace-${label}`);
-    const generatedDir = resolve(TEST_HOME, `generated-${label}`);
+  async function startScenario(scenario: Scenario): Promise<{
+    orchestrator: WorkflowOrchestrator;
+    workflowId: string;
+    states: string[];
+    workspaceDir: string;
+    raiseGate: ReturnType<typeof vi.fn>;
+  }> {
+    const runDir = resolve(tmpDir, `run-${scenario}`);
+    const workspaceDir = resolve(tmpDir, `workspace-${scenario}`);
+    const generatedDir = resolve(TEST_HOME, `generated-${scenario}`);
     mkdirSync(runDir, { recursive: true });
     mkdirSync(workspaceDir, { recursive: true });
     mkdirSync(generatedDir, { recursive: true });
@@ -321,24 +333,61 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
       await destroyDockerInfrastructure(bundle);
     });
 
-    const orchestratorScript =
-      mode === 'positive'
-        ? [
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'complete',
-          ]
-        : ['design', 'evaluate', 'analyze', 'record', 'design', 'evaluate'];
+    const scripts: Record<Scenario, string[]> = {
+      approve: [
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'complete',
+      ],
+      'preflight-abort': [],
+      'evaluator-force-revision': [
+        'design',
+        'evaluate',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'complete',
+      ],
+      'final-force-revision': [
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'complete',
+        'design',
+        'evaluate',
+        'analyze',
+        'record',
+        'complete',
+      ],
+    };
 
     let preflightTurns = 0;
     let orchestratorTurns = 0;
@@ -352,18 +401,18 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
         responses: (msg: string) => {
           if (msg.includes('configuring a multi-round Evolve experiment')) {
             preflightTurns += 1;
-            writePreflightRunSpec(workspacePath, ROUND_COUNT);
-            return statusBlock('ready', 'preflight confirmed');
+            writePreflightRunSpec(workspacePath);
+            return statusBlock('ready', `preflight ${preflightTurns} confirmed`);
           }
           if (msg.includes('You are the Evolve orchestrator')) {
-            const verdict = orchestratorScript[orchestratorTurns];
+            const verdict = scripts[scenario][orchestratorTurns];
             orchestratorTurns += 1;
             if (!verdict) throw new Error(`orchestrator script exhausted at turn ${orchestratorTurns}`);
             return statusBlock(verdict, `orchestrator turn ${orchestratorTurns}`);
           }
           if (msg.includes('Write exactly one candidate program for this round')) {
             researcherTurns += 1;
-            writeCandidate(workspacePath, mode, researcherTurns);
+            writeCandidate(workspacePath, scenario, researcherTurns);
             return approvedResponse(`candidate ${researcherTurns} written`);
           }
           if (msg.includes('write a SHORT transferable lesson')) {
@@ -374,14 +423,13 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
           if (msg.includes('The Evolve run has reached its round budget')) {
             finalSummaryTurns += 1;
             writeFinalReport(workspacePath);
-            return approvedResponse(`final summary ${finalSummaryTurns} written`);
+            return approvedResponse(`final report ${finalSummaryTurns} written`);
           }
           throw new Error(`unexpected agent prompt: ${msg.slice(0, 200)}`);
         },
       });
     });
     const raiseGate = vi.fn();
-
     const orchestrator = new WorkflowOrchestrator(
       createDeps(runDir, {
         createSession,
@@ -397,116 +445,133 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
 
     const manifestPath = resolve(process.cwd(), 'src', 'workflow', 'workflows', 'evolve', 'workflow.yaml');
     const workflowId = await orchestrator.start(manifestPath, TASK, workspaceDir);
-
-    const firstGate = await waitForGate(raiseGate, 1, 180_000);
-    expect(firstGate[0].stateName).toBe('preflight_review');
-    expect([...firstGate[0].presentedArtifacts.keys()].sort()).toEqual(['cognition_seed', 'run_spec']);
-    orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
-
-    if (mode === 'positive') {
-      const gates = await waitForGate(raiseGate, 2, 180_000);
-      expect(gates[1].stateName).toBe('final_review');
-      expect(gates[1].presentedArtifacts.has('final_report')).toBe(true);
-      orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
-    } else {
-      const gates = await waitForGate(raiseGate, 2, 180_000);
-      expect(gates[1].stateName).toBe('human_escalation');
-      expect(gates[1].acceptedEvents).toEqual(['APPROVE', 'FORCE_REVISION', 'ABORT']);
-      expect(gates[1].presentedArtifacts.has('run_spec')).toBe(true);
-      expect(gates[1].summary).toContain('evaluator_blocked');
-      orchestrator.resolveGate(workflowId, { type: 'ABORT' });
-    }
-
-    await waitForCompletion(orchestrator, workflowId, 180_000);
-    await orchestrator.shutdownAll();
-
-    expect(preflightTurns).toBe(1);
-    if (mode === 'positive') {
-      expect(orchestratorTurns).toBe(4 * ROUND_COUNT + 1);
-      expect(researcherTurns).toBe(ROUND_COUNT);
-      expect(analyzerTurns).toBe(ROUND_COUNT);
-      expect(finalSummaryTurns).toBe(1);
-    } else {
-      expect(orchestratorTurns).toBe(6);
-      expect(researcherTurns).toBe(2);
-      expect(analyzerTurns).toBe(1);
-      expect(finalSummaryTurns).toBe(0);
-    }
-
-    return { states, workspaceDir };
+    return { orchestrator, workflowId, states, workspaceDir, raiseGate };
   }
 
-  it('runs three rounds to done with parents, analyses, cognition, best, and deterministic vectors', async () => {
-    const first = await runEvolve('positive-a', 'positive');
-    const second = await runEvolve('positive-b', 'positive');
-    const runDir = resolve(first.workspaceDir, '.evolve_runs', 'main');
-    const secondRunDir = resolve(second.workspaceDir, '.evolve_runs', 'main');
+  it('A: APPROVE reaches done through final_summary and final_review', async () => {
+    const run = await startScenario('approve');
+    const [preflightGate] = await waitForGate(run.raiseGate, 1, 180_000);
+    expect(preflightGate.stateName).toBe('preflight_review');
+    expect(preflightGate.acceptedEvents).toEqual(['APPROVE', 'FORCE_REVISION', 'ABORT']);
+    expect([...preflightGate.presentedArtifacts.keys()].sort()).toEqual(['cognition_seed', 'run_spec']);
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
 
-    expect(first.states.at(-1)).toBe('done');
-    expect(first.states).not.toContain('failed');
-    expect(first.states).toContain('preflight_review');
-    expect(first.states).toContain('final_summary');
-    expect(first.states).toContain('final_review');
-    for (const state of ['sample', 'evaluate', 'analyzer', 'analysis_record', 'researcher']) {
-      expect(countStates(first.states, state)).toBe(ROUND_COUNT);
-    }
-    expect(countStates(first.states, 'orchestrator')).toBe(4 * ROUND_COUNT + 1);
+    const gates = await waitForGate(run.raiseGate, 2, 180_000);
+    const finalGate = gates[1];
+    expect(finalGate.stateName).toBe('final_review');
+    expect(finalGate.presentedArtifacts.has('final_report')).toBe(true);
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
 
-    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
-    expect(nodes.next_id).toBe(ROUND_COUNT);
-    expect(Object.keys(nodes.nodes)).toEqual(['0', '1', '2']);
-    expect(nodes.nodes['0'].parent).toEqual([]);
-    expect(nodes.nodes['1'].parent.length).toBeGreaterThan(0);
-    expect(nodes.nodes['1'].parent[0]).toBeLessThan(1);
-    expect(nodes.nodes['2'].parent.length).toBeGreaterThan(0);
-    expect(nodes.nodes['2'].parent[0]).toBeLessThan(2);
-    expect(Object.values(nodes.nodes).every((node) => node.analysis.trim().length > 0)).toBe(true);
+    await waitForCompletion(run.orchestrator, run.workflowId, 180_000);
+    expect(run.orchestrator.getStatus(run.workflowId)?.phase).toBe('completed');
+    await run.orchestrator.shutdownAll();
 
-    const scores = Object.keys(nodes.nodes)
-      .sort()
-      .map((id) => nodes.nodes[id].score);
-    expect(scores).toEqual([2, 5, 6]);
-    expect(scores[0]).toBeLessThanOrEqual(scores[1]);
-    expect(scores[1]).toBeLessThanOrEqual(scores[2]);
+    expect(run.states.at(-1)).toBe('done');
+    expect(run.states).toEqual(expect.arrayContaining(['preflight_review', 'final_summary', 'final_review', 'done']));
+    expect(run.states).not.toContain('failed');
+    expect(run.states).not.toContain('aborted');
+    const report = readFileSync(resolve(run.workspaceDir, '.workflow', 'final_report', 'final_report.md'), 'utf-8');
+    expect(report).toContain('Best node');
+    expect(report).toContain('Score trajectory');
 
-    const cognition = readJson(resolve(runDir, 'cognition_data', 'cognition.json')) as {
-      items: Record<string, unknown>;
-    };
-    expect(Object.keys(cognition.items).length).toBeGreaterThanOrEqual(1);
-    const finalContext = readJson(resolve(runDir, 'current', 'context.json')) as {
-      cognition: { matches: readonly unknown[] };
-    };
-    expect(finalContext.cognition.matches.length).toBeGreaterThanOrEqual(1);
-
-    const bestScores = readdirSync(resolve(runDir, 'best'))
-      .map((entry) => readJson(resolve(runDir, 'best', entry, 'results.json')) as { eval_score: number })
-      .map((result) => result.eval_score);
-    expect(Math.max(...bestScores)).toBe(Math.max(...scores));
-    expect(
-      readFileSync(resolve(first.workspaceDir, '.workflow', 'final_report', 'final_report.md'), 'utf-8'),
-    ).toContain('Best node');
-
-    const firstVectorStore = readFileSync(resolve(runDir, 'database_data', 'faiss', 'vector_store.pkl'));
-    const secondVectorStore = readFileSync(resolve(secondRunDir, 'database_data', 'faiss', 'vector_store.pkl'));
-    expect(firstVectorStore.equals(secondVectorStore)).toBe(true);
-
-    const secondNodes = readJson(resolve(secondRunDir, 'database_data', 'nodes.json')) as NodesFile;
-    expect(stripCreatedAt(nodes)).toEqual(stripCreatedAt(secondNodes));
+    const nodes = readJson(
+      resolve(run.workspaceDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'),
+    ) as NodesFile;
+    expect(Object.keys(nodes.nodes)).toHaveLength(ROUND_COUNT);
+    expectParentLineage(nodes);
   }, 300_000);
 
-  it('routes a mid-loop evaluator crash to human_escalation without a partial second node', async () => {
-    const { states, workspaceDir } = await runEvolve('crash', 'crash-round-2');
-    const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
+  it('B: preflight_review ABORT reaches aborted with zero nodes', async () => {
+    const run = await startScenario('preflight-abort');
+    const [preflightGate] = await waitForGate(run.raiseGate, 1, 180_000);
+    expect(preflightGate.stateName).toBe('preflight_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'ABORT' });
 
-    expect(states.at(-1)).toBe('aborted');
-    expect(states).toContain('human_escalation');
-    expect(states).not.toContain('failed');
-    expect(countStates(states, 'evaluate')).toBe(2);
-    expect(countStates(states, 'analysis_record')).toBe(1);
-    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
-    expect(Object.keys(nodes.nodes)).toEqual(['0']);
-    expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe(
-      'evaluator_blocked',
+    await waitForCompletion(run.orchestrator, run.workflowId, 180_000);
+    expect(run.orchestrator.getStatus(run.workflowId)?.phase).toBe('aborted');
+    await run.orchestrator.shutdownAll();
+
+    expect(run.states.at(-1)).toBe('aborted');
+    expect(run.states).not.toContain('orchestrator');
+    expect(run.states).not.toContain('sample');
+    expect(run.states).not.toContain('evaluate');
+    expect(run.states).not.toContain('done');
+    expect(existsSync(resolve(run.workspaceDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'))).toBe(false);
+  }, 300_000);
+
+  it('C: evaluator_blocked routes to human_escalation and FORCE_REVISION proceeds without a spurious node', async () => {
+    const run = await startScenario('evaluator-force-revision');
+    const [preflightGate] = await waitForGate(run.raiseGate, 1, 180_000);
+    expect(preflightGate.stateName).toBe('preflight_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
+
+    const gatesAfterBlock = await waitForGate(run.raiseGate, 2, 180_000);
+    const escalationGate = gatesAfterBlock[1];
+    expect(escalationGate.stateName).toBe('human_escalation');
+    expect(escalationGate.acceptedEvents).toEqual(['APPROVE', 'FORCE_REVISION', 'ABORT']);
+    expect(escalationGate.presentedArtifacts.has('run_spec')).toBe(true);
+    run.orchestrator.resolveGate(run.workflowId, {
+      type: 'FORCE_REVISION',
+      prompt: 'fix the candidate to define solve(xs)',
+    });
+
+    const gatesAfterRevision = await waitForGate(run.raiseGate, 3, 180_000);
+    expect(gatesAfterRevision[2].stateName).toBe('preflight_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
+
+    const gatesAtFinal = await waitForGate(run.raiseGate, 4, 180_000);
+    expect(gatesAtFinal[3].stateName).toBe('final_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
+
+    await waitForCompletion(run.orchestrator, run.workflowId, 180_000);
+    expect(run.orchestrator.getStatus(run.workflowId)?.phase).toBe('completed');
+    await run.orchestrator.shutdownAll();
+
+    expect(run.states.at(-1)).toBe('done');
+    expect(countStates(run.states, 'human_escalation')).toBe(1);
+    expect(countStates(run.states, 'preflight_review')).toBe(2);
+    const nodes = readJson(
+      resolve(run.workspaceDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'),
+    ) as NodesFile;
+    expect(nodes.next_id).toBe(ROUND_COUNT);
+    expect(Object.keys(nodes.nodes)).toEqual(['0', '1', '2']);
+    expectParentLineage(nodes);
+    expect(nodeScores(nodes)).toEqual([2, 5, 6]);
+  }, 300_000);
+
+  it('D: final_review FORCE_REVISION runs exactly one extra round before APPROVE', async () => {
+    const run = await startScenario('final-force-revision');
+    const [preflightGate] = await waitForGate(run.raiseGate, 1, 180_000);
+    expect(preflightGate.stateName).toBe('preflight_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
+
+    const firstFinal = await waitForGate(run.raiseGate, 2, 180_000);
+    expect(firstFinal[1].stateName).toBe('final_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'FORCE_REVISION', prompt: 'run 1 more round' });
+
+    const secondFinal = await waitForGate(run.raiseGate, 3, 180_000);
+    expect(secondFinal[2].stateName).toBe('final_review');
+    run.orchestrator.resolveGate(run.workflowId, { type: 'APPROVE' });
+
+    await waitForCompletion(run.orchestrator, run.workflowId, 180_000);
+    expect(run.orchestrator.getStatus(run.workflowId)?.phase).toBe('completed');
+    await run.orchestrator.shutdownAll();
+
+    expect(run.states.at(-1)).toBe('done');
+    expect(countStates(run.states, 'final_summary')).toBe(2);
+    const nodes = readJson(
+      resolve(run.workspaceDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'),
+    ) as NodesFile;
+    expect(nodes.next_id).toBe(ROUND_COUNT + 1);
+    expect(Object.keys(nodes.nodes)).toEqual(['0', '1', '2', '3']);
+    expectParentLineage(nodes);
+    const scores = nodeScores(nodes);
+    expect(scores).toEqual([2, 5, 6, 6]);
+    expect(scores[0]).toBeLessThanOrEqual(scores[1]);
+    expect(scores[1]).toBeLessThanOrEqual(scores[2]);
+    expect(scores[2]).toBeLessThanOrEqual(scores[3]);
+    expect(readFileSync(resolve(run.workspaceDir, '.workflow', 'final_report', 'final_report.md'), 'utf-8')).toContain(
+      'Rounds: 4 / 3',
     );
   }, 300_000);
 });

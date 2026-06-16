@@ -16,7 +16,14 @@ import {
   type WorkflowLifecycleEvent,
 } from '../../src/workflow/orchestrator.js';
 import type { SessionOptions } from '../../src/session/types.js';
-import { approvedResponse, createDeps, MockSession, statusBlock, waitForCompletion } from './test-helpers.js';
+import {
+  approvedResponse,
+  createDeps,
+  MockSession,
+  statusBlock,
+  waitForCompletion,
+  waitForGate,
+} from './test-helpers.js';
 
 const IMAGE = 'ironcurtain-claude-code:latest';
 const TEST_HOME = `${REAL_TMP}/ironcurtain-evolve-single-round-${process.pid}`;
@@ -126,6 +133,13 @@ function writePreflightRunSpec(workspacePath: string): void {
   writeFileSync(resolve(runDir, 'run_spec.yaml'), JSON.stringify(runSpec, null, 2) + '\n');
   writeFileSync(resolve(runDir, 'preflight_summary.md'), '# Preflight Summary\n\n- Status: `READY`\n');
   writeFileSync(resolve(runDir, 'cognition_seed.md'), '# Cognition Seed Draft\n');
+  mkdirSync(resolve(workspacePath, '.workflow', 'run_spec'), { recursive: true });
+  mkdirSync(resolve(workspacePath, '.workflow', 'cognition_seed'), { recursive: true });
+  writeFileSync(
+    resolve(workspacePath, '.workflow', 'run_spec', 'run_spec.md'),
+    JSON.stringify(runSpec, null, 2) + '\n',
+  );
+  writeFileSync(resolve(workspacePath, '.workflow', 'cognition_seed', 'cognition_seed.md'), '# Cognition Seed Draft\n');
 }
 
 function writeCandidate(workspacePath: string, kind: CandidateKind): void {
@@ -145,6 +159,28 @@ function writeAnalysis(workspacePath: string): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
   mkdirSync(resolve(runDir, 'current'), { recursive: true });
   writeFileSync(resolve(runDir, 'current', 'analysis.md'), 'Single-round lesson.\n');
+}
+
+function writeFinalReport(workspacePath: string): void {
+  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
+  const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as {
+    nodes: Record<string, { id: number; score: number; analysis: string }>;
+  };
+  const best = Object.values(nodes.nodes)[0];
+  const report = [
+    '# Final Evolve Report',
+    '',
+    `Objective: ${TASK}`,
+    `Rounds: ${Object.keys(nodes.nodes).length} / 1`,
+    `Best node: ${best.id}, score ${best.score}`,
+    `Best lesson: ${best.analysis.trim()}`,
+    `Score trajectory: ${best.id} -> ${best.score}`,
+    'Recommendation: accept the candidate.',
+    '',
+  ].join('\n');
+  writeFileSync(resolve(runDir, 'final_report.md'), report);
+  mkdirSync(resolve(workspacePath, '.workflow', 'final_report'), { recursive: true });
+  writeFileSync(resolve(workspacePath, '.workflow', 'final_report', 'final_report.md'), report);
 }
 
 function readJson(path: string): unknown {
@@ -237,6 +273,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
     let orchestratorCount = 0;
     let researcherCount = 0;
     let analyzerCount = 0;
+    let finalSummaryCount = 0;
     const createSession = vi.fn(async (options: SessionOptions) => {
       const workspacePath = options.workspacePath;
       if (!workspacePath) throw new Error('workflow agent session missing workspacePath');
@@ -263,16 +300,23 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
             writeAnalysis(workspacePath);
             return approvedResponse('analysis written');
           }
+          if (msg.includes('The Evolve run has reached its round budget')) {
+            finalSummaryCount += 1;
+            writeFinalReport(workspacePath);
+            return approvedResponse('final report written');
+          }
           throw new Error(`unexpected agent prompt: ${msg.slice(0, 200)}`);
         },
       });
     });
+    const raiseGate = vi.fn();
 
     const orchestrator = new WorkflowOrchestrator(
       createDeps(runDir, {
         createSession,
         createWorkflowInfrastructure: createInfra,
         destroyWorkflowInfrastructure: destroyInfra,
+        raiseGate,
       }),
     );
     const states: string[] = [];
@@ -282,11 +326,31 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     const manifestPath = resolve(process.cwd(), 'src', 'workflow', 'workflows', 'evolve', 'workflow.yaml');
     const workflowId = await orchestrator.start(manifestPath, TASK, workspaceDir);
+
+    const firstGate = await waitForGate(raiseGate, 1, 150_000);
+    expect(firstGate[0].stateName).toBe('preflight_review');
+    expect([...firstGate[0].presentedArtifacts.keys()].sort()).toEqual(['cognition_seed', 'run_spec']);
+    orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
+
+    if (kind === 'crash') {
+      const gates = await waitForGate(raiseGate, 2, 150_000);
+      expect(gates[1].stateName).toBe('human_escalation');
+      expect(gates[1].acceptedEvents).toEqual(['APPROVE', 'FORCE_REVISION', 'ABORT']);
+      expect(gates[1].presentedArtifacts.has('run_spec')).toBe(true);
+      orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    } else {
+      const gates = await waitForGate(raiseGate, 2, 150_000);
+      expect(gates[1].stateName).toBe('final_review');
+      expect(gates[1].presentedArtifacts.has('final_report')).toBe(true);
+      orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
+    }
+
     await waitForCompletion(orchestrator, workflowId, 150_000);
     await orchestrator.shutdownAll();
     expect(preflightCount).toBe(1);
     expect(researcherCount).toBe(1);
     expect(analyzerCount).toBe(kind === 'crash' ? 0 : 1);
+    expect(finalSummaryCount).toBe(kind === 'crash' ? 0 : 1);
     return { states, workspaceDir };
   }
 
@@ -297,6 +361,9 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     expect(states.at(-1)).toBe('done');
     expect(states).not.toContain('failed');
+    expect(states).toContain('preflight_review');
+    expect(states).toContain('final_summary');
+    expect(states).toContain('final_review');
     expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe('evaluated');
     expect((readJson(resolve(runDir, 'current', 'analysis_record.json')) as { verdict: string }).verdict).toBe(
       'recorded',
@@ -321,6 +388,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
     const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
 
     expect(states.at(-1)).toBe('done');
+    expect(states).toContain('final_review');
     const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as {
       nodes: Record<string, { score: number }>;
     };
@@ -329,12 +397,14 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
     expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe('evaluated');
   }, 240_000);
 
-  it('routes evaluator crashes to failed without recording a node', async () => {
+  it('routes evaluator crashes to human_escalation without recording a node', async () => {
     const { states, workspaceDir } = await runEvolve('crash');
     const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
 
-    expect(states.at(-1)).toBe('failed');
+    expect(states.at(-1)).toBe('aborted');
     expect(states).toContain('evaluate');
+    expect(states).toContain('human_escalation');
+    expect(states).not.toContain('failed');
     expect(states).not.toContain('analysis_record');
     expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe(
       'evaluator_blocked',

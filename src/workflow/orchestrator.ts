@@ -2559,10 +2559,20 @@ export class WorkflowOrchestrator implements WorkflowController {
       }
     }
 
-    // Surface context.lastError in the gate summary so callers know
-    // whether this gate was reached normally or via an invoke error.
+    // Surface error context in the gate summary so callers know whether this
+    // gate was reached normally, via an invoke error, or via a deterministic
+    // verdict such as evaluator_blocked.
     const snapshot = instance?.actor.getSnapshot() as { context?: WorkflowContext } | undefined;
-    const errorContext = snapshot?.context?.lastError ? ` (error: ${snapshot.context.lastError})` : '';
+    const context = snapshot?.context;
+    const previousState =
+      context?.previousStateName && instance ? instance.definition.states[context.previousStateName] : undefined;
+    const previousDeterministicVerdict =
+      previousState?.type === 'deterministic' ? context?.lastDeterministicResult?.verdict : undefined;
+    const errorContext = context?.lastError
+      ? ` (error: ${context.lastError})`
+      : previousDeterministicVerdict
+        ? ` (verdict: ${previousDeterministicVerdict})`
+        : '';
 
     return {
       gateId: `${workflowId}-${gateName}`,

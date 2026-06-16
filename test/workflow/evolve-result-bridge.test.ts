@@ -29,15 +29,42 @@ describe('evolve workflow manifest', () => {
     const raw = parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }) as {
       settings: { maxRounds: number };
       states: {
-        preflight: { prompt: string };
+        preflight: {
+          prompt: string;
+          outputs: string[];
+          transitions: Array<{ to: string; when?: { verdict?: string } }>;
+        };
         orchestrator: { transitions: Array<{ to: string; guard?: string; when?: { verdict?: string } }> };
+        evaluate: { transitions: Array<{ to: string; when?: { verdict?: string } }> };
         researcher: { transitions: Array<{ to: string }> };
         analyzer: { transitions: Array<{ to: string }> };
+        preflight_review: {
+          type: string;
+          present: string[];
+          acceptedEvents: string[];
+          transitions: Array<{ to: string; event: string }>;
+        };
+        human_escalation: {
+          type: string;
+          present: string[];
+          acceptedEvents: string[];
+          transitions: Array<{ to: string; event: string }>;
+        };
+        final_summary: { type: string; outputs: string[]; transitions: Array<{ to: string }> };
+        final_review: {
+          type: string;
+          present: string[];
+          acceptedEvents: string[];
+          transitions: Array<{ to: string; event: string }>;
+        };
+        aborted: { type: string };
       };
     };
     const prompt = raw.states.preflight.prompt;
 
     expect(raw.settings.maxRounds).toBe(200);
+    expect(raw.states.preflight.outputs).toEqual(['run_spec', 'cognition_seed']);
+    expect(raw.states.preflight.transitions[0]).toMatchObject({ to: 'preflight_review', when: { verdict: 'ready' } });
     expect(raw.states.orchestrator.transitions[0]).toEqual({ to: 'failed', guard: 'isRoundLimitReached' });
     expect(raw.states.orchestrator.transitions.map((t) => t.when?.verdict).filter(Boolean)).toEqual([
       'design',
@@ -47,8 +74,46 @@ describe('evolve workflow manifest', () => {
       'complete',
       'escalate',
     ]);
+    expect(raw.states.orchestrator.transitions.find((t) => t.when?.verdict === 'complete')?.to).toBe('final_summary');
+    expect(raw.states.orchestrator.transitions.find((t) => t.when?.verdict === 'escalate')?.to).toBe(
+      'human_escalation',
+    );
+    expect(raw.states.evaluate.transitions.find((t) => t.when?.verdict === 'evaluator_blocked')?.to).toBe(
+      'human_escalation',
+    );
     expect(raw.states.researcher.transitions).toEqual([{ to: 'orchestrator' }]);
     expect(raw.states.analyzer.transitions).toEqual([{ to: 'orchestrator' }]);
+    expect(raw.states.preflight_review).toMatchObject({
+      type: 'human_gate',
+      acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+      present: ['run_spec', 'cognition_seed'],
+    });
+    expect(raw.states.preflight_review.transitions.map((t) => [t.event, t.to])).toEqual([
+      ['APPROVE', 'orchestrator'],
+      ['FORCE_REVISION', 'preflight'],
+      ['ABORT', 'aborted'],
+    ]);
+    expect(raw.states.human_escalation).toMatchObject({
+      type: 'human_gate',
+      acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+      present: ['run_spec'],
+    });
+    expect(raw.states.final_summary).toMatchObject({
+      type: 'agent',
+      outputs: ['final_report'],
+      transitions: [{ to: 'final_review' }],
+    });
+    expect(raw.states.final_review).toMatchObject({
+      type: 'human_gate',
+      acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+      present: ['final_report'],
+    });
+    expect(raw.states.final_review.transitions.map((t) => [t.event, t.to])).toEqual([
+      ['APPROVE', 'done'],
+      ['FORCE_REVISION', 'orchestrator'],
+      ['ABORT', 'aborted'],
+    ]);
+    expect(raw.states.aborted.type).toBe('terminal');
 
     for (const flag of [
       '--workspace-root /workspace',
@@ -72,6 +137,8 @@ describe('evolve workflow manifest', () => {
     }
     expect(prompt).toContain('runpy.run_path');
     expect(prompt).toContain('do not rely on importlib.util.spec_from_file_location');
+    expect(prompt).toContain('/workspace/.workflow/run_spec/run_spec.md');
+    expect(prompt).toContain('/workspace/.workflow/cognition_seed/cognition_seed.md');
   });
 });
 
