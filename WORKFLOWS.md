@@ -404,17 +404,31 @@ Print the content of an artifact a gate presents — turning the `presentedArtif
 ironcurtain workflow show <workflowId> --artifact <name> [--json]
 ```
 
-#### Exit codes (`run` / `await` / `status` / `gate` / `show`)
+#### Exit codes
 
-| Code | Meaning                                                                   |
-| ---- | ------------------------------------------------------------------------- |
-| `0`  | At a gate (`waiting_human`) or `completed`                                |
-| `1`  | Operational failure (no daemon reachable, RPC error)                      |
-| `2`  | Usage error (bad flags, missing/empty required `--prompt`, unknown event) |
-| `3`  | Terminal failure phase (`failed` or `aborted`)                            |
-| `4`  | `await` timed out before a decision point                                 |
+`await` and `status` report the **workflow phase** as their exit code; `run`, `gate`, and `show` report the **result of the call**.
 
-Exit codes derive from the **authoritative workflow phase**, never from a lifecycle event: a gate `ABORT` ends in `phase:"aborted"` (exit `3`) even though the run emits a "completed" lifecycle event internally.
+`await` / `status` — phase-derived:
+
+| Code | Meaning                                                           |
+| ---- | ----------------------------------------------------------------- |
+| `0`  | At a gate (`waiting_human`) or `completed`                        |
+| `3`  | Terminal failure phase (`failed` or `aborted`)                    |
+| `4`  | `await` timed out before a decision point (workflow left running) |
+| `1`  | Operational failure (no daemon reachable, RPC error)              |
+| `2`  | Usage error (bad flags)                                           |
+
+The phase is read from an authoritative `workflows.get`, never inferred from a lifecycle event: a gate `ABORT` ends in `phase:"aborted"` (exit `3`) even though the run emits a "completed" lifecycle event internally.
+
+`run` / `gate` / `show` — call-result:
+
+| Code | Meaning                                                                                                                                              |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | The call succeeded (workflow started / gate resolved / artifact returned)                                                                            |
+| `1`  | Operational or RPC error — e.g. `ARTIFACT_NOT_FOUND` (artifact not produced yet), `WORKFLOW_NOT_AT_GATE`, `WORKFLOW_NOT_FOUND`, `DAEMON_NOT_RUNNING` |
+| `2`  | Usage error (bad flags, missing/empty required `--prompt`, unknown event)                                                                            |
+
+`show` is phase-agnostic: it returns `0` as soon as the named artifact exists on disk (even mid-run) and `1` (`ARTIFACT_NOT_FOUND`) while the producing state is still executing — it never reports a workflow phase.
 
 ## Human gates
 
