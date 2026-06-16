@@ -9,7 +9,6 @@
 
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import '@utcp/mcp'; // Register MCP call template type with UTCP SDK
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { Protocol } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -220,7 +219,7 @@ function buildNamespaceAliasSnippet(
  * `manualName` is the UTCP manual name (unsanitized, may contain hyphens).
  * `utcpGlobalName` is the sanitized form UTCP uses as a V8 global.
  */
-function buildInterfacePatchSnippet(
+export function buildInterfacePatchSnippet(
   callableToRawMap: Record<string, string>,
   manualName: string,
   utcpGlobalName: string,
@@ -261,7 +260,11 @@ function buildInterfacePatchSnippet(
             if (rawName) return _origGetToolInterface(rawName);
           }
 
-          // Build helpful error with suggestions
+          // Build helpful error with suggestions. Only ever surface
+          // friendly callable names (e.g. "filesystem.read_file"); never
+          // the internal UTCP names carrying the per-sandbox manual prefix
+          // (e.g. "tools_<id>.filesystem_read_file"), which are useless and
+          // confusing for the agent to copy into its next call.
           var allNames = Object.keys(_callableToRaw);
           var suggestions = [];
           var needle = toolName.toLowerCase();
@@ -269,13 +272,14 @@ function buildInterfacePatchSnippet(
             needle = needle.slice(_manualPrefix.length);
           }
           for (var i = 0; i < allNames.length && suggestions.length < 3; i++) {
-            var candidate = allNames[i].toLowerCase();
-            if (candidate.indexOf(_manualPrefix.toLowerCase()) === 0) {
-              candidate = candidate.slice(_manualPrefix.length);
+            var name = allNames[i];
+            // Skip internal UTCP names (manual- or global-prefixed).
+            if (name.indexOf(_manualPrefix) === 0 || name.indexOf(_utcpGlobalPrefix) === 0) {
+              continue;
             }
-            if (allNames[i].toLowerCase().indexOf(needle) !== -1 ||
-                needle.indexOf(candidate) !== -1) {
-              suggestions.push(allNames[i]);
+            var candidate = name.toLowerCase();
+            if (candidate.indexOf(needle) !== -1 || needle.indexOf(candidate) !== -1) {
+              suggestions.push(name);
             }
           }
           var msg = "Unknown tool '" + toolName + "'.";
@@ -338,10 +342,17 @@ export function buildHelpSnippet(helpData: HelpData): string {
 }
 
 /**
- * Prefix for per-sandbox virtual UTCP manual names. A random suffix is
- * appended per Sandbox instance so two sandboxes running in the same
- * Node process (e.g., the daemon hosting multiple sessions) can coexist
- * without their `coordinatorByManual` bindings colliding.
+ * Prefix for per-sandbox virtual UTCP manual names. A short counter
+ * suffix is appended per Sandbox instance so two sandboxes running in the
+ * same Node process (e.g., the daemon hosting multiple sessions) can
+ * coexist without their `coordinatorByManual` bindings colliding.
+ *
+ * Uniqueness only needs to hold within a single process (the binding map
+ * is in-memory, per process) -- it does NOT need to be globally unique or
+ * unguessable, so a monotonic counter is sufficient and keeps the name
+ * tiny. A short name matters because UTCP creates `global.<name>` in the
+ * V8 isolate; if it ever surfaces (e.g. an agent enumerating globals) we
+ * want `tools_3`, not a 32-char UUID.
  *
  * The prefix + suffix are already valid identifier characters
  * (underscores, letters, digits) so UTCP's own name sanitization
@@ -351,6 +362,9 @@ export function buildHelpSnippet(helpData: HelpData): string {
  */
 const VIRTUAL_MANUAL_PREFIX = 'tools_';
 
+/** Monotonic per-process counter making each sandbox's manual name unique. */
+let manualNameCounter = 0;
+
 export class Sandbox {
   private client: CodeModeUtcpClient | null = null;
   private toolCatalog: string = '';
@@ -358,12 +372,12 @@ export class Sandbox {
   private helpData: HelpData = { serverDescriptions: {}, toolsByServer: {} };
   private coordinator: ToolCallCoordinator | null = null;
   /**
-   * Per-sandbox UTCP manual name (e.g., `tools_abc123_...`). Unique
-   * per instance so concurrent sandboxes don't overwrite each other's
-   * coordinator binding. The same name is used as the V8 global UTCP
-   * creates in the isolate; snippets reference it directly.
+   * Per-sandbox UTCP manual name (e.g., `tools_3`). Unique per instance
+   * (within the process) so concurrent sandboxes don't overwrite each
+   * other's coordinator binding. The same name is used as the V8 global
+   * UTCP creates in the isolate; snippets reference it directly.
    */
-  private readonly manualName = `${VIRTUAL_MANUAL_PREFIX}${randomUUID().replace(/-/g, '_')}`;
+  private readonly manualName = `${VIRTUAL_MANUAL_PREFIX}${++manualNameCounter}`;
 
   /**
    * Exposes the policy coordinator once the sandbox is initialized.
