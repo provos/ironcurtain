@@ -91,6 +91,42 @@ IronCurtain's workflow runtime.
   execution happens inside the shared container; host-side `execFile` is not used
   for any untrusted or domain-mutating command.
 
+## Implementation Status
+
+> **Status as of 2026-06-16.** The early phases of this roadmap have shipped as
+> four merged PRs (verified against `master`). This section is the index; each
+> roadmap-bearing section below carries an inline `**[DONE — #NNN]**` /
+> `**[PARTIAL — #NNN]**` / `**[PENDING]**` marker next to the specific item, with
+> a one-line note where the shipped reality diverges from the original sketch.
+
+| Milestone (Migration Plan #) | Status | PR / commit | Note |
+| --- | --- | --- | --- |
+| Containerized deterministic execution (#1) | DONE | #292 / `9602675` | `container: true` + `containerScope`; runs `run:` array via `DockerManager.exec` in the scope's bundle; WF011 lint guards ordering |
+| Structured deterministic result contract (#2) | DONE | #299 / `b3f4bf0` | `resultFile` + `when: { verdict }` routing; `{ verdict, payload?, passed? }`; reserved `result_file_error`; symlink-safe host-side read; WF012 lint |
+| Workflow script packaging (#3) | DONE | #292 / `9602675` | `scripts/` staged read-only at `/workflow-scripts` for the whole run; per-workflow image baked from `requirements.txt`; build-hash includes the manifest |
+| `.workflow/` schema + declared outputs (#4) | PARTIAL | #300 / `8fd85cd` | **Deviation:** ships on the engine-native `.evolve_runs/main/` layout (hard-coded in `run_state.py`), NOT the flattened `.workflow/database/...` sketched here. No subtrees are declared as outputs yet; flattening + UI-declared artifacts are deferred |
+| Package the `evolve` engine (#5) | DONE | #300 / `8fd85cd` | `evolve_core` vendored **byte-verbatim** under `scripts/` (Apache-2.0 + README) + CLI wrappers; the `evolve_result.py` bridge translates engine JSON → result contract. The standalone `pipeline/` orchestrator is not ported |
+| Build the FSM (#6) | PARTIAL | #300 → #302 / `8fd85cd`, `e066898` | Orchestrator-hub FSM built and looping (preflight → orchestrator hub → sample/researcher/evaluate/analyzer/analysis_record → done/failed). **Missing vs the proposed FSM:** all four human gates (`preflight_review`, `human_escalation`, `final_summary`, `final_review`) and `seed_initial` are deferred; `escalate → failed` stands in for `human_escalation`. **The human-surface slice (the three gates + `final_summary` + `aborted` terminal) is now DESIGNED and ready to implement — see [`evolve-human-surface-slice.md`](./evolve-human-surface-slice.md)** (3 maintainer decisions signed off 2026-06-16); `seed_initial` remains deferred |
+| Durable-write / transaction helpers (#7) | PARTIAL | #300 → #302 / `8fd85cd`, `e066898` | The vendored `run_state.py` / `file_lock.py` layer ships and `analysis_record` is the single durable engine write per round. The full transaction-log protocol in "Run State Persistence" is **not** implemented; record-by-step-id idempotency is deferred |
+| Migrate one demo to a single-file fixture (#8) | PARTIAL | #300 → #302 / `8fd85cd`, `e066898` | The gates use a tiny in-test `solve(xs)→6` fixture, not the circle-packing demo named in the plan. Sufficient to prove the loop end to end; a shipped demo workflow input is still pending |
+| UI summary artifacts (#9) | PENDING | — | No declared summary artifacts / round table; surfacing is blocked on the `.evolve_runs/` vs `.workflow/` decision (#4) |
+
+**Determinism fixes (not a numbered milestone but load-bearing):** `PYTHONHASHSEED=0`
+is pinned in the **bridge subprocess env** (`evolve_result.py`), not by patching the
+vendored engine; `created_at` is normalized at comparison time. Both shipped in
+**#302 / `e066898`**. This is the recurring shape of the shipped work: corrections
+live in the IronCurtain-authored bridge, the vendored engine stays byte-verbatim.
+
+**Two-slice delivery.** The FSM/engine work landed as two vertical slices, each with
+its own detailed spec and real-Docker gate:
+[`evolve-single-round-slice.md`](./evolve-single-round-slice.md) (#300, linear
+single round) and [`evolve-multi-round-slice.md`](./evolve-multi-round-slice.md)
+(#302, the orchestrator-hub loop). Consult those for the exact shipped
+`workflow.yaml`, bridge argv, and gate assertions. The next slice —
+[`evolve-human-surface-slice.md`](./evolve-human-surface-slice.md) — is
+**designed and ready to implement** (the four deferred human gates + `final_summary`
++ `aborted` terminal; awaiting implementation by a separate system).
+
 ## Current Workflow Semantics
 
 The design must account for these canonical current IronCurtain behaviors:
@@ -125,13 +161,19 @@ The design must account for these canonical current IronCurtain behaviors:
   declared top-level output names, not to arbitrary nested paths; undeclared
   workspace paths are simply never snapshotted.
 
-The bullets above describe the runtime **as it exists today**. Two of them —
-host-side deterministic execution and the pass/fail-only deterministic result —
-are exactly what this design changes: see "Runtime Capabilities," which moves
-deterministic execution into the shared container and adds a structured result
-contract. The steering model is otherwise unchanged: the `orchestrator` agent
-owns search strategy, and deterministic states run the evaluator, durable writes,
-and mechanical checks under that orchestration.
+The bullets above describe the runtime **as it existed at design time**. Two of
+them — host-side deterministic execution and the pass/fail-only deterministic
+result — are exactly what this design changed: see "Runtime Capabilities," which
+moves deterministic execution into the shared container and adds a structured
+result contract. **Both have shipped** (`**[DONE — #292, #299]**`): a deterministic
+state with `container: true` now runs its `run:` array via `DockerManager.exec`,
+and deterministic states route on `when: { verdict }` from a helper-written
+`resultFile`. The two bullets above are therefore now superseded for
+`container: true` states; host-side `execFile` + pass/fail guards remain the
+default only for ordinary (non-container) deterministic states. The steering model
+is otherwise unchanged: the `orchestrator` agent owns search strategy, and
+deterministic states run the evaluator, durable writes, and mechanical checks under
+that orchestration.
 
 ## Runtime Capabilities: New Work in v1
 
@@ -151,7 +193,12 @@ route only through a pass/fail guard on a `{ passed, testCount, errors }` result
 (`orchestrator.ts:2253-2279`). This design moves the evaluator and node-recording
 into deterministic states, so those two limitations must be lifted.
 
-**1. Containerized deterministic execution.** A deterministic state should be
+**1. Containerized deterministic execution.** `**[DONE — #292]**` Shipped as the
+opt-in `container: true` + `containerScope` flags on deterministic states; the
+state's `run:` array executes via `DockerManager.exec` against the scope's bundle,
+guarded by the WF011 lint (a container state must be reachable only behind a
+same-scope agent that mints the container) and validation (`container: true`
+requires `sharedContainer` + `mode: docker`). A deterministic state should be
 able to run its command array _inside the workflow's shared container_ instead of
 host-side. The plumbing already exists: `DockerManager.exec(containerId, command,
 timeoutMs)` returns `{ exitCode, stdout, stderr }` with a timeout
@@ -166,10 +213,17 @@ and decide the lifecycle rule (simplest: a container-exec deterministic state
 requires its scope's container to already exist, which holds here because the
 `orchestrator` agent always runs first).
 
-**2. A structured deterministic result contract.** A deterministic state should
-be able to emit a structured verdict plus a machine-readable payload, not only
-`passed`/`testCount`/`errors`, and the machine-builder should route deterministic
-states on `when: { verdict: ... }` edges the same way it routes agent states.
+**2. A structured deterministic result contract.** `**[DONE — #299]**` Shipped:
+a `container: true` deterministic state declares a `resultFile`, a helper writes
+`{ verdict, payload?, passed? }` to it, and the machine routes on
+`when: { verdict: ... }` via the existing `__matchesWhen` guard. The reserved
+`result_file_error` verdict covers a missing/malformed file, and the host-side read
+is symlink-safe (`isWithinDirectory` containment, split read/parse errors). This is
+exactly what lets `evaluate`/`record_node` route mechanical outcomes. A
+deterministic state should be able to emit a structured verdict plus a
+machine-readable payload, not only `passed`/`testCount`/`errors`, and the
+machine-builder should route deterministic states on `when: { verdict: ... }` edges
+the same way it routes agent states.
 The verdict is sourced from a result file the helper writes (e.g.
 `evaluation.json`, `record_result.json`) — the orchestrator reads it and routes.
 This is what lets a deterministic `evaluate` distinguish `evaluated` from
@@ -179,7 +233,16 @@ from `needs_repair`, so hard mechanical failures route straight to
 deterministic transitions accept only `guard:`, not `when:`.)
 
 **3. Durable, idempotent domain-state writes** for run state, current-step state,
-nodes, sampler state, indexes, step artifacts, and best snapshots. IronCurtain
+nodes, sampler state, indexes, step artifacts, and best snapshots.
+`**[PARTIAL — #300, #302]**` The vendored `run_state.py` / `file_lock.py` layer
+ships and is exercised: `analysis_record` is the **single** durable engine
+node-write per round (`evolve-db record --analysis-file --parent`), which keeps the
+node count exactly N. **What remains:** the full transaction-log protocol below
+(`transactions/<txn_id>.json`, hash-checked inputs, index/version pairing) is _not_
+implemented, and `evolve-db record` is **not** idempotent by step name (every call
+allocates a fresh id), so crash-then-resume double-commit is currently avoided by
+graph construction (one record call, after analysis), not by an idempotency key —
+record-by-step-id is explicitly deferred. IronCurtain
 checkpoints snapshot FSM/control state, not domain mutations (`types.ts:532-558`),
 so crash-safe domain writes are the workflow engine's responsibility, not the
 runtime's. This is mostly **already built**: the vendored `evolve_core` ships
@@ -201,11 +264,27 @@ deterministic.
 There is no artifact "bridge" gap. The artifact directory already _is_ the
 domain store (`.workflow/`), so surfacing a subtree to gates, prompts, UI, or
 `.vN` versioning is just declaring it as a state `output` — a naming convention,
-not a missing runtime feature. See "Artifact Layout." Packaging the Python
-helpers and their dependencies into the container is a fourth piece of new work,
-covered in "Packaging Helper Scripts and Dependencies."
+not a missing runtime feature. See "Artifact Layout." **[Shipped reality — #300]:**
+the shipped workflow writes its domain store under the engine-native
+`.evolve_runs/main/` layout (hard-coded by `run_state.py`), _not_ under
+`.workflow/`, so nothing is currently declared as an output and the "just declare
+it" surfacing is deferred until the layout is flattened or shimmed. Packaging the
+Python helpers and their dependencies into the container is a fourth piece of new
+work, covered in "Packaging Helper Scripts and Dependencies" `**[DONE — #292]**`
+(see that section for the shipped staging/image mechanism).
 
 ## V1 Strategy
+
+> `**[PARTIAL — #300, #302]**` **Shipped reality:** the v1 split below is built and
+> looping, with two deltas. (a) The orchestrator was implemented as a true
+> **agent hub** (the "Proposed FSM" shape), not a thin controller — the loop is
+> driven by the orchestrator's `design`/`evaluate`/`analyze`/`record`/`complete`
+> verdicts with every specialist returning to it. (b) `record_node` as a separate
+> durable write was **folded into a single `analysis_record` deterministic state**
+> per round (the engine's `record` is not step-idempotent, so the round records
+> exactly once, after analysis). `final_summary` is deferred. A `sample`
+> deterministic state was also added ahead of `researcher` to do the durable
+> parent/cognition read.
 
 The v1 workflow is a native IronCurtain FSM with a clean split between semantic
 agent states and mechanical/transactional deterministic states:
@@ -214,10 +293,13 @@ agent states and mechanical/transactional deterministic states:
   verdicts.
 - `researcher`, `analyzer`, and `final_summary` are agent states that perform
   their scoped semantic work and emit formatted `agent_status` verdicts.
+  (`final_summary` is deferred in the shipped slices.)
 - `evaluate` and `record_node` are **deterministic** states that `exec` packaged
   helpers inside the shared container, capture exit code / stdout / stderr, and
   emit a structured result verdict the machine routes on. The evaluator never
-  runs on the host and is never driven by an LLM.
+  runs on the host and is never driven by an LLM. (Shipped: `evaluate` plus a
+  `sample` and an `analysis_record` deterministic state; `record_node` collapsed
+  into `analysis_record`.)
 - Other deterministic states may perform mechanical checks (run-spec
   normalization, candidate manifest validation, summary generation). They do not
   decide the next research direction.
@@ -233,8 +315,9 @@ and state handoffs use `.workflow/` artifacts. It is not just `python main.py`
 wrapped in a shell.
 
 The v1 candidate scope is **single-file**: each node materializes one complete
-candidate file at `steps/<step_id>/code`. Multi-file evolution is a later data
-model extension requiring candidate manifests, per-file hashes, diff storage,
+candidate file at `steps/<step_id>/code`. `**[DONE — #300, #302]**` Shipped as
+designed (full-file emit; diff-apply deferred). Multi-file evolution is a later
+data model extension requiring candidate manifests, per-file hashes, diff storage,
 restore behavior, and best-snapshot semantics.
 
 ## Current ASI-Evolve Model
@@ -290,6 +373,25 @@ instead of relying on an agent to manually drive wrapper commands.
 | Skill preflight approval        | `preflight_review` human gate                                                                        |
 
 ## Proposed FSM
+
+> `**[PARTIAL — #302]**` **Shipped FSM (`src/workflow/workflows/evolve/workflow.yaml`).**
+> The orchestrator-hub shape below is built and looping. Differences from the
+> diagram, all deliberate deferrals (see `evolve-multi-round-slice.md` §11, §15):
+> the four human gates (`preflight_review`, `human_escalation`, `final_summary`,
+> `final_review`) are **not** present — the shipped graph is
+> `preflight → orchestrator (hub) → {sample → researcher, evaluate, analyzer,
+> analysis_record} → done | failed`. `seed_initial` is collapsed (round 1 just
+> samples an empty DB → `parent: null`). The orchestrator's `escalate` and every
+> deterministic hard-failure (`evaluator_blocked`, `sample_error`, `needs_repair`,
+> `result_file_error`) route to a terminal `failed` instead of `human_escalation`,
+> and `complete` routes straight to `done` instead of through `final_summary`/
+> `final_review`. Approval is still _enforced_ at the helper layer
+> (`require_evolve_ready`); only the human-in-the-loop UI gates are deferred. A
+> `sample` deterministic state (greedy parent + cognition retrieval) precedes
+> `researcher`, and the single durable node-write is `analysis_record` (the
+> diagram's `record_node`, renamed and made the one-write-per-round state). The
+> `settings.maxRounds` + `isRoundLimitReached` guard is the terminal-safety
+> backstop for a wedged hub; the real round budget lives in `run_spec.yaml`.
 
 The workflow should follow the same agent-driven, verdict-routed model as
 `vuln-discovery`, with an `orchestrator` hub at its center. An `orchestrator`
@@ -357,7 +459,9 @@ failures straight to `human_escalation` without spending an orchestrator turn.
 
 ### State Responsibilities
 
-`preflight` (`agent`)
+`preflight` (`agent`) `**[DONE — #300, #302]**` (writes `.evolve_runs/main/run_spec.yaml`
+not `.workflow/run_spec.yaml`; also authors `cognition_seed.md`; sets
+`approval.confirmed=true`)
 : Reads the task description and workspace. Produces
 `.workflow/run_spec.yaml` and `.workflow/preflight_summary.md`.
 It must specify objective, core score, secondary metrics, evaluator command or
@@ -366,13 +470,17 @@ single-file candidate path, sampling algorithm, cognition source mode, and
 round budget. It must also keep a machine-readable
 `approval.confirmed=false` field until explicit human approval.
 
-`preflight_review` (`human_gate`)
+`preflight_review` (`human_gate`) `**[PENDING — deferred to the human-surface slice]**`
+(not in the shipped graph; approval is enforced at the helper layer via
+`require_evolve_ready`, and `preflight` sets `approval.confirmed=true`)
 : Presents the run spec and summary. Approval is required before any candidate
 mutation or evaluator execution. Approval must be reflected in domain state by
 an orchestrator-controlled update that flips `approval.confirmed=true`; helpers
 must reject mutating or evaluator commands while this flag is false.
 
-`orchestrator` (`agent`)
+`orchestrator` (`agent`) `**[DONE — #302]**` (built as the agent hub; reads
+`run_spec.yaml` + `database_data/nodes.json` to derive `done_rounds` vs
+`max_rounds`; emits `design`/`evaluate`/`analyze`/`record`/`complete`/`escalate`)
 : The central router. It reads `.workflow/run_state.json`,
 `round_log.jsonl`, database summaries, best-node metadata, and the prior
 state's output. It chooses the next state by emitting a verdict such as
@@ -380,7 +488,9 @@ state's output. It chooses the next state by emitting a verdict such as
 `escalate`. It also writes a concise directive for the next specialist state,
 mirroring `vuln-discovery`'s "Directive for next agent" pattern.
 
-`seed_initial` (`agent`)
+`seed_initial` (`agent`) `**[PENDING — deferred]**` (collapsed: round 1 samples an
+empty DB → `parent: null`, and the normal `researcher` writes the first candidate;
+no separate baseline-seeding state ships)
 : If an initial candidate exists, materializes it into
 `steps/step_0000_initial/code` and returns to `orchestrator`, which then
 dispatches the normal deterministic `evaluate` and `record_node` states for it —
@@ -389,7 +499,17 @@ candidates. If no initial candidate exists, it records an empty database and
 continues. It may be split into `seed_initial` and `analyze_initial` if the
 baseline node should receive an LLM analysis in v1.
 
-`researcher` (`agent`)
+`sample` (`deterministic`, runs in the shared container) `**[DONE — #302]**` (new
+state, not in the original responsibilities list; precedes `researcher`)
+: The round's single "read durable state" boundary. Runs `evolve-db sample`
+(greedy parent) **and** `evolve-cognition search` (vector retrieval), seeds
+cognition on first entry, allocates the per-round `step_name`, and merges
+everything into `current/context.json`. Emits `sampled` (→ `researcher`) or a
+hard-failure verdict (→ `failed`).
+
+`researcher` (`agent`) `**[DONE — #302]**` (sampling/cognition were moved out to the
+deterministic `sample` state; `researcher` reads `current/context.json` and emits a
+full candidate file; diff-apply deferred)
 : Reads the orchestrator directive, run spec, sampled context, retrieved
 cognition, and candidate parent code. Sampling and cognition retrieval can be
 performed by durable evolve wrappers at the start of this state, with outputs
@@ -399,7 +519,9 @@ and code under the current step directory. The prompt should support diff and
 full-rewrite modes, but final materialized code should always be emitted as a
 complete candidate file. It returns to `orchestrator` after writing artifacts.
 
-`evaluate` (`deterministic`, runs in the shared container)
+`evaluate` (`deterministic`, runs in the shared container) `**[DONE — #300, #302]**`
+(per-round step/code resolved from `current/` via `--*-from-current` flags;
+verdicts `evaluated`/`evaluator_blocked`/`result_file_error`)
 : `exec`s the packaged evaluator helper inside the workflow's shared container.
 The helper reads `steps/<step_id>/code`, runs the configured evaluator with the
 configured timeout, captures stdout/stderr into `eval.stdout` / `eval.stderr`,
@@ -412,14 +534,20 @@ It emits `evaluated` on success (→ `orchestrator`, which decides whether to
 analyze, redesign, escalate, or stop) or `evaluator_blocked` on a missing score,
 timeout, or malformed result (→ `human_escalation`).
 
-`analyzer` (`agent`)
+`analyzer` (`agent`) `**[DONE — #302]**` (writes `current/analysis.md`; returns to
+`orchestrator` unconditionally — its verdict is informational, not a routing
+verdict; the lesson is persisted onto the node by `analysis_record`)
 : Reads candidate code, normalized evaluator results, task description, and the
 best sampled node. Writes `analysis.md` and a short structured verdict such as
 `analyzed`, `retry_analysis`, or `escalate`. The next route still goes
 through `orchestrator`; the analyzer's verdict is evidence for the
 orchestrator, not direct host steering.
 
-`record_node` (`deterministic`, runs in the shared container)
+`record_node` (`deterministic`, runs in the shared container) `**[PARTIAL — #302,
+shipped as `analysis_record`]**` (renamed `analysis_record`; the **single** durable
+`evolve-db record --analysis-file --parent` per round; the full transaction
+protocol below is not implemented, and `needs_repair` is detected from the helper
+exit/verdict, not a transaction-log audit)
 : `exec`s the transactional record helper, which creates the durable node record,
 updates embeddings/vector index, updates sampler state, appends round-log entries,
 and updates `.workflow/best/` when the node improves the best score. Atomicity is
@@ -430,22 +558,36 @@ is not enough for this state. It emits `recorded` on a clean commit
 (→ `orchestrator`) or `needs_repair` when it detects a partial or inconsistent
 prior commit (→ `human_escalation`).
 
-`human_escalation` (`human_gate`)
+`human_escalation` (`human_gate`) `**[PENDING — deferred]**` (the shipped graph
+routes `escalate` and all deterministic hard-failures to a terminal `failed`
+instead)
 : Used for evaluator failures, ambiguous evaluator contracts, repeated invalid
 candidate generation, noisy metrics, exhausted mutation scope, or required
 run-spec changes.
 
-`final_summary` (`agent`)
+`final_summary` (`agent`) `**[PENDING — deferred]**` (the orchestrator's `complete`
+routes straight to `done`)
 : Produces a human-readable experiment summary, best candidate report, lineage
 notes, and recommended next steps.
 
-`final_review` (`human_gate`)
+`final_review` (`human_gate`) `**[PENDING — deferred]**`
 : Lets the user accept the final summary or force additional rounds/revisions.
 
-`done` and `aborted` (`terminal`)
+`done` and `aborted` (`terminal`) `**[DONE — #300; partial: `failed`, not `aborted`]**`
+(the shipped failure terminal is named `failed`; `aborted` as a distinct
+human-abort terminal arrives with the human gates)
 : End states.
 
 ## Transitions and Verdicts
+
+> `**[DONE — #302]**` The two-verdict-source model below is implemented as
+> described. Shipped verdict set: orchestrator emits
+> `design`/`evaluate`/`analyze`/`record`/`complete`/`escalate` (no `seed_initial`);
+> `sample` emits `sampled`/`sample_error`/`result_file_error`; `evaluate` emits
+> `evaluated`/`evaluator_blocked`/`result_file_error`; `analysis_record` emits
+> `recorded`/`needs_repair`/`result_file_error`; `researcher`/`analyzer` return
+> unconditionally (informational verdict). Human-gate events are not yet exercised
+> (gates deferred).
 
 The workflow uses two verdict sources. **Agent states** emit a fenced
 `agent_status` YAML block: each agent prompt receives the valid verdict values
@@ -670,6 +812,16 @@ Cognition requirements:
 
 Embedding/index implementation:
 
+> `**[PARTIAL — #300, #302]**` Shipped on **Tier 0**: `evolve_core` runs in the
+> container on numpy + PyYAML with the hash-token embedding and brute-force pickle
+> index (no FAISS / sentence-transformers). `greedy` is the only wired sampler
+> (deterministic — `ucb1`/`random`/`island` are deferred behind a seeding story).
+> Cognition is seeded at `preflight` (text) + embedded in-container on `sample`'s
+> first entry, and retrieved each round. **Determinism caveat:** the Tier-0
+> hash-token retrieval is reproducible only because `PYTHONHASHSEED=0` is pinned in
+> the bridge subprocess (#302), and it is a lower-quality retrieval policy than
+> FAISS — not silently equivalent. Tier 1 (FAISS) is deferred.
+
 - The storage/sampler/index code is the packaged `evolve_core` Python, run in the
   container by deterministic states (see "Packaging Helper Scripts and
   Dependencies"). A TypeScript port is no longer required to "avoid Python deps" —
@@ -686,6 +838,14 @@ Embedding/index implementation:
   raises retrieval quality but is not required for a functional v1.
 
 ## Evaluator Execution Model
+
+> `**[DONE — #300, #302]**` The `evaluate` deterministic state runs the configured
+> evaluator via `docker exec` into the `--network=none` shared container, captures
+> stdout/stderr/exit code, normalizes results, and treats a missing scalar score as
+> `evaluator_blocked`. **Open gap confirmed still open:** evaluator write-scoping to
+> `steps/<step_id>/` is _not_ enforced — the whole `/workspace` is mounted RW. The
+> optional LLM judge is not implemented (it would be a separate `judge_candidate`
+> agent state if added).
 
 The evaluator is the primary trust boundary. The run spec should define:
 
@@ -729,6 +889,15 @@ such as `judge_candidate`, that writes a judge score and rationale which
 `record_node` combines with `eval_score`.
 
 ## Packaging Helper Scripts and Dependencies
+
+> `**[DONE — #292 (mechanism), #300 (consumer)]**` Script packaging shipped: a
+> workflow's `scripts/` are staged read-only at `/workflow-scripts` for the whole
+> run (not filtered per agent-state `skills:`), and a per-workflow image is baked
+> from `requirements.txt` at build time with the build-hash extended to include the
+> manifest. The `evolve` workflow ships **Tier 0** (`numpy` + `pyyaml`); deterministic
+> states invoke `/opt/workflow-venv/bin/python /workflow-scripts/evolve_result.py ...`.
+> Tier 1 (FAISS image layer) and Tier 2 (vendored wheels) remain as designed —
+> deferred / avoided respectively.
 
 The deterministic states `exec` Python helpers (the `evolve_core` engine and its
 CLI wrappers) inside the shared container. Two things must therefore travel with
@@ -961,36 +1130,58 @@ The native workflow should make that risk explicit:
 
 ## Migration Plan
 
+> **Roadmap status (2026-06-16).** Items 1–3 and 5 are fully done; 6–8 are partially
+> done (FSM loops but human gates / `final_summary` / `seed_initial` deferred; the
+> transaction protocol is not built; the demo is a tiny in-test fixture, not circle
+> packing); 4 is deviated (engine-native `.evolve_runs/` layout shipped instead of
+> the `.workflow/` schema) and 9 is not started. The single recommended next
+> increment is the **human-surface slice** (gates `preflight_review` /
+> `human_escalation` / `final_summary` / `final_review`); see the report.
+
 Runtime work (general; lands first because the workflow depends on it):
 
-1. Containerized deterministic execution: thread the workflow id / container scope
+1. `**[DONE — #292]**` Containerized deterministic execution: thread the workflow id / container scope
    into the deterministic execution path and run command arrays via
    `DockerManager.exec` against the scope's bundle, requiring that the container
    already exist.
-2. Structured deterministic result contract: let deterministic states emit a
+2. `**[DONE — #299]**` Structured deterministic result contract: let deterministic states emit a
    verdict + payload via a result file and route on `when: { verdict: ... }`.
-3. Workflow script packaging: stage a workflow's `scripts/` into the container
+3. `**[DONE — #292]**` Workflow script packaging: stage a workflow's `scripts/` into the container
    unconditionally for the run, and extend the image build-hash to include a
    workflow's dependency manifest so a per-workflow image layer rebuilds on change
    (Tier 1). Tier 0 (base-image deps + lexical fallback) needs no image change.
 
 Workflow work:
 
-4. Define the workspace `.workflow/` schema and decide which subtrees are
+4. `**[PARTIAL — #300; deviated]**` Define the workspace `.workflow/` schema and decide which subtrees are
    _declared_ as top-level logical artifact outputs (versioning, gates, UI) versus
-   left as unmanaged workspace files.
-5. Package the `evolve` engine: move `evolve_core` + CLI wrappers into the
+   left as unmanaged workspace files. _Shipped on the engine-native_
+   `.evolve_runs/main/` _layout (hard-coded by_ `run_state.py`_); nothing is
+   declared as an output yet, so the_ `.workflow/` _flattening + declared outputs
+   are still pending (blocks item 9)._
+5. `**[DONE — #300]**` Package the `evolve` engine: move `evolve_core` + CLI wrappers into the
    workflow's `scripts/`, and the prompt/reference content into a de-sequenced
    `evolve` skill. Port or wrap the storage/sampler code rather than the standalone
-   `pipeline/` orchestrator; document any algorithmic differences.
-6. Build the FSM: `preflight` → gate → `orchestrator` hub with `researcher` /
+   `pipeline/` orchestrator; document any algorithmic differences. _Engine vendored
+   byte-verbatim with a thin_ `evolve_result.py` _bridge; prompts inlined in
+   `workflow.yaml` rather than a separate skill dir._
+6. `**[PARTIAL — #300, #302]**` Build the FSM: `preflight` → gate → `orchestrator` hub with `researcher` /
    `analyzer` / `final_summary` agent states and `evaluate` / `record_node`
-   deterministic states, plus the human gates and a terminal-safety guard.
-7. Implement the durable-write / transaction helpers behind `record_node` and
-   `evaluate` (see "Run State Persistence").
-8. Migrate one demo, preferably circle packing, into a single-file fixture.
-9. Add UI summary artifacts for preflight, current best, round log, and evaluator
-   failure bundles.
+   deterministic states, plus the human gates and a terminal-safety guard. _Hub +
+   loop + terminal-safety guard built; the four **human gates** and_ `final_summary`
+   _/ `seed_initial` are **deferred** —_ `record_node` _shipped as_ `analysis_record`
+   _and a_ `sample` _state was added._
+7. `**[PARTIAL — #300, #302]**` Implement the durable-write / transaction helpers behind `record_node` and
+   `evaluate` (see "Run State Persistence"). _Single durable write per round
+   (`analysis_record`) + the vendored_ `run_state.py`/`file_lock.py` _layer ship;
+   the full transaction-log protocol and record-by-step-id idempotency are not
+   built._
+8. `**[PARTIAL — #300, #302]**` Migrate one demo, preferably circle packing, into a single-file fixture.
+   _The gates use a tiny in-test_ `solve(xs)→6` _fixture; a shipped demo workflow
+   input (circle packing or similar) is still pending._
+9. `**[PENDING]**` Add UI summary artifacts for preflight, current best, round log, and evaluator
+   failure bundles. _Blocked on item 4 (the engine-native layout means these need a
+   copy-step or path shim before they can be declared outputs)._
 
 Later (post-v1):
 
@@ -1004,6 +1195,19 @@ Later (post-v1):
 
 ## Testing Plan
 
+> **Shipped test coverage (2026-06-16).** The runtime-capability tests are **done**
+> (#292 `deterministic-eval-smoke` + `#299` `deterministic-verdict-smoke` real-Docker
+> gates, plus `orchestrator-deterministic`/`machine-builder`/`validate`/`lint` unit
+> suites). The bridge unit suite (`test/workflow/evolve-result-bridge.test.ts`, 14
+> cases incl. the PYTHONHASHSEED determinism check) and the two real-Docker
+> integration gates (`evolve-single-round.integration.test.ts`,
+> `evolve-multi-round.integration.test.ts`, 5/5 incl. three-rounds-to-done +
+> byte-identical vector store) are **done**. **Still pending:** the gate-approval /
+> human-gate tests (deferred with the gates), the resume-after-`evaluate` /
+> resume-after-`record_node` / partial-sampler-update resume tests, the write-scoping
+> security test (gap still open), and the `island`/`ucb1` sampler tests (samplers
+> deferred). Inline markers below flag each.
+
 Unit tests:
 
 - Run-spec normalization and validation.
@@ -1015,7 +1219,8 @@ Unit tests:
 - Evaluator result parsing, timeout handling, and failure normalization.
 - `record_node` idempotency.
 
-Runtime tests (the new capabilities):
+Runtime tests (the new capabilities): `**[DONE — #292, #299]**` (the verdict edges
+shipped routing to `failed`, not `human_escalation`, since gates are deferred)
 
 - A deterministic state runs its command array inside the shared container via
   `DockerManager.exec`, capturing exit code, stdout, and stderr.
@@ -1041,30 +1246,32 @@ Workflow/linter tests:
 - Round-budget stop path reaches final summary.
 - Repeated invalid candidate path reaches human escalation.
 
-Integration tests:
+Integration tests: `**[PARTIAL — #300, #302]**`
 
-- Tiny evaluator that scores a one-function Python candidate.
-- Evaluator runs in the shared container under `--network=none` and cannot reach
+- `**[DONE]**` Tiny evaluator that scores a one-function Python candidate.
+- `**[DONE]**` Evaluator runs in the shared container under `--network=none` and cannot reach
   the network.
-- Initial-program seeding.
-- Resume after `evaluate` before `record_node`.
-- Resume after `record_node`.
-- Resume after partial sampler/index/best-snapshot updates.
-- Best snapshot update.
-- Human preflight rejection and revision.
-- Human final summary force-revision.
+- `**[PARTIAL]**` Initial-program seeding. _(round-1 empty-DB sample shipped;_
+  `seed_initial` _baseline path deferred.)_
+- `**[PENDING]**` Resume after `evaluate` before `record_node`. _(resume-safety designed —
+  orchestrator recomputes from durable `nodes.json` — but no resume integration test ships.)_
+- `**[PENDING]**` Resume after `record_node`.
+- `**[PENDING]**` Resume after partial sampler/index/best-snapshot updates. _(transaction protocol not built.)_
+- `**[DONE]**` Best snapshot update. _(asserted non-decreasing across rounds in the multi-round gate.)_
+- `**[PENDING]**` Human preflight rejection and revision. _(gate deferred.)_
+- `**[PENDING]**` Human final summary force-revision. _(gate deferred.)_
 
-Security tests:
+Security tests: `**[PARTIAL — #292, #299, #300, #302]**`
 
-- Evaluator cannot reach the network (`--network=none` container).
-- Timeout via `exec` terminates the command; the container's `--init` reaps
+- `**[DONE]**` Evaluator cannot reach the network (`--network=none` container).
+- `**[DONE]**` Timeout via `exec` terminates the command; the container's `--init` reaps
   orphaned children.
-- Malformed `results.json` is captured as a failed evaluation (`evaluator_blocked`).
-- Evaluator and helper execution happen inside the shared container, never on the
+- `**[DONE]**` Malformed `results.json` is captured as a failed evaluation (`evaluator_blocked`).
+- `**[DONE]**` Evaluator and helper execution happen inside the shared container, never on the
   host — no host-side `execFile` for any untrusted or domain-mutating command.
-- No dependency is fetched from the network at run time; the dependency set is
+- `**[DONE]**` No dependency is fetched from the network at run time; the dependency set is
   fixed at image build.
-- (Open gap) Evaluator write-scoping to `steps/<step_id>/` is not yet enforced; add
+- `**[PENDING — gap still open]**` (Open gap) Evaluator write-scoping to `steps/<step_id>/` is not yet enforced; add
   a test once the sub-mount / hash-check mechanism exists.
 
 ## Risks
@@ -1100,26 +1307,52 @@ Resolved by the 2026-06-15 revision (kept for traceability):
 
 - **Engine language** — Python helpers packaged with the workflow and run in the
   container via `docker exec`; a TypeScript port is optional, not required.
+  `**[CONFIRMED in shipping — #300]**`
 - **`sharedContainer`** — yes, the workflow runs in shared-container mode;
   disposable-per-eval-step containers remain a possible future hardening, not v1.
+  `**[CONFIRMED in shipping — #300]**`
 - **Which helpers are deterministic** — `evaluate` and `record_node` in v1, run as
-  container-exec deterministic states; more may follow.
+  container-exec deterministic states; more may follow. `**[CONFIRMED + extended —
+  #302]**` _Shipped as_ `sample` _,_ `evaluate` _, and_ `analysis_record`
+  _(`record_node` folded in) — three container-deterministic states, not two._
 - **FAISS vs. lexical** — lexical retrieval (Tier 0) is the v1 default; FAISS /
   sentence-transformers move onto a Tier 1 workflow image layer.
+  `**[CONFIRMED in shipping — #300, #302]**` _Tier 0 ships; Tier 1 deferred._
+
+Resolved by the shipped slices (#300 / #302):
+
+- **Loop mechanism: agent hub vs. deterministic controller** — `**[RESOLVED — #302]**`
+  Built as the parent-design `orchestrator` **agent hub** (signed off 2026-06-16),
+  with `isRoundLimitReached` + `settings.maxRounds` as the wedge backstop, not a
+  deterministic round controller.
+- **Sampler for v1: `greedy` vs. `ucb1`** — `**[RESOLVED — #302]**` `greedy`
+  (deterministic; satisfies the parent-linkage gate without a seeding story).
+  `ucb1`/`random`/`island` deferred behind a deterministic-seed mechanism.
+- **Single durable node-write placement** — `**[RESOLVED — #302]**` Exactly one
+  `evolve-db record` per round, in `analysis_record`, after the analyzer's lesson
+  exists (the engine is not step-idempotent, so recording once avoids a duplicate
+  node). Record-by-step-id idempotency remains the long-term fix (deferred).
+- **Determinism of the Tier-0 hash-token embedding** — `**[RESOLVED — #302]**`
+  Pinned via `PYTHONHASHSEED=0` in the **bridge subprocess env**, not by patching
+  the vendored engine; `created_at` normalized at comparison time.
 
 Still open:
 
 - Canonical? no: Should `seed_initial` include an Analyzer pass for the baseline
   node, matching standalone ASI-Evolve, or should initial analysis be optional
-  to reduce startup cost?
+  to reduce startup cost? _(Moot in the shipped slices —_ `seed_initial` _is
+  deferred and round 1 just samples an empty DB; revisit when the baseline-seeding
+  state is added.)_
 - Canonical? no: Should LLM judge scoring be included in v1 as a separate agent
-  state, or deferred until evaluator-only scoring is stable?
+  state, or deferred until evaluator-only scoring is stable? _(Shipped slices
+  defer it — evaluator-only scoring; still open as a v-next decision.)_
 - Canonical? no: Should cognition updates during the run require a human gate,
   helper validation only, or unrestricted Analyzer proposals?
 - Canonical? no: What mechanism enforces evaluator write-scoping to
   `steps/<step_id>/` (a step-dir sub-mount, copy-in/out, or post-hoc hash check),
   and is it required for v1 or acceptable as a tracked gap given `--network=none`
-  already denies egress?
+  already denies egress? _(Shipped slices accept it as a **tracked gap** — the whole
+  `/workspace` is mounted RW; the enforcement mechanism is still unchosen and open.)_
 - Canonical? no: Should the workflow support custom samplers in v1? If yes, what
   policy boundary applies to loading sampler code?
 - Canonical? no: How should the web UI render long-running experiment tables:
@@ -1129,10 +1362,14 @@ Still open:
   spec in place?
 - Canonical? no: What is the canonical stop-condition language for noisy
   evaluators: fixed rounds, patience, statistical confidence, or user-defined
-  predicates?
+  predicates? _(v1 ships `max_rounds` as the enforced terminator with `patience`
+  carried in the run spec but advisory; the canonical language is still open.)_
 - Canonical? no: Should `database/`, `cognition/`, and `best/` be unversioned
   workflow artifacts by default, or should IronCurtain artifact versioning be
-  enhanced for large append-only stores?
+  enhanced for large append-only stores? _(In the shipped slices these live under
+  the engine-native `.evolve_runs/` tree and are **undeclared** — never
+  `.vN`-snapshotted — which sidesteps the question for now; the versioning-vs-shim
+  decision returns with item 4 / item 9.)_
 - Canonical? no: For post-v1 multi-file evolution, should the candidate mutation
   scope apply to a manifest of generated files, workspace patches, or isolated
   candidate directories?
