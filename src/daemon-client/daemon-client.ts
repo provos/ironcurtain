@@ -15,6 +15,10 @@
  *  - RPC-level errors resolve as `{ ok:false, ... }` — callers branch on the
  *    discriminant rather than try/catch.
  *  - Transport failures (socket closed, connect/request timeout) reject.
+ *  - `onClose()` fires at most once for an *involuntary* disconnect (remote or
+ *    network close, or a post-handshake error). A deliberate `close()` does NOT
+ *    fire it — that is how listeners distinguish "the daemon went away" from
+ *    "we tore down on purpose".
  */
 
 import { readFileSync } from 'node:fs';
@@ -50,6 +54,16 @@ export interface DaemonEvent {
 /** Unsubscribe handle returned by {@link DaemonClient.onEvent}. */
 export type Unsubscribe = () => void;
 
+/** Delivered to onClose listeners when the connection drops involuntarily. */
+export interface DaemonCloseInfo {
+  /** WS close code when available. */
+  readonly code?: number;
+  /** Human-friendly: `lastError.message`, else `daemon connection closed (code N)`. */
+  readonly reason: string;
+  /** The transport error that preceded close, if any. */
+  readonly error?: Error;
+}
+
 export interface DaemonClientOptions {
   /** Override discovery (tests, alternate endpoints). */
   readonly endpoint?: DaemonEndpoint;
@@ -71,6 +85,10 @@ export interface DaemonClientOptions {
  *    closed, timeout) DO reject.
  *  - `onEvent()` delivers every push frame (`{event,payload,seq}`) to the
  *    listener until unsubscribed. Listeners never see response frames.
+ *  - `onClose()` fires AT MOST ONCE, and ONLY for an involuntary disconnect
+ *    (remote/network close or a post-handshake error). It does NOT fire when the
+ *    caller invokes `close()` (deliberate teardown). After it fires, or after
+ *    `close()`, no further `onEvent`/`onClose` callbacks occur.
  *  - `close()` is idempotent and unblocks any in-flight `call()` with a
  *    rejection. Safe to call from a `finally`.
  *  - The client never writes to stdout/stderr; all presentation is the caller's.
@@ -79,6 +97,13 @@ export interface DaemonClient {
   connect(): Promise<void>;
   call<T = unknown>(method: MethodName, params?: Record<string, unknown>): Promise<RpcResult<T>>;
   onEvent(listener: (e: DaemonEvent) => void): Unsubscribe;
+  /**
+   * Registers a listener for an *involuntary* disconnect. Fires AT MOST ONCE,
+   * and ONLY for a remote/network close or a post-handshake transport error —
+   * never for a deliberate {@link DaemonClient.close}. Returns an Unsubscribe
+   * that removes the listener.
+   */
+  onClose(listener: (info: DaemonCloseInfo) => void): Unsubscribe;
   close(): Promise<void>;
 }
 
@@ -186,8 +211,11 @@ class WebSocketDaemonClient implements DaemonClient {
   private ws: WebSocket | undefined;
   private readonly pending = new Map<string, PendingCall>();
   private readonly listeners = new Set<(e: DaemonEvent) => void>();
+  private readonly closeListeners = new Set<(info: DaemonCloseInfo) => void>();
   private idCounter = 0;
   private closed = false;
+  private lastError: Error | undefined;
+  private closeNotified = false;
 
   constructor(
     private readonly endpoint: DaemonEndpoint,
@@ -271,12 +299,24 @@ class WebSocketDaemonClient implements DaemonClient {
     };
   }
 
+  onClose(listener: (info: DaemonCloseInfo) => void): Unsubscribe {
+    this.closeListeners.add(listener);
+    return () => {
+      this.closeListeners.delete(listener);
+    };
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
 
     this.rejectAllPending(new Error('DaemonClient closed'));
     this.listeners.clear();
+    // Deliberate teardown: `this.closed = true` (set above) is already in place
+    // before `ws.close()` below, so the steady-state 'close' handler's
+    // `!this.closed` guard suppresses any spurious onClose. Clearing here also
+    // releases references for callers that never disconnect involuntarily.
+    this.closeListeners.clear();
 
     const ws = this.ws;
     if (!ws) return;
@@ -294,11 +334,14 @@ class WebSocketDaemonClient implements DaemonClient {
 
   private attachSteadyStateHandlers(ws: WebSocket): void {
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => this.handleMessage(data));
-    ws.on('close', () => this.handleClose());
+    ws.on('close', (code: number) => this.handleClose(code));
     // Post-handshake errors surface via the 'close' that follows; rejecting
-    // pending calls there keeps a single drain path. The no-op listener
-    // prevents an unhandled 'error' from crashing the process.
-    ws.on('error', () => {});
+    // pending calls there keeps a single drain path. Capturing the error here
+    // (instead of a no-op) still prevents an unhandled 'error' from crashing the
+    // process, while preserving its message for the onClose info.
+    ws.on('error', (err: Error) => {
+      this.lastError = err;
+    });
   }
 
   private handleMessage(data: Buffer | ArrayBuffer | Buffer[]): void {
@@ -341,8 +384,31 @@ class WebSocketDaemonClient implements DaemonClient {
     }
   }
 
-  private handleClose(): void {
+  private handleClose(code?: number): void {
     this.rejectAllPending(new Error('Daemon connection closed'));
+
+    // Only fire onClose for an *involuntary* disconnect. `close()` sets
+    // `this.closed = true` before closing the socket, so a deliberate teardown
+    // is suppressed here. Fire at most once via the `closeNotified` latch.
+    if (this.closed || this.closeNotified) return;
+    this.closeNotified = true;
+
+    const info: DaemonCloseInfo = {
+      code,
+      reason: this.lastError?.message ?? `daemon connection closed${code !== undefined ? ` (code ${code})` : ''}`,
+      ...(this.lastError ? { error: this.lastError } : {}),
+    };
+    this.fanOutClose(info);
+  }
+
+  private fanOutClose(info: DaemonCloseInfo): void {
+    for (const listener of this.closeListeners) {
+      try {
+        listener(info);
+      } catch {
+        // A misbehaving listener must not break delivery to the others.
+      }
+    }
   }
 
   private rejectAllPending(err: Error): void {

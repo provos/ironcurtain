@@ -101,6 +101,13 @@ class StubDaemonServer {
     }
   }
 
+  /** Cleanly closes every connected socket with a code (graceful remote close). */
+  closeConnections(code: number, reason = ''): void {
+    for (const ws of this.wss.clients) {
+      ws.close(code, reason);
+    }
+  }
+
   async close(): Promise<void> {
     for (const ws of this.wss.clients) ws.terminate();
     await new Promise<void>((res) => this.wss.close(() => res()));
@@ -257,6 +264,86 @@ describe('DaemonClient', () => {
       const result = await client.call('status');
       expect(result.ok).toBe(true);
       expect(events).toEqual([]);
+    });
+  });
+
+  describe('onClose', () => {
+    it('fires with a reason and code when the server closes the socket involuntarily', async () => {
+      const client = makeClient();
+      await client.connect();
+
+      const closes: Array<{ reason: string; code: number | undefined }> = [];
+      client.onClose((info) => closes.push({ reason: info.reason, code: info.code }));
+
+      server?.closeConnections(4002, 'gone');
+      await waitFor(() => closes.length === 1);
+
+      expect(closes[0].code).toBe(4002);
+      expect(closes[0].reason).toContain('4002');
+    });
+
+    it('does NOT fire when the caller invokes close()', async () => {
+      const client = makeClient();
+      await client.connect();
+
+      let fired = false;
+      client.onClose(() => {
+        fired = true;
+      });
+
+      await client.close();
+      // Give any stray 'close' event a chance to land before asserting.
+      await new Promise((r) => setTimeout(r, 30));
+      expect(fired).toBe(false);
+    });
+
+    it('fires AT MOST ONCE', async () => {
+      const client = makeClient();
+      await client.connect();
+
+      let count = 0;
+      client.onClose(() => {
+        count += 1;
+      });
+
+      // A graceful close followed by an abrupt drop must still notify only once.
+      server?.closeConnections(4003, 'first');
+      await waitFor(() => count === 1);
+      server?.dropConnections();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(count).toBe(1);
+    });
+
+    it('stops delivery after the Unsubscribe returned by onClose', async () => {
+      const client = makeClient();
+      await client.connect();
+
+      let fired = false;
+      const unsubscribe = client.onClose(() => {
+        fired = true;
+      });
+      unsubscribe();
+
+      server?.closeConnections(4004, 'gone');
+      await new Promise((r) => setTimeout(r, 30));
+      expect(fired).toBe(false);
+    });
+
+    it('flows a captured transport error message into the reason', async () => {
+      const client = makeClient();
+      await client.connect();
+
+      const reasons: string[] = [];
+      client.onClose((info) => reasons.push(info.reason));
+
+      // Inject an 'error' on the live socket, then drop it. The client's
+      // steady-state handler captures the error message for the close info.
+      const internal = client as unknown as { ws?: { emit(event: string, err: Error): void } };
+      internal.ws?.emit('error', new Error('boom-transport'));
+      server?.dropConnections();
+
+      await waitFor(() => reasons.length === 1);
+      expect(reasons[0]).toBe('boom-transport');
     });
   });
 

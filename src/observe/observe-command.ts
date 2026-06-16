@@ -10,14 +10,16 @@
  * line-oriented renderer.
  */
 
-import { readFileSync } from 'node:fs';
 import chalk from 'chalk';
-import { WebSocket } from 'ws';
 
 import { checkHelp, parseArgsStrict, type CommandSpec } from '../cli-help.js';
-import { getWebUiStatePath } from '../config/paths.js';
+import {
+  createDaemonClient,
+  discoverDaemon,
+  type DaemonClient,
+  type DaemonCloseInfo,
+} from '../daemon-client/daemon-client.js';
 import { renderEventBatch, renderConnected, renderSessionEnded, type RenderOptions } from './observe-renderer.js';
-import { wsDataToString } from '../web-ui/ws-utils.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
 import type { ObserveEventSink } from './observe-tui-types.js';
 import { createObserveTui, type ObserveTui } from './observe-tui.js';
@@ -49,38 +51,6 @@ const observeSpec: CommandSpec = {
     'ironcurtain observe --all --json      # NDJSON output for piping',
   ],
 };
-
-// ---------------------------------------------------------------------------
-// Web UI state (persisted by daemon)
-// ---------------------------------------------------------------------------
-
-interface WebUiState {
-  readonly port: number;
-  readonly host: string;
-  readonly token: string;
-}
-
-/** Reads daemon connection info from the well-known state file. */
-function loadWebUiState(): WebUiState | null {
-  try {
-    const raw = readFileSync(getWebUiStatePath(), 'utf-8');
-    return JSON.parse(raw) as WebUiState;
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// JSON-RPC helpers
-// ---------------------------------------------------------------------------
-
-let rpcIdCounter = 0;
-
-function sendRpc(ws: WebSocket, method: string, params: Record<string, unknown> = {}): string {
-  const id = `observe-${++rpcIdCounter}`;
-  ws.send(JSON.stringify({ id, method, params }));
-  return id;
-}
 
 // ---------------------------------------------------------------------------
 // Plain renderer adapter
@@ -213,52 +183,91 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
     sink = createPlainSink(renderOptions);
   }
 
-  // Load daemon connection info
-  const state = loadWebUiState();
-  if (!state) {
+  // Discover daemon connection info; "no daemon" surfaces identically to before.
+  const endpoint = discoverDaemon();
+  if (!endpoint) {
     tui?.destroy();
-    process.stderr.write(
-      chalk.red('Error: cannot connect to daemon. Is the daemon running with --web-ui?\n') +
-        chalk.dim('Start with: ironcurtain daemon --web-ui\n'),
-    );
+    printConnectionError();
     process.exit(1);
   }
 
-  // Connect to the daemon WebSocket
-  const wsUrl = `ws://${state.host}:${state.port}/ws?token=${state.token}`;
-  const ws = new WebSocket(wsUrl);
+  const client = createDaemonClient({ endpoint });
 
-  await new Promise<void>((resolve, reject) => {
-    let subscribeId: string | null = null;
-    let unsubscribeId: string | null = null;
+  try {
+    await client.connect();
+  } catch {
+    // A connect failure is presentationally identical to "no daemon".
+    tui?.destroy();
+    printConnectionError();
+    process.exit(1);
+  }
+
+  await runObserveSession(client, { label, useTui, tui, sink });
+}
+
+// ---------------------------------------------------------------------------
+// Session lifecycle
+// ---------------------------------------------------------------------------
+
+interface ObserveSessionContext {
+  readonly label: number | undefined;
+  readonly useTui: boolean;
+  readonly tui: ObserveTui | null;
+  readonly sink: ObserveEventSink;
+}
+
+/**
+ * Drives a connected {@link DaemonClient}: subscribes to the token stream,
+ * routes push events to the sink, and tears down on session end, involuntary
+ * disconnect, or Ctrl+C. Resolves exactly once.
+ */
+async function runObserveSession(client: DaemonClient, ctx: ObserveSessionContext): Promise<void> {
+  const { label, useTui, tui, sink } = ctx;
+
+  await new Promise<void>((resolve) => {
     let closing = false;
+    let unsubscribeEvents: (() => void) | null = null;
+    let unsubscribeClose: (() => void) | null = null;
+    let sigHandler: (() => void) | null = null;
 
+    const removeSignalHandlers = () => {
+      if (sigHandler) {
+        process.off('SIGINT', sigHandler);
+        process.off('SIGTERM', sigHandler);
+        sigHandler = null;
+      }
+    };
+
+    // Deliberate teardown: destroy TUI, unsubscribe, then close the client.
+    // `client.close()` is what suppresses any onClose for this self-initiated
+    // disconnect, so connectionLost never fires for our own cleanup.
     const cleanup = () => {
       if (closing) return;
       closing = true;
 
-      // Destroy TUI before unsubscribing (restores terminal state)
+      // Destroy TUI before unsubscribing (restores terminal state).
       tui?.destroy();
+      unsubscribeEvents?.();
+      unsubscribeClose?.();
+      removeSignalHandlers();
 
-      // Unsubscribe before closing
-      if (ws.readyState === WebSocket.OPEN) {
-        if (label !== undefined) {
-          unsubscribeId = sendRpc(ws, 'sessions.unsubscribeTokenStream', { label });
-        } else {
-          unsubscribeId = sendRpc(ws, 'sessions.unsubscribeAllTokenStreams');
-        }
-        // Give a moment for the unsubscribe to send, then close
-        setTimeout(() => {
-          ws.close();
-          resolve();
-        }, 100);
-      } else {
-        resolve();
-      }
+      const unsubscribe =
+        label !== undefined
+          ? client.call('sessions.unsubscribeTokenStream', { label })
+          : client.call('sessions.unsubscribeAllTokenStreams');
+
+      void unsubscribe
+        .catch(() => {
+          /* best-effort: we are tearing down regardless */
+        })
+        .then(() => client.close())
+        .catch(() => {
+          /* close() is idempotent and never throws meaningfully here */
+        })
+        .finally(resolve);
     };
 
-    // Handle Ctrl+C -- only register for plain mode; TUI handles its own signals
-    let sigHandler: (() => void) | null = null;
+    // Handle Ctrl+C -- only register for plain mode; TUI handles its own signals.
     if (!useTui) {
       sigHandler = () => {
         process.stderr.write(chalk.dim('\n'));
@@ -268,82 +277,59 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       process.on('SIGTERM', sigHandler);
     }
 
-    ws.on('open', () => {
-      // Subscribe
-      if (label !== undefined) {
-        subscribeId = sendRpc(ws, 'sessions.subscribeTokenStream', { label });
-      } else {
-        subscribeId = sendRpc(ws, 'sessions.subscribeAllTokenStreams');
-      }
+    unsubscribeEvents = client.onEvent((e) => {
+      handlePushEvent(e.event, e.payload as Record<string, unknown>, sink, label, cleanup);
     });
 
-    ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
-      const text = wsDataToString(data);
-
-      let frame: Record<string, unknown>;
-      try {
-        frame = JSON.parse(text) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-
-      // Response to a request
-      if ('id' in frame && typeof frame.id === 'string') {
-        if (frame.id === subscribeId) {
-          if (frame.ok) {
-            // In TUI mode the text panel shows state; in plain mode write to stderr
-            if (!useTui) {
-              process.stderr.write(renderConnected(label));
-            }
-          } else {
-            const err = frame.error as { message?: string } | undefined;
-            if (!useTui) {
-              process.stderr.write(chalk.red(`Error: ${err?.message ?? 'subscription failed'}\n`));
-            }
-            cleanup();
-          }
-          return;
-        }
-        if (frame.id === unsubscribeId) {
-          // Unsubscribe response -- close handled by timeout
-          return;
-        }
-        return;
-      }
-
-      // Push event
-      if ('event' in frame && typeof frame.event === 'string') {
-        handlePushEvent(frame.event, frame.payload as Record<string, unknown>, sink, label, cleanup);
-      }
-    });
-
-    ws.on('error', (err: Error) => {
-      // Notify the sink of the connection loss
-      sink.connectionLost(err.message);
-      if (tui) {
-        // TUI manages its own 3-second exit timer; do not destroy immediately.
-        // The promise resolves so runObserveCommand returns, but the TUI's
-        // frame loop and stdin keep the event loop alive until destroy() fires.
-        resolve();
-      } else {
-        reject(err);
-      }
-    });
-
-    ws.on('close', (code: number) => {
-      // Remove signal handlers if we registered them (plain mode only)
-      if (sigHandler) {
-        process.off('SIGINT', sigHandler);
-        process.off('SIGTERM', sigHandler);
-      }
-
-      // If not a clean close triggered by our cleanup, notify the sink
-      if (!closing) {
-        sink.connectionLost(`WebSocket closed (code ${code})`);
-        // In TUI mode, the 3-second exit timer handles cleanup
-      }
-
+    unsubscribeClose = client.onClose((info: DaemonCloseInfo) => {
+      // An *involuntary* disconnect (our own cleanup uses client.close(), which
+      // never fires onClose). Mirror the old ws 'error'/'close' behavior.
+      if (closing) return;
+      closing = true;
+      removeSignalHandlers();
+      sink.connectionLost(info.reason);
+      // In TUI mode the TUI's own 3-second exit timer manages shutdown; the
+      // promise resolves so runObserveCommand returns, but the TUI's frame loop
+      // and stdin keep the event loop alive until its destroy() fires.
       resolve();
     });
+
+    void subscribe(client, label, useTui).then((ok) => {
+      if (closing) return;
+      if (ok) {
+        // In TUI mode the text panel shows state; in plain mode write to stderr.
+        if (!useTui) process.stderr.write(renderConnected(label));
+      } else {
+        cleanup();
+      }
+    });
   });
+}
+
+/**
+ * Subscribes to the token stream for `label` (or all sessions). Returns true on
+ * success; on an RPC error, writes the plain-mode error and returns false.
+ */
+async function subscribe(client: DaemonClient, label: number | undefined, useTui: boolean): Promise<boolean> {
+  const result =
+    label !== undefined
+      ? await client.call('sessions.subscribeTokenStream', { label })
+      : await client.call('sessions.subscribeAllTokenStreams');
+
+  if (result.ok) return true;
+
+  // Match the old plain-mode behavior: TUI mode swallows the message (the panel
+  // surfaces state); plain mode prints it. Cleanup is the caller's job.
+  if (!useTui) {
+    process.stderr.write(chalk.red(`Error: ${result.message || 'subscription failed'}\n`));
+  }
+  return false;
+}
+
+/** Prints the shared "cannot connect to daemon" guidance to stderr. */
+function printConnectionError(): void {
+  process.stderr.write(
+    chalk.red('Error: cannot connect to daemon. Is the daemon running with --web-ui?\n') +
+      chalk.dim('Start with: ironcurtain daemon --web-ui\n'),
+  );
 }
