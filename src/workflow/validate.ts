@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { posix as pathPosix, resolve } from 'node:path';
 import { z } from 'zod';
 import { validateSkillName } from '../skills/staging.js';
 import { discoverSkills } from '../skills/discovery.js';
@@ -79,6 +79,10 @@ const deterministicStateSchema = z.object({
   type: z.literal('deterministic'),
   description: z.string().min(1),
   run: z.array(z.array(z.string())),
+  container: z.boolean().optional(),
+  containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  resultFile: z.string().min(1).optional(),
   transitions: z.array(agentTransitionSchema).min(1),
 });
 
@@ -127,7 +131,7 @@ const workflowDefinitionSchema = z.object({
  * dotted-path state-node semantics (e.g., `xstate.done.actor.<stateId>`). */
 const STATE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const AGENT_ONLY_STATE_FIELDS = ['maxVisits', 'containerScope'] as const;
+const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
 
 /**
  * Validates raw-level invariants that would otherwise be lost by Zod's default
@@ -155,7 +159,15 @@ function validateRawInput(raw: unknown): string[] {
 
     if (!isPlainObject(stateValue)) continue;
     const stateType = stateValue.type;
-    if (typeof stateType !== 'string' || stateType === 'agent') continue;
+    if (typeof stateType !== 'string') continue;
+
+    if ('resultFile' in stateValue && stateType !== 'deterministic') {
+      issues.push(
+        `State "${stateId}" (type: ${stateType}) has "resultFile" but that field is only valid on deterministic states.`,
+      );
+    }
+
+    if (stateType === 'agent') continue;
 
     for (const field of AGENT_ONLY_STATE_FIELDS) {
       if (field in stateValue) {
@@ -163,6 +175,12 @@ function validateRawInput(raw: unknown): string[] {
           `State "${stateId}" (type: ${stateType}) has "${field}" but that field is only valid on agent states.`,
         );
       }
+    }
+
+    if ('containerScope' in stateValue && stateType !== 'deterministic') {
+      issues.push(
+        `State "${stateId}" (type: ${stateType}) has "containerScope" but that field is only valid on agent states and containerized deterministic states.`,
+      );
     }
   }
 
@@ -187,7 +205,7 @@ export class WorkflowValidationError extends Error {
 // Semantic validation
 // ---------------------------------------------------------------------------
 
-function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
+export function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
   switch (state.type) {
     case 'agent':
     case 'deterministic':
@@ -197,6 +215,15 @@ function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
     case 'terminal':
       return [];
   }
+}
+
+/**
+ * True if any transition routes on a `when: { verdict: ... }` clause. Shared by
+ * the container-only validation rule (`validateContainerScopes`) and the WF012
+ * lint (which requires such states to declare a `resultFile`).
+ */
+export function usesVerdictEdges(transitions: readonly AgentTransitionDefinition[]): boolean {
+  return transitions.some((t) => t.when !== undefined && 'verdict' in t.when);
 }
 
 /**
@@ -249,6 +276,15 @@ export function findReachableStates(initial: string, states: Record<string, Work
 
 const AGENT_OUTPUT_FIELD_SET: ReadonlySet<string> = new Set(AGENT_OUTPUT_FIELDS);
 const CONFIDENCE_VALUE_SET: ReadonlySet<string> = new Set(CONFIDENCE_VALUES);
+
+export function isSafeWorkspaceRelativePath(path: string): boolean {
+  if (path.length === 0) return false;
+  if (path.includes('\0')) return false;
+  if (path.startsWith('/')) return false;
+  if (path === '.') return false;
+  if (path.split('/').some((part) => part === '..')) return false;
+  return pathPosix.normalize(path) === path;
+}
 
 /**
  * Expected runtime type for each AgentOutput field used in `when` clauses.
@@ -321,11 +357,6 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
       issues.push(
         `State "${stateId}" has transition to "${t.to}" with both "guard" and "when" — they are mutually exclusive`,
       );
-    }
-
-    // Agent-only scope: when on deterministic state
-    if (state.type === 'deterministic' && t.when) {
-      issues.push(`State "${stateId}" is deterministic and cannot use "when" (agent output not available)`);
     }
 
     if (!t.when) continue;
@@ -443,10 +474,16 @@ function validateSemantics(definition: WorkflowDefinition): void {
 /**
  * Validates `containerScope` usage across a workflow definition.
  *
- * `containerScope` is meaningful only under `sharedContainer: true`.
- * If the flag is absent or false, any state declaring a scope is a
- * hard error (silent no-ops are footguns). The charset check runs at
- * the Zod layer (see `CONTAINER_SCOPE_PATTERN`).
+ * `containerScope` is meaningful only when a shared container is
+ * actually active — i.e. `sharedContainer: true` AND `mode: docker`.
+ * Builtin mode ignores `sharedContainer` (see the orchestrator's
+ * `shouldUseSharedContainer`), so a scope declared under
+ * `mode: builtin` is a silent no-op. Either condition missing is a
+ * hard error (silent no-ops are footguns). For deterministic states
+ * this is reached transitively (`containerScope` requires
+ * `container: true`, which requires `mode: docker`); agent states are
+ * checked directly. The charset check runs at the Zod layer (see
+ * `CONTAINER_SCOPE_PATTERN`).
  *
  * Note: scope governs container lifecycle (which bundle a state runs
  * in); persona governs the active policy. They are orthogonal —
@@ -456,15 +493,46 @@ function validateSemantics(definition: WorkflowDefinition): void {
  */
 function validateContainerScopes(definition: WorkflowDefinition, issues: string[]): void {
   const sharedContainer = definition.settings?.sharedContainer === true;
+  const mode = definition.settings?.mode ?? 'docker';
 
   for (const [stateId, state] of Object.entries(definition.states)) {
-    if (state.type !== 'agent') continue;
+    if (state.type === 'agent') {
+      if (state.containerScope !== undefined && !sharedContainer) {
+        issues.push(
+          `State "${stateId}" declares containerScope "${state.containerScope}" but the workflow does not have sharedContainer: true. ` +
+            `containerScope is only valid when sharedContainer is true.`,
+        );
+      }
+      if (state.containerScope !== undefined && mode !== 'docker') {
+        issues.push(
+          `State "${stateId}" declares containerScope "${state.containerScope}" but settings.mode is "${mode}", not "docker". ` +
+            `Builtin mode ignores sharedContainer, so the scope would be a silent no-op.`,
+        );
+      }
+      continue;
+    }
 
-    if (state.containerScope !== undefined && !sharedContainer) {
+    if (state.type !== 'deterministic') continue;
+
+    if (state.containerScope !== undefined && state.container !== true) {
+      issues.push(`State "${stateId}" declares containerScope but is not container: true`);
+    }
+    if ((state.resultFile !== undefined || usesVerdictEdges(state.transitions)) && state.container !== true) {
       issues.push(
-        `State "${stateId}" declares containerScope "${state.containerScope}" but the workflow does not have sharedContainer: true. ` +
-          `containerScope is only valid when sharedContainer is true.`,
+        `State "${stateId}" uses resultFile / when:{verdict} routing but is not container: true. ` +
+          `Structured deterministic result routing is container-only.`,
       );
+    }
+    if (state.resultFile !== undefined && !isSafeWorkspaceRelativePath(state.resultFile)) {
+      issues.push(
+        `State "${stateId}" has resultFile "${state.resultFile}" — must be a workspace-relative path (no leading "/", no "..").`,
+      );
+    }
+    if (state.container === true && !sharedContainer) {
+      issues.push(`State "${stateId}" has container: true but the workflow does not have sharedContainer: true.`);
+    }
+    if (state.container === true && mode !== 'docker') {
+      issues.push(`State "${stateId}" has container: true but settings.mode is not "docker".`);
     }
   }
 }

@@ -70,6 +70,14 @@ Opt in by setting `settings.sharedContainer: true` in the workflow definition. I
 
 Before each agent state runs, the orchestrator hot-swaps the coordinator's active `PolicyEngine` to match the incoming state's `persona`. The swap is a `POST /__ironcurtain/policy/load` over the workflow's Unix domain control socket; the coordinator reloads `compiled-policy.json` / `tool-annotations.json` / `dynamic-lists.json` from the persona's policy directory under `callMutex` then `policyMutex`, so in-flight tool calls finish against the old engine and new calls use the new engine. The audit log is a single `audit.jsonl` for the whole run; each entry carries a `persona` field so per-state slices can be reconstructed by scanning.
 
+Deterministic states can opt into this shared bundle with `container: true`.
+Those commands run via `docker exec` inside the state's `containerScope`
+(default: `primary`) instead of host-side `execFile`. Workflow packages may
+ship a sibling `scripts/` directory; it is staged into the run directory and
+mounted read-only at `/workflow-scripts`. If `scripts/requirements.txt` or
+`scripts/package.json` exists, dependencies are baked into a per-workflow child
+image at build time so runtime still runs without network access.
+
 ### Workflow run layout
 
 Workflow runs live under `~/.ironcurtain/workflow-runs/<workflowId>/`:
@@ -105,7 +113,7 @@ The built-in `design-and-code` workflow follows this flow:
 plan --> [plan_review] --> design --> [design_review] --> implement --> review
   ^          |               ^            |                  ^          |
   |          |               |            |                  |          |
-  +-- revision               +-- revision                   +-- rejected
+  +-- revision               +-- revision                    +-- rejected
                                                              |
                                                         [escalate_gate] --> done
 ```
@@ -233,6 +241,8 @@ Exit codes:
 | `WF006` | warning  | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored)    |
 | `WF007` | warning  | Agent state references a persona not installed locally (runtime failure)                                |
 | `WF008` | error    | `maxVisits` state has a cap-guarded transition positioned after a non-approval `when` (cap never fires) |
+| `WF011` | warning  | Container deterministic state can run before an agent has populated its container scope                 |
+| `WF012` | warning  | Deterministic state routes on `when:{verdict}` but declares no `resultFile`                             |
 
 Example:
 
@@ -519,6 +529,65 @@ validate:
 
 Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard for success transitions.
 
+By default, deterministic commands execute on the host for backward
+compatibility. To run them inside the workflow's shared Docker container, set
+`container: true` and enable `settings.sharedContainer: true` with Docker mode:
+
+```yaml
+evaluate:
+  type: deterministic
+  description: Run packaged evaluator in the workflow container
+  container: true
+  containerScope: primary # optional; defaults to primary
+  run:
+    - - /opt/workflow-venv/bin/python
+      - /workflow-scripts/run_eval.py
+  transitions:
+    - to: next
+      guard: isPassed
+    - to: failed
+```
+
+Container deterministic commands run with `/workspace` as their working
+directory, see the same workspace as the agent states in that scope, and can
+read workflow helper code from `/workflow-scripts`.
+
+Container deterministic states can also route on a helper-written verdict file.
+Set `resultFile` to a normalized workspace-relative path and have the helper
+write JSON with a required string `verdict`, optional object `payload`, and
+optional boolean `passed`:
+
+```yaml
+classify:
+  type: deterministic
+  description: Route on helper output
+  container: true
+  resultFile: .workflow/result.json
+  run:
+    - - python3
+      - /workflow-scripts/classify.py
+  transitions:
+    - to: passed
+      when: { verdict: pass }
+    - to: blocked
+      when: { verdict: block }
+    - to: error
+      when: { verdict: result_file_error }
+    - to: error
+```
+
+The result file is read only after all commands exit successfully. If a command
+fails, legacy `isPassed`/`isFailed` behavior is unchanged and the file is not
+read. When the file sets `passed`, it overrides the exit-code-derived pass/fail
+(an evaluator can exit 0 yet report `passed: false` — e.g. a candidate that ran
+cleanly but failed its checks), and `isPassed`/`isFailed` then see that
+overridden value. If the file is missing, malformed, not a JSON object, or lacks a non-empty
+string `verdict`, the deterministic result becomes `passed: false` with the
+reserved verdict `result_file_error`, which can be routed with
+`when: { verdict: result_file_error }`. `resultFile` and deterministic
+`when:{verdict}` routing are container-only; host deterministic states remain
+guard-based.
+
 When a deterministic state fails (any command exited non-zero) and routes to an agent state, the failed commands' captured output (stderr per command, falling back to stdout when stderr is empty, joined across all failing commands) is forwarded as the agent's prior-state context, rendered under `## Output from <det-state> / Directive: ...` in the agent's prompt. Successful deterministic results update only `previousTestCount`; the agent's own prior-state context fields (`previousAgentOutput`, `previousAgentNotes`, `previousStateName`) are left untouched, so the next agent still sees the last agent state's output.
 
 ### Terminal states
@@ -550,11 +619,11 @@ There are two ways to control transitions: declarative `when` conditions and cod
   when: { verdict: escalate }
 ```
 
-`when` matches against the agent's status block output. All specified fields must match (AND semantics). The primary matchable field is `verdict`. Other fields (`completed`, `confidence`, `escalation`, `testCount`, `notes`) are also available but are deprecated for routing -- use `verdict` and `notes` instead.
+`when` matches against the agent's status block output. On container deterministic states with `resultFile`, `when:{verdict}` matches the helper-written deterministic verdict. All specified fields must match (AND semantics). The supported matchable field is `verdict`; other fields (`completed`, `confidence`, `escalation`, `testCount`, `notes`) are deprecated and rejected by validation.
 
 The `verdict` field accepts any string value, enabling custom verdicts for direct routing (e.g., `"thesis_validate"`, `"escalate"`, `"reanalyze"`). Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`. This is the recommended pattern for new workflows: instruct the agent to use specific verdict strings in its prompt, then match on them with `when`.
 
-`when` is only available on agent state transitions (not deterministic states). A transition cannot have both `when` and `guard`.
+Deterministic `when:{verdict}` requires `container: true`; without `resultFile`, WF012 warns that the verdict edges are dead. A transition cannot have both `when` and `guard`.
 
 **`guard` -- code-based conditions (for context-based checks):**
 
@@ -565,7 +634,7 @@ The `verdict` field accepts any string value, enabling custom verdicts for direc
 | `isStalled`                | Agent produced identical output artifacts as previous round                                                                              |
 | `isPassed`                 | Deterministic state commands all passed                                                                                                  |
 
-Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). For verdict-based routing, use `when` clauses -- e.g., `when: { verdict: "approved" }` supports any verdict string for direct routing.
+Use `guard` for conditions that depend on workflow context (round limits, stall detection) and for legacy deterministic pass/fail routing (`isPassed`). For verdict-based routing, use `when` clauses -- e.g., `when: { verdict: "approved" }` supports any verdict string for direct routing.
 
 `isRoundLimitReached` applies a single workflow-wide cap across every state; `isStateVisitLimitReached` scopes the cap to one state via that state's `maxVisits`. Use the per-state guard for narrowly bounded loops (e.g., a review step that should escalate after N iterations without halting the whole workflow).
 

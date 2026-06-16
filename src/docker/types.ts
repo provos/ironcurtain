@@ -173,12 +173,15 @@ export interface ContainerRuntime {
    *   - `null`: skip the `--user` flag entirely. Required for non-agent
    *     containers that have no `codespace` account (e.g. the
    *     `bbernhard/signal-cli-rest-api` image).
+   * @param workdir - optional working directory passed via
+   *   `docker exec --workdir <dir>`.
    */
   exec(
     nameOrId: string,
     command: readonly string[],
     timeoutMs?: number,
     execUser?: string | null,
+    workdir?: string,
   ): Promise<DockerExecResult>;
 
   /** Stop a running container (SIGTERM, then SIGKILL after grace period). */

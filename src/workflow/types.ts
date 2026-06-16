@@ -65,6 +65,9 @@ export function resolveWorkflowSkillsOptions(
  */
 export const DEFAULT_CONTAINER_SCOPE = 'primary';
 
+/** Reserved deterministic result verdict emitted when a declared result file cannot be read or parsed. */
+export const DETERMINISTIC_RESULT_ERROR_VERDICT = 'result_file_error';
+
 // ---------------------------------------------------------------------------
 // Branded identifiers
 // ---------------------------------------------------------------------------
@@ -256,6 +259,26 @@ export interface DeterministicStateDefinition {
    * Never a shell string -- per CLAUDE.md safe coding rules.
    */
   readonly run: readonly (readonly string[])[];
+  /**
+   * When true, execute the command arrays inside the workflow's shared
+   * Docker container via docker exec instead of on the host.
+   */
+  readonly container?: boolean;
+  /**
+   * Shared-container scope to exec into when `container` is true. Defaults
+   * to DEFAULT_CONTAINER_SCOPE.
+   */
+  readonly containerScope?: string;
+  /**
+   * Per-command timeout in milliseconds for deterministic execution.
+   * Undefined uses the runner default.
+   */
+  readonly timeoutMs?: number;
+  /**
+   * Workspace-relative JSON result file written by a containerized helper.
+   * Container-only; see validate.ts for path and routing constraints.
+   */
+  readonly resultFile?: string;
   readonly transitions: readonly AgentTransitionDefinition[];
 }
 
@@ -413,6 +436,10 @@ export interface WorkflowContext {
   /** Per-role output hash for stall detection. */
   readonly previousOutputHashes: Record<string, string>;
   readonly previousTestCount: number | null;
+  readonly lastDeterministicResult?: {
+    readonly verdict?: string;
+    readonly payload?: Record<string, unknown>;
+  };
   readonly humanPrompt: string | null;
   readonly reviewHistory: readonly string[];
   readonly parallelResults: Record<string, ParallelSlotResult>;
@@ -549,6 +576,12 @@ export interface WorkflowCheckpoint {
    * from `definitionPath`'s package dir).
    */
   readonly workflowSkillsDir?: string;
+  /**
+   * Per-run staged copy of the workflow package's `scripts/` tree (when
+   * the package shipped one). Mounted read-only at /workflow-scripts for
+   * shared-container deterministic states.
+   */
+  readonly workflowScriptsDir?: string;
   /**
    * Terminal-phase status, populated only when the workflow has reached a terminal
    * phase (completed / aborted / failed / waiting_human). Absent for mid-run

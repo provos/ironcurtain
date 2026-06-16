@@ -12,6 +12,9 @@ export default tseslint.config(
       'node_modules/',
       'packages/',
       'scripts/',
+      // Packaged workflow helper scripts (Python/JS) run in-container, not in
+      // the TS build — exclude them from the typescript-eslint project parser.
+      'src/workflow/workflows/*/scripts/',
       'vitest.config.ts',
       'eslint.config.js',
     ],
@@ -24,14 +27,8 @@ export default tseslint.config(
       },
     },
     rules: {
-      '@typescript-eslint/restrict-template-expressions': [
-        'error',
-        { allowNumber: true, allowBoolean: true },
-      ],
-      '@typescript-eslint/no-confusing-void-expression': [
-        'error',
-        { ignoreArrowShorthand: true },
-      ],
+      '@typescript-eslint/restrict-template-expressions': ['error', { allowNumber: true, allowBoolean: true }],
+      '@typescript-eslint/no-confusing-void-expression': ['error', { ignoreArrowShorthand: true }],
       '@typescript-eslint/no-non-null-assertion': 'error',
     },
   },

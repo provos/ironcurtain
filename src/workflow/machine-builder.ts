@@ -61,6 +61,10 @@ export interface DeterministicInvokeInput {
   readonly stateId: string;
   readonly commands: readonly (readonly string[])[];
   readonly context: WorkflowContext;
+  readonly container?: boolean;
+  readonly containerScope?: string;
+  readonly timeoutMs?: number;
+  readonly resultFile?: string;
 }
 
 /** Result from a deterministic (test/lint) state. */
@@ -68,6 +72,8 @@ export interface DeterministicInvokeResult {
   readonly passed: boolean;
   readonly testCount?: number;
   readonly errors?: string;
+  readonly verdict?: string;
+  readonly payload?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +234,13 @@ function compileAction(action: WorkflowTransitionAction): XStateActionEntry {
   return { type: 'resetVisitCounts', params: { stateIds: action.stateIds } };
 }
 
-function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefinition[]): readonly object[] {
+// Shared onDone-transition builder for agent and deterministic states: both map a
+// `when:` clause to the __matchesWhen guard, else a bare `guard:`, and run a
+// per-state-type context-update action. Only the update action differs.
+function buildOnDoneTransitions(
+  transitions: readonly AgentTransitionDefinition[],
+  updateAction: string,
+): readonly object[] {
   return transitions.map((t) => {
     let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
     if (t.when) {
@@ -240,7 +252,7 @@ function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefini
     return {
       target: t.to,
       ...(guard ? { guard } : {}),
-      actions: collectTransitionActions(t, 'updateContextFromAgentResult'),
+      actions: collectTransitionActions(t, updateAction),
     };
   });
 }
@@ -256,7 +268,7 @@ function buildAgentState(stateId: string, config: AgentStateDefinition, definiti
         stateConfig: config,
         context,
       }),
-      onDone: buildAgentOnDoneTransitions(config.transitions),
+      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromAgentResult'),
       onError: {
         target: findErrorTarget(config, definition),
         actions: ['storeError', 'updateContextFromAgentInvocationError'],
@@ -270,11 +282,7 @@ function buildDeterministicState(
   config: DeterministicStateDefinition,
   definition: WorkflowDefinition,
 ): object {
-  const onDoneTransitions = config.transitions.map((t) => ({
-    target: t.to,
-    ...(t.guard ? { guard: t.guard } : {}),
-    actions: collectTransitionActions(t, 'updateContextFromDeterministicResult'),
-  }));
+  const onDoneTransitions = buildOnDoneTransitions(config.transitions, 'updateContextFromDeterministicResult');
 
   return {
     invoke: {
@@ -284,6 +292,10 @@ function buildDeterministicState(
         stateId,
         commands: config.run,
         context,
+        container: config.container ?? false,
+        containerScope: config.containerScope,
+        timeoutMs: config.timeoutMs,
+        resultFile: config.resultFile,
       }),
       onDone: onDoneTransitions,
       onError: {
@@ -426,16 +438,21 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   // directly (via extractInvokeResult inline) rather than on WorkflowEvent.
   xstateGuards['__matchesWhen'] = ({ event }, params) => {
     const doneEvent = event as { type: string; output?: unknown };
-    let agentOutput: AgentOutput | undefined;
+    let matchSource: Readonly<Record<string, unknown>> | undefined;
 
     if (doneEvent.type.startsWith('xstate.done.actor.')) {
       const result = extractInvokeResult(doneEvent as { output?: unknown });
       if (result) {
-        agentOutput = result.output;
+        matchSource = result.output as unknown as Readonly<Record<string, unknown>>;
+      } else {
+        const detResult = doneEvent.output as DeterministicInvokeResult | undefined;
+        if (typeof detResult?.verdict === 'string') {
+          matchSource = { verdict: detResult.verdict };
+        }
       }
     }
 
-    if (!agentOutput) return false;
+    if (!matchSource) return false;
 
     // Defensive: fail closed if params are missing or when is empty/missing.
     // Validation prevents these cases, but we don't want a silent unconditional
@@ -448,7 +465,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
     const when = whenMap as Readonly<Record<string, WhenValue>>;
 
     for (const [key, expected] of Object.entries(when)) {
-      const actual = agentOutput[key as keyof AgentOutput];
+      const actual = matchSource[key];
       if (actual !== expected) return false;
     }
     return true;
@@ -508,8 +525,21 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         const result = doneEvent.output;
         if (!result) return {};
 
+        // Only attach lastDeterministicResult when the state actually produced a
+        // verdict/payload (a result-file state). Guard-only deterministic states
+        // leave context byte-identical to the legacy path (the field stays absent).
+        const verdictUpdate =
+          result.verdict !== undefined || result.payload !== undefined
+            ? {
+                lastDeterministicResult: {
+                  ...(result.verdict !== undefined ? { verdict: result.verdict } : {}),
+                  ...(result.payload !== undefined ? { payload: result.payload } : {}),
+                },
+              }
+            : {};
         const baseUpdate = {
           previousTestCount: result.testCount ?? context.previousTestCount,
+          ...verdictUpdate,
         };
         if (result.passed) return baseUpdate;
 

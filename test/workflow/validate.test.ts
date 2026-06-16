@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import {
   validateDefinition,
   validateWorkflowSkillReferences,
@@ -342,10 +343,44 @@ describe('validateDefinition', () => {
       }
     });
 
-    it('rejects when on deterministic state', () => {
+    it('accepts deterministic when:{verdict} when the state is containerized and declares resultFile', () => {
+      const def = {
+        name: 'deterministic-verdict',
+        description: 'Deterministic verdict routing',
+        initial: 'author',
+        settings: { mode: 'docker', sharedContainer: true },
+        states: {
+          author: {
+            type: 'agent',
+            description: 'Mints container',
+            persona: 'global',
+            prompt: 'author',
+            inputs: [],
+            outputs: [],
+            transitions: [{ to: 'classify' }],
+          },
+          classify: {
+            type: 'deterministic',
+            description: 'Classifies',
+            run: [['python3', '/workflow-scripts/classify.py']],
+            container: true,
+            resultFile: '.workflow/result.json',
+            transitions: [
+              { to: 'passed', when: { verdict: 'pass' } },
+              { to: 'blocked', when: { verdict: 'block' } },
+            ],
+          },
+          passed: { type: 'terminal', description: 'pass' },
+          blocked: { type: 'terminal', description: 'block' },
+        },
+      };
+
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('rejects deterministic when:{verdict} when the state is not container:true', () => {
       const def = deepClone(validDefinition());
       const states = def.states as Record<string, Record<string, unknown>>;
-      // Replace review with a deterministic state that uses when
       states.review.transitions = [{ to: 'test' }];
       states.test = {
         type: 'deterministic',
@@ -353,12 +388,13 @@ describe('validateDefinition', () => {
         run: [['npm', 'test']],
         transitions: [{ to: 'gate', when: { verdict: 'approved' } }, { to: 'plan' }],
       };
+
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
       try {
         validateDefinition(def);
-        expect.fail('should have thrown');
       } catch (e) {
         const err = e as WorkflowValidationError;
-        expect(err.issues).toEqual(expect.arrayContaining([expect.stringContaining('deterministic')]));
+        expect(err.issues).toEqual(expect.arrayContaining([expect.stringContaining('container: true')]));
       }
     });
 
@@ -733,6 +769,20 @@ describe('validateDefinition', () => {
       }
     });
 
+    it('rejects an agent containerScope in builtin mode (sharedContainer is ignored there)', () => {
+      const def = sharedContainerDef({ stateContainerScopes: { plan: 'env-a' } });
+      // sharedContainer stays true, isolating the mode check: builtin mode
+      // ignores sharedContainer, so the scope would be a silent no-op.
+      (def.settings as Record<string, unknown>) = { mode: 'builtin', sharedContainer: true };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => /containerScope.*mode.*not "docker"/.test(i))).toBe(true);
+      }
+    });
+
     it('rejects containerScope values that violate the charset', () => {
       const def = sharedContainerDef({ stateContainerScopes: { plan: 'env a' } });
       expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
@@ -789,7 +839,164 @@ describe('validateDefinition', () => {
       };
       expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
     });
+
+    it('accepts containerized deterministic states in docker shared-container mode', () => {
+      const def = sharedContainerDef({});
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Run container helper',
+        container: true,
+        containerScope: 'primary',
+        timeoutMs: 1000,
+        run: [['python', '/workflow-scripts/check.py']],
+        transitions: [{ to: 'done', guard: 'isPassed' }, { to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('rejects deterministic containerScope without container true', () => {
+      const def = sharedContainerDef({});
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Bad scope',
+        containerScope: 'primary',
+        run: [['true']],
+        transitions: [{ to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('containerScope but is not container: true'))).toBe(true);
+      }
+    });
+
+    it('rejects deterministic container true without sharedContainer true', () => {
+      const def = sharedContainerDef({});
+      (def.settings as Record<string, unknown>) = { mode: 'docker', dockerAgent: 'claude-code' };
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'No shared container',
+        container: true,
+        run: [['true']],
+        transitions: [{ to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('container: true'))).toBe(true);
+      }
+    });
+
+    it('rejects deterministic container true in builtin mode', () => {
+      const def = sharedContainerDef({});
+      (def.settings as Record<string, unknown>) = { mode: 'builtin', sharedContainer: true };
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Builtin cannot exec in container',
+        container: true,
+        run: [['true']],
+        transitions: [{ to: 'done' }],
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('settings.mode is not "docker"'))).toBe(true);
+      }
+    });
+
+    it('rejects resultFile on a non-container deterministic state', () => {
+      const def = sharedContainerDef({});
+      const states = def.states as Record<string, unknown>;
+      states.review = {
+        type: 'deterministic',
+        description: 'Bad result file',
+        resultFile: '.workflow/result.json',
+        run: [['true']],
+        transitions: [{ to: 'done', guard: 'isPassed' }, { to: 'done' }],
+      };
+
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => i.includes('container: true'))).toBe(true);
+      }
+    });
+
+    it('rejects unsafe resultFile paths', () => {
+      for (const resultFile of ['/tmp/result.json', '../result.json', './result.json', 'a//result.json']) {
+        const def = sharedContainerDef({});
+        const states = def.states as Record<string, unknown>;
+        states.review = {
+          type: 'deterministic',
+          description: 'Bad result file path',
+          container: true,
+          resultFile,
+          run: [['true']],
+          transitions: [{ to: 'done', guard: 'isPassed' }, { to: 'done' }],
+        };
+
+        expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+        try {
+          validateDefinition(def);
+        } catch (err) {
+          if (!(err instanceof WorkflowValidationError)) throw err;
+          expect(err.issues.some((i) => i.includes('workspace-relative path'))).toBe(true);
+        }
+      }
+    });
+
+    it('rejects resultFile on non-deterministic states via the raw-input check', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.plan.resultFile = '.workflow/result.json';
+
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining('"resultFile" but that field is only valid on deterministic states'),
+          ]),
+        );
+      }
+    });
   });
+});
+
+// ---------------------------------------------------------------------------
+// No-regression — shipped workflows still validate after the schema additions.
+// ---------------------------------------------------------------------------
+
+describe('shipped workflows validate unchanged', () => {
+  const workflowsDir = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows');
+
+  for (const name of [
+    'vuln-discovery',
+    'design-and-code',
+    'test-email-summary',
+    'deterministic-eval-smoke',
+    'deterministic-verdict-smoke',
+  ]) {
+    it(`${name}: workflow.yaml validates without errors`, () => {
+      const manifestPath = resolve(workflowsDir, name, 'workflow.yaml');
+      const raw = parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 });
+      expect(() => validateDefinition(raw)).not.toThrow();
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------

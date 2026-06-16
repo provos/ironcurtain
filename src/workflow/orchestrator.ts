@@ -10,6 +10,8 @@ import {
   cpSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
+import { isWithinDirectory } from '../types/argument-roles.js';
+import { errorMessage } from '../utils/error-message.js';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -37,6 +39,7 @@ import {
   WORKFLOW_ARTIFACT_DIR,
   GLOBAL_PERSONA,
   DEFAULT_CONTAINER_SCOPE,
+  DETERMINISTIC_RESULT_ERROR_VERDICT,
   resolveWorkflowSkillsOptions,
 } from './types.js';
 import {
@@ -69,7 +72,12 @@ import type {
   SessionMode,
 } from '../session/types.js';
 import { createAgentConversationId, createBundleId } from '../session/types.js';
-import { describeTransientFailureKind, type AgentId, type TransientFailureKind } from '../docker/agent-adapter.js';
+import {
+  CONTAINER_WORKSPACE_DIR,
+  describeTransientFailureKind,
+  type AgentId,
+  type TransientFailureKind,
+} from '../docker/agent-adapter.js';
 import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
@@ -88,7 +96,12 @@ import {
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
-import { parseArtifactRef, validateDefinition, validateWorkflowSkillReferences } from './validate.js';
+import {
+  isSafeWorkspaceRelativePath,
+  parseArtifactRef,
+  validateDefinition,
+  validateWorkflowSkillReferences,
+} from './validate.js';
 import { parseDefinitionFile, getWorkflowPackageDir } from './discovery.js';
 import { resolveSkillsForSession } from '../skills/discovery.js';
 import type { ResolvedSkill } from '../skills/types.js';
@@ -170,6 +183,8 @@ function writeStderr(message: string): void {
 
 /** Per-run subdirectory name for the staged copy of the workflow's bundled `skills/` tree. */
 const STAGED_WORKFLOW_SKILLS_SUBDIR = 'workflow-skills';
+/** Per-run subdirectory name for the staged copy of workflow helper scripts. */
+const STAGED_WORKFLOW_SCRIPTS_SUBDIR = 'workflow-scripts';
 
 /**
  * Stages the workflow package's `skills/` tree into the run directory
@@ -193,11 +208,31 @@ const STAGED_WORKFLOW_SKILLS_SUBDIR = 'workflow-skills';
  * location.
  */
 export function stageWorkflowSkillsAtStart(packageDir: string, runMetaDir: string): string | undefined {
-  const sourceSkillsDir = resolve(packageDir, 'skills');
-  if (!existsSync(sourceSkillsDir)) return undefined;
+  return stageWorkflowSubdir(packageDir, runMetaDir, 'skills', STAGED_WORKFLOW_SKILLS_SUBDIR);
+}
 
-  const stagedDir = resolve(runMetaDir, STAGED_WORKFLOW_SKILLS_SUBDIR);
-  cpSync(sourceSkillsDir, stagedDir, { recursive: true });
+export function stageWorkflowScriptsAtStart(packageDir: string, runMetaDir: string): string | undefined {
+  return stageWorkflowSubdir(packageDir, runMetaDir, 'scripts', STAGED_WORKFLOW_SCRIPTS_SUBDIR);
+}
+
+/**
+ * Shallow-recursive copy of a workflow package subdir (`skills` / `scripts`) into
+ * the run dir. Returns the staged path, or `undefined` when the source subdir is
+ * absent (the workflow ships none — not an error). Throws only on copy I/O
+ * failure (a half-copied tree is worse than a missing one). See
+ * `stageWorkflowSkillsAtStart` above for why we copy rather than symlink.
+ */
+function stageWorkflowSubdir(
+  packageDir: string,
+  runMetaDir: string,
+  sourceSubdir: string,
+  stagedSubdir: string,
+): string | undefined {
+  const source = resolve(packageDir, sourceSubdir);
+  if (!existsSync(source)) return undefined;
+
+  const stagedDir = resolve(runMetaDir, stagedSubdir);
+  cpSync(source, stagedDir, { recursive: true });
   return stagedDir;
 }
 
@@ -251,6 +286,47 @@ function resolveWorkflowSkillsDirOnResume(opts: {
   // function was added to prevent.
   writeStderr(
     `[workflow] Resume ${workflowId}: no workflow-skills available (staged copy and ${packageDir}/skills both missing). Workflow-bundled skills will not be available in this run.`,
+  );
+  return undefined;
+}
+
+function resolveWorkflowScriptsDirOnResume(opts: {
+  workflowId: WorkflowId;
+  checkpointedStagedDir: string | undefined;
+  packageDir: string;
+  runMetaDir: string;
+}): string | undefined {
+  const { workflowId, checkpointedStagedDir, packageDir, runMetaDir } = opts;
+
+  if (checkpointedStagedDir !== undefined && existsSync(checkpointedStagedDir)) {
+    return checkpointedStagedDir;
+  }
+
+  try {
+    const restaged = stageWorkflowScriptsAtStart(packageDir, runMetaDir);
+    if (restaged !== undefined) {
+      writeStderr(
+        `[workflow] Resume ${workflowId}: workflow-scripts staged copy missing, re-staged from ${packageDir}.`,
+      );
+      return restaged;
+    }
+  } catch (err) {
+    writeStderr(
+      `[workflow] Resume ${workflowId}: failed to re-stage workflow scripts from ${packageDir}: ${toErrorMessage(err)}`,
+    );
+    return undefined;
+  }
+
+  // Both paths gone. Only warn if scripts were previously staged
+  // (`checkpointedStagedDir` set): a workflow that never shipped scripts must not
+  // warn about "missing" scripts on every resume. `stageWorkflowScriptsAtStart`
+  // already proved `scripts/` is absent here, so no source re-stat is needed.
+  if (checkpointedStagedDir === undefined) {
+    return undefined;
+  }
+
+  writeStderr(
+    `[workflow] Resume ${workflowId}: no workflow-scripts available (staged copy and ${packageDir}/scripts both missing). Container deterministic helpers will not be available in this run.`,
   );
   return undefined;
 }
@@ -321,6 +397,8 @@ export interface CreateWorkflowInfrastructureInput {
    * Persona skills are layered in per-state via `bundle.restageSkills`.
    */
   readonly resolvedSkills?: readonly ResolvedSkill[];
+  /** Per-run staged workflow scripts directory to mount read-only in the bundle. */
+  readonly workflowScriptsDir?: string;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -517,6 +595,7 @@ interface WorkflowInstance {
    * lost on resume — see `resolveWorkflowSkillsDirOnResume`).
    */
   readonly workflowSkillsDir: string | undefined;
+  readonly workflowScriptsDir: string | undefined;
   readonly actor: AnyActorRef;
   readonly gateStateNames: ReadonlySet<string>;
   readonly terminalStateNames: ReadonlySet<string>;
@@ -780,6 +859,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       scope,
       requiredServers,
       resolvedSkills,
+      workflowScriptsDir: instance.workflowScriptsDir,
     });
 
     // Abort may have landed while `factory()` was suspended. Publishing
@@ -1104,6 +1184,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           recordedAgentName: input.agentId,
           workflowRunId: input.workflowId,
         },
+        input.workflowScriptsDir,
       );
     };
   }
@@ -1209,6 +1290,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // exists. Cached on the instance and persisted in every checkpoint
     // so all subsequent reads point at this stable per-run copy.
     const workflowSkillsDir = stageWorkflowSkillsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
+    const workflowScriptsDir = stageWorkflowScriptsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
 
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
 
@@ -1222,6 +1304,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       definition,
       definitionPath,
       workflowSkillsDir,
+      workflowScriptsDir,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1310,12 +1393,19 @@ export class WorkflowOrchestrator implements WorkflowController {
       packageDir: getWorkflowPackageDir(checkpoint.definitionPath),
       runMetaDir,
     });
+    const workflowScriptsDir = resolveWorkflowScriptsDirOnResume({
+      workflowId,
+      checkpointedStagedDir: checkpoint.workflowScriptsDir,
+      packageDir: getWorkflowPackageDir(checkpoint.definitionPath),
+      runMetaDir,
+    });
 
     const instance: WorkflowInstance = {
       id: workflowId,
       definition,
       definitionPath: checkpoint.definitionPath,
       workflowSkillsDir,
+      workflowScriptsDir,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1398,7 +1488,15 @@ export class WorkflowOrchestrator implements WorkflowController {
     const servicePromise: Promise<unknown> =
       stateDef.type === 'agent'
         ? this.executeAgentState(workflowId, { stateId, stateConfig: stateDef, context }, definition)
-        : this.executeDeterministicState({ stateId, commands: stateDef.run, context });
+        : this.executeDeterministicState(workflowId, {
+            stateId,
+            commands: stateDef.run,
+            context,
+            container: stateDef.container ?? false,
+            containerScope: stateDef.containerScope,
+            timeoutMs: stateDef.timeoutMs,
+            resultFile: stateDef.resultFile,
+          });
 
     // Feed the result back to the actor as an XState internal invoke event.
     // These event types don't exist in our WorkflowEvent union, so we cast
@@ -1621,7 +1719,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         }),
         deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(async ({ input }) => {
           try {
-            return await this.executeDeterministicState(input);
+            return await this.executeDeterministicState(workflowId, input);
           } catch (err) {
             writeStderr(
               `[workflow] deterministicService invoke rejected for "${input.stateId}": ${toErrorMessage(err)}`,
@@ -1763,6 +1861,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // package path. Skipped when the workflow shipped no skills, to
       // keep the checkpoint shape tight for the common case.
       ...(instance.workflowSkillsDir !== undefined ? { workflowSkillsDir: instance.workflowSkillsDir } : {}),
+      ...(instance.workflowScriptsDir !== undefined ? { workflowScriptsDir: instance.workflowScriptsDir } : {}),
       ...(finalStatus !== undefined ? { finalStatus } : {}),
     };
   }
@@ -2276,24 +2375,129 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Deterministic state execution
   // -----------------------------------------------------------------------
 
-  private async executeDeterministicState(input: DeterministicInvokeInput): Promise<DeterministicInvokeResult> {
-    const { commands } = input;
+  private async executeDeterministicState(
+    workflowId: WorkflowId,
+    input: DeterministicInvokeInput,
+  ): Promise<DeterministicInvokeResult> {
+    if (!input.container) {
+      return this.runDeterministicHost(input.commands);
+    }
+
+    const instance = this.workflows.get(workflowId);
+    if (!instance) {
+      return { passed: false, errors: `workflow ${workflowId} not found` };
+    }
+    if (!this.shouldUseSharedContainer(instance.definition)) {
+      return { passed: false, errors: `State "${input.stateId}" requires shared-container Docker execution.` };
+    }
+
+    const scope = input.containerScope ?? DEFAULT_CONTAINER_SCOPE;
+    const bundleWasLive = instance.bundlesByScope.has(scope);
+    const bundle = await this.ensureBundleForScope(instance, scope);
+    const warning = bundleWasLive
+      ? undefined
+      : `container: true state "${input.stateId}": scope "${scope}" had no live container before this state. ` +
+        `On a fresh run this likely means no prior state populated it; on resume this can be expected.`;
+    const base = await this.runDeterministicInContainer(bundle, input, warning);
+    return this.applyResultFile(instance, input, base);
+  }
+
+  private applyResultFile(
+    instance: WorkflowInstance,
+    input: DeterministicInvokeInput,
+    base: DeterministicInvokeResult,
+  ): DeterministicInvokeResult {
+    if (input.resultFile === undefined) return base;
+    if (!base.passed) return base;
+
+    const appendError = (message: string): DeterministicInvokeResult => ({
+      ...base,
+      passed: false,
+      verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
+      errors: base.errors ? `${base.errors}\n${message}` : message,
+    });
+
+    if (!isSafeWorkspaceRelativePath(input.resultFile)) {
+      return appendError(`result file ${input.resultFile} is not a safe workspace-relative path`);
+    }
+
+    const resultPath = resolve(instance.workspacePath, input.resultFile);
+    // Symlink-safe containment: a container can plant a symlink inside the shared
+    // workspace, and this read happens host-side — so resolve both sides to their
+    // canonical real paths before comparing (same posture as the policy engine,
+    // see resolveRealPath / CLAUDE.md). A lexical resolve()/relative() check would
+    // follow such a symlink and read off-workspace on the host.
+    if (!isWithinDirectory(resultPath, instance.workspacePath)) {
+      return appendError(`result file ${input.resultFile} escapes the workspace`);
+    }
+
+    if (!existsSync(resultPath)) {
+      return appendError(`result file ${input.resultFile} not found`);
+    }
+
+    // Split read vs parse so a read failure (EISDIR/EPERM/...) is not mislabeled
+    // as a JSON syntax error.
+    let raw: string;
+    try {
+      raw = readFileSync(resultPath, 'utf8');
+    } catch (err) {
+      return appendError(`result file ${input.resultFile} could not be read: ${errorMessage(err)}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return appendError(`result file ${input.resultFile} is not valid JSON`);
+    }
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return appendError(`result file ${input.resultFile} is not a JSON object`);
+    }
+
+    const resultObject = parsed as Record<string, unknown>;
+    if (typeof resultObject.verdict !== 'string' || resultObject.verdict.length === 0) {
+      return appendError(`result file ${input.resultFile} missing verdict`);
+    }
+
+    const payload =
+      typeof resultObject.payload === 'object' && resultObject.payload !== null && !Array.isArray(resultObject.payload)
+        ? (resultObject.payload as Record<string, unknown>)
+        : undefined;
+
+    return {
+      ...base,
+      verdict: resultObject.verdict,
+      passed: typeof resultObject.passed === 'boolean' ? resultObject.passed : base.passed,
+      ...(payload !== undefined ? { payload } : {}),
+    };
+  }
+
+  /**
+   * Shared reduction for both deterministic execution paths: skip empty command
+   * arrays, mine the `N tests pass` heuristic from stdout, accumulate per-command
+   * failures, and shape the `{ passed, testCount, errors }` result. Host vs.
+   * container execution differ only in `runCommand` — keep that the only fork so
+   * the pass/fail and test-count semantics cannot drift between the two paths.
+   */
+  private async reduceDeterministicCommands(
+    commands: readonly (readonly string[])[],
+    runCommand: (cmd: readonly string[]) => Promise<{ stdout: string; error?: string }>,
+  ): Promise<DeterministicInvokeResult> {
     let totalTestCount = 0;
     const allErrors: string[] = [];
 
     for (const cmdArray of commands) {
       if (cmdArray.length === 0) continue;
-      const [binary, ...args] = cmdArray;
-      try {
-        const { stdout } = await execFileAsync(binary, args);
-        // Try to extract test count from stdout (simple heuristic)
-        const testMatch = /(\d+)\s+(?:tests?|specs?)\s+pass/i.exec(stdout);
-        if (testMatch) {
-          totalTestCount += parseInt(testMatch[1], 10);
-        }
-      } catch (err) {
-        const execErr = err as { code?: number; stderr?: string; stdout?: string };
-        allErrors.push(execErr.stderr ?? execErr.stdout ?? String(err));
+      const { stdout, error } = await runCommand(cmdArray);
+      if (error !== undefined) {
+        allErrors.push(error);
+        continue;
+      }
+      // Try to extract test count from stdout (simple heuristic)
+      const testMatch = /(\d+)\s+(?:tests?|specs?)\s+pass/i.exec(stdout);
+      if (testMatch) {
+        totalTestCount += parseInt(testMatch[1], 10);
       }
     }
 
@@ -2302,6 +2506,41 @@ export class WorkflowOrchestrator implements WorkflowController {
       testCount: totalTestCount > 0 ? totalTestCount : undefined,
       errors: allErrors.length > 0 ? allErrors.join('\n') : undefined,
     };
+  }
+
+  private async runDeterministicHost(commands: readonly (readonly string[])[]): Promise<DeterministicInvokeResult> {
+    return this.reduceDeterministicCommands(commands, async (cmdArray) => {
+      const [binary, ...args] = cmdArray;
+      try {
+        const { stdout } = await execFileAsync(binary, args);
+        return { stdout };
+      } catch (err) {
+        const execErr = err as { code?: number; stderr?: string; stdout?: string };
+        return { stdout: '', error: execErr.stderr ?? execErr.stdout ?? String(err) };
+      }
+    });
+  }
+
+  private async runDeterministicInContainer(
+    bundle: DockerInfrastructure,
+    input: DeterministicInvokeInput,
+    warning?: string,
+  ): Promise<DeterministicInvokeResult> {
+    if (warning) writeStderr(`[workflow] ${warning}`);
+
+    return this.reduceDeterministicCommands(input.commands, async (cmdArray) => {
+      const result = await bundle.docker.exec(
+        bundle.containerId,
+        cmdArray,
+        input.timeoutMs,
+        'codespace',
+        CONTAINER_WORKSPACE_DIR,
+      );
+      if (result.exitCode !== 0) {
+        return { stdout: '', error: result.stderr || result.stdout || `exit ${result.exitCode}` };
+      }
+      return { stdout: result.stdout };
+    });
   }
 
   // -----------------------------------------------------------------------

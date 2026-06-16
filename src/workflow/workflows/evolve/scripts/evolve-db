@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""CLI wrapper for database helpers."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from evolve_core.cli import main_for
+
+
+if __name__ == "__main__":
+    raise SystemExit(main_for("db"))
