@@ -41,6 +41,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain workflow start <name-or-path> "task" [--model <model>] [--workspace <path>]` - run a multi-agent workflow
 - `ironcurtain workflow resume <baseDir> [--state <stateName>]` - resume a checkpointed workflow
 - `ironcurtain workflow inspect <baseDir> [--all]` - inspect workflow status and message log
+- `ironcurtain workflow run <name-or-path> "task" [--ensure-daemon]` / `await <id>` / `status <id>` / `gate <id> --event <APPROVE|FORCE_REVISION|REPLAN|ABORT> [--prompt <text>]` / `show <id> --artifact <name>` - agent-driven, non-interactive gate resolution over a running daemon (`ironcurtain daemon --web-ui`): start a gated workflow, block until a human gate or terminal, and resolve gates programmatically (the agent is the decider). All support `--json`; exit codes derive from the authoritative phase. See [`WORKFLOWS.md`](WORKFLOWS.md) and [`docs/designs/agent-driven-workflow-gates.md`](docs/designs/agent-driven-workflow-gates.md).
 - `ironcurtain daemon --web-ui` - start daemon with web UI (opens on port 7400, prints auth URL to stderr)
 - `npm run build` - TypeScript compilation + copy config assets + web UI to `dist/`
 - `npm run build:web-ui` - build just the Svelte web UI to `dist/web-ui-static/`
