@@ -14,7 +14,7 @@ Predecessors (merged / designed, build ON — do not redesign):
 
 ## 1. Summary & goals
 
-The multi-round `evolve` workflow runs an entire bounded program-search loop with **no human in the loop** beyond the helper-layer approval check: it starts the first evaluator the moment `preflight` emits `ready`, it ends every unrecoverable condition (`escalate`, `sample_error`, `evaluator_blocked`, `needs_repair`, `result_file_error`, round-limit wedge) at a single opaque `failed` terminal, and it ends a successful budget-reached run at `done` with no human-readable report. This slice adds the deferred **human surface** from the parent design — and **only** that surface. It introduces three `human_gate` states (`preflight_review`, `human_escalation`, `final_review`), one `final_summary` agent state that produces a human-readable report, and a distinct `aborted` terminal for operator stops. It does **not** touch the orchestrator hub, the sampling/cognition/analyzer/determinism mechanics, or the engine. The result is **a graph superset of the shipped multi-round FSM plus three intentional edge retargets** — `escalate` and `evaluator_blocked` → `human_escalation`, and `complete` → `final_summary`. Every shipped state and edge is otherwise preserved, and the new states slot in at the four seams the parent design always intended for them. Two of the three retargets (`escalate`, `complete`) redirect edges that were never terminal in a way that preserves outcomes; the third (`evaluator_blocked`) is an **intentional behavior change** — it converts a previously-terminal `→ failed` outcome into a human-mediated `→ human_escalation` gate, on the deliberate rationale that a single bad or crashed candidate should not hard-fail a multi-round search (a human decides retry / revise / abort). Genuine infrastructure errors (`result_file_error`, sampler/engine crash) still route to the `failed` terminal; an evaluator that *ran* but rejected the candidate (`evaluator_blocked`) escalates to a human. This distinction is load-bearing and is re-stated in §4.2, §12, and §13.
+The multi-round `evolve` workflow runs an entire bounded program-search loop with **no human in the loop** beyond the helper-layer approval check: it starts the first evaluator the moment `preflight` emits `ready`, it ends every unrecoverable condition (`escalate`, `sample_error`, `evaluator_blocked`, `needs_repair`, `result_file_error`, round-limit wedge) at a single opaque `failed` terminal, and it ends a successful budget-reached run at `done` with no human-readable report. This slice adds the deferred **human surface** from the parent design — and **only** that surface. It introduces three `human_gate` states (`preflight_review`, `human_escalation`, `final_review`), one `final_summary` agent state that produces a human-readable report, and a distinct `aborted` terminal for operator stops. It does **not** touch the orchestrator hub, the sampling/cognition/analyzer/determinism mechanics, or the engine. The result is **a graph superset of the shipped multi-round FSM plus three intentional edge retargets** — `escalate` and `evaluator_blocked` → `human_escalation`, and `complete` → `final_summary`. Every shipped state and edge is otherwise preserved, and the new states slot in at the four seams the parent design always intended for them. Two of the three retargets (`escalate`, `complete`) redirect edges that were never terminal in a way that preserves outcomes; the third (`evaluator_blocked`) is an **intentional behavior change** — it converts a previously-terminal `→ failed` outcome into a human-mediated `→ human_escalation` gate, on the deliberate rationale that a single bad or crashed candidate should not hard-fail a multi-round search (a human decides retry / revise / abort). Genuine infrastructure errors (`result_file_error`, sampler/engine crash) still route to the `failed` terminal; an evaluator that _ran_ but rejected the candidate (`evaluator_blocked`) escalates to a human. This distinction is load-bearing and is re-stated in §4.2, §12, and §13.
 
 ```
 preflight (agent) ─ready→ preflight_review (GATE) ─APPROVE→ orchestrator (HUB) … (unchanged loop) …
@@ -74,16 +74,16 @@ After this slice, the §12 real-Docker gate proves all of:
 
 The multi-round slice proved hub + sampling + cognition + analyzer + determinism with `failed`/`done` terminals and no human gates. This slice keeps **every** state and edge that slice ships and adds the four human seams the parent design always reserved. In order of new surface:
 
-| Capability                       | Multi-round slice (shipped)                                   | This slice                                                                                               |
-| -------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Approval before first evaluator  | helper-layer only (`require_evolve_ready`), no UI gate (§9)   | `preflight_review` human gate between `preflight` and `orchestrator` (§4.1)                              |
-| Orchestrator `escalate`          | `escalate → failed` (opaque hard fail)                        | `escalate → human_escalation` (APPROVE/FORCE_REVISION/ABORT) (§4.2)                                      |
-| Evaluator-blocked round          | `evaluator_blocked → failed`                                  | `evaluator_blocked → human_escalation` (human-mediated; §4.2 justifies why **only** this hard-fail moves) |
-| Mechanical failures              | `result_file_error`/`sample_error`/`needs_repair → failed`    | **unchanged** — still hard-fail to `failed` (§4.2)                                                       |
-| Completion                       | `complete → done` (no report)                                 | `complete → final_summary → final_review → done` (§4.3)                                                  |
-| Final report                     | none                                                          | `final_summary` agent produces `final_report` (§6); `final_review` presents it                          |
-| Operator stop                    | none (every stop is `failed` or `done`)                       | distinct `aborted` terminal (§4.4, §7)                                                                   |
-| Round-limit wedge backstop       | `guard: isRoundLimitReached → failed`                         | **unchanged** (still `→ failed`; a wedge is a genuine error, not an operator action)                    |
+| Capability                      | Multi-round slice (shipped)                                 | This slice                                                                                                |
+| ------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Approval before first evaluator | helper-layer only (`require_evolve_ready`), no UI gate (§9) | `preflight_review` human gate between `preflight` and `orchestrator` (§4.1)                               |
+| Orchestrator `escalate`         | `escalate → failed` (opaque hard fail)                      | `escalate → human_escalation` (APPROVE/FORCE_REVISION/ABORT) (§4.2)                                       |
+| Evaluator-blocked round         | `evaluator_blocked → failed`                                | `evaluator_blocked → human_escalation` (human-mediated; §4.2 justifies why **only** this hard-fail moves) |
+| Mechanical failures             | `result_file_error`/`sample_error`/`needs_repair → failed`  | **unchanged** — still hard-fail to `failed` (§4.2)                                                        |
+| Completion                      | `complete → done` (no report)                               | `complete → final_summary → final_review → done` (§4.3)                                                   |
+| Final report                    | none                                                        | `final_summary` agent produces `final_report` (§6); `final_review` presents it                            |
+| Operator stop                   | none (every stop is `failed` or `done`)                     | distinct `aborted` terminal (§4.4, §7)                                                                    |
+| Round-limit wedge backstop      | `guard: isRoundLimitReached → failed`                       | **unchanged** (still `→ failed`; a wedge is a genuine error, not an operator action)                      |
 
 No workflow-**runtime** change is required. The human-gate machinery (`human_gate` state type, `acceptedEvents`, `present:`, `resolveGate`, `handleGateEntry`, the `waiting_human` phase, the `aborted` phase, WF004/WF001/`validateHumanGate` lint) is **already merged and exercised by `vuln-discovery`** (§3). This slice is, again, pure workflow-package + test — it adds gate/agent/terminal blocks to one YAML and one new integration test, and (maintainer decision §13, decision 1) at most one `evolve_result.py` helper or `final_summary` prompt to materialize the report.
 
@@ -105,7 +105,7 @@ Every fact below is verified in the current tree. The implementer should rely on
 
 ### 3.3 Default and per-transition gate actions
 
-When a gate resolves, the default gate actions run first: `storeHumanPrompt` (writes the feedback into `context.humanPrompt`) and `clearError`. Then any optional per-transition `actions` run — e.g. `resetVisitCounts`. This default-then-optional ordering is wired where gate transitions are **assembled**, in `machine-builder.ts:313-318` (the action list is built as `['storeHumanPrompt', 'clearError', ...t.actions]`, with the `assign` implementations at `machine-builder.ts:557-560`) — **not** in `orchestrator.ts:1566` (that is `resolveGate`, which validates the FORCE_REVISION/REPLAN prompt and sends the `HUMAN_<EVENT>` that triggers this transition). This ordering matters for the FORCE_REVISION loops (§8): the feedback is always available to the destination agent, and an optional `resetVisitCounts` can clear the `isRoundLimitReached` visit accounting after the human authorizes more work.
+When a gate resolves, the default gate actions run first: `storeHumanPrompt` (writes the feedback into `context.humanPrompt`) and `clearError`. Then any optional per-transition `actions` run — e.g. `resetVisitCounts`. This default-then-optional ordering is wired where gate transitions are **assembled**, in `machine-builder.ts:313-318` (the action list is built as `['storeHumanPrompt', 'clearError', ...t.actions]`, with the `assign` implementations at `machine-builder.ts:557-560`) — **not** in `orchestrator.ts:1566` (that is `resolveGate`, which validates the FORCE*REVISION/REPLAN prompt and sends the `HUMAN*<EVENT>`that triggers this transition). This ordering matters for the FORCE_REVISION loops (§8): the feedback is always available to the destination agent, and an optional`resetVisitCounts`can clear the`isRoundLimitReached` visit accounting after the human authorizes more work.
 
 ### 3.4 `validateHumanGate`
 
@@ -163,44 +163,44 @@ All edits are against the current shipped `src/workflow/workflows/evolve/workflo
 **Current** `preflight` transitions (`workflow.yaml:67-71`):
 
 ```yaml
-    transitions:
-      - to: orchestrator
-        when: { verdict: ready }
-      - to: failed
-        when: { verdict: blocked }
+transitions:
+  - to: orchestrator
+    when: { verdict: ready }
+  - to: failed
+    when: { verdict: blocked }
 ```
 
 **Edit** — redirect the `ready` edge into the new gate; the `blocked` hard-fail is unchanged (a structurally un-runnable spec is an error, not an operator decision):
 
 ```yaml
-    transitions:
-      - to: preflight_review        # CHANGED: was `orchestrator`
-        when: { verdict: ready }
-      - to: failed                  # unchanged
-        when: { verdict: blocked }
+transitions:
+  - to: preflight_review # CHANGED: was `orchestrator`
+    when: { verdict: ready }
+  - to: failed # unchanged
+    when: { verdict: blocked }
 ```
 
 **New gate state** (insert after `preflight`):
 
 ```yaml
-  preflight_review:
-    type: human_gate
-    description: >
-      Human approval of the run spec, objective, evaluator command, and cognition
-      seed before the first evaluator runs.
-    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
-    present:
-      - run_spec
-      - cognition_seed
-    transitions:
-      - to: orchestrator
-        event: APPROVE
-      - to: preflight
-        event: FORCE_REVISION
-        actions:
-          - { type: resetVisitCounts, stateIds: [preflight, orchestrator] }
-      - to: aborted
-        event: ABORT
+preflight_review:
+  type: human_gate
+  description: >
+    Human approval of the run spec, objective, evaluator command, and cognition
+    seed before the first evaluator runs.
+  acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+  present:
+    - run_spec
+    - cognition_seed
+  transitions:
+    - to: orchestrator
+      event: APPROVE
+    - to: preflight
+      event: FORCE_REVISION
+      actions:
+        - { type: resetVisitCounts, stateIds: [preflight, orchestrator] }
+    - to: aborted
+      event: ABORT
 ```
 
 `run_spec` and `cognition_seed` are the two durable artifacts `preflight` writes (`run_spec.yaml`, `cognition_seed.md`); to satisfy WF004 they must be declared as `preflight` outputs (§4.5, §6.2). The `resetVisitCounts` action (`machine-builder.ts:610-620`) clears the named states' visit counts so a re-authored preflight does not carry stale visit counts into the `isRoundLimitReached` backstop (§8.4). It **requires an explicit non-empty `stateIds` list** (`validate.ts:28-30`, min 1) that references known states (`validate.ts:333-345`) — the bare `actions: [resetVisitCounts]` form is invalid. Here we reset `[preflight, orchestrator]` so the loop restarts cleanly. (Lower-stakes decision, §13 "Lower-stakes decisions": whether `resetVisitCounts` is actually needed pre-loop; it is harmless here and included for symmetry with §4.2/§4.3.)
@@ -262,113 +262,114 @@ All edits are against the current shipped `src/workflow/workflows/evolve/workflo
 
 **Which `failed` edges become human-mediated, and why (explicit):**
 
-| Source edge                              | Disposition          | Rationale                                                                                                                                                                  |
-| ---------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| orchestrator `escalate`                  | → `human_escalation` | The orchestrator emits `escalate` precisely when it judges the run unrecoverable *by an agent* — this is the parent design's literal `human_escalation` trigger.          |
-| evaluate `evaluator_blocked`             | → `human_escalation` | An evaluator that rejects the candidate (e.g. missing `solve` symbol, evaluator timeout) is often **repairable by a human-directed revision** (fix the eval cmd, force a new candidate). A human can FORCE_REVISION back to preflight or APPROVE to retry. |
-| evaluate `result_file_error`             | → `failed` (stays)   | The deterministic bridge could not write/parse its `result.json` — a mechanical I/O / contract failure with no human-actionable revision. Hard-fail.                      |
-| sample `sample_error` / `result_file_error` | → `failed` (stays) | Sampler/engine crash or bridge I/O failure — mechanical, not human-actionable. Hard-fail.                                                                                 |
-| analysis_record `needs_repair` / `result_file_error` | → `failed` (stays) | Engine record failure / bridge I/O failure — mechanical. Hard-fail.                                                                                                       |
-| orchestrator `isRoundLimitReached` guard | → `failed` (stays)   | The wedge backstop. A hub that never terminates is a bug, not an operator decision; routing a wedge to a human gate would defeat the deterministic safety bound (multi-round §3.6). Hard-fail. |
+| Source edge                                          | Disposition          | Rationale                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| orchestrator `escalate`                              | → `human_escalation` | The orchestrator emits `escalate` precisely when it judges the run unrecoverable _by an agent_ — this is the parent design's literal `human_escalation` trigger.                                                                                           |
+| evaluate `evaluator_blocked`                         | → `human_escalation` | An evaluator that rejects the candidate (e.g. missing `solve` symbol, evaluator timeout) is often **repairable by a human-directed revision** (fix the eval cmd, force a new candidate). A human can FORCE_REVISION back to preflight or APPROVE to retry. |
+| evaluate `result_file_error`                         | → `failed` (stays)   | The deterministic bridge could not write/parse its `result.json` — a mechanical I/O / contract failure with no human-actionable revision. Hard-fail.                                                                                                       |
+| sample `sample_error` / `result_file_error`          | → `failed` (stays)   | Sampler/engine crash or bridge I/O failure — mechanical, not human-actionable. Hard-fail.                                                                                                                                                                  |
+| analysis_record `needs_repair` / `result_file_error` | → `failed` (stays)   | Engine record failure / bridge I/O failure — mechanical. Hard-fail.                                                                                                                                                                                        |
+| orchestrator `isRoundLimitReached` guard             | → `failed` (stays)   | The wedge backstop. A hub that never terminates is a bug, not an operator decision; routing a wedge to a human gate would defeat the deterministic safety bound (multi-round §3.6). Hard-fail.                                                             |
 
 The principle: **agent-judgment and evaluator-blocked stops are human-mediated; mechanical infrastructure failures and the wedge backstop stay hard failures.** This keeps `human_escalation` meaningful (a human can actually act on it) and keeps `failed` as the unambiguous "something broke mechanically" terminal.
 
 **New gate state** (insert after `analysis_record`, mirroring `vuln-discovery/workflow.yaml:296-313`):
 
 ```yaml
-  human_escalation:
-    type: human_gate
-    description: >
-      Human review when the orchestrator judges the run unrecoverable or the
-      evaluator blocked a round. Approve to resume, force a revision back to
-      preflight, or abort.
-    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
-    present:
-      - run_spec                    # ONLY agent-produced artifacts survive WF004 (§4.5, §10.2).
-                                    # nodes.json / current/result.json are deterministic-state
-                                    # outputs → not in the lint `produced` set → cannot be in present:.
-                                    # The human inspects them via `workflow inspect <baseDir>`.
-    transitions:
-      - to: orchestrator
-        event: APPROVE
-      - to: preflight
-        event: FORCE_REVISION
-        actions:
-          - { type: resetVisitCounts, stateIds: [preflight, orchestrator] }
-      - to: aborted
-        event: ABORT
+human_escalation:
+  type: human_gate
+  description: >
+    Human review when the orchestrator judges the run unrecoverable or the
+    evaluator blocked a round. Approve to resume, force a revision back to
+    preflight, or abort.
+  acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+  present:
+    - run_spec # ONLY agent-produced artifacts survive WF004 (§4.5, §10.2).
+      # nodes.json / current/result.json are deterministic-state
+      # outputs → not in the lint `produced` set → cannot be in present:.
+      # The human inspects them via `workflow inspect <baseDir>`.
+  transitions:
+    - to: orchestrator
+      event: APPROVE
+    - to: preflight
+      event: FORCE_REVISION
+      actions:
+        - { type: resetVisitCounts, stateIds: [preflight, orchestrator] }
+    - to: aborted
+      event: ABORT
 ```
 
-`run_spec` lets the human see the objective/evaluator that produced the block; the gate `summary` additionally carries the engine's `context.lastError` (the escalation/eval-block reason). The committed nodes (`database_data/nodes.json`) and the in-flight round result (`current/result.json`) are **not** surfaceable via `present:` because they are written by *deterministic* states, which WF004's `produced` set excludes (§4.5 note, §10.2) — the human inspects them on disk via `workflow inspect <baseDir>`. If a genuine agent producer for `nodes` is later added, `present:` can be widened (§13 "Lower-stakes decisions" — `human_escalation.present`).
+`run_spec` lets the human see the objective/evaluator that produced the block; the gate `summary` additionally carries the engine's `context.lastError` (the escalation/eval-block reason). The committed nodes (`database_data/nodes.json`) and the in-flight round result (`current/result.json`) are **not** surfaceable via `present:` because they are written by _deterministic_ states, which WF004's `produced` set excludes (§4.5 note, §10.2) — the human inspects them on disk via `workflow inspect <baseDir>`. If a genuine agent producer for `nodes` is later added, `present:` can be widened (§13 "Lower-stakes decisions" — `human_escalation.present`).
 
 ### 4.3 complete → final_summary → final_review → done
 
 **Current** completion edge (already shown in §4.2 above): `orchestrator … - to: done; when: { verdict: complete }`. §4.2's edit retargets it to `final_summary`. The two new states:
 
 ```yaml
-  final_summary:
-    type: agent
-    description: >
-      Read the durable run state and the best node, and write a human-readable
-      report summarizing the run for the final human review.
-    persona: global
-    prompt: |
-      The Evolve run has reached its round budget. Produce a concise, human-readable
-      report of what the run found, for a human reviewer who will decide whether to
-      accept the result or request more rounds.
+final_summary:
+  type: agent
+  description: >
+    Read the durable run state and the best node, and write a human-readable
+    report summarizing the run for the final human review.
+  persona: global
+  prompt: |
+    The Evolve run has reached its round budget. Produce a concise, human-readable
+    report of what the run found, for a human reviewer who will decide whether to
+    accept the result or request more rounds.
 
-      Read the durable run state:
-        - /workspace/.evolve_runs/main/run_spec.yaml — the objective, evaluator, and
-          budget.max_rounds (= N).
-        - /workspace/.evolve_runs/main/database_data/nodes.json — every recorded node
-          (id, parent, score, analysis). Count its "nodes" map for done_rounds.
-        - /workspace/.evolve_runs/main/best/ — the best snapshot per improving round;
-          the highest-scoring node is the run's result.
+    Read the durable run state:
+      - /workspace/.evolve_runs/main/run_spec.yaml — the objective, evaluator, and
+        budget.max_rounds (= N).
+      - /workspace/.evolve_runs/main/database_data/nodes.json — every recorded node
+        (id, parent, score, analysis). Count its "nodes" map for done_rounds.
+      - /workspace/.evolve_runs/main/best/ — the best snapshot per improving round;
+        the highest-scoring node is the run's result.
 
-      Write a Markdown report to BOTH of these paths (the second is what the human
-      reviewer sees through the workflow's artifact surface):
-        /workspace/.evolve_runs/main/final_report.md
-        /workspace/.workflow/final_report/final_report.md
-      Create the /workspace/.workflow/final_report/ directory if it does not exist.
-      The report MUST contain, in this order:
-        1. The objective (one line, from run_spec.yaml).
-        2. done_rounds vs budget.max_rounds.
-        3. The best node: its id, its score, and its analysis/lesson.
-        4. The score trajectory across rounds (id → score), so the reviewer can see
-           whether the search was still improving at the budget cap.
-        5. A one-paragraph recommendation: is the result acceptable, or would more
-           rounds plausibly help (e.g. the score was still rising at the cap)?
+    Write a Markdown report to BOTH of these paths (the second is what the human
+    reviewer sees through the workflow's artifact surface):
+      /workspace/.evolve_runs/main/final_report.md
+      /workspace/.workflow/final_report/final_report.md
+    Create the /workspace/.workflow/final_report/ directory if it does not exist.
+    The report MUST contain, in this order:
+      1. The objective (one line, from run_spec.yaml).
+      2. done_rounds vs budget.max_rounds.
+      3. The best node: its id, its score, and its analysis/lesson.
+      4. The score trajectory across rounds (id → score), so the reviewer can see
+         whether the search was still improving at the budget cap.
+      5. A one-paragraph recommendation: is the result acceptable, or would more
+         rounds plausibly help (e.g. the score was still rising at the cap)?
 
-      Do NOT re-run the evaluator, write candidates, or modify any node. You only read
-      durable state and write final_report.md.
+    Do NOT re-run the evaluator, write candidates, or modify any node. You only read
+    durable state and write final_report.md.
 
-      Finish with the required agent_status block; your verdict is informational
-      (you return to final_review unconditionally).
-    inputs:
-      - run_spec
-      - nodes
-    outputs:
-      - final_report
-    transitions:
-      - to: final_review
+    Finish with the required agent_status block; your verdict is informational
+    (you return to final_review unconditionally).
+  inputs:
+    - run_spec # only run_spec is an agent-produced artifact; nodes.json/best/ are
+      # read directly from /workspace/.evolve_runs/main/ (the prompt above),
+      # NOT declared inputs — see §6.1.
+  outputs:
+    - final_report
+  transitions:
+    - to: final_review
 
-  final_review:
-    type: human_gate
-    description: >
-      Human review of the completed run. Approve to finish, force a revision to run
-      more rounds, or abort.
-    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
-    present:
-      - final_report
-    transitions:
-      - to: done
-        event: APPROVE
-      - to: orchestrator
-        event: FORCE_REVISION
-        actions:
-          - { type: resetVisitCounts, stateIds: [orchestrator] }
-      - to: aborted
-        event: ABORT
+final_review:
+  type: human_gate
+  description: >
+    Human review of the completed run. Approve to finish, force a revision to run
+    more rounds, or abort.
+  acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+  present:
+    - final_report
+  transitions:
+    - to: done
+      event: APPROVE
+    - to: orchestrator
+      event: FORCE_REVISION
+      actions:
+        - { type: resetVisitCounts, stateIds: [orchestrator] }
+    - to: aborted
+      event: ABORT
 ```
 
 `final_summary` is an **agent** state with a single unconditional `to: final_review` edge — exactly the multi-round slice's specialist-return pattern (`researcher`/`analyzer` return unconditionally to the hub). Its `outputs: [final_report]` is what makes `final_review`'s `present: [final_report]` pass WF004 (§3.5). `final_report` is mapped to the on-disk `final_report.md` via the package's artifact-name → path convention (§6.2 / §13 "Lower-stakes decisions" — artifact-dir copy).
@@ -380,73 +381,73 @@ The principle: **agent-judgment and evaluator-blocked stops are human-mediated; 
 **Current** terminals (`workflow.yaml:255-262`):
 
 ```yaml
-  done:
-    type: terminal
-    description: Round budget reached; candidates scored and recorded.
+done:
+  type: terminal
+  description: Round budget reached; candidates scored and recorded.
 
-  failed:
-    type: terminal
-    description: Preflight blocked, sampling failed, evaluator failed, record failed, or round-limit wedge.
+failed:
+  type: terminal
+  description: Preflight blocked, sampling failed, evaluator failed, record failed, or round-limit wedge.
 ```
 
 **Edit** — keep both, add `aborted` (mirroring `vuln-discovery/workflow.yaml:923-925`):
 
 ```yaml
-  done:
-    type: terminal
-    description: Round budget reached and human-approved; candidates scored and recorded.
+done:
+  type: terminal
+  description: Round budget reached and human-approved; candidates scored and recorded.
 
-  failed:
-    type: terminal
-    description: >
-      Mechanical failure — preflight blocked, sampler/engine crash, result-file
-      contract error, record failure, or round-limit wedge backstop.
+failed:
+  type: terminal
+  description: >
+    Mechanical failure — preflight blocked, sampler/engine crash, result-file
+    contract error, record failure, or round-limit wedge backstop.
 
-  aborted:
-    type: terminal
-    description: Operator aborted the run at a human gate (preflight_review, human_escalation, or final_review).
+aborted:
+  type: terminal
+  description: Operator aborted the run at a human gate (preflight_review, human_escalation, or final_review).
 ```
 
 ### 4.5 Full extended states map (delta summary)
 
 Net state-list change against the shipped FSM:
 
-| State              | Status     | Type        | Note                                                                                      |
-| ------------------ | ---------- | ----------- | ----------------------------------------------------------------------------------------- |
-| `preflight`        | **edited** | agent       | `ready` edge retargeted to `preflight_review`; gains `outputs: [run_spec, cognition_seed]` (§6.2) |
-| `preflight_review` | **new**    | human_gate  | §4.1                                                                                       |
-| `orchestrator`     | **edited** | agent       | `escalate → human_escalation`, `complete → final_summary`; all other edges unchanged       |
-| `sample`           | unchanged  | deterministic |                                                                                          |
-| `researcher`       | unchanged  | agent       |                                                                                           |
-| `evaluate`         | **edited** | deterministic | `evaluator_blocked → human_escalation`; other edges unchanged                            |
-| `analyzer`         | unchanged  | agent       |                                                                                           |
-| `analysis_record`  | unchanged  | deterministic |                                                                                          |
-| `human_escalation` | **new**    | human_gate  | §4.2                                                                                       |
-| `final_summary`    | **new**    | agent       | §4.3, §6                                                                                   |
-| `final_review`     | **new**    | human_gate  | §4.3                                                                                       |
-| `done`             | edited     | terminal    | description only                                                                           |
-| `failed`           | edited     | terminal    | description only (now "mechanical failure")                                                |
-| `aborted`          | **new**    | terminal    | §4.4, §7                                                                                    |
+| State              | Status     | Type          | Note                                                                                              |
+| ------------------ | ---------- | ------------- | ------------------------------------------------------------------------------------------------- |
+| `preflight`        | **edited** | agent         | `ready` edge retargeted to `preflight_review`; gains `outputs: [run_spec, cognition_seed]` (§6.2) |
+| `preflight_review` | **new**    | human_gate    | §4.1                                                                                              |
+| `orchestrator`     | **edited** | agent         | `escalate → human_escalation`, `complete → final_summary`; all other edges unchanged              |
+| `sample`           | unchanged  | deterministic |                                                                                                   |
+| `researcher`       | unchanged  | agent         |                                                                                                   |
+| `evaluate`         | **edited** | deterministic | `evaluator_blocked → human_escalation`; other edges unchanged                                     |
+| `analyzer`         | unchanged  | agent         |                                                                                                   |
+| `analysis_record`  | unchanged  | deterministic |                                                                                                   |
+| `human_escalation` | **new**    | human_gate    | §4.2                                                                                              |
+| `final_summary`    | **new**    | agent         | §4.3, §6                                                                                          |
+| `final_review`     | **new**    | human_gate    | §4.3                                                                                              |
+| `done`             | edited     | terminal      | description only                                                                                  |
+| `failed`           | edited     | terminal      | description only (now "mechanical failure")                                                       |
+| `aborted`          | **new**    | terminal      | §4.4, §7                                                                                          |
 
 **WF004 production requirements** (the artifact names every gate `present:` references must be produced by a reachable agent state's `outputs:`):
 
-This table lists **only artifact names that legally appear in a gate `present:`** — i.e. names produced by a reachable **agent** state's `outputs:`. `nodes` and `current_result` are deliberately **absent**: they are written by *deterministic* states (`analysis_record`, `evaluate`), which WF004's `produced` set excludes, so they **cannot** appear in any gate's `present:` (see the note below). The SHIPPING `human_escalation.present:` is therefore `[run_spec]` only.
+This table lists **only artifact names that legally appear in a gate `present:`** — i.e. names produced by a reachable **agent** state's `outputs:`. `nodes` and `current_result` are deliberately **absent**: they are written by _deterministic_ states (`analysis_record`, `evaluate`), which WF004's `produced` set excludes, so they **cannot** appear in any gate's `present:` (see the note below). The SHIPPING `human_escalation.present:` is therefore `[run_spec]` only.
 
-| Artifact name     | `present:` in …                       | Produced by (`outputs:` of) …               |
-| ----------------- | ------------------------------------- | ------------------------------------------- |
-| `run_spec`        | preflight_review, human_escalation    | **`preflight`** (new `outputs:` entry)      |
-| `cognition_seed`  | preflight_review                      | **`preflight`** (new `outputs:` entry)      |
-| `final_report`    | final_review                          | **`final_summary`** (agent `outputs:` entry) |
+| Artifact name    | `present:` in …                    | Produced by (`outputs:` of) …                |
+| ---------------- | ---------------------------------- | -------------------------------------------- |
+| `run_spec`       | preflight_review, human_escalation | **`preflight`** (new `outputs:` entry)       |
+| `cognition_seed` | preflight_review                   | **`preflight`** (new `outputs:` entry)       |
+| `final_report`   | final_review                       | **`final_summary`** (agent `outputs:` entry) |
 
 **Do NOT add `nodes` or `current_result?` to any gate's `present:`.** WF004 will fire on both. They are inspect-only (`workflow inspect <baseDir>`), never gate-presented, unless a genuine **agent** producer is added (§13 "Lower-stakes decisions" — `human_escalation.present`). The two rows for `nodes`/`current_result?` that previously appeared here were a latent WF004 error and have been removed so an implementer copying this table cannot reintroduce it.
 
 **Note (load-bearing, §13 "Lower-stakes decisions" — `human_escalation.present`):** WF004's `produced` set is collected **only from reachable `agent` states' `outputs:`** (`collectReachableAgentOutputs`, `lint.ts:149-157`); deterministic-state `outputs:` are arrival declarations, not production, and are excluded (`lint.ts:145-148`). WF004 then parses each `present:` entry and checks the **bare name** against `produced` **regardless of any `?` suffix** (`lint.ts:267-268`: `const { name } = parseArtifactRef(entry); if (!produced.has(name)) …`). `nodes` and `current_result` are written by **deterministic** states (`analysis_record`, `evaluate`), which lint does **not** count as producers. Three resolutions, in preference order:
 
 1. **Mark them optional** (`nodes?`, `current_result?`) — WF004 still checks the parsed `name` against `produced` regardless of the `?` (`lint.ts:267-268` parses then checks the bare name), so optionality does **not** exempt them. This does **not** work; rejected.
-2. **Declare them as outputs of a reachable agent state.** The cleanest faithful option is to give the `orchestrator` (which reads `nodes.json` every turn) an `outputs: [nodes]` and the `analyzer`/`evaluate`-adjacent agent an output — but no agent *writes* `nodes.json` (the deterministic `analysis_record` does), so this would be a lint-satisfying fiction.
-3. **Drop the unproducible names from `present:`.** Keep `human_escalation`'s `present:` to artifacts that *are* agent-produced: `present: [run_spec]` (from `preflight`) is sufficient and honest. The human can still inspect `nodes.json`/`current/result.json` on disk via `workflow inspect`; `present:` is a convenience surface, not the only access path. **This is the recommended resolution** — it keeps WF004 clean without inventing fake producers. The §4.2 block above should therefore ship as `present: [run_spec]` unless the implementer adds a genuine agent producer for `nodes` (see §13 "Lower-stakes decisions" — `human_escalation.present`).
+2. **Declare them as outputs of a reachable agent state.** The cleanest faithful option is to give the `orchestrator` (which reads `nodes.json` every turn) an `outputs: [nodes]` and the `analyzer`/`evaluate`-adjacent agent an output — but no agent _writes_ `nodes.json` (the deterministic `analysis_record` does), so this would be a lint-satisfying fiction.
+3. **Drop the unproducible names from `present:`.** Keep `human_escalation`'s `present:` to artifacts that _are_ agent-produced: `present: [run_spec]` (from `preflight`) is sufficient and honest. The human can still inspect `nodes.json`/`current/result.json` on disk via `workflow inspect`; `present:` is a convenience surface, not the only access path. **This is the recommended resolution** — it keeps WF004 clean without inventing fake producers. The §4.2 block above should therefore ship as `present: [run_spec]` unless the implementer adds a genuine agent producer for `nodes` (see §13 "Lower-stakes decisions" — `human_escalation.present`).
 
-This wrinkle does **not** affect `preflight_review` (both its `present:` artifacts are written by the `preflight` *agent*) or `final_review` (its `final_report` is written by the `final_summary` *agent*). It only constrains `human_escalation`'s `present:` list. The verbatim §4.2 block is annotated accordingly; the safe default is `present: [run_spec]`.
+This wrinkle does **not** affect `preflight_review` (both its `present:` artifacts are written by the `preflight` _agent_) or `final_review` (its `final_report` is written by the `final_summary` _agent_). It only constrains `human_escalation`'s `present:` list. The verbatim §4.2 block is annotated accordingly; the safe default is `present: [run_spec]`.
 
 ---
 
@@ -485,17 +486,17 @@ Each gate, on entry, sets `phase: 'waiting_human'` and builds a `HumanGateReques
 
 ### 6.1 Inputs and behavior
 
-- **Inputs (read-only durable state)**: `run_spec.yaml` (objective, evaluator, `budget.max_rounds`), `database_data/nodes.json` (every recorded node — id, parent, score, analysis), and `best/` (the best snapshot per improving round). It does **not** re-run the evaluator, write candidates, or mutate any node — it is a pure read-then-summarize agent (the §4.3 prompt forbids mutation explicitly).
+- **Inputs**: the only declared workflow `inputs:` artifact is `run_spec` — the one input that is agent-produced (by `preflight`). The other durable state it reads — `database_data/nodes.json` (every recorded node — id, parent, score, analysis) and `best/` (the best snapshot per improving round) — is read **directly from `/workspace/.evolve_runs/main/` on disk via the §4.3 prompt**, NOT declared as `inputs:`. Declaring `nodes`/`best` as `inputs:` would fail `validateArtifactInputs` (`validate.ts:559-563`): they are written by deterministic states, so they are not in the agent-`outputs:` set — the same WF004 constraint that keeps them out of any gate's `present:` (§4.5). It does **not** re-run the evaluator, write candidates, or mutate any node — it is a pure read-then-summarize agent (the §4.3 prompt forbids mutation explicitly).
 - **Output (the report)**: a Markdown report covering (1) the objective, (2) `done_rounds` vs `budget.max_rounds`, (3) the best node (id, score, lesson), (4) the per-round score trajectory, (5) a recommendation on whether more rounds would plausibly help. The trajectory + recommendation are what let the human make the `APPROVE` vs `FORCE_REVISION` (run-more-rounds) decision at `final_review`.
 - **Transition**: a single unconditional `to: final_review` (no verdict gating) — the multi-round specialist-return pattern. Its `agent_status` verdict is informational.
 
-### 6.2 How the report is declared *produced* (WF004) and *surfaced* — the load-bearing detail
+### 6.2 How the report is declared _produced_ (WF004) and _surfaced_ — the load-bearing detail
 
 WF004 (`lint.ts:255-281`) requires that `final_review`'s `present: [final_report]` name be in the `produced` set, which `collectReachableAgentOutputs` builds from reachable **agent** states' `outputs:` (`lint.ts:149-157`). So `final_summary` declares:
 
 ```yaml
-    outputs:
-      - final_report
+outputs:
+  - final_report
 ```
 
 This is the **first non-empty `outputs:` in the evolve package** (all other evolve agent states use `outputs: []`). It does two things:
@@ -526,18 +527,18 @@ The two terminals differ both in **semantics** (operator stop vs mechanical erro
 When a run reaches a terminal, `handleWorkflowComplete` (`orchestrator.ts:2581-2634`) sets `finalStatus.phase`:
 
 - If the terminal **state name is `aborted`** (or contains `abort`), `phase: 'aborted'` with `reason: 'Workflow reached aborted state'` (`orchestrator.ts:2623-2627`). **This is exactly why the operator-stop terminal must be named `aborted`** — the name is the trigger.
-- **Otherwise** (including the `failed` and `done` terminals), `phase: 'completed'` (`orchestrator.ts:2628-2634`). So reaching the `failed` *terminal state* by itself does **not** produce `phase: 'failed'` — it produces `phase: 'completed'`, distinguished from `done` only by the terminal state *name* recorded in the checkpoint.
+- **Otherwise** (including the `failed` and `done` terminals), `phase: 'completed'` (`orchestrator.ts:2628-2634`). So reaching the `failed` _terminal state_ by itself does **not** produce `phase: 'failed'` — it produces `phase: 'completed'`, distinguished from `done` only by the terminal state _name_ recorded in the checkpoint.
 - A true `phase: 'failed'` (`types.ts:492`, `{ phase: 'failed'; error; lastState }`) arises from a different path — an **invoke/agent error** surfaced via the lifecycle `kind: 'failed'` event (`orchestrator.ts:1771-1775`, `1647`), not from transiting to a terminal named `failed`. (Quota/transient upstream failures also force `phase: 'aborted'` to preserve the checkpoint — `orchestrator.ts:2601-2622` — independent of which terminal was reached.)
 
-**Implication for this slice:** the *only* reliable way to give an operator-stop a distinct, resumable, non-error phase is the dedicated `aborted` terminal. A gate `ABORT → failed` would land on `phase: 'completed'` and be indistinguishable from a normal `done` in `finalStatus.phase` (differing only by the recorded terminal name). The `aborted` terminal is therefore **load-bearing**, not cosmetic.
+**Implication for this slice:** the _only_ reliable way to give an operator-stop a distinct, resumable, non-error phase is the dedicated `aborted` terminal. A gate `ABORT → failed` would land on `phase: 'completed'` and be indistinguishable from a normal `done` in `finalStatus.phase` (differing only by the recorded terminal name). The `aborted` terminal is therefore **load-bearing**, not cosmetic.
 
 ### 7.2 Checkpoint / resume difference
 
-`isCheckpointResumable` excludes `phase: 'completed'` runs but **retains** `phase: 'aborted'` and `phase: 'failed'` (`orchestrator.ts:1611-1613` references all three). **Note the two distinct things both spelled "failed":** the `failed` *terminal state* maps to `phase: 'completed'` (§7.1, `checkpoint.ts:17-18`) and is therefore **not** resumable, whereas an invoke/agent-error `phase: 'failed'` (a different path — §7.1 third bullet) **is** retained and resumable. Reaching the `failed` terminal does not produce `phase: 'failed'`. So:
+`isCheckpointResumable` excludes `phase: 'completed'` runs but **retains** `phase: 'aborted'` and `phase: 'failed'` (`orchestrator.ts:1611-1613` references all three). **Note the two distinct things both spelled "failed":** the `failed` _terminal state_ maps to `phase: 'completed'` (§7.1, `checkpoint.ts:17-18`) and is therefore **not** resumable, whereas an invoke/agent-error `phase: 'failed'` (a different path — §7.1 third bullet) **is** retained and resumable. Reaching the `failed` terminal does not produce `phase: 'failed'`. So:
 
 - `done` (→ `phase: 'completed'`): not resumable; checkpoint retained for inspection only.
 - `aborted` (→ `phase: 'aborted'`): **resumable** — the checkpoint preserves the last non-terminal state so `workflow resume <baseDir>` can re-enter where the operator stopped (§8). This is the right behavior: an operator who aborted to inspect can resume.
-- `failed` *terminal* (→ `phase: 'completed'`, recorded terminal `failed`): **not resumable** — treated as a finished mechanical failure; inspect shows `Final: completed` with the terminal state `failed`. This is **distinct** from a genuine invoke-error `phase: 'failed'`, which never transits a terminal and *is* separately resumable per `orchestrator.ts:1611-1613`. Do not conflate the `failed` terminal (non-resumable, `phase: 'completed'`) with the invoke-error `phase: 'failed'` (resumable).
+- `failed` _terminal_ (→ `phase: 'completed'`, recorded terminal `failed`): **not resumable** — treated as a finished mechanical failure; inspect shows `Final: completed` with the terminal state `failed`. This is **distinct** from a genuine invoke-error `phase: 'failed'`, which never transits a terminal and _is_ separately resumable per `orchestrator.ts:1611-1613`. Do not conflate the `failed` terminal (non-resumable, `phase: 'completed'`) with the invoke-error `phase: 'failed'` (resumable).
 
 ### 7.3 `workflow inspect` / UI
 
@@ -556,23 +557,23 @@ A human gate is a **durable `waiting_human` pause**: on entry the orchestrator s
 
 ### 8.1 A gate is a durable pause; `workflow resume` re-enters it
 
-When a gate raises, the checkpoint records the run at the gate state with `phase: 'waiting_human'`. `ironcurtain workflow resume <baseDir> [--state <name>]` (`workflow-command.ts:67`) re-enters a paused run. For a gate, resume re-surfaces the same `HumanGateRequest` (the gate state is re-entered and `handleGateEntry` re-fires), so the operator sees the summary + presented artifacts again and can resolve it. Resolving sends `HUMAN_<EVENT>` (`machine-builder.ts:309-329`) and the run continues down the chosen edge. Because all the run's *logic* state is durable on disk (`run_spec.yaml`, `nodes.json`, `current/`), nothing about the in-flight round is lost across the pause — the gate adds no in-memory state that resume must reconstruct beyond the gate request itself.
+When a gate raises, the checkpoint records the run at the gate state with `phase: 'waiting_human'`. `ironcurtain workflow resume <baseDir> [--state <name>]` (`workflow-command.ts:67`) re-enters a paused run. For a gate, resume re-surfaces the same `HumanGateRequest` (the gate state is re-entered and `handleGateEntry` re-fires), so the operator sees the summary + presented artifacts again and can resolve it. Resolving sends `HUMAN_<EVENT>` (`machine-builder.ts:309-329`) and the run continues down the chosen edge. Because all the run's _logic_ state is durable on disk (`run_spec.yaml`, `nodes.json`, `current/`), nothing about the in-flight round is lost across the pause — the gate adds no in-memory state that resume must reconstruct beyond the gate request itself.
 
 ### 8.2 FORCE_REVISION back to `preflight` (preflight_review, human_escalation)
 
 These loops re-enter `preflight`, an agent state that **overwrites** `run_spec.yaml`/`cognition_seed.md` from scratch with the human's `context.humanPrompt` feedback in hand. Two cases:
 
 - **`preflight_review → preflight` (no nodes yet).** `done_rounds == 0` (no `nodes.json`), so there is nothing to double-count. Re-authoring is a clean restart of the spec; the subsequent `preflight_review` re-approves the revised spec. `resetVisitCounts [preflight, orchestrator]` clears any visit accounting from the first preflight attempt.
-- **`human_escalation → preflight` (mid-run, nodes may exist).** Here `nodes.json` may already hold committed rounds. Re-authoring `run_spec.yaml` does **not** delete `nodes.json` — so when the loop returns through `preflight_review → orchestrator`, the orchestrator recomputes `done_rounds` from the **existing** `nodes.json` and resumes the loop from the committed count. This is correct *only if* the human's revision is compatible with the existing nodes (e.g. fixing the evaluator command). **OPEN MAINTAINER DECISION (§13 decision 2):** if the human's revision changes the *objective* (making prior nodes meaningless), the existing `nodes.json` is stale but not cleared, so the orchestrator would count stale rounds toward `max_rounds` **and sample them as parents**. No safe engine "reset DB" operation was found, so re-authoring the spec cannot clear the database. The recommended conservative contract is: `human_escalation → preflight` is for *evaluator/spec repair that preserves node validity*; a fundamental objective change should `ABORT` and start a fresh run. The preflight prompt and the gate description should state this. (Adding an engine "reset DB" step on objective change is real scope creep, out of scope here — see §13 decision 2 for the tradeoff and the requested sign-off.)
+- **`human_escalation → preflight` (mid-run, nodes may exist).** Here `nodes.json` may already hold committed rounds. Re-authoring `run_spec.yaml` does **not** delete `nodes.json` — so when the loop returns through `preflight_review → orchestrator`, the orchestrator recomputes `done_rounds` from the **existing** `nodes.json` and resumes the loop from the committed count. This is correct _only if_ the human's revision is compatible with the existing nodes (e.g. fixing the evaluator command). **OPEN MAINTAINER DECISION (§13 decision 2):** if the human's revision changes the _objective_ (making prior nodes meaningless), the existing `nodes.json` is stale but not cleared, so the orchestrator would count stale rounds toward `max_rounds` **and sample them as parents**. No safe engine "reset DB" operation was found, so re-authoring the spec cannot clear the database. The recommended conservative contract is: `human_escalation → preflight` is for _evaluator/spec repair that preserves node validity_; a fundamental objective change should `ABORT` and start a fresh run. The preflight prompt and the gate description should state this. (Adding an engine "reset DB" step on objective change is real scope creep, out of scope here — see §13 decision 2 for the tradeoff and the requested sign-off.)
 
 ### 8.3 FORCE_REVISION back to `orchestrator` (final_review) — the double-count question, answered
 
 This is the subtle one. At `final_review`, `done_rounds == max_rounds` (the loop completed). `FORCE_REVISION → orchestrator` re-enters the hub. The multi-round slice's load-bearing property is: **the orchestrator recomputes `done_rounds` from `nodes.json` on every entry, never from FSM memory** (multi-round §3.2, §10.3). So on this re-entry the orchestrator reads `done_rounds == max_rounds` again and — with no other change — would immediately re-emit `complete`, bouncing straight back to `final_summary → final_review` in an unproductive loop. **Running "more rounds" therefore requires raising the effective round budget**, and there are exactly two clean ways to do it:
 
-1. **(Recommended) The human's FORCE_REVISION feedback instructs a budget raise, and the orchestrator honors `context.humanPrompt` over the spec for this decision.** The human's required `prompt` (e.g. "run 2 more rounds") arrives as `context.humanPrompt`. The orchestrator's prompt is extended (§11) with: *"If `context.humanPrompt` requests additional rounds, treat the effective budget as `done_rounds + K` for this turn and emit `design` instead of `complete`; you do not need to rewrite run_spec.yaml."* The orchestrator then emits `design`, runs K more rounds (each appending one node to `nodes.json`, so `done_rounds` climbs past the original `max_rounds`), and re-emits `complete` once `done_rounds >= done_rounds_at_force + K`. **No double-count:** each extra round is a genuine new `analysis_record` node at the next `next_id`, with a real sampled parent — the node count, parents, and scores stay consistent exactly as in a normal round (the §12 gate asserts this). The extra rounds are *additional* real rounds, not re-records of existing ones.
-2. **(Unnecessary alternative) The orchestrator rewrites `run_spec.yaml budget.max_rounds`.** This was once recorded as a possible fallback in case some *engine* helper enforced `budget.max_rounds` as a hard stop and rejected `done_rounds` exceeding it. **It does not, so this rewrite is unnecessary** — see "Budget enforcement (RESOLVED)" below. Retained here only to note it is mechanically possible (the engine's `cmd_brief_normalize` treats *sampling* config as immutable once nodes exist, multi-round §4.1, but `budget.max_rounds` is not in that immutable set), not because the slice needs it.
+1. **(Recommended) The human's FORCE_REVISION feedback instructs a budget raise, and the orchestrator honors `context.humanPrompt` over the spec for this decision.** The human's required `prompt` (e.g. "run 2 more rounds") arrives as `context.humanPrompt`. The orchestrator's prompt is extended (§11) with: _"If `context.humanPrompt` requests additional rounds, treat the effective budget as `done_rounds + K` for this turn and emit `design` instead of `complete`; you do not need to rewrite run_spec.yaml."_ The orchestrator then emits `design`, runs K more rounds (each appending one node to `nodes.json`, so `done_rounds` climbs past the original `max_rounds`), and re-emits `complete` once `done_rounds >= done_rounds_at_force + K`. **No double-count:** each extra round is a genuine new `analysis_record` node at the next `next_id`, with a real sampled parent — the node count, parents, and scores stay consistent exactly as in a normal round (the §12 gate asserts this). The extra rounds are _additional_ real rounds, not re-records of existing ones.
+2. **(Unnecessary alternative) The orchestrator rewrites `run_spec.yaml budget.max_rounds`.** This was once recorded as a possible fallback in case some _engine_ helper enforced `budget.max_rounds` as a hard stop and rejected `done_rounds` exceeding it. **It does not, so this rewrite is unnecessary** — see "Budget enforcement (RESOLVED)" below. Retained here only to note it is mechanically possible (the engine's `cmd_brief_normalize` treats _sampling_ config as immutable once nodes exist, multi-round §4.1, but `budget.max_rounds` is not in that immutable set), not because the slice needs it.
 
-**Budget enforcement — RESOLVED (option 1 is confirmed viable; option 2 is unnecessary).** Verified in the vendored engine: **no engine helper enforces `budget.max_rounds` as a stopping condition.** The orchestrator is the *only* component that compares `done_rounds` against `max_rounds`. Specifically:
+**Budget enforcement — RESOLVED (option 1 is confirmed viable; option 2 is unnecessary).** Verified in the vendored engine: **no engine helper enforces `budget.max_rounds` as a stopping condition.** The orchestrator is the _only_ component that compares `done_rounds` against `max_rounds`. Specifically:
 
 - `require_evolve_ready` (`evolve-engine/.../run_state.py:288-297`) — the gate every mutating/evaluator/record helper calls — checks only (a) missing required fields and (b) `approval.confirmed`. It does **not** read or enforce `budget.max_rounds`.
 - The result bridge computes `done_rounds = _node_count(run_dir)` and allocates `step_{done_rounds + 1:04d}` with **no cap** (`evolve-engine/.../evolve_result.py:276-277`) — it will happily run a `done_rounds + 1`-th round when `done_rounds == max_rounds`.
@@ -580,7 +581,7 @@ This is the subtle one. At `final_review`, `done_rounds == max_rounds` (the loop
 
 So an extra round past the original `max_rounds` (option 1: orchestrator emits `design`, consuming `context.humanPrompt`, without rewriting the spec) is accepted by every helper and records a real node at the next `next_id`. **The slice ships option 1.** Scenario D's "exactly N+1 nodes, monotone scores, intact lineage" assertion is the end-to-end proof. (This resolves what was formerly open question #6 — see the "Resolved" entry in §13.)
 
-**Why no double-count under either path:** the engine's `evolve-db record` allocates a fresh `next_id` per call (multi-round §3.5), and `analysis_record` is the *single* record per round. An extra round runs the full `design → evaluate → analyze → record` cycle once and commits exactly one new node whose `parent` is the greedy pick from the now-larger DB. The "recompute `done_rounds` from `nodes.json`" property *guarantees* the loop terminates again at the new effective budget — it never re-counts a committed node. The only thing FORCE_REVISION changes is the *target* the orchestrator compares `done_rounds` against.
+**Why no double-count under either path:** the engine's `evolve-db record` allocates a fresh `next_id` per call (multi-round §3.5), and `analysis_record` is the _single_ record per round. An extra round runs the full `design → evaluate → analyze → record` cycle once and commits exactly one new node whose `parent` is the greedy pick from the now-larger DB. The "recompute `done_rounds` from `nodes.json`" property _guarantees_ the loop terminates again at the new effective budget — it never re-counts a committed node. The only thing FORCE_REVISION changes is the _target_ the orchestrator compares `done_rounds` against.
 
 ### 8.4 The `isRoundLimitReached` backstop and `resetVisitCounts`
 
@@ -588,14 +589,14 @@ So an extra round past the original `max_rounds` (option 1: orchestrator emits `
 
 The wedge backstop (`settings.maxRounds: 200`, `guard: isRoundLimitReached → failed`, multi-round §3.6) counts **agent-state visits** via `context.visitCounts` (incremented only on agent entry, `machine-builder.ts:262`; the guard compares `max(visitCounts) >= maxRounds`, `guards.ts:21-26`). The orchestrator is the most-visited agent (~`4N+1` entries for N rounds). Two interactions:
 
-- **FORCE_REVISION → orchestrator (run more rounds) accumulates orchestrator visits.** K extra rounds add ~`4K` orchestrator entries on top of the original `4N+1`. With `maxRounds: 200` and realistic N+K, this is far below the cap, so the backstop is not tripped by a single human-authorized extension. But to be safe and to keep the backstop's semantics ("safety ceiling on hub entries, not the round budget"), the FORCE_REVISION edges carry `resetVisitCounts: [orchestrator]` (and `[preflight, orchestrator]` for the preflight-bound edges) — clearing the accumulated visit count at the human-authorized boundary so a long sequence of human-driven extensions cannot spuriously trip the wedge guard. This is correct because the human pressing FORCE_REVISION *is* the deliberate authorization the backstop exists to distinguish from a wedged agent.
+- **FORCE_REVISION → orchestrator (run more rounds) accumulates orchestrator visits.** K extra rounds add ~`4K` orchestrator entries on top of the original `4N+1`. With `maxRounds: 200` and realistic N+K, this is far below the cap, so the backstop is not tripped by a single human-authorized extension. But to be safe and to keep the backstop's semantics ("safety ceiling on hub entries, not the round budget"), the FORCE_REVISION edges carry `resetVisitCounts: [orchestrator]` (and `[preflight, orchestrator]` for the preflight-bound edges) — clearing the accumulated visit count at the human-authorized boundary so a long sequence of human-driven extensions cannot spuriously trip the wedge guard. This is correct because the human pressing FORCE_REVISION _is_ the deliberate authorization the backstop exists to distinguish from a wedged agent.
 - **`resetVisitCounts` only touches the named states** (`machine-builder.ts:610-619`) — it does not reset unrelated states' counts, and it does not affect `done_rounds` (which is recomputed from `nodes.json`, not from `visitCounts`). So resetting orchestrator visits at a gate is purely a backstop concern; it cannot corrupt the loop's round logic.
 
-**Important non-interaction:** `done_rounds` (the loop terminator) is read from durable `nodes.json` and is **entirely independent** of `visitCounts` (the wedge backstop). `resetVisitCounts` can never cause a round to re-run or double-count — it only changes how many *more* agent entries the safety guard will tolerate before force-failing. The forced extra round in §8.3 increments `done_rounds` by exactly one per `analysis_record`, regardless of any visit-count reset.
+**Important non-interaction:** `done_rounds` (the loop terminator) is read from durable `nodes.json` and is **entirely independent** of `visitCounts` (the wedge backstop). `resetVisitCounts` can never cause a round to re-run or double-count — it only changes how many _more_ agent entries the safety guard will tolerate before force-failing. The forced extra round in §8.3 increments `done_rounds` by exactly one per `analysis_record`, regardless of any visit-count reset.
 
 ### 8.5 Checkpoint retention across abort
 
-A gate `ABORT → aborted` lands on `phase: 'aborted'`, which `isCheckpointResumable` retains (§7.2). So an operator who aborts at a gate can later `workflow resume <baseDir>` and re-enter the *pre-gate* state (the checkpoint preserves the last non-terminal state, `orchestrator.ts:2636-2643`). This means `ABORT` is not destructive — it is a resumable stop, consistent with the parent design's operator-stop semantics.
+A gate `ABORT → aborted` lands on `phase: 'aborted'`, which `isCheckpointResumable` retains (§7.2). So an operator who aborts at a gate can later `workflow resume <baseDir>` and re-enter the _pre-gate_ state (the checkpoint preserves the last non-terminal state, `orchestrator.ts:2636-2643`). This means `ABORT` is not destructive — it is a resumable stop, consistent with the parent design's operator-stop semantics.
 
 ---
 
@@ -606,7 +607,7 @@ The parent design requires "explicit human approval before running the first eva
 `preflight_review` closes the other half:
 
 - **Enforcement half (unchanged, still present):** `require_evolve_ready` still gates every helper. Nothing about the helper-layer check changes — it remains the authoritative machine guard that an unapproved run cannot evaluate or record.
-- **Human-in-the-loop half (new):** `preflight_review` inserts a real operator pause *between* `preflight` (which authors `run_spec.yaml` with `approval.confirmed=true`) and the orchestrator hub (the first state that would dispatch `sample`/`evaluate`). The first evaluator (`evaluate`) is reachable **only** via `orchestrator`, which is reachable **only** via `preflight_review` `APPROVE`. So no evaluator can run until a human has seen the objective + evaluator command + cognition seed (`present: [run_spec, cognition_seed]`) and explicitly approved — exactly the parent design's requirement, now enforced by FSM topology, not just helper-layer self-assertion.
+- **Human-in-the-loop half (new):** `preflight_review` inserts a real operator pause _between_ `preflight` (which authors `run_spec.yaml` with `approval.confirmed=true`) and the orchestrator hub (the first state that would dispatch `sample`/`evaluate`). The first evaluator (`evaluate`) is reachable **only** via `orchestrator`, which is reachable **only** via `preflight_review` `APPROVE`. So no evaluator can run until a human has seen the objective + evaluator command + cognition seed (`present: [run_spec, cognition_seed]`) and explicitly approved — exactly the parent design's requirement, now enforced by FSM topology, not just helper-layer self-assertion.
 
 **Defense in depth:** the two halves are complementary. Even if a future FSM edit accidentally routed around `preflight_review`, `require_evolve_ready` would still reject an unapproved run at the helper layer; and even if `approval.confirmed` were set by a misbehaving agent, the human gate still pauses the run before the first evaluator. Neither half is weakened by adding the other. This slice does **not** modify the helper-layer check, the approval field, or any policy-engine behavior — it is purely an FSM/gate-topology addition that makes the human approval observable and blocking.
 
@@ -632,9 +633,9 @@ No gate uses `REPLAN`, so none needs a `REPLAN` transition. (A gate may declare 
 
 The `produced` set = reachable **agent** states' `outputs:` (`lint.ts:149-157`). Required producers:
 
-- `preflight_review.present: [run_spec, cognition_seed]` ⇐ `preflight.outputs: [run_spec, cognition_seed]` (new). ✓ *provided* `preflight` copies them into `.workflow/run_spec/` and `.workflow/cognition_seed/` (§6.2/§6.3) so the post-agent `findMissingArtifacts` check passes — declaring an output the agent never writes into the artifact dir makes the *agent state* fail at runtime even though lint is satisfied.
+- `preflight_review.present: [run_spec, cognition_seed]` ⇐ `preflight.outputs: [run_spec, cognition_seed]` (new). ✓ _provided_ `preflight` copies them into `.workflow/run_spec/` and `.workflow/cognition_seed/` (§6.2/§6.3) so the post-agent `findMissingArtifacts` check passes — declaring an output the agent never writes into the artifact dir makes the _agent state_ fail at runtime even though lint is satisfied.
 - `final_review.present: [final_report]` ⇐ `final_summary.outputs: [final_report]` (new). ✓ (and `final_summary` writes `.workflow/final_report/final_report.md`, §6.2).
-- `human_escalation.present`: the **recommended** form is `present: [run_spec]` (⇐ `preflight.outputs`), avoiding the `nodes`/`current_result` problem (those are written by *deterministic* states, which lint does not count as producers — §4.5 note). If the implementer keeps `nodes`/`current_result?` in `present:`, WF004 **will fire** (they are not agent-produced) regardless of the `?` suffix (`lint.ts:267-268` parses then checks the bare name). **So the §4.2 block must ship as `present: [run_spec]`** unless a genuine agent producer for `nodes` is added (§13 "Lower-stakes decisions" — `human_escalation.present`).
+- `human_escalation.present`: the **recommended** form is `present: [run_spec]` (⇐ `preflight.outputs`), avoiding the `nodes`/`current_result` problem (those are written by _deterministic_ states, which lint does not count as producers — §4.5 note). If the implementer keeps `nodes`/`current_result?` in `present:`, WF004 **will fire** (they are not agent-produced) regardless of the `?` suffix (`lint.ts:267-268` parses then checks the bare name). **So the §4.2 block must ship as `present: [run_spec]`** unless a genuine agent producer for `nodes` is added (§13 "Lower-stakes decisions" — `human_escalation.present`).
 
 ### 10.3 WF001 — terminal reachability (`lint.ts:168-196`)
 
@@ -684,7 +685,7 @@ The orchestrator's verdict vocabulary is **unchanged** (`design`/`evaluate`/`ana
 
 This is the §8.3 path (option 1), and it is the one the slice ships: §13 "Resolved" confirms no engine helper enforces `budget.max_rounds`, so the spec-rewrite path (option 2) is unnecessary — the orchestrator does not need to rewrite `budget.max_rounds`.
 
-No change to the `escalate` definition: the orchestrator already emits `escalate` "only if the run is unrecoverable"; that verdict now routes to `human_escalation` instead of `failed`, but the *agent's* decision criterion is identical.
+No change to the `escalate` definition: the orchestrator already emits `escalate` "only if the run is unrecoverable"; that verdict now routes to `human_escalation` instead of `failed`, but the _agent's_ decision criterion is identical.
 
 ### 11.3 `final_summary` prompt (new) and `analyzer`/`researcher` (unchanged)
 
@@ -692,7 +693,7 @@ No change to the `escalate` definition: the orchestrator already emits `escalate
 
 ### 11.4 No skill changes
 
-No SKILL.md changes. The gates encode *ordering* (approve-before-loop, escalate-to-human, summarize-before-final-review), which is FSM territory by the CLAUDE.md rule — none of it belongs in a skill. The `final_summary` report structure is content but is small and run-specific enough to live in the state prompt rather than a reusable skill.
+No SKILL.md changes. The gates encode _ordering_ (approve-before-loop, escalate-to-human, summarize-before-final-review), which is FSM territory by the CLAUDE.md rule — none of it belongs in a skill. The `final_summary` report structure is content but is small and run-specific enough to live in the state prompt rather than a reusable skill.
 
 ---
 
@@ -704,15 +705,13 @@ The slice is done when all three checkable conditions below hold. This mirrors t
 
 A new test (or new `describe` blocks added to `test/workflow/evolve-multi-round.integration.test.ts`), gated `describe.skipIf(!dockerReady)` with the **same** `dockerReady` guard as the multi-round gate. It reuses that test's `TEST_HOME`/CA staging, `buildDockerSessionConfig`, `createInfra`/`destroyInfra`, `createDeps`, `onEvent` state collection, and the prompt-substring mock-routing of the four agent roles (multi-round §12.2). The new machinery is the **gate-driving helpers** (`test-helpers.ts:392-441`): `waitForGate(raiseGateMock, count, timeout)` (collects the raised `HumanGateRequest[]`), `waitForGateOrCompletion(orchestrator, workflowId, timeout)` (`'gate' | 'done'`), and `orchestrator.resolveGate(workflowId, { type, prompt? })` to inject the human event. `createDeps` must wire `raiseGate` to a `vi.fn()` so `waitForGate` can observe it.
 
-The mock orchestrator verdict script is the multi-round `[design, evaluate, analyze, record] × N` then `complete`, with the *gates* interleaved by the orchestrator pausing at `waiting_human` — the test drives those pauses with `resolveGate`. Four scenarios:
+The mock orchestrator verdict script is the multi-round `[design, evaluate, analyze, record] × N` then `complete`, with the _gates_ interleaved by the orchestrator pausing at `waiting_human` — the test drives those pauses with `resolveGate`. Four scenarios:
 
-**Required mock-router change — the `final_summary` branch (load-bearing).** The multi-round test's mock prompt router (`evolve-multi-round.integration.test.ts:313-336`) routes by prompt-substring and `throw`s on any unrecognized prompt (the `throw new Error(\`unexpected agent prompt: …\`)` at ~`:335`). The new `final_summary` agent state introduces a prompt that none of the existing four branches (`preflight` / `orchestrator` / `researcher` / `analyzer`) match, so **without a new branch it would hit that throw and fail Scenarios A and D before they can reach `final_review`.** The harness MUST add a fifth routing branch that matches `final_summary`'s prompt (e.g. `if (msg.includes('produce a concise, human-readable report'))` or another unique substring of the §4.3 prompt) and, critically, **materializes the report artifact** the same way the other branches materialize their files:
+**Required mock-router change — the `final_summary` branch (load-bearing).** The multi-round test's mock prompt router (`evolve-multi-round.integration.test.ts:313-336`) routes by prompt-substring and `throw`s on any unrecognized prompt (the `throw new Error(\`unexpected agent prompt: …\`)` at ~`:335`). The new `final_summary` agent state introduces a prompt that none of the existing four branches (`preflight`/`orchestrator`/`researcher`/`analyzer`) match, so **without a new branch it would hit that throw and fail Scenarios A and D before they can reach `final_review`.** The harness MUST add a fifth routing branch that matches `final_summary`'s prompt (e.g. `if (msg.includes('produce a concise, human-readable report'))` or another unique substring of the §4.3 prompt) and, critically, **materializes the report artifact** the same way the other branches materialize their files:
 
 - The branch MUST write a **non-empty** report file into `<workspace>/.workflow/final_report/final_report.md` (creating `<workspace>/.workflow/final_report/` first). This is mandatory, not cosmetic: `final_summary` declares `outputs: [final_report]`, so after it runs the orchestrator calls `findMissingArtifacts(stateConfig, instance.artifactDir)` (`orchestrator.ts:2249-2265`); if `<workspace>/.workflow/final_report/` is empty, the agent is re-prompted and then the **run errors** — Scenarios A and D would fail in the engine, not at an assertion. Writing the file is what makes both the production check pass and the §12.1 Scenario A assertion on `presentedArtifacts.final_report` (and the on-disk `existsSync(... /final_report.md)` non-empty check) hold.
 - The mock content should be non-empty and mention the best score (a real `final_summary` summarizes the best node), so Scenario A's "content … mentions the best score" assertion is satisfiable. A helper like `writeFinalReport(workspacePath, bestScore)` mirrors the existing `writeCandidate` / `writeAnalysis` helpers.
 - Because Scenario D runs the loop twice (one forced extra round), the `final_summary` branch fires **twice**; the helper should overwrite the report each time, so the final on-disk report reflects N+1 rounds.
-
-
 
 #### Scenario A — preflight_review APPROVE → done via final_summary/final_review (happy path)
 
@@ -791,7 +790,7 @@ The live run confirms the gates **surface** (the CLI renders the summary + prese
 - **Scenario A** ⇒ the approve-path topology (`preflight_review → orchestrator → … → final_summary → final_review → done`) is wired and `final_summary` produces a real report the gate surfaces.
 - **Scenario B** ⇒ `preflight_review` genuinely blocks the first evaluator (the §9 requirement) and routes to the distinct `aborted` terminal.
 - **Scenario C** ⇒ an evaluator-blocked round becomes human-mediated (not an opaque `failed`), FORCE_REVISION re-enters cleanly, and the forced re-entry does not corrupt node count/lineage.
-- **Scenario D** ⇒ `final_review` can drive *additional real rounds* without double-counting against the durable `done_rounds` recompute — the subtle §8.3 property holds end-to-end.
+- **Scenario D** ⇒ `final_review` can drive _additional real rounds_ without double-counting against the durable `done_rounds` recompute — the subtle §8.3 property holds end-to-end.
 - No single scenario proves the surface alone: A proves the happy path, B the approval-block + aborted terminal, C the escalation + repair loop, D the run-more-rounds loop. Together they exercise all three gates, both FORCE_REVISION destinations, the `aborted` terminal, and the no-double-count invariant.
 
 ---
@@ -803,7 +802,7 @@ The live run confirms the gates **surface** (the CLI renders the summary + prese
 All three decisions below are signed off by the maintainer; each took the recommended default. The rationale/tradeoffs are retained as the decision record. The doc body and embedded YAML already reflect these choices, so the slice is ready to implement.
 
 1. **`final_summary` as a pure agent state vs a deterministic helper (§6.4).** Both are buildable; this is a genuine cost/scope preference. _Recommended default: **agent state**_ (one YAML + one test, parent-design-faithful, no new `evolve_result.py` subcommand). **Tradeoff:** the agent version costs an LLM call per completion and produces a narrative report; a `deterministic`/`container` state running a templated `evolve_result.py final_summary` subcommand is cheaper and fully reproducible (testable without a model) but adds a bridge subcommand (mild scope creep against "single-file workflow scope") and yields a less useful report. **DECIDED (2026-06-16): agent state** — as assumed by the §4.3 / §6 embedded YAML.
-2. **`human_escalation → preflight` on objective change (§8.2).** Re-authoring `run_spec.yaml` does **not** clear `nodes.json`, so a FORCE_REVISION that *changes the objective* leaves stale nodes counting toward `max_rounds` and being sampled as parents. **No safe engine "reset DB" operation was found** — re-authoring the spec does not clear the database, so stale nodes would corrupt both the round count and parent sampling. _Recommended conservative contract: **"FORCE_REVISION preserves node validity; an objective change ⇒ ABORT and start a fresh run."**_ State this in the gate description and the preflight prompt. **Tradeoff:** the conservative contract is safe but means an operator who wants to keep the run alive across an objective pivot must abort and restart (losing the pause-resume convenience); the alternative — adding an engine DB-reset path on objective change — is real scope creep and needs its own design. **DECIDED (2026-06-16): adopt the conservative contract** — FORCE_REVISION preserves node validity; an objective change ⇒ ABORT and start a fresh run. No engine DB-reset path is added in this slice; state the contract in the `human_escalation` gate description and the `preflight` prompt.
+2. **`human_escalation → preflight` on objective change (§8.2).** Re-authoring `run_spec.yaml` does **not** clear `nodes.json`, so a FORCE*REVISION that *changes the objective* leaves stale nodes counting toward `max_rounds` and being sampled as parents. **No safe engine "reset DB" operation was found** — re-authoring the spec does not clear the database, so stale nodes would corrupt both the round count and parent sampling. \_Recommended conservative contract: **"FORCE_REVISION preserves node validity; an objective change ⇒ ABORT and start a fresh run."*** State this in the gate description and the preflight prompt. **Tradeoff:** the conservative contract is safe but means an operator who wants to keep the run alive across an objective pivot must abort and restart (losing the pause-resume convenience); the alternative — adding an engine DB-reset path on objective change — is real scope creep and needs its own design. **DECIDED (2026-06-16): adopt the conservative contract** — FORCE_REVISION preserves node validity; an objective change ⇒ ABORT and start a fresh run. No engine DB-reset path is added in this slice; state the contract in the `human_escalation` gate description and the `preflight` prompt.
 3. **`evaluator_blocked` routing — reroute to `human_escalation` vs keep hard-`failed` (§1, §4.2, §12).** This is the one **intentional behavior change** in the slice: it converts a previously-terminal `→ failed` outcome into a human-mediated gate, on the rationale that a single bad/crashed candidate should not hard-fail a multi-round search (a human decides retry / revise / abort). _Recommended default: **reroute** to `human_escalation`._ **Tradeoff:** rerouting makes a blocked candidate recoverable (and is the parent design's intent for evaluator-judgment stops) but is a UX change that **breaks two shipped integration tests** (§12) and changes operator-visible behavior; keeping hard-`failed` is the status-quo-preserving choice that needs no test churn but loses the recovery path the parent design wanted. (Note: this only moves the `evaluator_blocked` edge; `result_file_error`, sampler/engine crash, `needs_repair`, and the wedge backstop still hard-fail to `failed` — §4.2.) **DECIDED (2026-06-16): reroute to `human_escalation`** — the two shipped integration tests are updated per §12.
 
 ### Lower-stakes decisions (recommended defaults — implementer may proceed unless a maintainer objects)
@@ -812,7 +811,7 @@ These are settled enough to implement on the recommended default; listed for vis
 
 - **Artifact-dir copy for gate `present:` (§6.2, §6.3, §11.1).** Gate-presented artifacts are read from `<workspace>/.workflow/<name>/`, not `.evolve_runs/main/`, so `preflight`/`final_summary` must copy their files there (a few `mkdir -p`+`cp` lines). _Recommended: do the copy_ so the gates are actually informative. Alternative: descope `preflight_review.present` to empty and rely on `workflow inspect`.
 - **`resetVisitCounts` on the `preflight_review` FORCE_REVISION edge (§4.1, §8.4).** Pre-loop there are no accumulated orchestrator visits, so the reset is harmless but possibly unnecessary; included for symmetry. _Recommended: keep for symmetry._
-- **`human_escalation.present` is limited to `run_spec` (§4.5, §10.2).** `nodes.json`/`current/result.json` are written by *deterministic* states and cannot appear in `present:` without tripping WF004. _Recommended: ship `present: [run_spec]`; the human inspects nodes/result via `workflow inspect`._ Alternative: add a thin agent producer that re-emits `nodes` into the artifact dir solely to satisfy WF004 (a lint-satisfying copy).
+- **`human_escalation.present` is limited to `run_spec` (§4.5, §10.2).** `nodes.json`/`current/result.json` are written by _deterministic_ states and cannot appear in `present:` without tripping WF004. _Recommended: ship `present: [run_spec]`; the human inspects nodes/result via `workflow inspect`._ Alternative: add a thin agent producer that re-emits `nodes` into the artifact dir solely to satisfy WF004 (a lint-satisfying copy).
 
 ### Resolved (previously open; ground-truth verified in this revision)
 
@@ -831,5 +830,5 @@ These are settled enough to implement on the recommended default; listed for vis
 ### Invariants preserved (not at risk)
 
 - **Determinism** (multi-round §9) and the **vendored-engine byte-verbatim** invariant are untouched — this slice adds no engine code and no determinism-affecting path; it is FSM/gate surface only.
-- **The orchestrator hub** is not re-architected — only two of its declared edge *targets* move (`escalate → human_escalation`, `complete → final_summary`); its verdict vocabulary and `done_rounds`-from-`nodes.json` logic are unchanged.
+- **The orchestrator hub** is not re-architected — only two of its declared edge _targets_ move (`escalate → human_escalation`, `complete → final_summary`); its verdict vocabulary and `done_rounds`-from-`nodes.json` logic are unchanged.
 - **The multi-round FSM is preserved as a graph superset, with three intentional edge retargets** (`escalate`/`evaluator_blocked` → `human_escalation`, `complete` → `final_summary`). Every shipped state and edge is otherwise preserved. This is **not** a strict superset: the `evaluator_blocked → human_escalation` retarget deliberately changes a previously-terminal `→ failed` outcome into a human-mediated gate (rationale: §1, §4.2). That change is the one breaking-by-design item in this slice — it requires updating two shipped integration tests (§12) and a maintainer sign-off (§13 decision 3). Genuine mechanical/infrastructure errors and the wedge backstop still route to `failed` unchanged.
