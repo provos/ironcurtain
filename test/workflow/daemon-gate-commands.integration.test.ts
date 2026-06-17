@@ -251,6 +251,21 @@ describe('daemon gate commands (command-layer integration)', () => {
     expect(rejected.json.ok).toBe(false);
     expect(rejected.json.error).toBe('WORKSPACE_NOT_DIRECTORY');
     expect(rejected.json.path).toBe(resolve(notADir));
+
+    // A non-existent path makes statSync throw (ENOENT); the validation must
+    // catch it and still return the structured error, not crash the CLI.
+    const missing = join(tmpdir(), 'ic-gate-cmd-missing-dir-xyz');
+    const gone = await runCommand('run', [
+      FIXTURE_PATH,
+      'Draft with a missing workspace',
+      '--workspace',
+      missing,
+      '--json',
+    ]);
+    expect(gone.exitCode).toBe(1);
+    expect(gone.json.ok).toBe(false);
+    expect(gone.json.error).toBe('WORKSPACE_NOT_DIRECTORY');
+    expect(gone.json.path).toBe(resolve(missing));
   });
 
   it('run -> await(gate) -> show -> APPROVE -> await(completed)', async () => {

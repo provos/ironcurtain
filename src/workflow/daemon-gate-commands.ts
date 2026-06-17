@@ -16,7 +16,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { resolveWorkflowPath } from './discovery.js';
@@ -319,7 +319,16 @@ async function runRun(args: string[]): Promise<number> {
   let workspacePath: string | undefined;
   if (typeof values.workspace === 'string') {
     workspacePath = resolve(values.workspace);
-    if (!existsSync(workspacePath) || !statSync(workspacePath).isDirectory()) {
+    let isDirectory: boolean;
+    try {
+      isDirectory = statSync(workspacePath).isDirectory();
+    } catch {
+      // Any stat failure — ENOENT (incl. a racy delete after a check), EACCES,
+      // ELOOP, etc. — means the path is unusable as a workspace. Treat as invalid
+      // so the command returns the structured error instead of throwing.
+      isDirectory = false;
+    }
+    if (!isDirectory) {
       return fail(mode, 'WORKSPACE_NOT_DIRECTORY', { path: workspacePath });
     }
   }

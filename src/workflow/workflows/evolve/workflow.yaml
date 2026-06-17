@@ -191,6 +191,13 @@ states:
          when it specifies a number of rounds; otherwise default to 3. Default
          EVAL_TIMEOUT_SECS to 300 when nothing implies a different budget.
 
+         If /workspace/initial_program exists, add 1 to MAX_ROUNDS before passing
+         it. The seed is copied verbatim as node 0 and the engine counts every
+         recorded node toward done_rounds, so without the +1 a request for N
+         rounds would yield only N-1 evolution rounds (the seed consumes one). The
+         +1 restores the requested number of evolution rounds. Do NOT add the +1
+         when no initial_program is seeded (node 0 is then a real first round).
+
          /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
            --workspace-root /workspace \
            --run-name main \

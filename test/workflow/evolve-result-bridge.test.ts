@@ -139,6 +139,8 @@ describe('evolve workflow manifest', () => {
     expect(prompt).toContain('importlib.util.spec_from_file_location');
     expect(prompt).toContain('/workspace/.workflow/run_spec/run_spec.md');
     expect(prompt).toContain('/workspace/.workflow/cognition_seed/cognition_seed.md');
+    // The seed consumes a node-count slot, so a seeded run must add 1 to max-rounds.
+    expect(prompt).toContain('add 1 to MAX_ROUNDS');
   });
 });
 
