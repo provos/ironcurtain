@@ -176,21 +176,20 @@ def evaluate(args: argparse.Namespace) -> int:
     step_name = _resolve_step_name(args)
     code_path = _resolve_code_path(args, step_name)
     helper = SCRIPT_DIR / "evolve-eval"
-    helper_return_code, engine, helper_error = _run_helper(
-        [
-            sys.executable,
-            str(helper),
-            "run",
-            "--run-dir",
-            args.run_dir,
-            "--code-path",
-            code_path,
-            "--step-name",
-            step_name,
-            "--timeout",
-            str(args.timeout),
-        ]
-    )
+    helper_args = [
+        sys.executable,
+        str(helper),
+        "run",
+        "--run-dir",
+        args.run_dir,
+        "--code-path",
+        code_path,
+        "--step-name",
+        step_name,
+    ]
+    if args.timeout is not None:
+        helper_args.extend(["--timeout", str(args.timeout)])
+    helper_return_code, engine, helper_error = _run_helper(helper_args)
 
     payload: dict[str, Any] = {}
     if isinstance(engine, dict):
@@ -460,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--code-path")
     eval_parser.add_argument("--code-from-current", action="store_true")
     eval_parser.add_argument("--result-file", required=True)
-    eval_parser.add_argument("--timeout", type=int, default=30)
+    eval_parser.add_argument("--timeout", type=int)
     eval_parser.set_defaults(func=evaluate)
 
     sample_parser = subparsers.add_parser("sample")
