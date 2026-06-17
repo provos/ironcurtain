@@ -11,7 +11,8 @@ import {
   resolveRealKey,
   canRefreshOAuth,
   computeWorkflowDependencyHash,
-  ensureWorkflowImage,
+  buildWorkflowExecCommand,
+  ensureImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
@@ -612,7 +613,11 @@ describe('createSessionContainers', () => {
         { source: nodeModulesDir, target: '/opt/workflow-node_modules', readonly: false },
       ]),
     );
-    expect(createCalls[0].env.PATH).toContain('/opt/workflow-venv/bin');
+    // PATH must NOT be overridden: Docker `-e PATH=...` REPLACES (not appends)
+    // the image PATH, which would discard the base image's real PATH (e.g. the
+    // NVM node dir on the x86 devcontainer base). The workflow venv bin is
+    // prepended to the live $PATH at exec time instead (buildWorkflowExecCommand).
+    expect(createCalls[0].env.PATH).toBeUndefined();
     expect(createCalls[0].env.NODE_PATH).toBe('/opt/workflow-node_modules');
   });
 
@@ -986,68 +991,98 @@ describe('computeWorkflowDependencyHash', () => {
   });
 });
 
-describe('ensureWorkflowImage runtime-dependency path', () => {
+// Runtime workflow dependencies are installed into mounted caches at container
+// start (see provisionWorkflowDependencies); no per-workflow image is ever
+// built. `ensureImage` only ever materializes the shared agent image (and its
+// base), never an `ironcurtain-wf-*` tag.
+describe('ensureImage builds no per-workflow image', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'wf-image-fastpath-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'ensure-image-'));
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  // The mock Docker stamps build labels per tag; we assert no per-workflow
-  // image tag (`ironcurtain-wf-*`) is ever built, even when manifests exist.
-  function builtWorkflowImageTags(docker: DockerManager): string[] {
+  // The mock Docker stamps build labels per tag; capture every built tag so we
+  // can assert no per-workflow image tag (`ironcurtain-wf-*`) is produced.
+  function trackBuiltTags(docker: DockerManager): string[] {
     const built: string[] = [];
     const original = docker.buildImage.bind(docker);
     docker.buildImage = async (tag, df, ctx, labels) => {
-      if (tag.startsWith('ironcurtain-wf-')) built.push(tag);
+      built.push(tag);
       return original(tag, df, ctx, labels);
     };
     return built;
   }
 
-  it('returns the shared agent image unchanged when scriptsDir is undefined', async () => {
+  it('returns the shared agent image and builds only the agent + base images', async () => {
     const docker = createMockDocker();
     const ca = createMockCA(tempDir);
-    const built = builtWorkflowImageTags(docker);
+    const built = trackBuiltTags(docker);
 
-    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', undefined, docker, ca);
+    const buildHash = await ensureImage('ironcurtain-claude-code:latest', docker, ca);
 
-    expect(image).toBe('ironcurtain-claude-code:latest');
-    expect(built).toEqual([]);
+    expect(typeof buildHash).toBe('string');
+    expect(buildHash.length).toBeGreaterThan(0);
+    expect(built).toContain('ironcurtain-claude-code:latest');
+    expect(built.some((tag) => tag.startsWith('ironcurtain-wf-'))).toBe(false);
   });
 
-  it('returns the shared agent image when scripts/ has no dependency manifest', async () => {
-    const scriptsDir = join(tempDir, 'scripts');
-    mkdirSync(scriptsDir);
-    // A helper script but no requirements.txt / package.json.
-    writeFileSync(join(scriptsDir, 'run_eval.py'), 'print("hi")\n');
-
+  it('skips the rebuild when images are already up to date (content-hash labels)', async () => {
     const docker = createMockDocker();
     const ca = createMockCA(tempDir);
-    const built = builtWorkflowImageTags(docker);
 
-    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', scriptsDir, docker, ca);
+    // First call builds; second call must be a no-op (labels already stamped).
+    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    const built = trackBuiltTags(docker);
+    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
 
-    expect(image).toBe('ironcurtain-claude-code:latest');
     expect(built).toEqual([]);
   });
+});
 
-  it('returns the shared agent image and builds no workflow image when requirements.txt exists', async () => {
-    const scriptsDir = join(tempDir, 'scripts');
-    mkdirSync(scriptsDir);
-    writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy\npyyaml\n');
+describe('buildWorkflowExecCommand', () => {
+  const pythonMount = { hostDir: '/host/venv', target: '/opt/workflow-venv', cacheKey: 'abc' } as const;
+  const nodeMount = {
+    hostDir: '/host/node_modules',
+    target: '/opt/workflow-node_modules',
+    cacheKey: 'abc',
+    hasPackageLock: false,
+  } as const;
 
-    const docker = createMockDocker();
-    const ca = createMockCA(tempDir);
-    const built = builtWorkflowImageTags(docker);
+  it('returns the command unchanged when no dependency mount is present', () => {
+    const cmd = ['node', '/workflow-scripts/format_report.js'];
+    expect(buildWorkflowExecCommand({}, cmd)).toEqual(cmd);
+  });
 
-    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', scriptsDir, docker, ca);
+  it('prepends the live $PATH (not a replacement) so the image PATH is preserved', () => {
+    const wrapped = buildWorkflowExecCommand({ workflowPythonVenvMount: pythonMount }, [
+      'node',
+      '/workflow-scripts/format_report.js',
+    ]);
 
-    expect(image).toBe('ironcurtain-claude-code:latest');
-    expect(built).toEqual([]);
+    // Shell wrapper expands $PATH at runtime rather than hardcoding a PATH.
+    expect(wrapped[0]).toBe('/bin/sh');
+    expect(wrapped[1]).toBe('-lc');
+    expect(wrapped[2]).toContain('export PATH=/opt/workflow-venv/bin:"$PATH"');
+    expect(wrapped[2]).toContain('exec "$@"');
+    // Original argv is passed verbatim as positional params after the `sh` $0.
+    expect(wrapped.slice(3)).toEqual(['sh', 'node', '/workflow-scripts/format_report.js']);
+  });
+
+  it('prepends both the venv bin and the node_modules/.bin when both mounts exist', () => {
+    const wrapped = buildWorkflowExecCommand(
+      { workflowPythonVenvMount: pythonMount, workflowNodeModulesMount: nodeMount },
+      ['python', '-c', 'print(1)'],
+    );
+    expect(wrapped[2]).toContain('export PATH=/opt/workflow-venv/bin:/opt/workflow-node_modules/.bin:"$PATH"');
+    expect(wrapped.slice(3)).toEqual(['sh', 'python', '-c', 'print(1)']);
+  });
+
+  it('returns an empty command unchanged (no shell wrapper)', () => {
+    expect(buildWorkflowExecCommand({ workflowPythonVenvMount: pythonMount }, [])).toEqual([]);
   });
 });

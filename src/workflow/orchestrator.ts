@@ -78,7 +78,11 @@ import {
   type AgentId,
   type TransientFailureKind,
 } from '../docker/agent-adapter.js';
-import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
+import {
+  buildWorkflowExecCommand,
+  ensureSecureBundleDir,
+  type DockerInfrastructure,
+} from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -2503,9 +2507,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     if (warning) writeStderr(`[workflow] ${warning}`);
 
     return this.reduceDeterministicCommands(input.commands, async (cmdArray) => {
+      // Prepend the workflow venv / node bins to the container's live $PATH so
+      // bare `node` / `python` helpers resolve regardless of base-image arch
+      // (the image's own PATH is preserved — see buildWorkflowExecCommand).
       const result = await bundle.docker.exec(
         bundle.containerId,
-        cmdArray,
+        buildWorkflowExecCommand(bundle, cmdArray),
         input.timeoutMs,
         'codespace',
         CONTAINER_WORKSPACE_DIR,

@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { execFile as execFileCb } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -8,6 +18,7 @@ import { REAL_TMP, testCompiledPolicy, testToolAnnotations } from '../fixtures/t
 import { isDockerAvailable, isDockerImageAvailable } from '../helpers/docker-available.js';
 import type { IronCurtainConfig } from '../../src/config/types.js';
 import {
+  buildWorkflowExecCommand,
   createDockerInfrastructure,
   destroyDockerInfrastructure,
   type DockerInfrastructure,
@@ -66,7 +77,7 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
       packageInstall: {
         enabled: true,
         quarantineDays: 2,
-        allowedPackages: ['numpy'],
+        allowedPackages: ['numpy', 'six'],
         deniedPackages: [],
       },
       serverCredentials: {},
@@ -83,6 +94,21 @@ async function workflowImageTags(): Promise<Set<string>> {
 async function containerConfigImage(containerId: string): Promise<string> {
   const { stdout } = await execFile('docker', ['inspect', '-f', '{{.Config.Image}}', containerId]);
   return stdout.trim();
+}
+
+/** Lists the host-side workflow dependency cache dirs (one per content hash). */
+function listDependencyCacheDirs(): string[] {
+  const cacheRoot = join(TEST_HOME, 'workflow-deps');
+  if (!existsSync(cacheRoot)) return [];
+  return readdirSync(cacheRoot).sort();
+}
+
+/** Returns the provisioned-sentinel file path inside a python venv cache, or null. */
+function findVenvSentinel(cacheKeyDir: string): string | null {
+  const venvDir = join(TEST_HOME, 'workflow-deps', cacheKeyDir, 'python-venv');
+  if (!existsSync(venvDir)) return null;
+  const sentinel = readdirSync(venvDir).find((name) => name.startsWith('.ironcurtain-provisioned-'));
+  return sentinel ? join(venvDir, sentinel) : null;
 }
 
 async function readPackageAudit(bundleDir: string): Promise<readonly Record<string, unknown>[]> {
@@ -202,5 +228,109 @@ describe.skipIf(!dockerReady)('workflow runtime dependency provisioning with rea
           (entry.source === 'metadata-filter' || entry.source === 'tarball-backstop'),
       ),
     ).toBe(true);
+
+    // A bare `node` invocation must resolve from the container's real PATH
+    // (the venv bin / node_modules .bin are prepended at exec time, the image
+    // PATH is preserved). This guards the PATH-replacement regression.
+    const nodeVersion = await bundle.docker.exec(
+      bundle.containerId,
+      buildWorkflowExecCommand(bundle, ['node', '--version']),
+      30_000,
+      'codespace',
+      '/workspace',
+    );
+    expect(nodeVersion.exitCode).toBe(0);
+    expect(nodeVersion.stdout.trim()).toMatch(/^v\d+/);
+  }, 300_000);
+
+  // Helper: stand up a bundle whose scripts carry the given requirements.txt.
+  async function makeBundleWithRequirements(label: string, requirements: string): Promise<DockerInfrastructure> {
+    const workspaceDir = resolve(tmpDir, `workspace-${label}`);
+    const generatedDir = resolve(TEST_HOME, 'generated');
+    const bundleDir = resolve(TEST_HOME, 'bundles', label);
+    const escalationDir = resolve(bundleDir, 'escalations');
+    const scriptsDir = resolve(tmpDir, `scripts-${label}`);
+    for (const dir of [workspaceDir, generatedDir, bundleDir, escalationDir, scriptsDir]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(resolve(generatedDir, 'compiled-policy.json'), JSON.stringify(testCompiledPolicy));
+    writeFileSync(resolve(generatedDir, 'tool-annotations.json'), JSON.stringify(testToolAnnotations));
+    writeFileSync(resolve(scriptsDir, 'requirements.txt'), requirements);
+
+    const bundle = await createDockerInfrastructure(
+      buildDockerSessionConfig(workspaceDir, generatedDir),
+      { kind: 'docker', agent: 'claude-code' },
+      bundleDir,
+      workspaceDir,
+      escalationDir,
+      `${label}-bundle` as BundleId,
+      `${label}-workflow` as WorkflowId,
+      'primary',
+      [],
+      undefined,
+      scriptsDir,
+    );
+    liveBundles.add(bundle);
+    return bundle;
+  }
+
+  it('reuses the content-keyed cache on identical deps and re-provisions on a deps change', async () => {
+    // First run with numpy: installs into a fresh content-keyed cache.
+    const first = await makeBundleWithRequirements('cache-reuse-a', 'numpy\n');
+    const firstImport = await first.docker.exec(
+      first.containerId,
+      ['/opt/workflow-venv/bin/python', '-c', 'import numpy; print("ok")'],
+      60_000,
+      'codespace',
+      '/workspace',
+    );
+    expect(firstImport.exitCode).toBe(0);
+
+    // The numpy-only cache is content-keyed, so it is the single cache dir for
+    // this requirements set (it may already exist from the prior test, which
+    // also installs numpy into the same shared TEST_HOME — that is exactly the
+    // cross-run reuse this test asserts).
+    const cacheDirsAfterFirst = listDependencyCacheDirs();
+    const numpyCacheDir = cacheDirsAfterFirst.find((dir) => findVenvSentinel(dir) !== null);
+    expect(numpyCacheDir).toBeDefined();
+    const sentinelPath = findVenvSentinel(numpyCacheDir as string);
+    expect(sentinelPath).not.toBeNull();
+    const sentinelMtimeBefore = statSync(sentinelPath as string).mtimeMs;
+
+    // Second run with the SAME requirements: same content hash → same cache
+    // dir. The sentinel short-circuits, so the venv is NOT rebuilt (sentinel
+    // mtime unchanged) and no new cache dir appears.
+    const second = await makeBundleWithRequirements('cache-reuse-b', 'numpy\n');
+    expect(second.workflowPythonVenvMount?.hostDir).toBe(first.workflowPythonVenvMount?.hostDir);
+
+    const cacheDirsAfterSecond = listDependencyCacheDirs();
+    expect(cacheDirsAfterSecond).toEqual(cacheDirsAfterFirst);
+    expect(statSync(sentinelPath as string).mtimeMs).toBe(sentinelMtimeBefore);
+    // numpy is already importable in the reused venv.
+    const secondImport = await second.docker.exec(
+      second.containerId,
+      ['/opt/workflow-venv/bin/python', '-c', 'import numpy; print("ok")'],
+      60_000,
+      'codespace',
+      '/workspace',
+    );
+    expect(secondImport.exitCode).toBe(0);
+
+    // Third run with CHANGED requirements: different content hash → a NEW cache
+    // dir is created (re-provision), the original cache is left intact.
+    const third = await makeBundleWithRequirements('cache-reuse-c', 'numpy\nsix\n');
+    expect(third.workflowPythonVenvMount?.hostDir).not.toBe(first.workflowPythonVenvMount?.hostDir);
+    const cacheDirsAfterThird = listDependencyCacheDirs();
+    expect(cacheDirsAfterThird.length).toBe(cacheDirsAfterFirst.length + 1);
+    expect(cacheDirsAfterThird).toEqual(expect.arrayContaining(cacheDirsAfterFirst));
+    // The new venv really has the changed deps (six importable alongside numpy).
+    const thirdImport = await third.docker.exec(
+      third.containerId,
+      ['/opt/workflow-venv/bin/python', '-c', 'import numpy, six; print("ok")'],
+      60_000,
+      'codespace',
+      '/workspace',
+    );
+    expect(thirdImport.exitCode).toBe(0);
   }, 300_000);
 });
