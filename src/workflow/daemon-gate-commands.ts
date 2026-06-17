@@ -314,18 +314,22 @@ async function runRun(args: string[]): Promise<number> {
     });
   }
 
+  // Validate the workspace client-side BEFORE connecting to the daemon, so an
+  // invalid --workspace fails fast without spawning or connecting it.
+  let workspacePath: string | undefined;
+  if (typeof values.workspace === 'string') {
+    workspacePath = resolve(values.workspace);
+    if (!existsSync(workspacePath) || !statSync(workspacePath).isDirectory()) {
+      return fail(mode, 'WORKSPACE_NOT_DIRECTORY', { path: workspacePath });
+    }
+  }
+
   const client = await openClient(mode, values['ensure-daemon'] === true);
   if (!client) return EXIT_ERROR;
 
   try {
     const params: Record<string, unknown> = { definitionPath, taskDescription };
-    if (typeof values.workspace === 'string') {
-      const workspacePath = resolve(values.workspace);
-      if (!existsSync(workspacePath) || !statSync(workspacePath).isDirectory()) {
-        return fail(mode, 'WORKSPACE_NOT_DIRECTORY', { path: workspacePath });
-      }
-      params.workspacePath = workspacePath;
-    }
+    if (workspacePath !== undefined) params.workspacePath = workspacePath;
 
     const result = await client.call<{ workflowId: string }>('workflows.start', params);
     if (!result.ok) return reportRpcError(mode, result);

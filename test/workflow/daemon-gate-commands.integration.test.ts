@@ -235,6 +235,24 @@ describe('daemon gate commands (command-layer integration)', () => {
     }
   }, 30_000);
 
+  it('run rejects a --workspace that is not a directory before connecting', async () => {
+    // No daemon is booted: the workspace check runs client-side BEFORE openClient,
+    // so a bad --workspace must surface WORKSPACE_NOT_DIRECTORY (the fail-fast
+    // ordering), not a daemon-connect error. FIXTURE_PATH is an existing file.
+    const notADir = FIXTURE_PATH;
+    const rejected = await runCommand('run', [
+      FIXTURE_PATH,
+      'Draft with a bad workspace',
+      '--workspace',
+      notADir,
+      '--json',
+    ]);
+    expect(rejected.exitCode).toBe(1);
+    expect(rejected.json.ok).toBe(false);
+    expect(rejected.json.error).toBe('WORKSPACE_NOT_DIRECTORY');
+    expect(rejected.json.path).toBe(resolve(notADir));
+  });
+
   it('run -> await(gate) -> show -> APPROVE -> await(completed)', async () => {
     harness = await boot();
 

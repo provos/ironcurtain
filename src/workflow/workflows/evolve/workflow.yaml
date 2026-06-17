@@ -155,9 +155,14 @@ states:
            /opt/workflow-venv/bin/python /workspace/evaluator.py {quoted_code_path} {quoted_results_path}
            when evaluator.py has that CLI contract. The command must write JSON
            containing an eval_score number at {quoted_results_path}.
-         - SUCCESS_CRITERION as a reasonable nonzero quality bar such as
-           eval_score >= 1.0. Aspirational benchmark targets are not hard gates
-           unless the task explicitly says they are.
+         - SUCCESS_CRITERION from the task's stated goal first. If the task names
+           a target (e.g. "toward the AlphaEvolve target"), resolve the concrete
+           number from the experiment brief (input.md/README) and use it, e.g.
+           eval_score >= 2.635. If the task names no target, fall back to the
+           experiment brief's stated target; use a generic eval_score >= 1.0 only
+           when neither states one. This is a recorded quality descriptor, not a
+           hard gate (the run stops on max_rounds), so prefer an accurate target
+           over a conservative placeholder.
          - EVAL_TIMEOUT_SECS as a generous per-candidate evaluation budget in
            seconds. Default to 300. Raise it (up to ~600) when the experiment or
            task implies heavy evaluation (e.g. numerical optimization) or when the
