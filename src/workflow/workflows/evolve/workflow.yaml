@@ -1,6 +1,6 @@
 name: evolve
 description: 'Evolve - multi-round evaluator-driven candidate search via an orchestrator hub: sampling, cognition, and per-round analysis.'
-initial: preflight
+initial: provision
 
 settings:
   mode: docker
@@ -16,19 +16,169 @@ settings:
   maxRounds: 200
 
 states:
-  preflight:
+  provision:
     type: agent
-    description: Define the run spec, initialize the run, and author the cognition seed.
+    description: >
+      Install the staged experiment's runtime dependencies into the persistent
+      workflow venv, once. Idempotent: skips when the venv is already provisioned.
     persona: global
     prompt: |
-      You are configuring a multi-round Evolve experiment. The task describes a
-      program-search objective with an evaluator that prints a score.
+      You are provisioning the Python environment for an Evolve experiment BEFORE
+      any candidate is evaluated. The experiment's files (if this run was given one)
+      live at the WORKSPACE ROOT, /workspace - the experiment dir IS the run's
+      workspace. Treat the experiment's own source files (the evaluator, input.md,
+      initial_program, requirements) as READ-ONLY by convention: do NOT modify them.
+      Your run state goes under /workspace/.evolve_runs/ and /workspace/.workflow/.
+      The persistent virtual environment lives at /opt/workflow-venv (a SEPARATE
+      mount, not under /workspace) and ALREADY contains the workflow's base
+      dependencies (numpy, pyyaml).
+
+      Your job: make sure every dependency the experiment's evaluator and its
+      candidates need is installed into /opt/workflow-venv, exactly once.
+
+      DURABILITY MODEL (read first - it governs every step below). Two kinds of
+      install live in this container, and they survive a resume DIFFERENTLY:
+        - pip/uv installs into /opt/workflow-venv are RESUME-DURABLE: the venv is
+          a host-mounted directory, so on workflow resume the same venv is
+          re-mounted with its packages intact.
+        - apt / system-library installs are NOT resume-durable: resume mints a
+          FRESH container, so anything installed into the container filesystem
+          (apt packages, the .so files they drop) is GONE on resume.
+      Therefore the .provisioned marker gates ONLY the durable venv install. apt
+      steps are re-applied on EVERY entry to this state (they are no-ops within a
+      run when the lib is already present, and they reinstall into the fresh
+      container on resume). NEVER let the marker short-circuit an apt step.
+
+      1. DURABLE-VENV SKIP CHECK. First check for the marker file
+         /workspace/.evolve_runs/main/.provisioned. If it exists, the venv was
+         already provisioned on a prior run or a prior visit - do NOT re-run the
+         pip install. Verify the venv still imports the recorded packages (run
+         `/opt/workflow-venv/bin/python -c "import numpy"` plus any package names
+         listed in the marker). If they import, the durable venv is intact: SKIP
+         the pip install but STILL run the system-library step (step 3b) before
+         emitting verdict: ready (apt libs may have vanished on a resume).
+
+      2. INFER DEPENDENCIES. Look at the workspace root /workspace. If it holds no
+         experiment files (it is a fresh/empty sandbox - no evaluator, no input.md,
+         no manifest), there is nothing experiment-specific to install: the base
+         venv is sufficient - write the marker (step 4) and emit verdict: ready.
+         Otherwise read, in this order, whichever exist at the workspace root
+         /workspace (ignore the run-state subtrees .evolve_runs/ and .workflow/):
+           - requirements.txt / pyproject.toml / setup.cfg / setup.py
+           - README / README.md
+           - the evaluator and any cognition / init script source
+         Build the minimal set of third-party packages the EVALUATOR needs to run
+         and that CANDIDATES are expected to import. For circle packing this is
+         numpy (already present) plus scipy. scipy ships as a self-contained PyPI
+         wheel with bundled BLAS, so the circle-packing demo needs NO apt step.
+
+      3a. INSTALL THE DURABLE VENV DEPS (through the proxy). Skip this sub-step
+         entirely if step 1 already verified the marker. Otherwise, for each
+         needed package, install it into /opt/workflow-venv using uv:
+           UV_NATIVE_TLS=1 VIRTUAL_ENV=/opt/workflow-venv uv pip install <pkg> [<pkg> ...]
+         Network egress is mediated by the IronCurtain MITM proxy
+         (HTTPS_PROXY/HTTP_PROXY are already set); registries are reachable.
+         Prefer a requirements.txt install when the workspace ships one:
+           UV_NATIVE_TLS=1 VIRTUAL_ENV=/opt/workflow-venv uv pip install -r /workspace/requirements.txt
+
+      3b. RE-APPLY SYSTEM LIBRARIES (every entry, NOT gated by the marker). If -
+         and only if - a wheel genuinely needs an unbundled system library, run
+         `sudo apt-get install -y <lib>` on EVERY entry to this state, before the
+         import verification. Record apt package names in
+         /workspace/.evolve_runs/main/.apt-provisioned for your own reference, but
+         do NOT use that marker to skip the apt step. For circle packing there is
+         no apt step, so this sub-step is a no-op.
+
+      4. VERIFY + MARK. Confirm each needed package imports:
+           /opt/workflow-venv/bin/python -c "import scipy, numpy"
+         Then write /workspace/.evolve_runs/main/.provisioned containing one line
+         per VENV (pip) package name. The marker records only durable venv deps;
+         apt packages are tracked separately and are never marker-gated. Create
+         /workspace/.evolve_runs/main/ first if needed.
+
+      Finish with the required agent_status block:
+        - verdict: ready - the venv now has everything the experiment needs (or
+          the workspace holds no experiment files and the base venv suffices).
+        - verdict: blocked - a dependency cannot be installed (registry refuses
+          it, a system lib is unavailable, the experiment's deps are uninferable).
+          Put the specific failure in your status so a human can act on it.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: preflight
+        when: { verdict: ready }
+      - to: provision_review
+        when: { verdict: blocked }
+
+  provision_review:
+    type: human_gate
+    description: >
+      Human review when the experiment's dependencies could not be provisioned.
+      Approve to retry provisioning, force a revision to re-infer the deps, or abort.
+    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+    transitions:
+      - to: provision
+        event: APPROVE
+        actions:
+          - { type: resetVisitCounts, stateIds: [provision] }
+      - to: provision
+        event: FORCE_REVISION
+        actions:
+          - { type: resetVisitCounts, stateIds: [provision] }
+      - to: aborted
+        event: ABORT
+
+  preflight:
+    type: agent
+    description: Infer the experiment spec, initialize the run, and author the cognition seed.
+    persona: global
+    prompt: |
+      You are configuring a multi-round Evolve experiment. The workspace root is
+      /workspace. If /workspace contains experiment files, infer the objective,
+      evaluator command, cognition seed, and optional initial-program contract from
+      those files. If /workspace is a fresh sandbox with no experiment files,
+      fall back to authoring a toy run spec from the task string exactly as the
+      older workflow did.
 
       Do ALL of these, in order, then finish with the required agent_status block:
 
-      1. Initialize the run by executing the evolve-brief helper. The run lives under
-         /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE and EVAL_CMD
-         from the task (set --max-rounds to the requested number of rounds, default 3):
+      1. Inspect /workspace, ignoring the run-state subtrees .evolve_runs/ and
+         .workflow/. Treat files such as input.md, README.md, evaluator.py,
+         initial_program, init_cognition.py, requirements.txt, pyproject.toml,
+         config.yaml, and prompts/ as experiment evidence. Do NOT modify the
+         experiment's source files; write only under .evolve_runs/ and .workflow/.
+
+      2. If experiment files are present, infer these values:
+         - OBJECTIVE from input.md or README.md. Keep it one line and faithful to
+           the experiment.
+         - EVAL_CMD from the experiment's evaluator. Prefer
+           /opt/workflow-venv/bin/python /workspace/evaluator.py {quoted_code_path} {quoted_results_path}
+           when evaluator.py has that CLI contract. The command must write JSON
+           containing an eval_score number at {quoted_results_path}.
+         - SUCCESS_CRITERION as a reasonable nonzero quality bar such as
+           eval_score >= 1.0. Aspirational benchmark targets are not hard gates
+           unless the task explicitly says they are.
+         - COGNITION_SEED from init_cognition.py, README.md, prompts/, and input.md.
+           If init_cognition.py contains CognitionItem-style heuristics, translate
+           their content/source/metadata into JSON seed objects. Do not execute
+           init_cognition.py.
+         - PRIMARY_TARGET as candidate.py unless the experiment clearly names a
+           different target. If /workspace/initial_program exists, note in the
+           cognition seed that round 1 should copy it verbatim; the researcher
+           prompt will do the actual copy.
+
+      3. If no experiment files are present, infer OBJECTIVE and EVAL_CMD from the
+         task string. EVAL_CMD must read the candidate at {quoted_code_path}, run
+         it, and write JSON with an eval_score number at {quoted_results_path}.
+         Candidate files may be extensionless, so Python evaluators must load
+         them with runpy.run_path or exec(compile(...)); do not rely on
+         importlib.util.spec_from_file_location for {quoted_code_path}.
+
+      4. Initialize the run by executing the evolve-brief helper. The run lives
+         under /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE,
+         EVAL_CMD, SUCCESS_CRITERION, MAX_ROUNDS, and PRIMARY_TARGET from the
+         inference above. Set --max-rounds from the task when it specifies a
+         number of rounds; otherwise default to 3.
 
          /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
            --workspace-root /workspace \
@@ -37,34 +187,30 @@ states:
            --core-score eval_score \
            --evaluation-command "EVAL_CMD" \
            --evaluation-timeout-secs 30 \
-           --success-criterion "eval_score >= 1.0" \
-           --max-rounds 3 \
+           --success-criterion "SUCCESS_CRITERION" \
+           --max-rounds MAX_ROUNDS \
            --patience 2 \
            --stop-condition "max_rounds" \
            --writable-path .evolve_runs \
-           --primary-target candidate.py \
+           --primary-target PRIMARY_TARGET \
            --sampling-algorithm greedy \
            --sample-n 1 \
            --cognition-source-mode seed \
            --confirmed true
 
-         EVAL_CMD must read the candidate at {quoted_code_path}, run it, and write a JSON
-         file at {quoted_results_path} containing an "eval_score" number. Candidate files
-         may be extensionless, so Python evaluators must load them with runpy.run_path or
-         exec(compile(...)); do not rely on importlib.util.spec_from_file_location for
-         {quoted_code_path}.
+      5. Write a cognition seed file at /workspace/.evolve_runs/main/cognition_seed.md
+         containing one or more ```json fenced blocks of reusable domain heuristics
+         for this objective. Do not put round-by-round results here; only durable
+         knowledge. For a workspace experiment, preserve the experiment's own
+         heuristics and interface contract.
 
-      2. Write a cognition seed file at /workspace/.evolve_runs/main/cognition_seed.md
-         containing one or more ```json fenced blocks of reusable domain heuristics for
-         this objective. Do not put round-by-round results here; only durable knowledge.
-
-      3. Copy the human-review artifacts into the workflow artifact directory:
+      6. Copy the human-review artifacts into the workflow artifact directory:
 
          mkdir -p /workspace/.workflow/run_spec /workspace/.workflow/cognition_seed
          cp /workspace/.evolve_runs/main/run_spec.yaml /workspace/.workflow/run_spec/run_spec.md
          cp /workspace/.evolve_runs/main/cognition_seed.md /workspace/.workflow/cognition_seed/cognition_seed.md
 
-      4. Confirm evolve-brief exited 0, run_spec.yaml exists, and both workflow
+      7. Confirm evolve-brief exited 0, run_spec.yaml exists, and both workflow
          artifact copies exist.
 
       If a human directive is present at the top of this message, treat it as
@@ -200,7 +346,10 @@ states:
         - cognition.matches: retrieved durable heuristics relevant to this objective
 
       If a parent is present, evolve it: improve on the parent's code using the cognition
-      hints. If parent is null, write a full candidate from scratch.
+      hints. If parent is null and /workspace/initial_program exists, copy it
+      verbatim as this round's candidate without modifying it - it is the
+      experiment's baseline, and the evaluator will score it as node 0. If parent
+      is null and no initial_program exists, write a full candidate from scratch.
 
       Write the COMPLETE candidate file to:
         /workspace/.evolve_runs/main/steps/<step_name>/code

@@ -928,6 +928,48 @@ describe('WF011 — container scope not populated by a prior agent', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bundled evolve manifest controls
+// ---------------------------------------------------------------------------
+
+describe('bundled evolve manifest', () => {
+  const manifestPath = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'evolve', 'workflow.yaml');
+
+  function loadRaw(): Record<string, unknown> {
+    return parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }) as Record<string, unknown>;
+  }
+
+  it('lints clean with provision as the initial state', () => {
+    const def = validateDefinition(loadRaw());
+    const result = lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath });
+
+    expect(def.initial).toBe('provision');
+    expect(result.filter((d) => d.severity === 'error')).toEqual([]);
+  });
+
+  it('fails validation if the provision blocked edge points at a missing state', () => {
+    const raw = loadRaw();
+    const states = raw.states as Record<string, { transitions?: Array<Record<string, unknown>> }>;
+    const provision = states.provision;
+    if (!provision.transitions) throw new Error('evolve provision state missing transitions');
+    const blocked = provision.transitions.find((transition) => {
+      const when = transition.when as Record<string, unknown> | undefined;
+      return when?.verdict === 'blocked';
+    });
+    if (!blocked) throw new Error('evolve provision state missing blocked transition');
+    blocked.to = 'missing_state';
+
+    expect(() => validateDefinition(raw)).toThrow(/missing_state/);
+  });
+
+  it('fails validation if the initial state is missing', () => {
+    const raw = loadRaw();
+    raw.initial = 'missing_initial';
+
+    expect(() => validateDefinition(raw)).toThrow(/Initial state "missing_initial" does not exist/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // WF012 — deterministic verdict edges need a resultFile source
 // ---------------------------------------------------------------------------
 

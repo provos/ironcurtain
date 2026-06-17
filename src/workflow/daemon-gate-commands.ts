@@ -16,6 +16,8 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { resolveWorkflowPath } from './discovery.js';
 import {
@@ -317,7 +319,13 @@ async function runRun(args: string[]): Promise<number> {
 
   try {
     const params: Record<string, unknown> = { definitionPath, taskDescription };
-    if (typeof values.workspace === 'string') params.workspacePath = values.workspace;
+    if (typeof values.workspace === 'string') {
+      const workspacePath = resolve(values.workspace);
+      if (!existsSync(workspacePath) || !statSync(workspacePath).isDirectory()) {
+        return fail(mode, 'WORKSPACE_NOT_DIRECTORY', { path: workspacePath });
+      }
+      params.workspacePath = workspacePath;
+    }
 
     const result = await client.call<{ workflowId: string }>('workflows.start', params);
     if (!result.ok) return reportRpcError(mode, result);

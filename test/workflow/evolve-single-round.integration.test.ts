@@ -142,6 +142,12 @@ function writePreflightRunSpec(workspacePath: string): void {
   writeFileSync(resolve(workspacePath, '.workflow', 'cognition_seed', 'cognition_seed.md'), '# Cognition Seed Draft\n');
 }
 
+function writeProvisionMarker(workspacePath: string): void {
+  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(resolve(runDir, '.provisioned'), 'numpy\npyyaml\n');
+}
+
 function writeCandidate(workspacePath: string, kind: CandidateKind): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
   const context = readJson(resolve(runDir, 'current', 'context.json')) as { step_name: string };
@@ -269,6 +275,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     const orchestratorScript =
       kind === 'crash' ? ['design', 'evaluate'] : ['design', 'evaluate', 'analyze', 'record', 'complete'];
+    let provisionCount = 0;
     let preflightCount = 0;
     let orchestratorCount = 0;
     let researcherCount = 0;
@@ -279,6 +286,11 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
       if (!workspacePath) throw new Error('workflow agent session missing workspacePath');
       return new MockSession({
         responses: (msg: string) => {
+          if (msg.includes('provisioning the Python environment')) {
+            provisionCount += 1;
+            writeProvisionMarker(workspacePath);
+            return statusBlock('ready', 'provision confirmed');
+          }
           if (msg.includes('configuring a multi-round Evolve experiment')) {
             preflightCount += 1;
             writePreflightRunSpec(workspacePath);
@@ -347,6 +359,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     await waitForCompletion(orchestrator, workflowId, 150_000);
     await orchestrator.shutdownAll();
+    expect(provisionCount).toBe(1);
     expect(preflightCount).toBe(1);
     expect(researcherCount).toBe(1);
     expect(analyzerCount).toBe(kind === 'crash' ? 0 : 1);
@@ -361,6 +374,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     expect(states.at(-1)).toBe('done');
     expect(states).not.toContain('failed');
+    expect(states[0]).toBe('provision');
     expect(states).toContain('preflight_review');
     expect(states).toContain('final_summary');
     expect(states).toContain('final_review');
@@ -388,6 +402,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
     const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
 
     expect(states.at(-1)).toBe('done');
+    expect(states[0]).toBe('provision');
     expect(states).toContain('final_review');
     const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as {
       nodes: Record<string, { score: number }>;
@@ -402,6 +417,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
     const runDir = resolve(workspaceDir, '.evolve_runs', 'main');
 
     expect(states.at(-1)).toBe('aborted');
+    expect(states[0]).toBe('provision');
     expect(states).toContain('evaluate');
     expect(states).toContain('human_escalation');
     expect(states).not.toContain('failed');

@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +38,7 @@ import type { RunRecord } from '../../src/cron/types.js';
 import { runDaemonGateCommand } from '../../src/workflow/daemon-gate-commands.js';
 import { createArtifactAwareSession, approvedResponse } from './test-helpers.js';
 import type { Session, SessionOptions } from '../../src/session/types.js';
+import type { WorkflowId } from '../../src/workflow/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = resolve(__dirname, 'fixtures', 'test-gate-smoke', 'workflow.yaml');
@@ -67,6 +68,7 @@ function makeMockHandler(): ControlRequestHandler {
 
 interface Harness {
   readonly server: WebUiServer;
+  readonly manager: WorkflowManager;
   readonly baseDir: string;
   readonly home: string;
 }
@@ -125,7 +127,7 @@ async function boot(): Promise<Harness> {
     { mode: 0o600 },
   );
 
-  return { server, baseDir, home };
+  return { server, manager, baseDir, home };
 }
 
 /**
@@ -205,6 +207,34 @@ async function startAndAwaitGate(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 describe('daemon gate commands (command-layer integration)', () => {
+  it('run resolves a relative --workspace path before sending workflows.start', async () => {
+    harness = await boot();
+    const cwd = mkdtempSync(join(tmpdir(), 'ic-gate-cmd-cwd-'));
+    const workspace = join(cwd, 'workspace');
+    mkdirSync(workspace);
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+
+      const run = await runCommand('run', [
+        FIXTURE_PATH,
+        'Draft from relative workspace',
+        '--workspace',
+        'workspace',
+        '--json',
+      ]);
+      expect(run.exitCode).toBe(0);
+      expect(run.json.ok).toBe(true);
+      const workflowId = run.json.workflowId as WorkflowId;
+      const detail = harness.manager.getOrchestrator().getDetail(workflowId);
+
+      expect(detail?.workspacePath).toBe(resolve('workspace'));
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('run -> await(gate) -> show -> APPROVE -> await(completed)', async () => {
     harness = await boot();
 
