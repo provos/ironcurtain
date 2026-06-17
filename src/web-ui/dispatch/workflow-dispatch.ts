@@ -301,15 +301,19 @@ export async function workflowDispatch(
     return definitions;
   }
 
-  // workflows.readme addressed by definitionPath needs no workflow manager
-  // (Start picker, no running workflow). The workflowId form is handled in
-  // the switch below, where the manager is available.
+  // workflows.readme is handled here, in one place: the definitionPath form
+  // (Start picker) needs no workflow manager, while the workflowId form
+  // (detail view) does. The schema's refine guarantees exactly one is set.
   if (method === 'workflows.readme') {
-    const parsed = validateParams(workflowReadmeSchema, params);
-    if (parsed.definitionPath) {
-      return readReadmeForDefinitionPath(parsed.definitionPath);
+    const { definitionPath, workflowId } = validateParams(workflowReadmeSchema, params);
+    if (definitionPath) {
+      return readReadmeForDefinitionPath(definitionPath);
     }
-    // workflowId form: validated to be present by the schema's refine.
+    if (!ctx.workflowManager) {
+      throw new RpcError('INTERNAL_ERROR', 'Workflow system not available');
+    }
+    const mgr = ctx.workflowManager;
+    return readReadmeForWorkflowId(mgr.getOrchestrator(), mgr, workflowId as WorkflowId);
   }
 
   if (!ctx.workflowManager) {
@@ -334,16 +338,6 @@ export async function workflowDispatch(
         }
       }
       return summaries;
-    }
-
-    case 'workflows.readme': {
-      // definitionPath form is handled before the manager guard above; only
-      // the workflowId form reaches here.
-      const { workflowId } = validateParams(workflowReadmeSchema, params);
-      if (!workflowId) {
-        throw new RpcError('INVALID_PARAMS', 'workflowId is required');
-      }
-      return readReadmeForWorkflowId(controller, manager, workflowId as WorkflowId);
     }
 
     case 'workflows.get': {

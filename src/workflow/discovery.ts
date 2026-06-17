@@ -111,17 +111,22 @@ export function getWorkflowPackageDir(workflowFilePath: string): string {
   return dirname(workflowFilePath);
 }
 
+/** Returns the first `<dir>/<basename>` that exists on disk, or `undefined`. */
+function findFirstExisting(dir: string, basenames: readonly string[]): string | undefined {
+  for (const basename of basenames) {
+    const candidate = resolve(dir, basename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
 /**
  * Locates the manifest file inside a workflow package directory.
  * Returns the absolute path to `workflow.yaml` or `workflow.yml` if
  * present (yaml takes precedence on collision), `undefined` otherwise.
  */
 function findManifest(packageDir: string): string | undefined {
-  for (const basename of MANIFEST_BASENAMES) {
-    const candidate = resolve(packageDir, basename);
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
+  return findFirstExisting(packageDir, MANIFEST_BASENAMES);
 }
 
 /**
@@ -130,11 +135,7 @@ function findManifest(packageDir: string): string | undefined {
  * `undefined` otherwise.
  */
 function findReadme(packageDir: string): string | undefined {
-  for (const basename of README_BASENAMES) {
-    const candidate = resolve(packageDir, basename);
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
+  return findFirstExisting(packageDir, README_BASENAMES);
 }
 
 // ---------------------------------------------------------------------------

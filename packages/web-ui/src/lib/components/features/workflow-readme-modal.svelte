@@ -4,6 +4,7 @@
   import { Spinner } from '$lib/components/ui/spinner/index.js';
   import { renderMarkdown } from '$lib/markdown.js';
   import BookOpen from 'phosphor-svelte/lib/BookOpen';
+  import X from 'phosphor-svelte/lib/X';
 
   let {
     open,
@@ -55,8 +56,6 @@
       if (token === loadToken) loading = false;
     }
   }
-
-  const hasContent = $derived(content !== null && content.trim().length > 0);
 </script>
 
 <Modal {open} {onclose} class="max-w-3xl">
@@ -75,9 +74,7 @@
       aria-label="Close README"
       class="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
     >
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-      </svg>
+      <X size={16} />
     </button>
   </div>
 
@@ -90,7 +87,7 @@
       <div class="py-6 text-sm text-destructive" data-testid="workflow-readme-error">
         Could not load README: {error}
       </div>
-    {:else if hasContent && content !== null}
+    {:else if content !== null && content.trim().length > 0}
       <article class="prose-markdown text-sm" data-testid="workflow-readme-content">
         {@html renderMarkdown(content)}
       </article>
