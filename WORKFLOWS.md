@@ -314,6 +314,122 @@ ironcurtain workflow run-state <workflow> <state> \
 
 This is a single-state runner. It does not transition to other states, does not update the journal, does not write a checkpoint, and does not persist anything back to the source `--artifacts` directory. If a state's behavior depends on the workflow journal or on artifacts produced by other states earlier in the run, those artifacts must be present in the `--artifacts` dir before invocation.
 
+### Driving workflows from an agent (daemon-backed)
+
+The commands above run the orchestrator **in-process** and resolve human gates through an interactive terminal prompt — unusable by an autonomous agent. The commands in this section instead drive a **running daemon** over the same WebSocket JSON-RPC the web UI uses, so an agent (or any script) can start a gated workflow, observe in machine-readable JSON when human input is required, and resolve the gate itself — no TTY, no human. They add **no new daemon RPC methods**; they are a thin client over the existing `workflows.*` surface. See [`docs/designs/agent-driven-workflow-gates.md`](docs/designs/agent-driven-workflow-gates.md) for the design.
+
+They require a daemon started with the web UI:
+
+```bash
+ironcurtain daemon --web-ui
+```
+
+Every command here accepts `--json`, which prints a single newline-terminated JSON object to **stdout** while human-readable text goes to **stderr** (the two never interleave, so an agent parses stdout safely). When no daemon is reachable they fail fast with `{"ok":false,"error":"DAEMON_NOT_RUNNING"}` and a non-zero exit rather than hanging.
+
+The agent's loop is `run → await → (show → gate → await)* → terminal`:
+
+```bash
+# Start a gated workflow on the daemon; capture its id from stdout.
+ironcurtain workflow run vuln-discovery "Audit the parser" --json
+# stdout: {"ok":true,"workflowId":"4b2f9c1e-...","phase":"running"}
+WF=4b2f9c1e-...
+
+# Block until the run needs a decision (or finishes).
+ironcurtain workflow await "$WF" --json
+# stdout (shape is representative): {"ok":true,"workflowId":"4b2f9c1e-...",
+#   "phase":"waiting_human","currentState":"review","round":1,
+#   "gate":{"stateName":"review","summary":"...","acceptedEvents":["APPROVE","FORCE_REVISION","ABORT"],
+#           "presentedArtifacts":["report"]}}
+
+# Inspect what the gate presents (names -> content), then decide.
+ironcurtain workflow show "$WF" --artifact report --json
+ironcurtain workflow gate "$WF" --event FORCE_REVISION --prompt "dig into the auth path" --json
+
+# Loop await -> gate until a terminal; eventually approve.
+ironcurtain workflow gate "$WF" --event APPROVE --json
+ironcurtain workflow await "$WF" --json
+# stdout: {"ok":true,"workflowId":"4b2f9c1e-...","phase":"completed","currentState":"done"}
+```
+
+#### `ironcurtain workflow run`
+
+Start a workflow on the daemon and return immediately with its id (the daemon hosts the orchestrator). The first argument is a workflow name or a path, resolved client-side.
+
+```bash
+ironcurtain workflow run <name-or-path> "task description" [--workspace <path>] [--json] [--ensure-daemon]
+```
+
+Options:
+
+- `--workspace <path>` -- Run against an existing directory instead of a fresh sandbox
+- `--ensure-daemon` -- If no daemon is running, spawn a detached `ironcurtain daemon --web-ui` and wait for it to come up (off by default; lets an agent self-bootstrap)
+
+Errors: `WORKFLOW_DEFINITION_NOT_FOUND` if the name/path doesn't resolve; `LINT_FAILED` (carrying `diagnostics`) or `INVALID_PARAMS` if the definition fails pre-flight lint or fails to load.
+
+#### `ironcurtain workflow await`
+
+Block until the workflow next reaches a human gate **or** a terminal, print its status, and exit. This is the primary way an agent waits — it returns exactly at the next decision point, with no polling.
+
+```bash
+ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]
+```
+
+- `--timeout <sec>` -- Maximum seconds to wait (default 600). On timeout, exits `4` and leaves the workflow running; re-issue `await` to keep waiting.
+
+#### `ironcurtain workflow status`
+
+One-shot, stateless poll of a workflow's current phase and gate — the same JSON shape `await` prints, but returns immediately without blocking. Use it for a quick check or when a long-held connection is undesirable.
+
+```bash
+ironcurtain workflow status <workflowId> [--json]
+```
+
+#### `ironcurtain workflow gate`
+
+Resolve a pending human gate by choosing an event. When driven by an agent, the agent is the decider.
+
+```bash
+ironcurtain workflow gate <workflowId> --event <APPROVE|FORCE_REVISION|REPLAN|ABORT> [--prompt <text>] [--json]
+```
+
+- `--prompt <text>` -- Required for `FORCE_REVISION` and `REPLAN` (the feedback is injected into the next agent's prompt); an empty prompt is rejected. Validated locally and re-validated by the daemon.
+
+Returns `WORKFLOW_NOT_AT_GATE` if the workflow isn't currently waiting at a gate (run `await` or `status` first).
+
+#### `ironcurtain workflow show`
+
+Print the content of an artifact a gate presents — turning the `presentedArtifacts` _names_ from `await`/`status` into the bytes the agent reasons over.
+
+```bash
+ironcurtain workflow show <workflowId> --artifact <name> [--json]
+```
+
+#### Exit codes
+
+`await` and `status` report the **workflow phase** as their exit code; `run`, `gate`, and `show` report the **result of the call**.
+
+`await` / `status` — phase-derived:
+
+| Code | Meaning                                                           |
+| ---- | ----------------------------------------------------------------- |
+| `0`  | At a gate (`waiting_human`) or `completed`                        |
+| `3`  | Terminal failure phase (`failed` or `aborted`)                    |
+| `4`  | `await` timed out before a decision point (workflow left running) |
+| `1`  | Operational failure (no daemon reachable, RPC error)              |
+| `2`  | Usage error (bad flags)                                           |
+
+The phase is read from an authoritative `workflows.get`, never inferred from a lifecycle event: a gate `ABORT` ends in `phase:"aborted"` (exit `3`) even though the run emits a "completed" lifecycle event internally.
+
+`run` / `gate` / `show` — call-result:
+
+| Code | Meaning                                                                                                                                              |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | The call succeeded (workflow started / gate resolved / artifact returned)                                                                            |
+| `1`  | Operational or RPC error — e.g. `ARTIFACT_NOT_FOUND` (artifact not produced yet), `WORKFLOW_NOT_AT_GATE`, `WORKFLOW_NOT_FOUND`, `DAEMON_NOT_RUNNING` |
+| `2`  | Usage error (bad flags, missing/empty required `--prompt`, unknown event)                                                                            |
+
+`show` is phase-agnostic: it returns `0` as soon as the named artifact exists on disk (even mid-run) and `1` (`ARTIFACT_NOT_FOUND`) while the producing state is still executing — it never reports a workflow phase.
+
 ## Human gates
 
 When a workflow reaches a human gate, you're prompted to choose:
@@ -324,6 +440,12 @@ When a workflow reaches a human gate, you're prompted to choose:
 - **Abort (`x`)** -- Stop the workflow
 
 Your feedback text is included in the next agent's prompt.
+
+### Resolving gates without a human (agent-driven)
+
+The prompt above is interactive — it expects a person at a terminal and is what the in-process `ironcurtain workflow start` uses. To let an **autonomous agent** drive a gated workflow (start it, detect when a gate needs a decision, and choose the event itself, with no human involved), use the daemon-backed commands instead — see [Driving workflows from an agent](#driving-workflows-from-an-agent-daemon-backed).
+
+The agent observes the pending gate in machine-readable JSON (`workflow await`/`status` report the gate's `summary`, `acceptedEvents`, and `presentedArtifacts`), inspects the presented artifacts with `workflow show`, then resolves with `workflow gate --event ...`, looping `await → gate → await` until a terminal. The same four events (`APPROVE` / `FORCE_REVISION` / `REPLAN` / `ABORT`) and the same "feedback required for `FORCE_REVISION`/`REPLAN`" rule apply — the agent simply plays the role a human plays at the interactive prompt.
 
 ## Creating custom workflows
 
