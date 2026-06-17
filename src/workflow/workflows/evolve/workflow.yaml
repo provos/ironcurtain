@@ -158,6 +158,11 @@ states:
          - SUCCESS_CRITERION as a reasonable nonzero quality bar such as
            eval_score >= 1.0. Aspirational benchmark targets are not hard gates
            unless the task explicitly says they are.
+         - EVAL_TIMEOUT_SECS as a generous per-candidate evaluation budget in
+           seconds. Default to 300. Raise it (up to ~600) when the experiment or
+           task implies heavy evaluation (e.g. numerical optimization) or when the
+           experiment declares a larger per-candidate budget. A too-short timeout
+           truncates slow-but-valid candidates as failures.
          - COGNITION_SEED from init_cognition.py, README.md, prompts/, and input.md.
            If init_cognition.py contains CognitionItem-style heuristics, translate
            their content/source/metadata into JSON seed objects. Do not execute
@@ -176,9 +181,10 @@ states:
 
       4. Initialize the run by executing the evolve-brief helper. The run lives
          under /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE,
-         EVAL_CMD, SUCCESS_CRITERION, MAX_ROUNDS, and PRIMARY_TARGET from the
-         inference above. Set --max-rounds from the task when it specifies a
-         number of rounds; otherwise default to 3.
+         EVAL_CMD, SUCCESS_CRITERION, EVAL_TIMEOUT_SECS, MAX_ROUNDS, and
+         PRIMARY_TARGET from the inference above. Set --max-rounds from the task
+         when it specifies a number of rounds; otherwise default to 3. Default
+         EVAL_TIMEOUT_SECS to 300 when nothing implies a different budget.
 
          /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
            --workspace-root /workspace \
@@ -186,7 +192,7 @@ states:
            --objective "OBJECTIVE" \
            --core-score eval_score \
            --evaluation-command "EVAL_CMD" \
-           --evaluation-timeout-secs 30 \
+           --evaluation-timeout-secs EVAL_TIMEOUT_SECS \
            --success-criterion "SUCCESS_CRITERION" \
            --max-rounds MAX_ROUNDS \
            --patience 2 \
