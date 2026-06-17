@@ -46,6 +46,7 @@ import {
   RESET,
 } from './cli-support.js';
 import { runRunState } from './run-state-command.js';
+import { runDaemonGateCommand } from './daemon-gate-commands.js';
 import {
   formatDiagnostic,
   printDiagnostics,
@@ -68,14 +69,24 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow inspect <baseDir> [--all]',
     'ironcurtain workflow lint <name-or-path> [--strict]',
     'ironcurtain workflow run-state <name-or-path> <state> --artifacts <dir> [options]',
+    'ironcurtain workflow run <name-or-path> "task" [--workspace <path>] [--json] [--ensure-daemon]',
+    'ironcurtain workflow status <workflowId> [--json]',
+    'ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]',
+    'ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]',
+    'ironcurtain workflow show <workflowId> --artifact <name> [--json]',
   ],
   subcommands: [
     { name: 'list', description: 'List available workflow definitions' },
-    { name: 'start', description: 'Start a workflow by name or definition file path' },
+    { name: 'start', description: 'Start a workflow by name or definition file path (interactive)' },
     { name: 'resume', description: 'Resume a checkpointed workflow' },
     { name: 'inspect', description: 'Show workflow status, artifacts, and recent messages' },
     { name: 'lint', description: 'Run semantic checks on a workflow definition' },
     { name: 'run-state', description: 'Run a single agent state once against pre-staged artifacts' },
+    { name: 'run', description: 'Start a gated workflow on the daemon (non-interactive, machine-readable)' },
+    { name: 'status', description: 'Print a workflow status snapshot (poll)' },
+    { name: 'await', description: 'Block until a workflow reaches a gate or terminal' },
+    { name: 'gate', description: 'Resolve a human gate with an event (APPROVE/FORCE_REVISION/REPLAN/ABORT)' },
+    { name: 'show', description: 'Print a presented artifact for a gated workflow' },
   ],
   options: [
     { flag: 'model', description: 'Override the agent model (start, resume)', placeholder: '<model-id>' },
@@ -94,6 +105,23 @@ const workflowSpec: CommandSpec = {
     { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume)' },
     { flag: 'strict', description: 'Treat lint warnings as errors (lint only)' },
     { flag: 'capture-traces', description: 'Capture LLM API traces for this run (start only)' },
+    { flag: 'json', description: 'Emit machine-readable JSON to stdout (run, status, await, gate, show)' },
+    {
+      flag: 'ensure-daemon',
+      description: 'Auto-start a detached daemon if none is running (run, status, await, gate, show)',
+    },
+    {
+      flag: 'event',
+      description: 'Gate event: APPROVE | FORCE_REVISION | REPLAN | ABORT (gate only)',
+      placeholder: '<EVENT>',
+    },
+    {
+      flag: 'prompt',
+      description: 'Feedback for FORCE_REVISION/REPLAN gate events (gate only)',
+      placeholder: '<text>',
+    },
+    { flag: 'artifact', description: 'Artifact name to read (show only)', placeholder: '<name>' },
+    { flag: 'timeout', description: 'Max seconds to block (await only)', placeholder: '<sec>' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
@@ -106,6 +134,11 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow resume /tmp/workflow-abc123 --model anthropic:claude-sonnet-4-6',
     'ironcurtain workflow inspect /tmp/workflow-abc123',
     'ironcurtain workflow inspect /tmp/workflow-abc123 --all',
+    'ironcurtain workflow run design-and-code "Build a REST API" --json --ensure-daemon',
+    'ironcurtain workflow await wf-7a3 --json',
+    'ironcurtain workflow show wf-7a3 --artifact spec --json',
+    'ironcurtain workflow gate wf-7a3 --event FORCE_REVISION --prompt "tighten the intro" --json',
+    'ironcurtain workflow gate wf-7a3 --event APPROVE --json',
   ],
 };
 
@@ -687,6 +720,21 @@ export async function main(args: string[]): Promise<void> {
     case 'run-state':
       await runRunState(subArgs);
       break;
+    case 'run':
+    case 'status':
+    case 'await':
+    case 'gate':
+    case 'show': {
+      // Daemon-backed, non-interactive commands. They own all stdout/stderr and
+      // return an exit code derived from the workflow phase (or a CLI error).
+      if (subArgs.includes('--help') || subArgs.includes('-h')) {
+        process.stderr.write(formatHelp(workflowSpec) + '\n');
+        return;
+      }
+      const code = await runDaemonGateCommand(subcommand, subArgs);
+      process.exit(code);
+      break;
+    }
     default:
       writeStderr(`${RED}Unknown workflow subcommand: ${subcommand}${RESET}`);
       process.stderr.write(formatHelp(workflowSpec) + '\n');
