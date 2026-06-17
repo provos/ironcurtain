@@ -681,9 +681,21 @@ function runList(): void {
   const header = `${'NAME'.padEnd(nameWidth)}  ${'SOURCE'.padEnd(sourceWidth)}  DESCRIPTION`;
   writeStdout(`${BOLD}${header}${RESET}`);
 
+  let anyHidden = false;
   for (const wf of workflows) {
-    const line = `${wf.name.padEnd(nameWidth)}  ${wf.source.padEnd(sourceWidth)}  ${wf.description}`;
+    // `hidden` workflows are runnable from the CLI but suppressed in the web
+    // UI; flag them here so CLI users know which ones won't appear there.
+    const marker = wf.hidden ? ` ${DIM}(hidden from web UI)${RESET}` : '';
+    if (wf.hidden) anyHidden = true;
+    const line = `${wf.name.padEnd(nameWidth)}  ${wf.source.padEnd(sourceWidth)}  ${wf.description}${marker}`;
     writeStdout(line);
+  }
+
+  if (anyHidden) {
+    writeStdout('');
+    writeStdout(
+      `${DIM}Workflows marked "hidden from web UI" run from the CLI but are excluded from the daemon web UI.${RESET}`,
+    );
   }
 }
 

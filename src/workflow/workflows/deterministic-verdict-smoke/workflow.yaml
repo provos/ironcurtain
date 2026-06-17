@@ -1,5 +1,6 @@
 name: deterministic-verdict-smoke
 description: 'TESTING ONLY - deterministic state routes on a helper-written verdict file.'
+hidden: true
 initial: author
 
 settings:

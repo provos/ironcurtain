@@ -593,6 +593,40 @@ const CODE_REVIEW_GRAPH = {
   ],
 };
 
+// Workflows that ship a co-packaged README (mirrors the bundled design-and-code
+// package). Drives `hasReadme` on definitions/details and `workflows.readme`.
+const README_WORKFLOW_NAMES = new Set(['design-and-code']);
+
+// Workflows hidden from the web UI (smoke tests / fixtures). The real daemon
+// filters these out of listDefinitions / list / listResumable while still
+// listing them in the CLI; the mock mirrors that suppression so the UI's
+// "no test workflows visible" behavior is exercisable end-to-end.
+const HIDDEN_WORKFLOW_NAMES = new Set(['deterministic-verdict-smoke']);
+
+// Canned README markdown returned by `workflows.readme` for README workflows.
+const MOCK_README = `# Design & Code
+
+A four-phase workflow: **plan → design → implement → review**, with human gates
+between the planning stages and an automated coder–critic loop at the end.
+
+## Phases
+
+| Phase | Role | Output |
+|-------|------|--------|
+| Plan | Planner — orders the work into steps | \`plan.md\` |
+| Design | Architect — interfaces and types | \`spec.md\` |
+| Implement | Engineer — code + unit tests | \`src/\` |
+| Review | Reviewer — correctness and quality | \`review.md\` |
+
+## Human gates
+
+- **Plan review** — approve the approach before design.
+- **Design review** — approve interfaces before implementation.
+
+> Tip: write a detailed task description — the planner only sees the task text
+> and whatever already exists in the workspace.
+`;
+
 function buildWorkflowDetailDto(wf: MockWorkflow, gate?: MockGate) {
   const isDesignAndCode = wf.name.includes('design');
   const graph = isDesignAndCode ? DESIGN_AND_CODE_GRAPH : CODE_REVIEW_GRAPH;
@@ -625,6 +659,7 @@ function buildWorkflowDetailDto(wf: MockWorkflow, gate?: MockGate) {
     },
     gate: gate ?? undefined,
     workspacePath: `/tmp/ironcurtain-workflow/${wf.workflowId}`,
+    hasReadme: README_WORKFLOW_NAMES.has(wf.name),
   };
 }
 
@@ -766,6 +801,23 @@ function buildPastRunFixtures(): MockPastRun[] {
       timestamp: new Date(Date.now() - 1800_000).toISOString(),
       durationMs: 540_000,
       workspacePath: '/home/user/projects/checkpoint-retention',
+    },
+    // Hidden smoke-test run: present on disk but suppressed from the UI because
+    // its workflow is marked `hidden: true`. The listResumable handler filters
+    // it out (mirroring the daemon), so it should never reach the past-runs table.
+    {
+      workflowId: 'wf-past-smoke-hidden',
+      name: 'deterministic-verdict-smoke',
+      phase: 'completed',
+      currentState: 'completed',
+      lastState: 'completed',
+      taskDescription: 'TESTING ONLY - deterministic verdict smoke run',
+      round: 1,
+      maxRounds: 1,
+      totalTokens: 1200,
+      timestamp: new Date(Date.now() - 600_000).toISOString(),
+      durationMs: 15_000,
+      workspacePath: '/tmp/smoke',
     },
   ];
 }
@@ -1195,24 +1247,29 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     // Workflow methods
     case 'workflows.listDefinitions':
+      // Mirrors the daemon: hidden (smoke/fixture) workflows are never returned
+      // here, and each entry carries `hasReadme`.
       return [
         {
           name: 'design-and-code',
           description: 'Plan -> Design -> Implement -> Review workflow',
-          path: '/opt/ironcurtain/workflows/design-and-code.yaml',
+          path: '/opt/ironcurtain/workflows/design-and-code/workflow.yaml',
           source: 'bundled',
+          hasReadme: README_WORKFLOW_NAMES.has('design-and-code'),
         },
         {
           name: 'code-review',
           description: 'Automated code review with multiple reviewers',
-          path: '/opt/ironcurtain/workflows/code-review.yaml',
+          path: '/opt/ironcurtain/workflows/code-review/workflow.yaml',
           source: 'bundled',
+          hasReadme: README_WORKFLOW_NAMES.has('code-review'),
         },
         {
           name: 'my-custom-flow',
           description: 'Custom workflow for internal tooling',
-          path: '/home/user/.ironcurtain/workflows/my-custom-flow.yaml',
+          path: '/home/user/.ironcurtain/workflows/my-custom-flow/workflow.yaml',
           source: 'user',
+          hasReadme: README_WORKFLOW_NAMES.has('my-custom-flow'),
         },
       ];
 
@@ -1220,7 +1277,8 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       if (replayConfig) {
         return replayController ? [replayController.getStatus()] : [];
       }
-      return [...workflows.values()];
+      // Suppress hidden workflows' runs, mirroring the daemon.
+      return [...workflows.values()].filter((wf) => !HIDDEN_WORKFLOW_NAMES.has(wf.name));
     }
 
     case 'workflows.get': {
@@ -1401,7 +1459,8 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     case 'workflows.listResumable': {
       if (replayConfig) return [];
-      return buildPastRunFixtures();
+      // Suppress hidden workflows' past runs, mirroring the daemon.
+      return buildPastRunFixtures().filter((r) => !HIDDEN_WORKFLOW_NAMES.has(r.name));
     }
 
     case 'workflows.messageLog': {
@@ -1426,6 +1485,25 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         hasMore = filtered.some((e) => e.ts < cursor);
       }
       return { entries, hasMore };
+    }
+
+    case 'workflows.readme': {
+      const definitionPath = typeof params.definitionPath === 'string' ? params.definitionPath : undefined;
+      const wfId = typeof params.workflowId === 'string' ? params.workflowId : undefined;
+      // Resolve the workflow name from whichever address form was provided.
+      let name: string | undefined;
+      if (definitionPath) {
+        // Mock manifest paths look like `.../<name>/workflow.yaml`.
+        name = definitionPath.match(/\/([^/]+)\/workflow\.ya?ml$/)?.[1];
+      } else if (wfId) {
+        name = workflows.get(wfId)?.name ?? buildPastRunFixtures().find((r) => r.workflowId === wfId)?.name;
+      } else {
+        return errorResult('INVALID_PARAMS', 'Provide exactly one of definitionPath or workflowId');
+      }
+      if (name && README_WORKFLOW_NAMES.has(name)) {
+        return { content: MOCK_README };
+      }
+      return errorResult('README_NOT_FOUND', `No README for ${name ?? 'workflow'}`);
     }
 
     case 'workflows.import':

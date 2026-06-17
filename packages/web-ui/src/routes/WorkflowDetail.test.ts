@@ -56,6 +56,7 @@ vi.mock('$lib/stores.svelte.js', () => ({
   getWorkflowArtifacts: (...args: unknown[]) => mockGetWorkflowArtifacts(...args),
   getWorkflowMessageLog: (...args: unknown[]) =>
     mockGetWorkflowMessageLog(...(args as [string, { before?: string; limit?: number } | undefined])),
+  getWorkflowReadme: () => Promise.resolve({ content: '# Readme' }),
 }));
 
 vi.mock('$lib/utils.js', async (importOriginal) => {
@@ -129,6 +130,7 @@ function makeDetail(overrides: Partial<WorkflowDetailDto> = {}): WorkflowDetailD
       visitCounts: {},
     },
     workspacePath: '/tmp/wf-workspace',
+    hasReadme: false,
     ...overrides,
   };
 }

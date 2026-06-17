@@ -1,5 +1,6 @@
 name: deterministic-eval-smoke
 description: 'TESTING ONLY - minimal agent plus deterministic in-container helper execution.'
+hidden: true
 initial: author
 
 settings:

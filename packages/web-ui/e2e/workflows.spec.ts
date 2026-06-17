@@ -388,3 +388,64 @@ test.describe('Workflow List Actions', () => {
     await expect(abortButton).not.toBeVisible({ timeout: 5_000 });
   });
 });
+
+test.describe('Workflow README', () => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
+    await connectWithToken(page);
+    await navigateToWorkflowsList(page);
+  });
+
+  test('README info button opens a modal with rendered content for a workflow that ships one', async ({ page }) => {
+    // Selecting design-and-code (hasReadme: true) enables the README button.
+    await page.getByLabel('Workflow definition').selectOption({ label: 'design-and-code' });
+    const readmeButton = page.getByTestId('readme-info-button');
+    await expect(readmeButton).toBeEnabled();
+    await readmeButton.click();
+
+    // The modal renders the README markdown (an <h1> from "# Design & Code").
+    const body = page.getByTestId('workflow-readme-content');
+    await expect(body).toBeVisible({ timeout: 5_000 });
+    await expect(body.getByRole('heading', { name: 'Design & Code' })).toBeVisible();
+  });
+
+  test('README button is disabled for a workflow without a README', async ({ page }) => {
+    await page.getByLabel('Workflow definition').selectOption({ label: 'code-review' });
+    await expect(page.getByTestId('readme-info-button')).toBeDisabled();
+  });
+
+  test('selecting a definition shows its description and source', async ({ page }) => {
+    await page.getByLabel('Workflow definition').selectOption({ label: 'design-and-code' });
+    const meta = page.getByTestId('selected-definition-meta');
+    await expect(meta).toBeVisible();
+    await expect(meta).toContainText('bundled');
+  });
+});
+
+test.describe('Hidden workflows are suppressed', () => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
+    await connectWithToken(page);
+    await navigateToWorkflowsList(page);
+  });
+
+  test('the start picker omits hidden smoke workflows', async ({ page }) => {
+    const optionLabels = await page.getByLabel('Workflow definition').locator('option').allInnerTexts();
+    expect(optionLabels.some((t) => t.includes('deterministic-verdict-smoke'))).toBe(false);
+    // Sanity: a real workflow is still offered.
+    expect(optionLabels.some((t) => t.includes('design-and-code'))).toBe(true);
+  });
+
+  test('the past-runs table omits hidden smoke runs', async ({ page }) => {
+    await expect(page.getByTestId('past-runs-section')).toBeVisible();
+    // A non-hidden past run renders (sanity that the table populated)...
+    await expect(
+      page
+        .getByTestId('past-runs-section')
+        .getByText(/circle of fifths/i)
+        .first(),
+    ).toBeVisible({ timeout: 5_000 });
+    // ...but the seeded hidden smoke run's task text must not appear anywhere.
+    await expect(page.getByText(/deterministic verdict smoke run/i)).toHaveCount(0);
+  });
+});
