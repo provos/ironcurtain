@@ -170,6 +170,12 @@ function writePreflightRunSpec(workspacePath: string): void {
   writeFileSync(resolve(workspacePath, '.workflow', 'cognition_seed', 'cognition_seed.md'), seed);
 }
 
+function writeProvisionMarker(workspacePath: string): void {
+  const runDir = resolve(workspacePath, '.evolve_runs', 'main');
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(resolve(runDir, '.provisioned'), 'numpy\npyyaml\n');
+}
+
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
 }
@@ -389,6 +395,7 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
       ],
     };
 
+    let provisionTurns = 0;
     let preflightTurns = 0;
     let orchestratorTurns = 0;
     let researcherTurns = 0;
@@ -399,6 +406,11 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
       if (!workspacePath) throw new Error('workflow agent session missing workspacePath');
       return new MockSession({
         responses: (msg: string) => {
+          if (msg.includes('provisioning the Python environment')) {
+            provisionTurns += 1;
+            writeProvisionMarker(workspacePath);
+            return statusBlock('ready', `provision ${provisionTurns} confirmed`);
+          }
           if (msg.includes('configuring a multi-round Evolve experiment')) {
             preflightTurns += 1;
             writePreflightRunSpec(workspacePath);
@@ -467,6 +479,7 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
     await run.orchestrator.shutdownAll();
 
     expect(run.states.at(-1)).toBe('done');
+    expect(run.states[0]).toBe('provision');
     expect(run.states).toEqual(expect.arrayContaining(['preflight_review', 'final_summary', 'final_review', 'done']));
     expect(run.states).not.toContain('failed');
     expect(run.states).not.toContain('aborted');
@@ -492,6 +505,7 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
     await run.orchestrator.shutdownAll();
 
     expect(run.states.at(-1)).toBe('aborted');
+    expect(run.states[0]).toBe('provision');
     expect(run.states).not.toContain('orchestrator');
     expect(run.states).not.toContain('sample');
     expect(run.states).not.toContain('evaluate');
@@ -531,6 +545,7 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
     await run.orchestrator.shutdownAll();
 
     expect(run.states.at(-1)).toBe('done');
+    expect(run.states[0]).toBe('provision');
     expect(countStates(run.states, 'human_escalation')).toBe(1);
     expect(countStates(run.states, 'preflight_review')).toBe(2);
     const nodes = readJson(
@@ -561,6 +576,7 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
     await run.orchestrator.shutdownAll();
 
     expect(run.states.at(-1)).toBe('done');
+    expect(run.states[0]).toBe('provision');
     expect(countStates(run.states, 'final_summary')).toBe(2);
     const nodes = readJson(
       resolve(run.workspaceDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'),

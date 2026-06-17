@@ -16,6 +16,8 @@
  */
 
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { resolveWorkflowPath } from './discovery.js';
 import {
@@ -312,12 +314,31 @@ async function runRun(args: string[]): Promise<number> {
     });
   }
 
+  // Validate the workspace client-side BEFORE connecting to the daemon, so an
+  // invalid --workspace fails fast without spawning or connecting it.
+  let workspacePath: string | undefined;
+  if (typeof values.workspace === 'string') {
+    workspacePath = resolve(values.workspace);
+    let isDirectory: boolean;
+    try {
+      isDirectory = statSync(workspacePath).isDirectory();
+    } catch {
+      // Any stat failure — ENOENT (incl. a racy delete after a check), EACCES,
+      // ELOOP, etc. — means the path is unusable as a workspace. Treat as invalid
+      // so the command returns the structured error instead of throwing.
+      isDirectory = false;
+    }
+    if (!isDirectory) {
+      return fail(mode, 'WORKSPACE_NOT_DIRECTORY', { path: workspacePath });
+    }
+  }
+
   const client = await openClient(mode, values['ensure-daemon'] === true);
   if (!client) return EXIT_ERROR;
 
   try {
     const params: Record<string, unknown> = { definitionPath, taskDescription };
-    if (typeof values.workspace === 'string') params.workspacePath = values.workspace;
+    if (workspacePath !== undefined) params.workspacePath = workspacePath;
 
     const result = await client.call<{ workflowId: string }>('workflows.start', params);
     if (!result.ok) return reportRpcError(mode, result);

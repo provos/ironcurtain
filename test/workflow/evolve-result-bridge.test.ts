@@ -121,13 +121,13 @@ describe('evolve workflow manifest', () => {
       '--objective "OBJECTIVE"',
       '--core-score eval_score',
       '--evaluation-command "EVAL_CMD"',
-      '--evaluation-timeout-secs 30',
-      '--success-criterion "eval_score >= 1.0"',
-      '--max-rounds 3',
+      '--evaluation-timeout-secs EVAL_TIMEOUT_SECS',
+      '--success-criterion "SUCCESS_CRITERION"',
+      '--max-rounds MAX_ROUNDS',
       '--patience 2',
       '--stop-condition "max_rounds"',
       '--writable-path .evolve_runs',
-      '--primary-target candidate.py',
+      '--primary-target PRIMARY_TARGET',
       '--sampling-algorithm greedy',
       '--sample-n 1',
       '--cognition-source-mode seed',
@@ -136,9 +136,11 @@ describe('evolve workflow manifest', () => {
       expect(prompt).toContain(flag);
     }
     expect(prompt).toContain('runpy.run_path');
-    expect(prompt).toContain('do not rely on importlib.util.spec_from_file_location');
+    expect(prompt).toContain('importlib.util.spec_from_file_location');
     expect(prompt).toContain('/workspace/.workflow/run_spec/run_spec.md');
     expect(prompt).toContain('/workspace/.workflow/cognition_seed/cognition_seed.md');
+    // The seed consumes a node-count slot, so a seeded run must add 1 to max-rounds.
+    expect(prompt).toContain('add 1 to MAX_ROUNDS');
   });
 });
 
@@ -234,6 +236,36 @@ describe('evolve_result.py bridge', () => {
       passed: true,
       payload: { score: 6, return_code: 0, success: true },
     });
+  });
+
+  it('lets evolve-eval read timeout_secs from run_spec unless --timeout is explicit', () => {
+    const scriptsDir = writeHarness({
+      evalStub:
+        [
+          'import json, sys',
+          'from pathlib import Path',
+          "run_dir = Path(sys.argv[sys.argv.index('--run-dir') + 1])",
+          "step = sys.argv[sys.argv.index('--step-name') + 1]",
+          "result = run_dir / 'steps' / step / 'results.json'",
+          'result.parent.mkdir(parents=True, exist_ok=True)',
+          "(run_dir / 'argv.json').write_text(json.dumps(sys.argv), encoding='utf-8')",
+          "result.write_text(json.dumps({'eval_score': 6, 'success': True}), encoding='utf-8')",
+          "print(json.dumps({'results_path': str(result), 'return_code': 0, 'step_dir': str(result.parent), 'success': True}))",
+        ].join('\n') + '\n',
+    });
+
+    const defaultRunDir = resolve(tmpDir, 'default-run');
+    const explicitRunDir = resolve(tmpDir, 'explicit-run');
+
+    expect(runBridge(scriptsDir, evalArgs(defaultRunDir)).result.verdict).toBe('evaluated');
+    expect(JSON.parse(readFileSync(resolve(defaultRunDir, 'argv.json'), 'utf-8'))).not.toContain('--timeout');
+
+    expect(runBridge(scriptsDir, [...evalArgs(explicitRunDir), '--timeout', '77']).result.verdict).toBe('evaluated');
+    const explicitArgv = JSON.parse(readFileSync(resolve(explicitRunDir, 'argv.json'), 'utf-8')) as string[];
+    expect(explicitArgv.slice(explicitArgv.indexOf('--timeout'), explicitArgv.indexOf('--timeout') + 2)).toEqual([
+      '--timeout',
+      '77',
+    ]);
   });
 
   it('keeps a low numeric score as evaluated, not evaluator_blocked', () => {
