@@ -26,7 +26,7 @@ import {
   type DaemonEvent,
   type RpcResult,
 } from '../daemon-client/daemon-client.js';
-import { parseArgsStrict } from './cli-shared.js';
+import { parseArgsResult, type ParseArgsResult, type ParseArgsOptions } from './cli-shared.js';
 import type { WorkflowDetailDto } from '../web-ui/web-ui-types.js';
 import type { HumanGateRequestDto } from './types.js';
 
@@ -77,6 +77,61 @@ function fail(mode: OutputMode, error: string, extra: Record<string, unknown> = 
 function formatErrorText(error: string, extra: Record<string, unknown>): string {
   const message = typeof extra.message === 'string' ? extra.message : undefined;
   return message ? `Error: ${error}: ${message}` : `Error: ${error}`;
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing (under the stdout/exit-code contract)
+// ---------------------------------------------------------------------------
+
+type ParsedGateArgs = Extract<ParseArgsResult, { readonly ok: true }>;
+
+type GateArgs =
+  | {
+      readonly ok: true;
+      readonly mode: OutputMode;
+      readonly values: ParsedGateArgs['values'];
+      readonly positionals: ParsedGateArgs['positionals'];
+    }
+  | { readonly ok: false; readonly exitCode: number };
+
+/**
+ * Cheap pre-scan for the `--json` flag, used to pick the output channel when
+ * strict parsing FAILS before {@link OutputMode} can be read from parsed
+ * values. A typo'd flag must still honor the caller's `--json` choice so the
+ * failure lands on the right channel (machine JSON on stdout vs human stderr).
+ */
+function detectOutputMode(args: string[]): OutputMode {
+  return { json: args.includes('--json') };
+}
+
+/**
+ * Parses a daemon-gate subcommand's args under this module's output contract.
+ *
+ * On an unknown/typo'd flag or a missing option value, reports a structured
+ * `INVALID_USAGE` (JSON on stdout when `--json`, human text on stderr) and exits
+ * {@link EXIT_USAGE} — rather than the bare stderr `process.exit(1)` that
+ * {@link parseArgsStrict} would do, which an agent driving the CLI cannot parse.
+ */
+function parseGateArgs(args: string[], options: ParseArgsOptions): GateArgs {
+  const result = parseArgsResult({ args, options, allowPositionals: true });
+  if (!result.ok) {
+    const mode = detectOutputMode(args);
+    return {
+      ok: false,
+      exitCode: fail(
+        mode,
+        'INVALID_USAGE',
+        { message: result.message, hint: 'Run with --help to see available options.' },
+        EXIT_USAGE,
+      ),
+    };
+  }
+  return {
+    ok: true,
+    mode: { json: result.values.json === true },
+    values: result.values,
+    positionals: result.positionals,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -287,16 +342,13 @@ function extractDiagnostics(data: unknown): unknown[] | undefined {
 // ---------------------------------------------------------------------------
 
 async function runRun(args: string[]): Promise<number> {
-  const { values, positionals } = parseArgsStrict({
-    args,
-    options: {
-      json: { type: 'boolean' },
-      workspace: { type: 'string' },
-      'ensure-daemon': { type: 'boolean' },
-    },
-    allowPositionals: true,
+  const parsed = parseGateArgs(args, {
+    json: { type: 'boolean' },
+    workspace: { type: 'string' },
+    'ensure-daemon': { type: 'boolean' },
   });
-  const mode: OutputMode = { json: values.json === true };
+  if (!parsed.ok) return parsed.exitCode;
+  const { mode, values, positionals } = parsed;
 
   const definitionRef = positionals[0];
   const taskDescription = positionals[1];
@@ -357,15 +409,12 @@ async function runRun(args: string[]): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function runStatus(args: string[]): Promise<number> {
-  const { values, positionals } = parseArgsStrict({
-    args,
-    options: {
-      json: { type: 'boolean' },
-      'ensure-daemon': { type: 'boolean' },
-    },
-    allowPositionals: true,
+  const parsed = parseGateArgs(args, {
+    json: { type: 'boolean' },
+    'ensure-daemon': { type: 'boolean' },
   });
-  const mode: OutputMode = { json: values.json === true };
+  if (!parsed.ok) return parsed.exitCode;
+  const { mode, values, positionals } = parsed;
 
   const workflowId = positionals[0];
   if (!workflowId) {
@@ -405,16 +454,13 @@ function formatStatusText(p: StatusProjection): string {
 // ---------------------------------------------------------------------------
 
 async function runAwait(args: string[]): Promise<number> {
-  const { values, positionals } = parseArgsStrict({
-    args,
-    options: {
-      json: { type: 'boolean' },
-      timeout: { type: 'string' },
-      'ensure-daemon': { type: 'boolean' },
-    },
-    allowPositionals: true,
+  const parsed = parseGateArgs(args, {
+    json: { type: 'boolean' },
+    timeout: { type: 'string' },
+    'ensure-daemon': { type: 'boolean' },
   });
-  const mode: OutputMode = { json: values.json === true };
+  if (!parsed.ok) return parsed.exitCode;
+  const { mode, values, positionals } = parsed;
 
   const workflowId = positionals[0];
   if (!workflowId) {
@@ -565,17 +611,14 @@ function requiresPrompt(event: GateEvent): boolean {
 }
 
 async function runGate(args: string[]): Promise<number> {
-  const { values, positionals } = parseArgsStrict({
-    args,
-    options: {
-      json: { type: 'boolean' },
-      event: { type: 'string' },
-      prompt: { type: 'string' },
-      'ensure-daemon': { type: 'boolean' },
-    },
-    allowPositionals: true,
+  const parsed = parseGateArgs(args, {
+    json: { type: 'boolean' },
+    event: { type: 'string' },
+    prompt: { type: 'string' },
+    'ensure-daemon': { type: 'boolean' },
   });
-  const mode: OutputMode = { json: values.json === true };
+  if (!parsed.ok) return parsed.exitCode;
+  const { mode, values, positionals } = parsed;
 
   const workflowId = positionals[0];
   if (!workflowId) {
@@ -623,16 +666,13 @@ interface ArtifactContent {
 }
 
 async function runShow(args: string[]): Promise<number> {
-  const { values, positionals } = parseArgsStrict({
-    args,
-    options: {
-      json: { type: 'boolean' },
-      artifact: { type: 'string' },
-      'ensure-daemon': { type: 'boolean' },
-    },
-    allowPositionals: true,
+  const parsed = parseGateArgs(args, {
+    json: { type: 'boolean' },
+    artifact: { type: 'string' },
+    'ensure-daemon': { type: 'boolean' },
   });
-  const mode: OutputMode = { json: values.json === true };
+  if (!parsed.ok) return parsed.exitCode;
+  const { mode, values, positionals } = parsed;
 
   const workflowId = positionals[0];
   const artifactName = values.artifact;
