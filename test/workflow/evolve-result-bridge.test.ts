@@ -121,7 +121,7 @@ describe('evolve workflow manifest', () => {
       '--objective "OBJECTIVE"',
       '--core-score eval_score',
       '--evaluation-command "EVAL_CMD"',
-      '--evaluation-timeout-secs 30',
+      '--evaluation-timeout-secs EVAL_TIMEOUT_SECS',
       '--success-criterion "SUCCESS_CRITERION"',
       '--max-rounds MAX_ROUNDS',
       '--patience 2',
