@@ -20,7 +20,6 @@ import { spawn } from 'node:child_process';
 import { resolveWorkflowPath } from './discovery.js';
 import {
   createDaemonClient,
-  discoverDaemon,
   type DaemonClient,
   type DaemonEvent,
   type RpcResult,
@@ -121,10 +120,14 @@ function exitCodeForPhase(phase: WorkflowPhase): number {
       return EXIT_OK;
     case 'failed':
     case 'aborted':
+    case 'interrupted':
+      // `interrupted` is the disk-fallback state for a run stranded by a daemon
+      // restart with no live orchestrator: a stuck workflow is a failure, not a
+      // success, so it shares the terminal-failure exit code.
       return EXIT_TERMINAL_FAILURE;
     default:
-      // `running` / `interrupted`: not a resting point for this projection, but
-      // surfaced as a non-failure so the agent re-issues `await`.
+      // `running`: not a resting point for this projection, but surfaced as a
+      // non-failure so the agent re-issues `await`.
       return EXIT_OK;
   }
 }
@@ -138,21 +141,26 @@ function isTerminalPhase(phase: WorkflowPhase): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates and connects a {@link DaemonClient}, ensuring a daemon exists first
- * when `--ensure-daemon` is set. Returns `undefined` (after printing an error)
- * when no daemon can be reached.
+ * Outcome of a single attempt to discover + connect to a running daemon.
+ *
+ * `no-endpoint` means discovery found no `web-ui.json` (no daemon configured);
+ * `connect-failed` means an endpoint existed but a connection could not be
+ * established (stale state file from a crashed daemon, or the daemon is down).
+ * These are distinguished so the non-`--ensure-daemon` path can preserve the
+ * historical `DAEMON_NOT_RUNNING` vs `DAEMON_CONNECT_FAILED` error strings.
  */
-async function openClient(mode: OutputMode, ensureDaemon: boolean): Promise<DaemonClient | undefined> {
-  if (ensureDaemon && !discoverDaemon()) {
-    const started = await ensureDaemonRunning();
-    if (!started) {
-      fail(mode, 'DAEMON_START_TIMEOUT', {
-        hint: `Timed out waiting for a daemon to come up after ${ENSURE_DAEMON_TIMEOUT_MS}ms`,
-      });
-      return undefined;
-    }
-  }
+type ConnectAttempt =
+  | { readonly kind: 'connected'; readonly client: DaemonClient }
+  | { readonly kind: 'no-endpoint' }
+  | { readonly kind: 'connect-failed'; readonly message: string };
 
+/**
+ * Performs ONE discover + create + connect cycle. On any failure the half-open
+ * client is closed so no attempt leaks a socket. Readiness here means a daemon
+ * actually ANSWERED a connect — never merely "the state file exists" (a crashed
+ * daemon leaves a stale `web-ui.json` that discovery would otherwise accept).
+ */
+async function attemptConnect(): Promise<ConnectAttempt> {
   let client: DaemonClient;
   try {
     client = createDaemonClient();
@@ -160,10 +168,7 @@ async function openClient(mode: OutputMode, ensureDaemon: boolean): Promise<Daem
     // Cross-module catch: branch on the `code` discriminant rather than only
     // `instanceof` (per CLAUDE.md), so this stays robust if the error crosses a
     // module boundary that defeats `instanceof`.
-    if (isDaemonNotRunning(err)) {
-      fail(mode, 'DAEMON_NOT_RUNNING', { hint: 'Start the daemon with: ironcurtain daemon --web-ui' });
-      return undefined;
-    }
+    if (isDaemonNotRunning(err)) return { kind: 'no-endpoint' };
     throw err;
   }
 
@@ -171,11 +176,47 @@ async function openClient(mode: OutputMode, ensureDaemon: boolean): Promise<Daem
     await client.connect();
   } catch (err) {
     await client.close().catch(() => {});
-    fail(mode, 'DAEMON_CONNECT_FAILED', { message: err instanceof Error ? err.message : String(err) });
+    return { kind: 'connect-failed', message: err instanceof Error ? err.message : String(err) };
+  }
+
+  return { kind: 'connected', client };
+}
+
+/**
+ * Returns a connected {@link DaemonClient}, ensuring a daemon exists first when
+ * `--ensure-daemon` is set. Returns `undefined` (after printing an error) when
+ * no daemon can be reached.
+ *
+ * Control flow:
+ *  1. Attempt a real connect to an existing daemon; on success, return it.
+ *  2. If that fails and `ensureDaemon` is set, spawn a detached daemon ONCE and
+ *     poll by RE-ATTEMPTING connect (not by polling discovery — a stale state
+ *     file would make discovery a false positive) until a connect succeeds or
+ *     `ENSURE_DAEMON_TIMEOUT_MS` elapses.
+ *  3. If that fails and `ensureDaemon` is NOT set, report the historical error:
+ *     `DAEMON_NOT_RUNNING` (no endpoint) or `DAEMON_CONNECT_FAILED` (endpoint
+ *     present but unreachable).
+ */
+async function openClient(mode: OutputMode, ensureDaemon: boolean): Promise<DaemonClient | undefined> {
+  const initial = await attemptConnect();
+  if (initial.kind === 'connected') return initial.client;
+
+  if (ensureDaemon) {
+    const ensured = await ensureDaemonRunning();
+    if (ensured) return ensured;
+    fail(mode, 'DAEMON_START_TIMEOUT', {
+      hint: `Timed out waiting for a daemon to come up after ${ENSURE_DAEMON_TIMEOUT_MS}ms`,
+    });
     return undefined;
   }
 
-  return client;
+  if (initial.kind === 'no-endpoint') {
+    fail(mode, 'DAEMON_NOT_RUNNING', { hint: 'Start the daemon with: ironcurtain daemon --web-ui' });
+    return undefined;
+  }
+
+  fail(mode, 'DAEMON_CONNECT_FAILED', { message: initial.message });
+  return undefined;
 }
 
 /** Discriminant check for the "no daemon running" error (no `instanceof`). */
@@ -184,13 +225,18 @@ function isDaemonNotRunning(err: unknown): boolean {
 }
 
 /**
- * Spawns a detached `ironcurtain daemon --web-ui` and polls discovery until the
- * endpoint appears or a bounded timeout elapses. Arg-array spawn — no shell
- * string concatenation (CLAUDE.md Safe Coding).
+ * Spawns a detached `ironcurtain daemon --web-ui` ONCE, then polls by
+ * re-attempting a real connect until one succeeds or a bounded timeout elapses.
+ * Returns the connected client on success, or `undefined` on timeout. Arg-array
+ * spawn — no shell string concatenation (CLAUDE.md Safe Coding).
+ *
+ * Polling on connect (rather than discovery) is what makes readiness real: a
+ * stale `web-ui.json` left by a crashed daemon would make `discoverDaemon()`
+ * return immediately, but its socket will not accept a connection.
  */
-async function ensureDaemonRunning(): Promise<boolean> {
+async function ensureDaemonRunning(): Promise<DaemonClient | undefined> {
   const cliEntry = process.argv[1];
-  if (!cliEntry) return false;
+  if (!cliEntry) return undefined;
 
   const child = spawn(process.execPath, [cliEntry, 'daemon', '--web-ui'], {
     detached: true,
@@ -199,11 +245,12 @@ async function ensureDaemonRunning(): Promise<boolean> {
   child.unref();
 
   const deadline = Date.now() + ENSURE_DAEMON_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (discoverDaemon()) return true;
+  for (;;) {
+    const attempt = await attemptConnect();
+    if (attempt.kind === 'connected') return attempt.client;
+    if (Date.now() >= deadline) return undefined;
     await delay(ENSURE_DAEMON_POLL_INTERVAL_MS);
   }
-  return discoverDaemon() !== undefined;
 }
 
 function delay(ms: number): Promise<void> {
@@ -301,7 +348,7 @@ async function runStatus(args: string[]): Promise<number> {
 
   const workflowId = positionals[0];
   if (!workflowId) {
-    emitText('Usage: ironcurtain workflow status <workflowId> [--json]');
+    emitText('Usage: ironcurtain workflow status <workflowId> [--json] [--ensure-daemon]');
     return EXIT_USAGE;
   }
 
@@ -350,7 +397,7 @@ async function runAwait(args: string[]): Promise<number> {
 
   const workflowId = positionals[0];
   if (!workflowId) {
-    emitText('Usage: ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]');
+    emitText('Usage: ironcurtain workflow await <workflowId> [--timeout <sec>] [--json] [--ensure-daemon]');
     return EXIT_USAGE;
   }
 
@@ -431,9 +478,16 @@ async function awaitDecisionPoint(
   }
 }
 
-/** A phase at which `await` stops: a gate or any terminal. */
+/**
+ * A phase at which `await` stops: a gate, any terminal, or `interrupted`.
+ *
+ * `interrupted` is the on-disk fallback synthesized after a daemon restart for a
+ * run whose checkpoint exists but has no live orchestrator. No further lifecycle
+ * event will ever fire for it, so `await` must resolve immediately rather than
+ * block for the full timeout waiting on an event that will never come.
+ */
 function isRestingPhase(phase: WorkflowPhase): boolean {
-  return phase === 'waiting_human' || isTerminalPhase(phase);
+  return phase === 'waiting_human' || phase === 'interrupted' || isTerminalPhase(phase);
 }
 
 function isResolvingEvent(eventName: string): boolean {
@@ -504,7 +558,9 @@ async function runGate(args: string[]): Promise<number> {
 
   const workflowId = positionals[0];
   if (!workflowId) {
-    emitText('Usage: ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]');
+    emitText(
+      'Usage: ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json] [--ensure-daemon]',
+    );
     return EXIT_USAGE;
   }
 
@@ -560,7 +616,7 @@ async function runShow(args: string[]): Promise<number> {
   const workflowId = positionals[0];
   const artifactName = values.artifact;
   if (!workflowId || typeof artifactName !== 'string') {
-    emitText('Usage: ironcurtain workflow show <workflowId> --artifact <name> [--json]');
+    emitText('Usage: ironcurtain workflow show <workflowId> --artifact <name> [--json] [--ensure-daemon]');
     return EXIT_USAGE;
   }
 

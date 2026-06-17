@@ -294,15 +294,25 @@ async function runObserveSession(client: DaemonClient, ctx: ObserveSessionContex
       resolve();
     });
 
-    void subscribe(client, label, useTui).then((ok) => {
-      if (closing) return;
-      if (ok) {
-        // In TUI mode the text panel shows state; in plain mode write to stderr.
-        if (!useTui) process.stderr.write(renderConnected(label));
-      } else {
+    void subscribe(client, label, useTui)
+      .then((ok) => {
+        if (closing) return;
+        if (ok) {
+          // In TUI mode the text panel shows state; in plain mode write to stderr.
+          if (!useTui) process.stderr.write(renderConnected(label));
+        } else {
+          cleanup();
+        }
+      })
+      .catch(() => {
+        // `subscribe()` awaits `client.call()`, which REJECTS on a transport
+        // failure (e.g. the socket drops in the subscribe window). Without this
+        // handler that becomes an unhandled rejection. The onClose path already
+        // tears down on involuntary disconnect, so here we only need to clean up
+        // if we are not already closing (mirrors awaitDecisionPoint's guard).
+        if (closing) return;
         cleanup();
-      }
-    });
+      });
   });
 }
 

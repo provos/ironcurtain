@@ -181,10 +181,11 @@ afterEach(async () => {
 });
 
 /**
- * Drives a fresh workflow to its gate via the CLI: `run` then `await`. Returns
- * the workflow id once `await` reports `phase:'waiting_human'`. Retries `await`
- * in case the gate is raised slightly after the first poll (the command itself
- * blocks on the gate, so one call is normally sufficient).
+ * Drives a fresh workflow to its gate via the CLI: `run` then a single `await`.
+ * Returns the workflow id once `await` reports `phase:'waiting_human'`. A single
+ * `await` is sufficient: the command blocks server-side until the gate is
+ * raised (its internal `awaitDecisionPoint` subscribes before the initial get
+ * and resolves on the `gate_raised` event), so there is no retry loop here.
  */
 async function startAndAwaitGate(): Promise<string> {
   const run = await runCommand('run', [FIXTURE_PATH, 'Draft and review a thing', '--json']);

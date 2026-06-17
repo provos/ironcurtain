@@ -163,7 +163,9 @@ function isDaemonEndpoint(value: unknown): value is DaemonEndpoint {
     typeof v.host === 'string' &&
     v.host.length > 0 &&
     typeof v.port === 'number' &&
-    Number.isFinite(v.port) &&
+    Number.isInteger(v.port) &&
+    v.port > 0 &&
+    v.port <= 65535 &&
     typeof v.token === 'string' &&
     v.token.length > 0
   );
@@ -234,10 +236,21 @@ class WebSocketDaemonClient implements DaemonClient {
     const ws = new WebSocket(url);
     this.ws = ws;
 
+    // Permanent error-capturing listener, attached BEFORE the connect-phase
+    // handlers. `ws.close()` on a still-CONNECTING socket schedules a deferred
+    // 'error' emit; without any listener that becomes an unhandled 'error' event
+    // and crashes the process. Keeping a handler attached for the socket's whole
+    // life guarantees the deferred error always has somewhere to go, and
+    // preserves its message for the onClose info.
+    ws.on('error', (err: Error) => {
+      this.lastError = err;
+    });
+
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         ws.removeListener('open', onOpen);
         ws.removeListener('error', onError);
+        if (this.ws === ws) this.ws = undefined;
         ws.close();
         reject(new Error(`Timed out connecting to daemon after ${this.timeouts.connectTimeoutMs}ms`));
       }, this.timeouts.connectTimeoutMs);
@@ -252,6 +265,8 @@ class WebSocketDaemonClient implements DaemonClient {
       const onError = (err: Error): void => {
         clearTimeout(timer);
         ws.removeListener('open', onOpen);
+        if (this.ws === ws) this.ws = undefined;
+        ws.close();
         reject(err);
       };
 
@@ -336,12 +351,10 @@ class WebSocketDaemonClient implements DaemonClient {
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => this.handleMessage(data));
     ws.on('close', (code: number) => this.handleClose(code));
     // Post-handshake errors surface via the 'close' that follows; rejecting
-    // pending calls there keeps a single drain path. Capturing the error here
-    // (instead of a no-op) still prevents an unhandled 'error' from crashing the
-    // process, while preserving its message for the onClose info.
-    ws.on('error', (err: Error) => {
-      this.lastError = err;
-    });
+    // pending calls there keeps a single drain path. The permanent error-capturing
+    // listener attached in `connect()` (before this socket reached steady state)
+    // already records `this.lastError`, so its message is available for the
+    // onClose info — no second 'error' listener is needed here.
   }
 
   private handleMessage(data: Buffer | ArrayBuffer | Buffer[]): void {

@@ -14,6 +14,7 @@
 
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { createServer as createNetServer, type Server as NetServer, type Socket } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -354,6 +355,66 @@ describe('DaemonClient', () => {
       const client = createDaemonClient({ endpoint: badEndpoint, connectTimeoutMs: 50 });
       clients.push(client);
       await expect(client.connect()).rejects.toThrow();
+    });
+
+    // Regression: a server that ACCEPTS the TCP connection but never completes
+    // the WS handshake leaves the socket CONNECTING when the timeout fires. The
+    // pre-fix `ws.close()` on a CONNECTING socket schedules a deferred 'error'
+    // emit; with the connect-phase 'error' listener already removed, that became
+    // an unhandled 'error' and crashed the whole process. It also left
+    // `this.ws` set, so a retry rejected with 'already connected'.
+    it('times out without crashing on a TCP-accept-but-no-handshake server, and stays reusable', async () => {
+      const held: Socket[] = [];
+      const stalled: NetServer = createNetServer((socket) => {
+        // Accept the TCP connection but never write a WS handshake response.
+        held.push(socket);
+        socket.on('error', () => {
+          /* the client side closing mid-handshake is expected */
+        });
+      });
+      await new Promise<void>((res) => stalled.listen(0, '127.0.0.1', res));
+      const addr = stalled.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      const stalledEndpoint: DaemonEndpoint = { host: '127.0.0.1', port, token: 't' };
+
+      // Fail the test if the deferred close-on-CONNECTING error surfaces as an
+      // unhandled process event (the pre-fix crash mode).
+      let processError: unknown;
+      const onUncaught = (err: unknown): void => {
+        processError = err;
+      };
+      const onUnhandled = (reason: unknown): void => {
+        processError = reason;
+      };
+      process.on('uncaughtException', onUncaught);
+      process.on('unhandledRejection', onUnhandled);
+
+      try {
+        const client = createDaemonClient({ endpoint: stalledEndpoint, connectTimeoutMs: 150 });
+        clients.push(client);
+
+        await expect(client.connect()).rejects.toThrow(/timed out/i);
+
+        // Give the deferred 'error' from ws.close() a tick to surface; with the
+        // permanent error listener it is captured, not thrown.
+        await new Promise((r) => setTimeout(r, 50));
+        expect(processError).toBeUndefined();
+
+        // A second connect() on the same client must NOT reject with the latent
+        // 'already connected' bug — the failed connect cleared `this.ws`. It will
+        // time out again against the still-stalled server, which is fine.
+        const second = client.connect();
+        await expect(second).rejects.toThrow();
+        await expect(second).rejects.not.toThrow(/already connected/i);
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(processError).toBeUndefined();
+      } finally {
+        process.off('uncaughtException', onUncaught);
+        process.off('unhandledRejection', onUnhandled);
+        for (const socket of held) socket.destroy();
+        await new Promise<void>((res) => stalled.close(() => res()));
+      }
     });
   });
 
