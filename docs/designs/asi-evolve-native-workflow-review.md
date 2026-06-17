@@ -1,3 +1,5 @@
+> **Historical:** this is the pre-implementation critical review of the design above; retained for record. The design has since shipped across #300 / #302 / #303 / #309.
+
 # Review: `asi-evolve-native-workflow.md`
 
 **Date:** 2026-06-15

@@ -93,23 +93,30 @@ IronCurtain's workflow runtime.
 
 ## Implementation Status
 
-> **Status as of 2026-06-16.** The early phases of this roadmap have shipped as
-> four merged PRs (verified against `master`). This section is the index; each
+> **Status as of 2026-06-17.** The full v1 roadmap — the three runtime capabilities,
+> the orchestrator-hub FSM, **all four human gates** (`preflight_review` /
+> `human_escalation` / `final_summary` / `final_review`), the `aborted` terminal, and
+> a **generic experiment harness** that runs any ASI-Evolve-layout experiment via
+> `--workspace` with zero per-experiment edits — has shipped across six merged PRs
+> (#292, #299, #300, #302, #303, #309), all verified against `master`. The design is
+> substantially implemented; the genuine remainders are resume-safety / record-by-
+> step-id idempotency (#7), the `.evolve_runs/`→`.workflow/` flatten + UI summary
+> artifacts (#4→#9), and `seed_initial`. This section is the index; each
 > roadmap-bearing section below carries an inline `**[DONE — #NNN]**` /
 > `**[PARTIAL — #NNN]**` / `**[PENDING]**` marker next to the specific item, with
 > a one-line note where the shipped reality diverges from the original sketch.
 
-| Milestone (Migration Plan #) | Status | PR / commit | Note |
-| --- | --- | --- | --- |
-| Containerized deterministic execution (#1) | DONE | #292 / `9602675` | `container: true` + `containerScope`; runs `run:` array via `DockerManager.exec` in the scope's bundle; WF011 lint guards ordering |
-| Structured deterministic result contract (#2) | DONE | #299 / `b3f4bf0` | `resultFile` + `when: { verdict }` routing; `{ verdict, payload?, passed? }`; reserved `result_file_error`; symlink-safe host-side read; WF012 lint |
-| Workflow script packaging (#3) | DONE | #292 / `9602675` | `scripts/` staged read-only at `/workflow-scripts` for the whole run; per-workflow image baked from `requirements.txt`; build-hash includes the manifest |
-| `.workflow/` schema + declared outputs (#4) | PARTIAL | #300 / `8fd85cd` | **Deviation:** ships on the engine-native `.evolve_runs/main/` layout (hard-coded in `run_state.py`), NOT the flattened `.workflow/database/...` sketched here. No subtrees are declared as outputs yet; flattening + UI-declared artifacts are deferred |
-| Package the `evolve` engine (#5) | DONE | #300 / `8fd85cd` | `evolve_core` vendored **byte-verbatim** under `scripts/` (Apache-2.0 + README) + CLI wrappers; the `evolve_result.py` bridge translates engine JSON → result contract. The standalone `pipeline/` orchestrator is not ported |
-| Build the FSM (#6) | PARTIAL | #300 → #302 / `8fd85cd`, `e066898` | Orchestrator-hub FSM built and looping (preflight → orchestrator hub → sample/researcher/evaluate/analyzer/analysis_record → done/failed). **Missing vs the proposed FSM:** all four human gates (`preflight_review`, `human_escalation`, `final_summary`, `final_review`) and `seed_initial` are deferred; `escalate → failed` stands in for `human_escalation`. **The human-surface slice (the three gates + `final_summary` + `aborted` terminal) is now DESIGNED and ready to implement — see [`evolve-human-surface-slice.md`](./evolve-human-surface-slice.md)** (3 maintainer decisions signed off 2026-06-16); `seed_initial` remains deferred |
-| Durable-write / transaction helpers (#7) | PARTIAL | #300 → #302 / `8fd85cd`, `e066898` | The vendored `run_state.py` / `file_lock.py` layer ships and `analysis_record` is the single durable engine write per round. The full transaction-log protocol in "Run State Persistence" is **not** implemented; record-by-step-id idempotency is deferred |
-| Migrate one demo to a single-file fixture (#8) | PARTIAL | #300 → #302 / `8fd85cd`, `e066898` | The gates use a tiny in-test `solve(xs)→6` fixture, not the circle-packing demo named in the plan. Sufficient to prove the loop end to end; a shipped demo workflow input is still pending |
-| UI summary artifacts (#9) | PENDING | — | No declared summary artifacts / round table; surfacing is blocked on the `.evolve_runs/` vs `.workflow/` decision (#4) |
+| Milestone (Migration Plan #)                   | Status  | PR / commit                                          | Note                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------------------------- | ------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Containerized deterministic execution (#1)     | DONE    | #292 / `9602675`                                     | `container: true` + `containerScope`; runs `run:` array via `DockerManager.exec` in the scope's bundle; WF011 lint guards ordering                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Structured deterministic result contract (#2)  | DONE    | #299 / `b3f4bf0`                                     | `resultFile` + `when: { verdict }` routing; `{ verdict, payload?, passed? }`; reserved `result_file_error`; symlink-safe host-side read; WF012 lint                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Workflow script packaging (#3)                 | DONE    | #292 / `9602675` (deps: #308 / #309)                 | `scripts/` staged read-only at `/workflow-scripts` for the whole run. **Dependency provisioning changed after design:** #308 replaced the baked per-workflow image with **runtime install through the MITM proxy**, and #309's `provision` agent state installs each experiment's `requirements.txt` at run time (see "Getting the dependencies into the container")                                                                                                                                                                                                         |
+| `.workflow/` schema + declared outputs (#4)    | PARTIAL | #300 / `8fd85cd`                                     | **Deviation:** ships on the engine-native `.evolve_runs/main/` layout (hard-coded in `run_state.py`), NOT the flattened `.workflow/database/...` sketched here. No subtrees are declared as outputs yet; flattening + UI-declared artifacts are deferred (→ #9)                                                                                                                                                                                                                                                                                                              |
+| Package the `evolve` engine (#5)               | DONE    | #300 / `8fd85cd`                                     | `evolve_core` vendored **byte-verbatim** under `scripts/` (Apache-2.0 + README) + CLI wrappers; the `evolve_result.py` bridge translates engine JSON → result contract. The standalone `pipeline/` orchestrator is not ported                                                                                                                                                                                                                                                                                                                                                |
+| Build the FSM, incl. all human gates (#6)      | DONE    | #300 → #302 → #303 / `8fd85cd`, `e066898`, `25e115a` | Orchestrator-hub FSM looping with the **full** human surface: all four gates (`preflight_review`, `human_escalation`, `final_review` + the harness-added `provision_review`), the `final_summary` agent state, and the `aborted` terminal all ship in `src/workflow/workflows/evolve/workflow.yaml`. `complete → final_summary → final_review → done`; `escalate`/hard-failures → `human_escalation`; the `failed` terminal is retained behind the `isRoundLimitReached` wedge backstop. Only `seed_initial` remains deferred (round 1 samples an empty DB → `parent: null`) |
+| Durable-write / transaction helpers (#7)       | PARTIAL | #300 → #302 / `8fd85cd`, `e066898`                   | The vendored `run_state.py` / `file_lock.py` layer ships and `analysis_record` is the single durable engine write per round. The full transaction-log protocol in "Run State Persistence" is **not** implemented; resume-safety + record-by-step-id idempotency are deferred                                                                                                                                                                                                                                                                                                 |
+| Migrate one demo to a single-file fixture (#8) | DONE    | #309 / `58233f1`                                     | The **generic experiment harness** supersedes the per-demo migration: any ASI-Evolve-layout experiment runs by pointing the existing `--workspace <dir>` at it (new `provision` agent state, generic `preflight` inference, no per-experiment `workflow.yaml`/`scripts/` edits). Validated live — the **circle-packing** demo reached `done` via `--workspace` (score 0.96 → 2.62, zero evaluator-timeout truncations after the bridge timeout fix). CI fixtures remain the tiny in-test `solve(xs)→6` for speed                                                             |
+| UI summary artifacts (#9)                      | PENDING | —                                                    | No declared summary artifacts / round table; surfacing is still blocked on the `.evolve_runs/` vs `.workflow/` decision (#4)                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 **Determinism fixes (not a numbered milestone but load-bearing):** `PYTHONHASHSEED=0`
 is pinned in the **bridge subprocess env** (`evolve_result.py`), not by patching the
@@ -117,15 +124,27 @@ vendored engine; `created_at` is normalized at comparison time. Both shipped in
 **#302 / `e066898`**. This is the recurring shape of the shipped work: corrections
 live in the IronCurtain-authored bridge, the vendored engine stays byte-verbatim.
 
-**Two-slice delivery.** The FSM/engine work landed as two vertical slices, each with
-its own detailed spec and real-Docker gate:
-[`evolve-single-round-slice.md`](./evolve-single-round-slice.md) (#300, linear
-single round) and [`evolve-multi-round-slice.md`](./evolve-multi-round-slice.md)
-(#302, the orchestrator-hub loop). Consult those for the exact shipped
-`workflow.yaml`, bridge argv, and gate assertions. The next slice —
-[`evolve-human-surface-slice.md`](./evolve-human-surface-slice.md) — is
-**designed and ready to implement** (the four deferred human gates + `final_summary`
-+ `aborted` terminal; awaiting implementation by a separate system).
+**Slice delivery — all four slices merged.** The FSM/engine work landed as four
+vertical slices, each with its own detailed spec and real-Docker gate (consult those
+for the exact shipped `workflow.yaml`, bridge argv, and gate assertions):
+
+- [`evolve-single-round-slice.md`](./evolve-single-round-slice.md) — #300, the linear
+  single round.
+- [`evolve-multi-round-slice.md`](./evolve-multi-round-slice.md) — #302, the
+  orchestrator-hub loop, analyzer, and cognition.
+- [`evolve-human-surface-slice.md`](./evolve-human-surface-slice.md) — #303, the four
+  human gates (`preflight_review` / `human_escalation` / `final_review`), the
+  `final_summary` agent state, and the `aborted` terminal. **Merged**, not pending.
+- [`evolve-experiment-harness-slice.md`](./evolve-experiment-harness-slice.md) — #309,
+  the generic harness: a `provision` agent state, reuse of the existing `--workspace`
+  flag as the experiment-dir source, generic `preflight` inference, the bridge
+  evaluator-timeout fix, seed-aware max-rounds, and a task-derived success criterion.
+  **Merged**, validated live on the circle-packing demo.
+
+The genuine remaining work is no longer a slice that is "designed and ready to
+implement" — it is the residual items called out in the table above: resume-safety +
+record-by-step-id idempotency (#7), the `.evolve_runs/`→`.workflow/` flatten + UI
+summary artifacts (#4→#9), and the deferred `seed_initial` baseline-seeding state.
 
 ## Current Workflow Semantics
 
@@ -275,16 +294,16 @@ work, covered in "Packaging Helper Scripts and Dependencies" `**[DONE — #292]*
 
 ## V1 Strategy
 
-> `**[PARTIAL — #300, #302]**` **Shipped reality:** the v1 split below is built and
+> `**[DONE — #300, #302, #303, #309]**` **Shipped reality:** the v1 split below is built and
 > looping, with two deltas. (a) The orchestrator was implemented as a true
 > **agent hub** (the "Proposed FSM" shape), not a thin controller — the loop is
 > driven by the orchestrator's `design`/`evaluate`/`analyze`/`record`/`complete`
 > verdicts with every specialist returning to it. (b) `record_node` as a separate
 > durable write was **folded into a single `analysis_record` deterministic state**
 > per round (the engine's `record` is not step-idempotent, so the round records
-> exactly once, after analysis). `final_summary` is deferred. A `sample`
+> exactly once, after analysis). `final_summary` now ships (#303). A `sample`
 > deterministic state was also added ahead of `researcher` to do the durable
-> parent/cognition read.
+> parent/cognition read, and a `provision` agent state (#309) fronts the FSM.
 
 The v1 workflow is a native IronCurtain FSM with a clean split between semantic
 agent states and mechanical/transactional deterministic states:
@@ -293,7 +312,7 @@ agent states and mechanical/transactional deterministic states:
   verdicts.
 - `researcher`, `analyzer`, and `final_summary` are agent states that perform
   their scoped semantic work and emit formatted `agent_status` verdicts.
-  (`final_summary` is deferred in the shipped slices.)
+  (All three ship; `final_summary` landed in #303.)
 - `evaluate` and `record_node` are **deterministic** states that `exec` packaged
   helpers inside the shared container, capture exit code / stdout / stderr, and
   emit a structured result verdict the machine routes on. The evaluator never
@@ -374,22 +393,22 @@ instead of relying on an agent to manually drive wrapper commands.
 
 ## Proposed FSM
 
-> `**[PARTIAL — #302]**` **Shipped FSM (`src/workflow/workflows/evolve/workflow.yaml`).**
-> The orchestrator-hub shape below is built and looping. Differences from the
-> diagram, all deliberate deferrals (see `evolve-multi-round-slice.md` §11, §15):
-> the four human gates (`preflight_review`, `human_escalation`, `final_summary`,
-> `final_review`) are **not** present — the shipped graph is
-> `preflight → orchestrator (hub) → {sample → researcher, evaluate, analyzer,
-> analysis_record} → done | failed`. `seed_initial` is collapsed (round 1 just
-> samples an empty DB → `parent: null`). The orchestrator's `escalate` and every
+> `**[DONE — #302, #303, #309]**` **Shipped FSM (`src/workflow/workflows/evolve/workflow.yaml`).**
+> The orchestrator-hub shape below is built, looping, and now carries the **full
+> human surface**: all four gates (`preflight_review`, `human_escalation`,
+> `final_review`, plus the harness-added `provision_review`), the `final_summary`
+> agent state, and the `aborted` terminal all ship (#303). `complete →
+final_summary → final_review → done`; the orchestrator's `escalate` and every
 > deterministic hard-failure (`evaluator_blocked`, `sample_error`, `needs_repair`,
-> `result_file_error`) route to a terminal `failed` instead of `human_escalation`,
-> and `complete` routes straight to `done` instead of through `final_summary`/
-> `final_review`. Approval is still _enforced_ at the helper layer
-> (`require_evolve_ready`); only the human-in-the-loop UI gates are deferred. A
-> `sample` deterministic state (greedy parent + cognition retrieval) precedes
-> `researcher`, and the single durable node-write is `analysis_record` (the
-> diagram's `record_node`, renamed and made the one-write-per-round state). The
+> `result_file_error`) route to `human_escalation`. The `failed` terminal is
+> **retained** but now only as the wedge backstop behind the
+> `isRoundLimitReached` guard, not as the stand-in for human escalation. The
+> harness slice (#309) made `provision` the new `initial:` state, ahead of
+> `preflight`. Remaining diagram differences, all deliberate: `seed_initial` is
+> still collapsed (round 1 just samples an empty DB → `parent: null`); a `sample`
+> deterministic state (greedy parent + cognition retrieval) precedes `researcher`,
+> and the single durable node-write is `analysis_record` (the diagram's
+> `record_node`, renamed and made the one-write-per-round state). The
 > `settings.maxRounds` + `isRoundLimitReached` guard is the terminal-safety
 > backstop for a wedged hub; the real round budget lives in `run_spec.yaml`.
 
@@ -459,9 +478,12 @@ failures straight to `human_escalation` without spending an orchestrator turn.
 
 ### State Responsibilities
 
-`preflight` (`agent`) `**[DONE — #300, #302]**` (writes `.evolve_runs/main/run_spec.yaml`
-not `.workflow/run_spec.yaml`; also authors `cognition_seed.md`; sets
-`approval.confirmed=true`)
+`preflight` (`agent`) `**[DONE — #300, #302, #309]**` (writes
+`.evolve_runs/main/run_spec.yaml` not `.workflow/run_spec.yaml`; also authors
+`cognition_seed.md`. Since #303 a real `preflight_review` gate flips approval; since
+#309 the spec is **inferred generically** from the `--workspace` experiment dir —
+objective / evaluator command / cognition seed / initial-program seed — with a
+task-string fallback when the workspace is a fresh sandbox)
 : Reads the task description and workspace. Produces
 `.workflow/run_spec.yaml` and `.workflow/preflight_summary.md`.
 It must specify objective, core score, secondary metrics, evaluator command or
@@ -470,9 +492,8 @@ single-file candidate path, sampling algorithm, cognition source mode, and
 round budget. It must also keep a machine-readable
 `approval.confirmed=false` field until explicit human approval.
 
-`preflight_review` (`human_gate`) `**[PENDING — deferred to the human-surface slice]**`
-(not in the shipped graph; approval is enforced at the helper layer via
-`require_evolve_ready`, and `preflight` sets `approval.confirmed=true`)
+`preflight_review` (`human_gate`) `**[DONE — #303]**` (ships in the graph; approval
+is also still enforced at the helper layer via `require_evolve_ready`)
 : Presents the run spec and summary. Approval is required before any candidate
 mutation or evaluator execution. Approval must be reflected in domain state by
 an orchestrator-controlled update that flips `approval.confirmed=true`; helpers
@@ -558,24 +579,24 @@ is not enough for this state. It emits `recorded` on a clean commit
 (→ `orchestrator`) or `needs_repair` when it detects a partial or inconsistent
 prior commit (→ `human_escalation`).
 
-`human_escalation` (`human_gate`) `**[PENDING — deferred]**` (the shipped graph
-routes `escalate` and all deterministic hard-failures to a terminal `failed`
-instead)
+`human_escalation` (`human_gate`) `**[DONE — #303]**` (ships in the graph; the
+orchestrator's `escalate` and every deterministic hard-failure now route here. The
+`failed` terminal is retained only as the `isRoundLimitReached` wedge backstop)
 : Used for evaluator failures, ambiguous evaluator contracts, repeated invalid
 candidate generation, noisy metrics, exhausted mutation scope, or required
 run-spec changes.
 
-`final_summary` (`agent`) `**[PENDING — deferred]**` (the orchestrator's `complete`
-routes straight to `done`)
+`final_summary` (`agent`) `**[DONE — #303]**` (ships; the orchestrator's `complete`
+now routes here, then to `final_review`)
 : Produces a human-readable experiment summary, best candidate report, lineage
 notes, and recommended next steps.
 
-`final_review` (`human_gate`) `**[PENDING — deferred]**`
+`final_review` (`human_gate`) `**[DONE — #303]**`
 : Lets the user accept the final summary or force additional rounds/revisions.
 
-`done` and `aborted` (`terminal`) `**[DONE — #300; partial: `failed`, not `aborted`]**`
-(the shipped failure terminal is named `failed`; `aborted` as a distinct
-human-abort terminal arrives with the human gates)
+`done` and `aborted` (`terminal`) `**[DONE — #300, #303]**` (both ship; `aborted` is
+the distinct human-abort terminal added with the human gates in #303. The separate
+`failed` terminal is also retained as the `isRoundLimitReached` wedge backstop)
 : End states.
 
 ## Transitions and Verdicts
@@ -586,8 +607,10 @@ human-abort terminal arrives with the human gates)
 > `sample` emits `sampled`/`sample_error`/`result_file_error`; `evaluate` emits
 > `evaluated`/`evaluator_blocked`/`result_file_error`; `analysis_record` emits
 > `recorded`/`needs_repair`/`result_file_error`; `researcher`/`analyzer` return
-> unconditionally (informational verdict). Human-gate events are not yet exercised
-> (gates deferred).
+> unconditionally (informational verdict). Human-gate events (`APPROVE` /
+> `FORCE_REVISION` / `ABORT`) are now live and exercised at all four gates
+> (`provision_review`, `preflight_review`, `human_escalation`, `final_review`)
+> since #303 / #309.
 
 The workflow uses two verdict sources. **Agent states** emit a fenced
 `agent_status` YAML block: each agent prompt receives the valid verdict values
@@ -964,6 +987,18 @@ needed — the code is already on disk in the container.
 
 ### Getting the dependencies into the container (the hard part)
 
+> **[SUPERSEDED — #308 / #309].** The build-time premise below turned out to be
+> wrong. The workflow container reaches the network through the host **MITM proxy**
+> (`HTTPS_PROXY`/`HTTP_PROXY` are wired into the container env, and the proxy
+> allowlist already models package **registries**), so `pip`/`uv`/`apt` _can_ run
+> during the workflow despite `--network=none`. PR **#308** therefore switched
+> dependency provisioning from baking a per-workflow image to **installing deps at
+> runtime through the proxy** into a persistent venv, and PR **#309** added a
+> generic `provision` agent state that installs each experiment's own
+> `requirements.txt` at run time (no per-workflow image build, no manifest in the
+> build hash). The three build-time tiers below are retained only as the original
+> design reasoning; they are not how dependencies ship.
+
 `--network=none` at runtime (`docker-infrastructure.ts:1086`) means **`pip install`
 cannot run during the workflow**. Dependencies must be present before the container
 starts. Image _build_ does have network, so deps belong at build time. Three tiers:
@@ -1130,13 +1165,16 @@ The native workflow should make that risk explicit:
 
 ## Migration Plan
 
-> **Roadmap status (2026-06-16).** Items 1–3 and 5 are fully done; 6–8 are partially
-> done (FSM loops but human gates / `final_summary` / `seed_initial` deferred; the
-> transaction protocol is not built; the demo is a tiny in-test fixture, not circle
-> packing); 4 is deviated (engine-native `.evolve_runs/` layout shipped instead of
-> the `.workflow/` schema) and 9 is not started. The single recommended next
-> increment is the **human-surface slice** (gates `preflight_review` /
-> `human_escalation` / `final_summary` / `final_review`); see the report.
+> **Roadmap status (2026-06-17).** Items 1–3, 5, 6, and 8 are **done**: the runtime
+> capabilities, the engine packaging, the full FSM **including all four human gates +
+> `final_summary` + `aborted`** (#303), and the demo path — superseded by the generic
+> experiment harness that runs any experiment via `--workspace`, validated live on
+> circle packing (#309). Item 7 is partial (single durable write per round ships; the
+> transaction protocol + resume-safety / record-by-step-id idempotency are not built);
+> item 4 is deviated (engine-native `.evolve_runs/` layout shipped instead of the
+> `.workflow/` schema) and item 9 is not started. The genuine next increments are
+> resume-safety (#7), the `.evolve_runs/`→`.workflow/` flatten + UI summary artifacts
+> (#4→#9), and the deferred `seed_initial` baseline-seeding state.
 
 Runtime work (general; lands first because the workflow depends on it):
 
@@ -1165,20 +1203,26 @@ Workflow work:
    `pipeline/` orchestrator; document any algorithmic differences. _Engine vendored
    byte-verbatim with a thin_ `evolve_result.py` _bridge; prompts inlined in
    `workflow.yaml` rather than a separate skill dir._
-6. `**[PARTIAL — #300, #302]**` Build the FSM: `preflight` → gate → `orchestrator` hub with `researcher` /
+6. `**[DONE — #300, #302, #303]**` Build the FSM: `preflight` → gate → `orchestrator` hub with `researcher` /
    `analyzer` / `final_summary` agent states and `evaluate` / `record_node`
    deterministic states, plus the human gates and a terminal-safety guard. _Hub +
-   loop + terminal-safety guard built; the four **human gates** and_ `final_summary`
-   _/ `seed_initial` are **deferred** —_ `record_node` _shipped as_ `analysis_record`
+   loop + terminal-safety guard built (#300/#302); **all four human gates** +_
+   `final_summary` _+ the_ `aborted` _terminal ship in #303 (`complete` → `final_summary`
+   → `final_review` → `done`; `escalate`/hard-failures → `human_escalation`). Only_
+   `seed_initial` _remains deferred._ `record_node` _shipped as_ `analysis_record`
    _and a_ `sample` _state was added._
 7. `**[PARTIAL — #300, #302]**` Implement the durable-write / transaction helpers behind `record_node` and
    `evaluate` (see "Run State Persistence"). _Single durable write per round
    (`analysis_record`) + the vendored_ `run_state.py`/`file_lock.py` _layer ship;
    the full transaction-log protocol and record-by-step-id idempotency are not
    built._
-8. `**[PARTIAL — #300, #302]**` Migrate one demo, preferably circle packing, into a single-file fixture.
-   _The gates use a tiny in-test_ `solve(xs)→6` _fixture; a shipped demo workflow
-   input (circle packing or similar) is still pending._
+8. `**[DONE — #309]**` Migrate one demo, preferably circle packing, into a single-file fixture.
+   _Superseded by the **generic experiment harness**: a new_ `provision` _agent state +
+   generic_ `preflight` _inference let any ASI-Evolve-layout experiment run via the
+   existing_ `--workspace <dir>` _flag with zero per-experiment_ `workflow.yaml`/`scripts/`
+   _edits. The **circle-packing** demo was validated live end-to-end (score 0.96 → 2.62,
+   zero evaluator-timeout truncations after the bridge timeout fix); CI fixtures keep the
+   tiny in-test_ `solve(xs)→6` _for speed._
 9. `**[PENDING]**` Add UI summary artifacts for preflight, current best, round log, and evaluator
    failure bundles. _Blocked on item 4 (the engine-native layout means these need a
    copy-step or path shim before they can be declared outputs)._
@@ -1195,15 +1239,19 @@ Later (post-v1):
 
 ## Testing Plan
 
-> **Shipped test coverage (2026-06-16).** The runtime-capability tests are **done**
+> **Shipped test coverage (2026-06-17).** The runtime-capability tests are **done**
 > (#292 `deterministic-eval-smoke` + `#299` `deterministic-verdict-smoke` real-Docker
 > gates, plus `orchestrator-deterministic`/`machine-builder`/`validate`/`lint` unit
-> suites). The bridge unit suite (`test/workflow/evolve-result-bridge.test.ts`, 14
-> cases incl. the PYTHONHASHSEED determinism check) and the two real-Docker
-> integration gates (`evolve-single-round.integration.test.ts`,
-> `evolve-multi-round.integration.test.ts`, 5/5 incl. three-rounds-to-done +
-> byte-identical vector store) are **done**. **Still pending:** the gate-approval /
-> human-gate tests (deferred with the gates), the resume-after-`evaluate` /
+> suites). The bridge unit suite (`test/workflow/evolve-result-bridge.test.ts`, incl.
+> the PYTHONHASHSEED determinism check) and the real-Docker integration gates are
+> **done**: `evolve-single-round` + `evolve-multi-round` (incl. three-rounds-to-done +
+> byte-identical vector store), the **human-surface** gate suite
+> (`evolve-human-surface.integration.test.ts` — APPROVE-through-`final_summary`,
+> `preflight_review` ABORT → `aborted`, `evaluator_blocked` → `human_escalation` +
+> FORCE_REVISION, `final_review` FORCE_REVISION runs one extra round; #303), and the
+> **experiment-harness** suite (`evolve-experiment-harness.integration.test.ts` —
+> provisions a synthetic-dependency experiment and reaches `done`, plus the no-workspace
+> toy run; #309). **Still pending:** the resume-after-`evaluate` /
 > resume-after-`record_node` / partial-sampler-update resume tests, the write-scoping
 > security test (gap still open), and the `island`/`ucb1` sampler tests (samplers
 > deferred). Inline markers below flag each.
@@ -1219,8 +1267,8 @@ Unit tests:
 - Evaluator result parsing, timeout handling, and failure normalization.
 - `record_node` idempotency.
 
-Runtime tests (the new capabilities): `**[DONE — #292, #299]**` (the verdict edges
-shipped routing to `failed`, not `human_escalation`, since gates are deferred)
+Runtime tests (the new capabilities): `**[DONE — #292, #299]**` (verdict edges now
+route hard failures to the real `human_escalation` gate, shipped in #303)
 
 - A deterministic state runs its command array inside the shared container via
   `DockerManager.exec`, capturing exit code, stdout, and stderr.
@@ -1246,20 +1294,24 @@ Workflow/linter tests:
 - Round-budget stop path reaches final summary.
 - Repeated invalid candidate path reaches human escalation.
 
-Integration tests: `**[PARTIAL — #300, #302]**`
+Integration tests: `**[PARTIAL — #300, #302, #303, #309]**`
 
 - `**[DONE]**` Tiny evaluator that scores a one-function Python candidate.
 - `**[DONE]**` Evaluator runs in the shared container under `--network=none` and cannot reach
   the network.
-- `**[PARTIAL]**` Initial-program seeding. _(round-1 empty-DB sample shipped;_
-  `seed_initial` _baseline path deferred.)_
+- `**[PARTIAL]**` Initial-program seeding. _(round-1 empty-DB sample shipped, plus
+  workspace-seeded initial program in the harness suite (#309);_ `seed_initial` _as a
+  distinct baseline state is still deferred.)_
 - `**[PENDING]**` Resume after `evaluate` before `record_node`. _(resume-safety designed —
   orchestrator recomputes from durable `nodes.json` — but no resume integration test ships.)_
 - `**[PENDING]**` Resume after `record_node`.
 - `**[PENDING]**` Resume after partial sampler/index/best-snapshot updates. _(transaction protocol not built.)_
 - `**[DONE]**` Best snapshot update. _(asserted non-decreasing across rounds in the multi-round gate.)_
-- `**[PENDING]**` Human preflight rejection and revision. _(gate deferred.)_
-- `**[PENDING]**` Human final summary force-revision. _(gate deferred.)_
+- `**[DONE — #303]**` Human preflight rejection and revision. _(`preflight_review` ABORT →
+  `aborted` with zero nodes; `evaluator_blocked` → `human_escalation` then FORCE_REVISION
+  proceeds without a spurious node.)_
+- `**[DONE — #303]**` Human final summary force-revision. _(`final_review` FORCE_REVISION runs
+  exactly one extra round before APPROVE → `done`.)_
 
 Security tests: `**[PARTIAL — #292, #299, #300, #302]**`
 
@@ -1313,14 +1365,30 @@ Resolved by the 2026-06-15 revision (kept for traceability):
   `**[CONFIRMED in shipping — #300]**`
 - **Which helpers are deterministic** — `evaluate` and `record_node` in v1, run as
   container-exec deterministic states; more may follow. `**[CONFIRMED + extended —
-  #302]**` _Shipped as_ `sample` _,_ `evaluate` _, and_ `analysis_record`
+#302]**` _Shipped as_ `sample` _,_ `evaluate` _, and_ `analysis_record`
   _(`record_node` folded in) — three container-deterministic states, not two._
 - **FAISS vs. lexical** — lexical retrieval (Tier 0) is the v1 default; FAISS /
   sentence-transformers move onto a Tier 1 workflow image layer.
   `**[CONFIRMED in shipping — #300, #302]**` _Tier 0 ships; Tier 1 deferred._
 
-Resolved by the shipped slices (#300 / #302):
+Resolved by the shipped slices (#300 / #302 / #303 / #309):
 
+- **Human gates in v1** — `**[RESOLVED — #303]**` All four human gates ship
+  (`provision_review`, `preflight_review`, `human_escalation`, `final_review`) with the
+  `final_summary` agent state and the `aborted` terminal. `escalate` and every
+  deterministic hard-failure route to `human_escalation` rather than a terminal
+  `failed`. The human-surface design is no longer "ready to implement" — it is merged.
+- **Generic harness / problem-agnostic runs** — `**[RESOLVED — #309]**` Any
+  ASI-Evolve-layout experiment runs by pointing the existing `--workspace <dir>` flag
+  at it (no new flag, mount, or threading): a new `provision` agent state installs the
+  experiment's deps into a persistent venv once, and a generic `preflight` infers
+  objective / evaluator / cognition seed / initial-program from the workspace root with
+  a task-string fallback. `max_rounds` is seed-aware (+1 when an initial program is
+  seeded), and a task-derived success criterion is recorded as a descriptor.
+- **Evaluator timeout handling** — `**[RESOLVED — #309]**` The bridge now honors the
+  run-spec `timeout_secs` (the vendored engine stays untouched) and `preflight` authors
+  a generous, experiment-aware budget instead of a hardcoded 30s — the circle-packing
+  run went from 3 timeout truncations to zero.
 - **Loop mechanism: agent hub vs. deterministic controller** — `**[RESOLVED — #302]**`
   Built as the parent-design `orchestrator` **agent hub** (signed off 2026-06-16),
   with `isRoundLimitReached` + `settings.maxRounds` as the wedge backstop, not a
@@ -1359,7 +1427,8 @@ Still open:
   derived from `round_log.jsonl`, `nodes.json`, or a new workflow summary API?
 - Canonical? no: Should evaluator command changes route back through
   `preflight_review` every time, or can a human escalation approval patch the run
-  spec in place?
+  spec in place? _(Both gates now exist (#303), so either routing is mechanically
+  possible; the policy choice between them is still open.)_
 - Canonical? no: What is the canonical stop-condition language for noisy
   evaluators: fixed rounds, patience, statistical confidence, or user-defined
   predicates? _(v1 ships `max_rounds` as the enforced terminator with `patience`
