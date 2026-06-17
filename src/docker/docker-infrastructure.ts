@@ -1162,7 +1162,7 @@ export async function createSessionContainers(
         // PATH — including the NVM directory where `node`/`npm` live on the x86
         // devcontainer base. Bare-`node` workflow helpers would then fail to
         // resolve. The workflow venv bin is instead prepended to the live
-        // `$PATH` at exec time (see buildWorkflowPathPrefixedCommand), which is
+        // `$PATH` at exec time (see buildWorkflowExecCommand), which is
         // base-image-agnostic and preserves the image's own PATH.
         ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
         ...uidRemap.env,

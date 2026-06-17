@@ -20,11 +20,20 @@
  * dependency on other domain modules) so the `docker/` layer stays decoupled.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /** Polling interval while waiting for a contended lock. */
 const RETRY_INTERVAL_MS = 200;
+
+/**
+ * Grace window for a lock directory that exists but has no readable `meta.json`
+ * yet: the holder created the dir (atomic `mkdir`) and is about to write its
+ * metadata. Within this window the lock is treated as freshly held and is never
+ * stolen; past it, a meta-less dir is an orphaned mid-acquisition (the holder
+ * crashed between `mkdir` and the metadata write) and is reclaimable.
+ */
+const ACQUIRE_GRACE_MS = 5_000;
 
 interface LockMetadata {
   readonly pid: number;
@@ -37,9 +46,10 @@ function isPidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (err: unknown) {
-    // ESRCH → no such process. EPERM → process exists but is owned by another
-    // user (still alive). Anything else → treat as alive to avoid stealing.
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
+    // ESRCH → no such process (dead). EPERM → process exists but is owned by
+    // another user (still alive). Any other unexpected error → treat as alive
+    // so a transient probe failure never lets a waiter steal a live holder.
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
   }
 }
 
@@ -53,23 +63,37 @@ function forceRelease(lockDir: string): void {
 }
 
 /**
- * Returns true when an existing lock is stale: the owning process is dead, the
- * metadata is unreadable, or the lock has been held past `staleMs`.
+ * Returns true when an existing lock is stale and may be reclaimed: the owning
+ * process is dead, or the lock has been held past `staleMs`. When `meta.json`
+ * is not yet readable, the lock is reclaimed only if its directory is older than
+ * `ACQUIRE_GRACE_MS` — otherwise the holder is mid-acquisition (it created the
+ * dir but has not written metadata yet) and must not be stolen.
  */
 function isLockStale(lockDir: string, staleMs: number): boolean {
+  let meta: LockMetadata;
   try {
-    const meta = JSON.parse(readFileSync(resolve(lockDir, 'meta.json'), 'utf-8')) as LockMetadata;
-    if (!isPidAlive(meta.pid)) return true;
-    return Date.now() - meta.timestamp > staleMs;
+    meta = JSON.parse(readFileSync(resolve(lockDir, 'meta.json'), 'utf-8')) as LockMetadata;
   } catch {
-    return true;
+    // meta.json missing or unparseable. Do NOT treat that as stale outright, or
+    // a waiter could steal a lock during the holder's mkdir→write window. Fall
+    // back to the lock dir's own age: reclaim only an orphaned dir whose holder
+    // crashed before writing metadata.
+    try {
+      return Date.now() - statSync(lockDir).mtimeMs > ACQUIRE_GRACE_MS;
+    } catch {
+      // Lock dir vanished entirely → not held.
+      return true;
+    }
   }
+  if (!isPidAlive(meta.pid)) return true;
+  return Date.now() - meta.timestamp > staleMs;
 }
 
 /**
  * Single non-blocking attempt to acquire the lock. Atomic `mkdir` is the
- * authoritative acquisition; stale detection only runs after EEXIST so there
- * is no TOCTOU window.
+ * authoritative acquisition; stale detection only runs after EEXIST. The window
+ * between a holder's `mkdir` and its `meta.json` write is covered by
+ * `isLockStale`'s grace fallback, so a just-acquired lock is never stolen.
  */
 function tryAcquire(lockDir: string, staleMs: number): boolean {
   try {

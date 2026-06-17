@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withProvisionLock } from '../../src/docker/provision-lock.js';
 
@@ -13,6 +13,7 @@ describe('withProvisionLock', () => {
 
   afterEach(() => {
     rmSync(cacheDir, { recursive: true, force: true });
+    rmSync(`${cacheDir}.lock`, { recursive: true, force: true });
   });
 
   it('runs the critical section and releases the lock afterward', async () => {
@@ -96,5 +97,34 @@ describe('withProvisionLock', () => {
     );
 
     await holder;
+  });
+
+  it('does not steal a freshly-created lock dir that has no meta.json yet (mkdir→write race)', async () => {
+    // Simulate a holder that has created the lock dir but not yet written meta.json.
+    mkdirSync(`${cacheDir}.lock`);
+    // A waiter must treat the fresh meta-less dir as held (mid-acquisition), not stale.
+    await expect(
+      withProvisionLock(cacheDir, async () => 'stolen', { maxWaitMs: 100, staleMs: 60_000 }),
+    ).rejects.toThrow(/Failed to acquire workflow provisioning lock/);
+  });
+
+  it('reclaims an orphaned meta-less lock dir older than the grace window', async () => {
+    const lockDir = `${cacheDir}.lock`;
+    mkdirSync(lockDir);
+    // Backdate the dir mtime past ACQUIRE_GRACE_MS to simulate a holder that
+    // crashed between mkdir and the meta.json write.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+    const result = await withProvisionLock(cacheDir, async () => 'reclaimed', { maxWaitMs: 2_000, staleMs: 60_000 });
+    expect(result).toBe('reclaimed');
+  });
+
+  it('reclaims a lock whose holder process is dead', async () => {
+    const lockDir = `${cacheDir}.lock`;
+    mkdirSync(lockDir);
+    // A PID that is essentially guaranteed not to be running → probe yields ESRCH.
+    writeFileSync(resolve(lockDir, 'meta.json'), JSON.stringify({ pid: 2 ** 30, timestamp: Date.now() }));
+    const result = await withProvisionLock(cacheDir, async () => 'reclaimed', { maxWaitMs: 2_000, staleMs: 60_000 });
+    expect(result).toBe('reclaimed');
   });
 });
