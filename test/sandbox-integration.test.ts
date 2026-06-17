@@ -50,6 +50,17 @@ function makeSandboxedConfig(overrides: Partial<ResolvedSandboxParams> = {}): Re
   };
 }
 
+function hasReachableSshAgentKey(): boolean {
+  if (process.platform !== 'darwin' || !process.env.SSH_AUTH_SOCK) return false;
+  try {
+    return execFileSync('ssh-add', ['-l'], { encoding: 'utf-8', timeout: 5_000 }).includes('SHA256:');
+  } catch {
+    return false;
+  }
+}
+
+const canExerciseSshAgentSocket = hasReachableSshAgentKey();
+
 // ── checkSandboxAvailability ─────────────────────────────────────────────
 
 describe('checkSandboxAvailability', () => {
@@ -957,7 +968,7 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
 
   // Verify that SSH agent socket is accessible from within the sandbox
   // when allowUnixSockets includes the socket's parent directory.
-  it.skipIf(process.platform !== 'darwin' || !process.env.SSH_AUTH_SOCK)(
+  it.skipIf(!canExerciseSshAgentSocket)(
     'sandboxed process can reach SSH agent socket via allowUnixSockets',
     () => {
       const sshAuthSock = process.env.SSH_AUTH_SOCK!;
@@ -1004,7 +1015,7 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
   );
 
   // Verify that WITHOUT allowUnixSockets, the SSH agent socket is NOT accessible.
-  it.skipIf(process.platform !== 'darwin' || !process.env.SSH_AUTH_SOCK)(
+  it.skipIf(!canExerciseSshAgentSocket)(
     'sandboxed process cannot reach SSH agent socket without allowUnixSockets',
     () => {
       // Write settings WITHOUT allowUnixSockets by writing the file manually

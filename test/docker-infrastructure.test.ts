@@ -10,8 +10,9 @@ import {
   destroyDockerInfrastructure,
   resolveRealKey,
   canRefreshOAuth,
-  computeWorkflowImageHash,
-  ensureWorkflowImage,
+  computeWorkflowDependencyHash,
+  buildWorkflowExecCommand,
+  ensureImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
@@ -577,6 +578,49 @@ describe('createSessionContainers', () => {
     expect(scriptsMount).toEqual({ source: scriptsDir, target: '/workflow-scripts', readonly: true });
   });
 
+  it('uses the stock agent image while mounting workflow dependency caches', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+    const pythonVenvDir = join(tempDir, 'workflow-deps', 'python-venv');
+    const nodeModulesDir = join(tempDir, 'workflow-deps', 'node_modules');
+    mkdirSync(pythonVenvDir, { recursive: true });
+    mkdirSync(nodeModulesDir, { recursive: true });
+
+    await createSessionContainers(
+      {
+        ...core,
+        workflowPythonVenvMount: {
+          hostDir: pythonVenvDir,
+          target: '/opt/workflow-venv',
+          cacheKey: 'abc123',
+        },
+        workflowNodeModulesMount: {
+          hostDir: nodeModulesDir,
+          target: '/opt/workflow-node_modules',
+          cacheKey: 'abc123',
+          hasPackageLock: false,
+        },
+      },
+      makeMockConfig(),
+    );
+
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].image).toBe('ironcurtain-claude-code:latest');
+    expect(createCalls[0].image).not.toMatch(/^ironcurtain-wf-/);
+    expect(createCalls[0].mounts).toEqual(
+      expect.arrayContaining([
+        { source: pythonVenvDir, target: '/opt/workflow-venv', readonly: false },
+        { source: nodeModulesDir, target: '/opt/workflow-node_modules', readonly: false },
+      ]),
+    );
+    // PATH must NOT be overridden: Docker `-e PATH=...` REPLACES (not appends)
+    // the image PATH, which would discard the base image's real PATH (e.g. the
+    // NVM node dir on the x86 devcontainer base). The workflow venv bin is
+    // prepended to the live $PATH at exec time instead (buildWorkflowExecCommand).
+    expect(createCalls[0].env.PATH).toBeUndefined();
+    expect(createCalls[0].env.NODE_PATH).toBe('/opt/workflow-node_modules');
+  });
+
   // --- UID remap (issue #232) ---
   it('does NOT pass --user 0:0 or UID env in TCP (macOS) mode', async () => {
     // On macOS, VirtioFS handles UID translation and `--user 0:0` would
@@ -881,10 +925,10 @@ describe('destroyDockerInfrastructure', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Per-workflow dependency image hashing (design §6.3, test plan §11 #5)
+// Per-workflow runtime dependency cache hashing
 // ---------------------------------------------------------------------------
 
-describe('computeWorkflowImageHash', () => {
+describe('computeWorkflowDependencyHash', () => {
   let scriptsDir: string;
 
   beforeEach(() => {
@@ -899,8 +943,8 @@ describe('computeWorkflowImageHash', () => {
     writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==1.26.0\n');
     writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^8" } }\n');
 
-    const first = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
-    const second = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const first = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
+    const second = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     expect(first).toBe(second);
     // sha256 hex digest
@@ -909,20 +953,20 @@ describe('computeWorkflowImageHash', () => {
 
   it('changes the hash when requirements.txt content changes', () => {
     writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==1.26.0\n');
-    const before = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const before = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==2.0.0\n');
-    const after = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const after = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     expect(after).not.toBe(before);
   });
 
   it('changes the hash when package.json content changes', () => {
     writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^8" } }\n');
-    const before = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const before = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^9" } }\n');
-    const after = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const after = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     expect(after).not.toBe(before);
   });
@@ -930,70 +974,115 @@ describe('computeWorkflowImageHash', () => {
   it('changes the hash when the parent agent hash changes (parent chaining)', () => {
     writeFileSync(join(scriptsDir, 'requirements.txt'), 'numpy==1.26.0\n');
 
-    const withAgentA = computeWorkflowImageHash('agent-hash-A', scriptsDir);
-    const withAgentB = computeWorkflowImageHash('agent-hash-B', scriptsDir);
+    const withAgentA = computeWorkflowDependencyHash('agent-hash-A', scriptsDir);
+    const withAgentB = computeWorkflowDependencyHash('agent-hash-B', scriptsDir);
 
     expect(withAgentA).not.toBe(withAgentB);
   });
 
   it('folds package-lock.json into the hash when present', () => {
     writeFileSync(join(scriptsDir, 'package.json'), '{ "dependencies": { "ajv": "^8" } }\n');
-    const withoutLock = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const withoutLock = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     writeFileSync(join(scriptsDir, 'package-lock.json'), '{ "lockfileVersion": 3 }\n');
-    const withLock = computeWorkflowImageHash('agent-hash-abc', scriptsDir);
+    const withLock = computeWorkflowDependencyHash('agent-hash-abc', scriptsDir);
 
     expect(withLock).not.toBe(withoutLock);
   });
 });
 
-describe('ensureWorkflowImage no-manifest fast path', () => {
+// Runtime workflow dependencies are installed into mounted caches at container
+// start (see provisionWorkflowDependencies); no per-workflow image is ever
+// built. `ensureImage` only ever materializes the shared agent image (and its
+// base), never an `ironcurtain-wf-*` tag.
+describe('ensureImage builds no per-workflow image', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'wf-image-fastpath-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'ensure-image-'));
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  // The mock Docker stamps build labels per tag; we assert no per-workflow
-  // image tag (`ironcurtain-wf-*`) is ever built on the fast path.
-  function builtWorkflowImageTags(docker: DockerManager): string[] {
+  // The mock Docker stamps build labels per tag; capture every built tag so we
+  // can assert no per-workflow image tag (`ironcurtain-wf-*`) is produced.
+  function trackBuiltTags(docker: DockerManager): string[] {
     const built: string[] = [];
     const original = docker.buildImage.bind(docker);
     docker.buildImage = async (tag, df, ctx, labels) => {
-      if (tag.startsWith('ironcurtain-wf-')) built.push(tag);
+      built.push(tag);
       return original(tag, df, ctx, labels);
     };
     return built;
   }
 
-  it('returns the shared agent image unchanged when scriptsDir is undefined', async () => {
+  it('returns the shared agent image and builds only the agent + base images', async () => {
     const docker = createMockDocker();
     const ca = createMockCA(tempDir);
-    const built = builtWorkflowImageTags(docker);
+    const built = trackBuiltTags(docker);
 
-    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', undefined, docker, ca);
+    const buildHash = await ensureImage('ironcurtain-claude-code:latest', docker, ca);
 
-    expect(image).toBe('ironcurtain-claude-code:latest');
-    expect(built).toEqual([]);
+    expect(typeof buildHash).toBe('string');
+    expect(buildHash.length).toBeGreaterThan(0);
+    expect(built).toContain('ironcurtain-claude-code:latest');
+    expect(built.some((tag) => tag.startsWith('ironcurtain-wf-'))).toBe(false);
   });
 
-  it('returns the shared agent image when scripts/ has no dependency manifest', async () => {
-    const scriptsDir = join(tempDir, 'scripts');
-    mkdirSync(scriptsDir);
-    // A helper script but no requirements.txt / package.json.
-    writeFileSync(join(scriptsDir, 'run_eval.py'), 'print("hi")\n');
-
+  it('skips the rebuild when images are already up to date (content-hash labels)', async () => {
     const docker = createMockDocker();
     const ca = createMockCA(tempDir);
-    const built = builtWorkflowImageTags(docker);
 
-    const image = await ensureWorkflowImage('ironcurtain-claude-code:latest', scriptsDir, docker, ca);
+    // First call builds; second call must be a no-op (labels already stamped).
+    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    const built = trackBuiltTags(docker);
+    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
 
-    expect(image).toBe('ironcurtain-claude-code:latest');
     expect(built).toEqual([]);
+  });
+});
+
+describe('buildWorkflowExecCommand', () => {
+  const pythonMount = { hostDir: '/host/venv', target: '/opt/workflow-venv', cacheKey: 'abc' } as const;
+  const nodeMount = {
+    hostDir: '/host/node_modules',
+    target: '/opt/workflow-node_modules',
+    cacheKey: 'abc',
+    hasPackageLock: false,
+  } as const;
+
+  it('returns the command unchanged when no dependency mount is present', () => {
+    const cmd = ['node', '/workflow-scripts/format_report.js'];
+    expect(buildWorkflowExecCommand({}, cmd)).toEqual(cmd);
+  });
+
+  it('prepends the live $PATH (not a replacement) so the image PATH is preserved', () => {
+    const wrapped = buildWorkflowExecCommand({ workflowPythonVenvMount: pythonMount }, [
+      'node',
+      '/workflow-scripts/format_report.js',
+    ]);
+
+    // Shell wrapper expands $PATH at runtime rather than hardcoding a PATH.
+    expect(wrapped[0]).toBe('/bin/sh');
+    expect(wrapped[1]).toBe('-lc');
+    expect(wrapped[2]).toContain('export PATH=/opt/workflow-venv/bin:"$PATH"');
+    expect(wrapped[2]).toContain('exec "$@"');
+    // Original argv is passed verbatim as positional params after the `sh` $0.
+    expect(wrapped.slice(3)).toEqual(['sh', 'node', '/workflow-scripts/format_report.js']);
+  });
+
+  it('prepends both the venv bin and the node_modules/.bin when both mounts exist', () => {
+    const wrapped = buildWorkflowExecCommand(
+      { workflowPythonVenvMount: pythonMount, workflowNodeModulesMount: nodeMount },
+      ['python', '-c', 'print(1)'],
+    );
+    expect(wrapped[2]).toContain('export PATH=/opt/workflow-venv/bin:/opt/workflow-node_modules/.bin:"$PATH"');
+    expect(wrapped.slice(3)).toEqual(['sh', 'python', '-c', 'print(1)']);
+  });
+
+  it('returns an empty command unchanged (no shell wrapper)', () => {
+    expect(buildWorkflowExecCommand({ workflowPythonVenvMount: pythonMount }, [])).toEqual([]);
   });
 });

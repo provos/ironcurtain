@@ -89,9 +89,9 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
       auditRedaction: { enabled: false },
       memory: { enabled: false, llmBaseUrl: undefined, llmApiKey: undefined },
       packageInstall: {
-        enabled: false,
+        enabled: true,
         quarantineDays: 2,
-        allowedPackages: [],
+        allowedPackages: ['numpy', 'pyyaml'],
         deniedPackages: [],
       },
       serverCredentials: {},
