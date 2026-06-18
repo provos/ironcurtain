@@ -118,4 +118,23 @@ describe('FileTree', () => {
 
     await waitFor(() => expect(fetchFileTree).toHaveBeenCalledTimes(1));
   });
+
+  it('renders the tree when a reconcile pre-empts an in-flight initial load', async () => {
+    let call = 0;
+    const fetchFileTree = vi.fn((_workflowId: string, _path?: string): Promise<FileTreeResponseDto> => {
+      call += 1;
+      // The initial full load never resolves; the reconcile that pre-empts it
+      // must still surface its tree (and clear the initial-load spinner).
+      if (call === 1) return new Promise<FileTreeResponseDto>(() => {});
+      return Promise.resolve({ entries: [{ name: 'src', type: 'directory' }] });
+    });
+    const base = { workflowId: 'wf-1', onFileSelect: vi.fn(), fetchFileTree };
+    const { rerender } = render(FileTree, { props: { ...base, refreshKey: 'k0' } });
+
+    // Initial fetch is pending — bump refreshKey to start the pre-empting reconcile.
+    await rerender({ ...base, refreshKey: 'k1' });
+
+    // Without rootLoading being cleared, this stays stuck on the spinner forever.
+    expect(await screen.findByText('src/')).toBeTruthy();
+  });
 });

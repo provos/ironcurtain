@@ -91,7 +91,13 @@
     } catch {
       // Keep the existing tree on a transient refresh failure.
     } finally {
-      if (version === loadVersion) refreshing = false;
+      if (version === loadVersion) {
+        refreshing = false;
+        // A reconcile that ran supersedes any initial full load it pre-empted,
+        // whose stale `finally` would otherwise leave `rootLoading` stuck true
+        // (spinner forever). Normally rootLoading is already false here.
+        rootLoading = false;
+      }
     }
   }
 
