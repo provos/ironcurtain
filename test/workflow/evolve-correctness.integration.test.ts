@@ -441,7 +441,7 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
     writeFileSync(resolve(runStateDir, 'current', 'step_name'), 'step_0001\n');
     writeFileSync(
       resolve(runStateDir, 'current', 'context.json'),
-      JSON.stringify({ step_name: 'step_0001', parent: null }),
+      JSON.stringify({ step_name: 'step_0001', parents: [] }),
     );
     writeFileSync(
       resolve(runStateDir, 'current', 'result.json'),

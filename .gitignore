@@ -40,3 +40,6 @@ coverage/
 # Playwright
 e2e-results/
 playwright-report/
+
+# Generated docs (build.sh regenerates these)
+docs/vuln-discovery-onboarding/*.pdf

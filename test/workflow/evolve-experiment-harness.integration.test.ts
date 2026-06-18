@@ -214,11 +214,11 @@ function countTabulateAudit(bundleDir: string): number {
 
 function writeCandidate(workspacePath: string, turn: number, experiment: boolean): void {
   const runDir = resolve(workspacePath, '.evolve_runs', 'main');
-  const context = readJson(resolve(runDir, 'current', 'context.json')) as { step_name: string; parent: unknown };
+  const context = readJson(resolve(runDir, 'current', 'context.json')) as { step_name: string; parents: unknown[] };
   const stepDir = resolve(runDir, 'steps', context.step_name);
   mkdirSync(stepDir, { recursive: true });
 
-  if (experiment && context.parent === null && existsSync(resolve(workspacePath, 'initial_program'))) {
+  if (experiment && context.parents.length === 0 && existsSync(resolve(workspacePath, 'initial_program'))) {
     cpSync(resolve(workspacePath, 'initial_program'), resolve(stepDir, 'code'));
     return;
   }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ IMPROVEMENT_EPS = 1e-9
 TARGET_RE = re.compile(
     r"^\s*([A-Za-z_]\w*)\s*(>=|>|==|<=|<)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
 )
+STOCHASTIC_SAMPLERS = {"random", "ucb1", "island"}
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -65,6 +67,7 @@ def _clear_current_round(current_dir: Path) -> None:
         "analysis.md",
         "analysis_record.json",
         "stop_signals.json",
+        "cognition_item.json",
     ):
         (current_dir / name).unlink(missing_ok=True)
 
@@ -131,13 +134,14 @@ def _resolve_parent(args: argparse.Namespace) -> list[int]:
     if not getattr(args, "parent_from_current", False):
         return list(args.parent or [])
     context = _load_current_context(_run_dir(args))
-    parent = context.get("parent")
-    if not isinstance(parent, dict):
-        return []
-    parent_id = parent.get("id")
-    if isinstance(parent_id, bool) or not isinstance(parent_id, int):
-        return []
-    return [parent_id]
+    parents = context.get("parents")
+    parent_ids: list[int] = []
+    for parent in parents if isinstance(parents, list) else []:
+        parent_id = parent.get("id") if isinstance(parent, dict) else None
+        if isinstance(parent_id, bool) or not isinstance(parent_id, int):
+            continue
+        parent_ids.append(parent_id)
+    return parent_ids
 
 
 def _node_count(run_dir: Path) -> int:
@@ -341,6 +345,35 @@ def _objective_query(run_dir: Path) -> str:
     return str(spec.get("objective", "") or "")
 
 
+def _sampling_config(run_dir: Path) -> dict[str, Any]:
+    spec_path = run_dir / "run_spec.yaml"
+    spec = _load_structured(spec_path) if spec_path.exists() else {}
+    sampling = spec.get("sampling")
+    return sampling if isinstance(sampling, dict) else {}
+
+
+def _sample_n_from_spec(run_dir: Path) -> int:
+    return max(1, _safe_int(_sampling_config(run_dir).get("sample_n"), default=1))
+
+
+def _sampling_algorithm(run_dir: Path) -> str:
+    # Normalize so the STOCHASTIC_SAMPLERS membership check (and thus the seed
+    # requirement) is case/whitespace-insensitive: a spec "UCB1" / " island "
+    # must not slip past as non-stochastic and run unseeded.
+    algorithm = _sampling_config(run_dir).get("algorithm")
+    return str(algorithm or "greedy").strip().lower()
+
+
+def _sampling_seed(run_dir: Path) -> int | None:
+    seed_file = run_dir / "sampling_seed.txt"
+    if not seed_file.exists():
+        return None
+    try:
+        return int(seed_file.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
 def _numeric_score(results: dict[str, Any]) -> float | None:
     raw = results.get("eval_score", results.get("score"))
     if isinstance(raw, bool) or raw is None:
@@ -359,6 +392,83 @@ def _run_helper(argv: list[str]) -> tuple[int, dict[str, Any] | None, str]:
         payload = None
         error = f"{error}\ninvalid helper JSON: {exc}".strip()
     return completed.returncode, payload, error
+
+
+def _run_seeded_helper(script_path: Path, helper_args: list[str], seed: int) -> tuple[int, dict[str, Any] | None, str]:
+    preamble = (
+        "import random, runpy, sys; "
+        f"random.seed({seed!r}); "
+        f"sys.argv = {[str(script_path), *helper_args]!r}; "
+        f"runpy.run_path({str(script_path)!r}, run_name='__main__')"
+    )
+    return _run_helper([sys.executable, "-c", preamble])
+
+
+def _promote_lesson(
+    run_dir: Path,
+    analysis_file: Path,
+    step_name: str,
+    node_id: Any,
+    best_updated: Any,
+) -> dict[str, Any]:
+    if not analysis_file.exists():
+        return {"promoted": False, "reason": "no_analysis_file"}
+    lesson = analysis_file.read_text(encoding="utf-8").strip()
+    if not lesson:
+        return {"promoted": False, "reason": "empty_lesson"}
+    digest = hashlib.sha256(lesson.encode("utf-8")).hexdigest()
+    ledger_path = run_dir / "cognition_promoted.json"
+    ledger: Any = {}
+    if ledger_path.exists():
+        # A crash mid-write can leave the ledger truncated; a corrupt dedup
+        # ledger must not fail the whole run — fall back to an empty ledger
+        # (worst case: a lesson is promoted twice, which the engine tolerates).
+        try:
+            ledger = _load_json(ledger_path)
+        except (json.JSONDecodeError, OSError):
+            ledger = {}
+    if not isinstance(ledger, dict):
+        ledger = {}
+    if digest in ledger:
+        return {"promoted": False, "reason": "duplicate", "first_seen": ledger[digest]}
+
+    score: float | None = None
+    existing_node = _find_recorded_node_for_step(run_dir, step_name)
+    if existing_node is not None:
+        score = _node_score(existing_node)
+    item = {
+        "content": lesson,
+        "source": step_name,
+        "metadata": {
+            "kind": "round_lesson",
+            "node_id": node_id,
+            "best_updated": bool(best_updated),
+            "score": score,
+        },
+    }
+    item_json = _current_dir(run_dir) / "cognition_item.json"
+    _write_json(item_json, item)
+    code, output, error = _run_helper(
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "evolve-cognition"),
+            "add",
+            "--run-dir",
+            str(run_dir),
+            "--json-file",
+            str(item_json),
+        ]
+    )
+    if code != 0 or not isinstance(output, dict):
+        return {"promoted": False, "reason": "helper_error", "error": error}
+
+    ledger[digest] = step_name
+    _write_json(ledger_path, ledger)
+    return {
+        "promoted": True,
+        "items_added": output.get("items_added"),
+        "total_items": output.get("total_items"),
+    }
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -466,17 +576,39 @@ def sample(args: argparse.Namespace) -> int:
     step_name = f"step_{done_rounds + 1:04d}"
     (current_dir / "step_name").write_text(step_name + "\n", encoding="utf-8")
 
-    sample_code, sample_payload, sample_error = _run_helper(
-        [
-            sys.executable,
-            str(SCRIPT_DIR / "evolve-db"),
-            "sample",
-            "--run-dir",
-            args.run_dir,
-            "--n",
-            str(args.n),
-        ]
-    )
+    n = _sample_n_from_spec(run_dir) if args.n_from_spec else max(1, args.n)
+    sampling_algorithm = _sampling_algorithm(run_dir)
+    sampling_seed = _sampling_seed(run_dir)
+    sample_helper = SCRIPT_DIR / "evolve-db"
+    sample_helper_args = [
+        "sample",
+        "--run-dir",
+        args.run_dir,
+        "--n",
+        str(n),
+    ]
+    if sampling_algorithm in STOCHASTIC_SAMPLERS:
+        if sampling_seed is None:
+            seed_file = run_dir / "sampling_seed.txt"
+            detail = "exists but is not a single integer" if seed_file.exists() else "is missing"
+            _write_json(
+                result_file,
+                {
+                    "verdict": "sample_error",
+                    "payload": {
+                        "stage": "db_sample",
+                        "error": (
+                            f"stochastic sampler {sampling_algorithm} requires a sampling_seed.txt "
+                            f"with a single integer; the file {detail}"
+                        ),
+                    },
+                    "passed": False,
+                },
+            )
+            return 0
+        sample_code, sample_payload, sample_error = _run_seeded_helper(sample_helper, sample_helper_args, sampling_seed)
+    else:
+        sample_code, sample_payload, sample_error = _run_helper([sys.executable, str(sample_helper), *sample_helper_args])
     if sample_code != 0 or not isinstance(sample_payload, dict):
         _write_json(
             result_file,
@@ -514,11 +646,16 @@ def sample(args: argparse.Namespace) -> int:
         return 0
 
     sampled_nodes = sample_payload.get("nodes")
-    parent = sampled_nodes[0] if isinstance(sampled_nodes, list) and sampled_nodes else None
+    parents = [node for node in sampled_nodes if isinstance(node, dict)] if isinstance(sampled_nodes, list) else []
+    parent_ids = [
+        parent_id
+        for parent_id in (_node_id(parent, "") for parent in parents)
+        if parent_id is not None
+    ]
     matches = cognition_payload.get("matches")
     context = {
         "step_name": step_name,
-        "parent": parent if isinstance(parent, dict) else None,
+        "parents": parents,
         "cognition": {
             "query": query,
             "matches": matches if isinstance(matches, list) else [],
@@ -533,7 +670,10 @@ def sample(args: argparse.Namespace) -> int:
             "verdict": "sampled",
             "payload": {
                 "step_name": step_name,
-                "parent_id": context["parent"].get("id") if isinstance(context["parent"], dict) else None,
+                "parent_ids": parent_ids,
+                "sample_n": n,
+                "sampling_algorithm": sampling_algorithm,
+                "sampling_seed": sampling_seed,
                 "cognition_seeded_items": seed_payload.get("total_items") if isinstance(seed_payload, dict) else None,
                 "cognition_matches": len(context["cognition"]["matches"]),
             },
@@ -660,6 +800,14 @@ def attach_analysis(args: argparse.Namespace) -> int:
     payload["stop_signals_path"] = str(_current_dir(run_dir) / "stop_signals.json")
     if "target_parse_warning" in signals:
         payload["target_parse_warning"] = signals["target_parse_warning"]
+    if verdict == "recorded" and payload.get("node_id") is not None:
+        payload["cognition_promoted"] = _promote_lesson(
+            run_dir,
+            analysis_file=Path(args.analysis_file),
+            step_name=step_name,
+            node_id=payload.get("node_id"),
+            best_updated=payload.get("best_updated"),
+        )
 
     _write_json(result_file, {"verdict": verdict, "payload": payload, "passed": passed})
     return 0
@@ -685,6 +833,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample_parser.add_argument("--query-from-spec", action="store_true")
     sample_parser.add_argument("--top-k", type=int, default=5)
     sample_parser.add_argument("--n", type=int, default=1)
+    sample_parser.add_argument("--n-from-spec", action="store_true")
     sample_parser.add_argument("--context-file", required=True)
     sample_parser.add_argument("--result-file", required=True)
     sample_parser.set_defaults(func=sample)

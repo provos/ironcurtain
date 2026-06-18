@@ -178,6 +178,20 @@ states:
            different target. If /workspace/initial_program exists, note in the
            cognition seed that round 1 should copy it verbatim; the researcher
            prompt will do the actual copy.
+         - SAMPLE_N as the number of parent candidates to sample each round.
+           Default to 1 for from-scratch toy tasks. If the task or experiment
+           implies recombination/crossover search, or config.yaml declares
+           sample_n, use that value, commonly 3. Keep SAMPLE_N positive and at
+           most 5 so the researcher's context stays tractable.
+         - SAMPLER as the parent-selection strategy. Default to greedy. Choose
+           ucb1 when the search should balance exploiting high scores with
+           exploring under-visited parents, island when diversity across
+           sub-populations is wanted, or random only for a diversity baseline.
+           You may choose a non-greedy sampler only when you also write a
+           reproducibility seed to /workspace/.evolve_runs/main/sampling_seed.txt
+           as a single integer. Without that seed, use greedy. For island, add
+           --sampling-feature complexity --sampling-feature diversity
+           --sampling-feature-bins 10 unless the experiment specifies otherwise.
 
       3. If no experiment files are present, infer OBJECTIVE and EVAL_CMD from the
          task string. EVAL_CMD must read the candidate at {quoted_code_path}, run
@@ -188,9 +202,9 @@ states:
 
       4. Initialize the run by executing the evolve-brief helper. The run lives
          under /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE,
-         EVAL_CMD, SUCCESS_CRITERION, EVAL_TIMEOUT_SECS, MAX_ROUNDS, and
-         PRIMARY_TARGET from the inference above. Set --max-rounds from the task
-         when it specifies a number of rounds; otherwise default to 3. Default
+         EVAL_CMD, SUCCESS_CRITERION, EVAL_TIMEOUT_SECS, MAX_ROUNDS, PRIMARY_TARGET,
+         SAMPLER, and SAMPLE_N from the inference above. Set --max-rounds from the
+         task when it specifies a number of rounds; otherwise default to 3. Default
          EVAL_TIMEOUT_SECS to 300 when nothing implies a different budget.
 
          If /workspace/initial_program exists, add 1 to MAX_ROUNDS before passing
@@ -213,25 +227,37 @@ states:
            --stop-condition "max_rounds" \
            --writable-path .evolve_runs \
            --primary-target PRIMARY_TARGET \
-           --sampling-algorithm greedy \
-           --sample-n 1 \
+           --sampling-algorithm SAMPLER \
+           --sample-n SAMPLE_N \
            --cognition-source-mode seed \
            --confirmed true
 
-      5. Write a cognition seed file at /workspace/.evolve_runs/main/cognition_seed.md
+         If SAMPLER is island and feature dimensions are not already specified by
+         the experiment, include:
+           --sampling-feature complexity \
+           --sampling-feature diversity \
+           --sampling-feature-bins 10
+
+      5. If SAMPLER is not greedy, write /workspace/.evolve_runs/main/sampling_seed.txt
+         containing one integer seed on a single line. Use a stable seed inferred
+         from the task or experiment when one is declared; otherwise use 0. If you
+         cannot write a seed, switch SAMPLER back to greedy before normalizing.
+
+      6. Write a cognition seed file at /workspace/.evolve_runs/main/cognition_seed.md
          containing one or more ```json fenced blocks of reusable domain heuristics
          for this objective. Do not put round-by-round results here; only durable
          knowledge. For a workspace experiment, preserve the experiment's own
          heuristics and interface contract.
 
-      6. Copy the human-review artifacts into the workflow artifact directory:
+      7. Copy the human-review artifacts into the workflow artifact directory:
 
          mkdir -p /workspace/.workflow/run_spec /workspace/.workflow/cognition_seed
          cp /workspace/.evolve_runs/main/run_spec.yaml /workspace/.workflow/run_spec/run_spec.md
          cp /workspace/.evolve_runs/main/cognition_seed.md /workspace/.workflow/cognition_seed/cognition_seed.md
 
-      7. Confirm evolve-brief exited 0, run_spec.yaml exists, and both workflow
-         artifact copies exist.
+      8. Confirm evolve-brief exited 0, run_spec.yaml exists, cognition_seed.md
+         exists, sampling_seed.txt exists when SAMPLER is non-greedy, and both
+         workflow artifact copies exist.
 
       If a human directive is present at the top of this message, treat it as
       authoritative. Adjust the objective, evaluator command, budget, or cognition
@@ -334,7 +360,7 @@ states:
 
   sample:
     type: deterministic
-    description: Sample a parent node and retrieve cognition; seed cognition on first entry.
+    description: Sample parent nodes and retrieve cognition; seed cognition on first entry.
     container: true
     resultFile: .evolve_runs/main/current/sample.json
     run:
@@ -345,6 +371,7 @@ states:
           '--run-dir',
           '/workspace/.evolve_runs/main',
           '--query-from-spec',
+          '--n-from-spec',
           '--context-file',
           '/workspace/.evolve_runs/main/current/context.json',
           '--result-file',
@@ -361,7 +388,7 @@ states:
 
   researcher:
     type: agent
-    description: Evolve one candidate from the sampled parent and retrieved cognition.
+    description: Evolve one candidate from sampled parents and retrieved cognition.
     persona: global
     prompt: |
       Write exactly one candidate program for this round.
@@ -369,14 +396,17 @@ states:
       Read the round context at /workspace/.evolve_runs/main/current/context.json. It
       contains:
         - step_name: the directory you must write the candidate into
-        - parent: the sampled parent node, or null on round 1
+        - parents: a list of sampled parent nodes, empty on round 1
         - cognition.matches: retrieved durable heuristics relevant to this objective
 
-      If a parent is present, evolve it: improve on the parent's code using the cognition
-      hints. If parent is null and /workspace/initial_program exists, copy it
-      verbatim as this round's candidate without modifying it - it is the
-      experiment's baseline, and the evaluator will score it as node 0. If parent
-      is null and no initial_program exists, write a full candidate from scratch.
+      If parents is empty and /workspace/initial_program exists, copy it verbatim
+      as this round's candidate without modifying it - it is the experiment's
+      baseline, and the evaluator will score it as node 0. If parents is empty
+      and no initial_program exists, write a full candidate from scratch. If
+      parents has one node, evolve it using the cognition hints. If parents has
+      multiple nodes, produce a candidate that recombines their strengths: take
+      the best ideas from each parent's code and the cognition hints, then
+      synthesize one improved candidate. Do not merely concatenate; integrate.
 
       Write the COMPLETE candidate file to:
         /workspace/.evolve_runs/main/steps/<step_name>/code
@@ -430,6 +460,8 @@ states:
       Write a concise markdown lesson to:
         /workspace/.evolve_runs/main/current/analysis.md
       Keep it to a few sentences. Do not restate the score; capture the transferable insight.
+      This lesson is promoted into the cognition store after the durable record,
+      so write something future rounds can retrieve and apply.
 
       Finish with the required agent_status block; your verdict is informational.
     inputs: []
@@ -440,7 +472,7 @@ states:
 
   analysis_record:
     type: deterministic
-    description: The single durable engine node-write; commit the round with its lesson and parent.
+    description: The single durable engine node-write; commit the round with its lesson and parents.
     container: true
     resultFile: .evolve_runs/main/current/analysis_record.json
     run:
