@@ -1,5 +1,11 @@
 # IronCurtain Architecture Notes
 
+## Topic files
+- [anvil-trajectory-capture.md](anvil-trajectory-capture.md) — Anvil PRD vs real MITM trajectory capture; key hole: no artifact IDs so cross-state lineage is path/content inference, not a deterministic join
+- [workflow-human-gates.md](workflow-human-gates.md) — human_gate machinery: event vocab (APPROVE/FORCE_REVISION/REPLAN/ABORT), WF004 present-artifact rule, surfacing/resolveGate/resume, terminal→phase mapping (`failed` name → phase:completed!), resetVisitCounts
+- [daemon-ws-jsonrpc.md](daemon-ws-jsonrpc.md) — daemon WS JSON-RPC surface: discovery file is `web-ui.json` (not web-ui-state.json), `--web-ui` required, wire types in web-ui-types.ts, observe-command.ts has inline WS client to extract, gate DTO = artifact NAMES only
+- [evolve-workflow-package.md](evolve-workflow-package.md) — evolve FSM + scripts/evolve_core engine + run_spec schema + evaluator-command wiring seam (cli.py:243 shell-formats `{quoted_code_path}`); docker venv-provisioning ALREADY EXISTS (uv pip install via container exec, sentinel-gated); `--experiment` threading chain (CLI→workflows.start RPC→controller.start); circle_packing_demo reference layout
+
 ## Key Files
 - `src/trusted-process/policy-engine.ts` - two-phase engine: structural invariants + compiled declarative rules
 - `src/trusted-process/policy-types.ts` - EvaluationResult interface

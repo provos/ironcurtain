@@ -54,3 +54,35 @@ The parent inode stays stable across re-stages, so the bind mount remains live a
 - To clear contents under a bind-mount source dir, iterate and remove children individually (`for (const entry of readdirSync(dir)) rmSync(resolve(dir, entry), {recursive:true,force:true})`).
 - This rule applies anywhere a host directory is bind-mounted into a long-lived container that the host expects to mutate in place — currently `stageSkillsToBundle`, but the same trap applies to any future "stage X into a live mount" code.
 - Independent but related: avoid NESTING bind mounts (one mount target inside another). Docker Desktop / macOS handle this unreliably (silent empty inner mount on 4.67.x; known Lima/Colima bugs). For the skills mount specifically, the adapter's `skillsContainerPath` is required to be a sibling path that does not nest under any other mount target — see `src/docker/agent-adapter.ts`.
+
+## Independent: file locks (flock) do NOT propagate across containers on macOS bind mounts
+
+In-container `flock` on a host-bind-mounted file does NOT serialize across two
+separate containers on Docker Desktop / macOS (VirtioFS). Verified empirically
+with the `ironcurtain-claude-code:latest` image: container B acquired the lock
+on a shared `-v $HOST:/cache` file ~0.5s after start while container A was still
+holding it during a 3s sleep. So "`flock` on the mounted cache dir inside the
+provisioning shell" is NOT a reliable cross-run lock on this platform.
+
+Correct pattern for serializing concurrent workflow runs that share a
+content-keyed host cache dir (`~/.ironcurtain/workflow-deps/<hash>/...`): a
+HOST-side advisory lock. The runs share the same host process tree, so an
+atomic-`mkdir` lockfile next to the cache dir works regardless of VirtioFS.
+Implemented as `withProvisionLock(cacheDir, fn)` in
+`src/docker/provision-lock.ts` (self-contained, no cross-module deps; PID
+liveness via `process.kill(pid, 0)`; 25-min default timeouts because a
+`uv pip install` / `npm install` critical section can run that long — the cron
+`file-lock.ts` 30s/10s defaults are far too short for this use).
+
+## Docker `-e PATH=...` REPLACES the image PATH (does not append)
+
+`docker run -e PATH=foo` overwrites the image's own PATH entirely. On the x86
+devcontainer base (`mcr.microsoft.com/devcontainers/universal:latest`),
+`node`/`npm` live under an NVM dir NOT in a hardcoded conservative PATH, so a
+PATH override breaks bare `node`. On arm64 (`node:22-trixie`) node is in
+`/usr/local/bin` so the bug is invisible locally. Base-image-agnostic fix:
+do NOT set `-e PATH`; preserve the image PATH and prepend extra bins to the LIVE
+`$PATH` at exec time via a shell wrapper that expands `$PATH` at runtime
+(`buildWorkflowExecCommand` in `docker-infrastructure.ts`:
+`/bin/sh -lc 'export PATH=<dirs>:"$PATH"; exec "$@"' sh <cmd...>`). The original
+argv passes through `exec "$@"` positionals — never string-interpolated.
