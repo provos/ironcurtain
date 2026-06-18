@@ -50,6 +50,9 @@
       loading = true;
       error = '';
       content = null;
+      // Clear any leftover silent-refresh indicator from a pre-empted fetch so
+      // the header doesn't show "refreshing" during a full-load spinner.
+      refreshing = false;
     } else {
       refreshing = true;
     }

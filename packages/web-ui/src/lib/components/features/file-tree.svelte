@@ -62,6 +62,10 @@
     const version = ++loadVersion;
     rootLoading = true;
     error = '';
+    // A workflow switch can pre-empt an in-flight reconcile whose `finally`
+    // is now stale (won't clear `refreshing`); reset it here so the Refresh
+    // spinner doesn't stick on for the new workflow.
+    refreshing = false;
     try {
       const res = await fetchFileTree(id);
       if (version !== loadVersion) return;

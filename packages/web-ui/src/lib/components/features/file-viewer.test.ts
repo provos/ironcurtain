@@ -88,4 +88,35 @@ describe('FileViewer', () => {
     expect(await screen.findByText('body:b.txt')).toBeTruthy();
     expect(fetchFileContent).toHaveBeenCalledTimes(2);
   });
+
+  it('clears the refreshing indicator when a hard reload pre-empts an in-flight silent refresh', async () => {
+    let resolveHardReload: ((v: FileContentResponseDto) => void) | undefined;
+    let call = 0;
+    const fetchFileContent = vi.fn(() => {
+      call += 1;
+      if (call === 1) return Promise.resolve(textContent('a'));
+      // call 2 (silent refresh) and call 3 (hard reload) both hang.
+      if (call === 2) return new Promise<FileContentResponseDto>(() => {});
+      return new Promise<FileContentResponseDto>((res) => {
+        resolveHardReload = res;
+      });
+    });
+    const base = { workflowId: 'wf-1', fetchFileContent };
+    const { rerender } = render(FileViewer, { props: { ...base, path: 'a.txt', refreshKey: 'k0' } });
+
+    expect(await screen.findByText('a')).toBeTruthy();
+
+    // Silent refresh (same path, bumped key) — its fetch stays pending, so the
+    // "refreshing" indicator turns on.
+    await rerender({ ...base, path: 'a.txt', refreshKey: 'k1' });
+    expect(screen.getByText(/refreshing/i)).toBeTruthy();
+
+    // A path change is a hard reload; it must clear the leftover indicator
+    // even though the pre-empted silent fetch never resolves.
+    await rerender({ ...base, path: 'b.txt', refreshKey: 'k1' });
+    expect(screen.queryByText(/refreshing/i)).toBeNull();
+
+    resolveHardReload?.(textContent('b'));
+    expect(await screen.findByText('b')).toBeTruthy();
+  });
 });
