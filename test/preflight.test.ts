@@ -303,6 +303,27 @@ describe('resolveSessionMode', () => {
         expect(loadFromKeychain).not.toHaveBeenCalled();
       });
 
+      it('uses the provider inferred from agentModelId for builtin API key validation', async () => {
+        const dockerSpy = vi.fn(dockerAvailable);
+        const loadFromFile = vi.fn(() => null);
+        const loadFromKeychain = vi.fn(() => null);
+
+        const promise = resolveSessionMode({
+          config: createTestConfig({
+            anthropicApiKey: '',
+            preferredMode: 'builtin',
+            agentModelId: 'openai:gpt-4o',
+          }),
+          isDockerAvailable: dockerSpy,
+          credentialSources: { loadFromFile, loadFromKeychain },
+        });
+
+        await expect(promise).rejects.toThrow(PreflightError);
+        await expect(promise).rejects.toThrow(/no OPENAI_API_KEY/);
+        expect(dockerSpy).not.toHaveBeenCalled();
+        expect(loadFromFile).not.toHaveBeenCalled();
+        expect(loadFromKeychain).not.toHaveBeenCalled();
+      });
     });
 
     describe('--agent overrides preferredMode', () => {
