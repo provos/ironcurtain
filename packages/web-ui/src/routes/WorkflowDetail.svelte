@@ -126,6 +126,23 @@
       });
   });
 
+  // Auto-refresh signal for the workspace browser. It changes whenever the
+  // workflow advances in a way that has likely mutated the workspace — a state
+  // transition (currentState/phase), a fresh agent verdict (latestVerdict), a
+  // gate, a terminal phase — or when the socket reconnects (we may have missed
+  // events). The browser silently re-reads the file tree and the open file on
+  // each change; no backend file-watching is involved.
+  const workspaceRefreshSignal = $derived(
+    [
+      summary.currentState,
+      summary.phase,
+      summary.latestVerdict?.stateId ?? '',
+      summary.latestVerdict?.verdict ?? '',
+      summary.latestVerdict?.confidence ?? '',
+      connectionGeneration.value,
+    ].join('|'),
+  );
+
   async function loadMessageLogPage(before?: string): Promise<void> {
     messageLogLoading = true;
     messageLogError = '';
@@ -272,6 +289,7 @@
         {workflowId}
         workflowName={summary.name}
         stateDescription={gateStateDescription}
+        refreshSignal={workspaceRefreshSignal}
         onResolve={handleGateResolve}
         fetchArtifacts={getWorkflowArtifacts}
         fetchFileTree={getWorkflowFileTree}
@@ -385,6 +403,7 @@
           <div class="h-[400px]">
             <WorkspaceBrowser
               {workflowId}
+              refreshSignal={workspaceRefreshSignal}
               fetchFileTree={getWorkflowFileTree}
               fetchFileContent={getWorkflowFileContent}
             />

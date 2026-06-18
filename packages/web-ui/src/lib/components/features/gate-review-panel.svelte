@@ -16,6 +16,7 @@
     workflowName,
     workflowId,
     stateDescription,
+    refreshSignal = '',
     onResolve,
     fetchArtifacts,
     fetchFileTree,
@@ -25,6 +26,8 @@
     workflowName: string;
     workflowId: string;
     stateDescription?: string;
+    // Forwarded to the embedded workspace browser so the Files tab auto-refreshes.
+    refreshSignal?: string | number;
     onResolve: (event: string, prompt?: string) => void | Promise<void>;
     fetchArtifacts?: (workflowId: string, artifactName: string) => Promise<ArtifactContentDto>;
     fetchFileTree?: (workflowId: string, path?: string) => Promise<FileTreeResponseDto>;
@@ -265,7 +268,7 @@
   {:else if activeTab === 'files' && fetchFileTree && fetchFileContent}
     <!-- Workspace file browser -->
     <div class="h-[400px]">
-      <WorkspaceBrowser {workflowId} {fetchFileTree} {fetchFileContent} />
+      <WorkspaceBrowser {workflowId} {refreshSignal} {fetchFileTree} {fetchFileContent} />
     </div>
   {/if}
 

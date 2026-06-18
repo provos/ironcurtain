@@ -4,10 +4,20 @@
 
   let {
     workflowId,
+    refreshKey = '',
+    refreshing = $bindable(false),
     onFileSelect,
     fetchFileTree,
   }: {
     workflowId: string;
+    // Bumps on a workflow lifecycle event or a manual Refresh click. A change
+    // triggers a *silent* reconcile that re-reads the root and every currently
+    // expanded directory, surfacing new/removed files while preserving each
+    // node's expansion state, identity (keyed DOM), and scroll position.
+    refreshKey?: string | number;
+    // Bound up to the parent so a shared Refresh control can reflect an
+    // in-flight reconcile.
+    refreshing?: boolean;
     onFileSelect: (path: string) => void;
     fetchFileTree: (workflowId: string, path?: string) => Promise<FileTreeResponseDto>;
   } = $props();
@@ -25,21 +35,121 @@
   let roots = $state<TreeNode[]>([]);
   let rootLoading = $state(true);
   let error = $state('');
+  // Bumped by every load/reconcile; an in-flight async pass that finds its
+  // version stale abandons its writes so a newer pass always wins.
+  let loadVersion = 0;
+  let lastId: string | undefined;
+  let lastRefreshKey: string | number | undefined;
 
   $effect(() => {
     const id = workflowId;
+    const key = refreshKey;
+    if (id !== lastId) {
+      // First mount or a workflow switch: full load with a spinner.
+      lastId = id;
+      lastRefreshKey = key;
+      void fullLoad(id);
+      return;
+    }
+    if (key !== lastRefreshKey) {
+      // Same workflow, external refresh signal: reconcile silently.
+      lastRefreshKey = key;
+      void reconcile(id);
+    }
+  });
+
+  async function fullLoad(id: string): Promise<void> {
+    const version = ++loadVersion;
     rootLoading = true;
     error = '';
-    fetchFileTree(id)
-      .then((res) => {
-        roots = res.entries.map((e) => entryToNode(e, ''));
+    // A workflow switch can pre-empt an in-flight reconcile whose `finally`
+    // is now stale (won't clear `refreshing`); reset it here so the Refresh
+    // spinner doesn't stick on for the new workflow.
+    refreshing = false;
+    try {
+      const res = await fetchFileTree(id);
+      if (version !== loadVersion) return;
+      roots = res.entries.map((e) => entryToNode(e, ''));
+    } catch (err) {
+      if (version !== loadVersion) return;
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (version === loadVersion) rootLoading = false;
+    }
+  }
+
+  async function reconcile(id: string): Promise<void> {
+    const version = ++loadVersion;
+    refreshing = true;
+    try {
+      const res = await fetchFileTree(id);
+      if (version !== loadVersion) return;
+      const merged = await mergeLevel(id, roots, res.entries, '', version);
+      // A newer pass may have started while we were merging; don't clobber it.
+      if (version !== loadVersion) return;
+      roots = merged;
+    } catch {
+      // Keep the existing tree on a transient refresh failure.
+    } finally {
+      if (version === loadVersion) {
+        refreshing = false;
+        // A reconcile that ran supersedes any initial full load it pre-empted,
+        // whose stale `finally` would otherwise leave `rootLoading` stuck true
+        // (spinner forever). Normally rootLoading is already false here.
         rootLoading = false;
-      })
-      .catch((err) => {
-        error = err instanceof Error ? err.message : String(err);
-        rootLoading = false;
-      });
-  });
+      }
+    }
+  }
+
+  // Reconcile a fresh directory listing against existing nodes. Unchanged
+  // entries keep their node object (preserving expansion + already-loaded
+  // children and keeping the keyed DOM stable); expanded directories are
+  // re-fetched recursively so newly created files appear; entries absent from
+  // the new listing fall away because the result is rebuilt from `entries`.
+  // Sibling directories are re-fetched concurrently rather than one at a time.
+  async function mergeLevel(
+    id: string,
+    existing: TreeNode[],
+    entries: readonly FileTreeEntryDto[],
+    parentPath: string,
+    version: number,
+  ): Promise<TreeNode[]> {
+    const byPath = new Map(existing.map((n) => [n.path, n]));
+    const result: TreeNode[] = [];
+    const childFetches: Promise<void>[] = [];
+    for (const entry of entries) {
+      const path = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+      const prev = byPath.get(path);
+      if (prev && prev.type === entry.type) {
+        prev.size = entry.size;
+        if (prev.type === 'directory' && prev.expanded && prev.children !== null) {
+          const node = prev;
+          childFetches.push(
+            (async () => {
+              try {
+                const sub = await fetchFileTree(id, node.path);
+                if (version !== loadVersion) return;
+                const childResult = await mergeLevel(id, node.children ?? [], sub.entries, node.path, version);
+                // Re-check after the recursive merge: a newer pass may have
+                // superseded us while it was awaiting, and a stale pass must
+                // not mutate the live tree (the assignment below is otherwise
+                // unguarded, unlike the top-level `roots = merged`).
+                if (version !== loadVersion) return;
+                node.children = childResult;
+              } catch {
+                // Keep previously loaded children if this sub-fetch fails.
+              }
+            })(),
+          );
+        }
+        result.push(prev);
+      } else {
+        result.push(entryToNode(entry, parentPath));
+      }
+    }
+    await Promise.all(childFetches);
+    return result;
+  }
 
   function entryToNode(entry: FileTreeEntryDto, parentPath: string): TreeNode {
     const path = parentPath ? `${parentPath}/${entry.name}` : entry.name;
