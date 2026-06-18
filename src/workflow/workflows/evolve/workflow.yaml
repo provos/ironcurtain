@@ -8,13 +8,15 @@ settings:
   sharedContainer: true
   model: anthropic:claude-sonnet-4-6
   # Safety backstop for a wedged round pipeline, NOT the round budget.
-  # isRoundLimitReached trips when the most-visited state reaches this count. In
-  # the linear round chain every state (orchestrator, sample, researcher,
-  # evaluate, analyzer, analysis_record) is entered once per evolution round, so
-  # this bounds a wedged run at ~maxRounds rounds. Set well above
-  # run_spec.budget.max_rounds so a legitimate long run is never capped before
-  # the orchestrator emits `complete`; the real round budget is enforced by the
-  # orchestrator against run_spec.budget.max_rounds.
+  # isRoundLimitReached trips when the MAX visit count across all states reaches
+  # this number. On the happy path every state is entered once per evolution
+  # round, so this bounds a clean run at ~maxRounds rounds; mid-round recovery
+  # (evaluator_blocked -> human_escalation -> resume) re-visits evaluate and the
+  # orchestrator, so a run with many recoveries trips the backstop in fewer
+  # rounds. It is set well above run_spec.budget.max_rounds either way, so a
+  # legitimate run is never capped before the orchestrator emits `complete`; the
+  # real round budget is enforced by the orchestrator against
+  # run_spec.budget.max_rounds.
   maxRounds: 200
 
 states:
