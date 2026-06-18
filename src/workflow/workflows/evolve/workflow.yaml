@@ -295,13 +295,13 @@ states:
         - analysis.md means analysis for the in-flight round is done.
         - analysis_record.json means the round was recorded.
 
-      If a human directive in this message requests additional rounds, for example
-      "run 2 more rounds", that directive overrides a stop_reason for extension
-      turns. Treat the effective budget as done_rounds + that number for this turn.
-      Emit design to start the next round instead of complete until that extended
-      target is reached. Do not rewrite run_spec.yaml; extra rounds append new nodes
-      to nodes.json like normal rounds. Once done_rounds reaches that extended
-      target, emit complete again.
+      If a human directive in this message requests more rounds, that directive
+      overrides any stop_reason for THIS turn only: emit design to start one more
+      round instead of complete, even when stop_signals.json reports a stop. The
+      directive is present for a single turn; after that round records, route
+      normally on the freshly recomputed stop_signals.json — the human can request
+      another round at the next final_review gate. Do not rewrite run_spec.yaml;
+      extra rounds append new nodes to nodes.json like normal rounds.
 
       Decide and emit one verdict:
         - complete  - if stop_signals.json exists and its stop_reason is non-null,
