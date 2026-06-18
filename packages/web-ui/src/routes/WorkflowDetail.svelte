@@ -9,6 +9,7 @@
     getWorkflowFileContent,
     getWorkflowArtifacts,
     getWorkflowMessageLog,
+    getWorkflowReadme,
   } from '$lib/stores.svelte.js';
   import { RpcError } from '$lib/ws-client.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
@@ -21,7 +22,14 @@
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
   import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
   import MessageLogTimeline from '$lib/components/features/message-log-timeline.svelte';
+  import WorkflowReadmeModal from '$lib/components/features/workflow-readme-modal.svelte';
   import { renderMarkdown } from '$lib/markdown.js';
+  import Info from 'phosphor-svelte/lib/Info';
+  import ArrowsClockwise from 'phosphor-svelte/lib/ArrowsClockwise';
+  import Lightning from 'phosphor-svelte/lib/Lightning';
+  import FolderOpen from 'phosphor-svelte/lib/FolderOpen';
+  import Note from 'phosphor-svelte/lib/Note';
+  import SealCheck from 'phosphor-svelte/lib/SealCheck';
 
   const MESSAGE_LOG_PAGE_SIZE = 200;
 
@@ -45,6 +53,7 @@
   // exact corruption cause without parsing the message string.
   let corruptionMessage = $state('');
   let resolveError = $state('');
+  let readmeOpen = $state(false);
   let workspaceExpanded = $state(false);
   let expandedMessages = $state(new Set<number>());
 
@@ -214,6 +223,18 @@
     <Button variant="ghost" size="sm" onclick={onback}>&larr; Back</Button>
     <h2 class="text-xl font-semibold tracking-tight">{summary.name}</h2>
     <Badge variant={phaseBadgeVariant(summary.phase)}>{summary.phase.replace('_', ' ')}</Badge>
+    {#if detail?.hasReadme}
+      <Button
+        variant="outline"
+        size="sm"
+        type="button"
+        data-testid="readme-info-button"
+        title="View workflow README"
+        onclick={() => (readmeOpen = true)}
+      >
+        <Info size={15} weight="duotone" class="mr-1" /> README
+      </Button>
+    {/if}
     <span class="text-sm text-muted-foreground ml-auto">
       State: <span class="font-mono">{summary.currentState}</span>
     </span>
@@ -290,33 +311,43 @@
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Card>
           <CardContent>
-            <p class="text-xs text-muted-foreground">Round</p>
-            <p class="text-lg font-semibold">{detail.context.round}/{detail.context.maxRounds}</p>
+            <p class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+              <ArrowsClockwise size={14} weight="duotone" /> Round
+            </p>
+            <p class="text-lg font-semibold tabular-nums">{detail.context.round}/{detail.context.maxRounds}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent>
-            <p class="text-xs text-muted-foreground">Total Tokens</p>
-            <p class="text-lg font-semibold">{detail.context.totalTokens.toLocaleString()}</p>
+            <p class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+              <Lightning size={14} weight="duotone" /> Total Tokens
+            </p>
+            <p class="text-lg font-semibold tabular-nums">{detail.context.totalTokens.toLocaleString()}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent>
-            <p class="text-xs text-muted-foreground">Workspace</p>
-            <p class="text-sm font-mono truncate" title={detail.workspacePath}>{detail.workspacePath}</p>
+            <p class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+              <FolderOpen size={14} weight="duotone" /> Workspace
+            </p>
+            <p class="text-sm font-mono truncate" title={detail.workspacePath}>{detail.workspacePath || '--'}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent>
-            <p class="text-xs text-muted-foreground">Description</p>
+            <p class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+              <Note size={14} weight="duotone" /> Description
+            </p>
             <p class="text-sm truncate" title={detail.description}>{detail.description || '--'}</p>
           </CardContent>
         </Card>
         {#if latestVerdict}
           {@const confidenceText = formatConfidence(latestVerdict.confidence)}
-          <Card data-testid="latest-verdict-card">
+          <Card data-testid="latest-verdict-card" class="border-primary/30">
             <CardContent>
-              <p class="text-xs text-muted-foreground">Latest verdict</p>
+              <p class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
+                <SealCheck size={14} weight="duotone" class="text-primary" /> Latest verdict
+              </p>
               <p class="text-sm font-semibold truncate" title={latestVerdict.verdict}>
                 <span data-testid="latest-verdict-value">{latestVerdict.verdict}</span>
                 {#if confidenceText}
@@ -438,4 +469,11 @@
       {/if}
     </Card>
   {/if}
+
+  <WorkflowReadmeModal
+    open={readmeOpen}
+    onclose={() => (readmeOpen = false)}
+    title={summary.name}
+    fetchReadme={async () => (await getWorkflowReadme({ workflowId })).content}
+  />
 </div>

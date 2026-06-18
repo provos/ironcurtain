@@ -118,6 +118,7 @@ const workflowSettingsSchema = z
 const workflowDefinitionSchema = z.object({
   name: z.string().min(1),
   description: z.string(),
+  hidden: z.boolean().optional(),
   initial: z.string(),
   states: z.record(z.string(), stateDefinitionSchema),
   settings: workflowSettingsSchema,

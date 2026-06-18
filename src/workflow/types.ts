@@ -90,6 +90,13 @@ export function createWorkflowId(): WorkflowId {
 export interface WorkflowDefinition {
   readonly name: string;
   readonly description: string;
+  /**
+   * When true, the workflow is omitted from the web UI — both the start
+   * picker and the active/past-run tables. The CLI `workflow list` still
+   * shows it. Use for smoke-test / fixture workflows that should remain
+   * runnable from the CLI without cluttering the UI. Default: false.
+   */
+  readonly hidden?: boolean;
   readonly initial: string;
   readonly states: Record<string, WorkflowStateDefinition>;
   readonly settings?: WorkflowSettings;

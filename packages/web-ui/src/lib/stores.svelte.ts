@@ -21,6 +21,7 @@ import type {
   WorkflowSummaryDto,
   WorkflowDetailDto,
   WorkflowDefinitionDto,
+  WorkflowReadmeDto,
   HumanGateRequestDto,
   FileTreeResponseDto,
   FileContentResponseDto,
@@ -420,6 +421,18 @@ export async function listPersonas(): Promise<PersonaListItem[]> {
 
 export async function listWorkflowDefinitions(): Promise<WorkflowDefinitionDto[]> {
   return getWsClient().request<WorkflowDefinitionDto[]>('workflows.listDefinitions');
+}
+
+/**
+ * Fetches a workflow's co-packaged README markdown, addressed either by its
+ * definition manifest path (Start picker, no running workflow) or by a
+ * running/past workflow id (detail view). Exactly one argument is sent.
+ */
+export async function getWorkflowReadme(target: {
+  definitionPath?: string;
+  workflowId?: string;
+}): Promise<WorkflowReadmeDto> {
+  return getWsClient().request<WorkflowReadmeDto>('workflows.readme', target);
 }
 
 export async function listWorkflows(): Promise<WorkflowSummaryDto[]> {

@@ -52,6 +52,7 @@ vi.mock('$lib/stores.svelte.js', () => ({
   listResumableWorkflows: () => mockListResumable(),
   resumeWorkflow: (...a: unknown[]) => mockResumeWorkflow(...(a as [string])),
   importWorkflow: (...a: unknown[]) => mockImportWorkflow(...(a as [string])),
+  getWorkflowReadme: () => Promise.resolve({ content: '# Readme' }),
 }));
 
 // WorkflowDetail pulls in workspace-browser etc. Replace with a noop stub so we

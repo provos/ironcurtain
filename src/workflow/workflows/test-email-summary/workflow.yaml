@@ -1,5 +1,6 @@
 name: test-email-summary
 description: 'TESTING ONLY — fetch a small set of emails (exec-assistant) then summarize them to a file (global). Used to smoke-test the agent skills feature; not a real workflow. The task description supplies the scope (which emails: sent/received, count, time range, etc.).'
+hidden: true
 initial: fetch
 
 settings:

@@ -57,6 +57,7 @@ export type MethodName =
   | 'workflows.listDefinitions'
   | 'workflows.listResumable'
   | 'workflows.messageLog'
+  | 'workflows.readme'
   | 'personas.get'
   | 'personas.compile';
 
@@ -95,6 +96,7 @@ export type ErrorCode =
   | 'WORKFLOW_CORRUPTED'
   | 'WORKFLOW_NOT_AT_GATE'
   | 'ARTIFACT_NOT_FOUND'
+  | 'README_NOT_FOUND'
   | 'PERSONA_NOT_FOUND'
   | 'FILE_TOO_LARGE'
   | 'INVALID_PARAMS'
@@ -236,6 +238,8 @@ export type WorkflowDetailDto = WorkflowCardDto & {
   readonly context: WorkflowContextDto;
   readonly gate?: HumanGateRequestDto;
   readonly workspacePath: string;
+  /** True when the workflow's source package ships a `README.md` (lazily fetched via `workflows.readme`). */
+  readonly hasReadme: boolean;
 };
 
 /** Minimal representation of the state machine graph for frontend rendering. */
@@ -359,6 +363,14 @@ export interface WorkflowDefinitionDto {
   readonly description: string;
   readonly path: string;
   readonly source: 'bundled' | 'user' | 'custom';
+  /** True when the package ships a `README.md` (fetch with `workflows.readme`). */
+  readonly hasReadme: boolean;
+}
+
+/** README markdown for a workflow, returned by `workflows.readme`. */
+export interface WorkflowReadmeDto {
+  /** Raw markdown source; the client renders + sanitizes it. */
+  readonly content: string;
 }
 
 // ---------------------------------------------------------------------------

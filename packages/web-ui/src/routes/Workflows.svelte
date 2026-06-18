@@ -8,6 +8,7 @@
     listResumableWorkflows,
     resumeWorkflow as rpcResumeWorkflow,
     importWorkflow as rpcImportWorkflow,
+    getWorkflowReadme,
   } from '../lib/stores.svelte.js';
   import type { WorkflowSummaryDto, WorkflowDefinitionDto, PastRunDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
@@ -21,6 +22,7 @@
     countByPhase,
     formatConfidence,
     formatDurationMs,
+    formatRelativeTime,
     buildSummaryPlaceholder,
     synthesizeSummaryFromPastRun,
     synthesizeSummaryFromId,
@@ -33,8 +35,12 @@
   import { Alert } from '$lib/components/ui/alert/index.js';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
   import WorkflowDetail from './WorkflowDetail.svelte';
+  import WorkflowReadmeModal from '$lib/components/features/workflow-readme-modal.svelte';
   import Copy from 'phosphor-svelte/lib/Copy';
   import Check from 'phosphor-svelte/lib/Check';
+  import Info from 'phosphor-svelte/lib/Info';
+  import Rocket from 'phosphor-svelte/lib/Rocket';
+  import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
 
   const CUSTOM_PATH_SENTINEL = '__custom__';
 
@@ -45,6 +51,8 @@
   let workspacePath = $state('');
   let starting = $state(false);
   let actionError = $state('');
+  // README modal for the currently-selected definition in the Start form.
+  let readmeOpen = $state(false);
   // Track the gate set that was visible when the user dismissed the detail view.
   // The auto-select effect will not re-select until the set of pending gates changes.
   let dismissedGateIds: Set<string> | null = $state(null);
@@ -119,6 +127,9 @@
 
   const isCustomPath = $derived(selectedDefinition === CUSTOM_PATH_SENTINEL);
   const effectivePath = $derived(isCustomPath ? customPath.trim() : selectedDefinition);
+  // The selected bundled/user definition (undefined for the custom-path option
+  // or no selection). Drives the description helper text and README affordance.
+  const selectedDef = $derived(definitions.find((d) => d.path === selectedDefinition));
 
   $effect(() => {
     refreshWorkflows();
@@ -351,31 +362,55 @@
         <CardTitle>Start Workflow</CardTitle>
       </CardHeader>
       <CardContent>
-        <div class="space-y-3">
+        <div class="space-y-4">
           <div>
             <label for="def-select" class="block text-sm text-muted-foreground mb-1">Workflow definition</label>
-            <select
-              id="def-select"
-              bind:value={selectedDefinition}
-              class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
-            >
-              <option value="">Select a workflow...</option>
-              {#if bundledDefs.length > 0}
-                <optgroup label="Bundled">
-                  {#each bundledDefs as def (def.path)}
-                    <option value={def.path}>{def.name} -- {def.description}</option>
-                  {/each}
-                </optgroup>
-              {/if}
-              {#if userDefs.length > 0}
-                <optgroup label="User">
-                  {#each userDefs as def (def.path)}
-                    <option value={def.path}>{def.name} -- {def.description}</option>
-                  {/each}
-                </optgroup>
-              {/if}
-              <option value={CUSTOM_PATH_SENTINEL}>Other (custom path)...</option>
-            </select>
+            <div class="flex items-stretch gap-2">
+              <select
+                id="def-select"
+                bind:value={selectedDefinition}
+                class="flex-1 min-w-0 px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
+              >
+                <option value="">Select a workflow…</option>
+                {#if bundledDefs.length > 0}
+                  <optgroup label="Bundled">
+                    {#each bundledDefs as def (def.path)}
+                      <option value={def.path}>{def.name}</option>
+                    {/each}
+                  </optgroup>
+                {/if}
+                {#if userDefs.length > 0}
+                  <optgroup label="User">
+                    {#each userDefs as def (def.path)}
+                      <option value={def.path}>{def.name}</option>
+                    {/each}
+                  </optgroup>
+                {/if}
+                <option value={CUSTOM_PATH_SENTINEL}>Other (custom path)…</option>
+              </select>
+              <Button
+                variant="outline"
+                size="icon"
+                type="button"
+                class="shrink-0"
+                aria-label="View workflow README"
+                title={selectedDef?.hasReadme ? 'View README' : 'No README for this workflow'}
+                disabled={!selectedDef?.hasReadme}
+                data-testid="readme-info-button"
+                onclick={() => (readmeOpen = true)}
+              >
+                <Info size={18} weight="duotone" />
+              </Button>
+            </div>
+            {#if selectedDef}
+              <div
+                class="mt-2 flex items-start gap-2 text-xs text-muted-foreground"
+                data-testid="selected-definition-meta"
+              >
+                <Badge variant="outline" class="shrink-0 capitalize">{selectedDef.source}</Badge>
+                <span class="leading-relaxed">{selectedDef.description}</span>
+              </div>
+            {/if}
           </div>
           {#if isCustomPath}
             <div>
@@ -388,16 +423,19 @@
             <textarea
               id="task-desc"
               bind:value={taskDescription}
-              placeholder="Describe the task in detail..."
+              placeholder="Describe the task in detail…"
               rows="4"
               class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring placeholder:text-muted-foreground/50 transition-all disabled:opacity-50 resize-y min-h-[80px]"
             ></textarea>
           </div>
           <div>
-            <label for="ws-path" class="block text-sm text-muted-foreground mb-1">Workspace path (optional)</label>
+            <label for="ws-path" class="block text-sm text-muted-foreground mb-1">
+              Workspace path <span class="text-muted-foreground/60">(optional)</span>
+            </label>
             <Input id="ws-path" bind:value={workspacePath} placeholder="/path/to/workspace" />
           </div>
           <Button onclick={handleStart} loading={starting} disabled={!effectivePath || !taskDescription.trim()}>
+            {#if !starting}<Rocket size={16} weight="duotone" class="mr-1.5" />{/if}
             Start Workflow
           </Button>
         </div>
@@ -473,7 +511,11 @@
       {#if activeWorkflows.length === 0}
         <Card>
           <CardContent>
-            <p class="text-center text-muted-foreground py-8">No active workflows. Start one above.</p>
+            <div class="flex flex-col items-center gap-2 py-10 text-center">
+              <TreeStructure size={28} weight="duotone" class="text-muted-foreground/40" />
+              <p class="text-sm text-muted-foreground">No active workflows</p>
+              <p class="text-xs text-muted-foreground/70">Start one with the form above.</p>
+            </div>
           </CardContent>
         </Card>
       {:else}
@@ -508,8 +550,8 @@
                   {wf.maxRounds > 0 ? `${wf.round}/${wf.maxRounds}` : '--'}
                 </TableCell>
                 <TableCell>{@render verdictBadge(wf.latestVerdict)}</TableCell>
-                <TableCell class="text-muted-foreground text-sm">
-                  {new Date(wf.startedAt).toLocaleTimeString()}
+                <TableCell class="text-muted-foreground text-sm whitespace-nowrap">
+                  <span title={new Date(wf.startedAt).toLocaleString()}>{formatRelativeTime(wf.startedAt)}</span>
                 </TableCell>
                 <TableCell class="text-right">
                   {#if wf.phase === 'running' || wf.phase === 'waiting_human'}
@@ -594,8 +636,8 @@
                     <TableCell class="text-muted-foreground text-sm">
                       {formatDurationMs(row.durationMs) || '--'}
                     </TableCell>
-                    <TableCell class="text-muted-foreground text-sm">
-                      {new Date(row.timestamp).toLocaleString()}
+                    <TableCell class="text-muted-foreground text-sm whitespace-nowrap">
+                      <span title={new Date(row.timestamp).toLocaleString()}>{formatRelativeTime(row.timestamp)}</span>
                     </TableCell>
                     <TableCell class="text-right space-x-1.5 whitespace-nowrap">
                       <Button
@@ -656,5 +698,12 @@
         </CardContent>
       </Card>
     </section>
+
+    <WorkflowReadmeModal
+      open={readmeOpen}
+      onclose={() => (readmeOpen = false)}
+      title={selectedDef?.name ?? 'Workflow'}
+      fetchReadme={async () => (await getWorkflowReadme({ definitionPath: selectedDefinition })).content}
+    />
   </div>
 {/if}

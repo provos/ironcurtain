@@ -9,6 +9,7 @@ import {
   countByPhase,
   formatConfidence,
   formatDurationMs,
+  formatRelativeTime,
 } from './workflows-helpers.js';
 import type { PastRunDto, WorkflowSummaryDto, PastRunPhase, LiveWorkflowPhase } from '$lib/types.js';
 
@@ -206,6 +207,34 @@ describe('workflows-helpers', () => {
     it('returns empty for undefined or negative', () => {
       expect(formatDurationMs(undefined)).toBe('');
       expect(formatDurationMs(-1)).toBe('');
+    });
+  });
+
+  describe('formatRelativeTime', () => {
+    const now = new Date('2026-06-17T12:00:00.000Z').getTime();
+    const ago = (ms: number): string => new Date(now - ms).toISOString();
+
+    it('reports recent times as "just now"', () => {
+      expect(formatRelativeTime(ago(5_000), now)).toBe('just now');
+      expect(formatRelativeTime(ago(44_000), now)).toBe('just now');
+    });
+    it('reports minutes, hours, and days', () => {
+      expect(formatRelativeTime(ago(5 * 60_000), now)).toBe('5m ago');
+      expect(formatRelativeTime(ago(3 * 3_600_000), now)).toBe('3h ago');
+      expect(formatRelativeTime(ago(2 * 86_400_000), now)).toBe('2d ago');
+    });
+    it('floors at unit boundaries (no early roll-over)', () => {
+      expect(formatRelativeTime(ago(60_000), now)).toBe('1m ago');
+      expect(formatRelativeTime(ago(59 * 60_000 + 59_000), now)).toBe('59m ago');
+      expect(formatRelativeTime(ago(23 * 3_600_000 + 59 * 60_000), now)).toBe('23h ago');
+    });
+    it('falls back to a locale date beyond a week', () => {
+      const old = ago(10 * 86_400_000);
+      expect(formatRelativeTime(old, now)).toBe(new Date(old).toLocaleDateString());
+    });
+    it('returns -- for empty or unparseable input', () => {
+      expect(formatRelativeTime('', now)).toBe('--');
+      expect(formatRelativeTime('not-a-date', now)).toBe('--');
     });
   });
 });
