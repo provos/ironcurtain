@@ -383,7 +383,7 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
             writeAnalysis(workspacePath, analyzerTurns);
             return approvedResponse(`analysis ${analyzerTurns} written`);
           }
-          if (msg.includes('The Evolve run has reached its round budget')) {
+          if (msg.includes('The Evolve run has reached a stop condition')) {
             finalSummaryTurns += 1;
             writeFinalReport(workspacePath);
             return approvedResponse(`final summary ${finalSummaryTurns} written`);

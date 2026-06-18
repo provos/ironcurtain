@@ -158,11 +158,13 @@ states:
          - SUCCESS_CRITERION from the task's stated goal first. If the task names
            a target (e.g. "toward the AlphaEvolve target"), resolve the concrete
            number from the experiment brief (input.md/README) and use it, e.g.
-           eval_score >= 2.635. If the task names no target, fall back to the
+           eval_score >= 2.635. This MUST be the FIRST success_criteria entry in
+           canonical <core_score> <comparator> <number> form. Use only maximize
+           comparators >=, >, or ==. If the task names no target, fall back to the
            experiment brief's stated target; use a generic eval_score >= 1.0 only
-           when neither states one. This is a recorded quality descriptor, not a
-           hard gate (the run stops on max_rounds), so prefer an accurate target
-           over a conservative placeholder.
+           when neither states one. This is a hard early-stop target parsed after
+           each durable node record, so prefer an accurate target over a
+           conservative placeholder. Do not use prose, <, or <=.
          - EVAL_TIMEOUT_SECS as a generous per-candidate evaluation budget in
            seconds. Default to 300. Raise it (up to ~600) when the experiment or
            task implies heavy evaluation (e.g. numerical optimization) or when the
@@ -278,10 +280,14 @@ states:
       verdict in your agent_status block. You do not write candidates, run evaluators,
       or record nodes; you only decide what happens next.
 
-      Read these two files first:
+      Read these files first:
         - /workspace/.evolve_runs/main/run_spec.yaml - budget.max_rounds is N.
         - /workspace/.evolve_runs/main/database_data/nodes.json - count its "nodes" map.
           The file is absent before round 1, which means done_rounds = 0.
+        - /workspace/.evolve_runs/main/current/stop_signals.json, if present. It
+          is written by analysis_record after the durable node record. Use its
+          precomputed stop_reason; do NOT recompute target, patience, or max-round
+          logic yourself.
 
       Also inspect /workspace/.evolve_runs/main/current/. It is overwritten each round:
         - context.json means sampling for the in-flight round is done.
@@ -290,15 +296,18 @@ states:
         - analysis_record.json means the round was recorded.
 
       If a human directive in this message requests additional rounds, for example
-      "run 2 more rounds", treat the effective budget as done_rounds + that number
-      for this turn. Emit design to start the next round instead of complete. Do
-      not rewrite run_spec.yaml; extra rounds append new nodes to nodes.json like
-      normal rounds. Once done_rounds reaches that extended target, emit complete
-      again.
+      "run 2 more rounds", that directive overrides a stop_reason for extension
+      turns. Treat the effective budget as done_rounds + that number for this turn.
+      Emit design to start the next round instead of complete until that extended
+      target is reached. Do not rewrite run_spec.yaml; extra rounds append new nodes
+      to nodes.json like normal rounds. Once done_rounds reaches that extended
+      target, emit complete again.
 
       Decide and emit one verdict:
-        - complete  - if done_rounds >= max_rounds.
-        - design    - if done_rounds < max_rounds and no round is in-flight.
+        - complete  - if stop_signals.json exists and its stop_reason is non-null,
+                      unless a human extension directive is still active.
+        - design    - if no round is in-flight and no active stop_reason should
+                      complete the run.
         - evaluate  - if the in-flight round has a candidate written but no result.json yet.
         - analyze   - if the in-flight round has a result.json but no analysis.md yet.
         - record    - if the in-flight round has an analysis.md but is not yet committed.
@@ -487,7 +496,7 @@ states:
       report summarizing the run for the final human review.
     persona: global
     prompt: |
-      The Evolve run has reached its round budget. Produce a concise, human-readable
+      The Evolve run has reached a stop condition. Produce a concise, human-readable
       report of what the run found, for a human reviewer who will decide whether to
       accept the result or request more rounds.
 
@@ -496,6 +505,9 @@ states:
           budget.max_rounds (= N).
         - /workspace/.evolve_runs/main/database_data/nodes.json - every recorded node
           (id, parent, score, analysis). Count its "nodes" map for done_rounds.
+        - /workspace/.evolve_runs/main/current/stop_signals.json - the precomputed
+          stop_reason and stop metrics. Use this file; do NOT recompute the stop
+          condition.
         - /workspace/.evolve_runs/main/best/ - the best snapshot per improving round;
           the highest-scoring node is the run's result.
 
@@ -506,10 +518,12 @@ states:
       The report MUST contain, in this order:
         1. The objective (one line, from run_spec.yaml).
         2. done_rounds vs budget.max_rounds.
-        3. The best node: its id, its score, and its analysis/lesson.
-        4. The score trajectory across rounds (id -> score), so the reviewer can see
-           whether the search was still improving at the budget cap.
-        5. A one-paragraph recommendation: is the result acceptable, or would more
+        3. The stop reason from stop_signals.json: target_met, patience, max_rounds,
+           or the recorded null/unknown value if no stop signal is present.
+        4. The best node: its id, its score, and its analysis/lesson.
+        5. The score trajectory across rounds (id -> score), so the reviewer can see
+           whether the search was still improving at the stop condition.
+        6. A one-paragraph recommendation: is the result acceptable, or would more
            rounds plausibly help.
 
       Do NOT re-run the evaluator, write candidates, or modify any node. You only read

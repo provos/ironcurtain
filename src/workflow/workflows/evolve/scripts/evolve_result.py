@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +16,10 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DETERMINISTIC_ENV = {**os.environ, "PYTHONHASHSEED": "0"}
+IMPROVEMENT_EPS = 1e-9
+TARGET_RE = re.compile(
+    r"^\s*([A-Za-z_]\w*)\s*(>=|>|==|<=|<)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
+)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -125,14 +131,188 @@ def _resolve_parent(args: argparse.Namespace) -> list[int]:
 
 
 def _node_count(run_dir: Path) -> int:
+    return len(_nodes_payload(run_dir))
+
+
+def _nodes_payload(run_dir: Path) -> dict[str, Any]:
     nodes_path = run_dir / "database_data" / "nodes.json"
     if not nodes_path.exists():
-        return 0
+        return {}
     loaded = _load_json(nodes_path)
     if not isinstance(loaded, dict):
-        return 0
+        return {}
     nodes = loaded.get("nodes")
-    return len(nodes) if isinstance(nodes, dict) else 0
+    return nodes if isinstance(nodes, dict) else {}
+
+
+def _node_id(node: dict[str, Any], fallback: str) -> int | None:
+    raw = node.get("id")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(fallback)
+    except ValueError:
+        return None
+
+
+def _sorted_nodes(run_dir: Path) -> list[dict[str, Any]]:
+    items: list[tuple[int, dict[str, Any]]] = []
+    for key, value in _nodes_payload(run_dir).items():
+        if not isinstance(value, dict):
+            continue
+        node_id = _node_id(value, key)
+        if node_id is None:
+            continue
+        items.append((node_id, value))
+    return [node for _, node in sorted(items, key=lambda item: item[0])]
+
+
+def _find_recorded_node_for_step(run_dir: Path, step_name: str) -> dict[str, Any] | None:
+    for node in _sorted_nodes(run_dir):
+        meta = node.get("meta_info")
+        if isinstance(meta, dict) and meta.get("step_name") == step_name:
+            return node
+    return None
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _parse_success_target(spec: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    evaluation = spec.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return None, "run_spec.yaml has no evaluation object"
+
+    core_score = str(evaluation.get("core_score") or "eval_score")
+    raw_criteria = evaluation.get("success_criteria")
+    criteria = raw_criteria if isinstance(raw_criteria, list) else []
+    for raw in criteria:
+        if not isinstance(raw, str):
+            continue
+        match = TARGET_RE.match(raw)
+        if match is None:
+            continue
+        metric, comparator, threshold = match.groups()
+        if metric != core_score:
+            continue
+        if comparator in {"<", "<="}:
+            return None, f"unsupported maximize-only comparator in success criterion: {raw}"
+        return (
+            {
+                "metric": metric,
+                "comparator": comparator,
+                "threshold": float(threshold),
+                "raw": raw,
+            },
+            None,
+        )
+    return None, f"no canonical success criterion found for {core_score}"
+
+
+def _node_score(node: dict[str, Any]) -> float | None:
+    raw = node.get("score")
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
+def _target_is_met(best_score: float | None, target: dict[str, Any] | None) -> bool:
+    if best_score is None or target is None:
+        return False
+    threshold = float(target["threshold"])
+    comparator = target["comparator"]
+    if comparator == ">=":
+        return best_score + IMPROVEMENT_EPS >= threshold
+    if comparator == ">":
+        return best_score > threshold + IMPROVEMENT_EPS
+    if comparator == "==":
+        return abs(best_score - threshold) <= IMPROVEMENT_EPS
+    return False
+
+
+def _compute_stop_signals(run_dir: Path) -> dict[str, Any]:
+    spec_path = run_dir / "run_spec.yaml"
+    spec = _load_structured(spec_path) if spec_path.exists() else {}
+    budget = spec.get("budget")
+    if not isinstance(budget, dict):
+        budget = {}
+
+    target, target_parse_warning = _parse_success_target(spec)
+    max_rounds = _safe_int(budget.get("max_rounds"))
+    patience = _safe_int(budget.get("patience"))
+    nodes = _sorted_nodes(run_dir)
+    warnings: list[str] = []
+    best_score: float | None = None
+    best_node_id: int | None = None
+    rounds_since_improvement = 0
+
+    for index, node in enumerate(nodes):
+        node_id = _node_id(node, str(index))
+        score = _node_score(node)
+        if score is None:
+            warnings.append(f"node {node_id if node_id is not None else index} has no numeric score; treated as -inf")
+
+        if score is not None and (best_score is None or score > best_score + IMPROVEMENT_EPS):
+            best_score = score
+            best_node_id = node_id
+            rounds_since_improvement = 0
+        elif best_node_id is not None:
+            rounds_since_improvement += 1
+
+    done_rounds = len(nodes)
+    target_met = _target_is_met(best_score, target)
+    patience_exceeded = patience > 0 and rounds_since_improvement >= patience
+    max_rounds_reached = max_rounds > 0 and done_rounds >= max_rounds
+    if target_met:
+        stop_reason = "target_met"
+    elif patience_exceeded:
+        stop_reason = "patience"
+    elif max_rounds_reached:
+        stop_reason = "max_rounds"
+    else:
+        stop_reason = None
+
+    payload: dict[str, Any] = {
+        "best_score": best_score,
+        "best_node_id": best_node_id,
+        "evolution_rounds": done_rounds,
+        "rounds_since_improvement": rounds_since_improvement,
+        "target": target,
+        "target_met": target_met,
+        "patience": patience,
+        "patience_exceeded": patience_exceeded,
+        "done_rounds": done_rounds,
+        "max_rounds": max_rounds,
+        "stop_reason": stop_reason,
+        "improvement_epsilon": IMPROVEMENT_EPS,
+    }
+    if target_parse_warning is not None:
+        payload["target_parse_warning"] = target_parse_warning
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
+def _write_stop_signals(run_dir: Path) -> dict[str, Any]:
+    signals = _compute_stop_signals(run_dir)
+    _write_json(_current_dir(run_dir) / "stop_signals.json", signals)
+    return signals
 
 
 def _cognition_item_count(run_dir: Path) -> int:
@@ -398,7 +578,28 @@ def record(args: argparse.Namespace) -> int:
 
 def attach_analysis(args: argparse.Namespace) -> int:
     result_file = Path(args.result_file)
+    run_dir = _run_dir(args)
     step_name = _resolve_step_name(args)
+    existing_node = _find_recorded_node_for_step(run_dir, step_name)
+    if existing_node is not None:
+        node_id = _node_id(existing_node, "")
+        parent = existing_node.get("parent")
+        payload: dict[str, Any] = {
+            "step_name": step_name,
+            "parent": parent if isinstance(parent, list) else [],
+            "node_id": node_id,
+            "best_updated": False,
+            "step_dir": str(run_dir / "steps" / step_name),
+            "idempotent_skip": True,
+        }
+        signals = _write_stop_signals(run_dir)
+        payload["stop_reason"] = signals.get("stop_reason")
+        payload["stop_signals_path"] = str(_current_dir(run_dir) / "stop_signals.json")
+        if "target_parse_warning" in signals:
+            payload["target_parse_warning"] = signals["target_parse_warning"]
+        _write_json(result_file, {"verdict": "recorded", "payload": payload, "passed": True})
+        return 0
+
     code_path = _resolve_code_path(args, step_name)
     results_file = _resolve_results_file(args, step_name)
     name = _resolve_round_name(args, step_name)
@@ -443,6 +644,12 @@ def attach_analysis(args: argparse.Namespace) -> int:
         verdict = "needs_repair"
         passed = False
         payload["error"] = helper_error or f"evolve-db exited with code {helper_return_code}"
+
+    signals = _write_stop_signals(run_dir)
+    payload["stop_reason"] = signals.get("stop_reason")
+    payload["stop_signals_path"] = str(_current_dir(run_dir) / "stop_signals.json")
+    if "target_parse_warning" in signals:
+        payload["target_parse_warning"] = signals["target_parse_warning"]
 
     _write_json(result_file, {"verdict": verdict, "payload": payload, "passed": passed})
     return 0

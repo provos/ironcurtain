@@ -34,7 +34,10 @@ describe('evolve workflow manifest', () => {
           outputs: string[];
           transitions: Array<{ to: string; when?: { verdict?: string } }>;
         };
-        orchestrator: { transitions: Array<{ to: string; guard?: string; when?: { verdict?: string } }> };
+        orchestrator: {
+          prompt: string;
+          transitions: Array<{ to: string; guard?: string; when?: { verdict?: string } }>;
+        };
         evaluate: { transitions: Array<{ to: string; when?: { verdict?: string } }> };
         researcher: { transitions: Array<{ to: string }> };
         analyzer: { transitions: Array<{ to: string }> };
@@ -50,7 +53,7 @@ describe('evolve workflow manifest', () => {
           acceptedEvents: string[];
           transitions: Array<{ to: string; event: string }>;
         };
-        final_summary: { type: string; outputs: string[]; transitions: Array<{ to: string }> };
+        final_summary: { type: string; prompt: string; outputs: string[]; transitions: Array<{ to: string }> };
         final_review: {
           type: string;
           present: string[];
@@ -139,6 +142,14 @@ describe('evolve workflow manifest', () => {
     expect(prompt).toContain('importlib.util.spec_from_file_location');
     expect(prompt).toContain('/workspace/.workflow/run_spec/run_spec.md');
     expect(prompt).toContain('/workspace/.workflow/cognition_seed/cognition_seed.md');
+    expect(prompt).toContain('FIRST success_criteria entry');
+    expect(prompt).toContain('canonical <core_score> <comparator> <number> form');
+    expect(prompt).not.toContain('not a hard gate');
+    expect(prompt).not.toContain('the run stops on max_rounds');
+    expect(raw.states.orchestrator.prompt).toContain('stop_signals.json');
+    expect(raw.states.orchestrator.prompt).toContain('precomputed stop_reason');
+    expect(raw.states.final_summary.prompt).toContain('stop_signals.json');
+    expect(raw.states.final_summary.prompt).toContain('The stop reason from stop_signals.json');
     // The seed consumes a node-count slot, so a seeded run must add 1 to max-rounds.
     expect(prompt).toContain('add 1 to MAX_ROUNDS');
   });
@@ -224,6 +235,66 @@ describe('evolve_result.py bridge', () => {
         budget: { max_rounds: 3, patience: 2 },
       }) + '\n',
     );
+  }
+
+  function writeStopRunSpec(runDir: string, opts: { criterion: string; maxRounds: number; patience: number }): void {
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      resolve(runDir, 'run_spec.yaml'),
+      JSON.stringify({
+        objective: 'pin stop signal behavior',
+        evaluation: {
+          core_score: 'eval_score',
+          success_criteria: [opts.criterion],
+        },
+        budget: { max_rounds: opts.maxRounds, patience: opts.patience },
+      }) + '\n',
+    );
+  }
+
+  function writeNodes(runDir: string, scores: readonly number[], stepOffset = 1): void {
+    mkdirSync(resolve(runDir, 'database_data'), { recursive: true });
+    const nodes = Object.fromEntries(
+      scores.map((score, index) => {
+        const id = index;
+        const stepName = `step_${String(index + stepOffset).padStart(4, '0')}`;
+        return [
+          String(id),
+          {
+            id,
+            name: `round-${index + stepOffset}`,
+            parent: index === 0 ? [] : [index - 1],
+            score,
+            results: { eval_score: score },
+            analysis: `analysis ${id}`,
+            meta_info: { step_name: stepName },
+          },
+        ];
+      }),
+    );
+    writeFileSync(resolve(runDir, 'database_data', 'nodes.json'), JSON.stringify({ next_id: scores.length, nodes }));
+  }
+
+  function attachForExistingStep(scriptsDir: string, runDir: string, stepName: string): Record<string, unknown> {
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    const analysisFile = resolve(runDir, 'current', 'analysis.md');
+    writeFileSync(analysisFile, 'existing analysis\n');
+    return runBridge(scriptsDir, [
+      'attach_analysis',
+      '--run-dir',
+      runDir,
+      '--step-name',
+      stepName,
+      '--analysis-file',
+      analysisFile,
+    ]).result;
+  }
+
+  function readStopSignals(runDir: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(resolve(runDir, 'current', 'stop_signals.json'), 'utf-8')) as Record<
+      string,
+      unknown
+    >;
   }
 
   it('maps a numeric eval_score to verdict evaluated', () => {
@@ -396,6 +467,157 @@ describe('evolve_result.py bridge', () => {
     expect(failure.status).toBe(0);
     expect(failure.result.verdict).toBe('needs_repair');
     expect(failure.result.passed).toBe(false);
+  });
+
+  it('computes target-met stop signals after the recorded node and gives target precedence', () => {
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'target-stop-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 2', maxRounds: 3, patience: 1 });
+    writeNodes(runDir, [1, 3, 3]);
+
+    const result = attachForExistingStep(scriptsDir, runDir, 'step_0003');
+    const signals = readStopSignals(runDir);
+
+    expect(result).toMatchObject({
+      verdict: 'recorded',
+      passed: true,
+      payload: { node_id: 2, idempotent_skip: true, stop_reason: 'target_met' },
+    });
+    expect(signals).toMatchObject({
+      best_score: 3,
+      best_node_id: 1,
+      target_met: true,
+      patience_exceeded: true,
+      done_rounds: 3,
+      max_rounds: 3,
+      stop_reason: 'target_met',
+    });
+    expect(signals.target).toMatchObject({
+      metric: 'eval_score',
+      comparator: '>=',
+      threshold: 2,
+      raw: 'eval_score >= 2',
+    });
+  });
+
+  it('rejects <= success criteria for maximize-only stop targets', () => {
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'reject-target-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score <= 2', maxRounds: 5, patience: 0 });
+    writeNodes(runDir, [1]);
+
+    attachForExistingStep(scriptsDir, runDir, 'step_0001');
+    const signals = readStopSignals(runDir);
+
+    expect(signals).toMatchObject({
+      target: null,
+      target_met: false,
+      stop_reason: null,
+    });
+    expect(signals.target_parse_warning).toContain('unsupported maximize-only comparator');
+  });
+
+  it('counts patience plateaus from the node-0 baseline', () => {
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'patience-stop-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 2 });
+    writeNodes(runDir, [1, 2, 2, 2]);
+
+    attachForExistingStep(scriptsDir, runDir, 'step_0004');
+    const signals = readStopSignals(runDir);
+
+    expect(signals).toMatchObject({
+      best_score: 2,
+      best_node_id: 1,
+      rounds_since_improvement: 2,
+      target_met: false,
+      patience_exceeded: true,
+      stop_reason: 'patience',
+    });
+  });
+
+  it('uses max_rounds only after target and patience do not stop the run', () => {
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'max-rounds-stop-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 3, patience: 0 });
+    writeNodes(runDir, [1, 2, 3]);
+
+    attachForExistingStep(scriptsDir, runDir, 'step_0003');
+    const signals = readStopSignals(runDir);
+
+    expect(signals).toMatchObject({
+      target_met: false,
+      patience_exceeded: false,
+      done_rounds: 3,
+      max_rounds: 3,
+      stop_reason: 'max_rounds',
+    });
+  });
+
+  it('finds an already-recorded analysis node by step_name instead of appending a duplicate', () => {
+    const dbStub = [
+      'import json, sys',
+      'from pathlib import Path',
+      "run_dir = Path(sys.argv[sys.argv.index('--run-dir') + 1])",
+      "step_name = sys.argv[sys.argv.index('--step-name') + 1]",
+      "results_file = Path(sys.argv[sys.argv.index('--results-file') + 1])",
+      "results = json.loads(results_file.read_text(encoding='utf-8'))",
+      "nodes_path = run_dir / 'database_data' / 'nodes.json'",
+      'nodes_path.parent.mkdir(parents=True, exist_ok=True)',
+      "data = json.loads(nodes_path.read_text(encoding='utf-8')) if nodes_path.exists() else {'next_id': 0, 'nodes': {}}",
+      "node_id = int(data.get('next_id', 0))",
+      'parents = []',
+      'for index, value in enumerate(sys.argv):',
+      "    if value == '--parent':",
+      '        parents.append(int(sys.argv[index + 1]))',
+      "node = {'id': node_id, 'name': 'round-1', 'parent': parents, 'score': float(results['eval_score']), 'results': results, 'analysis': 'lesson', 'meta_info': {'step_name': step_name}}",
+      "data['nodes'][str(node_id)] = node",
+      "data['next_id'] = node_id + 1",
+      "nodes_path.write_text(json.dumps(data), encoding='utf-8')",
+      "(run_dir / 'record-calls.txt').open('a', encoding='utf-8').write(step_name + '\\n')",
+      "print(json.dumps({'node_id': node_id, 'best_updated': True, 'step_dir': str(run_dir / 'steps' / step_name)}))",
+    ].join('\n');
+    const scriptsDir = writeHarness({ dbStub: dbStub + '\n' });
+    const runDir = resolve(tmpDir, 'dedup-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 3, patience: 2 });
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    mkdirSync(resolve(runDir, 'steps', 'step_0001'), { recursive: true });
+    const analysisFile = resolve(runDir, 'current', 'analysis.md');
+    const resultsFile = resolve(runDir, 'steps', 'step_0001', 'results.json');
+    writeFileSync(analysisFile, 'lesson\n');
+    writeFileSync(resolve(runDir, 'steps', 'step_0001', 'code'), 'def score():\n    return 1\n');
+    writeFileSync(resultsFile, JSON.stringify({ eval_score: 7 }) + '\n');
+
+    const args = [
+      'attach_analysis',
+      '--run-dir',
+      runDir,
+      '--step-name',
+      'step_0001',
+      '--name',
+      'round-1',
+      '--parent',
+      '0',
+      '--code-path',
+      'candidate.py',
+      '--results-file',
+      resultsFile,
+      '--analysis-file',
+      analysisFile,
+    ];
+    const first = runBridge(scriptsDir, args);
+    const second = runBridge(scriptsDir, args);
+    const nodes = JSON.parse(readFileSync(resolve(runDir, 'database_data', 'nodes.json'), 'utf-8')) as {
+      nodes: Record<string, unknown>;
+    };
+
+    expect(first.result).toMatchObject({ verdict: 'recorded', payload: { node_id: 0 } });
+    expect(second.result).toMatchObject({
+      verdict: 'recorded',
+      payload: { node_id: 0, idempotent_skip: true },
+    });
+    expect(Object.keys(nodes.nodes)).toEqual(['0']);
+    expect(readFileSync(resolve(runDir, 'record-calls.txt'), 'utf-8').trim().split('\n')).toEqual(['step_0001']);
   });
 
   it('pins PYTHONHASHSEED for engine subprocesses', () => {

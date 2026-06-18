@@ -432,7 +432,7 @@ describe.skipIf(!dockerReady)('evolve human-surface workflow with real Docker co
             writeAnalysis(workspacePath, analyzerTurns);
             return approvedResponse(`analysis ${analyzerTurns} written`);
           }
-          if (msg.includes('The Evolve run has reached its round budget')) {
+          if (msg.includes('The Evolve run has reached a stop condition')) {
             finalSummaryTurns += 1;
             writeFinalReport(workspacePath);
             return approvedResponse(`final report ${finalSummaryTurns} written`);

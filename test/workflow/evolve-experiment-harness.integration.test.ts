@@ -437,7 +437,7 @@ describe.skipIf(!dockerReady)('evolve generic experiment harness with real Docke
             writeAnalysis(sessionWorkspace, analyzerTurns);
             return approvedResponse(`analysis ${analyzerTurns} written`);
           }
-          if (msg.includes('The Evolve run has reached its round budget')) {
+          if (msg.includes('The Evolve run has reached a stop condition')) {
             finalSummaryTurns += 1;
             writeFinalReport(sessionWorkspace);
             return approvedResponse(`final report ${finalSummaryTurns} written`);
