@@ -1490,6 +1490,10 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'workflows.readme': {
       const definitionPath = typeof params.definitionPath === 'string' ? params.definitionPath : undefined;
       const wfId = typeof params.workflowId === 'string' ? params.workflowId : undefined;
+      // Match the daemon's Zod refine: exactly one address form (not zero, not both).
+      if ((definitionPath ? 1 : 0) + (wfId ? 1 : 0) !== 1) {
+        return errorResult('INVALID_PARAMS', 'Provide exactly one of definitionPath or workflowId');
+      }
       // Resolve the workflow name from whichever address form was provided.
       let name: string | undefined;
       if (definitionPath) {
@@ -1497,8 +1501,6 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         name = definitionPath.match(/\/([^/]+)\/workflow\.ya?ml$/)?.[1];
       } else if (wfId) {
         name = workflows.get(wfId)?.name ?? buildPastRunFixtures().find((r) => r.workflowId === wfId)?.name;
-      } else {
-        return errorResult('INVALID_PARAMS', 'Provide exactly one of definitionPath or workflowId');
       }
       if (name && README_WORKFLOW_NAMES.has(name)) {
         return { content: MOCK_README };

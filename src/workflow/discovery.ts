@@ -19,6 +19,7 @@ import { dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { getUserWorkflowsDir } from '../config/paths.js';
+import { isWithinDirectory } from '../types/argument-roles.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -229,13 +230,23 @@ export function findWorkflowByName(name: string): WorkflowEntry | undefined {
 /**
  * Reads the README.md co-packaged with a workflow, given the absolute path
  * to its manifest. Returns the raw markdown, or `undefined` when no README
- * is present, it exceeds {@link MAX_README_BYTES}, or it cannot be read.
+ * is present, it resolves (via symlink) outside the workflow package, it
+ * exceeds {@link MAX_README_BYTES}, or it cannot be read.
+ *
+ * The containment check is the security boundary for `workflows.readme`: a
+ * symlinked README must not let the daemon serve arbitrary host files.
+ * `isWithinDirectory` resolves both paths to their canonical real form, so a
+ * symlink escaping the package dir is rejected while a legitimate in-package
+ * symlink still resolves.
  */
 export function readWorkflowReadme(manifestPath: string): string | undefined {
-  const readme = findReadme(getWorkflowPackageDir(manifestPath));
+  const packageDir = getWorkflowPackageDir(manifestPath);
+  const readme = findReadme(packageDir);
   if (!readme) return undefined;
+  if (!isWithinDirectory(readme, packageDir)) return undefined;
   try {
-    if (statSync(readme).size > MAX_README_BYTES) return undefined;
+    const stats = statSync(readme);
+    if (!stats.isFile() || stats.size > MAX_README_BYTES) return undefined;
     return readFileSync(readme, 'utf-8');
   } catch {
     return undefined;

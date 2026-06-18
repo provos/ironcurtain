@@ -223,6 +223,11 @@ describe('workflows-helpers', () => {
       expect(formatRelativeTime(ago(3 * 3_600_000), now)).toBe('3h ago');
       expect(formatRelativeTime(ago(2 * 86_400_000), now)).toBe('2d ago');
     });
+    it('floors at unit boundaries (no early roll-over)', () => {
+      expect(formatRelativeTime(ago(60_000), now)).toBe('1m ago');
+      expect(formatRelativeTime(ago(59 * 60_000 + 59_000), now)).toBe('59m ago');
+      expect(formatRelativeTime(ago(23 * 3_600_000 + 59 * 60_000), now)).toBe('23h ago');
+    });
     it('falls back to a locale date beyond a week', () => {
       const old = ago(10 * 86_400_000);
       expect(formatRelativeTime(old, now)).toBe(new Date(old).toLocaleDateString());

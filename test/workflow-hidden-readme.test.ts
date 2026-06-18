@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -87,6 +87,22 @@ describe('discovery: hidden flag + README detection', () => {
 
   it('readWorkflowReadme returns undefined when there is no README', () => {
     const manifest = writePackage('no-doc-flow');
+    expect(readWorkflowReadme(manifest)).toBeUndefined();
+  });
+
+  it('refuses a README symlinked outside the workflow package', () => {
+    // A file outside any workflow package that a symlinked README could leak.
+    const secret = resolve(tempDir, 'secret.txt');
+    writeFileSync(secret, 'TOP SECRET');
+    const dir = resolve(tempDir, 'workflows', 'evil-flow');
+    mkdirSync(dir, { recursive: true });
+    const manifest = resolve(dir, 'workflow.yaml');
+    writeFileSync(manifest, 'name: evil-flow\ndescription: "x"\ninitial: start\nstates: {}\n');
+    symlinkSync(secret, resolve(dir, 'README.md'));
+
+    // The symlink exists (so hasReadme is true), but reading it must be refused
+    // because it resolves outside the package dir — no arbitrary host reads.
+    expect(findWorkflowByName('evil-flow')?.hasReadme).toBe(true);
     expect(readWorkflowReadme(manifest)).toBeUndefined();
   });
 });

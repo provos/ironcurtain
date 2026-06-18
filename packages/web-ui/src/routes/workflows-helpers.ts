@@ -215,13 +215,15 @@ export function formatRelativeTime(iso: string, now: number = Date.now()): strin
   if (!iso) return '--';
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return '--';
-  const diffSec = Math.round((now - t) / 1000);
-  if (diffSec < 45) return 'just now';
-  const diffMin = Math.round(diffSec / 60);
+  // Floor each unit so we never round up across a boundary (e.g. 59m 31s must
+  // read "59m ago", not "1h ago"). The sub-minute window absorbs the floor=0 case.
+  const diffSec = Math.floor((now - t) / 1000);
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.floor(diffSec / 60);
   if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.round(diffMin / 60);
+  const diffHr = Math.floor(diffMin / 60);
   if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.round(diffHr / 24);
+  const diffDay = Math.floor(diffHr / 24);
   if (diffDay < 7) return `${diffDay}d ago`;
   return new Date(t).toLocaleDateString();
 }
