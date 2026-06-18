@@ -578,13 +578,18 @@ def sample(args: argparse.Namespace) -> int:
     ]
     if sampling_algorithm in STOCHASTIC_SAMPLERS:
         if sampling_seed is None:
+            seed_file = run_dir / "sampling_seed.txt"
+            detail = "exists but is not a single integer" if seed_file.exists() else "is missing"
             _write_json(
                 result_file,
                 {
                     "verdict": "sample_error",
                     "payload": {
                         "stage": "db_sample",
-                        "error": f"stochastic sampler {sampling_algorithm} requires sampling_seed.txt",
+                        "error": (
+                            f"stochastic sampler {sampling_algorithm} requires a sampling_seed.txt "
+                            f"with a single integer; the file {detail}"
+                        ),
                     },
                     "passed": False,
                 },
