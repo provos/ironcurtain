@@ -29,8 +29,13 @@ const oauthOnlySources: CredentialSources = {
 };
 
 function createTestConfig(
-  overrides: { anthropicApiKey?: string; preferredMode?: 'docker' | 'builtin' } = {},
+  overrides: {
+    anthropicApiKey?: string;
+    preferredMode?: 'docker' | 'builtin';
+    agentModelId?: string;
+  } = {},
 ): IronCurtainConfig {
+  const agentModelId = overrides.agentModelId ?? 'anthropic:claude-sonnet-4-6';
   return {
     auditLogPath: './audit.jsonl',
     allowedDirectory: TEST_SANDBOX_DIR,
@@ -40,14 +45,18 @@ function createTestConfig(
     protectedPaths: [],
     generatedDir: `${REAL_TMP}/test-generated`,
     constitutionPath: `${REAL_TMP}/test-constitution.md`,
-    agentModelId: 'anthropic:claude-sonnet-4-6',
+    agentModelId,
     escalationTimeoutSeconds: 300,
     userConfig: {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId,
       policyModelId: 'anthropic:claude-sonnet-4-6',
+      prefilterModelId: 'anthropic:claude-haiku-4-5',
       anthropicApiKey: overrides.anthropicApiKey ?? 'test-api-key',
       googleApiKey: '',
       openaiApiKey: '',
+      anthropicBaseUrl: '',
+      openaiBaseUrl: '',
+      googleBaseUrl: '',
       escalationTimeoutSeconds: 300,
       resourceBudget: {
         maxTotalTokens: 1_000_000,
@@ -64,11 +73,16 @@ function createTestConfig(
       },
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: true },
+      memory: { enabled: true, autoSave: true, llmBaseUrl: undefined, llmApiKey: undefined },
+      webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
       serverCredentials: {},
+      signal: null,
       gooseProvider: 'anthropic',
       gooseModel: 'claude-sonnet-4-20250514',
       preferredDockerAgent: 'claude-code',
       preferredMode: overrides.preferredMode ?? 'docker',
+      packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
+      dockerResources: { memoryMb: 8192, cpus: 4 },
     },
   };
 }
@@ -288,6 +302,7 @@ describe('resolveSessionMode', () => {
         expect(loadFromFile).not.toHaveBeenCalled();
         expect(loadFromKeychain).not.toHaveBeenCalled();
       });
+
     });
 
     describe('--agent overrides preferredMode', () => {
