@@ -137,4 +137,58 @@ describe('FileTree', () => {
     // Without rootLoading being cleared, this stays stuck on the spinner forever.
     expect(await screen.findByText('src/')).toBeTruthy();
   });
+
+  it('does not let a superseded reconcile clobber a newer one’s nested children', async () => {
+    // 'sub' fetches are resolved by hand so we can suspend one reconcile's deep
+    // recursion while a newer reconcile overtakes it — the exact window where a
+    // stale pass could otherwise write node.children after a newer pass won.
+    const subResolvers: Array<(r: FileTreeResponseDto) => void> = [];
+    // Keys are full node paths, matching what the component fetches.
+    const data: DirMap = {
+      '': [{ name: 'src', type: 'directory' }],
+      src: [{ name: 'sub', type: 'directory' }],
+      'src/sub': [{ name: 'a.ts', type: 'file', size: 1 }],
+    };
+    const fetchFileTree = vi.fn((_workflowId: string, path?: string): Promise<FileTreeResponseDto> => {
+      const p = path ?? '';
+      if (p === 'src/sub') return new Promise<FileTreeResponseDto>((resolve) => subResolvers.push(resolve));
+      return Promise.resolve({ entries: data[p] ?? [] });
+    });
+    const base = { workflowId: 'wf-1', onFileSelect: vi.fn(), fetchFileTree };
+    const { rerender } = render(FileTree, { props: { ...base, refreshKey: 'k0' } });
+
+    // Open src, then sub (resolving sub's initial expansion fetch).
+    await expandDir('src/');
+    await expandDir('sub/');
+    await waitFor(() => expect(subResolvers).toHaveLength(1));
+    subResolvers[0]({ entries: data['src/sub'] });
+    expect(await screen.findByText('a.ts')).toBeTruthy();
+
+    // Reconcile v2: it reads src as [sub] then suspends on its sub fetch.
+    await rerender({ ...base, refreshKey: 'k1' });
+    await waitFor(() => expect(subResolvers).toHaveLength(2));
+
+    // A new top-level file lands in src/ before the *next* reconcile reads it.
+    data.src = [
+      { name: 'sub', type: 'directory' },
+      { name: 'b.ts', type: 'file', size: 2 },
+    ];
+
+    // Reconcile v3: reads the updated src (with b.ts) and its own sub fetch.
+    await rerender({ ...base, refreshKey: 'k2' });
+    await waitFor(() => expect(subResolvers).toHaveLength(3));
+
+    // Let v3 finish first; b.ts is now in the tree.
+    subResolvers[2]({ entries: data['src/sub'] });
+    expect(await screen.findByText('b.ts')).toBeTruthy();
+
+    // The stale v2 sub fetch now resolves. Its src listing predates b.ts, so an
+    // unguarded write would drop b.ts; the post-merge version check must stop it.
+    subResolvers[1]({ entries: data['src/sub'] });
+    // Drain microtasks so any stale write (all promise continuations) lands.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText('b.ts')).toBeTruthy();
+    expect(screen.getByText('a.ts')).toBeTruthy();
+  });
 });

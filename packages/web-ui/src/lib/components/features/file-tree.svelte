@@ -129,7 +129,13 @@
               try {
                 const sub = await fetchFileTree(id, node.path);
                 if (version !== loadVersion) return;
-                node.children = await mergeLevel(id, node.children ?? [], sub.entries, node.path, version);
+                const childResult = await mergeLevel(id, node.children ?? [], sub.entries, node.path, version);
+                // Re-check after the recursive merge: a newer pass may have
+                // superseded us while it was awaiting, and a stale pass must
+                // not mutate the live tree (the assignment below is otherwise
+                // unguarded, unlike the top-level `roots = merged`).
+                if (version !== loadVersion) return;
+                node.children = childResult;
               } catch {
                 // Keep previously loaded children if this sub-fetch fails.
               }
