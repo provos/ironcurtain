@@ -333,7 +333,9 @@ describe('evolve_result.py bridge', () => {
           evaluation: {
             core_score: 'eval_score',
             secondary_metrics: [],
-            command: 'python3 -c \'import json; json.dump({"eval_score": 1}, open({quoted_results_path}, "w"))\'',
+            // dict(eval_score=1) is brace-free: the engine runs command.format(...) on this
+            // string, so a JSON-literal {"eval_score": 1} would be parsed as a format field.
+            command: 'python3 -c \'import json; json.dump(dict(eval_score=1), open({quoted_results_path}, "w"))\'',
             script_path: '',
             timeout_secs: 30,
             success_criteria: ['eval_score >= 99'],

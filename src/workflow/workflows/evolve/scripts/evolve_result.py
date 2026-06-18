@@ -357,8 +357,11 @@ def _sample_n_from_spec(run_dir: Path) -> int:
 
 
 def _sampling_algorithm(run_dir: Path) -> str:
+    # Normalize so the STOCHASTIC_SAMPLERS membership check (and thus the seed
+    # requirement) is case/whitespace-insensitive: a spec "UCB1" / " island "
+    # must not slip past as non-stochastic and run unseeded.
     algorithm = _sampling_config(run_dir).get("algorithm")
-    return str(algorithm or "greedy")
+    return str(algorithm or "greedy").strip().lower()
 
 
 def _sampling_seed(run_dir: Path) -> int | None:
@@ -415,7 +418,15 @@ def _promote_lesson(
         return {"promoted": False, "reason": "empty_lesson"}
     digest = hashlib.sha256(lesson.encode("utf-8")).hexdigest()
     ledger_path = run_dir / "cognition_promoted.json"
-    ledger = _load_json(ledger_path) if ledger_path.exists() else {}
+    ledger: Any = {}
+    if ledger_path.exists():
+        # A crash mid-write can leave the ledger truncated; a corrupt dedup
+        # ledger must not fail the whole run — fall back to an empty ledger
+        # (worst case: a lesson is promoted twice, which the engine tolerates).
+        try:
+            ledger = _load_json(ledger_path)
+        except (json.JSONDecodeError, OSError):
+            ledger = {}
     if not isinstance(ledger, dict):
         ledger = {}
     if digest in ledger:
