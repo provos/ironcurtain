@@ -25,6 +25,7 @@ import type {
   WorkflowStatus,
   WorkflowResult,
   WorkflowCheckpoint,
+  ContainerSnapshotRef,
   WorkflowEvent,
   TransitionRecord,
   HumanGateRequest,
@@ -83,6 +84,7 @@ import {
   ensureSecureBundleDir,
   type DockerInfrastructure,
 } from '../docker/docker-infrastructure.js';
+import type { DockerManager } from '../docker/types.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -118,6 +120,7 @@ import {
   isWorkflowQuotaExhaustedError,
   isWorkflowTransientFailureError,
 } from './errors.js';
+import { commitContainerSnapshot, removeContainerSnapshotImages } from './container-snapshots.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -403,6 +406,8 @@ export interface CreateWorkflowInfrastructureInput {
   readonly resolvedSkills?: readonly ResolvedSkill[];
   /** Per-run staged workflow scripts directory to mount read-only in the bundle. */
   readonly workflowScriptsDir?: string;
+  /** Optional immutable snapshot image digest to use for the main container. */
+  readonly baseImageOverride?: string;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -600,6 +605,7 @@ interface WorkflowInstance {
    */
   readonly workflowSkillsDir: string | undefined;
   readonly workflowScriptsDir: string | undefined;
+  readonly containerSnapshots: Readonly<Record<string, ContainerSnapshotRef>> | undefined;
   readonly actor: AnyActorRef;
   readonly gateStateNames: ReadonlySet<string>;
   readonly terminalStateNames: ReadonlySet<string>;
@@ -854,6 +860,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // being on disk.
     const resolvedSkills = resolveSkillsForSession({ workflowSkillsDir: instance.workflowSkillsDir });
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
+    const baseImageOverride = instance.containerSnapshots?.[scope]?.image;
     const infra = await factory({
       workflowId: instance.id,
       bundleId,
@@ -864,6 +871,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       requiredServers,
       resolvedSkills,
       workflowScriptsDir: instance.workflowScriptsDir,
+      baseImageOverride,
     });
 
     // Abort may have landed while `factory()` was suspended. Publishing
@@ -1106,6 +1114,70 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
   }
 
+  private shouldSnapshotOnStop(instance: WorkflowInstance): boolean {
+    if (!this.shouldUseSharedContainer(instance.definition)) return false;
+    if (instance.definition.settings?.snapshotOnStop !== true) return false;
+    return this.deps.userConfig.snapshot.enabled;
+  }
+
+  private async snapshotResumableScopes(
+    instance: WorkflowInstance,
+  ): Promise<Readonly<Record<string, ContainerSnapshotRef>> | undefined> {
+    if (!this.shouldSnapshotOnStop(instance)) return undefined;
+    const entries = [...instance.bundlesByScope.entries()];
+    if (entries.length === 0) return undefined;
+
+    const snapshots: Record<string, ContainerSnapshotRef> = {};
+    for (const [scope, infra] of entries) {
+      try {
+        snapshots[scope] = await commitContainerSnapshot({
+          docker: infra.docker,
+          workflowId: instance.id,
+          scope,
+          containerId: infra.containerId,
+        });
+      } catch (err) {
+        writeStderr(
+          `[workflow] Failed to snapshot container for ${instance.id} scope "${scope}": ${toErrorMessage(err)}`,
+        );
+      }
+    }
+    return Object.keys(snapshots).length > 0 ? snapshots : undefined;
+  }
+
+  private async dockerForSnapshotCleanup(instance: WorkflowInstance): Promise<DockerManager> {
+    if (instance.bundlesByScope.size > 0) {
+      return [...instance.bundlesByScope.values()][0].docker;
+    }
+    const { createDockerManager } = await import('../docker/docker-manager.js');
+    return createDockerManager();
+  }
+
+  private async removeSnapshotImagesAfterTeardown(
+    docker: DockerManager,
+    snapshots: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
+  ): Promise<void> {
+    if (!snapshots || Object.keys(snapshots).length === 0) return;
+    await removeContainerSnapshotImages(docker, snapshots).catch((err: unknown) => {
+      writeStderr(`[workflow] Failed to remove container snapshot image(s): ${toErrorMessage(err)}`);
+    });
+  }
+
+  private snapshotsSupersededBy(
+    previous: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
+    next: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
+  ): Readonly<Record<string, ContainerSnapshotRef>> | undefined {
+    if (!previous) return undefined;
+    const nextImages = new Set(Object.values(next ?? {}).map((snapshot) => snapshot.image));
+    const superseded: Record<string, ContainerSnapshotRef> = {};
+    for (const [scope, snapshot] of Object.entries(previous)) {
+      if (!nextImages.has(snapshot.image)) {
+        superseded[scope] = snapshot;
+      }
+    }
+    return Object.keys(superseded).length > 0 ? superseded : undefined;
+  }
+
   /**
    * Lazy-loads the default `createDockerInfrastructure` wrapper. The real
    * helper requires Docker dependencies and the session config, so we
@@ -1175,6 +1247,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           workflowRunId: input.workflowId,
         },
         input.workflowScriptsDir,
+        input.baseImageOverride ? { baseImageOverride: input.baseImageOverride } : undefined,
       );
     };
   }
@@ -1295,6 +1368,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       definitionPath,
       workflowSkillsDir,
       workflowScriptsDir,
+      containerSnapshots: undefined,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1396,6 +1470,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       definitionPath: checkpoint.definitionPath,
       workflowSkillsDir,
       workflowScriptsDir,
+      containerSnapshots: checkpoint.containerSnapshots,
       actor,
       gateStateNames,
       terminalStateNames,
@@ -1421,16 +1496,19 @@ export class WorkflowOrchestrator implements WorkflowController {
       },
     };
 
-    // Resume does NOT reclaim the original containers — any
-    // dependencies installed in the previous run are lost. Under the
-    // lazy-mint model there is nothing to do at resume time:
-    // `bundlesByScope` starts empty and the first state to execute
-    // mints its bundle afresh. Container reclamation across resume is
-    // tracked as a follow-up.
+    // Under the lazy-mint model there is nothing to create at resume
+    // time: `bundlesByScope` starts empty and the first state to execute
+    // mints its bundle. When the checkpoint carries snapshot digests,
+    // the per-scope mint path uses them as immutable image overrides
+    // after an imageExists guard; missing images degrade to fresh.
     if (this.shouldUseSharedContainer(definition)) {
+      const restoredScopes = Object.keys(checkpoint.containerSnapshots ?? {});
+      const snapshotNote =
+        restoredScopes.length > 0
+          ? ` Snapshot restore available for scope(s): ${restoredScopes.join(', ')}.`
+          : ' No container snapshots recorded; scopes will start fresh.';
       writeStderr(
-        `[workflow] Resuming ${workflowId} in shared-container mode: bundles will be re-created lazily per scope. ` +
-          `Any dependencies installed in pre-resume containers are lost.`,
+        `[workflow] Resuming ${workflowId} in shared-container mode: bundles will be re-created lazily per scope.${snapshotNote}`,
       );
     }
 
@@ -1644,13 +1722,44 @@ export class WorkflowOrchestrator implements WorkflowController {
       reason: 'Workflow aborted by user',
     };
 
+    let previousCheckpoint: WorkflowCheckpoint | undefined;
+    try {
+      previousCheckpoint = this.deps.checkpointStore.load(id);
+    } catch (err) {
+      writeStderr(`[workflow] Failed to load existing checkpoint during abort for ${id}: ${toErrorMessage(err)}`);
+    }
+    const containerSnapshots = await this.snapshotResumableScopes(instance);
+    try {
+      const terminalCheckpoint = this.buildCheckpoint(
+        instance,
+        instance.actor.getSnapshot() as { value: unknown; context: unknown },
+        instance.finalStatus,
+        containerSnapshots,
+      );
+      const checkpoint = previousCheckpoint
+        ? {
+            ...terminalCheckpoint,
+            machineState: previousCheckpoint.machineState,
+            context: previousCheckpoint.context,
+          }
+        : terminalCheckpoint;
+      this.deps.checkpointStore.save(id, checkpoint);
+    } catch (err) {
+      writeStderr(`[workflow] Failed to save aborted checkpoint for ${id}: ${toErrorMessage(err)}`);
+    }
+
     // Release the token-stream bus subscription before the async infra
     // teardown so no late events land against a finalized workflow.
     this.teardownTokenSubscription(instance);
 
     // Tear down workflow-scoped Docker infrastructure after all sessions
     // are closed. Error-tolerant (see destroyWorkflowInfrastructure).
+    const snapshotsToRemove = this.snapshotsSupersededBy(previousCheckpoint?.containerSnapshots, containerSnapshots);
+    const cleanupDocker = snapshotsToRemove ? await this.dockerForSnapshotCleanup(instance) : undefined;
     await this.destroyWorkflowInfrastructure(instance);
+    if (cleanupDocker) {
+      await this.removeSnapshotImagesAfterTeardown(cleanupDocker, snapshotsToRemove);
+    }
 
     // Intentionally leave the checkpoint in place: a user-triggered abort
     // should remain resumable via `workflow resume`. The checkpoint is only
@@ -1819,7 +1928,9 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       // Check for terminal states
       if (snapshot.status === 'done') {
-        this.handleWorkflowComplete(workflowId, snapshot.context);
+        this.handleWorkflowComplete(workflowId, snapshot.context).catch((err: unknown) => {
+          writeStderr(`[workflow] terminal handling failed for ${workflowId}: ${toErrorMessage(err)}`);
+        });
       }
     });
   }
@@ -1846,6 +1957,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     instance: WorkflowInstance,
     snapshot: { value: unknown; context: unknown },
     finalStatus?: WorkflowStatus,
+    containerSnapshots?: Readonly<Record<string, ContainerSnapshotRef>>,
   ): WorkflowCheckpoint {
     return {
       machineState: snapshot.value,
@@ -1860,6 +1972,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // keep the checkpoint shape tight for the common case.
       ...(instance.workflowSkillsDir !== undefined ? { workflowSkillsDir: instance.workflowSkillsDir } : {}),
       ...(instance.workflowScriptsDir !== undefined ? { workflowScriptsDir: instance.workflowScriptsDir } : {}),
+      ...(containerSnapshots !== undefined && Object.keys(containerSnapshots).length > 0 ? { containerSnapshots } : {}),
       ...(finalStatus !== undefined ? { finalStatus } : {}),
     };
   }
@@ -2615,7 +2728,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Completion handling
   // -----------------------------------------------------------------------
 
-  private handleWorkflowComplete(workflowId: WorkflowId, context: WorkflowContext): void {
+  private async handleWorkflowComplete(workflowId: WorkflowId, context: WorkflowContext): Promise<void> {
     const instance = this.workflows.get(workflowId);
     if (!instance) return;
 
@@ -2670,6 +2783,16 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
+    let existing: WorkflowCheckpoint | undefined;
+    try {
+      existing = this.deps.checkpointStore.load(workflowId);
+    } catch (err) {
+      writeStderr(`[workflow] Failed to load existing checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
+    }
+
+    const containerSnapshots =
+      instance.finalStatus.phase === 'aborted' ? await this.snapshotResumableScopes(instance) : undefined;
+
     // Persist finalStatus so isCheckpointResumable can later distinguish
     // completed (excluded) from aborted/failed (still resumable). Preserve
     // the existing on-disk machineState/context (which points at the last
@@ -2679,11 +2802,11 @@ export class WorkflowOrchestrator implements WorkflowController {
     // exists (e.g. a workflow that transitioned straight to terminal
     // without ever passing through a non-terminal save point).
     try {
-      const existing = this.deps.checkpointStore.load(workflowId);
       const terminalCheckpoint = this.buildCheckpoint(
         instance,
         instance.actor.getSnapshot() as { value: unknown; context: unknown },
         instance.finalStatus,
+        containerSnapshots,
       );
       const checkpoint = existing
         ? {
@@ -2705,13 +2828,24 @@ export class WorkflowOrchestrator implements WorkflowController {
     // callback — idempotent if already cleared by abort().
     this.teardownTokenSubscription(instance);
 
+    const snapshotsToRemove =
+      instance.finalStatus.phase === 'completed'
+        ? existing?.containerSnapshots
+        : this.snapshotsSupersededBy(existing?.containerSnapshots, containerSnapshots);
+    const cleanupDocker = snapshotsToRemove ? await this.dockerForSnapshotCleanup(instance) : undefined;
+
     // Tear down workflow-scoped Docker infrastructure. Runs asynchronously
     // because the actor subscription is sync; destroyWorkflowInfrastructure
     // is error-tolerant so unhandled rejections should not occur, but we
     // still catch defensively for a belt-and-suspenders guarantee. The
     // promise is retained on the instance so `shutdownAll` can await it
     // before the CLI exits (see `teardownPromise`).
-    instance.teardownPromise = this.destroyWorkflowInfrastructure(instance).catch((err: unknown) => {
+    instance.teardownPromise = (async () => {
+      await this.destroyWorkflowInfrastructure(instance);
+      if (cleanupDocker) {
+        await this.removeSnapshotImagesAfterTeardown(cleanupDocker, snapshotsToRemove);
+      }
+    })().catch((err: unknown) => {
       writeStderr(
         `[workflow] destroyWorkflowInfrastructure unexpectedly threw for ${workflowId}: ${toErrorMessage(err)}`,
       );

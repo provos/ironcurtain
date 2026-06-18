@@ -296,12 +296,15 @@ export function makeTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}):
     gooseProvider: 'anthropic',
     gooseModel: 'claude-sonnet-4-20250514',
     preferredDockerAgent: 'claude-code',
+    preferredMode: 'docker',
     packageInstall: {
       enabled: true,
       quarantineDays: 2,
       allowedPackages: [],
       deniedPackages: [],
     },
+    dockerResources: { memoryMb: null, cpus: null },
+    snapshot: { enabled: true, maxAgeDays: 7, sweepIntervalHours: 24, maxBytes: null },
     ...overrides,
   };
 }

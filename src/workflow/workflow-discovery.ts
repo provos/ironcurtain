@@ -1,4 +1,4 @@
-import { readdirSync, statSync, type Dirent } from 'node:fs';
+import { readFileSync, readdirSync, statSync, type Dirent } from 'node:fs';
 import { resolve } from 'node:path';
 import { SESSION_METADATA_FILENAME } from '../config/paths.js';
 import { loadSessionMetadataFromPath } from '../session/session-metadata.js';
@@ -10,18 +10,43 @@ export interface WorkflowRunSummary {
   readonly hasCheckpoint: boolean;
   readonly hasDefinition: boolean;
   readonly hasMessageLog: boolean;
+  readonly hasSnapshot: boolean;
+  readonly snapshotImages: readonly string[];
   readonly mtime: Date;
 }
 
 function buildSummary(directoryPath: string, workflowId: WorkflowId, mtime: Date): WorkflowRunSummary {
+  const snapshotImages = readSnapshotImages(directoryPath);
   return {
     workflowId,
     directoryPath,
     hasCheckpoint: existsSyncSafe(resolve(directoryPath, 'checkpoint.json')),
     hasDefinition: existsSyncSafe(resolve(directoryPath, 'definition.json')),
     hasMessageLog: existsSyncSafe(resolve(directoryPath, 'messages.jsonl')),
+    hasSnapshot: snapshotImages.length > 0,
+    snapshotImages,
     mtime,
   };
+}
+
+function readSnapshotImages(directoryPath: string): readonly string[] {
+  try {
+    const raw = JSON.parse(readFileSync(resolve(directoryPath, 'checkpoint.json'), 'utf-8')) as {
+      containerSnapshots?: Record<string, { image?: unknown }>;
+    };
+    const snapshots = raw.containerSnapshots;
+    if (!snapshots) return [];
+    return [
+      ...new Set(
+        Object.values(snapshots)
+          .map((snapshot) => snapshot.image)
+          .filter((image): image is string => typeof image === 'string'),
+      ),
+    ];
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    return [];
+  }
 }
 
 function existsSyncSafe(path: string): boolean {

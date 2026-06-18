@@ -41,6 +41,7 @@ import {
   type WorkflowCheckpoint,
   type WorkflowDefinition,
 } from './types.js';
+import { sweepContainerSnapshots } from './container-snapshots.js';
 
 // ---------------------------------------------------------------------------
 // loadPastRun result types
@@ -121,6 +122,8 @@ export interface WorkflowManagerOptions {
    * real session factory. The type matches `WorkflowOrchestratorDeps.createSession`.
    */
   readonly sessionFactoryOverride?: (options: SessionOptions) => Promise<Session>;
+  /** Enable daemon-mode startup and periodic workflow container snapshot GC. */
+  readonly enableSnapshotGc?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,12 +136,15 @@ export class WorkflowManager {
   private readonly baseDirOverride: string | undefined;
   private readonly captureTraces: boolean | undefined;
   private readonly sessionFactoryOverride: ((options: SessionOptions) => Promise<Session>) | undefined;
+  private readonly enableSnapshotGc: boolean;
+  private snapshotGcTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: WorkflowManagerOptions) {
     this.eventBus = options.eventBus;
     this.baseDirOverride = options.baseDirOverride;
     this.captureTraces = options.captureTraces;
     this.sessionFactoryOverride = options.sessionFactoryOverride;
+    this.enableSnapshotGc = options.enableSnapshotGc ?? false;
   }
 
   /** Lazily creates the orchestrator on first use. */
@@ -151,6 +157,10 @@ export class WorkflowManager {
 
   /** Clean shutdown of all workflows. */
   async shutdown(): Promise<void> {
+    if (this.snapshotGcTimer !== undefined) {
+      clearInterval(this.snapshotGcTimer);
+      this.snapshotGcTimer = undefined;
+    }
     if (this.orchestrator) {
       await this.orchestrator.shutdownAll();
       this.orchestrator = null;
@@ -338,6 +348,9 @@ export class WorkflowManager {
     this._checkpointStore = checkpointStore;
     const sessionFactory = this.sessionFactoryOverride ?? createWorkflowSessionFactory();
     const config = loadConfig();
+    if (this.enableSnapshotGc) {
+      this.startSnapshotGc(baseDir, checkpointStore, config.userConfig);
+    }
 
     const deps: WorkflowOrchestratorDeps = {
       createSession: sessionFactory,
@@ -363,6 +376,21 @@ export class WorkflowManager {
     const orchestrator = new WorkflowOrchestrator(deps);
     orchestrator.onEvent((event) => this.forwardLifecycleEvent(event));
     return orchestrator;
+  }
+
+  private startSnapshotGc(
+    baseDir: string,
+    checkpointStore: FileCheckpointStore,
+    userConfig: ReturnType<typeof loadConfig>['userConfig'],
+  ): void {
+    if (this.snapshotGcTimer !== undefined) return;
+    const runSweep = (): void => {
+      sweepContainerSnapshots({ baseDir, checkpointStore, userConfig }).catch(() => {});
+    };
+    runSweep();
+    const intervalMs = Math.max(1, userConfig.snapshot.sweepIntervalHours) * 60 * 60 * 1000;
+    this.snapshotGcTimer = setInterval(runSweep, intervalMs);
+    this.snapshotGcTimer.unref();
   }
 
   private createNoOpTab(): WorkflowTabHandle {

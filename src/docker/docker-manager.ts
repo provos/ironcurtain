@@ -7,8 +7,11 @@
  */
 
 import { execFile as execFileCb } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { DockerContainerConfig, DockerExecResult, DockerManager } from './types.js';
+import type { DockerContainerConfig, DockerExecResult, DockerImageInfo, DockerManager } from './types.js';
 import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
@@ -34,6 +37,9 @@ export const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
 /** Default timeout for docker exec commands (10 minutes). */
 export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 
+/** Default timeout for docker commit. Large writable layers can legitimately take minutes. */
+export const DEFAULT_COMMIT_TIMEOUT_MS = 600_000;
+
 /**
  * Idle (no-stdout/stderr) timeout for `docker pull`. The Docker daemon
  * heartbeats layer progress every few hundred ms during a healthy pull, so
@@ -58,6 +64,39 @@ const STOP_TIMEOUT_SECONDS = 10;
 export const IRONCURTAIN_LABEL_BUNDLE = 'ironcurtain.bundle';
 export const IRONCURTAIN_LABEL_WORKFLOW = 'ironcurtain.workflow';
 export const IRONCURTAIN_LABEL_SCOPE = 'ironcurtain.scope';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseDockerImageInfo(raw: unknown): DockerImageInfo {
+  if (!isRecord(raw)) {
+    throw new Error('Unexpected docker image inspect result: expected object');
+  }
+  const config = isRecord(raw.Config) ? raw.Config : {};
+  const labelsRaw = isRecord(config.Labels) ? config.Labels : {};
+  const labels: Record<string, string> = {};
+  for (const [key, value] of Object.entries(labelsRaw)) {
+    if (typeof value === 'string') labels[key] = value;
+  }
+  const repoTagsRaw = Array.isArray(raw.RepoTags) ? raw.RepoTags : [];
+  const repoTags = repoTagsRaw.filter((tag): tag is string => typeof tag === 'string');
+  return {
+    id: typeof raw.Id === 'string' ? raw.Id : '',
+    repoTags,
+    labels,
+    created: typeof raw.Created === 'string' ? raw.Created : '',
+  };
+}
+
+function parseDockerImageId(stdout: string): string {
+  const matches = stdout.match(/sha256:[a-f0-9]{64}/gi);
+  const imageId = matches?.at(-1);
+  if (!imageId) {
+    throw new Error(`docker image creation returned unexpected image id: ${stdout.trim() || '(empty)'}`);
+  }
+  return imageId;
+}
 
 /**
  * Builds the `docker create` argument list from a container config.
@@ -321,6 +360,105 @@ export function createDockerManager(
         return true;
       } catch {
         return false;
+      }
+    },
+
+    async commit(containerId: string, options = {}): Promise<string> {
+      if (options.flatten === true) {
+        const dir = mkdtempSync(join(tmpdir(), 'ironcurtain-snapshot-'));
+        const tarPath = join(dir, 'container.tar');
+        try {
+          await exec('docker', ['export', '--output', tarPath, containerId], {
+            timeout: options.timeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS,
+            maxBuffer: 1024 * 1024,
+          });
+          const args = ['import'];
+          for (const change of options.changes ?? []) {
+            args.push('--change', change);
+          }
+          args.push(tarPath);
+          if (options.tag !== undefined) {
+            args.push(options.tag);
+          }
+          const { stdout } = await exec('docker', args, {
+            timeout: options.timeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS,
+            maxBuffer: 1024 * 1024,
+          });
+          return parseDockerImageId(stdout);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+
+      const args = ['commit'];
+      if (options.pause === false) {
+        args.push('--no-pause');
+      }
+      for (const change of options.changes ?? []) {
+        args.push('--change', change);
+      }
+      args.push(containerId);
+      if (options.tag !== undefined) {
+        args.push(options.tag);
+      }
+      const { stdout } = await exec('docker', args, {
+        timeout: options.timeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+      return parseDockerImageId(stdout);
+    },
+
+    async removeImage(ref: string): Promise<boolean> {
+      try {
+        await exec('docker', ['image', 'rm', '--force', ref], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+        return true;
+      } catch (err: unknown) {
+        if (isExecError(err) && /no such image|not found|does not exist/i.test(err.stderr)) {
+          return false;
+        }
+        const detail = isExecError(err) ? err.stderr.trim() || err.message : String(err);
+        logger.warn(`[docker-manager] failed to remove image ${ref}: ${detail}`);
+        return false;
+      }
+    },
+
+    async listImages(options?: { readonly labelFilter?: string }): Promise<readonly DockerImageInfo[]> {
+      const args = ['image', 'ls', '--no-trunc', '--quiet'];
+      if (options?.labelFilter !== undefined) {
+        args.push('--filter', `label=${options.labelFilter}`);
+      }
+      const { stdout } = await exec('docker', args, { timeout: 10_000, maxBuffer: 10 * 1024 * 1024 });
+      const ids = [
+        ...new Set(
+          stdout
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean),
+        ),
+      ];
+      if (ids.length === 0) return [];
+      const { stdout: inspectStdout } = await exec('docker', ['image', 'inspect', ...ids], {
+        timeout: 30_000,
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      const parsed = JSON.parse(inspectStdout) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new Error('Unexpected docker image inspect result: expected array');
+      }
+      return parsed.map(parseDockerImageInfo);
+    },
+
+    async inspectImage(ref: string): Promise<DockerImageInfo | undefined> {
+      try {
+        const { stdout } = await exec('docker', ['image', 'inspect', ref], {
+          timeout: 10_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        const parsed = JSON.parse(stdout) as unknown;
+        if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+        return parseDockerImageInfo(parsed[0]);
+      } catch {
+        return undefined;
       }
     },
 

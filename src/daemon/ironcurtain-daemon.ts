@@ -753,6 +753,7 @@ export class IronCurtainDaemon {
     server.setWorkflowManager(
       new WorkflowManager({
         eventBus: server.getEventBus(),
+        enableSnapshotGc: true,
         // Opt-in only, matching the cron-session path above: set the override
         // solely when the daemon flag is present. Passing `false` here would
         // override (and disable) a user's `capture.enabled` config, since the

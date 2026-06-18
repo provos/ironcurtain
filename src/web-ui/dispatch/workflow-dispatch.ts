@@ -366,6 +366,8 @@ export async function workflowDispatch(
         hasCheckpoint: false,
         hasDefinition: false,
         hasMessageLog: false,
+        hasSnapshot: false,
+        snapshotImages: [],
         mtime: new Date(),
       };
       return buildDetailFromPastRun(id, result, summary);

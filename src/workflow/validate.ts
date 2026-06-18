@@ -112,6 +112,7 @@ const workflowSettingsSchema = z
     unversionedArtifacts: z.array(z.string()).optional(),
     model: looseModelId.optional(),
     sharedContainer: z.boolean().optional(),
+    snapshotOnStop: z.boolean().optional(),
   })
   .optional();
 

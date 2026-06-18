@@ -47,6 +47,7 @@ import {
 } from './cli-support.js';
 import { runRunState } from './run-state-command.js';
 import { runDaemonGateCommand } from './daemon-gate-commands.js';
+import { sweepContainerSnapshots } from './container-snapshots.js';
 import {
   formatDiagnostic,
   printDiagnostics,
@@ -214,6 +215,9 @@ async function runStart(args: string[]): Promise<void> {
   const gateHandler = createGateHandler();
   const sessionFactory = createWorkflowSessionFactory(modelOverride);
   const config = loadConfig();
+  await sweepContainerSnapshots({ baseDir, checkpointStore, userConfig: config.userConfig }).catch((err: unknown) => {
+    writeStderr(`[workflow] Container snapshot GC skipped: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
@@ -331,6 +335,9 @@ async function runResume(args: string[]): Promise<void> {
   printResumeInfo(baseDir, selected.workflowId, selected.checkpoint);
 
   const config = loadConfig();
+  await sweepContainerSnapshots({ baseDir, checkpointStore, userConfig: config.userConfig }).catch((err: unknown) => {
+    writeStderr(`[workflow] Container snapshot GC skipped: ${err instanceof Error ? err.message : String(err)}`);
+  });
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
     createWorkflowTab: (label: string): WorkflowTabHandle => createConsoleTab(label),
@@ -487,6 +494,9 @@ function runInspect(args: string[]): void {
       writeStdout(`  Timestamp: ${checkpoint.timestamp}`);
       if (checkpoint.context.lastError) {
         writeStdout(`  Error: ${RED}${checkpoint.context.lastError}${RESET}`);
+      }
+      if (checkpoint.containerSnapshots && Object.keys(checkpoint.containerSnapshots).length > 0) {
+        writeStdout(`  Container snapshots: ${Object.keys(checkpoint.containerSnapshots).length}`);
       }
       writeStdout(`  Task: ${checkpoint.context.taskDescription.slice(0, 100)}`);
     } else {

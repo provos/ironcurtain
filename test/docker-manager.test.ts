@@ -1012,6 +1012,144 @@ describe('DockerManager', () => {
     });
   });
 
+  describe('commit', () => {
+    it('commits a container with pause and change options and returns the image digest', async () => {
+      const digest = `sha256:${'a'.repeat(64)}`;
+      mock.setResponse(`Flag --pause has been deprecated\n${digest}\n`);
+      const manager = createDockerManager(mock.mockExec);
+
+      const result = await manager.commit('container-id', {
+        tag: 'ironcurtain-snapshot:wf-primary-stop',
+        pause: false,
+        changes: ['LABEL ironcurtain.snapshot.workflow=wf'],
+        timeoutMs: 1234,
+      });
+
+      expect(result).toBe(digest);
+      expect(mock.calls[0].args).toEqual([
+        'commit',
+        '--no-pause',
+        '--change',
+        'LABEL ironcurtain.snapshot.workflow=wf',
+        'container-id',
+        'ironcurtain-snapshot:wf-primary-stop',
+      ]);
+      expect(mock.calls[0].opts.timeout).toBe(1234);
+    });
+
+    it('rejects unexpected commit output', async () => {
+      mock.setResponse('not-a-digest\n');
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.commit('container-id')).rejects.toThrow('unexpected image id');
+    });
+
+    it('can flatten a container through docker export/import', async () => {
+      const digest = `sha256:${'b'.repeat(64)}`;
+      mock.setSequence([{ stdout: '' }, { stdout: `${digest}\n` }]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const result = await manager.commit('container-id', {
+        flatten: true,
+        tag: 'ironcurtain-snapshot:wf-primary-stop',
+        changes: ['LABEL ironcurtain.snapshot.workflow=wf'],
+        timeoutMs: 4321,
+      });
+
+      expect(result).toBe(digest);
+      expect(mock.calls[0].args[0]).toBe('export');
+      expect(mock.calls[0].args[1]).toBe('--output');
+      const tarPath = mock.calls[0].args[2];
+      expect(mock.calls[0].args[3]).toBe('container-id');
+      expect(mock.calls[1].args).toEqual([
+        'import',
+        '--change',
+        'LABEL ironcurtain.snapshot.workflow=wf',
+        tarPath,
+        'ironcurtain-snapshot:wf-primary-stop',
+      ]);
+      expect(mock.calls[0].opts.timeout).toBe(4321);
+      expect(mock.calls[1].opts.timeout).toBe(4321);
+    });
+  });
+
+  describe('removeImage', () => {
+    it('removes an image by reference', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.removeImage('sha256:abc123')).resolves.toBe(true);
+      expect(mock.calls[0].args).toEqual(['image', 'rm', '--force', 'sha256:abc123']);
+    });
+
+    it('returns false when the image is already missing', async () => {
+      mock.setError(1, '', 'No such image: sha256:abc123');
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.removeImage('sha256:abc123')).resolves.toBe(false);
+    });
+  });
+
+  describe('listImages and inspectImage', () => {
+    it('lists images by label using full IDs and inspect metadata', async () => {
+      const inspected = [
+        {
+          Id: 'sha256:abc123',
+          RepoTags: ['ironcurtain-snapshot:wf-primary-stop'],
+          Created: '2026-06-18T00:00:00Z',
+          Config: { Labels: { 'ironcurtain.snapshot.workflow': 'wf' } },
+        },
+      ];
+      mock.setSequence([{ stdout: 'sha256:abc123\n' }, { stdout: JSON.stringify(inspected) }]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const images = await manager.listImages({ labelFilter: 'ironcurtain.snapshot.workflow' });
+
+      expect(mock.calls[0].args).toEqual([
+        'image',
+        'ls',
+        '--no-trunc',
+        '--quiet',
+        '--filter',
+        'label=ironcurtain.snapshot.workflow',
+      ]);
+      expect(mock.calls[1].args).toEqual(['image', 'inspect', 'sha256:abc123']);
+      expect(images).toEqual([
+        {
+          id: 'sha256:abc123',
+          repoTags: ['ironcurtain-snapshot:wf-primary-stop'],
+          created: '2026-06-18T00:00:00Z',
+          labels: { 'ironcurtain.snapshot.workflow': 'wf' },
+        },
+      ]);
+    });
+
+    it('inspects one image and returns undefined when missing', async () => {
+      mock.setSequence([
+        {
+          stdout: JSON.stringify([
+            {
+              Id: 'sha256:def456',
+              RepoTags: null,
+              Created: '2026-06-18T00:00:00Z',
+              Config: { Labels: null },
+            },
+          ]),
+        },
+        { error: true, code: 1, stderr: 'No such image' },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.inspectImage('sha256:def456')).resolves.toEqual({
+        id: 'sha256:def456',
+        repoTags: [],
+        labels: {},
+        created: '2026-06-18T00:00:00Z',
+      });
+      await expect(manager.inspectImage('missing')).resolves.toBeUndefined();
+    });
+  });
+
   describe('getImageLabel', () => {
     it('returns label value from docker inspect', async () => {
       mock.setResponse('abc123\n');

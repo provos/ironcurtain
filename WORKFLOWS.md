@@ -70,13 +70,15 @@ Opt in by setting `settings.sharedContainer: true` in the workflow definition. I
 
 Before each agent state runs, the orchestrator hot-swaps the coordinator's active `PolicyEngine` to match the incoming state's `persona`. The swap is a `POST /__ironcurtain/policy/load` over the workflow's Unix domain control socket; the coordinator reloads `compiled-policy.json` / `tool-annotations.json` / `dynamic-lists.json` from the persona's policy directory under `callMutex` then `policyMutex`, so in-flight tool calls finish against the old engine and new calls use the new engine. The audit log is a single `audit.jsonl` for the whole run; each entry carries a `persona` field so per-state slices can be reconstructed by scanning.
 
+Snapshot resume is opt-in on top of shared-container mode with `settings.snapshotOnStop: true`. When such a workflow stops in the `aborted` terminal phase, IronCurtain snapshots each live `containerScope` to an immutable local Docker image id (`sha256:...`) and records that digest in the checkpoint. `workflow resume` still prepares the normal agent image and workflow dependency cache, then creates each scope's container from the recorded digest when it still exists. If an operator prunes the snapshot image, resume falls back to a fresh container and keeps the checkpoint resumable.
+
 Deterministic states can opt into this shared bundle with `container: true`.
 Those commands run via `docker exec` inside the state's `containerScope`
 (default: `primary`) instead of host-side `execFile`. Workflow packages may
 ship a sibling `scripts/` directory; it is staged into the run directory and
 mounted read-only at `/workflow-scripts`. If `scripts/requirements.txt` or
-`scripts/package.json` exists, dependencies are baked into a per-workflow child
-image at build time so runtime still runs without network access.
+`scripts/package.json` exists, dependencies are provisioned into content-hash
+host caches mounted at `/opt/workflow-venv` and `/opt/workflow-node_modules`.
 
 ### Workflow run layout
 
@@ -462,6 +464,7 @@ settings:
   maxRounds: 3
   systemPrompt: Optional persistent context for all agents
   sharedContainer: true # optional; see "Shared-container mode" above
+  snapshotOnStop: true # optional; requires sharedContainer and preserves container writable layers across aborted resume
 
 states:
   first_state:
