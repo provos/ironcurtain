@@ -678,6 +678,18 @@ interface WorkflowInstance {
    */
   aborted: boolean;
   /**
+   * Tracks the fire-and-forget Docker teardown started by
+   * `handleWorkflowComplete` on a normal terminal. The terminal handler runs
+   * inside the synchronous actor subscription and so cannot await teardown;
+   * it stores the promise here instead. `shutdownAll` drains it so the CLI's
+   * `process.exit()` does not race the in-flight teardown and orphan the
+   * per-run `--internal` Docker network. Note that `destroyWorkflowInfrastructure`
+   * snapshot-and-clears `bundlesByScope` synchronously, so a redundant destroy
+   * pass no-ops while the real work stays captured in this promise — awaiting
+   * it is the only way to observe teardown completion.
+   */
+  teardownPromise?: Promise<void>;
+  /**
    * Stamped by `throwIfQuotaExhausted` when an agent turn reports
    * upstream quota exhaustion. `handleWorkflowComplete` consults this
    * to force an abort-like terminal phase and preserve the checkpoint,
@@ -1673,6 +1685,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         return instance ? this.destroyWorkflowInfrastructure(instance) : Promise.resolve();
       }),
     );
+    // Drain any fire-and-forget teardown started by `handleWorkflowComplete`
+    // on a normal terminal. Because `destroyWorkflowInfrastructure`
+    // snapshot-and-clears `bundlesByScope` up front, the explicit pass above
+    // no-ops for an already-completed workflow whose teardown is still in
+    // flight — so we must await the stored promise to guarantee the Docker
+    // network/container removal has actually finished before the caller (the
+    // CLI) calls process.exit().
+    await Promise.allSettled(ids.map((id) => this.workflows.get(id)?.teardownPromise ?? Promise.resolve()));
   }
 
   // -----------------------------------------------------------------------
@@ -2688,8 +2708,10 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Tear down workflow-scoped Docker infrastructure. Runs asynchronously
     // because the actor subscription is sync; destroyWorkflowInfrastructure
     // is error-tolerant so unhandled rejections should not occur, but we
-    // still catch defensively for a belt-and-suspenders guarantee.
-    void this.destroyWorkflowInfrastructure(instance).catch((err: unknown) => {
+    // still catch defensively for a belt-and-suspenders guarantee. The
+    // promise is retained on the instance so `shutdownAll` can await it
+    // before the CLI exits (see `teardownPromise`).
+    instance.teardownPromise = this.destroyWorkflowInfrastructure(instance).catch((err: unknown) => {
       writeStderr(
         `[workflow] destroyWorkflowInfrastructure unexpectedly threw for ${workflowId}: ${toErrorMessage(err)}`,
       );
