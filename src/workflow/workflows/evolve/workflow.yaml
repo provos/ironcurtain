@@ -1,5 +1,5 @@
 name: evolve
-description: 'Evolve - multi-round evaluator-driven candidate search via an orchestrator hub: sampling, cognition, and per-round analysis.'
+description: 'Evolve - multi-round evaluator-driven candidate search: a linear per-round pipeline (sample, researcher, evaluate, analyzer, record) with a round-boundary orchestrator enforcing budget and stop conditions.'
 initial: provision
 
 settings:
@@ -7,12 +7,14 @@ settings:
   dockerAgent: claude-code
   sharedContainer: true
   model: anthropic:claude-sonnet-4-6
-  # Safety backstop for a wedged orchestrator hub, NOT the round budget.
-  # isRoundLimitReached trips when the most-visited state (the orchestrator,
-  # entered ~4 times per evolution round) reaches this count. Set well above
-  # 4 * run_spec.budget.max_rounds + 1 so a legitimate long run is never capped
-  # before the orchestrator emits `complete`; the real round budget is enforced
-  # by the orchestrator against run_spec.budget.max_rounds.
+  # Safety backstop for a wedged round pipeline, NOT the round budget.
+  # isRoundLimitReached trips when the most-visited state reaches this count. In
+  # the linear round chain every state (orchestrator, sample, researcher,
+  # evaluate, analyzer, analysis_record) is entered once per evolution round, so
+  # this bounds a wedged run at ~maxRounds rounds. Set well above
+  # run_spec.budget.max_rounds so a legitimate long run is never capped before
+  # the orchestrator emits `complete`; the real round budget is enforced by the
+  # orchestrator against run_spec.budget.max_rounds.
   maxRounds: 200
 
 states:
@@ -298,13 +300,16 @@ states:
 
   orchestrator:
     type: agent
-    description: Central router. Reads the durable run state and routes the next phase.
+    description: Round-boundary controller - after each recorded round (and at the start) it enforces the budget and stop conditions, routing to continue, complete, or escalate.
     persona: global
     prompt: |
-      You are the Evolve orchestrator - the central router for a bounded multi-round
-      search. On every turn you read the durable run state and emit exactly ONE routing
-      verdict in your agent_status block. You do not write candidates, run evaluators,
-      or record nodes; you only decide what happens next.
+      You are the Evolve orchestrator - the round-boundary controller for a bounded
+      multi-round search. You are entered at the start of the run and again after each
+      round is durably recorded; you read the durable run state and emit exactly ONE
+      routing verdict in your agent_status block. You do not write candidates, run
+      evaluators, or record nodes. The per-round pipeline runs on its own - sample ->
+      researcher -> evaluate -> analyzer -> analysis_record - and returns here only
+      once the round is committed.
 
       Read these files first:
         - /workspace/.evolve_runs/main/run_spec.yaml - budget.max_rounds is N.
@@ -315,11 +320,10 @@ states:
           precomputed stop_reason; do NOT recompute target, patience, or max-round
           logic yourself.
 
-      Also inspect /workspace/.evolve_runs/main/current/. It is overwritten each round:
-        - context.json means sampling for the in-flight round is done.
-        - result.json means evaluation for the in-flight round is done.
-        - analysis.md means analysis for the in-flight round is done.
-        - analysis_record.json means the round was recorded.
+      One recovery case: if a human just approved an evaluator-blocked round, you are
+      entered mid-round with a candidate written but not yet scored. Detect this by
+      /workspace/.evolve_runs/main/current/context.json present AND result.json absent,
+      and emit evaluate to resume that round rather than starting a new one.
 
       If a human directive in this message requests more rounds, that directive
       overrides any stop_reason for THIS turn only: emit design to start one more
@@ -332,11 +336,10 @@ states:
       Decide and emit one verdict:
         - complete  - if stop_signals.json exists and its stop_reason is non-null,
                       unless a human extension directive is still active.
-        - design    - if no round is in-flight and no active stop_reason should
+        - design    - to start the next round, when no active stop_reason should
                       complete the run.
-        - evaluate  - if the in-flight round has a candidate written but no result.json yet.
-        - analyze   - if the in-flight round has a result.json but no analysis.md yet.
-        - record    - if the in-flight round has an analysis.md but is not yet committed.
+        - evaluate  - only to resume an evaluator-blocked round (the recovery case
+                      above): a candidate is written but result.json is absent.
         - escalate  - only if the run is unrecoverable.
 
       Finish with the required agent_status block carrying exactly one of those verdicts.
@@ -349,10 +352,6 @@ states:
         when: { verdict: design }
       - to: evaluate
         when: { verdict: evaluate }
-      - to: analyzer
-        when: { verdict: analyze }
-      - to: analysis_record
-        when: { verdict: record }
       - to: final_summary
         when: { verdict: complete }
       - to: human_escalation
@@ -418,7 +417,7 @@ states:
     outputs: []
     maxVisits: 3
     transitions:
-      - to: orchestrator
+      - to: evaluate
 
   evaluate:
     type: deterministic
@@ -438,7 +437,7 @@ states:
           '/workspace/.evolve_runs/main/current/result.json',
         ]
     transitions:
-      - to: orchestrator
+      - to: analyzer
         when: { verdict: evaluated }
       - to: human_escalation
         when: { verdict: evaluator_blocked }
@@ -468,7 +467,7 @@ states:
     outputs: []
     maxVisits: 3
     transitions:
-      - to: orchestrator
+      - to: analysis_record
 
   analysis_record:
     type: deterministic

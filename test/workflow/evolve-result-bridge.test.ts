@@ -30,7 +30,7 @@ describe('evolve workflow manifest', () => {
     expect(diagnostics.map((d) => d.code)).not.toContain('WF012');
   });
 
-  it('manifest wires the multi-round hub and confirmed run-spec fields', () => {
+  it('manifest wires the linear round chain and confirmed run-spec fields', () => {
     const manifestPath = resolve(WORKFLOW_DIR, 'workflow.yaml');
     const raw = parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }) as {
       settings: { maxRounds: number };
@@ -47,6 +47,7 @@ describe('evolve workflow manifest', () => {
         evaluate: { transitions: Array<{ to: string; when?: { verdict?: string } }> };
         researcher: { prompt: string; transitions: Array<{ to: string }> };
         analyzer: { transitions: Array<{ to: string }> };
+        analysis_record: { transitions: Array<{ to: string; when?: { verdict?: string } }> };
         preflight_review: {
           type: string;
           present: string[];
@@ -75,11 +76,12 @@ describe('evolve workflow manifest', () => {
     expect(raw.states.preflight.outputs).toEqual(['run_spec', 'cognition_seed']);
     expect(raw.states.preflight.transitions[0]).toMatchObject({ to: 'preflight_review', when: { verdict: 'ready' } });
     expect(raw.states.orchestrator.transitions[0]).toEqual({ to: 'failed', guard: 'isRoundLimitReached' });
+    // Round-boundary controller: design (next round), evaluate (resume an
+    // evaluator-blocked round only), complete, escalate. The mid-round verdicts
+    // (analyze/record) are gone — those steps now chain directly.
     expect(raw.states.orchestrator.transitions.map((t) => t.when?.verdict).filter(Boolean)).toEqual([
       'design',
       'evaluate',
-      'analyze',
-      'record',
       'complete',
       'escalate',
     ]);
@@ -87,11 +89,15 @@ describe('evolve workflow manifest', () => {
     expect(raw.states.orchestrator.transitions.find((t) => t.when?.verdict === 'escalate')?.to).toBe(
       'human_escalation',
     );
+    // Linear round chain: sample -> researcher -> evaluate -> analyzer ->
+    // analysis_record -> orchestrator. Only the durable record returns to the hub.
+    expect(raw.states.researcher.transitions).toEqual([{ to: 'evaluate' }]);
+    expect(raw.states.evaluate.transitions.find((t) => t.when?.verdict === 'evaluated')?.to).toBe('analyzer');
     expect(raw.states.evaluate.transitions.find((t) => t.when?.verdict === 'evaluator_blocked')?.to).toBe(
       'human_escalation',
     );
-    expect(raw.states.researcher.transitions).toEqual([{ to: 'orchestrator' }]);
-    expect(raw.states.analyzer.transitions).toEqual([{ to: 'orchestrator' }]);
+    expect(raw.states.analyzer.transitions).toEqual([{ to: 'analysis_record' }]);
+    expect(raw.states.analysis_record.transitions.find((t) => t.when?.verdict === 'recorded')?.to).toBe('orchestrator');
     expect(raw.states.preflight_review).toMatchObject({
       type: 'human_gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
