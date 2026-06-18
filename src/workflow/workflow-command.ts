@@ -239,6 +239,15 @@ async function runStart(args: string[]): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
+  // Exit only AFTER the finally so workflow + Docker teardown (shutdownAll)
+  // fully drains first. Calling process.exit() inside the try — as this code
+  // used to — terminates the process synchronously and cuts off the async
+  // teardown in the finally, orphaning each run's per-session --internal
+  // Docker network (which has no stale-reaper) until Docker's address pools
+  // are exhausted.
+  // Definitely assigned before the post-finally `process.exit`: the only way
+  // to skip that assignment is a throw, which propagates past it.
+  let exitCode: number;
   try {
     writeStdout(`${BOLD}${MAGENTA}Starting workflow${RESET}`);
     writeStdout(`${DIM}Task: ${taskDescription}${RESET}`);
@@ -254,13 +263,13 @@ async function runStart(args: string[]): Promise<void> {
 
     printSummary(orchestrator, workflowId, artifactDir);
 
-    const exitCode = computeExitCode(orchestrator, workflowId, controller.signal);
-    process.exit(exitCode);
+    exitCode = computeExitCode(orchestrator, workflowId, controller.signal);
   } finally {
     rl.close();
     await orchestrator.shutdownAll().catch(() => {});
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
+  process.exit(exitCode);
 }
 
 async function runResume(args: string[]): Promise<void> {
@@ -343,6 +352,11 @@ async function runResume(args: string[]): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
+  // Exit only AFTER the finally so teardown (shutdownAll) fully drains first.
+  // See runStart for why process.exit() inside the try leaks Docker networks.
+  // Definitely assigned before the post-finally `process.exit`: the only way
+  // to skip that assignment is a throw, which propagates past it.
+  let exitCode: number;
   try {
     writeStdout(`${BOLD}${MAGENTA}Resuming...${RESET}`);
     writeStdout('');
@@ -356,13 +370,13 @@ async function runResume(args: string[]): Promise<void> {
 
     printSummary(orchestrator, selected.workflowId, artifactDir);
 
-    const exitCode = computeExitCode(orchestrator, selected.workflowId, controller.signal);
-    process.exit(exitCode);
+    exitCode = computeExitCode(orchestrator, selected.workflowId, controller.signal);
   } finally {
     rl.close();
     await orchestrator.shutdownAll().catch(() => {});
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
+  process.exit(exitCode);
 }
 
 function runInspect(args: string[]): void {

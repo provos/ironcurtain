@@ -447,6 +447,83 @@ describe('WorkflowOrchestrator shared-container mode', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Test 6b: shutdownAll drains the terminal handler's in-flight teardown
+  //
+  // Regression for the leaked-Docker-network bug: on a normal terminal,
+  // handleWorkflowComplete kicks off destroyWorkflowInfrastructure as a
+  // fire-and-forget (the actor subscription is synchronous). Because
+  // destroyWorkflowInfrastructure snapshot-and-clears bundlesByScope up
+  // front, shutdownAll's redundant destroy pass no-ops — so shutdownAll
+  // MUST await the retained teardownPromise, otherwise the CLI's
+  // process.exit() races the still-running `docker network rm` and orphans
+  // the per-run --internal network.
+  // -------------------------------------------------------------------------
+
+  it('shutdownAll awaits the in-flight teardown started by a normal terminal', async () => {
+    const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
+
+    const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+      makeStubInfrastructure(input.workflowId, input.bundleId),
+    );
+
+    // Gate the teardown so it cannot finish until we release it. This models
+    // the slow `docker stop`/`rm`/`network rm` calls inside cleanupContainers.
+    let releaseDestroy!: () => void;
+    const destroyGate = new Promise<void>((r) => {
+      releaseDestroy = r;
+    });
+    let destroyFinished = false;
+    const destroyInfra = vi.fn(async () => {
+      await destroyGate;
+      destroyFinished = true;
+    });
+
+    const sessionFactory = vi.fn(async () =>
+      createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['result'] }], tmpDir),
+    );
+
+    const orchestrator = new WorkflowOrchestrator(
+      createDeps(tmpDir, {
+        createSession: sessionFactory,
+        createWorkflowInfrastructure: createInfra,
+        destroyWorkflowInfrastructure: destroyInfra,
+      }),
+    );
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // The terminal handler has dispatched destroy, but it is blocked on the
+    // gate (still in flight).
+    const start = Date.now();
+    while (destroyInfra.mock.calls.length === 0 && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(destroyInfra).toHaveBeenCalledTimes(1);
+    expect(destroyFinished).toBe(false);
+
+    // shutdownAll must NOT resolve while the teardown is still running.
+    let shutdownResolved = false;
+    const shutdownPromise = orchestrator.shutdownAll().then(() => {
+      shutdownResolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(shutdownResolved).toBe(false);
+    expect(destroyFinished).toBe(false);
+
+    // Release the teardown; now shutdownAll can complete — and only after the
+    // teardown has fully finished.
+    releaseDestroy();
+    await shutdownPromise;
+    activeOrchestrator = undefined;
+
+    expect(shutdownResolved).toBe(true);
+    expect(destroyFinished).toBe(true);
+    expect(destroyInfra).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
   // Test 7: Builtin workflows ignore the sharedContainer flag
   // -------------------------------------------------------------------------
 

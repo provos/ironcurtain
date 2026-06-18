@@ -394,8 +394,15 @@ export function createDockerManager(
     async removeNetwork(name: string): Promise<void> {
       try {
         await exec('docker', ['network', 'rm', name], { timeout: 10_000 });
-      } catch {
-        // Ignore errors -- network may already be removed
+      } catch (err: unknown) {
+        // Non-fatal: callers invoke this in best-effort teardown paths and
+        // depend on it never throwing. But a genuine failure here orphans the
+        // network (there is no stale-network reaper, unlike removeStaleContainer),
+        // so surface it rather than swallowing silently. "not found" is benign
+        // (already removed) and stays quiet.
+        if (isExecError(err) && /not found|no such network/i.test(err.stderr)) return;
+        const detail = isExecError(err) ? err.stderr.trim() || err.message : String(err);
+        logger.warn(`removeNetwork: failed to remove "${name}": ${detail}`);
       }
     },
 
