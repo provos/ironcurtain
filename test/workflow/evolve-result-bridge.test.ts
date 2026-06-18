@@ -11,6 +11,12 @@ const PYTHON = process.env.PYTHON ?? 'python3';
 const WORKFLOW_DIR = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'evolve');
 const BRIDGE_PATH = resolve(WORKFLOW_DIR, 'scripts', 'evolve_result.py');
 
+// The real-engine cases below spawn the byte-verbatim evolve_core helpers, which
+// import numpy (the faiss-free fallback). CI runners have python3 but not numpy, so
+// gate those cases on engine-deps availability, mirroring how the Docker integration
+// tests gate on dockerReady. They run locally and in the container.
+const REAL_ENGINE_READY = spawnSync(PYTHON, ['-c', 'import numpy, yaml'], { stdio: 'ignore' }).status === 0;
+
 describe('evolve workflow manifest', () => {
   it('validates and lints cleanly', () => {
     const manifestPath = resolve(WORKFLOW_DIR, 'workflow.yaml');
@@ -739,60 +745,63 @@ describe('evolve_result.py bridge', () => {
     expect(readFileSync(resolve(runDir, 'record-calls.txt'), 'utf-8').trim().split('\n')).toEqual(['step_0001']);
   });
 
-  it('promotes recorded lessons into the real cognition store and retrieves them on a later sample', () => {
-    const runDir = realRunDir('real-cognition');
-    writeRealRunSpec(runDir, {
-      objective: 'alpha beta recombination round lesson',
-      sampleN: 1,
-      algorithm: 'greedy',
-    });
+  it.skipIf(!REAL_ENGINE_READY)(
+    'promotes recorded lessons into the real cognition store and retrieves them on a later sample',
+    () => {
+      const runDir = realRunDir('real-cognition');
+      writeRealRunSpec(runDir, {
+        objective: 'alpha beta recombination round lesson',
+        sampleN: 1,
+        algorithm: 'greedy',
+      });
 
-    const lesson = 'alpha beta recombination lesson carries forward';
-    const recorded = recordRealStep(runDir, 1, 1, lesson);
-    expect(recorded).toMatchObject({
-      verdict: 'recorded',
-      passed: true,
-      payload: { cognition_promoted: { promoted: true, items_added: 1 } },
-    });
-    const promotedItems = readCognitionItems(runDir).filter((item) => item.metadata.kind === 'round_lesson');
-    expect(promotedItems).toHaveLength(1);
-    const [promotedItem] = promotedItems;
-    expect(promotedItem.content).toBe(lesson);
-    expect(promotedItem.source).toBe('step_0001');
-    expect(promotedItem.metadata).toMatchObject({
-      kind: 'round_lesson',
-      node_id: 0,
-      best_updated: true,
-      score: 1,
-    });
-    expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(1);
+      const lesson = 'alpha beta recombination lesson carries forward';
+      const recorded = recordRealStep(runDir, 1, 1, lesson);
+      expect(recorded).toMatchObject({
+        verdict: 'recorded',
+        passed: true,
+        payload: { cognition_promoted: { promoted: true, items_added: 1 } },
+      });
+      const promotedItems = readCognitionItems(runDir).filter((item) => item.metadata.kind === 'round_lesson');
+      expect(promotedItems).toHaveLength(1);
+      const [promotedItem] = promotedItems;
+      expect(promotedItem.content).toBe(lesson);
+      expect(promotedItem.source).toBe('step_0001');
+      expect(promotedItem.metadata).toMatchObject({
+        kind: 'round_lesson',
+        node_id: 0,
+        best_updated: true,
+        score: 1,
+      });
+      expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(1);
 
-    const contextFile = resolve(runDir, 'current', 'context.json');
-    const sampled = runBridge(realScriptsDir(), [
-      'sample',
-      '--run-dir',
-      runDir,
-      '--query-from-spec',
-      '--n-from-spec',
-      '--context-file',
-      contextFile,
-    ]);
-    const context = JSON.parse(readFileSync(contextFile, 'utf-8')) as {
-      parents: Array<{ id: number }>;
-      cognition: { matches: Array<{ content: string; source: string; metadata: { kind?: string } }> };
-    };
-    expect(sampled.result).toMatchObject({
-      verdict: 'sampled',
-      payload: { parent_ids: [0], sample_n: 1, sampling_algorithm: 'greedy' },
-    });
-    expect(context.parents.map((parent) => parent.id)).toEqual([0]);
-    expect(context).not.toHaveProperty('parent');
-    expect(context.cognition.matches.some((match) => match.content === lesson && match.source === 'step_0001')).toBe(
-      true,
-    );
-  });
+      const contextFile = resolve(runDir, 'current', 'context.json');
+      const sampled = runBridge(realScriptsDir(), [
+        'sample',
+        '--run-dir',
+        runDir,
+        '--query-from-spec',
+        '--n-from-spec',
+        '--context-file',
+        contextFile,
+      ]);
+      const context = JSON.parse(readFileSync(contextFile, 'utf-8')) as {
+        parents: Array<{ id: number }>;
+        cognition: { matches: Array<{ content: string; source: string; metadata: { kind?: string } }> };
+      };
+      expect(sampled.result).toMatchObject({
+        verdict: 'sampled',
+        payload: { parent_ids: [0], sample_n: 1, sampling_algorithm: 'greedy' },
+      });
+      expect(context.parents.map((parent) => parent.id)).toEqual([0]);
+      expect(context).not.toHaveProperty('parent');
+      expect(context.cognition.matches.some((match) => match.content === lesson && match.source === 'step_0001')).toBe(
+        true,
+      );
+    },
+  );
 
-  it('deduplicates repeated lesson promotion against the real cognition store', () => {
+  it.skipIf(!REAL_ENGINE_READY)('deduplicates repeated lesson promotion against the real cognition store', () => {
     const runDir = realRunDir('real-cognition-dedup');
     writeRealRunSpec(runDir);
     const lesson = 'duplicate lesson only appears once';
@@ -810,7 +819,7 @@ describe('evolve_result.py bridge', () => {
     expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(1);
   });
 
-  it('does not promote cognition on the idempotent attach_analysis path', () => {
+  it.skipIf(!REAL_ENGINE_READY)('does not promote cognition on the idempotent attach_analysis path', () => {
     const runDir = realRunDir('real-idempotent-skip');
     writeRealRunSpec(runDir);
     const lesson = 'idempotent skip must not promote twice';
@@ -837,7 +846,7 @@ describe('evolve_result.py bridge', () => {
     expect(replay.result.payload).not.toHaveProperty('cognition_promoted');
   });
 
-  it('samples multi-parent context from the real engine using run-spec sample_n', () => {
+  it.skipIf(!REAL_ENGINE_READY)('samples multi-parent context from the real engine using run-spec sample_n', () => {
     const runDir = realRunDir('real-multi-parent-sample');
     writeRealRunSpec(runDir, { sampleN: 3, algorithm: 'greedy' });
     recordRealStep(runDir, 1, 1, 'node one lesson');
@@ -867,7 +876,7 @@ describe('evolve_result.py bridge', () => {
     expect(context).not.toHaveProperty('parent');
   });
 
-  it('records every sampled parent from plural context into the real nodes database', () => {
+  it.skipIf(!REAL_ENGINE_READY)('records every sampled parent from plural context into the real nodes database', () => {
     const runDir = realRunDir('real-multi-parent-record');
     writeRealRunSpec(runDir, { sampleN: 3, algorithm: 'greedy' });
     recordRealStep(runDir, 1, 1, 'node one lesson');
@@ -901,26 +910,29 @@ describe('evolve_result.py bridge', () => {
     expect(nodes.nodes['3'].parent).toEqual([0, 1, 2]);
   });
 
-  it('seeds stochastic sampler subprocesses and records the configured sampler in the real round log', () => {
-    const runDir = realRunDir('real-seeded-ucb1');
-    writeRealRunSpec(runDir, { sampleN: 2, algorithm: 'ucb1' });
-    writeFileSync(resolve(runDir, 'sampling_seed.txt'), '123\n');
-    recordRealStep(runDir, 1, 1, 'node one lesson');
-    recordRealStep(runDir, 2, 2, 'node two lesson', [0]);
-    recordRealStep(runDir, 3, 3, 'node three lesson', [1]);
+  it.skipIf(!REAL_ENGINE_READY)(
+    'seeds stochastic sampler subprocesses and records the configured sampler in the real round log',
+    () => {
+      const runDir = realRunDir('real-seeded-ucb1');
+      writeRealRunSpec(runDir, { sampleN: 2, algorithm: 'ucb1' });
+      writeFileSync(resolve(runDir, 'sampling_seed.txt'), '123\n');
+      recordRealStep(runDir, 1, 1, 'node one lesson');
+      recordRealStep(runDir, 2, 2, 'node two lesson', [0]);
+      recordRealStep(runDir, 3, 3, 'node three lesson', [1]);
 
-    runBridge(realScriptsDir(), [
-      'sample',
-      '--run-dir',
-      runDir,
-      '--query-from-spec',
-      '--n-from-spec',
-      '--context-file',
-      resolve(runDir, 'current', 'context.json'),
-    ]);
-    const samples = roundLogEvents(runDir).filter((event) => event.event === 'db_sample');
-    expect(samples.at(-1)?.payload).toMatchObject({ algorithm: 'ucb1', n: 2 });
-  });
+      runBridge(realScriptsDir(), [
+        'sample',
+        '--run-dir',
+        runDir,
+        '--query-from-spec',
+        '--n-from-spec',
+        '--context-file',
+        resolve(runDir, 'current', 'context.json'),
+      ]);
+      const samples = roundLogEvents(runDir).filter((event) => event.event === 'db_sample');
+      expect(samples.at(-1)?.payload).toMatchObject({ algorithm: 'ucb1', n: 2 });
+    },
+  );
 
   it('pins PYTHONHASHSEED for engine subprocesses', () => {
     const evalStub = [
