@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
 import subprocess
@@ -55,7 +54,18 @@ def _current_dir(run_dir: Path) -> Path:
 
 
 def _clear_current_round(current_dir: Path) -> None:
-    for name in ("step_name", "context.json", "sample.json", "result.json", "analysis.md", "analysis_record.json"):
+    # stop_signals.json is cleared here so a human "run N more rounds" extension
+    # past an early stop does not re-route `complete` on a stale stop_reason from
+    # the round that triggered the stop (the human directive resets after one turn).
+    for name in (
+        "step_name",
+        "context.json",
+        "sample.json",
+        "result.json",
+        "analysis.md",
+        "analysis_record.json",
+        "stop_signals.json",
+    ):
         (current_dir / name).unlink(missing_ok=True)
 
 

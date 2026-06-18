@@ -273,7 +273,13 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
 
   async function runUntilStop(
     label: string,
-    opts: { scores: readonly number[]; criterion: string; maxRounds: number; patience: number },
+    opts: {
+      scores: readonly number[];
+      criterion: string;
+      maxRounds: number;
+      patience: number;
+      extendWith?: string;
+    },
   ) {
     const runDir = resolve(tmpDir, `run-${label}`);
     const workspaceDir = resolve(tmpDir, `workspace-${label}`);
@@ -304,6 +310,14 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
             return statusBlock('ready', 'preflight confirmed');
           }
           if (msg.includes('You are the Evolve orchestrator')) {
+            // A live human "run N more rounds" directive overrides a now-stale stop
+            // signal — route `design` for the extension round. The directive is only
+            // present on the first orchestrator turn after FORCE_REVISION (it resets
+            // after one turn); thereafter the router falls back to the stop signal,
+            // which `sample` must have cleared, or the extension re-stops prematurely.
+            if (opts.extendWith && msg.includes(opts.extendWith)) {
+              return statusBlock('design', 'human extension directive');
+            }
             return statusBlock(routeFromStopSignals(workspacePath), 'router inspected stop signals');
           }
           if (msg.includes('Write exactly one candidate program for this round')) {
@@ -354,12 +368,19 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
     orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
     const gates = await waitForGate(raiseGate, 2, 180_000);
     expect(gates[1].stateName).toBe('final_review');
+    if (opts.extendWith) {
+      // Force one more round past the early stop. The extension must record an
+      // extra node rather than re-stop on the stale stop_signals.json.
+      orchestrator.resolveGate(workflowId, { type: 'FORCE_REVISION', prompt: opts.extendWith });
+      const moreGates = await waitForGate(raiseGate, 3, 180_000);
+      expect(moreGates[2].stateName).toBe('final_review');
+    }
     orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
     await waitForCompletion(orchestrator, workflowId, 180_000);
     await orchestrator.shutdownAll();
 
     expect(preflightTurns).toBe(1);
-    expect(finalSummaryTurns).toBe(1);
+    expect(finalSummaryTurns).toBe(opts.extendWith ? 2 : 1);
     return { states, workspaceDir, researcherTurns, analyzerTurns };
   }
 
@@ -522,5 +543,23 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
     expect(nodes.next_id).toBe(1);
     expect(record.payload).toMatchObject({ node_id: 0, idempotent_skip: true });
     expect(finalSummaryTurns).toBe(1);
+  }, 300_000);
+
+  it('continues a human extension past an early stop instead of re-stopping on a stale signal', async () => {
+    // Target met at node 1 → the run stops at 2 nodes; a human FORCE_REVISION at
+    // final_review then asks for one more round. The extension MUST record node 2
+    // (3 nodes). Without `sample` clearing the stale stop_signals.json, the
+    // orchestrator re-stops on the round-2 target_met signal and node 2 never records.
+    const run = await runUntilStop('extend', {
+      scores: [1, 3, 3],
+      criterion: 'eval_score >= 3',
+      maxRounds: 5,
+      patience: 5,
+      extendWith: 'run one more evolution round',
+    });
+    const runDir = resolve(run.workspaceDir, '.evolve_runs', 'main');
+    const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
+    expect(Object.keys(nodes.nodes)).toEqual(['0', '1', '2']);
+    expect(run.states.at(-1)).toBe('done');
   }, 300_000);
 });

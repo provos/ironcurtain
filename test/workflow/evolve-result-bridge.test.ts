@@ -708,6 +708,7 @@ describe('evolve_result.py bridge', () => {
     writeFileSync(resolve(runDir, 'current', 'result.json'), '{"verdict":"old"}\n');
     writeFileSync(resolve(runDir, 'current', 'analysis.md'), 'old analysis\n');
     writeFileSync(resolve(runDir, 'current', 'analysis_record.json'), '{"verdict":"old"}\n');
+    writeFileSync(resolve(runDir, 'current', 'stop_signals.json'), '{"stop_reason":"target_met"}\n');
 
     const { result } = runBridge(scriptsDir, [
       'sample',
@@ -735,6 +736,9 @@ describe('evolve_result.py bridge', () => {
     expect(existsSync(resolve(runDir, 'current', 'result.json'))).toBe(false);
     expect(existsSync(resolve(runDir, 'current', 'analysis.md'))).toBe(false);
     expect(existsSync(resolve(runDir, 'current', 'analysis_record.json'))).toBe(false);
+    // Regression: a stale stop_signals.json must be cleared so a human "run N more
+    // rounds" extension past an early stop does not re-route `complete` on it.
+    expect(existsSync(resolve(runDir, 'current', 'stop_signals.json'))).toBe(false);
   });
 
   it('samples with an empty DB without reseeding a non-empty cognition store', () => {
