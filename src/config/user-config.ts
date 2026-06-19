@@ -46,6 +46,11 @@ export const USER_CONFIG_DEFAULTS = {
     /** CPU ceiling (fractional ok); null means "do not pass --cpus". */
     cpus: 4,
   },
+  snapshot: {
+    enabled: true,
+    maxAgeDays: 7,
+    sweepIntervalHours: 24,
+  },
 } as const;
 
 export const ESCALATION_TIMEOUT_MIN = 30;
@@ -170,6 +175,14 @@ const captureSchema = z
   })
   .optional();
 
+const snapshotSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxAgeDays: z.number().positive().nullable().optional(),
+    sweepIntervalHours: z.number().positive().optional(),
+  })
+  .optional();
+
 export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi'] as const;
 export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
@@ -274,6 +287,7 @@ export const userConfigSchema = z.object({
   packageInstall: packageInstallSchema,
   dockerResources: dockerResourcesSchema,
   capture: captureSchema,
+  snapshot: snapshotSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -340,6 +354,12 @@ export interface ResolvedDockerResourcesConfig {
   readonly cpus: number | null;
 }
 
+export interface ResolvedSnapshotConfig {
+  readonly enabled: boolean;
+  readonly maxAgeDays: number | null;
+  readonly sweepIntervalHours: number;
+}
+
 /** Resolved web search config with all fields present. */
 export interface ResolvedWebSearchConfig {
   readonly provider: WebSearchProvider | null;
@@ -381,6 +401,8 @@ export interface ResolvedUserConfig {
   readonly packageInstall: ResolvedPackageInstallConfig;
   /** Docker container resource ceilings (pre-clamp). */
   readonly dockerResources: ResolvedDockerResourcesConfig;
+  /** Workflow container snapshot retention and global enablement. */
+  readonly snapshot: ResolvedSnapshotConfig;
   /**
    * Trajectory-capture config. Optional — absent from
    * USER_CONFIG_DEFAULTS so the `?? false` at the session-factory
@@ -430,6 +452,7 @@ const DEFAULT_CONFIG_CONTENT =
       auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
       preferredMode: USER_CONFIG_DEFAULTS.preferredMode,
       dockerResources: USER_CONFIG_DEFAULTS.dockerResources,
+      snapshot: USER_CONFIG_DEFAULTS.snapshot,
     },
     null,
     2,
@@ -725,6 +748,14 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       } = config.dockerResources ?? {};
       return { memoryMb, cpus };
     })(),
+    snapshot: {
+      enabled: config.snapshot?.enabled ?? USER_CONFIG_DEFAULTS.snapshot.enabled,
+      maxAgeDays:
+        config.snapshot?.maxAgeDays !== undefined
+          ? config.snapshot.maxAgeDays
+          : USER_CONFIG_DEFAULTS.snapshot.maxAgeDays,
+      sweepIntervalHours: config.snapshot?.sweepIntervalHours ?? USER_CONFIG_DEFAULTS.snapshot.sweepIntervalHours,
+    },
     // Capture is left undefined unless the user explicitly set
     // `capture.enabled` in the config file. The session-factory
     // resolver applies the `?? false` default (§10).

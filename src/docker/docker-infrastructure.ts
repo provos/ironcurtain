@@ -779,6 +779,7 @@ export async function createDockerInfrastructure(
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
+  options?: CreateDockerInfrastructureOptions,
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -796,7 +797,7 @@ export async function createDockerInfrastructure(
 
   let containerResources: ContainerResources | undefined;
   try {
-    containerResources = await createSessionContainers(core, config);
+    containerResources = await createSessionContainers(core, config, options);
     const infra = { ...core, ...containerResources };
     await provisionWorkflowDependencies(infra, config.userConfig.packageInstall.enabled);
     return infra;
@@ -963,6 +964,15 @@ export interface ContainerResources {
   readonly internalNetwork?: string;
 }
 
+export interface CreateDockerInfrastructureOptions {
+  /**
+   * Optional immutable image ref used only for the main container's
+   * `docker create`. The normal agent image is still ensured first so
+   * workflow dependency caches keep their base-image hash.
+   */
+  readonly baseImageOverride?: string;
+}
+
 /**
  * Creates and starts the main agent container (plus TCP-mode sidecar and
  * internal network on macOS). Cleans up any partially-created resources
@@ -975,6 +985,7 @@ export interface ContainerResources {
 export async function createSessionContainers(
   core: PreContainerInfrastructure,
   config: IronCurtainConfig,
+  options?: CreateDockerInfrastructureOptions,
 ): Promise<ContainerResources> {
   const shortId = getBundleShortId(core.bundleId);
   const mainContainerName = `${CONTAINER_NAME_PREFIX}${shortId}`;
@@ -995,6 +1006,11 @@ export async function createSessionContainers(
   let internalNetwork: string | undefined;
 
   try {
+    const mainImage =
+      options?.baseImageOverride && (await core.docker.imageExists(options.baseImageOverride))
+        ? options.baseImageOverride
+        : core.image;
+
     // Base mounts shared by TCP and UDS modes: the sandbox as the
     // workspace and the orientation dir. Mode-specific mounts (apt proxy
     // config, sockets dir, conversation state) are appended below.
@@ -1151,7 +1167,7 @@ export async function createSessionContainers(
     const { effective: containerResources } = clampDockerResources(config.userConfig.dockerResources);
 
     mainContainerId = await core.docker.create({
-      image: core.image,
+      image: mainImage,
       name: mainContainerName,
       network: network ?? 'none',
       mounts,

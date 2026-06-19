@@ -7,8 +7,11 @@
  */
 
 import { execFile as execFileCb } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { DockerContainerConfig, DockerExecResult, DockerManager } from './types.js';
+import type { DockerContainerConfig, DockerExecResult, DockerImageInfo, DockerManager } from './types.js';
 import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
@@ -34,6 +37,9 @@ export const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
 /** Default timeout for docker exec commands (10 minutes). */
 export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 
+/** Default timeout for docker commit. Large writable layers can legitimately take minutes. */
+export const DEFAULT_COMMIT_TIMEOUT_MS = 600_000;
+
 /**
  * Idle (no-stdout/stderr) timeout for `docker pull`. The Docker daemon
  * heartbeats layer progress every few hundred ms during a healthy pull, so
@@ -58,6 +64,107 @@ const STOP_TIMEOUT_SECONDS = 10;
 export const IRONCURTAIN_LABEL_BUNDLE = 'ironcurtain.bundle';
 export const IRONCURTAIN_LABEL_WORKFLOW = 'ironcurtain.workflow';
 export const IRONCURTAIN_LABEL_SCOPE = 'ironcurtain.scope';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseDockerImageInfo(raw: unknown): DockerImageInfo {
+  if (!isRecord(raw)) {
+    throw new Error('Unexpected docker image inspect result: expected object');
+  }
+  const config = isRecord(raw.Config) ? raw.Config : {};
+  const labelsRaw = isRecord(config.Labels) ? config.Labels : {};
+  const labels: Record<string, string> = {};
+  for (const [key, value] of Object.entries(labelsRaw)) {
+    if (typeof value === 'string') labels[key] = value;
+  }
+  const repoTagsRaw = Array.isArray(raw.RepoTags) ? raw.RepoTags : [];
+  const repoTags = repoTagsRaw.filter((tag): tag is string => typeof tag === 'string');
+  return {
+    id: typeof raw.Id === 'string' ? raw.Id : '',
+    repoTags,
+    labels,
+    created: typeof raw.Created === 'string' ? raw.Created : '',
+  };
+}
+
+function parseDockerImageId(stdout: string): string {
+  const matches = stdout.match(/sha256:[a-f0-9]{64}/gi);
+  const imageId = matches?.at(-1);
+  if (!imageId) {
+    throw new Error(`docker image creation returned unexpected image id: ${stdout.trim() || '(empty)'}`);
+  }
+  return imageId;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+/**
+ * Renders a value for a Dockerfile `ENV key=value` directive. Values made of
+ * safe characters pass through bare; anything else is double-quoted with `\`
+ * and `"` escaped so `docker import --change` parses it intact.
+ */
+function quoteDockerfileValue(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Reads a container's effective Config (ENTRYPOINT/CMD/WORKDIR/USER/ENV) and
+ * renders it as Dockerfile `--change` directives. `docker export | docker
+ * import` flattens a container to a single-layer image but DROPS the image
+ * Config; re-baking it keeps a flattened snapshot behaving like its source on
+ * resume (the baked ENTRYPOINT runs the UID-remap + proxy bridge, and ENV
+ * carries the base-image PATH that container creation intentionally never
+ * re-supplies). **Throws** when the config cannot be read or parsed, so the
+ * flattened commit fails rather than shipping a config-less image that would
+ * resume broken; callers treat a snapshot failure as fall-back-to-fresh. (A
+ * successful read that genuinely yields no directives is fine and proceeds.)
+ */
+async function readContainerConfigChanges(exec: ExecFileFn, containerId: string): Promise<string[]> {
+  // Let an inspect failure propagate (do NOT swallow): a flattened snapshot with
+  // no re-baked ENTRYPOINT/PATH resumes broken, so failing the snapshot is safer
+  // than producing a config-less image.
+  const { stdout } = await exec('docker', ['container', 'inspect', '--format', '{{json .Config}}', containerId], {
+    timeout: 10_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(`docker container inspect returned unparseable Config for ${containerId}`);
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`docker container inspect returned a non-object Config for ${containerId}`);
+  }
+
+  const changes: string[] = [];
+  const entrypoint = asStringArray(parsed.Entrypoint);
+  if (entrypoint.length > 0) changes.push(`ENTRYPOINT ${JSON.stringify(entrypoint)}`);
+  const cmd = asStringArray(parsed.Cmd);
+  if (cmd.length > 0) changes.push(`CMD ${JSON.stringify(cmd)}`);
+  if (typeof parsed.WorkingDir === 'string' && parsed.WorkingDir.length > 0) {
+    changes.push(`WORKDIR ${parsed.WorkingDir}`);
+  }
+  if (typeof parsed.User === 'string' && parsed.User.length > 0) {
+    changes.push(`USER ${parsed.User}`);
+  }
+  for (const entry of asStringArray(parsed.Env)) {
+    const eq = entry.indexOf('=');
+    if (eq <= 0) continue;
+    const key = entry.slice(0, eq);
+    const value = entry.slice(eq + 1);
+    // A single ENV directive can't carry a newline; such values are dynamic
+    // (re-supplied at create) so dropping them from the snapshot is safe.
+    if (/[\r\n]/.test(value)) continue;
+    changes.push(`ENV ${key}=${quoteDockerfileValue(value)}`);
+  }
+  return changes;
+}
 
 /**
  * Builds the `docker create` argument list from a container config.
@@ -321,6 +428,117 @@ export function createDockerManager(
         return true;
       } catch {
         return false;
+      }
+    },
+
+    async commit(containerId: string, options = {}): Promise<string> {
+      if (options.flatten === true) {
+        // Re-bake the image Config that export/import drops. Read it BEFORE
+        // export so a still-running container reports its live ENTRYPOINT/ENV.
+        const configChanges = await readContainerConfigChanges(exec, containerId);
+        const dir = mkdtempSync(join(tmpdir(), 'ironcurtain-snapshot-'));
+        const tarPath = join(dir, 'container.tar');
+        try {
+          await exec('docker', ['export', '--output', tarPath, containerId], {
+            timeout: options.timeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS,
+            maxBuffer: 1024 * 1024,
+          });
+          const args = ['import'];
+          // Config first, then caller changes (labels) so a caller can override.
+          for (const change of [...configChanges, ...(options.changes ?? [])]) {
+            args.push('--change', change);
+          }
+          args.push(tarPath);
+          if (options.tag !== undefined) {
+            args.push(options.tag);
+          }
+          const { stdout } = await exec('docker', args, {
+            timeout: options.timeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS,
+            maxBuffer: 1024 * 1024,
+          });
+          return parseDockerImageId(stdout);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+
+      const args = ['commit'];
+      if (options.pause === false) {
+        args.push('--no-pause');
+      }
+      for (const change of options.changes ?? []) {
+        args.push('--change', change);
+      }
+      args.push(containerId);
+      if (options.tag !== undefined) {
+        args.push(options.tag);
+      }
+      const { stdout } = await exec('docker', args, {
+        timeout: options.timeoutMs ?? DEFAULT_COMMIT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+      return parseDockerImageId(stdout);
+    },
+
+    async removeImage(ref: string): Promise<boolean> {
+      try {
+        await exec('docker', ['image', 'rm', '--force', ref], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+        return true;
+      } catch (err: unknown) {
+        if (isExecError(err) && /no such image|not found|does not exist/i.test(err.stderr)) {
+          // Already gone -- nothing to reclaim.
+          return false;
+        }
+        if (isExecError(err) && /image is being used|in use by|dependent child|conflict/i.test(err.stderr)) {
+          // Still pinned by a running container or a derived image. Not a hard
+          // failure: a later GC sweep reclaims it once the holder is gone.
+          // Logged distinctly so it isn't conflated with an unexpected error.
+          logger.warn(`[docker-manager] image ${ref} still in use; deferring removal to a later sweep`);
+          return false;
+        }
+        const detail = isExecError(err) ? err.stderr.trim() || err.message : String(err);
+        logger.warn(`[docker-manager] failed to remove image ${ref}: ${detail}`);
+        return false;
+      }
+    },
+
+    async listImages(options?: { readonly labelFilter?: string }): Promise<readonly DockerImageInfo[]> {
+      const args = ['image', 'ls', '--no-trunc', '--quiet'];
+      if (options?.labelFilter !== undefined) {
+        args.push('--filter', `label=${options.labelFilter}`);
+      }
+      const { stdout } = await exec('docker', args, { timeout: 10_000, maxBuffer: 10 * 1024 * 1024 });
+      const ids = [
+        ...new Set(
+          stdout
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean),
+        ),
+      ];
+      if (ids.length === 0) return [];
+      const { stdout: inspectStdout } = await exec('docker', ['image', 'inspect', ...ids], {
+        timeout: 30_000,
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      const parsed = JSON.parse(inspectStdout) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new Error('Unexpected docker image inspect result: expected array');
+      }
+      return parsed.map(parseDockerImageInfo);
+    },
+
+    async inspectImage(ref: string): Promise<DockerImageInfo | undefined> {
+      try {
+        const { stdout } = await exec('docker', ['image', 'inspect', ref], {
+          timeout: 10_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        const parsed = JSON.parse(stdout) as unknown;
+        if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+        return parseDockerImageInfo(parsed[0]);
+      } catch {
+        return undefined;
       }
     },
 

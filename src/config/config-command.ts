@@ -125,6 +125,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     'auditRedaction',
     'memory',
     'dockerResources',
+    'snapshot',
   ] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
@@ -398,6 +399,73 @@ async function handleMemory(resolved: ResolvedUserConfig, pending: UserConfig): 
       if (isCancelled(enabled)) continue;
       if (enabled !== currentAutoSave) {
         pending.memory = { ...pending.memory, autoSave: enabled as boolean };
+      }
+    }
+  }
+}
+
+async function handleSnapshot(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentEnabled = pending.snapshot?.enabled ?? resolved.snapshot.enabled;
+    const currentMaxAge = pending.snapshot?.maxAgeDays ?? resolved.snapshot.maxAgeDays;
+    const currentSweep = pending.snapshot?.sweepIntervalHours ?? resolved.snapshot.sweepIntervalHours;
+
+    const field = await p.select({
+      message: 'Container Snapshots',
+      options: [
+        {
+          value: 'enabled',
+          label: 'Enabled (kill switch — snapshot capture + GC for all workflows)',
+          hint: currentEnabled ? 'on' : 'off',
+        },
+        {
+          value: 'maxAgeDays',
+          label: 'Max snapshot age before GC (days)',
+          hint: currentMaxAge === null ? 'unbounded' : String(currentMaxAge),
+        },
+        { value: 'sweepIntervalHours', label: 'GC sweep interval (hours)', hint: String(currentSweep) },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'enabled') {
+      const enabled = await p.confirm({
+        message:
+          'Enable workflow container snapshots globally? ' +
+          '(off disables snapshot capture on stop and GC for all workflows)',
+        initialValue: currentEnabled,
+      });
+      if (isCancelled(enabled)) continue;
+      if (enabled !== currentEnabled) {
+        pending.snapshot = { ...pending.snapshot, enabled: enabled as boolean };
+      }
+    } else if (field === 'maxAgeDays') {
+      const next = await promptNullableNumber({
+        message: 'Max snapshot age before automatic GC',
+        current: currentMaxAge,
+        validate: (n) => (n > 0 ? undefined : 'Must be a positive number of days'),
+        format: (n) => (n === null ? 'unbounded' : `${n} day(s)`),
+      });
+      if (next !== undefined && next !== currentMaxAge) {
+        pending.snapshot = { ...pending.snapshot, maxAgeDays: next };
+      }
+    } else if (field === 'sweepIntervalHours') {
+      const input = await p.text({
+        message: 'GC sweep interval (hours):',
+        placeholder: String(currentSweep),
+        validate: (val) => {
+          if (!val || val.trim() === '') return 'Must be a positive number';
+          const n = Number(val);
+          if (!Number.isFinite(n) || n <= 0) return 'Must be positive';
+          return undefined;
+        },
+      });
+      if (isCancelled(input)) continue;
+      const newVal = Number(input);
+      if (newVal !== currentSweep) {
+        pending.snapshot = { ...pending.snapshot, sweepIntervalHours: newVal };
       }
     }
   }
@@ -1017,6 +1085,13 @@ function memoryHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   return `on, auto-save: ${autoSave ? 'on' : 'off'}`;
 }
 
+function snapshotHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const enabled = pending.snapshot?.enabled ?? resolved.snapshot.enabled;
+  const maxAge = pending.snapshot?.maxAgeDays ?? resolved.snapshot.maxAgeDays;
+  if (!enabled) return 'off (kill switch)';
+  return `on, max age: ${maxAge === null ? 'unbounded' : `${maxAge}d`}`;
+}
+
 function dockerAgentHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const agent = DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
   return `${agent}, ${dockerResourcesSummary(resolved, pending)}`;
@@ -1069,6 +1144,7 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'websearch', label: `Web Search (${webSearchHint(resolved, pending)})` },
         { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
         { value: 'memory', label: `Memory (${memoryHint(resolved, pending)})` },
+        { value: 'snapshots', label: `Container Snapshots (${snapshotHint(resolved, pending)})` },
         { value: 'sessionMode', label: `Session Mode (${sessionModeHint(resolved, pending)})` },
         { value: 'dockerAgent', label: `Docker Agent (${dockerAgentHint(resolved, pending)})` },
         { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
@@ -1101,6 +1177,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'memory':
         await handleMemory(resolved, pending);
+        break;
+      case 'snapshots':
+        await handleSnapshot(resolved, pending);
         break;
       case 'sessionMode':
         await handleSessionMode(resolved, pending);

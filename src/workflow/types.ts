@@ -148,6 +148,12 @@ export interface WorkflowSettings {
    * Ignored for builtin workflows (no Docker infrastructure to share).
    */
   readonly sharedContainer?: boolean;
+  /**
+   * When true, aborted shared-container workflow stops snapshot each live
+   * container's writable layer so resume can recreate the scope from the
+   * recorded immutable image digest. Default: false.
+   */
+  readonly snapshotOnStop?: boolean;
 }
 
 /**
@@ -590,11 +596,22 @@ export interface WorkflowCheckpoint {
    */
   readonly workflowScriptsDir?: string;
   /**
+   * Per-containerScope Docker image snapshots captured at an aborted stop.
+   * `image` is the immutable sha256 image id and is the source of truth;
+   * `tag` is cosmetic only.
+   */
+  readonly containerSnapshots?: Readonly<Record<string, ContainerSnapshotRef>>;
+  /**
    * Terminal-phase status, populated only when the workflow has reached a terminal
    * phase (completed / aborted / failed / waiting_human). Absent for mid-run
    * checkpoints and for legacy retained checkpoints written before this field existed.
    */
   readonly finalStatus?: WorkflowStatus;
+}
+
+export interface ContainerSnapshotRef {
+  readonly image: string;
+  readonly tag?: string;
 }
 
 export interface TransitionRecord {

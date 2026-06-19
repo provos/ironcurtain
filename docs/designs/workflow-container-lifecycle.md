@@ -2,7 +2,7 @@
 
 ## Implementation status
 
-**Steps 1-5 shipped** on branch `feat/session-borrow-path` (PR: *"workflow shared-container mode"*). Steps 6-7 remain as follow-up work.
+**Steps 1-5 shipped** on branch `feat/session-borrow-path` (PR: *"workflow shared-container mode"*). Step 7 shipped as the opt-in snapshot-resume follow-up on `feat/workflow-container-snapshot-resume`; Step 6 remains follow-up work.
 
 | Step | §9 entry | Status |
 |------|----------|--------|
@@ -12,7 +12,7 @@
 | 4 | Session-side borrow path | shipped (branch, `963f793`) |
 | 5 | Engine-owned workflow infrastructure | shipped (branch, `d53b017` + `9918ad7` + follow-ups) |
 | 6 | Validation for `freshContainer` + `freshSession` | **pending** |
-| 7 | Resume reclamation | **pending** |
+| 7 | Resume reclamation | shipped (snapshot resume follow-up) |
 
 Several concrete decisions diverged from this design during implementation. The most
 load-bearing ones (single `audit.jsonl` with a `persona` field; consolidated
@@ -1576,56 +1576,21 @@ orchestrator persona. The engine is the owner; the state is data.
 
 ### Container reclamation on resume
 
-On `WorkflowOrchestrator.resume(id)`, the engine queries Docker for containers
-labeled `ironcurtain.workflow=<id>`:
+The shipped Step 7 implementation does not reclaim live Docker containers by
+label. It uses opt-in snapshot resume instead; see
+[`workflow-container-snapshot-resume.md`](./workflow-container-snapshot-resume.md).
+When `settings.sharedContainer: true` and `settings.snapshotOnStop: true` are
+set, an aborted terminal stop commits each live `containerScope` to an immutable
+local image digest and stores that digest in the workflow checkpoint. On resume,
+IronCurtain still ensures the normal agent image and dependency cache, then
+creates each scope's main container from its checkpointed digest if
+`docker image inspect` still succeeds. If the image was removed, resume falls
+back to the fresh ensured image and leaves the checkpoint resumable.
 
-- **Zero matches**: typical case after a host restart or clean shutdown.
-  Create a fresh bundle via `createDockerInfrastructure({ workflowId,
-  ... })`. Log a warning: `"Workflow container for <id> not found;
-  installed dependencies from the previous run are lost and will be
-  reinstalled on demand."` Resume the workflow.
-- **One match**: the previous process died but the container survived
-  (Docker daemon still running). Verify it is still in the running state
-  via `docker.isRunning()`. If so, reclaim it by constructing a
-  `DockerInfrastructure` handle around the existing container (the proxy
-  and MITM must be re-created fresh -- they died with the prior engine
-  process) and storing it on `instance.infra`. If the container is not
-  running, remove it and
-  create a fresh one. Log the path taken. Note that
-  `docker.isRunning()` returns `false` for `paused` containers (paused
-  is not running), so a paused container falls into the "not running →
-  remove and re-create" branch. This is the right outcome: unpausing
-  and resuming against potentially stale proxy connections is more
-  failure-prone than a clean recreate, and the `ironcurtain.workflow=`
-  label ensures the paused container is identified and removed
-  deterministically.
-- **More than one match**: shouldn't happen, but defensive: remove all but
-  the most recent (by `.State.StartedAt`) and reclaim the survivor. Log a
-  warning listing the removed container IDs.
-
-Proxies, coordinator, and CA material must be re-created on resume regardless
-of container state -- they live in process memory and were lost when the
-previous orchestrator process died. The new proxies bind to new sockets in
-the workflow's run directory, and the reclaimed container must be informed
-of the new proxy endpoints. For UDS mode this happens naturally because the
-bind-mounted sockets directory is a filesystem path owned by the engine; the
-coordinator writes fresh sockets there on startup and the `docker exec`
-issued by the next session picks them up through the long-established mount.
-For TCP mode (macOS), the socat sidecar address is baked into the container's
-`/etc/hosts` at `docker create` time -- if the proxy listens on a different
-port after resume, the sidecar is stale. The pragmatic answer is to **not
-reclaim TCP-mode containers**: on macOS, always create a fresh container on
-resume. Explicitly: before the fresh container is created, the resume path
-must remove any stale container tagged with this workflow's labels (the same
-`listContainers({ label })` query used by the reclamation path, followed by
-`docker rm -f`). Leaving a stale labeled container in place would cause the
-next resume to mis-reclaim it. Log the platform-specific decision. If
-`docker rm -f` itself fails (daemon transient error, container stuck in an
-unusual state), log a warning and proceed with fresh container creation --
-the new container gets a fresh, deterministic name derived from the new
-sessionId, so stale-name collision is not a concern for the happy path.
-A residual stale container is a resource-waste issue, not a correctness
-issue, and the orphan-cleanup follow-up in §6 covers eventual reaping.
+This supersedes the earlier live-container reclamation proposal. Proxies,
+coordinator state, CA material, sidecars, and bind mounts are always recreated
+fresh; only the container filesystem layer outside host mounts is restored from
+the image digest.
 
 ### Crash mid-state
 
@@ -1903,10 +1868,11 @@ does not break prior behavior):
 6. **Validation for `freshContainer` + `freshSession`.** *Status: pending.* Land the
    validator check once at least one workflow wants to use
    `freshContainer`.
-7. **Resume reclamation.** *Status: pending.* Add container reclamation in `resume()`.
-   Include the macOS TCP-mode stale-container cleanup described in §6.
-   Ship last because it is the most failure-prone and benefits from
-   exercising the happy path first.
+7. **Resume reclamation.** *Status: shipped as opt-in snapshot resume on
+   `feat/workflow-container-snapshot-resume`.* Commit live per-scope containers
+   at aborted terminal stops, store immutable image digests in checkpoints, use
+   those digests as guarded `baseImageOverride` values on resume, and reclaim
+   snapshots through supersede, completion, startup reconciliation, and age GC.
 
 ## 10. Deviations from original design
 
