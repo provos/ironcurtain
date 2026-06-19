@@ -155,6 +155,20 @@ export class WorkflowManager {
     return this.orchestrator;
   }
 
+  /**
+   * Eagerly starts background maintenance (snapshot GC startup sweep +
+   * periodic timer) at daemon boot rather than lazily on the first workflow
+   * request. Without this, a long-lived daemon that never receives a workflow
+   * request would never reclaim aged or orphaned snapshot images. No-op unless
+   * snapshot GC is enabled for this manager.
+   */
+  startBackgroundTasks(): void {
+    if (this.enableSnapshotGc) {
+      // Forcing orchestrator creation runs startSnapshotGc (sweep + timer).
+      this.getOrchestrator();
+    }
+  }
+
   /** Clean shutdown of all workflows. */
   async shutdown(): Promise<void> {
     if (this.snapshotGcTimer !== undefined) {

@@ -750,17 +750,19 @@ export class IronCurtainDaemon {
       devMode: this.webUiOptions?.devMode,
       captureTracesDefault: this.captureTracesDefault,
     });
-    server.setWorkflowManager(
-      new WorkflowManager({
-        eventBus: server.getEventBus(),
-        enableSnapshotGc: true,
-        // Opt-in only, matching the cron-session path above: set the override
-        // solely when the daemon flag is present. Passing `false` here would
-        // override (and disable) a user's `capture.enabled` config, since the
-        // infrastructure factory resolves `override ?? userConfig.capture`.
-        ...(this.captureTracesDefault ? { captureTraces: true } : {}),
-      }),
-    );
+    const workflowManager = new WorkflowManager({
+      eventBus: server.getEventBus(),
+      enableSnapshotGc: true,
+      // Opt-in only, matching the cron-session path above: set the override
+      // solely when the daemon flag is present. Passing `false` here would
+      // override (and disable) a user's `capture.enabled` config, since the
+      // infrastructure factory resolves `override ?? userConfig.capture`.
+      ...(this.captureTracesDefault ? { captureTraces: true } : {}),
+    });
+    server.setWorkflowManager(workflowManager);
+    // Start the snapshot GC sweep + periodic timer now, at daemon boot,
+    // rather than lazily on the first workflow request (which may never come).
+    workflowManager.startBackgroundTasks();
 
     const bridge = new TokenStreamBridge(server);
     server.setTokenStreamBridge(bridge);

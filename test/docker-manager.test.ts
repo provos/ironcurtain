@@ -1044,9 +1044,17 @@ describe('DockerManager', () => {
       await expect(manager.commit('container-id')).rejects.toThrow('unexpected image id');
     });
 
-    it('can flatten a container through docker export/import', async () => {
+    it('flattens through export/import and re-bakes the dropped image config', async () => {
       const digest = `sha256:${'b'.repeat(64)}`;
-      mock.setSequence([{ stdout: '' }, { stdout: `${digest}\n` }]);
+      const config = {
+        Entrypoint: ['/usr/local/bin/entrypoint.sh'],
+        Cmd: ['sleep', 'infinity'],
+        WorkingDir: '/workspace',
+        User: '',
+        Env: ['PATH=/usr/bin', 'FOO=bar baz'],
+      };
+      // (0) container inspect config, (1) export, (2) import → digest
+      mock.setSequence([{ stdout: JSON.stringify(config) }, { stdout: '' }, { stdout: `${digest}\n` }]);
       const manager = createDockerManager(mock.mockExec);
 
       const result = await manager.commit('container-id', {
@@ -1057,19 +1065,49 @@ describe('DockerManager', () => {
       });
 
       expect(result).toBe(digest);
-      expect(mock.calls[0].args[0]).toBe('export');
-      expect(mock.calls[0].args[1]).toBe('--output');
-      const tarPath = mock.calls[0].args[2];
-      expect(mock.calls[0].args[3]).toBe('container-id');
-      expect(mock.calls[1].args).toEqual([
+      // Config is read from the live container BEFORE export.
+      expect(mock.calls[0].args).toEqual(['container', 'inspect', '--format', '{{json .Config}}', 'container-id']);
+      expect(mock.calls[1].args[0]).toBe('export');
+      const tarPath = mock.calls[1].args[2];
+      expect(mock.calls[1].args[3]).toBe('container-id');
+      // Import re-bakes ENTRYPOINT/CMD/WORKDIR/ENV (so the flattened image
+      // still runs its entrypoint and keeps PATH on resume), THEN the caller's
+      // label, then the tar and tag. ENV with a space is quoted.
+      expect(mock.calls[2].args).toEqual([
         'import',
+        '--change',
+        'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]',
+        '--change',
+        'CMD ["sleep","infinity"]',
+        '--change',
+        'WORKDIR /workspace',
+        '--change',
+        'ENV PATH=/usr/bin',
+        '--change',
+        'ENV FOO="bar baz"',
         '--change',
         'LABEL ironcurtain.snapshot.workflow=wf',
         tarPath,
         'ironcurtain-snapshot:wf-primary-stop',
       ]);
-      expect(mock.calls[0].opts.timeout).toBe(4321);
       expect(mock.calls[1].opts.timeout).toBe(4321);
+      expect(mock.calls[2].opts.timeout).toBe(4321);
+    });
+
+    it('flatten proceeds with only caller changes when container inspect fails', async () => {
+      const digest = `sha256:${'c'.repeat(64)}`;
+      mock.setSequence([
+        { error: true, code: 1, stderr: 'no such container' },
+        { stdout: '' },
+        { stdout: `${digest}\n` },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const result = await manager.commit('container-id', { flatten: true, tag: 't', changes: ['LABEL x=y'] });
+
+      expect(result).toBe(digest);
+      const tarPath = mock.calls[1].args[2];
+      expect(mock.calls[2].args).toEqual(['import', '--change', 'LABEL x=y', tarPath, 't']);
     });
   });
 
@@ -1084,6 +1122,17 @@ describe('DockerManager', () => {
 
     it('returns false when the image is already missing', async () => {
       mock.setError(1, '', 'No such image: sha256:abc123');
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.removeImage('sha256:abc123')).resolves.toBe(false);
+    });
+
+    it('returns false (deferring to a later sweep) when the image is still in use', async () => {
+      mock.setError(
+        1,
+        '',
+        'conflict: unable to delete sha256:abc123 (cannot be forced) - image is being used by running container',
+      );
       const manager = createDockerManager(mock.mockExec);
 
       await expect(manager.removeImage('sha256:abc123')).resolves.toBe(false);

@@ -22,6 +22,14 @@ teardown; the **only** stop that actually reaches the teardown seam with a live
 container is `aborted`; and resume must keep calling `ensureImage` (for the
 dep-cache hash) while overriding only the final image reference.
 
+A post-implementation review added two further corrections, now reflected below:
+the snapshot primitive is a **flattened `docker export`/`import`** (a single,
+parent-less layer, so a superseded digest is force-removable) that **re-bakes the
+image Config** (ENTRYPOINT/ENV/…) that export/import drops — not a plain
+`docker commit`; and single-flight is enforced by `abort()` claiming
+`finalStatus` synchronously before its first `await`. The byte-cap eviction knob
+(`snapshot.maxBytes`) was dropped — there is no such config field today.
+
 ## Overview
 
 When a workflow stops in a **resumable** state, its Docker containers are
@@ -30,12 +38,13 @@ agent installed into the container's writable layer is lost** — system package
 globally-installed tools, and artifacts downloaded outside the mounted paths must
 be rebuilt from scratch, costing wall-clock time and agent tokens.
 
-This design takes a **`docker commit` snapshot** of each live container at a
-resumable stop, records the resulting **image digest** in the checkpoint, and
-recreates the container **from that digest** on resume so the writable layer
-comes back intact. Host bind mounts (`/workspace`, the workflow venv, conversation
-state) are *not* captured by the commit — they re-attach on resume — so the
-snapshot stores only the otherwise-lost slice, with no double-storage.
+This design takes a **flattened filesystem snapshot** of each live container at a
+resumable stop (`docker export` piped into `docker import`, see §4.1), records the
+resulting **image digest** in the checkpoint, and recreates the container **from
+that digest** on resume so the writable layer comes back intact. Host bind mounts
+(`/workspace`, the workflow venv, conversation state) are *not* captured — they
+re-attach on resume — so the snapshot stores only the otherwise-lost slice, with
+no double-storage.
 
 ### Parallel-workflow correctness is a first-class requirement
 
@@ -45,7 +54,7 @@ of them. The design therefore treats image *identity* as the central correctness
 problem, not an afterthought:
 
 - Each commit yields an **immutable content-addressed digest** (`sha256:…`,
-  printed on `docker commit` stdout). The checkpoint stores the **digest**, and
+  printed on `docker import` stdout). The checkpoint stores the **digest**, and
   resume + garbage collection bind to the **digest** — never to a mutable tag in
   the shared namespace. A human-readable tag is applied for `docker images`
   legibility only and is never the source of truth.
@@ -131,10 +140,10 @@ survives via mounts and is **excluded from the commit by design** (it lives unde
 
 ## 4. Design
 
-### 4.1 Why `docker commit`, not CRIU
+### 4.1 Why a flattened filesystem snapshot, not CRIU
 
-`docker commit` snapshots a container's filesystem (writable layer) into a new
-image. It does **not** capture process memory — which is exactly right here:
+A snapshot of the container's **filesystem** (writable layer) — not its process
+memory — is exactly right here:
 
 - The only long-lived in-container process is `sleep infinity`; the agent is a
   series of `docker exec` invocations whose *logical* state (conversation history)
@@ -142,36 +151,50 @@ image. It does **not** capture process memory — which is exactly right here:
 - A filesystem snapshot is sufficient to restore installed packages and downloaded
   artifacts.
 
-So **`docker commit`** is the primitive. `docker checkpoint` / CRIU (process-state
-freeze) is unnecessary, more fragile, and experimental in Docker.
+So `docker checkpoint` / CRIU (process-state freeze) is unnecessary, more fragile,
+and experimental in Docker.
 
-Use `docker commit --pause=false`: there is no agent process in flight at commit
-time (sessions are closed before the commit on both stop paths — §4.3), so
-freezing the filesystem mid-write is not a risk. The entrypoint's background
-`socat` UDS→TCP bridge is irrelevant to a filesystem commit.
+The filesystem snapshot is taken by **`docker export` → `docker import`** (a
+"flatten"), not plain `docker commit`. The reason is GC, not capture: a
+`docker commit` image is a *child layer* of the source image, so superseding it
+(resume → stop → re-commit from a container created off the prior snapshot) leaves
+the previous digest as a **parent of the new one**, and `docker image rm` refuses
+to remove an image with dependent children (not forceable). `export`/`import`
+squashes the container into a **single, parent-less layer**, so any superseded
+digest can be force-removed cleanly (§4.7). The cost: `export`/`import` discards
+the image **Config** (ENTRYPOINT/CMD/WORKDIR/USER/ENV), so the snapshot path
+re-bakes that config via `--change` (§4.2) — otherwise a resumed container would
+come up with no entrypoint (no UID-remap, no `socat` proxy bridge) and a default
+`PATH` (so `node`/`npm` would not resolve).
+
+There is no agent process in flight at snapshot time (sessions are closed before
+the commit on both stop paths — §4.3), and `docker export` captures the filesystem
+without pausing, so freezing mid-write is not a risk.
 
 ### 4.2 Image identity: bind to the digest, not the tag
 
 This is the crux of parallel-workflow safety.
 
-1. **Commit produces an untagged image; capture its digest.** `docker commit`
-   prints the new image ID (`sha256:…`) on stdout. That digest is immutable and
+1. **The flattened commit yields a digest; capture it.** `docker import` prints
+   the new image ID (`sha256:…`) on stdout. That digest is immutable and
    content-addressed — globally unique under any amount of parallelism, immune to
    retag/rm races in the shared namespace.
-2. **Neutralize baked-in container config.** `docker commit` bakes the source
-   container's `Config` into the image — including the IronCurtain container
-   labels (`ironcurtain.bundle`, `ironcurtain.workflow`, `ironcurtain.scope`, set
-   at create in `docker-manager.ts:112`) and runtime env (the per-session sentinel
-   key and `HTTPS_PROXY`). Strip/replace them at commit so they can never
-   mis-target GC or leak stale identity:
-   `docker commit --pause=false \
-      --change 'LABEL ironcurtain.bundle=' --change 'LABEL ironcurtain.scope=' \
-      --change 'LABEL ironcurtain.snapshot.workflow=<workflowId>' \
-      --change 'LABEL ironcurtain.snapshot.scope=<scope>' \
-      --change 'LABEL ironcurtain.snapshot.stop=<stopId>' <containerId>`.
-   The sentinel env baked into `Config.Env` is harmless — resume passes a fresh
-   `-e` of the same name that shadows it (§5) — but may also be cleared with
-   `--change 'ENV …='` for tidiness.
+2. **Re-bake structural config; stamp only the snapshot labels.** Because the
+   flatten drops *all* image Config and labels, there is nothing to "neutralize":
+   the inherited `ironcurtain.bundle`/`scope` labels and the per-session sentinel
+   env simply don't survive `export`/`import`. The snapshot path instead:
+   - reads the live container's `Config` (`docker container inspect`,
+     `readContainerConfigChanges` in `docker-manager.ts`) and re-emits
+     ENTRYPOINT/CMD/WORKDIR/USER/ENV as `--change` directives on `docker import`,
+     so the flattened image still runs its entrypoint and keeps its base-image
+     `PATH`. ENV values are shell-safely quoted (newline-bearing values, which are
+     always dynamic, are dropped); the stale sentinel key / `HTTPS_PROXY` are
+     re-baked but **shadowed** by the fresh `-e` resume passes (§5);
+   - stamps a **dedicated label namespace** —
+     `ironcurtain.snapshot.workflow=<workflowId>`,
+     `ironcurtain.snapshot.scope=<scope>`, `ironcurtain.snapshot.stop=<stopId>` —
+     used only by snapshot GC, never reusing `ironcurtain.bundle`, so container-GC
+     and image-GC can never cross-target.
 3. **Apply a cosmetic, per-stop-unique tag** for `docker images` legibility only:
    `ironcurtain-snapshot:<workflowId>-<scope>-<stopId>`, where `<stopId>` is a
    fresh UUID (or a monotonic per-instance stop counter) minted at **each** commit.
@@ -238,13 +261,17 @@ checkpoint can never reference an image that was never written.
 - **Per-scope try/catch.** A commit failure for one scope (disk full, container
   already gone) records nothing for that scope and continues; it must not abort the
   whole loop. Resume already tolerates absent scopes by minting fresh.
-- **Guard against a vanished container.** Treat `docker commit` ENOENT (container
-  already removed by a concurrent path) as "skip this scope," not a hard error.
+- **Guard against a vanished container.** Treat a snapshot failure from a
+  concurrently-removed container (ENOENT out of `docker container inspect` /
+  `docker export`) as "skip this scope," not a hard error.
 - **Single-flight stop.** `abort()` and `handleWorkflowComplete` both guard on
-  `finalStatus`, but they check-then-act without a lock; a normal completion can
-  race a user abort in the `session.close()` window. The snapshot must run under
-  the same single-flight discipline as teardown — reuse the `instance.teardownPromise`
-  pattern so exactly one path commits, and the other awaits it.
+  `finalStatus`, but a check-then-act without synchronization lets a natural
+  completion race a user abort in the `session.close()` window. `abort()` therefore
+  **claims the terminal synchronously** — it sets `finalStatus = aborted` before its
+  first `await` — so a completion firing during session close bails at its own
+  `finalStatus` guard. The early-return path `await`s any in-flight
+  `instance.teardownPromise`, so exactly one path commits + tears down and the
+  other waits.
 
 ### 4.5 Checkpoint schema
 
@@ -307,7 +334,9 @@ Lifecycle:
 - **Supersede (resume-of-a-resume):** on the *next* stop, commit a new image
   (new digest, new `<stopId>` tag), write the new checkpoint, **then**
   `docker image rm` the *previous* digest for that scope — write-new-then-delete-old
-  so a crash never strands the live reference.
+  so a crash never strands the live reference. The flattened (parent-less) image
+  from §4.1 is what makes that `rm` succeed: a plain-`commit` parent would be
+  un-removable while its child snapshot still exists.
 - **Delete on clean completion:** when a run reaches `completed`
   (non-resumable per `isCheckpointResumable`), `docker image rm` every digest in
   its `containerSnapshots`.
@@ -337,40 +366,41 @@ Lifecycle:
     invocation, so standalone runs reclaim too. All call the same idempotent,
     cheap sweep (a `listImages({labelFilter: 'ironcurtain.snapshot.workflow'})`
     plus an age compare), so coverage does not depend on a daemon being up.
-  - **Eviction order:** age first (anything past `maxAgeDays`); if an optional
-    `snapshot.maxBytes` cap (measured via `docker system df`) is also configured,
-    evict the remaining snapshots oldest-first until back under the cap. Age is
-    the primary, always-on bound; the byte cap is a secondary safety valve.
+  - **Eviction:** age only (anything past `maxAgeDays`). A byte-cap secondary
+    bound (oldest-first eviction under a total-size ceiling via `docker system df`)
+    is a deferred follow-up — there is no `snapshot.maxBytes` config field today.
 
 ### 4.8 Concurrency, disk, and cost
 
 The commit now sits on the awaited completion/abort path, and N parallel workflows
-× M scopes can commit multi-GB layers simultaneously:
+× M scopes can commit multi-GB layers simultaneously. The first two items below are
+**deferred hardening** (not in the current acceptance gate); the rest are shipped:
 
-- **Bound commit concurrency** with a global semaphore so simultaneous multi-GB
-  commits across parallel workflows can't collectively exhaust disk.
-- **Size pre-check / cap.** Before committing, check free space and a configurable
-  per-snapshot size cap; over the cap, **skip** (log) rather than block — the
-  workflow still resumes, just without that scope's snapshot.
-- **Partial-image cleanup.** On any commit error, best-effort `docker image rm`
-  the partial image/tag if it materialized, so a failed commit doesn't leak a
-  dangling layer the digest GC won't recognize.
-- **Bounded timeout.** The new `commit` method needs its own generous-but-finite
-  timeout (the existing `create` uses 30s, `exec` 10min); on timeout, skip-and-log.
-- **Default off.** Opt-in via a workflow-definition `settings.snapshotOnStop` flag
-  (alongside `sharedContainer`/`mode`, read near `shouldUseSharedContainer`,
-  `:790`) plus a global `UserConfig` kill-switch, mirroring the memory kill-switch
-  and the `--capture-traces` precedent (threaded raw to the infra factory).
+- **Bound commit concurrency** *(deferred)* with a global semaphore so simultaneous
+  multi-GB commits across parallel workflows can't collectively exhaust disk.
+- **Size pre-check / cap** *(deferred)*. Before committing, check free space and a
+  configurable per-snapshot size cap; over the cap, **skip** (log) rather than
+  block — the workflow still resumes, just without that scope's snapshot.
+- **Partial-image cleanup.** The flatten path removes its temp tar in a `finally`;
+  on a non-flatten commit error a best-effort `docker image rm` of a materialized
+  partial keeps the digest GC's view clean.
+- **Bounded timeout.** The `commit` method carries its own generous-but-finite
+  timeout (10 min, vs `create` 30s); on timeout it falls through to skip-and-log.
+- **Default off (shipped).** Opt-in via a workflow-definition
+  `settings.snapshotOnStop` flag (alongside `sharedContainer`/`mode`, read near
+  `shouldUseSharedContainer`) plus a global `snapshot.enabled` `UserConfig`
+  kill-switch — both editable in `ironcurtain config` (Container Snapshots
+  section), mirroring the memory kill-switch.
 
 ## 5. Security considerations
 
 - **Credential isolation is preserved.** Real API keys / OAuth tokens never enter
   the container — per-session sentinel keys are minted host-side
-  (`docker-infrastructure.ts:498`) and swapped at the MITM. A committed image's
-  baked `Config.Env` therefore contains only a *stale sentinel*, and on resume a
-  freshly minted `-e` of the same name shadows it. Env the agent exports
-  mid-run does **not** persist (only create-time `Config.Env` is baked). The
-  blast radius is bounded to known create-time vars; §4.2 clears them anyway.
+  (`docker-infrastructure.ts:498`) and swapped at the MITM. The snapshot's re-baked
+  `Config.Env` therefore contains only a *stale sentinel*, and on resume a freshly
+  minted `-e` of the same name shadows it. Env the agent exports mid-run does
+  **not** persist (only create-time `Config.Env` is re-baked, and only single-line
+  values). The blast radius is bounded to known create-time vars.
 - **The layer still holds whatever the agent wrote** — fetched data, downloaded
   artifacts, files created outside `/workspace`. Snapshots are host-local images:
   never pushed to a registry, deleted on GC, and covered by the same redaction
@@ -394,15 +424,18 @@ the agent decides on at runtime, which is the whole point here.
 
 ## 7. Implementation checklist (phased)
 
-1. **Extend `DockerManager`** — no `commit`/`removeImage`/`listImages` methods
-   exist today. Add them in `docker-manager.ts` following the existing
-   `execFile`/arg-array pattern (CLAUDE.md "no shell string concat"):
-   `commit(containerId, {tag, changes[], pause:false, timeoutMs})` returning the
-   `sha256:` digest; `removeImage(ref)`; `listImages({labelFilter})`.
-2. **`snapshotResumableScopes(instance)`** in the orchestrator (or a docker helper
-   it calls): per-scope commit with label/env neutralization (§4.2), per-scope
-   try/catch (§4.4), under the global commit semaphore + size cap (§4.8). Returns
-   `Record<scope, {image, tag}>`.
+1. **Extend `DockerManager`** (`docker-manager.ts`, `execFile`/arg-array pattern,
+   CLAUDE.md "no shell string concat"): `commit(containerId, {tag, changes[],
+   pause, flatten, timeoutMs})` — with `flatten:true` it routes through
+   `docker export | docker import`, re-baking the dropped Config via
+   `readContainerConfigChanges` — returning the `sha256:` digest; `removeImage(ref)`
+   (distinguishing "already gone" / "still in use" from hard failures);
+   `listImages({labelFilter})`; `inspectImage(ref)` (for `.Created` age).
+2. **`snapshotResumableScopes(instance)`** in the orchestrator, delegating per
+   scope to `commitContainerSnapshot` (`src/workflow/container-snapshots.ts`): a
+   flattened commit with config re-bake + snapshot-label stamping (§4.2), per-scope
+   try/catch (§4.4). Returns `Record<scope, {image, tag}>`. (Commit-concurrency
+   semaphore + size cap, §4.8, are deferred.)
 3. **Checkpoint field** `containerSnapshots` in `types.ts:566`; thread through the
    `handleWorkflowComplete` and `abort()` save paths **before** the terminal save
    (§4.3). Backward-compat test (absent field).
@@ -482,8 +515,12 @@ the agent decides on at runtime, which is the whole point here.
   (per-session sentinel key), `:907` (`buildBundleLabels`), `:1175` (capability
   set); `src/docker/docker-manager.ts:66` (`buildCreateArgs`), `:112` (label
   args), `:242` (`exec`), `:486` (`removeStaleContainer` — single-container, not a
-  sweep), `:59` (`IRONCURTAIN_LABEL_WORKFLOW`); `DockerManager` interface in
-  `src/docker/types.ts` (no `commit`/`removeImage` today). CA: `src/docker/ca.ts:37`.
+  sweep), `:59` (`IRONCURTAIN_LABEL_WORKFLOW`). Snapshot primitives — `commit`
+  (with `flatten` + `readContainerConfigChanges`), `removeImage`, `listImages`,
+  `inspectImage` — live in `docker-manager.ts` (interface in
+  `src/docker/types.ts`); the snapshot helpers `commitContainerSnapshot` /
+  `sweepContainerSnapshots` / `removeContainerSnapshotImages` in
+  `src/workflow/container-snapshots.ts`. CA: `src/docker/ca.ts:37`.
 - Base images: `docker/Dockerfile.base`, `docker/Dockerfile.claude-code`.
 - Discovery: `src/workflow/workflow-discovery.ts:7` (`WorkflowRunSummary`).
 - Related designs: `workflow-container-lifecycle.md` (Step 7),

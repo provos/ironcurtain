@@ -123,7 +123,7 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
         deniedPackages: [],
       },
       dockerResources: { memoryMb: null, cpus: null },
-      snapshot: { enabled: true, maxAgeDays: 7, sweepIntervalHours: 24, maxBytes: null },
+      snapshot: { enabled: true, maxAgeDays: 7, sweepIntervalHours: 24 },
     },
   } as IronCurtainConfig;
 }
@@ -452,7 +452,7 @@ describe.skipIf(!dockerReady)('workflow container snapshot and resume with real 
       now: new Date(Date.now() + 10 * 60 * 1000),
       userConfig: {
         ...buildDockerSessionConfig(agedRun.workspaceDir, resolve(TEST_HOME, 'generated-aged')).userConfig,
-        snapshot: { enabled: true, maxAgeDays: 0.000001, sweepIntervalHours: 24, maxBytes: null },
+        snapshot: { enabled: true, maxAgeDays: 0.000001, sweepIntervalHours: 24 },
       },
     });
     expect(gcResult.agedImages).toContain(agedDigest);

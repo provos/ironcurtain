@@ -180,7 +180,6 @@ const snapshotSchema = z
     enabled: z.boolean().optional(),
     maxAgeDays: z.number().positive().nullable().optional(),
     sweepIntervalHours: z.number().positive().optional(),
-    maxBytes: z.number().positive().nullable().optional(),
   })
   .optional();
 
@@ -359,7 +358,6 @@ export interface ResolvedSnapshotConfig {
   readonly enabled: boolean;
   readonly maxAgeDays: number | null;
   readonly sweepIntervalHours: number;
-  readonly maxBytes: number | null;
 }
 
 /** Resolved web search config with all fields present. */
@@ -757,7 +755,6 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
           ? config.snapshot.maxAgeDays
           : USER_CONFIG_DEFAULTS.snapshot.maxAgeDays,
       sweepIntervalHours: config.snapshot?.sweepIntervalHours ?? USER_CONFIG_DEFAULTS.snapshot.sweepIntervalHours,
-      maxBytes: config.snapshot?.maxBytes !== undefined ? config.snapshot.maxBytes : null,
     },
     // Capture is left undefined unless the user explicitly set
     // `capture.enabled` in the config file. The session-factory

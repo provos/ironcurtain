@@ -304,7 +304,7 @@ export function makeTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}):
       deniedPackages: [],
     },
     dockerResources: { memoryMb: null, cpus: null },
-    snapshot: { enabled: true, maxAgeDays: 7, sweepIntervalHours: 24, maxBytes: null },
+    snapshot: { enabled: true, maxAgeDays: 7, sweepIntervalHours: 24 },
     ...overrides,
   };
 }

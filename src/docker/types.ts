@@ -145,7 +145,11 @@ export interface DockerCommitOptions {
   /**
    * When true, snapshot through docker export/import instead of docker commit
    * so the resulting image is flattened and does not retain the source image
-   * as an inspectable parent. Intended for workflow resume snapshots.
+   * as an inspectable parent (a superseded snapshot digest can then be
+   * force-removed without a dependent-child-image conflict). Intended for
+   * workflow resume snapshots. The image Config that export/import would
+   * otherwise drop (ENTRYPOINT/CMD/WORKDIR/USER/ENV) is re-baked from the
+   * source container, so a flattened image still behaves like its source.
    */
   readonly flatten?: boolean;
 }

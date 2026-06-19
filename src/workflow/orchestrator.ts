@@ -1163,6 +1163,34 @@ export class WorkflowOrchestrator implements WorkflowController {
     });
   }
 
+  /**
+   * Builds and persists the terminal checkpoint, preserving the prior on-disk
+   * machineState/context (which point at the last non-terminal save point) so
+   * resume re-enters that state instead of the terminal snapshot. Shared by the
+   * abort() and handleWorkflowComplete() stop paths.
+   */
+  private saveTerminalCheckpoint(
+    instance: WorkflowInstance,
+    finalStatus: WorkflowStatus,
+    containerSnapshots: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
+    existing: WorkflowCheckpoint | undefined,
+  ): void {
+    try {
+      const terminalCheckpoint = this.buildCheckpoint(
+        instance,
+        instance.actor.getSnapshot() as { value: unknown; context: unknown },
+        finalStatus,
+        containerSnapshots,
+      );
+      const checkpoint = existing
+        ? { ...terminalCheckpoint, machineState: existing.machineState, context: existing.context }
+        : terminalCheckpoint;
+      this.deps.checkpointStore.save(instance.id, checkpoint);
+    } catch (err) {
+      writeStderr(`[workflow] Failed to save terminal checkpoint for ${instance.id}: ${toErrorMessage(err)}`);
+    }
+  }
+
   private snapshotsSupersededBy(
     previous: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
     next: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
@@ -1706,8 +1734,22 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.finalStatus?.phase === 'aborted' ||
       instance.finalStatus?.phase === 'failed'
     ) {
+      // A terminal transition is already in flight (e.g. a natural completion
+      // racing this abort). Wait for its teardown instead of starting a second
+      // one. `teardownPromise` is only set by the fire-and-forget completion
+      // path; awaiting `undefined` is a no-op on the abort-vs-abort race.
+      await instance.teardownPromise;
       return;
     }
+
+    // Claim the terminal synchronously, BEFORE the first await below, so a
+    // natural completion firing during session close sees `finalStatus` set
+    // and bails at its own guard. This is the single-flight gate that
+    // guarantees exactly-once snapshot + teardown across abort/complete.
+    instance.finalStatus = {
+      phase: 'aborted',
+      reason: 'Workflow aborted by user',
+    };
 
     const closePromises: Promise<void>[] = [];
     for (const session of instance.activeSessions) {
@@ -1717,10 +1759,6 @@ export class WorkflowOrchestrator implements WorkflowController {
     instance.activeSessions.clear();
 
     instance.actor.stop();
-    instance.finalStatus = {
-      phase: 'aborted',
-      reason: 'Workflow aborted by user',
-    };
 
     let previousCheckpoint: WorkflowCheckpoint | undefined;
     try {
@@ -1729,24 +1767,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       writeStderr(`[workflow] Failed to load existing checkpoint during abort for ${id}: ${toErrorMessage(err)}`);
     }
     const containerSnapshots = await this.snapshotResumableScopes(instance);
-    try {
-      const terminalCheckpoint = this.buildCheckpoint(
-        instance,
-        instance.actor.getSnapshot() as { value: unknown; context: unknown },
-        instance.finalStatus,
-        containerSnapshots,
-      );
-      const checkpoint = previousCheckpoint
-        ? {
-            ...terminalCheckpoint,
-            machineState: previousCheckpoint.machineState,
-            context: previousCheckpoint.context,
-          }
-        : terminalCheckpoint;
-      this.deps.checkpointStore.save(id, checkpoint);
-    } catch (err) {
-      writeStderr(`[workflow] Failed to save aborted checkpoint for ${id}: ${toErrorMessage(err)}`);
-    }
+    this.saveTerminalCheckpoint(instance, instance.finalStatus, containerSnapshots, previousCheckpoint);
 
     // Release the token-stream bus subscription before the async infra
     // teardown so no late events land against a finalized workflow.
@@ -2801,24 +2822,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // fallback path covers the unusual case where no prior checkpoint
     // exists (e.g. a workflow that transitioned straight to terminal
     // without ever passing through a non-terminal save point).
-    try {
-      const terminalCheckpoint = this.buildCheckpoint(
-        instance,
-        instance.actor.getSnapshot() as { value: unknown; context: unknown },
-        instance.finalStatus,
-        containerSnapshots,
-      );
-      const checkpoint = existing
-        ? {
-            ...terminalCheckpoint,
-            machineState: existing.machineState,
-            context: existing.context,
-          }
-        : terminalCheckpoint;
-      this.deps.checkpointStore.save(workflowId, checkpoint);
-    } catch (err) {
-      writeStderr(`[workflow] Failed to save terminal checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
-    }
+    this.saveTerminalCheckpoint(instance, instance.finalStatus, containerSnapshots, existing);
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
     instance.tab.close();

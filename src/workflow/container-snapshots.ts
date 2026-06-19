@@ -1,11 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DockerManager } from '../docker/types.js';
-import {
-  IRONCURTAIN_LABEL_BUNDLE,
-  IRONCURTAIN_LABEL_SCOPE,
-  IRONCURTAIN_LABEL_WORKFLOW,
-  createDockerManager,
-} from '../docker/docker-manager.js';
+import { createDockerManager } from '../docker/docker-manager.js';
 import type { CheckpointStore } from './checkpoint.js';
 import { isCheckpointResumable } from './checkpoint.js';
 import type { ContainerSnapshotRef, WorkflowCheckpoint, WorkflowId } from './types.js';
@@ -17,6 +12,15 @@ export const IRONCURTAIN_SNAPSHOT_LABEL_STOP = 'ironcurtain.snapshot.stop';
 
 const SNAPSHOT_TAG_REPOSITORY = 'ironcurtain-snapshot';
 const DEFAULT_SNAPSHOT_COMMIT_TIMEOUT_MS = 600_000;
+
+/**
+ * A snapshot image is committed (and labeled) BEFORE its checkpoint is saved
+ * (see the stop paths in orchestrator.ts). For that brief window the image is
+ * labeled but not yet referenced by any checkpoint. The orphan sweep skips
+ * images younger than this so a concurrent sweep can't delete a snapshot that
+ * another workflow is mid-commit on.
+ */
+const ORPHAN_SWEEP_GRACE_MS = 5 * 60 * 1000;
 
 function sanitizeTagPart(value: string): string {
   const sanitized = value.toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
@@ -54,10 +58,10 @@ export async function commitContainerSnapshot(input: {
     pause: false,
     flatten: true,
     timeoutMs: input.timeoutMs ?? DEFAULT_SNAPSHOT_COMMIT_TIMEOUT_MS,
+    // No need to clear inherited ironcurtain.bundle/scope labels: the flatten
+    // (export/import) path produces an image with no labels at all, so we only
+    // stamp the dedicated snapshot labels used by GC.
     changes: [
-      `LABEL ${IRONCURTAIN_LABEL_BUNDLE}=`,
-      `LABEL ${IRONCURTAIN_LABEL_WORKFLOW}=`,
-      `LABEL ${IRONCURTAIN_LABEL_SCOPE}=`,
       `LABEL ${IRONCURTAIN_SNAPSHOT_LABEL_WORKFLOW}=${input.workflowId}`,
       `LABEL ${IRONCURTAIN_SNAPSHOT_LABEL_SCOPE}=${input.scope}`,
       `LABEL ${IRONCURTAIN_SNAPSHOT_LABEL_STOP}=${stopId}`,
@@ -122,6 +126,8 @@ export async function sweepContainerSnapshots(input: {
 
   for (const image of labeledImages) {
     if (referenced.has(image.id)) continue;
+    const createdMs = Date.parse(image.created);
+    if (Number.isFinite(createdMs) && nowMs - createdMs < ORPHAN_SWEEP_GRACE_MS) continue;
     if (await docker.removeImage(image.id)) {
       removedImages.push(image.id);
       orphanImages.push(image.id);

@@ -98,6 +98,67 @@ function parseDockerImageId(stdout: string): string {
   return imageId;
 }
 
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+/**
+ * Renders a value for a Dockerfile `ENV key=value` directive. Values made of
+ * safe characters pass through bare; anything else is double-quoted with `\`
+ * and `"` escaped so `docker import --change` parses it intact.
+ */
+function quoteDockerfileValue(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Reads a container's effective Config (ENTRYPOINT/CMD/WORKDIR/USER/ENV) and
+ * renders it as Dockerfile `--change` directives. `docker export | docker
+ * import` flattens a container to a single-layer image but DROPS the image
+ * Config; re-baking it keeps a flattened snapshot behaving like its source on
+ * resume (the baked ENTRYPOINT runs the UID-remap + proxy bridge, and ENV
+ * carries the base-image PATH that container creation intentionally never
+ * re-supplies). Returns an empty list when the config can't be read; the
+ * caller's `docker export` then fails loudly on a genuinely missing container.
+ */
+async function readContainerConfigChanges(exec: ExecFileFn, containerId: string): Promise<string[]> {
+  let parsed: unknown;
+  try {
+    const { stdout } = await exec('docker', ['container', 'inspect', '--format', '{{json .Config}}', containerId], {
+      timeout: 10_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  if (!isRecord(parsed)) return [];
+
+  const changes: string[] = [];
+  const entrypoint = asStringArray(parsed.Entrypoint);
+  if (entrypoint.length > 0) changes.push(`ENTRYPOINT ${JSON.stringify(entrypoint)}`);
+  const cmd = asStringArray(parsed.Cmd);
+  if (cmd.length > 0) changes.push(`CMD ${JSON.stringify(cmd)}`);
+  if (typeof parsed.WorkingDir === 'string' && parsed.WorkingDir.length > 0) {
+    changes.push(`WORKDIR ${parsed.WorkingDir}`);
+  }
+  if (typeof parsed.User === 'string' && parsed.User.length > 0) {
+    changes.push(`USER ${parsed.User}`);
+  }
+  for (const entry of asStringArray(parsed.Env)) {
+    const eq = entry.indexOf('=');
+    if (eq <= 0) continue;
+    const key = entry.slice(0, eq);
+    const value = entry.slice(eq + 1);
+    // A single ENV directive can't carry a newline; such values are dynamic
+    // (re-supplied at create) so dropping them from the snapshot is safe.
+    if (/[\r\n]/.test(value)) continue;
+    changes.push(`ENV ${key}=${quoteDockerfileValue(value)}`);
+  }
+  return changes;
+}
+
 /**
  * Builds the `docker create` argument list from a container config.
  * Exported for testing.
@@ -365,6 +426,9 @@ export function createDockerManager(
 
     async commit(containerId: string, options = {}): Promise<string> {
       if (options.flatten === true) {
+        // Re-bake the image Config that export/import drops. Read it BEFORE
+        // export so a still-running container reports its live ENTRYPOINT/ENV.
+        const configChanges = await readContainerConfigChanges(exec, containerId);
         const dir = mkdtempSync(join(tmpdir(), 'ironcurtain-snapshot-'));
         const tarPath = join(dir, 'container.tar');
         try {
@@ -373,7 +437,8 @@ export function createDockerManager(
             maxBuffer: 1024 * 1024,
           });
           const args = ['import'];
-          for (const change of options.changes ?? []) {
+          // Config first, then caller changes (labels) so a caller can override.
+          for (const change of [...configChanges, ...(options.changes ?? [])]) {
             args.push('--change', change);
           }
           args.push(tarPath);
@@ -414,6 +479,14 @@ export function createDockerManager(
         return true;
       } catch (err: unknown) {
         if (isExecError(err) && /no such image|not found|does not exist/i.test(err.stderr)) {
+          // Already gone -- nothing to reclaim.
+          return false;
+        }
+        if (isExecError(err) && /image is being used|in use by|dependent child|conflict/i.test(err.stderr)) {
+          // Still pinned by a running container or a derived image. Not a hard
+          // failure: a later GC sweep reclaims it once the holder is gone.
+          // Logged distinctly so it isn't conflated with an unexpected error.
+          logger.warn(`[docker-manager] image ${ref} still in use; deferring removal to a later sweep`);
           return false;
         }
         const detail = isExecError(err) ? err.stderr.trim() || err.message : String(err);
