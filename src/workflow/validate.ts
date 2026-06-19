@@ -53,10 +53,13 @@ const CONTAINER_SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 const fanOutSchema = z.object({
   count: z.union([z.literal('workers'), z.number().int().positive()]),
-  join: z.string().min(1),
+  // Literal, not z.string(): only barrier joins are supported, and the
+  // literal makes a non-barrier join a parse-time rejection (matching the
+  // FanOutDefinition.join type). Async joins are a future, reviewed extension.
+  join: z.literal('barrier'),
 });
 
-const resourceBudgetSchema = z.object({
+const laneResourceRequestSchema = z.object({
   cpu: z.number().positive().optional(),
   mem: z.string().min(1).optional(),
   gpu: z.number().int().min(0).optional(),
@@ -64,7 +67,7 @@ const resourceBudgetSchema = z.object({
 
 const scheduleSchema = z.object({
   pool: z.enum(['eval', 'agent']),
-  resources: resourceBudgetSchema.optional(),
+  resources: laneResourceRequestSchema.optional(),
 });
 
 const agentStateSchema = z.object({
@@ -234,6 +237,22 @@ export class WorkflowValidationError extends Error {
 // Semantic validation
 // ---------------------------------------------------------------------------
 
+/**
+ * The two state types that run an ordered `transitions` list with
+ * agent-style `guard`/`when` routing (agent + deterministic). Human-gate
+ * transitions use a different (event-keyed) shape, so they are excluded.
+ */
+export type ExecutableState = Extract<WorkflowStateDefinition, { readonly type: 'agent' | 'deterministic' }>;
+
+/**
+ * True for {@link ExecutableState}s. Narrows the union so call sites can
+ * read `state.transitions` / `state.segment` without re-spelling the
+ * `Extract<...>` longhand.
+ */
+export function isExecutableState(state: WorkflowStateDefinition): state is ExecutableState {
+  return state.type === 'agent' || state.type === 'deterministic';
+}
+
 export function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
   switch (state.type) {
     case 'agent':
@@ -266,7 +285,7 @@ export function parseArtifactRef(ref: string): { readonly name: string; readonly
 }
 
 function collectGuardNames(state: WorkflowStateDefinition): string[] {
-  if (state.type === 'agent' || state.type === 'deterministic') {
+  if (isExecutableState(state)) {
     return state.transitions.filter((t): t is typeof t & { guard: string } => t.guard != null).map((t) => t.guard);
   }
   return [];
@@ -299,7 +318,7 @@ export function findReachableStates(initial: string, states: Record<string, Work
         queue.push(target);
       }
     }
-    if ((state.type === 'agent' || state.type === 'deterministic') && state.segment !== undefined) {
+    if (isExecutableState(state) && state.segment !== undefined) {
       for (const target of state.segment) {
         if (!reachable.has(target)) {
           queue.push(target);
@@ -351,7 +370,7 @@ function describeRuntimeType(value: unknown): string {
 function collectTransitionsWithActions(
   state: WorkflowStateDefinition,
 ): readonly (AgentTransitionDefinition | HumanGateTransitionDefinition)[] {
-  if (state.type === 'agent' || state.type === 'deterministic') {
+  if (isExecutableState(state)) {
     return state.transitions;
   }
   if (state.type === 'human_gate') {
@@ -449,15 +468,11 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
   const stateNames = new Set(Object.keys(definition.states));
 
   for (const [stateId, state] of Object.entries(definition.states)) {
-    if ((state.type === 'agent' || state.type === 'deterministic') && state.fanOut !== undefined) {
+    if (isExecutableState(state) && state.fanOut !== undefined) {
       validateFanOutState(definition, stateId, state, stateNames, issues);
     }
 
-    if (
-      (state.type === 'agent' || state.type === 'deterministic') &&
-      state.schedule?.pool === 'eval' &&
-      state.fanOutMember !== true
-    ) {
+    if (isExecutableState(state) && state.schedule?.pool === 'eval' && state.fanOutMember !== true) {
       issues.push(`State "${stateId}" declares schedule.pool: eval but is not fanOutMember: true.`);
     }
 
@@ -470,7 +485,8 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
     ) {
       issues.push(
         `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
-          `resultFile must be lane-scoped under current/lane_<k>/ (for example current/lane_\${laneId}/result.json).`,
+          `resultFile must be lane-scoped under a lane_\${laneId}/ segment (the pump substitutes lane_<digits> per lane, ` +
+          `for example current/lane_\${laneId}/result.json).`,
       );
     }
   }
@@ -485,7 +501,7 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
 function validateFanOutState(
   definition: WorkflowDefinition,
   stateId: string,
-  state: Extract<WorkflowStateDefinition, { readonly type: 'agent' | 'deterministic' }>,
+  state: ExecutableState,
   stateNames: ReadonlySet<string>,
   issues: string[],
 ): void {
@@ -513,11 +529,37 @@ function validateFanOutState(
   }
 }
 
+// Canonical lane-scoped form the pump emits at runtime: a `lane_<digits>`
+// path segment (e.g. current/lane_0/result.json). The `${laneId}` form is
+// the manifest-author placeholder the pump substitutes per lane. No other
+// spellings are accepted — the error message in validateFanOutScaffolding
+// advertises exactly these two.
+const LANE_SCOPED_RESULT_FILE_RE = /(?:^|\/)lane_(?:\$\{laneId\}|[0-9]+)(?:\/|$)/;
+
+/**
+ * Whether a fanOutMember's resultFile is lane-scoped (so concurrent lanes
+ * don't clobber a shared file). This checks lane-scoping ONLY — path
+ * containment safety (no leading `/`, no `..`) is enforced separately and
+ * unconditionally for every deterministic resultFile by
+ * `isSafeWorkspaceRelativePath` in `validateContainerScopes`, so there is
+ * no need to re-check traversal here.
+ */
 function isLaneScopedResultFile(resultFile: string): boolean {
-  const normalized = pathPosix.normalize(resultFile);
-  return /(?:^|\/)lane_(?:\$\{laneId\}|\{laneId\}|\$\{lane\}|\{lane\}|<k>|[0-9]+)(?:\/|$)/.test(normalized);
+  return LANE_SCOPED_RESULT_FILE_RE.test(pathPosix.normalize(resultFile));
 }
 
+/**
+ * Heuristic detection of a greedy sampler declared anywhere in the manifest.
+ * This encodes the inverse of the Python source of truth `STOCHASTIC_SAMPLERS`
+ * (`scripts/evolve_result.py`) across the language boundary: greedy is the one
+ * non-stochastic sampler, so a `workers>1` run that declares it is rejected.
+ *
+ * The detection is deliberately fragile: it scrapes manifest prompt/argv text
+ * for `--sampling-algorithm greedy`-style flags because the host validator runs
+ * at lint time, before any run-spec exists on disk — there is no authoritative
+ * `sampling.algorithm` field to read. A future move of the sampler decision into
+ * a manifest field would let this be exact; until then this is a best-effort guard.
+ */
 function workflowDeclaresGreedySampler(definition: WorkflowDefinition): boolean {
   for (const state of Object.values(definition.states)) {
     if (state.type === 'agent' && declaresGreedySamplerText(state.prompt)) {

@@ -1034,7 +1034,7 @@ describe('WF012 — deterministic verdict edges without resultFile', () => {
 });
 
 // ---------------------------------------------------------------------------
-// WF013/WF014 — fan-out scaffolding diagnostics
+// WF013 (fan-out budget) / WF014 (fan-out child-bounds) diagnostics
 // ---------------------------------------------------------------------------
 
 describe('WF013/WF014 — fan-out scaffolding diagnostics', () => {
@@ -1092,33 +1092,33 @@ describe('WF013/WF014 — fan-out scaffolding diagnostics', () => {
     });
   }
 
-  it('WF013 warns that maxRounds caps batches and self-loopable children need per-lane bounds', () => {
+  it('WF013 warns the fan-out state that maxRounds caps batches, not candidates', () => {
     const result = lintWorkflow(fanOutWorkflow(), stubCtx);
     const wf013 = result.filter((d) => d.code === 'WF013');
 
-    expect(wf013).toHaveLength(2);
-    expect(wf013.map((d) => d.severity)).toEqual(['warning', 'warning']);
-    expect(wf013.some((d) => d.stateId === 'workers' && d.message.includes('candidate budget'))).toBe(true);
-    expect(wf013.some((d) => d.stateId === 'worker' && d.message.includes('no per-lane maxVisits'))).toBe(true);
+    expect(wf013).toHaveLength(1);
+    expect(wf013[0]?.severity).toBe('warning');
+    expect(wf013[0]?.stateId).toBe('workers');
+    expect(wf013[0]?.message).toContain('candidate budget');
   });
 
-  it('WF013 does not warn on child loops that have maxVisits', () => {
-    const result = lintWorkflow(fanOutWorkflow({ workerState: { maxVisits: 3 } }), stubCtx);
-    const wf013 = result.filter((d) => d.code === 'WF013');
+  it('WF014 warns a self-loopable segment child that lacks a per-lane maxVisits bound', () => {
+    const result = lintWorkflow(fanOutWorkflow(), stubCtx);
+    const wf014 = result.filter((d) => d.code === 'WF014');
 
+    expect(wf014).toHaveLength(1);
+    expect(wf014[0]?.severity).toBe('warning');
+    expect(wf014[0]?.stateId).toBe('worker');
+    expect(wf014[0]?.message).toContain('no per-lane maxVisits');
+  });
+
+  it('WF014 does not warn on child loops that have maxVisits', () => {
+    const result = lintWorkflow(fanOutWorkflow({ workerState: { maxVisits: 3 } }), stubCtx);
+
+    expect(result.filter((d) => d.code === 'WF014')).toHaveLength(0);
+    // WF013 (budget) still fires on the fan-out state itself.
+    const wf013 = result.filter((d) => d.code === 'WF013');
     expect(wf013).toHaveLength(1);
     expect(wf013[0]?.stateId).toBe('workers');
-  });
-
-  it('WF014 errors when fanOut join is not barrier', () => {
-    const result = lintWorkflow(
-      fanOutWorkflow({ workersState: { fanOut: { count: 'workers', join: 'race' } } }),
-      stubCtx,
-    );
-    const diagnostic = result.find((d) => d.code === 'WF014');
-
-    expect(diagnostic?.severity).toBe('error');
-    expect(diagnostic?.stateId).toBe('workers');
-    expect(diagnostic?.message).toContain('only barrier joins are supported');
   });
 });

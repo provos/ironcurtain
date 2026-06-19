@@ -496,6 +496,10 @@ def _promote_lesson(
 
 
 def evaluate(args: argparse.Namespace) -> int:
+    # Validate --lane / EVOLVE_LANE up front and discard the value: evaluate
+    # uses explicit --step-name / --code-path, so it never reads the lane, but
+    # we still reject a malformed lane here so no subcommand path can slip past
+    # the injection-validation that the --step-from-current path performs.
     _resolve_lane(args)
     result_file = Path(args.result_file)
     step_name = _resolve_step_name(args)
@@ -714,6 +718,9 @@ def sample(args: argparse.Namespace) -> int:
 
 
 def record(args: argparse.Namespace) -> int:
+    # Validate --lane / EVOLVE_LANE up front and discard the value: record takes
+    # explicit --step-name, so it never reads the lane, but validating here keeps
+    # the lane-injection check uniform across every subcommand (see evaluate).
     _resolve_lane(args)
     result_file = Path(args.result_file)
     helper = SCRIPT_DIR / "evolve-db"

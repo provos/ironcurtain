@@ -18,6 +18,7 @@ import { GLOBAL_PERSONA, DEFAULT_CONTAINER_SCOPE } from './types.js';
 import {
   collectTransitionTargets,
   findReachableStates,
+  isExecutableState,
   iterateSkillRefIssues,
   parseArtifactRef,
   usesVerdictEdges,
@@ -57,6 +58,12 @@ import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
  * Both concerns are skipped cleanly when the lint caller did not
  * supply a `workflowFilePath` (the package dir is the only place skill
  * manifests can live).
+ *
+ * WF013 (fan-out maxRounds budget) and WF014 (fan-out child-bounds) are
+ * sibling fan-out checks split apart so each carries one concern. WF014
+ * previously flagged non-barrier fan-out joins; that is now a parse-time
+ * rejection (`FanOutDefinition.join` is the literal `'barrier'`), so the
+ * lint became unreachable and the number was reclaimed for child-bounds.
  */
 export type DiagnosticCode =
   | 'WF001'
@@ -124,8 +131,8 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkVisitCapTransitionOrder(def),
     ...checkContainerScopePopulatedByAgent(def),
     ...checkVerdictEdgesHaveResultFile(def),
-    ...checkFanOutBudgetAndChildBounds(def),
-    ...checkFanOutBarrierJoin(def),
+    ...checkFanOutBudget(def),
+    ...checkFanOutChildBounds(def),
     ...checkSkillReferencesAndManifests(def, ctx),
   ];
 }
@@ -294,7 +301,7 @@ function checkMaxRoundsHasGuard(def: WorkflowDefinition): Diagnostic[] {
   if (def.settings?.maxRounds === undefined) return [];
 
   for (const state of Object.values(def.states)) {
-    if (state.type !== 'agent' && state.type !== 'deterministic') continue;
+    if (!isExecutableState(state)) continue;
     for (const t of state.transitions) {
       if (t.guard === ROUND_LIMIT_GUARD) return [];
     }
@@ -526,29 +533,43 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
 }
 
 // ---------------------------------------------------------------------------
-// WF013 — fan-out changes maxRounds budget and child loop coverage
+// WF013 — fan-out re-scopes the maxRounds budget from candidates to batches
 // ---------------------------------------------------------------------------
 
-function checkFanOutBudgetAndChildBounds(def: WorkflowDefinition): Diagnostic[] {
+function checkFanOutBudget(def: WorkflowDefinition): Diagnostic[] {
+  const workers = def.settings?.workers ?? 1;
+  if (workers <= 1) return [];
+  if (def.settings?.maxRounds === undefined) return [];
+  const maxRounds = def.settings.maxRounds;
+
+  const diagnostics: Diagnostic[] = [];
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if (!isExecutableState(state) || state.fanOut === undefined) continue;
+    diagnostics.push({
+      code: 'WF013',
+      severity: 'warning',
+      stateId,
+      message:
+        `Fan-out state "${stateId}" runs with settings.workers=${workers}; settings.maxRounds=${maxRounds} ` +
+        `now caps batches, so the candidate budget is maxRounds × workers = ${maxRounds * workers}.`,
+      hint: 'If maxRounds is intended as a candidate budget, divide it by workers or set an explicit batch budget.',
+    });
+  }
+  return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// WF014 — self-loopable fan-out segment child lacks a per-lane visit bound
+// ---------------------------------------------------------------------------
+
+function checkFanOutChildBounds(def: WorkflowDefinition): Diagnostic[] {
   const workers = def.settings?.workers ?? 1;
   if (workers <= 1) return [];
 
   const diagnostics: Diagnostic[] = [];
-  for (const [stateId, state] of Object.entries(def.states)) {
-    if ((state.type !== 'agent' && state.type !== 'deterministic') || state.fanOut === undefined) continue;
+  for (const state of Object.values(def.states)) {
+    if (!isExecutableState(state) || state.fanOut === undefined) continue;
     const segment = state.segment ?? [];
-
-    if (def.settings?.maxRounds !== undefined) {
-      diagnostics.push({
-        code: 'WF013',
-        severity: 'warning',
-        stateId,
-        message:
-          `Fan-out state "${stateId}" runs with settings.workers=${workers}; settings.maxRounds=${def.settings.maxRounds} ` +
-          `now caps batches, so the candidate budget is maxRounds × workers = ${def.settings.maxRounds * workers}.`,
-        hint: 'If maxRounds is intended as a candidate budget, divide it by workers or set an explicit batch budget.',
-      });
-    }
 
     const segmentSet = new Set(segment);
     for (const memberId of segment) {
@@ -557,7 +578,7 @@ function checkFanOutBudgetAndChildBounds(def: WorkflowDefinition): Diagnostic[] 
       if (!isSelfLoopableWithinSegment(def, memberId, segmentSet)) continue;
       if (member.type === 'agent' && member.maxVisits !== undefined) continue;
       diagnostics.push({
-        code: 'WF013',
+        code: 'WF014',
         severity: 'warning',
         stateId: memberId,
         message:
@@ -586,26 +607,6 @@ function isSelfLoopableWithinSegment(def: WorkflowDefinition, stateId: string, s
     }
   }
   return false;
-}
-
-// ---------------------------------------------------------------------------
-// WF014 — fan-out joins must be barrier joins
-// ---------------------------------------------------------------------------
-
-function checkFanOutBarrierJoin(def: WorkflowDefinition): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  for (const [stateId, state] of Object.entries(def.states)) {
-    if ((state.type !== 'agent' && state.type !== 'deterministic') || state.fanOut === undefined) continue;
-    if (state.fanOut.join === 'barrier') continue;
-    diagnostics.push({
-      code: 'WF014',
-      severity: 'error',
-      stateId,
-      message: `Fan-out state "${stateId}" uses join "${state.fanOut.join}", but only barrier joins are supported.`,
-      hint: 'Use fanOut: { count: workers, join: barrier }. Async joins are a future, deliberately reviewed extension.',
-    });
-  }
-  return diagnostics;
 }
 
 // ---------------------------------------------------------------------------

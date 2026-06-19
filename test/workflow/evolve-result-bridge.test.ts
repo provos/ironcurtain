@@ -246,6 +246,12 @@ describe('evolve_result.py bridge', () => {
     };
   }
 
+  // Async sibling of `runBridge`. It exists (rather than reusing the sync
+  // helper) because the concurrent-lane cases need genuinely parallel child
+  // processes — `spawnSync` would serialize them, defeating the test — and
+  // because those cases also assert on captured stderr, which the streaming
+  // `spawn` form makes available per-child. Single-process cases keep using
+  // the simpler synchronous `runBridge`.
   function runBridgeAsync(
     scriptsDir: string,
     args: readonly string[],

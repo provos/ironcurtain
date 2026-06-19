@@ -166,11 +166,21 @@ export type WorkflowStateDefinition =
   | TerminalStateDefinition;
 
 export interface FanOutDefinition {
+  /**
+   * Lane multiplicity. `'workers'` defers to `settings.workers`; the
+   * `number` branch is a reserved per-state override and is not consumed
+   * by the pump yet.
+   */
   readonly count: 'workers' | number;
-  readonly join: string;
+  /**
+   * Join discipline. Only barrier joins are supported today (every lane
+   * must complete before the segment exits); async joins are a future,
+   * deliberately reviewed extension.
+   */
+  readonly join: 'barrier';
 }
 
-export interface ResourceBudget {
+export interface LaneResourceRequest {
   readonly cpu?: number;
   readonly mem?: string;
   readonly gpu?: number;
@@ -178,7 +188,7 @@ export interface ResourceBudget {
 
 export interface StateScheduleDefinition {
   readonly pool: 'eval' | 'agent';
-  readonly resources?: ResourceBudget;
+  readonly resources?: LaneResourceRequest;
 }
 
 export interface AgentStateDefinition {
@@ -202,12 +212,17 @@ export interface AgentStateDefinition {
   readonly outputs: readonly string[];
   /** Transitions evaluated in order; first match wins. */
   readonly transitions: readonly AgentTransitionDefinition[];
-  /** When true, each parallel instance gets a dedicated git worktree. */
+  /**
+   * Legacy field from the old per-instance parallel model (one git
+   * worktree per parallel instance). Unused on the `workers`/lane path —
+   * native fan-out lanes are scheduled by the pump, not by per-state
+   * worktree opt-in. Retained for backward compatibility with existing
+   * manifests; do not wire new behavior to it.
+   */
   readonly worktree?: boolean;
   /**
-   * Marks this state as a member of a parent fan-out segment. Parsed today
-   * as manifest scaffolding; consumed by the native fan-out pump in a later
-   * phase.
+   * Marks this state as a member of a parent fan-out segment. Schema-only
+   * until consumed by the native fan-out pump in a later phase.
    */
   readonly fanOutMember?: boolean;
   /** Fan-out topology metadata. Schema-only until the native pump consumes it. */

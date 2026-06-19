@@ -264,6 +264,15 @@ describe('validateDefinition', () => {
       });
       expect(issuesFor(raw).some((issue) => issue.includes('schedule.pool: eval'))).toBe(true);
     });
+
+    it('rejects a non-barrier fanOut join at parse time (join is the literal "barrier")', () => {
+      // The Zod literal makes a non-barrier join a structural parse error,
+      // so it never reaches the linter. This replaces the former WF014.
+      const raw = fanOutDefinition({
+        workersState: { fanOut: { count: 'workers', join: 'race' } },
+      });
+      expect(() => validateDefinition(raw)).toThrow(WorkflowValidationError);
+    });
   });
 
   describe('structural validation (Zod)', () => {
