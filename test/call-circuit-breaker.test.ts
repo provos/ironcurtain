@@ -29,6 +29,16 @@ describe('CallCircuitBreaker', () => {
     expect(result.reason).toContain('read_file');
   });
 
+  it('scales the effective threshold by worker count', () => {
+    const breaker = new CallCircuitBreaker({ threshold: 5, workerCount: 3, windowMs: 60_000 });
+    for (let i = 0; i < 15; i++) {
+      expect(breaker.check('read_file', { path: '/tmp/test.txt' }).allowed).toBe(true);
+    }
+    const result = breaker.check('read_file', { path: '/tmp/test.txt' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('15 times');
+  });
+
   it('tracks independent windows per tool+args combination', () => {
     const breaker = new CallCircuitBreaker({ threshold: 3, windowMs: 60_000 });
 

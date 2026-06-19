@@ -32,6 +32,7 @@ import {
   extractTextFromContent,
   type CallToolDeps,
   type ClientState,
+  type EscalationWaitRunner,
   type InProcessEscalationFn,
   type ProxiedTool,
   type ToolCallResponse,
@@ -107,6 +108,12 @@ export interface ToolCallCoordinatorOptions {
    * Optional; coordinator supplies an empty map when absent.
    */
   readonly resolvedSandboxConfigs?: Map<string, ResolvedSandboxConfig>;
+  /**
+   * Number of concurrent agent lanes expected to share this coordinator.
+   * Scales the circuit-breaker threshold so identical tool calls from
+   * N workers do not false-trip the single-lane runaway guard.
+   */
+  readonly workerCount?: number;
   /**
    * Optional HTTP control server endpoint. When supplied, `start()`
    * binds a small JSON API that the workflow orchestrator uses to
@@ -194,6 +201,11 @@ export class ToolCallCoordinator {
   private readonly toolMap = new Map<string, CoordinatorTool>();
   /** Client states used for roots expansion on escalation. */
   private readonly clientStates = new Map<string, ClientState>();
+  private activeToolCalls = 0;
+  private toolCallAdmissionOpen = true;
+  private closed = false;
+  private readonly toolCallAdmissionWaiters: Array<() => void> = [];
+  private readonly toolCallDrainWaiters: Array<() => void> = [];
 
   constructor(options: ToolCallCoordinatorOptions) {
     this.policyEngine = new PolicyEngine(
@@ -208,7 +220,7 @@ export class ToolCallCoordinator {
     this.auditLog = new AuditLog(options.auditLogPath, {
       redact: options.auditRedact === true,
     });
-    this.circuitBreaker = new CallCircuitBreaker();
+    this.circuitBreaker = new CallCircuitBreaker({ workerCount: options.workerCount ?? 1 });
     this.whitelist = createApprovalWhitelist();
     this.autoApproveModel = options.autoApproveModel ?? null;
     this.escalationDir = options.escalationDir;
@@ -307,10 +319,76 @@ export class ToolCallCoordinator {
     rawArgs: Record<string, unknown>,
   ): Promise<ToolCallResponse> {
     const key = `${serverName}__${toolName}`;
-    return this.callMutex.withLock(async () => {
-      const deps = this.buildCallToolDeps();
-      return handleCallTool(key, rawArgs, deps);
-    });
+    await this.enterToolCall();
+    try {
+      return await this.runSerializedToolCall(async (runEscalationWait) => {
+        const deps = this.buildCallToolDeps(null, runEscalationWait);
+        return handleCallTool(key, rawArgs, deps);
+      });
+    } finally {
+      this.leaveToolCall();
+    }
+  }
+
+  private async runSerializedToolCall<T>(run: (runEscalationWait: EscalationWaitRunner) => Promise<T>): Promise<T> {
+    let release = await this.callMutex.acquire();
+    let lockHeld = true;
+
+    const runEscalationWait: EscalationWaitRunner = async (wait) => {
+      if (lockHeld) {
+        release();
+        lockHeld = false;
+      }
+      try {
+        return await wait();
+      } finally {
+        release = await this.callMutex.acquire();
+        lockHeld = true;
+      }
+    };
+
+    try {
+      return await run(runEscalationWait);
+    } finally {
+      release();
+    }
+  }
+
+  private async enterToolCall(): Promise<void> {
+    for (;;) {
+      if (this.closed) {
+        throw new Error('ToolCallCoordinator is closed');
+      }
+      if (this.toolCallAdmissionOpen) {
+        this.activeToolCalls++;
+        return;
+      }
+      await new Promise<void>((resolve) => this.toolCallAdmissionWaiters.push(resolve));
+    }
+  }
+
+  private leaveToolCall(): void {
+    this.activeToolCalls = Math.max(0, this.activeToolCalls - 1);
+    if (this.activeToolCalls === 0) {
+      const waiters = this.toolCallDrainWaiters.splice(0);
+      for (const resolve of waiters) resolve();
+    }
+  }
+
+  private async withToolCallsQuiesced<T>(fn: () => Promise<T>): Promise<T> {
+    this.toolCallAdmissionOpen = false;
+    while (this.activeToolCalls > 0) {
+      await new Promise<void>((resolve) => this.toolCallDrainWaiters.push(resolve));
+    }
+    try {
+      return await fn();
+    } finally {
+      if (!this.closed) {
+        this.toolCallAdmissionOpen = true;
+      }
+      const waiters = this.toolCallAdmissionWaiters.splice(0);
+      for (const resolve of waiters) resolve();
+    }
   }
 
   /**
@@ -345,16 +423,22 @@ export class ToolCallCoordinator {
           inputSchema: {},
         };
 
-    const response = await this.callMutex.withLock(async () => {
-      const deps = this.buildCallToolDeps(synthetic);
-      // Preserve the caller's requestId/timestamp so audit entries
-      // correlate with caller-side tracing. Low-level UTCP callers
-      // route through `handleToolCall` below, which omits this.
-      return handleCallTool(key, request.arguments, deps, {
-        requestId: request.requestId,
-        timestamp: request.timestamp,
+    await this.enterToolCall();
+    let response: ToolCallResponse;
+    try {
+      response = await this.runSerializedToolCall(async (runEscalationWait) => {
+        const deps = this.buildCallToolDeps(synthetic, runEscalationWait);
+        // Preserve the caller's requestId/timestamp so audit entries
+        // correlate with caller-side tracing. Low-level UTCP callers
+        // route through `handleToolCall` below, which omits this.
+        return handleCallTool(key, request.arguments, deps, {
+          requestId: request.requestId,
+          timestamp: request.timestamp,
+        });
       });
-    });
+    } finally {
+      this.leaveToolCall();
+    }
 
     const isError = response.isError === true;
     // The pipeline always stamps `_policyDecision` on its responses, so
@@ -391,7 +475,10 @@ export class ToolCallCoordinator {
    * engine use this to avoid mutating the coordinator's long-lived
    * tool registry.
    */
-  private buildCallToolDeps(syntheticTool: CoordinatorTool | null = null): CallToolDeps {
+  private buildCallToolDeps(
+    syntheticTool: CoordinatorTool | null = null,
+    runEscalationWait?: EscalationWaitRunner,
+  ): CallToolDeps {
     // Capture the callback reference once to narrow the type, then
     // adapt it to the shape handleCallTool expects.
     const escalationFn = this.onEscalation;
@@ -422,6 +509,7 @@ export class ToolCallCoordinator {
       controlApiClient: this.controlApiClient,
       onEscalation,
       autoApproveUserMessage: this.lastUserMessage ?? undefined,
+      runEscalationWait,
       persona: this.currentPersona,
     };
   }
@@ -440,19 +528,18 @@ export class ToolCallCoordinator {
    *
    * Invariants:
    *
-   *   1. Acquire the call mutex first so every in-flight `handleToolCall`
-   *      finishes under the old policy before we swap. New callers queue
-   *      up on the mutex and start under the new policy.
-   *   2. Acquire the policy mutex next to serialize against overlapping
-   *      `loadPolicy` calls.
+   *   1. Suspend new tool-call admission and wait for active calls to drain
+   *      before we swap. This includes escalation waits that temporarily
+   *      release the call mutex.
+   *   2. Acquire the call mutex, then the policy mutex, to serialize against
+   *      overlapping tool-call tails and loadPolicy calls.
    *   3. Load + construct the new engine. If the policy dir is missing
    *      or malformed, we abort with the old engine still intact --
    *      callers can keep running under the previous persona's policy
    *      until they decide to tear down.
    *   4. Swap the engine reference AND update `currentPersona` in the
-   *      same critical section. Subsequent tool calls (queued behind the
-   *      call mutex, or started after we release) evaluate under the new
-   *      engine and stamp audit entries with the new persona.
+   *      same critical section. Subsequent tool calls start under the
+   *      new engine and stamp audit entries with the new persona.
    *   5. On failure in step 3, propagate the error without touching the
    *      old engine or `currentPersona`.
    *
@@ -477,59 +564,62 @@ export class ToolCallCoordinator {
     // load at attacker-controlled files outside the trusted roots.
     const canonicalPolicyDir = validatePolicyDir(req.policyDir);
 
-    // Wait for any in-flight tool call to drain, then serialize against
+    // Wait for any in-flight tool call to drain, including calls paused
+    // outside the call mutex for human escalation. Then serialize against
     // concurrent loadPolicy. The two mutexes are acquired in this order
     // (call, then policy) everywhere; deadlock is impossible because no
     // other code path acquires them in reverse.
-    await this.callMutex.withLock(async () => {
-      // The inner critical section is fully synchronous (policy load,
-      // engine construction, reference swap); `async` is kept only so
-      // the function matches `AsyncMutex.withLock`'s `() => Promise<T>`
-      // signature.
-      // eslint-disable-next-line @typescript-eslint/require-await
-      await this.policyMutex.withLock(async () => {
-        // Step 1: load only the per-persona artifacts (compiled policy
-        // + optional dynamic lists). Annotations are globally scoped
-        // and were retained at construction time -- persona dirs do
-        // not ship `tool-annotations.json`. If any required file is
-        // missing, the loader throws and we surface that to the caller
-        // without touching the live engine.
-        const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(canonicalPolicyDir);
+    await this.withToolCallsQuiesced(async () => {
+      await this.callMutex.withLock(async () => {
+        // The inner critical section is fully synchronous (policy load,
+        // engine construction, reference swap); `async` is kept only so
+        // the function matches `AsyncMutex.withLock`'s `() => Promise<T>`
+        // signature.
+        // eslint-disable-next-line @typescript-eslint/require-await
+        await this.policyMutex.withLock(async () => {
+          // Step 1: load only the per-persona artifacts (compiled policy
+          // + optional dynamic lists). Annotations are globally scoped
+          // and were retained at construction time -- persona dirs do
+          // not ship `tool-annotations.json`. If any required file is
+          // missing, the loader throws and we surface that to the caller
+          // without touching the live engine.
+          const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(canonicalPolicyDir);
 
-        // Step 2: re-merge the virtual proxy tool annotations and
-        // rules. The sandbox does this at construction time
-        // (src/sandbox/index.ts:581-585); a persona-swapped policy
-        // must re-apply the same merge or the new engine will treat
-        // `add_proxy_domain` / `remove_proxy_domain` /
-        // `list_proxy_domains` as unknown tools.
-        //
-        // The merge is idempotent: `proxy` is a reserved server name
-        // (RESERVED_SERVER_NAMES) so overwriting it on each load is
-        // always correct, even if the caller already merged at
-        // construction time.
-        const mergedAnnotations = mergeProxyAnnotations(this.toolAnnotations);
-        compiledPolicy.rules = [...proxyPolicyRules, ...compiledPolicy.rules];
+          // Step 2: re-merge the virtual proxy tool annotations and
+          // rules. The sandbox does this at construction time
+          // (src/sandbox/index.ts:581-585); a persona-swapped policy
+          // must re-apply the same merge or the new engine will treat
+          // `add_proxy_domain` / `remove_proxy_domain` /
+          // `list_proxy_domains` as unknown tools.
+          //
+          // The merge is idempotent: `proxy` is a reserved server name
+          // (RESERVED_SERVER_NAMES) so overwriting it on each load is
+          // always correct, even if the caller already merged at
+          // construction time.
+          const mergedAnnotations = mergeProxyAnnotations(this.toolAnnotations);
+          compiledPolicy.rules = [...proxyPolicyRules, ...compiledPolicy.rules];
 
-        // Step 3: build the replacement engine using the retained +
-        // proxy-merged annotations. A synchronous construction failure
-        // (malformed policy) propagates out below without touching
-        // `this.policyEngine` or `this.currentPersona`.
-        const nextEngine = new PolicyEngine(
-          compiledPolicy,
-          mergedAnnotations,
-          this.protectedPaths,
-          this.allowedDirectory,
-          this.serverDomainAllowlists,
-          dynamicLists,
-          this.trustedServers,
-        );
+          // Step 3: build the replacement engine using the retained +
+          // proxy-merged annotations. A synchronous construction failure
+          // (malformed policy) propagates out below without touching
+          // `this.policyEngine` or `this.currentPersona`.
+          const nextEngine = new PolicyEngine(
+            compiledPolicy,
+            mergedAnnotations,
+            this.protectedPaths,
+            this.allowedDirectory,
+            this.serverDomainAllowlists,
+            dynamicLists,
+            this.trustedServers,
+          );
 
-        // Step 4: swap the engine reference and update the persona
-        // stamp together. Both fields are read by handlers that queue
-        // on the call mutex we are holding, so they cannot observe a
-        // partial swap.
-        this.policyEngine = nextEngine;
-        this.currentPersona = req.persona;
+          // Step 4: swap the engine reference and update the persona
+          // stamp together. Both fields are read by handlers that queue
+          // on the call mutex we are holding, so they cannot observe a
+          // partial swap.
+          this.policyEngine = nextEngine;
+          this.currentPersona = req.persona;
+        });
       });
     });
   }
@@ -585,10 +675,13 @@ export class ToolCallCoordinator {
     // used elsewhere (call, then policy) guarantees those handlers
     // complete before we tear the audit log out from under them; no
     // deadlock risk because no code path takes these in reverse.
-    await this.callMutex.withLock(async () => {
-      await this.policyMutex.withLock(async () => {
-        // Mutexes held — no loadPolicy/handleCallTool can be in flight.
+    await this.withToolCallsQuiesced(async () => {
+      await this.callMutex.withLock(async () => {
+        await this.policyMutex.withLock(async () => {
+          // Mutexes held — no loadPolicy/handleCallTool can be in flight.
+        });
       });
+      this.closed = true;
     });
 
     if (this.ownedMcpManager) {
