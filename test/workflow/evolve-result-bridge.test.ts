@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
-import { validateDefinition } from '../../src/workflow/validate.js';
+import { isSafeWorkspaceRelativePath, validateDefinition } from '../../src/workflow/validate.js';
 import { lintWorkflow } from '../../src/workflow/lint.js';
+import { isWithinDirectory } from '../../src/types/argument-roles.js';
 
 const PYTHON = process.env.PYTHON ?? 'python3';
 const WORKFLOW_DIR = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'evolve');
@@ -225,6 +226,7 @@ describe('evolve_result.py bridge', () => {
   function runBridge(
     scriptsDir: string,
     args: readonly string[],
+    opts: { env?: Record<string, string | undefined> } = {},
   ): { status: number | null; result: Record<string, unknown> } {
     const resultFile = resolve(tmpDir, 'result.json');
     const completed = spawnSync(
@@ -232,6 +234,7 @@ describe('evolve_result.py bridge', () => {
       [resolve(scriptsDir, 'evolve_result.py'), ...args, '--result-file', resultFile],
       {
         encoding: 'utf-8',
+        env: { ...process.env, ...opts.env },
       },
     );
     if (completed.error) throw completed.error;
@@ -241,6 +244,37 @@ describe('evolve_result.py bridge', () => {
       status: completed.status,
       result: JSON.parse(readFileSync(resultFile, 'utf-8')) as Record<string, unknown>,
     };
+  }
+
+  function runBridgeAsync(
+    scriptsDir: string,
+    args: readonly string[],
+    resultFile: string,
+    env: Record<string, string | undefined> = {},
+  ): Promise<{ status: number | null; result: Record<string, unknown>; stderr: string }> {
+    return new Promise((resolveRun, reject) => {
+      const child = spawn(PYTHON, [resolve(scriptsDir, 'evolve_result.py'), ...args, '--result-file', resultFile], {
+        env: { ...process.env, ...env },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf-8');
+      child.stderr.on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      child.on('error', reject);
+      child.on('close', (status) => {
+        try {
+          resolveRun({
+            status,
+            stderr,
+            result: JSON.parse(readFileSync(resultFile, 'utf-8')) as Record<string, unknown>,
+          });
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+    });
   }
 
   function evalArgs(runDir = resolve(tmpDir, 'run')): string[] {
@@ -429,6 +463,56 @@ describe('evolve_result.py bridge', () => {
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { event: string; payload: Record<string, unknown> });
   }
+
+  it.skipIf(!REAL_ENGINE_READY)('records two lane-tagged steps concurrently as distinct nodes', async () => {
+    const runDir = realRunDir('real-concurrent-lane-record');
+    writeRealRunSpec(runDir);
+    const scriptsDir = realScriptsDir();
+    const stepNames = ['step_0001_lane_0', 'step_0001_lane_1'];
+
+    for (const [lane, stepName] of stepNames.entries()) {
+      const stepDir = resolve(runDir, 'steps', stepName);
+      mkdirSync(stepDir, { recursive: true });
+      writeFileSync(resolve(stepDir, 'code'), `def score():\n    return ${lane + 1}\n`);
+      writeFileSync(resolve(stepDir, 'results.json'), JSON.stringify({ eval_score: lane + 1 }) + '\n');
+    }
+
+    const results = await Promise.all(
+      stepNames.map((stepName, lane) =>
+        runBridgeAsync(
+          scriptsDir,
+          [
+            'record',
+            '--run-dir',
+            runDir,
+            '--lane',
+            String(lane),
+            '--step-name',
+            stepName,
+            '--name',
+            `round-1-lane-${lane}`,
+            '--code-path',
+            `.evolve_runs/main/steps/${stepName}/code`,
+            '--results-file',
+            `.evolve_runs/main/steps/${stepName}/results.json`,
+          ],
+          resolve(tmpDir, `record-lane-${lane}.json`),
+          { EVOLVE_DB_TEST_HOLD_LOCK_MS: '50' },
+        ),
+      ),
+    );
+
+    expect(results.map((result) => result.status)).toEqual([0, 0]);
+    expect(results.map((result) => result.stderr)).toEqual(['', '']);
+    expect(results.map((result) => result.result.verdict)).toEqual(['recorded', 'recorded']);
+    const payload = JSON.parse(readFileSync(resolve(runDir, 'database_data', 'nodes.json'), 'utf-8')) as {
+      nodes: Record<string, { id: number; meta_info?: { step_name?: string } }>;
+    };
+    const nodes = Object.values(payload.nodes);
+    expect(nodes).toHaveLength(2);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(2);
+    expect(new Set(nodes.map((node) => node.meta_info?.step_name))).toEqual(new Set(stepNames));
+  });
 
   it('maps a numeric eval_score to verdict evaluated', () => {
     const scriptsDir = writeHarness({});
@@ -714,21 +798,23 @@ describe('evolve_result.py bridge', () => {
     const runDir = resolve(tmpDir, 'dedup-run');
     writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 3, patience: 2 });
     mkdirSync(resolve(runDir, 'current'), { recursive: true });
-    mkdirSync(resolve(runDir, 'steps', 'step_0001'), { recursive: true });
+    mkdirSync(resolve(runDir, 'steps', 'step_0001_lane_0'), { recursive: true });
     const analysisFile = resolve(runDir, 'current', 'analysis.md');
-    const resultsFile = resolve(runDir, 'steps', 'step_0001', 'results.json');
+    const resultsFile = resolve(runDir, 'steps', 'step_0001_lane_0', 'results.json');
     writeFileSync(analysisFile, 'lesson\n');
-    writeFileSync(resolve(runDir, 'steps', 'step_0001', 'code'), 'def score():\n    return 1\n');
+    writeFileSync(resolve(runDir, 'steps', 'step_0001_lane_0', 'code'), 'def score():\n    return 1\n');
     writeFileSync(resultsFile, JSON.stringify({ eval_score: 7 }) + '\n');
 
     const args = [
       'attach_analysis',
       '--run-dir',
       runDir,
+      '--lane',
+      '0',
       '--step-name',
-      'step_0001',
+      'step_0001_lane_0',
       '--name',
-      'round-1',
+      'round-1-lane-0',
       '--parent',
       '0',
       '--code-path',
@@ -750,7 +836,7 @@ describe('evolve_result.py bridge', () => {
       payload: { node_id: 0, idempotent_skip: true },
     });
     expect(Object.keys(nodes.nodes)).toEqual(['0']);
-    expect(readFileSync(resolve(runDir, 'record-calls.txt'), 'utf-8').trim().split('\n')).toEqual(['step_0001']);
+    expect(readFileSync(resolve(runDir, 'record-calls.txt'), 'utf-8').trim().split('\n')).toEqual(['step_0001_lane_0']);
   });
 
   it.skipIf(!REAL_ENGINE_READY)(
@@ -1064,6 +1150,40 @@ describe('evolve_result.py bridge', () => {
     expect(existsSync(resolve(runDir, 'current', 'stop_signals.json'))).toBe(false);
   });
 
+  it('uses EVOLVE_LANE to route sample scratch files under current/lane_<k> without clearing shared stop signals', () => {
+    const runDir = resolve(tmpDir, 'lane-sample-run');
+    writeRunSpec(runDir);
+    writeNodes(runDir, [3]);
+    const scriptsDir = writeHarness({
+      dbStub: "import json\nprint(json.dumps({'nodes': [{'id': 0, 'score': 3, 'analysis': 'prior'}]}))\n",
+    });
+    const laneDir = resolve(runDir, 'current', 'lane_2');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(resolve(laneDir, 'result.json'), '{"verdict":"old"}\n');
+    writeFileSync(resolve(laneDir, 'analysis.md'), 'old analysis\n');
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    writeFileSync(resolve(runDir, 'current', 'stop_signals.json'), '{"stop_reason":"target_met"}\n');
+
+    const { result } = runBridge(
+      scriptsDir,
+      ['sample', '--run-dir', runDir, '--query-from-spec', '--context-file', resolve(laneDir, 'context.json')],
+      { env: { EVOLVE_LANE: '2' } },
+    );
+
+    expect(result).toMatchObject({
+      verdict: 'sampled',
+      passed: true,
+      payload: { step_name: 'step_0002_lane_2', lane: 2 },
+    });
+    const context = JSON.parse(readFileSync(resolve(laneDir, 'context.json'), 'utf-8')) as { step_name: string };
+    expect(context.step_name).toBe('step_0002_lane_2');
+    expect(readFileSync(resolve(laneDir, 'step_name'), 'utf-8')).toBe('step_0002_lane_2\n');
+    expect(existsSync(resolve(laneDir, 'result.json'))).toBe(false);
+    expect(existsSync(resolve(laneDir, 'analysis.md'))).toBe(false);
+    expect(existsSync(resolve(runDir, 'current', 'stop_signals.json'))).toBe(true);
+    expect(existsSync(resolve(runDir, 'current', 'context.json'))).toBe(false);
+  });
+
   it('samples with an empty DB without reseeding a non-empty cognition store', () => {
     const runDir = resolve(tmpDir, 'empty-sample-run');
     writeRunSpec(runDir);
@@ -1122,6 +1242,50 @@ describe('evolve_result.py bridge', () => {
     expect(result).toMatchObject({ verdict: 'evaluated', passed: true });
     expect(argv).toEqual(expect.arrayContaining(['--step-name', 'step_0003']));
     expect(argv).toEqual(expect.arrayContaining(['--code-path', '.evolve_runs/main/steps/step_0003/code']));
+  });
+
+  it('resolves current-round flags from the selected lane', () => {
+    const runDir = resolve(tmpDir, 'workspace', '.evolve_runs', 'main');
+    const laneDir = resolve(runDir, 'current', 'lane_3');
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(resolve(laneDir, 'step_name'), 'step_0005_lane_3\n');
+    const evalStub = [
+      'import json, sys',
+      'from pathlib import Path',
+      "run_dir = Path(sys.argv[sys.argv.index('--run-dir') + 1])",
+      "Path(run_dir / 'eval-argv.json').write_text(json.dumps(sys.argv), encoding='utf-8')",
+      "step = sys.argv[sys.argv.index('--step-name') + 1]",
+      "result = run_dir / 'steps' / step / 'results.json'",
+      'result.parent.mkdir(parents=True, exist_ok=True)',
+      "result.write_text(json.dumps({'eval_score': 5, 'success': True}), encoding='utf-8')",
+      "print(json.dumps({'results_path': str(result), 'return_code': 0, 'step_dir': str(result.parent), 'success': True}))",
+    ].join('\n');
+    const scriptsDir = writeHarness({ evalStub: evalStub + '\n' });
+
+    const { result } = runBridge(scriptsDir, [
+      'evaluate',
+      '--run-dir',
+      runDir,
+      '--lane',
+      '3',
+      '--step-from-current',
+      '--code-from-current',
+    ]);
+
+    const argv = JSON.parse(readFileSync(resolve(runDir, 'eval-argv.json'), 'utf-8')) as string[];
+    expect(result).toMatchObject({ verdict: 'evaluated', passed: true });
+    expect(argv).toEqual(expect.arrayContaining(['--step-name', 'step_0005_lane_3']));
+    expect(argv).toEqual(expect.arrayContaining(['--code-path', '.evolve_runs/main/steps/step_0005_lane_3/code']));
+  });
+
+  it('accepts lane-scoped result paths under the same containment checks as deterministic result files', () => {
+    const workspace = resolve(tmpDir, 'workspace');
+    const relativeResultFile = '.evolve_runs/main/current/lane_0/result.json';
+    const absoluteResultFile = resolve(workspace, relativeResultFile);
+    mkdirSync(resolve(workspace, '.evolve_runs', 'main', 'current', 'lane_0'), { recursive: true });
+
+    expect(isSafeWorkspaceRelativePath(relativeResultFile)).toBe(true);
+    expect(isWithinDirectory(absoluteResultFile, workspace)).toBe(true);
   });
 
   it('attaches analysis with the sampled parent and omits parent when context has none', () => {

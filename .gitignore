@@ -5,6 +5,10 @@ node_modules-linux/
 # Build output
 dist/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Environment and secrets
 .env
 .env.*

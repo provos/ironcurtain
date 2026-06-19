@@ -51,6 +51,22 @@ const humanGateTransitionSchema = z.object({
  */
 const CONTAINER_SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
+const fanOutSchema = z.object({
+  count: z.union([z.literal('workers'), z.number().int().positive()]),
+  join: z.string().min(1),
+});
+
+const resourceBudgetSchema = z.object({
+  cpu: z.number().positive().optional(),
+  mem: z.string().min(1).optional(),
+  gpu: z.number().int().min(0).optional(),
+});
+
+const scheduleSchema = z.object({
+  pool: z.enum(['eval', 'agent']),
+  resources: resourceBudgetSchema.optional(),
+});
+
 const agentStateSchema = z.object({
   type: z.literal('agent'),
   description: z.string().min(1),
@@ -60,6 +76,10 @@ const agentStateSchema = z.object({
   outputs: z.array(z.string()),
   transitions: z.array(agentTransitionSchema).min(1),
   worktree: z.boolean().optional(),
+  fanOutMember: z.boolean().optional(),
+  fanOut: fanOutSchema.optional(),
+  segment: z.array(z.string()).min(1).optional(),
+  schedule: scheduleSchema.optional(),
   freshSession: z.boolean().optional(),
   model: looseModelId.optional(),
   maxVisits: z.number().int().positive().optional(),
@@ -83,6 +103,10 @@ const deterministicStateSchema = z.object({
   containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
   timeoutMs: z.number().int().positive().optional(),
   resultFile: z.string().min(1).optional(),
+  fanOut: fanOutSchema.optional(),
+  segment: z.array(z.string()).min(1).optional(),
+  fanOutMember: z.boolean().optional(),
+  schedule: scheduleSchema.optional(),
   transitions: z.array(agentTransitionSchema).min(1),
 });
 
@@ -106,7 +130,7 @@ const workflowSettingsSchema = z
     dockerAgent: z.string().optional(),
     maxRounds: z.number().int().positive().optional(),
     gitRepoPath: z.string().optional(),
-    maxParallelism: z.number().int().positive().optional(),
+    workers: z.number().int().positive().optional(),
     systemPrompt: z.string().optional(),
     maxSessionSeconds: z.number().positive().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
@@ -148,6 +172,9 @@ const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
 function validateRawInput(raw: unknown): string[] {
   const issues: string[] = [];
   if (!isPlainObject(raw)) return issues;
+  if (isPlainObject(raw.settings) && 'maxParallelism' in raw.settings) {
+    issues.push('settings.maxParallelism is retired; use settings.workers instead.');
+  }
   if (!isPlainObject(raw.states)) return issues;
 
   for (const [stateId, stateValue] of Object.entries(raw.states)) {
@@ -270,6 +297,13 @@ export function findReachableStates(initial: string, states: Record<string, Work
     for (const target of collectTransitionTargets(state)) {
       if (!reachable.has(target)) {
         queue.push(target);
+      }
+    }
+    if ((state.type === 'agent' || state.type === 'deterministic') && state.segment !== undefined) {
+      for (const target of state.segment) {
+        if (!reachable.has(target)) {
+          queue.push(target);
+        }
       }
     }
   }
@@ -410,6 +444,109 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
   }
 }
 
+function validateFanOutScaffolding(definition: WorkflowDefinition, issues: string[]): void {
+  const workers = definition.settings?.workers ?? 1;
+  const stateNames = new Set(Object.keys(definition.states));
+
+  for (const [stateId, state] of Object.entries(definition.states)) {
+    if ((state.type === 'agent' || state.type === 'deterministic') && state.fanOut !== undefined) {
+      validateFanOutState(definition, stateId, state, stateNames, issues);
+    }
+
+    if (
+      (state.type === 'agent' || state.type === 'deterministic') &&
+      state.schedule?.pool === 'eval' &&
+      state.fanOutMember !== true
+    ) {
+      issues.push(`State "${stateId}" declares schedule.pool: eval but is not fanOutMember: true.`);
+    }
+
+    if (
+      workers > 1 &&
+      state.type === 'deterministic' &&
+      state.fanOutMember === true &&
+      state.resultFile !== undefined &&
+      !isLaneScopedResultFile(state.resultFile)
+    ) {
+      issues.push(
+        `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
+          `resultFile must be lane-scoped under current/lane_<k>/ (for example current/lane_\${laneId}/result.json).`,
+      );
+    }
+  }
+
+  if (workers > 1 && workflowDeclaresGreedySampler(definition)) {
+    issues.push(
+      `settings.workers=${workers} cannot be used with greedy sampling; multi-lane evolve runs must declare a stochastic sampler.`,
+    );
+  }
+}
+
+function validateFanOutState(
+  definition: WorkflowDefinition,
+  stateId: string,
+  state: Extract<WorkflowStateDefinition, { readonly type: 'agent' | 'deterministic' }>,
+  stateNames: ReadonlySet<string>,
+  issues: string[],
+): void {
+  const segment = state.segment ?? [];
+  if (segment.length === 0) {
+    issues.push(`State "${stateId}" declares fanOut but has no non-empty segment list.`);
+    return;
+  }
+
+  for (const memberId of segment) {
+    if (!stateNames.has(memberId)) {
+      issues.push(`State "${stateId}" fanOut segment references unknown state "${memberId}".`);
+      continue;
+    }
+    const member = definition.states[memberId];
+    if (member.type === 'human_gate') {
+      issues.push(
+        `State "${stateId}" fanOut segment includes human gate "${memberId}", but gates inside a fan-out segment are unreachable; aggregate to a gate outside the segment instead.`,
+      );
+      continue;
+    }
+    if ((member.type !== 'agent' && member.type !== 'deterministic') || member.fanOutMember !== true) {
+      issues.push(`State "${stateId}" fanOut segment member "${memberId}" must declare fanOutMember: true.`);
+    }
+  }
+}
+
+function isLaneScopedResultFile(resultFile: string): boolean {
+  const normalized = pathPosix.normalize(resultFile);
+  return /(?:^|\/)lane_(?:\$\{laneId\}|\{laneId\}|\$\{lane\}|\{lane\}|<k>|[0-9]+)(?:\/|$)/.test(normalized);
+}
+
+function workflowDeclaresGreedySampler(definition: WorkflowDefinition): boolean {
+  for (const state of Object.values(definition.states)) {
+    if (state.type === 'agent' && declaresGreedySamplerText(state.prompt)) {
+      return true;
+    }
+    if (state.type !== 'deterministic') continue;
+    for (const argv of state.run) {
+      if (declaresGreedySamplerArgv(argv)) return true;
+    }
+  }
+  return false;
+}
+
+function declaresGreedySamplerText(text: string): boolean {
+  return (
+    /--sampling-algorithm(?:=|\s+)["']?greedy\b/i.test(text) ||
+    /\bsampling[_\-. ]algorithm\s*[:=]\s*["']?greedy\b/i.test(text)
+  );
+}
+
+function declaresGreedySamplerArgv(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (/^--sampling-algorithm=greedy$/i.test(arg)) return true;
+    if (arg === '--sampling-algorithm' && /^greedy$/i.test(argv[i + 1] ?? '')) return true;
+  }
+  return false;
+}
+
 function validateSemantics(definition: WorkflowDefinition): void {
   const issues: string[] = [];
   const stateNames = new Set(Object.keys(definition.states));
@@ -467,6 +604,10 @@ function validateSemantics(definition: WorkflowDefinition): void {
 
   // containerScope usage: gated on sharedContainer + charset.
   validateContainerScopes(definition, issues);
+
+  // Fan-out scaffold usage: schema-only fields are parsed now so later phases
+  // can consume them without silent stripping.
+  validateFanOutScaffolding(definition, issues);
 
   if (issues.length > 0) {
     throw new WorkflowValidationError(issues);

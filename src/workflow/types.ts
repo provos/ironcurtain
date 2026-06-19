@@ -111,8 +111,8 @@ export interface WorkflowSettings {
   readonly maxRounds?: number;
   /** Git repository path for worktree management. */
   readonly gitRepoPath?: string;
-  /** Max parallel agent sessions. Default: 3. */
-  readonly maxParallelism?: number;
+  /** Number of synchronous evolve workers. Default: 1. */
+  readonly workers?: number;
   /**
    * Optional system prompt text appended to the base system prompt
    * for ALL agent states in this workflow. Use for workspace
@@ -165,6 +165,22 @@ export type WorkflowStateDefinition =
   | DeterministicStateDefinition
   | TerminalStateDefinition;
 
+export interface FanOutDefinition {
+  readonly count: 'workers' | number;
+  readonly join: string;
+}
+
+export interface ResourceBudget {
+  readonly cpu?: number;
+  readonly mem?: string;
+  readonly gpu?: number;
+}
+
+export interface StateScheduleDefinition {
+  readonly pool: 'eval' | 'agent';
+  readonly resources?: ResourceBudget;
+}
+
 export interface AgentStateDefinition {
   readonly type: 'agent';
   readonly description: string;
@@ -188,6 +204,18 @@ export interface AgentStateDefinition {
   readonly transitions: readonly AgentTransitionDefinition[];
   /** When true, each parallel instance gets a dedicated git worktree. */
   readonly worktree?: boolean;
+  /**
+   * Marks this state as a member of a parent fan-out segment. Parsed today
+   * as manifest scaffolding; consumed by the native fan-out pump in a later
+   * phase.
+   */
+  readonly fanOutMember?: boolean;
+  /** Fan-out topology metadata. Schema-only until the native pump consumes it. */
+  readonly fanOut?: FanOutDefinition;
+  /** Ordered fan-out segment member state IDs. Schema-only until consumed. */
+  readonly segment?: readonly string[];
+  /** Scheduling metadata for lane-local execution. Schema-only until Phase 8. */
+  readonly schedule?: StateScheduleDefinition;
   /**
    * When false, re-invocations of this state resume the previous agent
    * session via --continue, receiving an abbreviated re-visit prompt.
@@ -292,6 +320,14 @@ export interface DeterministicStateDefinition {
    * Container-only; see validate.ts for path and routing constraints.
    */
   readonly resultFile?: string;
+  /** Fan-out topology metadata. Schema-only until the native pump consumes it. */
+  readonly fanOut?: FanOutDefinition;
+  /** Ordered fan-out segment member state IDs. Schema-only until consumed. */
+  readonly segment?: readonly string[];
+  /** Marks this state as a member of a parent fan-out segment. */
+  readonly fanOutMember?: boolean;
+  /** Scheduling metadata for lane-local execution. Schema-only until Phase 8. */
+  readonly schedule?: StateScheduleDefinition;
   readonly transitions: readonly AgentTransitionDefinition[];
 }
 
@@ -431,11 +467,7 @@ export type WorkflowEvent =
   | { readonly type: 'HUMAN_APPROVE'; readonly prompt?: string }
   | { readonly type: 'HUMAN_FORCE_REVISION'; readonly prompt?: string }
   | { readonly type: 'HUMAN_REPLAN'; readonly prompt?: string }
-  | { readonly type: 'HUMAN_ABORT' }
-  | { readonly type: 'PARALLEL_ALL_COMPLETED'; readonly results: readonly ParallelSlotResult[] }
-  | { readonly type: 'PARALLEL_SLOT_FAILED'; readonly key: string; readonly error: string }
-  | { readonly type: 'MERGE_SUCCEEDED' }
-  | { readonly type: 'MERGE_CONFLICT'; readonly conflictDetails: string };
+  | { readonly type: 'HUMAN_ABORT' };
 
 // ---------------------------------------------------------------------------
 // Workflow context (XState context)
@@ -455,8 +487,6 @@ export interface WorkflowContext {
   };
   readonly humanPrompt: string | null;
   readonly reviewHistory: readonly string[];
-  readonly parallelResults: Record<string, ParallelSlotResult>;
-  readonly worktreeBranches: readonly string[];
   readonly totalTokens: number;
   readonly lastError: string | null;
   /**
@@ -516,13 +546,6 @@ export interface AgentSlot {
 
 export interface WorkflowResult {
   readonly finalArtifacts: Record<string, string>;
-}
-
-export interface ParallelSlotResult {
-  readonly key: string;
-  readonly status: 'success' | 'failed';
-  readonly error?: string;
-  readonly worktreeBranch?: string;
 }
 
 export interface HumanGateRequest {

@@ -131,6 +131,141 @@ describe('validateDefinition', () => {
     });
   });
 
+  describe('fan-out scaffolding', () => {
+    function fanOutDefinition(
+      overrides: {
+        settings?: Record<string, unknown>;
+        workersState?: Record<string, unknown>;
+        sampleState?: Record<string, unknown>;
+        startPrompt?: string;
+      } = {},
+    ): Record<string, unknown> {
+      return {
+        name: 'fanout-fixture',
+        description: 'Fan-out scaffold fixture',
+        initial: 'start',
+        settings: {
+          mode: 'docker',
+          dockerAgent: 'claude-code',
+          sharedContainer: true,
+          workers: 2,
+          ...overrides.settings,
+        },
+        states: {
+          start: {
+            type: 'agent',
+            description: 'Start',
+            persona: 'global',
+            prompt: overrides.startPrompt ?? 'start',
+            inputs: [],
+            outputs: [],
+            transitions: [{ to: 'workers' }],
+          },
+          workers: {
+            type: 'deterministic',
+            description: 'Fan out',
+            run: [['true']],
+            fanOut: { count: 'workers', join: 'barrier' },
+            segment: ['sample'],
+            transitions: [{ to: 'done' }],
+            ...overrides.workersState,
+          },
+          sample: {
+            type: 'deterministic',
+            description: 'Lane sample',
+            container: true,
+            fanOutMember: true,
+            resultFile: '.evolve_runs/main/current/lane_${laneId}/sample.json',
+            run: [['python3', '/workflow-scripts/sample.py']],
+            transitions: [{ to: 'done' }],
+            ...overrides.sampleState,
+          },
+          done: {
+            type: 'terminal',
+            description: 'Done',
+          },
+        },
+      };
+    }
+
+    function issuesFor(raw: Record<string, unknown>): readonly string[] {
+      try {
+        validateDefinition(raw);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        return err.issues;
+      }
+      throw new Error('expected validation to fail');
+    }
+
+    it('preserves workers, fanOut, segment, fanOutMember, and schedule fields', () => {
+      const def = validateDefinition(
+        fanOutDefinition({
+          sampleState: { schedule: { pool: 'eval', resources: { cpu: 2, mem: '8Gi', gpu: 0 } } },
+        }),
+      );
+
+      expect(def.settings?.workers).toBe(2);
+      const workers = def.states.workers;
+      const sample = def.states.sample;
+      expect(workers.type).toBe('deterministic');
+      expect(workers.fanOut).toEqual({ count: 'workers', join: 'barrier' });
+      expect(workers.segment).toEqual(['sample']);
+      expect(sample.type).toBe('deterministic');
+      expect(sample.fanOutMember).toBe(true);
+      expect(sample.schedule).toEqual({ pool: 'eval', resources: { cpu: 2, mem: '8Gi', gpu: 0 } });
+    });
+
+    it('rejects non-positive workers and the retired maxParallelism field', () => {
+      expect(() => validateDefinition(fanOutDefinition({ settings: { workers: 0 } }))).toThrow(WorkflowValidationError);
+      expect(
+        issuesFor(fanOutDefinition({ settings: { maxParallelism: 2 } })).some((issue) =>
+          issue.includes('settings.maxParallelism is retired'),
+        ),
+      ).toBe(true);
+    });
+
+    it('rejects a human gate inside a fan-out segment', () => {
+      const raw = fanOutDefinition();
+      (raw.states as Record<string, unknown>).sample = {
+        type: 'human_gate',
+        description: 'Lane gate',
+        acceptedEvents: ['APPROVE'],
+        transitions: [{ to: 'done', event: 'APPROVE' }],
+      };
+      expect(issuesFor(raw).some((issue) => issue.includes('gates inside a fan-out segment are unreachable'))).toBe(
+        true,
+      );
+    });
+
+    it('rejects segment members that are not marked fanOutMember', () => {
+      const raw = fanOutDefinition({ sampleState: { fanOutMember: false } });
+      expect(issuesFor(raw).some((issue) => issue.includes('must declare fanOutMember: true'))).toBe(true);
+    });
+
+    it('rejects workers > 1 with a manifest-visible greedy sampler declaration', () => {
+      const raw = fanOutDefinition({ startPrompt: 'run evolve-brief --sampling-algorithm greedy' });
+      expect(issuesFor(raw).some((issue) => issue.includes('cannot be used with greedy sampling'))).toBe(true);
+    });
+
+    it('rejects unscoped result files for deterministic fan-out members when workers > 1', () => {
+      const raw = fanOutDefinition({
+        sampleState: { resultFile: '.evolve_runs/main/current/result.json' },
+      });
+      expect(issuesFor(raw).some((issue) => issue.includes('resultFile must be lane-scoped'))).toBe(true);
+    });
+
+    it('rejects schedule.pool eval on non-fanOutMember states', () => {
+      const raw = fanOutDefinition({
+        sampleState: {
+          fanOutMember: false,
+          schedule: { pool: 'eval' },
+        },
+      });
+      expect(issuesFor(raw).some((issue) => issue.includes('schedule.pool: eval'))).toBe(true);
+    });
+  });
+
   describe('structural validation (Zod)', () => {
     it('rejects empty input', () => {
       expect(() => validateDefinition({})).toThrow(WorkflowValidationError);

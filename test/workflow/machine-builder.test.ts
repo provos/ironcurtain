@@ -299,8 +299,6 @@ describe('buildWorkflowMachine', () => {
       expect(ctx.previousTestCount).toBeNull();
       expect(ctx.humanPrompt).toBeNull();
       expect(ctx.reviewHistory).toEqual([]);
-      expect(ctx.parallelResults).toEqual({});
-      expect(ctx.worktreeBranches).toEqual([]);
       expect(ctx.totalTokens).toBe(0);
       expect(ctx.lastError).toBeNull();
       expect(ctx.agentConversationsByState).toEqual({});

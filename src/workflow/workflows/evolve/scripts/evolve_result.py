@@ -51,24 +51,47 @@ def _run_dir(args: argparse.Namespace) -> Path:
     return Path(args.run_dir)
 
 
-def _current_dir(run_dir: Path) -> Path:
-    return run_dir / "current"
+def _resolve_lane(args: argparse.Namespace) -> int | None:
+    raw_lane = getattr(args, "lane", None)
+    if raw_lane is None:
+        raw_lane = os.environ.get("EVOLVE_LANE")
+    if raw_lane is None or raw_lane == "":
+        return None
+    try:
+        lane = int(raw_lane)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("evolve_result: --lane / EVOLVE_LANE must be a non-negative integer") from exc
+    if lane < 0:
+        raise SystemExit("evolve_result: --lane / EVOLVE_LANE must be a non-negative integer")
+    return lane
 
 
-def _clear_current_round(current_dir: Path) -> None:
+def _current_dir(run_dir: Path, lane: int | None = None) -> Path:
+    base = run_dir / "current"
+    return base / f"lane_{lane}" if lane is not None else base
+
+
+def _stop_signals_path(run_dir: Path) -> Path:
+    return run_dir / "current" / "stop_signals.json"
+
+
+def _clear_current_round(run_dir: Path, lane: int | None = None) -> None:
     # stop_signals.json is cleared here so a human "run N more rounds" extension
     # past an early stop does not re-route `complete` on a stale stop_reason from
     # the round that triggered the stop (the human directive resets after one turn).
-    for name in (
+    current_dir = _current_dir(run_dir, lane)
+    names = [
         "step_name",
         "context.json",
         "sample.json",
         "result.json",
         "analysis.md",
         "analysis_record.json",
-        "stop_signals.json",
         "cognition_item.json",
-    ):
+    ]
+    if lane is None:
+        names.append("stop_signals.json")
+    for name in names:
         (current_dir / name).unlink(missing_ok=True)
 
 
@@ -80,12 +103,12 @@ def _workspace_relative_for(run_dir: Path, path: Path) -> str:
         return str(path)
 
 
-def _step_name_from_current(run_dir: Path) -> str:
-    return (_current_dir(run_dir) / "step_name").read_text(encoding="utf-8").strip()
+def _step_name_from_current(run_dir: Path, lane: int | None = None) -> str:
+    return (_current_dir(run_dir, lane) / "step_name").read_text(encoding="utf-8").strip()
 
 
-def _load_current_context(run_dir: Path) -> dict[str, Any]:
-    context_path = _current_dir(run_dir) / "context.json"
+def _load_current_context(run_dir: Path, lane: int | None = None) -> dict[str, Any]:
+    context_path = _current_dir(run_dir, lane) / "context.json"
     loaded = _load_json(context_path)
     if not isinstance(loaded, dict):
         raise ValueError(f"current context is not a JSON object: {context_path}")
@@ -94,7 +117,7 @@ def _load_current_context(run_dir: Path) -> dict[str, Any]:
 
 def _resolve_step_name(args: argparse.Namespace) -> str:
     if getattr(args, "step_from_current", False):
-        return _step_name_from_current(_run_dir(args))
+        return _step_name_from_current(_run_dir(args), _resolve_lane(args))
     if args.step_name is None:
         raise SystemExit("evolve_result: one of --step-name or --step-from-current is required")
     return args.step_name
@@ -133,7 +156,7 @@ def _resolve_round_name(args: argparse.Namespace, step_name: str) -> str:
 def _resolve_parent(args: argparse.Namespace) -> list[int]:
     if not getattr(args, "parent_from_current", False):
         return list(args.parent or [])
-    context = _load_current_context(_run_dir(args))
+    context = _load_current_context(_run_dir(args), _resolve_lane(args))
     parents = context.get("parents")
     parent_ids: list[int] = []
     for parent in parents if isinstance(parents, list) else []:
@@ -325,7 +348,7 @@ def _compute_stop_signals(run_dir: Path) -> dict[str, Any]:
 
 def _write_stop_signals(run_dir: Path) -> dict[str, Any]:
     signals = _compute_stop_signals(run_dir)
-    _write_json(_current_dir(run_dir) / "stop_signals.json", signals)
+    _write_json(_stop_signals_path(run_dir), signals)
     return signals
 
 
@@ -410,6 +433,7 @@ def _promote_lesson(
     step_name: str,
     node_id: Any,
     best_updated: Any,
+    lane: int | None = None,
 ) -> dict[str, Any]:
     if not analysis_file.exists():
         return {"promoted": False, "reason": "no_analysis_file"}
@@ -446,7 +470,7 @@ def _promote_lesson(
             "score": score,
         },
     }
-    item_json = _current_dir(run_dir) / "cognition_item.json"
+    item_json = _current_dir(run_dir, lane) / "cognition_item.json"
     _write_json(item_json, item)
     code, output, error = _run_helper(
         [
@@ -472,6 +496,7 @@ def _promote_lesson(
 
 
 def evaluate(args: argparse.Namespace) -> int:
+    _resolve_lane(args)
     result_file = Path(args.result_file)
     step_name = _resolve_step_name(args)
     code_path = _resolve_code_path(args, step_name)
@@ -541,10 +566,11 @@ def evaluate(args: argparse.Namespace) -> int:
 
 def sample(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
+    lane = _resolve_lane(args)
     result_file = Path(args.result_file)
-    current_dir = _current_dir(run_dir)
+    current_dir = _current_dir(run_dir, lane)
     current_dir.mkdir(parents=True, exist_ok=True)
-    _clear_current_round(current_dir)
+    _clear_current_round(run_dir, lane)
 
     seed_payload: dict[str, Any] | None = None
     if _cognition_item_count(run_dir) == 0:
@@ -573,7 +599,10 @@ def sample(args: argparse.Namespace) -> int:
                 return 0
 
     done_rounds = _node_count(run_dir)
-    step_name = f"step_{done_rounds + 1:04d}"
+    if lane is None:
+        step_name = f"step_{done_rounds + 1:04d}"
+    else:
+        step_name = f"step_{done_rounds + 1:04d}_lane_{lane}"
     (current_dir / "step_name").write_text(step_name + "\n", encoding="utf-8")
 
     n = _sample_n_from_spec(run_dir) if args.n_from_spec else max(1, args.n)
@@ -670,6 +699,7 @@ def sample(args: argparse.Namespace) -> int:
             "verdict": "sampled",
             "payload": {
                 "step_name": step_name,
+                **({"lane": lane} if lane is not None else {}),
                 "parent_ids": parent_ids,
                 "sample_n": n,
                 "sampling_algorithm": sampling_algorithm,
@@ -684,6 +714,7 @@ def sample(args: argparse.Namespace) -> int:
 
 
 def record(args: argparse.Namespace) -> int:
+    _resolve_lane(args)
     result_file = Path(args.result_file)
     helper = SCRIPT_DIR / "evolve-db"
     helper_return_code, engine, helper_error = _run_helper(
@@ -729,6 +760,7 @@ def record(args: argparse.Namespace) -> int:
 def attach_analysis(args: argparse.Namespace) -> int:
     result_file = Path(args.result_file)
     run_dir = _run_dir(args)
+    lane = _resolve_lane(args)
     step_name = _resolve_step_name(args)
     existing_node = _find_recorded_node_for_step(run_dir, step_name)
     if existing_node is not None:
@@ -744,7 +776,7 @@ def attach_analysis(args: argparse.Namespace) -> int:
         }
         signals = _write_stop_signals(run_dir)
         payload["stop_reason"] = signals.get("stop_reason")
-        payload["stop_signals_path"] = str(_current_dir(run_dir) / "stop_signals.json")
+        payload["stop_signals_path"] = str(_stop_signals_path(run_dir))
         if "target_parse_warning" in signals:
             payload["target_parse_warning"] = signals["target_parse_warning"]
         _write_json(result_file, {"verdict": "recorded", "payload": payload, "passed": True})
@@ -797,7 +829,7 @@ def attach_analysis(args: argparse.Namespace) -> int:
 
     signals = _write_stop_signals(run_dir)
     payload["stop_reason"] = signals.get("stop_reason")
-    payload["stop_signals_path"] = str(_current_dir(run_dir) / "stop_signals.json")
+    payload["stop_signals_path"] = str(_stop_signals_path(run_dir))
     if "target_parse_warning" in signals:
         payload["target_parse_warning"] = signals["target_parse_warning"]
     if verdict == "recorded" and payload.get("node_id") is not None:
@@ -807,6 +839,7 @@ def attach_analysis(args: argparse.Namespace) -> int:
             step_name=step_name,
             node_id=payload.get("node_id"),
             best_updated=payload.get("best_updated"),
+            lane=lane,
         )
 
     _write_json(result_file, {"verdict": verdict, "payload": payload, "passed": passed})
@@ -817,7 +850,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def add_lane_argument(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument("--lane", type=int)
+
     eval_parser = subparsers.add_parser("evaluate")
+    add_lane_argument(eval_parser)
     eval_parser.add_argument("--run-dir", required=True)
     eval_parser.add_argument("--step-name")
     eval_parser.add_argument("--step-from-current", action="store_true")
@@ -828,6 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.set_defaults(func=evaluate)
 
     sample_parser = subparsers.add_parser("sample")
+    add_lane_argument(sample_parser)
     sample_parser.add_argument("--run-dir", required=True)
     sample_parser.add_argument("--query", default="")
     sample_parser.add_argument("--query-from-spec", action="store_true")
@@ -839,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample_parser.set_defaults(func=sample)
 
     record_parser = subparsers.add_parser("record")
+    add_lane_argument(record_parser)
     record_parser.add_argument("--run-dir", required=True)
     record_parser.add_argument("--step-name", required=True)
     record_parser.add_argument("--name", required=True)
@@ -848,6 +887,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.set_defaults(func=record)
 
     attach_parser = subparsers.add_parser("attach_analysis")
+    add_lane_argument(attach_parser)
     attach_parser.add_argument("--run-dir", required=True)
     attach_parser.add_argument("--step-name")
     attach_parser.add_argument("--step-from-current", action="store_true")

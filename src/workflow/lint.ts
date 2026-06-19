@@ -68,7 +68,9 @@ export type DiagnosticCode =
   | 'WF008'
   | 'WF010'
   | 'WF011'
-  | 'WF012';
+  | 'WF012'
+  | 'WF013'
+  | 'WF014';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -122,6 +124,8 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkVisitCapTransitionOrder(def),
     ...checkContainerScopePopulatedByAgent(def),
     ...checkVerdictEdgesHaveResultFile(def),
+    ...checkFanOutBudgetAndChildBounds(def),
+    ...checkFanOutBarrierJoin(def),
     ...checkSkillReferencesAndManifests(def, ctx),
   ];
 }
@@ -518,6 +522,89 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
     });
   }
 
+  return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// WF013 — fan-out changes maxRounds budget and child loop coverage
+// ---------------------------------------------------------------------------
+
+function checkFanOutBudgetAndChildBounds(def: WorkflowDefinition): Diagnostic[] {
+  const workers = def.settings?.workers ?? 1;
+  if (workers <= 1) return [];
+
+  const diagnostics: Diagnostic[] = [];
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if ((state.type !== 'agent' && state.type !== 'deterministic') || state.fanOut === undefined) continue;
+    const segment = state.segment ?? [];
+
+    if (def.settings?.maxRounds !== undefined) {
+      diagnostics.push({
+        code: 'WF013',
+        severity: 'warning',
+        stateId,
+        message:
+          `Fan-out state "${stateId}" runs with settings.workers=${workers}; settings.maxRounds=${def.settings.maxRounds} ` +
+          `now caps batches, so the candidate budget is maxRounds × workers = ${def.settings.maxRounds * workers}.`,
+        hint: 'If maxRounds is intended as a candidate budget, divide it by workers or set an explicit batch budget.',
+      });
+    }
+
+    const segmentSet = new Set(segment);
+    for (const memberId of segment) {
+      const member = def.states[memberId] as WorkflowStateDefinition | undefined;
+      if (member === undefined) continue;
+      if (!isSelfLoopableWithinSegment(def, memberId, segmentSet)) continue;
+      if (member.type === 'agent' && member.maxVisits !== undefined) continue;
+      diagnostics.push({
+        code: 'WF013',
+        severity: 'warning',
+        stateId: memberId,
+        message:
+          `Fan-out segment member "${memberId}" can loop within the segment but has no per-lane maxVisits bound; ` +
+          `the parent maxRounds guard is blind to lane-internal visits.`,
+        hint: 'Add maxVisits to the child state, or add an explicit child-level round-limit guard when the fan-out pump is implemented.',
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function isSelfLoopableWithinSegment(def: WorkflowDefinition, stateId: string, segment: ReadonlySet<string>): boolean {
+  const seen = new Set<string>();
+  const queue = collectTransitionTargets(def.states[stateId]).filter((target) => segment.has(target));
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) continue;
+    if (current === stateId) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const state = def.states[current] as WorkflowStateDefinition | undefined;
+    if (state === undefined) continue;
+    for (const target of collectTransitionTargets(state)) {
+      if (segment.has(target)) queue.push(target);
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// WF014 — fan-out joins must be barrier joins
+// ---------------------------------------------------------------------------
+
+function checkFanOutBarrierJoin(def: WorkflowDefinition): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if ((state.type !== 'agent' && state.type !== 'deterministic') || state.fanOut === undefined) continue;
+    if (state.fanOut.join === 'barrier') continue;
+    diagnostics.push({
+      code: 'WF014',
+      severity: 'error',
+      stateId,
+      message: `Fan-out state "${stateId}" uses join "${state.fanOut.join}", but only barrier joins are supported.`,
+      hint: 'Use fanOut: { count: workers, join: barrier }. Async joins are a future, deliberately reviewed extension.',
+    });
+  }
   return diagnostics;
 }
 

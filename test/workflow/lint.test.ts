@@ -1032,3 +1032,93 @@ describe('WF012 — deterministic verdict edges without resultFile', () => {
     expect(codes(lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath }))).not.toContain('WF012');
   });
 });
+
+// ---------------------------------------------------------------------------
+// WF013/WF014 — fan-out scaffolding diagnostics
+// ---------------------------------------------------------------------------
+
+describe('WF013/WF014 — fan-out scaffolding diagnostics', () => {
+  function fanOutWorkflow(
+    overrides: {
+      settings?: Record<string, unknown>;
+      workersState?: Record<string, unknown>;
+      workerState?: Record<string, unknown>;
+    } = {},
+  ): WorkflowDefinition {
+    return validateDefinition({
+      name: 'fanout-lint',
+      description: 'd',
+      initial: 'start',
+      settings: {
+        mode: 'docker',
+        dockerAgent: 'claude-code',
+        sharedContainer: true,
+        workers: 3,
+        maxRounds: 5,
+        ...overrides.settings,
+      },
+      states: {
+        start: {
+          type: 'agent',
+          description: 'start',
+          persona: 'global',
+          prompt: 'start',
+          inputs: [],
+          outputs: [],
+          transitions: [{ to: 'workers' }],
+        },
+        workers: {
+          type: 'deterministic',
+          description: 'fan out',
+          run: [['true']],
+          fanOut: { count: 'workers', join: 'barrier' },
+          segment: ['worker'],
+          transitions: [{ to: 'done' }],
+          ...overrides.workersState,
+        },
+        worker: {
+          type: 'agent',
+          description: 'lane worker',
+          persona: 'global',
+          prompt: 'worker',
+          inputs: [],
+          outputs: [],
+          fanOutMember: true,
+          transitions: [{ to: 'worker', when: { verdict: 'retry' } }, { to: 'done' }],
+          ...overrides.workerState,
+        },
+        done: { type: 'terminal', description: 'done' },
+      },
+    });
+  }
+
+  it('WF013 warns that maxRounds caps batches and self-loopable children need per-lane bounds', () => {
+    const result = lintWorkflow(fanOutWorkflow(), stubCtx);
+    const wf013 = result.filter((d) => d.code === 'WF013');
+
+    expect(wf013).toHaveLength(2);
+    expect(wf013.map((d) => d.severity)).toEqual(['warning', 'warning']);
+    expect(wf013.some((d) => d.stateId === 'workers' && d.message.includes('candidate budget'))).toBe(true);
+    expect(wf013.some((d) => d.stateId === 'worker' && d.message.includes('no per-lane maxVisits'))).toBe(true);
+  });
+
+  it('WF013 does not warn on child loops that have maxVisits', () => {
+    const result = lintWorkflow(fanOutWorkflow({ workerState: { maxVisits: 3 } }), stubCtx);
+    const wf013 = result.filter((d) => d.code === 'WF013');
+
+    expect(wf013).toHaveLength(1);
+    expect(wf013[0]?.stateId).toBe('workers');
+  });
+
+  it('WF014 errors when fanOut join is not barrier', () => {
+    const result = lintWorkflow(
+      fanOutWorkflow({ workersState: { fanOut: { count: 'workers', join: 'race' } } }),
+      stubCtx,
+    );
+    const diagnostic = result.find((d) => d.code === 'WF014');
+
+    expect(diagnostic?.severity).toBe('error');
+    expect(diagnostic?.stateId).toBe('workers');
+    expect(diagnostic?.message).toContain('only barrier joins are supported');
+  });
+});

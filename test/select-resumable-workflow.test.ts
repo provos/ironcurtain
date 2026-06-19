@@ -28,8 +28,6 @@ function makeCheckpoint(opts: { timestamp?: string; finalStatus?: WorkflowStatus
       previousTestCount: null,
       humanPrompt: null,
       reviewHistory: [],
-      parallelResults: {},
-      worktreeBranches: [],
       totalTokens: 0,
       lastError: null,
       agentConversationsByState: {},

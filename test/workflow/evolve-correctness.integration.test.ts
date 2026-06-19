@@ -480,8 +480,6 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
         previousTestCount: null,
         humanPrompt: null,
         reviewHistory: [],
-        parallelResults: {},
-        worktreeBranches: [],
         totalTokens: 0,
         lastError: null,
         agentConversationsByState: {},
