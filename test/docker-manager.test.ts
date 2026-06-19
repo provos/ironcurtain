@@ -1094,20 +1094,16 @@ describe('DockerManager', () => {
       expect(mock.calls[2].opts.timeout).toBe(4321);
     });
 
-    it('flatten proceeds with only caller changes when container inspect fails', async () => {
-      const digest = `sha256:${'c'.repeat(64)}`;
-      mock.setSequence([
-        { error: true, code: 1, stderr: 'no such container' },
-        { stdout: '' },
-        { stdout: `${digest}\n` },
-      ]);
+    it('flatten fails (no config-less image) when the container config cannot be read', async () => {
+      mock.setSequence([{ error: true, code: 1, stderr: 'no such container' }]);
       const manager = createDockerManager(mock.mockExec);
 
-      const result = await manager.commit('container-id', { flatten: true, tag: 't', changes: ['LABEL x=y'] });
-
-      expect(result).toBe(digest);
-      const tarPath = mock.calls[1].args[2];
-      expect(mock.calls[2].args).toEqual(['import', '--change', 'LABEL x=y', tarPath, 't']);
+      await expect(
+        manager.commit('container-id', { flatten: true, tag: 't', changes: ['LABEL x=y'] }),
+      ).rejects.toThrow();
+      // Inspect failed → export/import never ran; we never ship a config-less snapshot.
+      expect(mock.calls).toHaveLength(1);
+      expect(mock.calls[0].args[0]).toBe('container');
     });
   });
 

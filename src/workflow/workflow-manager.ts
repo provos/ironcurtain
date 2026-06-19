@@ -42,6 +42,7 @@ import {
   type WorkflowDefinition,
 } from './types.js';
 import { sweepContainerSnapshots } from './container-snapshots.js';
+import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // loadPastRun result types
@@ -399,10 +400,21 @@ export class WorkflowManager {
   ): void {
     if (this.snapshotGcTimer !== undefined) return;
     const runSweep = (): void => {
-      sweepContainerSnapshots({ baseDir, checkpointStore, userConfig }).catch(() => {});
+      // The sweep absorbs the expected "Docker absent" case internally; a
+      // rejection here is genuinely unexpected, so surface it rather than
+      // letting GC die silently.
+      sweepContainerSnapshots({ baseDir, checkpointStore, userConfig }).catch((err: unknown) => {
+        logger.warn(`[workflow] snapshot GC sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     };
     runSweep();
-    const intervalMs = Math.max(1, userConfig.snapshot.sweepIntervalHours) * 60 * 60 * 1000;
+    // Node stores a timer delay in a signed 32-bit int; a delay over ~24.8 days
+    // (2^31-1 ms) overflows and fires every 1ms. Clamp to the max safe delay.
+    const MAX_TIMER_DELAY_MS = 2_147_483_647;
+    const intervalMs = Math.min(
+      MAX_TIMER_DELAY_MS,
+      Math.max(1, userConfig.snapshot.sweepIntervalHours) * 60 * 60 * 1000,
+    );
     this.snapshotGcTimer = setInterval(runSweep, intervalMs);
     this.snapshotGcTimer.unref();
   }

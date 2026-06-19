@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DockerManager } from '../docker/types.js';
 import { createDockerManager } from '../docker/docker-manager.js';
+import * as logger from '../logger.js';
 import type { CheckpointStore } from './checkpoint.js';
 import { isCheckpointResumable } from './checkpoint.js';
 import type { ContainerSnapshotRef, WorkflowCheckpoint, WorkflowId } from './types.js';
@@ -120,7 +121,11 @@ export async function sweepContainerSnapshots(input: {
   let labeledImages;
   try {
     labeledImages = await docker.listImages({ labelFilter: IRONCURTAIN_SNAPSHOT_LABEL_WORKFLOW });
-  } catch {
+  } catch (err) {
+    // Expected when Docker is unavailable (e.g. a builtin, non-Docker workflow
+    // triggered the CLI sweep), so degrade quietly -- debug-only so a persistent
+    // failure is still discoverable without spamming non-Docker users.
+    logger.debug(`snapshot GC: listImages failed, skipping sweep: ${err instanceof Error ? err.message : String(err)}`);
     return { removedImages, agedImages, orphanImages };
   }
 

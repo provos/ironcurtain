@@ -119,21 +119,28 @@ function quoteDockerfileValue(value: string): string {
  * Config; re-baking it keeps a flattened snapshot behaving like its source on
  * resume (the baked ENTRYPOINT runs the UID-remap + proxy bridge, and ENV
  * carries the base-image PATH that container creation intentionally never
- * re-supplies). Returns an empty list when the config can't be read; the
- * caller's `docker export` then fails loudly on a genuinely missing container.
+ * re-supplies). **Throws** when the config cannot be read or parsed, so the
+ * flattened commit fails rather than shipping a config-less image that would
+ * resume broken; callers treat a snapshot failure as fall-back-to-fresh. (A
+ * successful read that genuinely yields no directives is fine and proceeds.)
  */
 async function readContainerConfigChanges(exec: ExecFileFn, containerId: string): Promise<string[]> {
+  // Let an inspect failure propagate (do NOT swallow): a flattened snapshot with
+  // no re-baked ENTRYPOINT/PATH resumes broken, so failing the snapshot is safer
+  // than producing a config-less image.
+  const { stdout } = await exec('docker', ['container', 'inspect', '--format', '{{json .Config}}', containerId], {
+    timeout: 10_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
   let parsed: unknown;
   try {
-    const { stdout } = await exec('docker', ['container', 'inspect', '--format', '{{json .Config}}', containerId], {
-      timeout: 10_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
     parsed = JSON.parse(stdout);
   } catch {
-    return [];
+    throw new Error(`docker container inspect returned unparseable Config for ${containerId}`);
   }
-  if (!isRecord(parsed)) return [];
+  if (!isRecord(parsed)) {
+    throw new Error(`docker container inspect returned a non-object Config for ${containerId}`);
+  }
 
   const changes: string[] = [];
   const entrypoint = asStringArray(parsed.Entrypoint);
