@@ -2712,6 +2712,26 @@ export class WorkflowOrchestrator implements WorkflowController {
    * is the workers>1 cognition single-writer point (§9): lane `attach_analysis`
    * calls only record durable nodes; the parent invokes `promote_cognition`
    * after every child has recorded and before re-entering `orchestrator`.
+   *
+   * Only `recorded` lanes are promoted — blocked/errored children are filtered
+   * out because they contributed no durable node to seed a lesson from.
+   *
+   * Returns one of three shapes:
+   * - `{ error }` — the promotion ran but did not pass (the bridge returned a
+   *   non-`cognition_promoted` verdict / `needs_repair`), OR — a hard error —
+   *   `lanes.length === 0` for a workers>1 recorded batch (every recorded child
+   *   should carry a lane id, so an empty set means the join is inconsistent).
+   * - `{ result }` — the promotion passed; the caller folds the payload into the
+   *   batch result under `cognition_promotion`.
+   * - `{}` — a no-op, when {@link buildEvolvePromoteCognitionInput} returns
+   *   undefined (non-evolve segment, or a segment with nothing to promote).
+   *
+   * Mixed-verdict deferral (within §9, intended): this only runs when the batch
+   * verdict is `recorded`. When a batch instead escalates/fails, recorded lanes'
+   * lessons are NOT promoted that turn — on APPROVE→resume the recorded lanes
+   * idempotent-skip then barrier-promote (the ledger dedups), but an
+   * ABORT/FORCE_REVISION never promotes them, by design: an aborted batch must
+   * not seed cognition.
    */
   private async promoteBarrierCognition(
     workflowId: WorkflowId,
@@ -2732,7 +2752,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       return { error: 'fan-out cognition promotion had no recorded lanes to promote' };
     }
 
-    const input = this.buildEvolvePromoteCognitionInput(definition, segment, context, lanes);
+    const attach = this.findEvolveAttachAnalysisState(definition, segment);
+    if (!attach) return {};
+
+    const input = this.buildEvolvePromoteCognitionInput(attach.stateId, attach.state, attach.command, context, lanes);
     if (!input) return {};
 
     const result = await this.executeDeterministicState(workflowId, input);
@@ -2745,53 +2768,46 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   /**
-   * Derives the `promote_cognition` invoke input from the segment's declared
-   * `attach_analysis` command: reuses the bridge path, `--run-dir`, container
-   * scope, and timeout; rewrites the subcommand; passes the recorded lane ids;
-   * and writes one barrier-owned result at `current/cognition_promotion.json`.
+   * Locates the segment's `attach_analysis` deterministic state and its evolve
+   * command (the segment member that carries the `evolve_result.py` path and
+   * `--run-dir`). Returns `undefined` when the segment has no such state — a
+   * non-evolve fan-out has no cognition to promote.
    */
-  private buildEvolvePromoteCognitionInput(
+  private findEvolveAttachAnalysisState(
     definition: WorkflowDefinition,
     segment: readonly string[],
-    context: WorkflowContext,
-    lanes: readonly number[],
-  ): DeterministicInvokeInput | undefined {
+  ): { stateId: string; state: DeterministicStateDefinition; command: readonly string[] } | undefined {
     for (const stateId of segment) {
       const state = definition.states[stateId];
       if (state.type !== 'deterministic') continue;
-      const attachCommand = state.run.find((command) => this.isEvolveAttachAnalysisCommand(command));
-      if (!attachCommand) continue;
-
-      const scriptIndex = evolveResultScriptIndex(attachCommand);
-      if (scriptIndex < 0) return undefined;
-      const runDir = this.commandFlagValue(attachCommand, '--run-dir');
-      if (!runDir) return undefined;
-
-      const resultFile = `${runDir}/current/cognition_promotion.json`;
-      const workspaceRelativeResultFile = this.containerPathToWorkspaceRelative(resultFile);
-      if (!workspaceRelativeResultFile) return undefined;
-
-      const command = [
-        ...attachCommand.slice(0, scriptIndex + 1),
-        'promote_cognition',
-        '--run-dir',
-        runDir,
-        ...lanes.flatMap((lane) => ['--lane', String(lane)]),
-        '--result-file',
-        resultFile,
-      ];
-
-      return {
-        stateId: `${stateId}_promote_cognition`,
-        commands: [command],
-        context,
-        container: state.container ?? false,
-        containerScope: state.containerScope,
-        timeoutMs: state.timeoutMs,
-        resultFile: workspaceRelativeResultFile,
-      };
+      const command = state.run.find((entry) => this.isEvolveAttachAnalysisCommand(entry));
+      if (command) return { stateId, state, command };
     }
     return undefined;
+  }
+
+  /**
+   * Derives the `promote_cognition` invoke input from the segment's already-
+   * resolved `attach_analysis` command: reuses the bridge path, `--run-dir`,
+   * container scope, and timeout; rewrites the subcommand; passes the recorded
+   * lane ids; and writes one barrier-owned result at
+   * `current/cognition_promotion.json`. Returns `undefined` when the command
+   * lacks the bridge path, a `--run-dir`, or a resolvable workspace-relative
+   * result path (the caller then treats promotion as a no-op).
+   */
+  private buildEvolvePromoteCognitionInput(
+    stateId: string,
+    state: DeterministicStateDefinition,
+    attachCommand: readonly string[],
+    context: WorkflowContext,
+    lanes: readonly number[],
+  ): DeterministicInvokeInput | undefined {
+    return this.buildEvolveBarrierInput(stateId, state, attachCommand, context, {
+      stateIdSuffix: '_promote_cognition',
+      subcommand: 'promote_cognition',
+      resultBasename: 'cognition_promotion.json',
+      extraArgs: lanes.flatMap((lane) => ['--lane', String(lane)]),
+    });
   }
 
   /**
@@ -2844,34 +2860,11 @@ export class WorkflowOrchestrator implements WorkflowController {
   ): DeterministicInvokeInput | undefined {
     const sampleCommand = state.run.find((command) => this.isEvolveSampleCommand(command));
     if (!sampleCommand) return undefined;
-
-    const scriptIndex = evolveResultScriptIndex(sampleCommand);
-    if (scriptIndex < 0) return undefined;
-    const runDir = this.commandFlagValue(sampleCommand, '--run-dir');
-    if (!runDir) return undefined;
-
-    const resultFile = `${runDir}/current/stop_signals_compute.json`;
-    const workspaceRelativeResultFile = this.containerPathToWorkspaceRelative(resultFile);
-    if (!workspaceRelativeResultFile) return undefined;
-
-    const command = [
-      ...sampleCommand.slice(0, scriptIndex + 1),
-      'compute_stop_signals',
-      '--run-dir',
-      runDir,
-      '--result-file',
-      resultFile,
-    ];
-
-    return {
-      stateId: `${stateId}_stop_signals`,
-      commands: [command],
-      context,
-      container: state.container ?? false,
-      containerScope: state.containerScope,
-      timeoutMs: state.timeoutMs,
-      resultFile: workspaceRelativeResultFile,
-    };
+    return this.buildEvolveBarrierInput(stateId, state, sampleCommand, context, {
+      stateIdSuffix: '_stop_signals',
+      subcommand: 'compute_stop_signals',
+      resultBasename: 'stop_signals_compute.json',
+    });
   }
 
   /**
@@ -3037,31 +3030,57 @@ export class WorkflowOrchestrator implements WorkflowController {
   ): DeterministicInvokeInput | undefined {
     const sampleCommand = state.run.find((command) => this.isEvolveSampleCommand(command));
     if (!sampleCommand) return undefined;
+    return this.buildEvolveBarrierInput(stateId, state, sampleCommand, context, {
+      stateIdSuffix: '_batch',
+      subcommand: 'sample_batch',
+      resultBasename: 'sample_batch.json',
+      extraArgs: [
+        '--workers',
+        String(workers),
+        ...this.sampleQueryArgs(sampleCommand),
+        ...this.sampleTopKArgs(sampleCommand),
+      ],
+    });
+  }
 
-    const scriptIndex = evolveResultScriptIndex(sampleCommand);
+  /**
+   * Shared skeleton for the three barrier-side `evolve_result.py` invocations
+   * (`sample_batch`, `promote_cognition`, `compute_stop_signals`). Given an
+   * already-resolved `sourceCommand` (the caller does the `state.run.find`), it
+   * locates the bridge path, carries over `--run-dir`, rewrites the subcommand,
+   * splices in the per-caller `extraArgs`, and points `--result-file` at the
+   * shared barrier artifact `current/<resultBasename>`. Returns `undefined` when
+   * the source command lacks the bridge path, a `--run-dir`, or a resolvable
+   * workspace-relative result path — the caller's documented no-op signal.
+   */
+  private buildEvolveBarrierInput(
+    stateId: string,
+    state: DeterministicStateDefinition,
+    sourceCommand: readonly string[],
+    context: WorkflowContext,
+    options: { stateIdSuffix: string; subcommand: string; resultBasename: string; extraArgs?: readonly string[] },
+  ): DeterministicInvokeInput | undefined {
+    const scriptIndex = evolveResultScriptIndex(sourceCommand);
     if (scriptIndex < 0) return undefined;
-    const runDir = this.commandFlagValue(sampleCommand, '--run-dir');
+    const runDir = this.commandFlagValue(sourceCommand, '--run-dir');
     if (!runDir) return undefined;
 
-    const resultFile = `${runDir}/current/sample_batch.json`;
+    const resultFile = `${runDir}/current/${options.resultBasename}`;
     const workspaceRelativeResultFile = this.containerPathToWorkspaceRelative(resultFile);
     if (!workspaceRelativeResultFile) return undefined;
 
     const command = [
-      ...sampleCommand.slice(0, scriptIndex + 1),
-      'sample_batch',
+      ...sourceCommand.slice(0, scriptIndex + 1),
+      options.subcommand,
       '--run-dir',
       runDir,
-      '--workers',
-      String(workers),
-      ...this.sampleQueryArgs(sampleCommand),
-      ...this.sampleTopKArgs(sampleCommand),
+      ...(options.extraArgs ?? []),
       '--result-file',
       resultFile,
     ];
 
     return {
-      stateId: `${stateId}_batch`,
+      stateId: `${stateId}${options.stateIdSuffix}`,
       commands: [command],
       context,
       container: state.container ?? false,

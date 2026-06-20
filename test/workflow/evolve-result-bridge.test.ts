@@ -1023,6 +1023,45 @@ describe('evolve_result.py bridge', () => {
     },
   );
 
+  it('promote_cognition reports needs_repair when a recorded lane cannot be reconciled', () => {
+    // The failure path the all-success cases never exercise: a barrier promote
+    // over a recorded lane whose durable node is gone (recorded_node_missing) and
+    // a lane with no resolvable step name (missing_step_name). Both populate the
+    // fatal `errors` list, so the whole promote yields needs_repair / passed:false
+    // — no real engine needed, the bridge bails before touching the cognition store.
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'promote-failure-run');
+    // Lane 0 recorded step_0001_lane_0, but nodes.json holds only an unrelated step.
+    writeNodes(runDir, [3], 1);
+    mkdirSync(resolve(runDir, 'current', 'lane_0'), { recursive: true });
+    writeFileSync(
+      resolve(runDir, 'current', 'lane_0', 'analysis_record.json'),
+      JSON.stringify({ verdict: 'recorded', payload: { step_name: 'step_0001_lane_0', node_id: 0 } }) + '\n',
+    );
+    writeFileSync(resolve(runDir, 'current', 'lane_0', 'analysis.md'), 'lane zero lesson\n');
+    // Lane 1 has neither an analysis_record.json payload nor a step_name file.
+    mkdirSync(resolve(runDir, 'current', 'lane_1'), { recursive: true });
+
+    const { result } = runBridge(scriptsDir, ['promote_cognition', '--run-dir', runDir, '--lane', '0', '--lane', '1']);
+
+    expect(result).toMatchObject({
+      verdict: 'needs_repair',
+      passed: false,
+      payload: { lanes: [0, 1], promoted_count: 0 },
+    });
+    const errors = (result.payload as { errors: string[] }).errors;
+    expect(errors).toHaveLength(2);
+    expect(errors.some((message) => message.includes('recorded_node_missing'))).toBe(true);
+    expect(errors.some((message) => message.includes('missing_step_name'))).toBe(true);
+    const promotions = (result.payload as { promotions: Array<{ lane: number; reason: string }> }).promotions;
+    expect(promotions.map((item) => [item.lane, item.reason])).toEqual([
+      [0, 'recorded_node_missing'],
+      [1, 'missing_step_name'],
+    ]);
+    // The store was never written: the bridge fails closed before promotion.
+    expect(existsSync(resolve(runDir, 'cognition_promoted.json'))).toBe(false);
+  });
+
   it.skipIf(!REAL_ENGINE_READY)('deduplicates repeated lesson promotion against the real cognition store', () => {
     const runDir = realRunDir('real-cognition-dedup');
     writeRealRunSpec(runDir);

@@ -703,6 +703,11 @@ def _promote_lesson(
 
 
 def _lane_record_payload(run_dir: Path, lane: int) -> dict[str, Any]:
+    # Reads the lane's recorded `analysis_record.json` payload (step_name, node_id,
+    # best_updated) so the barrier promote can reuse it. Any failure — missing or
+    # torn record, non-dict shape — degrades to {} rather than raising: a single
+    # lane's bad record must NOT abort the whole barrier promote. The caller then
+    # falls back to the on-disk `step_name` (and the recorded node) instead.
     record_path = _current_dir(run_dir, lane) / "analysis_record.json"
     if not record_path.exists():
         return {}
@@ -717,6 +722,9 @@ def _lane_record_payload(run_dir: Path, lane: int) -> dict[str, Any]:
 
 
 def _dedupe_lanes(lanes: list[int] | None) -> list[int]:
+    # Order-preserving dedupe so a repeated `--lane k` promotes once and the
+    # per-lane tally stays accurate. Do NOT collapse to sorted(set(...)): the
+    # input order is asserted by tests (e.g. lanes==[0,1,2] is echoed verbatim).
     ordered: list[int] = []
     seen: set[int] = set()
     for lane in lanes or []:
@@ -1120,6 +1128,12 @@ def attach_analysis(args: argparse.Namespace) -> int:
     payload["stop_signals_path"] = str(_stop_signals_path(run_dir, lane))
     if "target_parse_warning" in signals:
         payload["target_parse_warning"] = signals["target_parse_warning"]
+    # Mode gate (the Phase-5 pivot): only the lone-lane path promotes inline.
+    # At workers:1 (lane is None) this process is the sole writer, so it promotes
+    # here. Under fan-out (lane is not None) each lane only RECORDS its node;
+    # promotion is deferred to the barrier `promote_cognition`, where a single
+    # process is the sole writer of the dedup ledger + cognition store. That
+    # single-writer invariant is what replaced the retired `.promote.lock`.
     if verdict == "recorded" and payload.get("node_id") is not None and lane is None:
         payload["cognition_promoted"] = _promote_lesson(
             run_dir,
@@ -1135,10 +1149,23 @@ def attach_analysis(args: argparse.Namespace) -> int:
 
 
 def promote_cognition(args: argparse.Namespace) -> int:
-    # Barrier-owned under fan-out: the orchestrator calls this once after all
-    # lanes have recorded. It promotes each lane's lesson serially in this
-    # process, preserving the workers:1 single-writer invariant without a
-    # cross-process lock.
+    """Barrier-owned fan-out promoter: the orchestrator calls this ONCE after all
+    lanes have recorded. It promotes each lane's lesson serially in this single
+    process, preserving the workers:1 single-writer invariant without a
+    cross-process lock.
+
+    Verdict contract: `cognition_promoted` (passed) when every lane is handled,
+    or `needs_repair` (not passed, fatal) when `errors` is non-empty. The
+    per-lane skip reasons that populate `errors` are FATAL — `missing_step_name`
+    (no recorded step_name on disk) and `recorded_node_missing` (the recorded
+    step has no durable node) both mean the barrier saw a recorded lane it could
+    not reconcile.
+
+    `skipped_count`/`duplicate_count` are NOT fatal: a duplicate (lesson already
+    in the ledger) or an empty lesson is a successful no-op, so they leave the
+    verdict `cognition_promoted`. The three counts are not a partition —
+    `skipped_count` counts every non-promoted lane and therefore SUPERSETS
+    `duplicate_count` (duplicates are one kind of skip)."""
     run_dir = _run_dir(args)
     result_file = Path(args.result_file)
     lanes = _dedupe_lanes(args.lane)
@@ -1171,9 +1198,16 @@ def promote_cognition(args: argparse.Namespace) -> int:
             continue
 
         node_id = record_payload.get("node_id")
+        # bool is a subclass of int in Python, so isinstance(True, int) is True;
+        # reject a stale/boolean recorded id and re-derive the real id from the
+        # on-disk node instead of trusting a corrupt payload value.
         if isinstance(node_id, bool) or not isinstance(node_id, int):
             node_id = _node_id(recorded_node, "")
         best_updated = record_payload.get("best_updated")
+        # _promote_lesson re-derives the recorded node internally (its own
+        # _find_recorded_node_for_step lookup) to score the lesson; this loop's
+        # earlier lookup is the node_id fallback above, not a redundant fetch we
+        # could thread through — keep the engine path (_promote_lesson) untouched.
         promoted = _promote_lesson(
             run_dir,
             analysis_file=_current_dir(run_dir, lane) / "analysis.md",
