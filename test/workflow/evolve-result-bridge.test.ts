@@ -929,6 +929,64 @@ describe('evolve_result.py bridge', () => {
     },
   );
 
+  it.skipIf(!REAL_ENGINE_READY)(
+    'serializes concurrent lane promotions under the cross-process lock so the store is not torn',
+    async () => {
+      const runDir = realRunDir('real-concurrent-promote');
+      writeRealRunSpec(runDir);
+      const scriptsDir = realScriptsDir();
+      const lessons = ['lane zero distinct lesson', 'lane one distinct lesson'];
+      const stepNames = ['step_0001_lane_0', 'step_0001_lane_1'];
+
+      for (const [lane, stepName] of stepNames.entries()) {
+        const stepDir = resolve(runDir, 'steps', stepName);
+        mkdirSync(stepDir, { recursive: true });
+        mkdirSync(resolve(runDir, 'current', `lane_${lane}`), { recursive: true });
+        writeFileSync(resolve(stepDir, 'code'), `def score():\n    return ${lane + 1}\n`);
+        writeFileSync(resolve(stepDir, 'results.json'), JSON.stringify({ eval_score: lane + 1 }) + '\n');
+        writeFileSync(resolve(runDir, 'current', `lane_${lane}`, 'analysis.md'), lessons[lane] + '\n');
+      }
+
+      // EVOLVE_PROMOTE_TEST_HOLD_LOCK_MS holds each lane inside its critical
+      // section so the two provably overlap; without the InterProcessFileLock
+      // guard they would race the non-atomic cognition store and tear it.
+      const results = await Promise.all(
+        stepNames.map((stepName, lane) =>
+          runBridgeAsync(
+            scriptsDir,
+            [
+              'attach_analysis',
+              '--run-dir',
+              runDir,
+              '--lane',
+              String(lane),
+              '--step-name',
+              stepName,
+              '--name',
+              `round-1-lane-${lane}`,
+              '--code-path',
+              `.evolve_runs/main/steps/${stepName}/code`,
+              '--results-file',
+              `.evolve_runs/main/steps/${stepName}/results.json`,
+              '--analysis-file',
+              resolve(runDir, 'current', `lane_${lane}`, 'analysis.md'),
+            ],
+            resolve(tmpDir, `promote-lane-${lane}.json`),
+            { EVOLVE_PROMOTE_TEST_HOLD_LOCK_MS: '60' },
+          ),
+        ),
+      );
+
+      expect(results.map((r) => r.status)).toEqual([0, 0]);
+      expect(results.map((r) => r.result.verdict)).toEqual(['recorded', 'recorded']);
+      // JSON.parse throws on a torn store; both distinct lessons must have landed.
+      const contents = readCognitionItems(runDir).map((item) => item.content);
+      expect(contents).toEqual(expect.arrayContaining(lessons));
+      expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(2);
+      expect(existsSync(resolve(runDir, 'cognition_data', '.promote.lock'))).toBe(true);
+    },
+  );
+
   it.skipIf(!REAL_ENGINE_READY)('deduplicates repeated lesson promotion against the real cognition store', () => {
     const runDir = realRunDir('real-cognition-dedup');
     writeRealRunSpec(runDir);

@@ -25,6 +25,35 @@ STOCHASTIC_SAMPLERS = {"random", "ucb1", "island"}
 # directory half of this same convention lives on the TS side as
 # DEFAULT_EVOLVE_LANE_DIR in src/workflow/lane-template.ts — keep both in sync if
 # the lane/step naming ever changes.
+
+
+def _load_inter_process_file_lock() -> Any:
+    """Load the engine's cross-process file lock by PATH, not via
+    `from evolve_core...`: `evolve_core/__init__.py` imports the heavy
+    database/cognition modules (numpy), but the bridge must stay importable
+    without them (the stub test harness copies evolve_result.py alone). file_lock.py
+    is stdlib-only, so loading it directly is numpy-free. When evolve_core is
+    absent entirely (the stub harness — which runs one process, no lanes to
+    guard), fall back to a no-op context manager.
+    """
+    lock_module = SCRIPT_DIR / "evolve_core" / "file_lock.py"
+    if not lock_module.exists():
+        from contextlib import nullcontext
+
+        return lambda _path: nullcontext()
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_evolve_file_lock", lock_module)
+    if spec is None or spec.loader is None:  # pragma: no cover - vendored module always loads
+        from contextlib import nullcontext
+
+        return lambda _path: nullcontext()
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.InterProcessFileLock
+
+
+_InterProcessFileLock = _load_inter_process_file_lock()
 STEP_NAME_RE = re.compile(r"^step_(\d+)(?:_lane_\d+)?$")
 
 
@@ -645,58 +674,76 @@ def _promote_lesson(
     if not lesson:
         return {"promoted": False, "reason": "empty_lesson"}
     digest = hashlib.sha256(lesson.encode("utf-8")).hexdigest()
-    ledger_path = run_dir / "cognition_promoted.json"
-    ledger: Any = {}
-    if ledger_path.exists():
-        # A crash mid-write can leave the ledger truncated; a corrupt dedup
-        # ledger must not fail the whole run — fall back to an empty ledger
-        # (worst case: a lesson is promoted twice, which the engine tolerates).
-        try:
-            ledger = _load_json(ledger_path)
-        except (json.JSONDecodeError, OSError):
+    # Serialize the ENTIRE promote critical section across concurrent fan-out
+    # lanes (each runs in its own process): both the dedup ledger
+    # (cognition_promoted.json) and the engine's cognition store are non-atomic
+    # full-file read-modify-writes, so N lanes promoting at once can interleave
+    # and tear either file — and a torn store hard-fails the next batch's
+    # `sample`. The cross-process flock makes the ledger check-and-write plus the
+    # engine `add` atomic per lane. Phase 5 will move promotion to a single
+    # barrier-serial call; this lock is the interim corruption guard while
+    # promotion still happens per lane.
+    with _InterProcessFileLock(run_dir / "cognition_data" / ".promote.lock"):
+        # Test-only: widen the held critical section so two concurrent lanes
+        # provably overlap, making the lock's serialization observable (mirrors
+        # EVOLVE_DB_TEST_HOLD_LOCK_MS in evolve_core/database.py).
+        _hold_ms = int(os.environ.get("EVOLVE_PROMOTE_TEST_HOLD_LOCK_MS", "0") or 0)
+        if _hold_ms > 0:
+            import time
+
+            time.sleep(_hold_ms / 1000.0)
+        ledger_path = run_dir / "cognition_promoted.json"
+        ledger: Any = {}
+        if ledger_path.exists():
+            # A crash mid-write can leave the ledger truncated; a corrupt dedup
+            # ledger must not fail the whole run — fall back to an empty ledger
+            # (worst case: a lesson is promoted twice, which the engine tolerates).
+            try:
+                ledger = _load_json(ledger_path)
+            except (json.JSONDecodeError, OSError):
+                ledger = {}
+        if not isinstance(ledger, dict):
             ledger = {}
-    if not isinstance(ledger, dict):
-        ledger = {}
-    if digest in ledger:
-        return {"promoted": False, "reason": "duplicate", "first_seen": ledger[digest]}
+        if digest in ledger:
+            return {"promoted": False, "reason": "duplicate", "first_seen": ledger[digest]}
 
-    score: float | None = None
-    existing_node = _find_recorded_node_for_step(run_dir, step_name)
-    if existing_node is not None:
-        score = _node_score(existing_node)
-    item = {
-        "content": lesson,
-        "source": step_name,
-        "metadata": {
-            "kind": "round_lesson",
-            "node_id": node_id,
-            "best_updated": bool(best_updated),
-            "score": score,
-        },
-    }
-    item_json = _current_dir(run_dir, lane) / "cognition_item.json"
-    _write_json(item_json, item)
-    code, output, error = _run_helper(
-        [
-            sys.executable,
-            str(SCRIPT_DIR / "evolve-cognition"),
-            "add",
-            "--run-dir",
-            str(run_dir),
-            "--json-file",
-            str(item_json),
-        ]
-    )
-    if code != 0 or not isinstance(output, dict):
-        return {"promoted": False, "reason": "helper_error", "error": error}
+        score: float | None = None
+        existing_node = _find_recorded_node_for_step(run_dir, step_name)
+        if existing_node is not None:
+            score = _node_score(existing_node)
+        item = {
+            "content": lesson,
+            "source": step_name,
+            "metadata": {
+                "kind": "round_lesson",
+                "node_id": node_id,
+                "best_updated": bool(best_updated),
+                "score": score,
+            },
+        }
+        item_json = _current_dir(run_dir, lane) / "cognition_item.json"
+        _write_json(item_json, item)
+        code, output, error = _run_helper(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "evolve-cognition"),
+                "add",
+                "--run-dir",
+                str(run_dir),
+                "--json-file",
+                str(item_json),
+            ]
+        )
+        if code != 0 or not isinstance(output, dict):
+            return {"promoted": False, "reason": "helper_error", "error": error}
 
-    ledger[digest] = step_name
-    _write_json(ledger_path, ledger)
-    return {
-        "promoted": True,
-        "items_added": output.get("items_added"),
-        "total_items": output.get("total_items"),
-    }
+        ledger[digest] = step_name
+        _write_json(ledger_path, ledger)
+        return {
+            "promoted": True,
+            "items_added": output.get("items_added"),
+            "total_items": output.get("total_items"),
+        }
 
 
 def evaluate(args: argparse.Namespace) -> int:
