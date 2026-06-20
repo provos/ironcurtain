@@ -7,9 +7,11 @@ import {
   type AgentInvokeInput,
   type DeterministicInvokeInput,
   type DeterministicInvokeResult,
+  type FanOutInvokeInput,
+  type FanOutInvokeResult,
 } from '../../src/workflow/machine-builder.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
-import { makeAgentResult, makeRejectedResult, settle } from './machine-test-helpers.js';
+import { makeAgentResult, makeRejectedResult, makeVerdictResult, settle } from './machine-test-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -150,6 +152,83 @@ const deterministicLoopDefinition: WorkflowDefinition = {
       description: 'Done',
       outputs: ['plan', 'code'],
     },
+  },
+};
+
+/** Parent orchestrator -> workers, child segment sample -> researcher -> evaluate -> analysis_record */
+const fanOutRoundDefinition: WorkflowDefinition = {
+  name: 'fanout-round-test',
+  description: 'Workflow with a fan-out child round',
+  initial: 'orchestrator',
+  settings: { workers: 1, maxRounds: 10 },
+  states: {
+    orchestrator: {
+      type: 'agent',
+      description: 'Chooses the next batch',
+      persona: 'planner',
+      prompt: 'You are a planner.',
+      inputs: [],
+      outputs: [],
+      transitions: [{ to: 'workers', when: { verdict: 'design' } }, { to: 'done' }],
+    },
+    workers: {
+      type: 'deterministic',
+      description: 'Runs the child round',
+      run: [],
+      fanOut: { count: 'workers', join: 'barrier' },
+      segment: ['sample', 'researcher', 'evaluate', 'analysis_record'],
+      transitions: [
+        { to: 'orchestrator', when: { verdict: 'recorded' } },
+        { to: 'human_escalation', when: { verdict: 'evaluator_blocked' } },
+        { to: 'failed', when: { verdict: 'result_file_error' } },
+      ],
+    },
+    sample: {
+      type: 'deterministic',
+      description: 'Samples parents',
+      run: [['sample']],
+      fanOutMember: true,
+      transitions: [{ to: 'researcher', when: { verdict: 'sampled' } }, { to: 'failed' }],
+    },
+    researcher: {
+      type: 'agent',
+      description: 'Writes a candidate',
+      persona: 'coder',
+      prompt: 'You are a coder.',
+      inputs: [],
+      outputs: [],
+      fanOutMember: true,
+      transitions: [{ to: 'evaluate' }],
+    },
+    evaluate: {
+      type: 'deterministic',
+      description: 'Evaluates candidate',
+      run: [['evaluate']],
+      fanOutMember: true,
+      transitions: [
+        { to: 'analysis_record', when: { verdict: 'evaluated' } },
+        { to: 'human_escalation', when: { verdict: 'evaluator_blocked' } },
+        { to: 'failed' },
+      ],
+    },
+    analysis_record: {
+      type: 'deterministic',
+      description: 'Records candidate',
+      run: [['record']],
+      fanOutMember: true,
+      transitions: [{ to: 'orchestrator', when: { verdict: 'recorded' } }, { to: 'failed' }],
+    },
+    human_escalation: {
+      type: 'human_gate',
+      description: 'Human review',
+      acceptedEvents: ['APPROVE', 'ABORT'],
+      transitions: [
+        { to: 'orchestrator', event: 'APPROVE' },
+        { to: 'failed', event: 'ABORT' },
+      ],
+    },
+    done: { type: 'terminal', description: 'Done' },
+    failed: { type: 'terminal', description: 'Failed' },
   },
 };
 
@@ -743,6 +822,134 @@ describe('buildWorkflowMachine', () => {
 
       expect(visited).toContain('error_terminal');
       expect(visited).not.toContain('passed_terminal');
+    });
+  });
+
+  describe('fan-out child machines', () => {
+    it('builds a round child machine that runs the configured segment to recorded', async () => {
+      const result = buildWorkflowMachine(fanOutRoundDefinition, 'task');
+      const roundMachine = result.roundMachinesByState.get('workers');
+      expect(roundMachine).toBeDefined();
+
+      const calls: string[] = [];
+      const testMachine = roundMachine!.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            calls.push(input.stateId);
+            return makeAgentResult({ outputHash: `hash-${input.stateId}` });
+          }),
+          deterministicService: fromPromise(async ({ input }: { input: DeterministicInvokeInput }) => {
+            calls.push(input.stateId);
+            const verdicts: Record<string, string> = {
+              sample: 'sampled',
+              evaluate: 'evaluated',
+              analysis_record: 'recorded',
+            };
+            return makeDeterministicResult({ verdict: verdicts[input.stateId] });
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine, {
+        input: {
+          context: {
+            ...createInitialContext(fanOutRoundDefinition),
+            taskDescription: 'task',
+          },
+        },
+      });
+      actor.start();
+
+      await settle();
+
+      expect(calls).toEqual(['sample', 'researcher', 'evaluate', 'analysis_record']);
+      expect(actor.getSnapshot().value).toBe('recorded');
+      expect(actor.getSnapshot().status).toBe('done');
+      expect(actor.getSnapshot().context.previousStateName).toBe('researcher');
+      expect(actor.getSnapshot().context.previousTestCount).toBe(10);
+    });
+
+    it('maps evaluator-blocked child exits to the blocked final state', async () => {
+      const result = buildWorkflowMachine(fanOutRoundDefinition, 'task');
+      const roundMachine = result.roundMachinesByState.get('workers');
+      expect(roundMachine).toBeDefined();
+
+      const testMachine = roundMachine!.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+          deterministicService: fromPromise(async ({ input }: { input: DeterministicInvokeInput }) => {
+            if (input.stateId === 'sample') return makeDeterministicResult({ verdict: 'sampled' });
+            if (input.stateId === 'evaluate') {
+              return makeDeterministicResult({
+                passed: false,
+                verdict: 'evaluator_blocked',
+                errors: 'evaluator needs credentials',
+              });
+            }
+            return makeDeterministicResult({ verdict: 'recorded' });
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine, {
+        input: {
+          context: {
+            ...createInitialContext(fanOutRoundDefinition),
+            taskDescription: 'task',
+          },
+        },
+      });
+      actor.start();
+
+      await settle();
+
+      expect(actor.getSnapshot().value).toBe('blocked');
+      expect(actor.getSnapshot().status).toBe('done');
+      expect(actor.getSnapshot().context.previousStateName).toBe('evaluate');
+      expect(actor.getSnapshot().context.previousAgentOutput).toBe('evaluator needs credentials');
+    });
+
+    it('updates parent context from fanOutService before following the recorded edge', async () => {
+      const parentDefinition: WorkflowDefinition = {
+        ...fanOutRoundDefinition,
+        states: {
+          ...fanOutRoundDefinition.states,
+          workers: {
+            ...fanOutRoundDefinition.states.workers,
+            transitions: [{ to: 'done', when: { verdict: 'recorded' } }, { to: 'failed' }],
+          },
+        },
+      };
+      const result = buildWorkflowMachine(parentDefinition, 'task');
+      let capturedFanOutInput: FanOutInvokeInput | undefined;
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeVerdictResult('design')),
+          fanOutService: fromPromise(async ({ input }: { input: FanOutInvokeInput }): Promise<FanOutInvokeResult> => {
+            capturedFanOutInput = input;
+            return {
+              passed: true,
+              verdict: 'recorded',
+              context: {
+                ...input.context,
+                previousTestCount: 123,
+                previousStateName: 'analysis_record',
+              },
+            };
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      expect(capturedFanOutInput?.stateId).toBe('workers');
+      expect(actor.getSnapshot().value).toBe('done');
+      expect(actor.getSnapshot().context.previousTestCount).toBe(123);
+      expect(actor.getSnapshot().context.previousStateName).toBe('analysis_record');
     });
   });
 

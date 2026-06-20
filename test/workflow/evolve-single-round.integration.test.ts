@@ -273,8 +273,7 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
       await destroyDockerInfrastructure(bundle);
     });
 
-    const orchestratorScript =
-      kind === 'crash' ? ['design', 'evaluate'] : ['design', 'evaluate', 'analyze', 'record', 'complete'];
+    const orchestratorScript = kind === 'crash' ? ['design'] : ['design', 'complete'];
     let provisionCount = 0;
     let preflightCount = 0;
     let orchestratorCount = 0;
@@ -418,9 +417,10 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
 
     expect(states.at(-1)).toBe('aborted');
     expect(states[0]).toBe('provision');
-    expect(states).toContain('evaluate');
+    expect(states).toContain('workers');
     expect(states).toContain('human_escalation');
     expect(states).not.toContain('failed');
+    expect(states).not.toContain('evaluate');
     expect(states).not.toContain('analysis_record');
     expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe(
       'evaluator_blocked',

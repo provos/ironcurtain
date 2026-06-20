@@ -359,22 +359,8 @@ describe.skipIf(!dockerReady)('evolve generic experiment harness with real Docke
 
     const orchestratorScript =
       opts.experiment && opts.explicitWorkspace
-        ? [
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'complete',
-          ]
-        : ['design', 'evaluate', 'analyze', 'record', 'complete'];
+        ? [...Array.from({ length: ROUND_COUNT }, () => 'design'), 'complete']
+        : ['design', 'complete'];
     let provisionTurns = 0;
     let preflightTurns = 0;
     let orchestratorTurns = 0;

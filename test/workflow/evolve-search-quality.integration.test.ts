@@ -297,12 +297,7 @@ describe.skipIf(!dockerReady)('evolve search-quality workflow with real Docker c
     writeFileSync(resolve(generatedDir, 'compiled-policy.json'), JSON.stringify(testCompiledPolicy));
     writeFileSync(resolve(generatedDir, 'tool-annotations.json'), JSON.stringify(testToolAnnotations));
 
-    const orchestratorScript = Array.from({ length: opts.rounds }).flatMap(() => [
-      'design',
-      'evaluate',
-      'analyze',
-      'record',
-    ]);
+    const orchestratorScript = Array.from({ length: opts.rounds }, () => 'design');
     orchestratorScript.push('complete');
     let orchestratorTurns = 0;
     let researcherTurns = 0;

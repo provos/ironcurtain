@@ -6,6 +6,7 @@ settings:
   mode: docker
   dockerAgent: claude-code
   sharedContainer: true
+  workers: 1
   model: anthropic:claude-sonnet-4-6
   # Safety backstop for a wedged round pipeline, NOT the round budget.
   # isRoundLimitReached trips when the MAX visit count across all states reaches
@@ -350,7 +351,7 @@ states:
     transitions:
       - to: failed
         guard: isRoundLimitReached
-      - to: sample
+      - to: workers
         when: { verdict: design }
       - to: evaluate
         when: { verdict: evaluate }
@@ -359,9 +360,25 @@ states:
       - to: human_escalation
         when: { verdict: escalate }
 
+  workers:
+    type: deterministic
+    description: Run one synchronous evolve round as a child FSM segment.
+    run: []
+    fanOut: { count: workers, join: barrier }
+    segment: [sample, researcher, evaluate, analyzer, analysis_record]
+    transitions:
+      - to: orchestrator
+        when: { verdict: recorded }
+      - to: human_escalation
+        when: { verdict: evaluator_blocked }
+      - to: failed
+        when: { verdict: result_file_error }
+      - to: failed
+
   sample:
     type: deterministic
     description: Sample parent nodes and retrieve cognition; seed cognition on first entry.
+    fanOutMember: true
     container: true
     resultFile: .evolve_runs/main/current/sample.json
     run:
@@ -390,6 +407,7 @@ states:
   researcher:
     type: agent
     description: Evolve one candidate from sampled parents and retrieved cognition.
+    fanOutMember: true
     persona: global
     prompt: |
       Write exactly one candidate program for this round.
@@ -424,6 +442,7 @@ states:
   evaluate:
     type: deterministic
     description: Run the configured evaluator on this round's candidate.
+    fanOutMember: true
     container: true
     resultFile: .evolve_runs/main/current/result.json
     run:
@@ -450,6 +469,7 @@ states:
   analyzer:
     type: agent
     description: Write a transferable lesson for the round.
+    fanOutMember: true
     persona: global
     prompt: |
       Analyze the round that just completed and write a SHORT transferable lesson.
@@ -474,6 +494,7 @@ states:
   analysis_record:
     type: deterministic
     description: The single durable engine node-write; commit the round with its lesson and parents.
+    fanOutMember: true
     container: true
     resultFile: .evolve_runs/main/current/analysis_record.json
     run:

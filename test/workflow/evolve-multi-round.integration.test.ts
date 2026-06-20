@@ -328,23 +328,7 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
     });
 
     const orchestratorScript =
-      mode === 'positive'
-        ? [
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'design',
-            'evaluate',
-            'analyze',
-            'record',
-            'complete',
-          ]
-        : ['design', 'evaluate', 'analyze', 'record', 'design', 'evaluate'];
+      mode === 'positive' ? [...Array.from({ length: ROUND_COUNT }, () => 'design'), 'complete'] : ['design', 'design'];
 
     let provisionTurns = 0;
     let preflightTurns = 0;
@@ -435,12 +419,12 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
     expect(provisionTurns).toBe(1);
     expect(preflightTurns).toBe(1);
     if (mode === 'positive') {
-      expect(orchestratorTurns).toBe(4 * ROUND_COUNT + 1);
+      expect(orchestratorTurns).toBe(ROUND_COUNT + 1);
       expect(researcherTurns).toBe(ROUND_COUNT);
       expect(analyzerTurns).toBe(ROUND_COUNT);
       expect(finalSummaryTurns).toBe(1);
     } else {
-      expect(orchestratorTurns).toBe(6);
+      expect(orchestratorTurns).toBe(2);
       expect(researcherTurns).toBe(2);
       expect(analyzerTurns).toBe(1);
       expect(finalSummaryTurns).toBe(0);
@@ -461,10 +445,8 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
     expect(first.states).toContain('preflight_review');
     expect(first.states).toContain('final_summary');
     expect(first.states).toContain('final_review');
-    for (const state of ['sample', 'evaluate', 'analyzer', 'analysis_record', 'researcher']) {
-      expect(countStates(first.states, state)).toBe(ROUND_COUNT);
-    }
-    expect(countStates(first.states, 'orchestrator')).toBe(4 * ROUND_COUNT + 1);
+    expect(countStates(first.states, 'workers')).toBe(ROUND_COUNT);
+    expect(countStates(first.states, 'orchestrator')).toBe(ROUND_COUNT + 1);
 
     const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
     expect(nodes.next_id).toBe(ROUND_COUNT);
@@ -516,8 +498,9 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
     expect(states[0]).toBe('provision');
     expect(states).toContain('human_escalation');
     expect(states).not.toContain('failed');
-    expect(countStates(states, 'evaluate')).toBe(2);
-    expect(countStates(states, 'analysis_record')).toBe(1);
+    expect(countStates(states, 'workers')).toBe(2);
+    expect(countStates(states, 'evaluate')).toBe(0);
+    expect(countStates(states, 'analysis_record')).toBe(0);
     const nodes = readJson(resolve(runDir, 'database_data', 'nodes.json')) as NodesFile;
     expect(Object.keys(nodes.nodes)).toEqual(['0']);
     expect((readJson(resolve(runDir, 'current', 'result.json')) as { verdict: string }).verdict).toBe(

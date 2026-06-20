@@ -17,7 +17,7 @@ import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as http from 'node:http';
-import { createActor, fromPromise, type AnyActorRef, type Snapshot } from 'xstate';
+import { createActor, fromPromise, type AnyActorRef, type AnyStateMachine, type Snapshot } from 'xstate';
 import type {
   WorkflowId,
   WorkflowDefinition,
@@ -91,6 +91,8 @@ import {
   type AgentInvokeResult,
   type DeterministicInvokeInput,
   type DeterministicInvokeResult,
+  type FanOutInvokeInput,
+  type FanOutInvokeResult,
 } from './machine-builder.js';
 import type { CheckpointStore } from './checkpoint.js';
 import {
@@ -607,6 +609,7 @@ interface WorkflowInstance {
   readonly workflowScriptsDir: string | undefined;
   readonly containerSnapshots: Readonly<Record<string, ContainerSnapshotRef>> | undefined;
   readonly actor: AnyActorRef;
+  readonly roundMachinesByState: ReadonlyMap<string, AnyStateMachine>;
   readonly gateStateNames: ReadonlySet<string>;
   readonly terminalStateNames: ReadonlySet<string>;
   readonly activeSessions: Set<Session>;
@@ -1383,9 +1386,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     const workflowSkillsDir = stageWorkflowSkillsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
     const workflowScriptsDir = stageWorkflowScriptsAtStart(getWorkflowPackageDir(definitionPath), metaDir);
 
-    const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
+    const { machine, roundMachinesByState, gateStateNames, terminalStateNames } = buildWorkflowMachine(
+      definition,
+      taskDescription,
+    );
 
-    const providedMachine = this.provideActors(machine, workflowId, definition);
+    const providedMachine = this.provideActors(machine, workflowId, definition, roundMachinesByState);
     const actor = createActor(providedMachine);
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
     const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
@@ -1398,6 +1404,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       workflowScriptsDir,
       containerSnapshots: undefined,
       actor,
+      roundMachinesByState,
       gateStateNames,
       terminalStateNames,
       activeSessions: new Set(),
@@ -1447,12 +1454,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
 
-    const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(
+    const { machine, roundMachinesByState, gateStateNames, terminalStateNames } = buildWorkflowMachine(
       definition,
       checkpoint.context.taskDescription,
     );
 
-    const providedMachine = this.provideActors(machine, workflowId, definition);
+    const providedMachine = this.provideActors(machine, workflowId, definition, roundMachinesByState);
 
     const restoredSnapshot = providedMachine.resolveState({
       value: checkpoint.machineState as string,
@@ -1500,6 +1507,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       workflowScriptsDir,
       containerSnapshots: checkpoint.containerSnapshots,
       actor,
+      roundMachinesByState,
       gateStateNames,
       terminalStateNames,
       activeSessions: new Set(),
@@ -1581,18 +1589,35 @@ export class WorkflowOrchestrator implements WorkflowController {
     const context = snapshot.context;
 
     // Build the service promise based on state type
-    const servicePromise: Promise<unknown> =
-      stateDef.type === 'agent'
-        ? this.executeAgentState(workflowId, { stateId, stateConfig: stateDef, context }, definition)
-        : this.executeDeterministicState(workflowId, {
-            stateId,
-            commands: stateDef.run,
-            context,
-            container: stateDef.container ?? false,
-            containerScope: stateDef.containerScope,
-            timeoutMs: stateDef.timeoutMs,
-            resultFile: stateDef.resultFile,
-          });
+    let servicePromise: Promise<unknown>;
+    if (stateDef.type === 'agent') {
+      servicePromise =
+        stateDef.fanOut !== undefined
+          ? this.runFanOutSegment(
+              workflowId,
+              { stateId, stateConfig: stateDef, context },
+              definition,
+              instance.roundMachinesByState,
+            )
+          : this.executeAgentState(workflowId, { stateId, stateConfig: stateDef, context }, definition);
+    } else if (stateDef.fanOut !== undefined) {
+      servicePromise = this.runFanOutSegment(
+        workflowId,
+        { stateId, stateConfig: stateDef, context },
+        definition,
+        instance.roundMachinesByState,
+      );
+    } else {
+      servicePromise = this.executeDeterministicState(workflowId, {
+        stateId,
+        commands: stateDef.run,
+        context,
+        container: stateDef.container ?? false,
+        containerScope: stateDef.containerScope,
+        timeoutMs: stateDef.timeoutMs,
+        resultFile: stateDef.resultFile,
+      });
+    }
 
     // Feed the result back to the actor as an XState internal invoke event.
     // These event types don't exist in our WorkflowEvent union, so we cast
@@ -1831,10 +1856,11 @@ export class WorkflowOrchestrator implements WorkflowController {
 
   /** Injects concrete agent/deterministic service implementations into the machine. */
   private provideActors(
-    machine: ReturnType<typeof buildWorkflowMachine>['machine'],
+    machine: AnyStateMachine,
     workflowId: WorkflowId,
     definition: WorkflowDefinition,
-  ): ReturnType<typeof buildWorkflowMachine>['machine'] {
+    roundMachinesByState: ReadonlyMap<string, AnyStateMachine>,
+  ): AnyStateMachine {
     return machine.provide({
       actors: {
         agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(async ({ input }) => {
@@ -1855,8 +1881,16 @@ export class WorkflowOrchestrator implements WorkflowController {
             throw err;
           }
         }),
+        fanOutService: fromPromise<FanOutInvokeResult, FanOutInvokeInput>(async ({ input }) => {
+          try {
+            return await this.runFanOutSegment(workflowId, input, definition, roundMachinesByState);
+          } catch (err) {
+            writeStderr(`[workflow] fanOutService invoke rejected for "${input.stateId}": ${toErrorMessage(err)}`);
+            throw err;
+          }
+        }),
       },
-    }) as ReturnType<typeof buildWorkflowMachine>['machine'];
+    }) as AnyStateMachine;
   }
 
   /** Subscribes to actor snapshot changes for lifecycle events, gates, and checkpointing. */
@@ -2501,6 +2535,179 @@ export class WorkflowOrchestrator implements WorkflowController {
         sessionId: endedSessionId,
       });
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Fan-out state execution
+  // -----------------------------------------------------------------------
+
+  private async runFanOutSegment(
+    workflowId: WorkflowId,
+    input: FanOutInvokeInput,
+    definition: WorkflowDefinition,
+    roundMachinesByState: ReadonlyMap<string, AnyStateMachine>,
+  ): Promise<FanOutInvokeResult> {
+    const instance = this.workflows.get(workflowId);
+    if (!instance) {
+      return this.fanOutErrorResult(input, `workflow ${workflowId} not found`);
+    }
+
+    const fanOut = input.stateConfig.fanOut;
+    const segment = input.stateConfig.segment ?? [];
+    if (fanOut === undefined || segment.length === 0) {
+      return this.fanOutErrorResult(input, `State "${input.stateId}" is not a configured fan-out segment.`);
+    }
+
+    const workers = fanOut.count === 'workers' ? (definition.settings?.workers ?? 1) : fanOut.count;
+    if (workers !== 1) {
+      return this.fanOutErrorResult(
+        input,
+        `State "${input.stateId}" resolved to ${workers} workers; this implementation slice only supports workers: 1.`,
+      );
+    }
+
+    const roundMachine = roundMachinesByState.get(input.stateId);
+    if (!roundMachine) {
+      return this.fanOutErrorResult(
+        input,
+        `No child round machine is registered for fan-out state "${input.stateId}".`,
+      );
+    }
+
+    await this.preMintFanOutScopeBundle(instance, input.stateId, segment);
+
+    instance.tab.write(`[fanout] Starting "${input.stateId}" with ${workers} worker`);
+    const providedRoundMachine = this.provideActors(roundMachine, workflowId, definition, roundMachinesByState);
+    const childActors = Array.from({ length: workers }, (_unused, index) => {
+      const child = createActor(providedRoundMachine, { input: { context: input.context } });
+      const done = this.waitForRoundChild(child, index);
+      child.start();
+      return done;
+    });
+
+    const settled = await Promise.allSettled(childActors);
+    const result = this.joinFanOutBatch(input, settled);
+    instance.tab.write(`[fanout] "${input.stateId}" joined: verdict=${result.verdict ?? 'none'}`);
+    return result;
+  }
+
+  private async preMintFanOutScopeBundle(
+    instance: WorkflowInstance,
+    fanOutStateId: string,
+    segment: readonly string[],
+  ): Promise<void> {
+    if (!this.shouldUseSharedContainer(instance.definition)) return;
+
+    const scopes = new Set<string>();
+    for (const memberId of segment) {
+      const member = instance.definition.states[memberId];
+      if (member.type === 'agent') {
+        scopes.add(member.containerScope ?? DEFAULT_CONTAINER_SCOPE);
+      } else if (member.type === 'deterministic' && member.container === true) {
+        scopes.add(member.containerScope ?? DEFAULT_CONTAINER_SCOPE);
+      }
+    }
+
+    if (scopes.size === 0) return;
+    if (scopes.size > 1) {
+      throw new Error(
+        `fan-out state "${fanOutStateId}" spans multiple container scopes (${[...scopes].join(', ')}); ` +
+          'multi-scope fan-out is out of scope for this implementation slice.',
+      );
+    }
+
+    await this.ensureBundleForScope(instance, [...scopes][0] ?? DEFAULT_CONTAINER_SCOPE);
+  }
+
+  private waitForRoundChild(
+    actor: AnyActorRef,
+    index: number,
+  ): Promise<{ readonly index: number; readonly status: string; readonly context: WorkflowContext }> {
+    return new Promise((resolvePromise, reject) => {
+      const observe = (snapshot: unknown): void => {
+        const snap = snapshot as {
+          readonly status?: string;
+          readonly value?: unknown;
+          readonly context?: WorkflowContext;
+          readonly error?: unknown;
+        };
+        if (snap.status === 'done') {
+          subscription.unsubscribe();
+          resolvePromise({
+            index,
+            status: String(snap.value),
+            context: snap.context as WorkflowContext,
+          });
+        } else if (snap.status === 'error') {
+          subscription.unsubscribe();
+          const reason = snap.error ?? `fan-out child ${index} errored`;
+          reject(reason instanceof Error ? reason : new Error(toErrorMessage(reason)));
+        }
+      };
+      const subscription = actor.subscribe(observe);
+      observe(actor.getSnapshot());
+    });
+  }
+
+  private joinFanOutBatch(
+    input: FanOutInvokeInput,
+    settled: readonly PromiseSettledResult<{
+      readonly index: number;
+      readonly status: string;
+      readonly context: WorkflowContext;
+    }>[],
+  ): FanOutInvokeResult {
+    const rejected = settled.find((result) => result.status === 'rejected');
+    if (rejected?.status === 'rejected') {
+      return this.fanOutErrorResult(input, toErrorMessage(rejected.reason));
+    }
+
+    const children = settled.map((result) => {
+      if (result.status !== 'fulfilled') {
+        throw new Error('unreachable rejected fan-out result after rejection check');
+      }
+      return result.value;
+    });
+    const first = children[0];
+
+    const childSummaries = children.map((child) => ({ index: child.index, status: child.status }));
+    const blocked = children.find((child) => child.status === 'blocked');
+    if (blocked) {
+      return {
+        passed: false,
+        verdict: 'evaluator_blocked',
+        errors: blocked.context.lastError ?? undefined,
+        context: blocked.context,
+        children: childSummaries,
+      };
+    }
+
+    const errored = children.find((child) => child.status !== 'recorded');
+    if (errored) {
+      return {
+        passed: false,
+        verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
+        errors: errored.context.lastError ?? `fan-out child ${errored.index} ended in "${errored.status}"`,
+        context: errored.context,
+        children: childSummaries,
+      };
+    }
+
+    return {
+      passed: true,
+      verdict: 'recorded',
+      context: first.context,
+      children: childSummaries,
+    };
+  }
+
+  private fanOutErrorResult(input: FanOutInvokeInput, message: string): FanOutInvokeResult {
+    return {
+      passed: false,
+      verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
+      errors: message,
+      context: input.context,
+    };
   }
 
   // -----------------------------------------------------------------------

@@ -514,6 +514,7 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
 
   for (const [stateId, state] of Object.entries(def.states)) {
     if (state.type !== 'deterministic') continue;
+    if (state.fanOut !== undefined) continue;
     if (state.resultFile !== undefined) continue;
 
     if (!usesVerdictEdges(state.transitions)) continue;

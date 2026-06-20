@@ -702,7 +702,10 @@ function validateContainerScopes(definition: WorkflowDefinition, issues: string[
     if (state.containerScope !== undefined && state.container !== true) {
       issues.push(`State "${stateId}" declares containerScope but is not container: true`);
     }
-    if ((state.resultFile !== undefined || usesVerdictEdges(state.transitions)) && state.container !== true) {
+    if (
+      (state.resultFile !== undefined || (state.fanOut === undefined && usesVerdictEdges(state.transitions))) &&
+      state.container !== true
+    ) {
       issues.push(
         `State "${stateId}" uses resultFile / when:{verdict} routing but is not container: true. ` +
           `Structured deterministic result routing is container-only.`,

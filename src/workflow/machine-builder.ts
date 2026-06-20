@@ -10,6 +10,7 @@ import type {
   AgentTransitionDefinition,
   WhenValue,
   WorkflowTransitionAction,
+  WorkflowStateDefinition,
 } from './types.js';
 import type { AgentConversationId } from '../session/types.js';
 import { guardImplementations } from './guards.js';
@@ -19,6 +20,8 @@ import { isAgentInvocationError } from './errors.js';
 // ---------------------------------------------------------------------------
 // Invoke input/result types
 // ---------------------------------------------------------------------------
+
+type ExecutableStateDefinition = AgentStateDefinition | DeterministicStateDefinition;
 
 /** Input provided to each invoked agent service. */
 export interface AgentInvokeInput {
@@ -76,6 +79,22 @@ export interface DeterministicInvokeResult {
   readonly payload?: Record<string, unknown>;
 }
 
+/** Input provided to a parent fan-out state invoke. */
+export interface FanOutInvokeInput {
+  readonly stateId: string;
+  readonly stateConfig: ExecutableStateDefinition;
+  readonly context: WorkflowContext;
+}
+
+/** Result returned by the fan-out pump after all children have joined. */
+export interface FanOutInvokeResult extends DeterministicInvokeResult {
+  readonly context: WorkflowContext;
+  readonly children?: readonly {
+    readonly index: number;
+    readonly status: string;
+  }[];
+}
+
 // ---------------------------------------------------------------------------
 // Build result
 // ---------------------------------------------------------------------------
@@ -83,6 +102,8 @@ export interface DeterministicInvokeResult {
 export interface BuildMachineResult {
   /** The XState machine (with placeholder actors). */
   readonly machine: AnyStateMachine;
+  /** Child round machines keyed by the parent fan-out state that invokes them. */
+  readonly roundMachinesByState: ReadonlyMap<string, AnyStateMachine>;
   /** Set of state names that are human gates (for snapshot.matches()). */
   readonly gateStateNames: ReadonlySet<string>;
   /** Set of state names that are terminal (for completion detection). */
@@ -238,6 +259,7 @@ function compileAction(action: WorkflowTransitionAction): XStateActionEntry {
 function buildOnDoneTransitions(
   transitions: readonly AgentTransitionDefinition[],
   updateAction: string,
+  mapTarget: (transition: AgentTransitionDefinition) => string = (transition) => transition.to,
 ): readonly object[] {
   return transitions.map((t) => {
     let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
@@ -248,14 +270,24 @@ function buildOnDoneTransitions(
     }
 
     return {
-      target: t.to,
+      target: mapTarget(t),
       ...(guard ? { guard } : {}),
       actions: collectTransitionActions(t, updateAction),
     };
   });
 }
 
-function buildAgentState(stateId: string, config: AgentStateDefinition, definition: WorkflowDefinition): object {
+interface ExecutableStateBuildOptions {
+  readonly mapTransitionTarget?: (transition: AgentTransitionDefinition) => string;
+  readonly onErrorTarget?: string;
+}
+
+function buildAgentState(
+  stateId: string,
+  config: AgentStateDefinition,
+  definition: WorkflowDefinition,
+  options: ExecutableStateBuildOptions = {},
+): object {
   return {
     entry: [{ type: 'incrementVisitCount', params: { stateId } }],
     invoke: {
@@ -266,9 +298,9 @@ function buildAgentState(stateId: string, config: AgentStateDefinition, definiti
         stateConfig: config,
         context,
       }),
-      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromAgentResult'),
+      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromAgentResult', options.mapTransitionTarget),
       onError: {
-        target: findErrorTarget(config, definition),
+        target: options.onErrorTarget ?? findErrorTarget(config, definition),
         actions: ['storeError', 'updateContextFromAgentInvocationError'],
       },
     },
@@ -279,8 +311,13 @@ function buildDeterministicState(
   stateId: string,
   config: DeterministicStateDefinition,
   definition: WorkflowDefinition,
+  options: ExecutableStateBuildOptions = {},
 ): object {
-  const onDoneTransitions = buildOnDoneTransitions(config.transitions, 'updateContextFromDeterministicResult');
+  const onDoneTransitions = buildOnDoneTransitions(
+    config.transitions,
+    'updateContextFromDeterministicResult',
+    options.mapTransitionTarget,
+  );
 
   return {
     invoke: {
@@ -296,6 +333,25 @@ function buildDeterministicState(
         resultFile: config.resultFile,
       }),
       onDone: onDoneTransitions,
+      onError: {
+        target: options.onErrorTarget ?? findErrorTarget(config, definition),
+        actions: ['storeError'],
+      },
+    },
+  };
+}
+
+function buildFanOutState(stateId: string, config: ExecutableStateDefinition, definition: WorkflowDefinition): object {
+  return {
+    invoke: {
+      id: stateId,
+      src: 'fanOutService',
+      input: ({ context }: { context: WorkflowContext }) => ({
+        stateId,
+        stateConfig: config,
+        context,
+      }),
+      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromFanOutResult'),
       onError: {
         target: findErrorTarget(config, definition),
         actions: ['storeError'],
@@ -326,9 +382,85 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
   return { on };
 }
 
+function buildRoundChildDefinition(
+  definition: WorkflowDefinition,
+  fanOutStateId: string,
+  segment: readonly string[],
+): WorkflowDefinition {
+  const segmentSet = new Set(segment);
+  const states: Record<string, WorkflowStateDefinition> = {};
+
+  for (const memberId of segment) {
+    const member = definition.states[memberId];
+    if (member.type !== 'agent' && member.type !== 'deterministic') {
+      throw new Error(`fan-out state "${fanOutStateId}" segment member "${memberId}" is not executable`);
+    }
+
+    const transitions = member.transitions.map((transition) => ({
+      ...transition,
+      to: mapRoundChildTarget(definition, transition, segmentSet),
+    }));
+
+    if (member.type === 'agent') {
+      const { fanOut: _fanOut, segment: _segment, ...rest } = member;
+      void _fanOut;
+      void _segment;
+      states[memberId] = { ...rest, transitions };
+    } else {
+      const { fanOut: _fanOut, segment: _segment, ...rest } = member;
+      void _fanOut;
+      void _segment;
+      states[memberId] = { ...rest, transitions };
+    }
+  }
+
+  states.recorded = {
+    type: 'terminal',
+    description: `Fan-out segment "${fanOutStateId}" recorded successfully.`,
+  };
+  states.blocked = {
+    type: 'terminal',
+    description: `Fan-out segment "${fanOutStateId}" needs human review.`,
+  };
+  states.errored = {
+    type: 'terminal',
+    description: `Fan-out segment "${fanOutStateId}" failed.`,
+  };
+
+  return {
+    name: `${definition.name}-${fanOutStateId}-round`,
+    description: `Child round machine for ${definition.name}.${fanOutStateId}`,
+    initial: segment[0],
+    settings: definition.settings,
+    states,
+  };
+}
+
+function mapRoundChildTarget(
+  definition: WorkflowDefinition,
+  transition: AgentTransitionDefinition,
+  segment: ReadonlySet<string>,
+): string {
+  if (segment.has(transition.to)) return transition.to;
+
+  const verdict = transition.when?.verdict;
+  if (verdict === 'recorded') return 'recorded';
+  if (verdict === 'evaluator_blocked') return 'blocked';
+  if (typeof verdict === 'string') return 'errored';
+
+  const targetState = definition.states[transition.to];
+  if (targetState.type === 'human_gate') return 'blocked';
+  return 'errored';
+}
+
 // ---------------------------------------------------------------------------
 // Machine builder
 // ---------------------------------------------------------------------------
+
+interface BuildWorkflowMachineOptions {
+  readonly contextFromInput?: boolean;
+  readonly buildRoundMachines?: boolean;
+}
 
 /**
  * Builds an XState v5 machine from a validated WorkflowDefinition.
@@ -341,8 +473,13 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
  * Guards are registered with concrete implementations from the guards
  * module. Actions for context updates are defined inline via `assign`.
  */
-export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescription: string): BuildMachineResult {
+export function buildWorkflowMachine(
+  definition: WorkflowDefinition,
+  taskDescription: string,
+  options: BuildWorkflowMachineOptions = {},
+): BuildMachineResult {
   const states: Record<string, object> = {};
+  const roundMachinesByState = new Map<string, AnyStateMachine>();
   const gateStateNames = new Set<string>();
   const terminalStateNames = new Set<string>();
 
@@ -355,13 +492,19 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   for (const [stateId, stateDef] of Object.entries(definition.states)) {
     switch (stateDef.type) {
       case 'agent':
-        states[stateId] = buildAgentState(stateId, stateDef, definition);
+        states[stateId] =
+          stateDef.fanOut !== undefined
+            ? buildFanOutState(stateId, stateDef, definition)
+            : buildAgentState(stateId, stateDef, definition);
         if (typeof stateDef.maxVisits === 'number') {
           maxVisitsByState.set(stateId, stateDef.maxVisits);
         }
         break;
       case 'deterministic':
-        states[stateId] = buildDeterministicState(stateId, stateDef, definition);
+        states[stateId] =
+          stateDef.fanOut !== undefined
+            ? buildFanOutState(stateId, stateDef, definition)
+            : buildDeterministicState(stateId, stateDef, definition);
         break;
       case 'human_gate':
         states[stateId] = buildHumanGateState(stateId, stateDef);
@@ -371,6 +514,22 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         states[stateId] = { type: 'final' as const };
         terminalStateNames.add(stateId);
         break;
+    }
+  }
+
+  if (options.buildRoundMachines !== false) {
+    for (const [stateId, stateDef] of Object.entries(definition.states)) {
+      if ((stateDef.type !== 'agent' && stateDef.type !== 'deterministic') || stateDef.fanOut === undefined) {
+        continue;
+      }
+      const segment = stateDef.segment ?? [];
+      if (segment.length === 0) continue;
+      const childDefinition = buildRoundChildDefinition(definition, stateId, segment);
+      const child = buildWorkflowMachine(childDefinition, taskDescription, {
+        contextFromInput: true,
+        buildRoundMachines: false,
+      });
+      roundMachinesByState.set(stateId, child.machine);
     }
   }
 
@@ -473,6 +632,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
     types: {
       context: {} as WorkflowContext,
       events: {} as WorkflowEvent,
+      input: {} as { context?: WorkflowContext } | undefined,
     },
     actors: {
       agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(() => {
@@ -480,6 +640,9 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
       }),
       deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(() => {
         return Promise.reject(new Error('deterministicService must be provided via machine.provide()'));
+      }),
+      fanOutService: fromPromise<FanOutInvokeResult, FanOutInvokeInput>(() => {
+        return Promise.reject(new Error('fanOutService must be provided via machine.provide()'));
       }),
     },
     guards: xstateGuards,
@@ -552,6 +715,12 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
           previousStateName: stateId,
         };
       }),
+      updateContextFromFanOutResult: assign(({ event }) => {
+        const doneEvent = event as unknown as { output?: FanOutInvokeResult };
+        const result = doneEvent.output;
+        if (!result) return {};
+        return result.context;
+      }),
       storeHumanPrompt: assign(({ event }) => ({
         humanPrompt: (event as { prompt?: string }).prompt ?? null,
       })),
@@ -620,15 +789,24 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   }).createMachine({
     id: definition.name,
     initial: definition.initial,
-    context: (): WorkflowContext => ({
-      ...createInitialContext(definition),
-      taskDescription,
-    }),
+    context: ({ input }: { input?: { context?: WorkflowContext } }): WorkflowContext => {
+      if (options.contextFromInput) {
+        if (!input?.context) {
+          throw new Error(`machine "${definition.name}" requires input.context`);
+        }
+        return input.context;
+      }
+      return {
+        ...createInitialContext(definition),
+        taskDescription,
+      };
+    },
     states,
   });
 
   return {
     machine,
+    roundMachinesByState,
     gateStateNames,
     terminalStateNames,
   };
