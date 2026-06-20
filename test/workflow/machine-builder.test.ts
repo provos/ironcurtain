@@ -179,7 +179,7 @@ const fanOutRoundDefinition: WorkflowDefinition = {
       segment: ['sample', 'researcher', 'evaluate', 'analysis_record'],
       transitions: [
         { to: 'orchestrator', when: { verdict: 'recorded' } },
-        { to: 'human_escalation', when: { verdict: 'evaluator_blocked' } },
+        { to: 'human_escalation', when: { verdict: 'escalate' } },
         { to: 'failed', when: { verdict: 'result_file_error' } },
       ],
     },

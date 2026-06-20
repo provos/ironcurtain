@@ -409,7 +409,8 @@ describe.skipIf(!dockerReady)('evolve multi-round workflow with real Docker cont
       expect(gates[1].stateName).toBe('human_escalation');
       expect(gates[1].acceptedEvents).toEqual(['APPROVE', 'FORCE_REVISION', 'ABORT']);
       expect(gates[1].presentedArtifacts.has('run_spec')).toBe(true);
-      expect(gates[1].summary).toContain('evaluator_blocked');
+      expect(gates[1].summary).toContain('verdict: escalate');
+      expect(gates[1].summary).toContain('lane 0 blocked');
       orchestrator.resolveGate(workflowId, { type: 'ABORT' });
     }
 

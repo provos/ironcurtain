@@ -93,14 +93,14 @@ export interface FanOutInvokeInput {
 }
 
 /**
- * The three synthetic terminal states every child round machine carries
- * (see `buildRoundChildDefinition`). They form the lane verdict surface the
- * barrier joins on: a lane finishes in exactly one of these, and the parent
- * maps each to a batch verdict (recorded -> continue, blocked -> escalate,
- * errored -> fail). Typed as a closed union so the join's branches are
+ * The three synthetic terminal states every child round machine carries are
+ * `recorded`/`blocked`/`errored` (see `buildRoundChildDefinition`). `drained`
+ * is not a child terminal; it is the parent-side outcome synthesized for a
+ * peer actor stopped by drain-on-escalation after another child blocked or
+ * errored. Typed as a closed union so the join's branches are
  * exhaustive-checkable.
  */
-export type RoundChildStatus = 'recorded' | 'blocked' | 'errored';
+export type RoundChildStatus = 'recorded' | 'blocked' | 'errored' | 'drained';
 
 /**
  * The fully-resolved result of joining one child round actor: the terminal
@@ -112,6 +112,7 @@ export interface RoundChildOutcome {
   readonly index: number;
   readonly status: RoundChildStatus;
   readonly context: WorkflowContext;
+  readonly drainedBy?: { readonly index: number; readonly status: 'blocked' | 'errored'; readonly reason: string };
 }
 
 /** Per-lane summary surfaced on the fan-out result for observability. */
@@ -124,10 +125,10 @@ export interface RoundChildSummary {
  * Result returned by the fan-out pump after all children have joined. Shaped
  * as a `DeterministicInvokeResult` so the parent `workers` state's transitions
  * match on `verdict` exactly like a normal deterministic state. The verdict
- * space is `recorded` (batch advanced) | `evaluator_blocked` (route to human
- * review) | `result_file_error` (a lane errored / the segment was
- * misconfigured). `context` is the joined context promoted onto the parent FSM;
- * `children` is the per-lane status summary, for observability only.
+ * space is `recorded` (batch advanced) | `escalate` (at least one lane blocked;
+ * route to human review) | `result_file_error` (errored-only lane / segment
+ * misconfiguration). `context` is the joined context promoted onto the parent
+ * FSM; `children` is the per-lane status summary, for observability only.
  */
 export interface FanOutInvokeResult extends DeterministicInvokeResult {
   readonly context: WorkflowContext;

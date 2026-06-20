@@ -12,8 +12,9 @@ settings:
   # isRoundLimitReached trips when the MAX visit count across all states reaches
   # this number. On the happy path every state is entered once per evolution
   # round, so this bounds a clean run at ~maxRounds rounds; mid-round recovery
-  # (evaluator_blocked -> human_escalation -> resume) re-visits evaluate and the
-  # orchestrator, so a run with many recoveries trips the backstop in fewer
+  # (evaluator_blocked -> human_escalation in the child segment, then APPROVE
+  # back to orchestrator) may revisit evaluate/orchestrator, so a run with many
+  # recoveries trips the backstop in fewer
   # rounds. It is set well above run_spec.budget.max_rounds either way, so a
   # legitimate run is never capped before the orchestrator emits `complete`; the
   # real round budget is enforced by the orchestrator against
@@ -327,6 +328,10 @@ states:
       entered mid-round with a candidate written but not yet scored. Detect this by
       /workspace/.evolve_runs/main/current/context.json present AND result.json absent,
       and emit evaluate to resume that round rather than starting a new one.
+      This recovery case is only for the legacy bare current/ files. If the previous
+      output says a fan-out batch escalated or drained lanes under current/lane_<k>/,
+      discard that lane scratch and re-decide normally; emit design for a fresh batch
+      unless stop_signals.json requires complete or the run is unrecoverable.
 
       If a human directive in this message requests more rounds, that directive
       overrides any stop_reason for THIS turn only: emit design to start one more
@@ -370,7 +375,7 @@ states:
       - to: orchestrator
         when: { verdict: recorded }
       - to: human_escalation
-        when: { verdict: evaluator_blocked }
+        when: { verdict: escalate }
       - to: failed
         when: { verdict: result_file_error }
       - to: failed

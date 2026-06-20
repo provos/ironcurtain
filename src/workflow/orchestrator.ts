@@ -178,6 +178,24 @@ function toRoundChildStatus(value: unknown, index: number): RoundChildStatus {
   return 'errored';
 }
 
+type RoundChildDrainTrigger = Pick<RoundChildOutcome, 'index' | 'status' | 'context'> & {
+  readonly status: 'blocked' | 'errored';
+};
+
+interface RoundChildWaiter {
+  readonly index: number;
+  readonly actor: AnyActorRef;
+  readonly promise: Promise<RoundChildOutcome>;
+  readonly isSettled: () => boolean;
+  readonly drain: (trigger: RoundChildDrainTrigger) => void;
+}
+
+interface FanOutIssue {
+  readonly index: number;
+  readonly status: 'blocked' | 'errored';
+  readonly reason: string;
+}
+
 /**
  * Parses an agent_status block into one of three explicit states: `ok` with the
  * parsed output, `missing` when no block was present, or `malformed` when a
@@ -2663,7 +2681,22 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[fanout] Starting "${input.stateId}" with ${workers} worker${workers === 1 ? '' : 's'}`);
     const providedRoundMachine = this.provideActors(roundMachine, workflowId, definition, roundMachinesByState);
-    const childActors = Array.from({ length: workers }, (_, index) => {
+    let drainTrigger: RoundChildDrainTrigger | undefined;
+    const childActors: RoundChildWaiter[] = [];
+    const requestDrain = (trigger: RoundChildDrainTrigger): void => {
+      if (drainTrigger !== undefined) return;
+      drainTrigger = trigger;
+      instance.tab.write(
+        `[fanout] "${input.stateId}" draining peers after lane ${trigger.index} ${trigger.status}: ` +
+          this.roundChildReason(trigger),
+      );
+      for (const child of childActors) {
+        if (child.index === trigger.index || child.isSettled()) continue;
+        child.drain(trigger);
+      }
+    };
+
+    for (let index = 0; index < workers; index += 1) {
       const childContext = this.buildFanOutLaneContext(
         input.context,
         index,
@@ -2671,12 +2704,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         preparedLaneResults.byLane[index],
       );
       const child = createActor(providedRoundMachine, { input: { context: childContext } });
-      const done = this.waitForRoundChild(child, index);
-      child.start();
-      return done;
-    });
+      childActors.push(this.waitForRoundChild(child, index, requestDrain));
+    }
 
-    const settled = await Promise.allSettled(childActors);
+    for (const child of childActors) {
+      child.actor.start();
+    }
+
+    const settled = await Promise.allSettled(childActors.map((child) => child.promise));
     let result = this.joinFanOutBatch(instance, input, settled);
     if (workers > 1 && result.verdict === 'recorded') {
       const promotion = await this.promoteBarrierCognition(workflowId, definition, segment, result.context, settled);
@@ -3133,8 +3168,9 @@ export class WorkflowOrchestrator implements WorkflowController {
    * rejection becomes a normal `errored` TERMINAL (status `done`, value
    * `errored`) and resolves here; the `status === 'error'` branch is the
    * residual safety net for an actor-level throw the `errored` terminal did not
-   * catch (e.g. an entry-action throw), which rejects so {@link joinFanOutBatch}
-   * folds it into a `result_file_error` verdict.
+   * catch (e.g. an entry-action throw), which resolves as an `errored` lane so
+   * drain-on-escalation can still stop peers and the join can report the full
+   * batch.
    *
    * The trailing `observe(actor.getSnapshot())` after `subscribe` guards the
    * synchronous-settle-before-subscribe race: a child whose first state
@@ -3143,8 +3179,27 @@ export class WorkflowOrchestrator implements WorkflowController {
    * never deliver that final snapshot. Observing the current snapshot once,
    * immediately, closes the lane in that case.
    */
-  private waitForRoundChild(actor: AnyActorRef, index: number): Promise<RoundChildOutcome> {
-    return new Promise((resolvePromise, reject) => {
+  private waitForRoundChild(
+    actor: AnyActorRef,
+    index: number,
+    onDrainTrigger: (trigger: RoundChildDrainTrigger) => void,
+  ): RoundChildWaiter {
+    let settled = false;
+    let subscription: { unsubscribe: () => void } | undefined;
+    let finishOutcome: (outcome: RoundChildOutcome) => void = () => {};
+
+    const promise = new Promise<RoundChildOutcome>((resolvePromise) => {
+      const finish = (outcome: RoundChildOutcome): void => {
+        if (settled) return;
+        settled = true;
+        subscription?.unsubscribe();
+        resolvePromise(outcome);
+        if (outcome.status === 'blocked' || outcome.status === 'errored') {
+          onDrainTrigger({ index: outcome.index, status: outcome.status, context: outcome.context });
+        }
+      };
+      finishOutcome = finish;
+
       const observe = (snapshot: unknown): void => {
         const snap = snapshot as {
           readonly status?: string;
@@ -3153,38 +3208,68 @@ export class WorkflowOrchestrator implements WorkflowController {
           readonly error?: unknown;
         };
         if (snap.status === 'done') {
-          subscription.unsubscribe();
-          resolvePromise({
+          finish({
             index,
             status: toRoundChildStatus(snap.value, index),
             context: snap.context as WorkflowContext,
           });
         } else if (snap.status === 'error') {
-          subscription.unsubscribe();
           const reason = snap.error ?? `fan-out child ${index} errored`;
-          reject(reason instanceof Error ? reason : new Error(toErrorMessage(reason)));
+          finish({
+            index,
+            status: 'errored',
+            context: snap.context as WorkflowContext,
+            drainedBy: undefined,
+          });
+          writeStderr(`[workflow] fan-out child ${index} actor error: ${toErrorMessage(reason)}`);
         }
       };
-      const subscription = actor.subscribe(observe);
+      subscription = actor.subscribe(observe);
       observe(actor.getSnapshot());
     });
+
+    return {
+      index,
+      actor,
+      promise,
+      isSettled: () => settled,
+      drain: (trigger) => {
+        if (settled) return;
+        const snapshot = actor.getSnapshot() as { context?: WorkflowContext };
+        const context = snapshot.context ?? trigger.context;
+        actor.stop();
+        // Resolve directly after stop(): the stopped actor will not enter its
+        // next state, while any already-started external promise may still finish
+        // out-of-band (there is no AbortSignal in the executor layer, FSM-M3).
+        finishOutcome({
+          index,
+          status: 'drained',
+          context,
+          drainedBy: {
+            index: trigger.index,
+            status: trigger.status,
+            reason: this.roundChildReason(trigger),
+          },
+        });
+      },
+    };
   }
 
   /**
    * Folds the settled lane outcomes into a single parent-edge result, applying
    * a fixed verdict precedence (worst lane wins):
-   *   1. any rejected settle -> `result_file_error` (an actor-level throw the
-   *      `errored` terminal did not catch);
-   *   2. else any `blocked` lane -> `evaluator_blocked` (route to human review);
-   *   3. else any non-`recorded` lane -> `result_file_error` (an `errored`
-   *      terminal — a segment-member service rejection after the child
-   *      `onError` -> `errored` fix);
-   *   4. else all `recorded` -> `recorded` (the batch advanced).
+   *   1. any rejected settle -> `result_file_error` (a residual actor-level
+   *      throw that did not resolve as an `errored` lane);
+   *   2. else any `blocked` lane -> `escalate` (route once to human review,
+   *      with every blocked/errored lane reason aggregated);
+   *   3. else any `errored` lane -> `result_file_error` (explicit fail mapping);
+   *   4. else any `drained` lane without an issue trigger -> `result_file_error`;
+   *   5. else all `recorded` -> `recorded` (the batch advanced).
    *
    * WHY `Promise.allSettled` (not `Promise.all`) upstream: one lane's rejection
    * must not abandon its N-1 in-flight peers (FSM-S5). `all` would reject on the
-   * first throw and lose the other lanes' outcomes; `allSettled` lets every lane
-   * reach a terminal so the join sees the full batch and can drain peers.
+   * first throw and lose the other lanes' outcomes; `allSettled` lets the join
+   * see the full batch, including parent-synthesized `drained` peer outcomes.
    *
    * For `workers: 1`, the recorded path still promotes the single child context
    * exactly. For N>1, the recorded path folds lane contexts into a parent batch
@@ -3210,32 +3295,48 @@ export class WorkflowOrchestrator implements WorkflowController {
     });
     const first = children[0];
     const childSummaries: RoundChildSummary[] = children.map((child) => ({ index: child.index, status: child.status }));
+    const issues = this.fanOutIssues(children);
 
-    const blocked = children.find((child) => child.status === 'blocked');
-    if (blocked) {
+    if (issues.some((issue) => issue.status === 'blocked')) {
+      const source = children.find((child) => child.status === 'blocked') ?? first;
+      const summary = this.formatFanOutIssues('Fan-out batch escalated after blocked lane(s):', issues);
       return {
         passed: false,
-        verdict: 'evaluator_blocked',
-        // `evaluate`'s `evaluator_blocked` writes the reason to
-        // `previousAgentOutput` (updateContextFromDeterministicResult); a
-        // blocked lane never trips `storeError`, so `lastError` stays null.
-        // Read previousAgentOutput first, with lastError as the fallback for
-        // any future block path that does set it.
-        errors: blocked.context.previousAgentOutput ?? blocked.context.lastError ?? undefined,
-        context: this.promoteFanOutContext(instance, input.context, blocked.context),
+        verdict: 'escalate',
+        errors: summary,
+        payload: { issues },
+        context: this.promoteFanOutIssueContext(instance, input.context, input.stateId, source, 'escalate', issues),
         children: childSummaries,
       };
     }
 
-    const errored = children.find((child) => child.status === 'errored');
-    if (errored) {
+    if (issues.some((issue) => issue.status === 'errored')) {
+      const source = children.find((child) => child.status === 'errored') ?? first;
+      const summary = this.formatFanOutIssues('Fan-out batch failed after errored lane(s):', issues);
       return {
         passed: false,
         verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
-        // An `errored` lane DID trip `storeError` (its service rejection routed
-        // through `onError`), so `lastError` carries the message here.
-        errors: errored.context.lastError ?? `fan-out child ${errored.index} ended in "${errored.status}"`,
-        context: this.promoteFanOutContext(instance, input.context, errored.context),
+        errors: summary,
+        payload: { issues },
+        context: this.promoteFanOutIssueContext(
+          instance,
+          input.context,
+          input.stateId,
+          source,
+          DETERMINISTIC_RESULT_ERROR_VERDICT,
+          issues,
+        ),
+        children: childSummaries,
+      };
+    }
+
+    const drained = children.find((child) => child.status === 'drained');
+    if (drained) {
+      return {
+        passed: false,
+        verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
+        errors: `fan-out child ${drained.index} was drained without a blocked or errored trigger`,
+        context: this.promoteFanOutContext(instance, input.context, drained.context),
         children: childSummaries,
       };
     }
@@ -3246,6 +3347,63 @@ export class WorkflowOrchestrator implements WorkflowController {
       context:
         children.length === 1 ? first.context : this.mergeRecordedFanOutContext(instance, input.context, children),
       children: childSummaries,
+    };
+  }
+
+  private fanOutIssues(children: readonly RoundChildOutcome[]): FanOutIssue[] {
+    return children
+      .filter((child) => child.status === 'blocked' || child.status === 'errored')
+      .map((child) => ({
+        index: child.index,
+        status: child.status as 'blocked' | 'errored',
+        reason: this.roundChildReason(child),
+      }));
+  }
+
+  private roundChildReason(child: Pick<RoundChildOutcome, 'index' | 'status' | 'context'>): string {
+    if (child.status === 'errored') {
+      return (
+        child.context.lastError ??
+        child.context.previousAgentOutput ??
+        `fan-out child ${child.index} ended in "${child.status}"`
+      );
+    }
+    return (
+      child.context.previousAgentOutput ??
+      child.context.lastError ??
+      `fan-out child ${child.index} ended in "${child.status}"`
+    );
+  }
+
+  private formatFanOutIssues(header: string, issues: readonly FanOutIssue[]): string {
+    if (issues.length === 0) return header;
+    return [header, ...issues.map((issue) => `- lane ${issue.index} ${issue.status}: ${issue.reason}`)].join('\n');
+  }
+
+  private promoteFanOutIssueContext(
+    instance: WorkflowInstance,
+    parentContext: WorkflowContext,
+    fanOutStateId: string,
+    source: RoundChildOutcome,
+    verdict: string,
+    issues: readonly FanOutIssue[],
+  ): WorkflowContext {
+    const summary = this.formatFanOutIssues(
+      verdict === DETERMINISTIC_RESULT_ERROR_VERDICT
+        ? 'Fan-out batch failed after errored lane(s):'
+        : 'Fan-out batch escalated after blocked lane(s):',
+      issues,
+    );
+    return {
+      ...this.promoteFanOutContext(instance, parentContext, source.context),
+      previousAgentOutput: summary,
+      previousAgentNotes: null,
+      previousStateName: fanOutStateId,
+      lastDeterministicResult: {
+        verdict,
+        payload: { issues: issues.map((issue) => ({ ...issue })) },
+      },
+      ...(verdict === DETERMINISTIC_RESULT_ERROR_VERDICT ? { lastError: summary } : { lastError: null }),
     };
   }
 
@@ -3706,10 +3864,14 @@ export class WorkflowOrchestrator implements WorkflowController {
       context?.previousStateName && instance ? instance.definition.states[context.previousStateName] : undefined;
     const previousDeterministicVerdict =
       previousState?.type === 'deterministic' ? context?.lastDeterministicResult?.verdict : undefined;
+    const previousOutputSummary =
+      context?.previousAgentOutput !== undefined && context.previousAgentOutput !== null
+        ? (truncateForTransition(context.previousAgentOutput) ?? '').replace(/\s+/g, ' ').trim()
+        : undefined;
     const errorContext = context?.lastError
       ? ` (error: ${context.lastError})`
       : previousDeterministicVerdict
-        ? ` (verdict: ${previousDeterministicVerdict})`
+        ? ` (verdict: ${previousDeterministicVerdict}${previousOutputSummary ? `; ${previousOutputSummary}` : ''})`
         : '';
 
     return {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -58,7 +58,7 @@ const fanOutDefinition: WorkflowDefinition = {
       segment: ['sample', 'researcher', 'evaluate', 'analysis_record'],
       transitions: [
         { to: 'orchestrator', when: { verdict: 'recorded' } },
-        { to: 'human_escalation', when: { verdict: 'evaluator_blocked' } },
+        { to: 'human_escalation', when: { verdict: 'escalate' } },
         { to: 'failed', when: { verdict: 'result_file_error' } },
       ],
     },
@@ -113,6 +113,7 @@ const fanOutDefinition: WorkflowDefinition = {
 
 type AgentStub = (input: AgentInvokeInput) => Promise<AgentInvokeResult>;
 type DeterministicStub = (input: DeterministicInvokeInput) => Promise<DeterministicInvokeResult>;
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: unknown) => void };
 
 // The real method signatures provideActors closes over: it calls
 // `this.executeAgentState(workflowId, input, definition)` and
@@ -173,6 +174,7 @@ function driveParent(
       def: WorkflowDefinition,
       rounds: ReadonlyMap<string, unknown>,
     ) => unknown;
+    subscribeToActor: (instance: unknown) => void;
   };
   internal.workflows.set(WF_ID, instance);
   // Override the leaf executors so the child round machine resolves verdicts
@@ -185,10 +187,10 @@ function driveParent(
   const provided = internal.provideActors(machine, WF_ID, definition, roundMachinesByState);
   const actor = createActor(provided as Parameters<typeof createActor>[0]);
   instance.actor = actor as AnyActorRef;
+  internal.subscribeToActor(instance);
   const visited: string[] = [];
   actor.subscribe((snap) => {
     const value = String((snap as { value: unknown }).value);
-    instance.currentState = value;
     visited.push(value);
   });
   actor.start();
@@ -204,6 +206,16 @@ const recordedDeterministicStub: DeterministicStub = async (input) => {
   };
   return { passed: true, testCount: 10, verdict: verdicts[input.stateId] };
 };
+
+function deferred<T>(): Deferred<T> {
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
 
 describe('WorkflowOrchestrator fan-out join path', () => {
   let tmpDir: string;
@@ -461,9 +473,157 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     // Parent waits at the human gate; the gate is a non-final state.
     expect(actor.getSnapshot().value).toBe('human_escalation');
     expect(actor.getSnapshot().status).toBe('active');
-    // MUST-FIX #2: evaluator_blocked writes the reason to previousAgentOutput,
-    // and joinFanOutBatch surfaces it (lastError stays null on the block path).
-    expect(actor.getSnapshot().context.previousAgentOutput).toBe('evaluator needs credentials');
+    // The joined context carries the aggregated lane reason for the single gate.
+    expect(actor.getSnapshot().context.previousAgentOutput).toContain('lane 0 blocked: evaluator needs credentials');
+    expect(actor.getSnapshot().context.lastDeterministicResult).toMatchObject({
+      verdict: 'escalate',
+      payload: { issues: [{ index: 0, status: 'blocked', reason: 'evaluator needs credentials' }] },
+    });
+  });
+
+  it('drains peer lanes on the first blocked child and opens one aggregated gate', async () => {
+    const raiseGate = vi.fn();
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir, { raiseGate }));
+    const parallelDefinition: WorkflowDefinition = {
+      ...fanOutDefinition,
+      settings: { ...fanOutDefinition.settings, workers: 3 },
+    };
+
+    const pendingResearchers = new Map<number, Deferred<AgentInvokeResult>>();
+    const deterministicCalls: Array<{ stateId: string; laneId: number | undefined }> = [];
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        return makeVerdictResult('design');
+      }
+      const lane = input.context.lane?.id ?? -1;
+      if (lane === 0) {
+        return makeAgentResult({ outputHash: 'researcher-lane-0' });
+      }
+      const hold = deferred<AgentInvokeResult>();
+      pendingResearchers.set(lane, hold);
+      return hold.promise;
+    };
+    const deterministicStub: DeterministicStub = async (input) => {
+      deterministicCalls.push({ stateId: input.stateId, laneId: input.context.lane?.id });
+      if (input.stateId === 'sample') return { passed: true, verdict: 'sampled' };
+      if (input.stateId === 'evaluate' && input.context.lane?.id === 0) {
+        return { passed: false, verdict: 'evaluator_blocked', errors: 'lane 0 evaluator blocked' };
+      }
+      if (input.stateId === 'evaluate') {
+        throw new Error(`lane ${input.context.lane?.id} should have been drained before evaluate`);
+      }
+      return recordedDeterministicStub(input);
+    };
+
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, parallelDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().value).toBe('human_escalation');
+    expect(actor.getSnapshot().status).toBe('active');
+    expect(raiseGate).toHaveBeenCalledTimes(1);
+    expect(raiseGate.mock.calls[0][0]).toMatchObject({
+      stateName: 'human_escalation',
+      summary: expect.stringContaining('lane 0 blocked: lane 0 evaluator blocked'),
+    });
+    expect(actor.getSnapshot().context.previousAgentOutput).toContain('lane 0 blocked: lane 0 evaluator blocked');
+    expect(actor.getSnapshot().context.lastDeterministicResult).toMatchObject({
+      verdict: 'escalate',
+      payload: { issues: [{ index: 0, status: 'blocked', reason: 'lane 0 evaluator blocked' }] },
+    });
+
+    expect(pendingResearchers.has(1)).toBe(true);
+    expect(pendingResearchers.has(2)).toBe(true);
+    expect(
+      deterministicCalls
+        .filter((call) => call.stateId === 'evaluate')
+        .map((call) => call.laneId)
+        .sort(),
+    ).toEqual([0]);
+    expect(deterministicCalls.some((call) => call.stateId === 'analysis_record')).toBe(false);
+
+    const log = readFileSync(join(tmpDir, 'messages.jsonl'), 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; verdict?: string; children?: Array<{ status: string }> });
+    expect(log.find((entry) => entry.type === 'fanout_join')).toMatchObject({
+      verdict: 'escalate',
+      children: [{ status: 'blocked' }, { status: 'drained' }, { status: 'drained' }],
+    });
+
+    for (const hold of pendingResearchers.values()) {
+      hold.resolve(makeAgentResult());
+    }
+  });
+
+  it('APPROVE after a drained escalation lets the orchestrator start a fresh batch', async () => {
+    const raiseGate = vi.fn();
+    const dismissGate = vi.fn();
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir, { raiseGate, dismissGate }));
+    const parallelDefinition: WorkflowDefinition = {
+      ...fanOutDefinition,
+      settings: { ...fanOutDefinition.settings, workers: 3 },
+    };
+
+    const firstBatchHeldResearchers = new Map<number, Deferred<AgentInvokeResult>>();
+    const deterministicCalls: Array<{ stateId: string; laneId: number | undefined; turn: number }> = [];
+    let orchestratorTurn = 0;
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        orchestratorTurn += 1;
+        return makeVerdictResult(orchestratorTurn <= 2 ? 'design' : 'finished');
+      }
+      const lane = input.context.lane?.id ?? -1;
+      if (orchestratorTurn === 1 && lane !== 0) {
+        const hold = deferred<AgentInvokeResult>();
+        firstBatchHeldResearchers.set(lane, hold);
+        return hold.promise;
+      }
+      return makeAgentResult({ outputHash: `researcher-turn-${orchestratorTurn}-lane-${lane}` });
+    };
+    const deterministicStub: DeterministicStub = async (input) => {
+      deterministicCalls.push({ stateId: input.stateId, laneId: input.context.lane?.id, turn: orchestratorTurn });
+      if (input.stateId === 'sample') return { passed: true, verdict: 'sampled' };
+      if (input.stateId === 'evaluate' && orchestratorTurn === 1 && input.context.lane?.id === 0) {
+        return { passed: false, verdict: 'evaluator_blocked', errors: 'lane 0 evaluator blocked' };
+      }
+      if (input.stateId === 'evaluate') return { passed: true, verdict: 'evaluated' };
+      if (input.stateId === 'analysis_record') return { passed: true, verdict: 'recorded' };
+      return recordedDeterministicStub(input);
+    };
+
+    const { actor, visited } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, parallelDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().value).toBe('human_escalation');
+    expect(raiseGate).toHaveBeenCalledTimes(1);
+    expect(
+      deterministicCalls.filter((call) => call.turn === 1 && call.stateId === 'evaluate').map((call) => call.laneId),
+    ).toEqual([0]);
+
+    for (const hold of firstBatchHeldResearchers.values()) {
+      hold.resolve(makeAgentResult());
+    }
+    orchestrator.resolveGate(WF_ID, { type: 'APPROVE' });
+    await settle();
+
+    expect(dismissGate).toHaveBeenCalledTimes(1);
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(actor.getSnapshot().value).toBe('done');
+    expect(visited.filter((state) => state === 'human_escalation')).toHaveLength(1);
+    expect(visited.filter((state) => state === 'workers')).toHaveLength(2);
+    expect(visited).not.toContain('evaluate');
+    expect(
+      deterministicCalls
+        .filter((call) => call.turn === 2 && call.stateId === 'sample')
+        .map((call) => call.laneId)
+        .sort(),
+    ).toEqual([0, 1, 2]);
+    expect(
+      deterministicCalls
+        .filter((call) => call.turn === 2 && call.stateId === 'analysis_record')
+        .map((call) => call.laneId)
+        .sort(),
+    ).toEqual([0, 1, 2]);
   });
 
   it('(c) a thrown agent service drives the lane to errored and the parent to failed', async () => {
@@ -483,7 +643,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     // runnable discrimination test for MUST-FIX #1.
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().status).toBe('done');
-    expect(actor.getSnapshot().context.lastError).toBe('researcher crashed');
+    expect(actor.getSnapshot().context.lastError).toContain('lane 0 errored: researcher crashed');
   });
 
   it('(c2) a thrown deterministic service also drives the parent to failed', async () => {
@@ -501,6 +661,6 @@ describe('WorkflowOrchestrator fan-out join path', () => {
 
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().status).toBe('done');
-    expect(actor.getSnapshot().context.lastError).toBe('evaluate harness crashed');
+    expect(actor.getSnapshot().context.lastError).toContain('lane 0 errored: evaluate harness crashed');
   });
 });
