@@ -324,12 +324,12 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     });
   });
 
-  it('computes the canonical stop_signals exactly once at the barrier for a workers:3 batch', async () => {
+  it('promotes cognition and computes the canonical stop_signals exactly once at the barrier for a workers:3 batch', async () => {
     const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
     // A sample state whose run carries a real evolve_result.py command, so the
-    // orchestrator drives the barrier-side sample_batch AND compute_stop_signals
-    // through executeDeterministicState (the bare ['sample'] command in
-    // fanOutDefinition is not recognized as an evolve command, so neither fires).
+    // orchestrator drives the barrier-side sample_batch, promote_cognition, and
+    // compute_stop_signals through executeDeterministicState (the bare commands
+    // in fanOutDefinition are not recognized as evolve commands, so none fire).
     const sampleCommand = [
       '/opt/workflow-venv/bin/python',
       '/workflow-scripts/evolve_result.py',
@@ -342,12 +342,25 @@ describe('WorkflowOrchestrator fan-out join path', () => {
       '--result-file',
       '/workspace/.evolve_runs/main/current/sample.json',
     ];
+    const attachCommand = [
+      '/opt/workflow-venv/bin/python',
+      '/workflow-scripts/evolve_result.py',
+      'attach_analysis',
+      '--run-dir',
+      '/workspace/.evolve_runs/main',
+      '--step-from-current',
+      '--analysis-file',
+      '/workspace/.evolve_runs/main/current/analysis.md',
+      '--result-file',
+      '/workspace/.evolve_runs/main/current/analysis_record.json',
+    ];
     const evolveDefinition: WorkflowDefinition = {
       ...fanOutDefinition,
       settings: { ...fanOutDefinition.settings, workers: 3 },
       states: {
         ...fanOutDefinition.states,
         sample: { ...fanOutDefinition.states.sample, run: [sampleCommand] },
+        analysis_record: { ...fanOutDefinition.states.analysis_record, run: [attachCommand] },
       },
     };
 
@@ -361,9 +374,12 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     };
 
     const stopSignalsCalls: DeterministicInvokeInput[] = [];
+    const promotionCalls: DeterministicInvokeInput[] = [];
     const sampleBatchCalls: DeterministicInvokeInput[] = [];
+    const barrierOrder: string[] = [];
     const deterministicStub: DeterministicStub = async (input) => {
       if (input.stateId === 'sample_batch') {
+        barrierOrder.push(input.stateId);
         sampleBatchCalls.push(input);
         // Return one prepared lane payload per worker so prepareFanOutLaneResults
         // can hand each child its sample result.
@@ -373,7 +389,17 @@ describe('WorkflowOrchestrator fan-out join path', () => {
           payload: { lanes: [0, 1, 2].map((lane) => ({ lane, step_name: `step_0001_lane_${lane}` })) },
         };
       }
+      if (input.stateId === 'analysis_record_promote_cognition') {
+        barrierOrder.push(input.stateId);
+        promotionCalls.push(input);
+        return {
+          passed: true,
+          verdict: 'cognition_promoted',
+          payload: { promoted_count: 3, duplicate_count: 0 },
+        };
+      }
       if (input.stateId === 'sample_stop_signals') {
+        barrierOrder.push(input.stateId);
         stopSignalsCalls.push(input);
         return { passed: true, verdict: 'stop_signals_computed', payload: { stop_reason: null } };
       }
@@ -385,6 +411,23 @@ describe('WorkflowOrchestrator fan-out join path', () => {
 
     expect(actor.getSnapshot().status).toBe('done');
     expect(actor.getSnapshot().value).toBe('done');
+    // Cognition promotion is barrier-owned: exactly ONE promote_cognition call
+    // over all recorded lanes, before the single stop_signals recompute.
+    expect(promotionCalls).toHaveLength(1);
+    expect(promotionCalls[0].commands[0]).toEqual(
+      expect.arrayContaining([
+        'promote_cognition',
+        '--run-dir',
+        '/workspace/.evolve_runs/main',
+        '--lane',
+        '0',
+        '--lane',
+        '1',
+        '--lane',
+        '2',
+      ]),
+    );
+    expect(promotionCalls[0].resultFile).toBe('.evolve_runs/main/current/cognition_promotion.json');
     // The barrier owns the canonical stop_signals: exactly ONE compute per batch,
     // not one per lane.
     expect(stopSignalsCalls).toHaveLength(1);
@@ -396,6 +439,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     expect(stopSignalsCalls[0].resultFile).not.toContain('lane_');
     // The single barrier-side sample_batch fired once (not one sample per lane).
     expect(sampleBatchCalls).toHaveLength(1);
+    expect(barrierOrder).toEqual(['sample_batch', 'analysis_record_promote_cognition', 'sample_stop_signals']);
   });
 
   it('(b) a blocked child routes the parent to human_escalation with the reason surfaced', async () => {

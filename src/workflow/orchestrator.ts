@@ -2677,13 +2677,26 @@ export class WorkflowOrchestrator implements WorkflowController {
     });
 
     const settled = await Promise.allSettled(childActors);
-    const result = this.joinFanOutBatch(instance, input, settled);
-    // Barrier-owned canonical stop_signals: with N lanes, each lane wrote only
-    // its lane-scoped stop_signals copy, so the single file the orchestrator
-    // routes on is computed ONCE here, post-barrier, over the N-grown nodes.json
-    // (SHOULD-FIX-1). At workers:1 the lone lane's attach_analysis already wrote
-    // the canonical bare file inline (byte-identical backward compat), so we skip.
+    let result = this.joinFanOutBatch(instance, input, settled);
     if (workers > 1 && result.verdict === 'recorded') {
+      const promotion = await this.promoteBarrierCognition(workflowId, definition, segment, result.context, settled);
+      if (promotion.error !== undefined) {
+        return this.fanOutErrorResult(input, promotion.error);
+      }
+      if (promotion.result?.payload !== undefined) {
+        result = {
+          ...result,
+          payload: {
+            ...(result.payload ?? {}),
+            cognition_promotion: promotion.result.payload,
+          },
+        };
+      }
+      // Barrier-owned canonical stop_signals: with N lanes, each lane wrote only
+      // its lane-scoped stop_signals copy, so the single file the orchestrator
+      // routes on is computed ONCE here, post-barrier, over the N-grown nodes.json
+      // (SHOULD-FIX-1). At workers:1 the lone lane's attach_analysis already wrote
+      // the canonical bare file inline (byte-identical backward compat), so we skip.
       const stopSignalsError = await this.computeBarrierStopSignals(workflowId, definition, segment, input.context);
       if (stopSignalsError !== undefined) {
         return this.fanOutErrorResult(input, stopSignalsError);
@@ -2692,6 +2705,93 @@ export class WorkflowOrchestrator implements WorkflowController {
     this.logFanOutJoin(instance, input.stateId, workers, result, settled);
     instance.tab.write(`[fanout] "${input.stateId}" joined: verdict=${result.verdict ?? 'none'}`);
     return result;
+  }
+
+  /**
+   * Promotes recorded lane lessons once, serially, at the fan-out barrier. This
+   * is the workers>1 cognition single-writer point (§9): lane `attach_analysis`
+   * calls only record durable nodes; the parent invokes `promote_cognition`
+   * after every child has recorded and before re-entering `orchestrator`.
+   */
+  private async promoteBarrierCognition(
+    workflowId: WorkflowId,
+    definition: WorkflowDefinition,
+    segment: readonly string[],
+    context: WorkflowContext,
+    settled: readonly PromiseSettledResult<RoundChildOutcome>[],
+  ): Promise<{ result?: DeterministicInvokeResult; error?: string }> {
+    const lanes = settled
+      .filter((entry): entry is PromiseFulfilledResult<RoundChildOutcome> => entry.status === 'fulfilled')
+      .map((entry) => entry.value)
+      .filter((child) => child.status === 'recorded')
+      .map((child) => child.context.lane?.id)
+      .filter((lane): lane is number => typeof lane === 'number' && Number.isInteger(lane) && lane >= 0)
+      .sort((a, b) => a - b);
+
+    if (lanes.length === 0) {
+      return { error: 'fan-out cognition promotion had no recorded lanes to promote' };
+    }
+
+    const input = this.buildEvolvePromoteCognitionInput(definition, segment, context, lanes);
+    if (!input) return {};
+
+    const result = await this.executeDeterministicState(workflowId, input);
+    if (!result.passed || result.verdict !== 'cognition_promoted') {
+      return {
+        error: result.errors ?? `barrier cognition promotion failed with verdict ${result.verdict ?? 'unknown'}`,
+      };
+    }
+    return { result };
+  }
+
+  /**
+   * Derives the `promote_cognition` invoke input from the segment's declared
+   * `attach_analysis` command: reuses the bridge path, `--run-dir`, container
+   * scope, and timeout; rewrites the subcommand; passes the recorded lane ids;
+   * and writes one barrier-owned result at `current/cognition_promotion.json`.
+   */
+  private buildEvolvePromoteCognitionInput(
+    definition: WorkflowDefinition,
+    segment: readonly string[],
+    context: WorkflowContext,
+    lanes: readonly number[],
+  ): DeterministicInvokeInput | undefined {
+    for (const stateId of segment) {
+      const state = definition.states[stateId];
+      if (state.type !== 'deterministic') continue;
+      const attachCommand = state.run.find((command) => this.isEvolveAttachAnalysisCommand(command));
+      if (!attachCommand) continue;
+
+      const scriptIndex = evolveResultScriptIndex(attachCommand);
+      if (scriptIndex < 0) return undefined;
+      const runDir = this.commandFlagValue(attachCommand, '--run-dir');
+      if (!runDir) return undefined;
+
+      const resultFile = `${runDir}/current/cognition_promotion.json`;
+      const workspaceRelativeResultFile = this.containerPathToWorkspaceRelative(resultFile);
+      if (!workspaceRelativeResultFile) return undefined;
+
+      const command = [
+        ...attachCommand.slice(0, scriptIndex + 1),
+        'promote_cognition',
+        '--run-dir',
+        runDir,
+        ...lanes.flatMap((lane) => ['--lane', String(lane)]),
+        '--result-file',
+        resultFile,
+      ];
+
+      return {
+        stateId: `${stateId}_promote_cognition`,
+        commands: [command],
+        context,
+        container: state.container ?? false,
+        containerScope: state.containerScope,
+        timeoutMs: state.timeoutMs,
+        resultFile: workspaceRelativeResultFile,
+      };
+    }
+    return undefined;
   }
 
   /**
@@ -2974,6 +3074,11 @@ export class WorkflowOrchestrator implements WorkflowController {
   private isEvolveSampleCommand(command: readonly string[]): boolean {
     const scriptIndex = evolveResultScriptIndex(command);
     return scriptIndex >= 0 && command[scriptIndex + 1] === 'sample';
+  }
+
+  private isEvolveAttachAnalysisCommand(command: readonly string[]): boolean {
+    const scriptIndex = evolveResultScriptIndex(command);
+    return scriptIndex >= 0 && command[scriptIndex + 1] === 'attach_analysis';
   }
 
   private commandFlagValue(command: readonly string[], flag: string): string | undefined {

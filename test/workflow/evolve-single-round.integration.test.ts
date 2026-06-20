@@ -310,6 +310,16 @@ function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf-8')) as unknown;
 }
 
+function readRoundLessons(runDir: string): string[] {
+  const store = readJson(resolve(runDir, 'cognition_data', 'cognition.json')) as {
+    items: Record<string, { content: string; metadata: { kind?: string } }>;
+  };
+  return Object.values(store.items)
+    .filter((item) => item.metadata.kind === 'round_lesson')
+    .map((item) => item.content)
+    .sort();
+}
+
 describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker container', () => {
   let tmpDir: string;
   let originalHome: string | undefined;
@@ -673,11 +683,30 @@ describe.skipIf(!dockerReady)('evolve single-round workflow with real Docker con
       expect(
         (readJson(resolve(evolveRunDir, 'current', `lane_${lane}`, 'result.json')) as { verdict: string }).verdict,
       ).toBe('evaluated');
-      expect(
-        (readJson(resolve(evolveRunDir, 'current', `lane_${lane}`, 'analysis_record.json')) as { verdict: string })
-          .verdict,
-      ).toBe('recorded');
+      const laneRecord = readJson(resolve(evolveRunDir, 'current', `lane_${lane}`, 'analysis_record.json')) as {
+        verdict: string;
+        payload: Record<string, unknown>;
+      };
+      expect(laneRecord.verdict).toBe('recorded');
+      expect(laneRecord.payload).not.toHaveProperty('cognition_promoted');
     }
+    const promotion = readJson(resolve(evolveRunDir, 'current', 'cognition_promotion.json')) as {
+      verdict: string;
+      payload: { promoted_count: number; duplicate_count: number };
+    };
+    expect(promotion).toMatchObject({
+      verdict: 'cognition_promoted',
+      payload: { promoted_count: 3, duplicate_count: 0 },
+    });
+    expect(readRoundLessons(evolveRunDir)).toEqual([
+      'Parallel lane 0 lesson.',
+      'Parallel lane 1 lesson.',
+      'Parallel lane 2 lesson.',
+    ]);
+    expect(
+      Object.keys(readJson(resolve(evolveRunDir, 'cognition_promoted.json')) as Record<string, string>),
+    ).toHaveLength(3);
+    expect(existsSync(resolve(evolveRunDir, 'cognition_data', '.promote.lock'))).toBe(false);
 
     const messages = readFileSync(resolve(runDir, workflowId, 'messages.jsonl'), 'utf-8')
       .trim()

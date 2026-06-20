@@ -930,13 +930,13 @@ describe('evolve_result.py bridge', () => {
   );
 
   it.skipIf(!REAL_ENGINE_READY)(
-    'serializes concurrent lane promotions under the cross-process lock so the store is not torn',
-    async () => {
-      const runDir = realRunDir('real-concurrent-promote');
+    'promotes recorded lane lessons serially at the barrier and deduplicates repeats',
+    () => {
+      const runDir = realRunDir('real-barrier-promote');
       writeRealRunSpec(runDir);
       const scriptsDir = realScriptsDir();
-      const lessons = ['lane zero distinct lesson', 'lane one distinct lesson'];
-      const stepNames = ['step_0001_lane_0', 'step_0001_lane_1'];
+      const lessons = ['lane zero distinct lesson', 'lane one distinct lesson', 'lane two distinct lesson'];
+      const stepNames = ['step_0001_lane_0', 'step_0001_lane_1', 'step_0001_lane_2'];
 
       for (const [lane, stepName] of stepNames.entries()) {
         const stepDir = resolve(runDir, 'steps', stepName);
@@ -944,46 +944,82 @@ describe('evolve_result.py bridge', () => {
         mkdirSync(resolve(runDir, 'current', `lane_${lane}`), { recursive: true });
         writeFileSync(resolve(stepDir, 'code'), `def score():\n    return ${lane + 1}\n`);
         writeFileSync(resolve(stepDir, 'results.json'), JSON.stringify({ eval_score: lane + 1 }) + '\n');
+        writeFileSync(resolve(runDir, 'current', `lane_${lane}`, 'step_name'), stepName + '\n');
         writeFileSync(resolve(runDir, 'current', `lane_${lane}`, 'analysis.md'), lessons[lane] + '\n');
+
+        const recorded = runBridge(scriptsDir, [
+          'attach_analysis',
+          '--run-dir',
+          runDir,
+          '--lane',
+          String(lane),
+          '--step-name',
+          stepName,
+          '--name',
+          `round-1-lane-${lane}`,
+          '--code-path',
+          `.evolve_runs/main/steps/${stepName}/code`,
+          '--results-file',
+          `.evolve_runs/main/steps/${stepName}/results.json`,
+          '--analysis-file',
+          resolve(runDir, 'current', `lane_${lane}`, 'analysis.md'),
+        ]);
+        expect(recorded.result).toMatchObject({ verdict: 'recorded', passed: true });
+        expect(recorded.result.payload).not.toHaveProperty('cognition_promoted');
       }
 
-      // EVOLVE_PROMOTE_TEST_HOLD_LOCK_MS holds each lane inside its critical
-      // section so the two provably overlap; without the InterProcessFileLock
-      // guard they would race the non-atomic cognition store and tear it.
-      const results = await Promise.all(
-        stepNames.map((stepName, lane) =>
-          runBridgeAsync(
-            scriptsDir,
-            [
-              'attach_analysis',
-              '--run-dir',
-              runDir,
-              '--lane',
-              String(lane),
-              '--step-name',
-              stepName,
-              '--name',
-              `round-1-lane-${lane}`,
-              '--code-path',
-              `.evolve_runs/main/steps/${stepName}/code`,
-              '--results-file',
-              `.evolve_runs/main/steps/${stepName}/results.json`,
-              '--analysis-file',
-              resolve(runDir, 'current', `lane_${lane}`, 'analysis.md'),
-            ],
-            resolve(tmpDir, `promote-lane-${lane}.json`),
-            { EVOLVE_PROMOTE_TEST_HOLD_LOCK_MS: '60' },
-          ),
-        ),
-      );
+      expect(existsSync(resolve(runDir, 'cognition_promoted.json'))).toBe(false);
 
-      expect(results.map((r) => r.status)).toEqual([0, 0]);
-      expect(results.map((r) => r.result.verdict)).toEqual(['recorded', 'recorded']);
-      // JSON.parse throws on a torn store; both distinct lessons must have landed.
+      const promoted = runBridge(scriptsDir, [
+        'promote_cognition',
+        '--run-dir',
+        runDir,
+        '--lane',
+        '0',
+        '--lane',
+        '1',
+        '--lane',
+        '2',
+      ]);
+      expect(promoted.result).toMatchObject({
+        verdict: 'cognition_promoted',
+        passed: true,
+        payload: { promoted_count: 3, duplicate_count: 0 },
+      });
+      expect(
+        (promoted.result.payload as { promotions: Array<{ promoted: boolean; step_name: string }> }).promotions.map(
+          (item) => [item.step_name, item.promoted],
+        ),
+      ).toEqual([
+        ['step_0001_lane_0', true],
+        ['step_0001_lane_1', true],
+        ['step_0001_lane_2', true],
+      ]);
+
       const contents = readCognitionItems(runDir).map((item) => item.content);
       expect(contents).toEqual(expect.arrayContaining(lessons));
-      expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(2);
-      expect(existsSync(resolve(runDir, 'cognition_data', '.promote.lock'))).toBe(true);
+      expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(3);
+      expect(existsSync(resolve(runDir, 'cognition_data', '.promote.lock'))).toBe(false);
+
+      const replay = runBridge(scriptsDir, [
+        'promote_cognition',
+        '--run-dir',
+        runDir,
+        '--lane',
+        '0',
+        '--lane',
+        '1',
+        '--lane',
+        '2',
+      ]);
+      expect(replay.result).toMatchObject({
+        verdict: 'cognition_promoted',
+        passed: true,
+        payload: { promoted_count: 0, duplicate_count: 3 },
+      });
+      const afterReplay = readCognitionItems(runDir).filter((item) => item.metadata.kind === 'round_lesson');
+      expect(afterReplay).toHaveLength(3);
+      expect(Object.keys(readPromotionLedger(runDir))).toHaveLength(3);
     },
   );
 
