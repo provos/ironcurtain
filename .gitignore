@@ -6,7 +6,7 @@ node_modules-linux/
 dist/
 
 # Python bytecode
-__pycache__/
+**/__pycache__/
 *.py[cod]
 
 # Environment and secrets
