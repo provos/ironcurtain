@@ -909,6 +909,78 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().context.previousAgentOutput).toBe('evaluator needs credentials');
     });
 
+    it('routes an agent service rejection to the errored final state (not recorded)', async () => {
+      const result = buildWorkflowMachine(fanOutRoundDefinition, 'task');
+      const roundMachine = result.roundMachinesByState.get('workers');
+      expect(roundMachine).toBeDefined();
+
+      const testMachine = roundMachine!.provide({
+        actors: {
+          // researcher (the only agent in the segment) rejects.
+          agentService: fromPromise(async () => {
+            throw new Error('researcher crashed');
+          }),
+          deterministicService: fromPromise(async ({ input }: { input: DeterministicInvokeInput }) => {
+            if (input.stateId === 'sample') return makeDeterministicResult({ verdict: 'sampled' });
+            return makeDeterministicResult({ verdict: 'recorded' });
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine, {
+        input: {
+          context: {
+            ...createInitialContext(fanOutRoundDefinition),
+            taskDescription: 'task',
+          },
+        },
+      });
+      actor.start();
+
+      await settle();
+
+      // Without the onError -> errored fix, findErrorTarget falls through to
+      // the first terminal (recorded) and the crashed lane is silently treated
+      // as a recorded round. This assertion is the discrimination test.
+      expect(actor.getSnapshot().value).toBe('errored');
+      expect(actor.getSnapshot().status).toBe('done');
+      expect(actor.getSnapshot().context.lastError).toBe('researcher crashed');
+    });
+
+    it('routes a deterministic service rejection to the errored final state (not recorded)', async () => {
+      const result = buildWorkflowMachine(fanOutRoundDefinition, 'task');
+      const roundMachine = result.roundMachinesByState.get('workers');
+      expect(roundMachine).toBeDefined();
+
+      const testMachine = roundMachine!.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+          deterministicService: fromPromise(async ({ input }: { input: DeterministicInvokeInput }) => {
+            if (input.stateId === 'sample') return makeDeterministicResult({ verdict: 'sampled' });
+            // evaluate rejects (e.g. the eval harness threw, distinct from the
+            // evaluator_blocked verdict).
+            throw new Error('evaluate harness crashed');
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine, {
+        input: {
+          context: {
+            ...createInitialContext(fanOutRoundDefinition),
+            taskDescription: 'task',
+          },
+        },
+      });
+      actor.start();
+
+      await settle();
+
+      expect(actor.getSnapshot().value).toBe('errored');
+      expect(actor.getSnapshot().status).toBe('done');
+      expect(actor.getSnapshot().context.lastError).toBe('evaluate harness crashed');
+    });
+
     it('updates parent context from fanOutService before following the recorded edge', async () => {
       const parentDefinition: WorkflowDefinition = {
         ...fanOutRoundDefinition,

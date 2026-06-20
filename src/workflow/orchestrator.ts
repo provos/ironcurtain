@@ -93,6 +93,9 @@ import {
   type DeterministicInvokeResult,
   type FanOutInvokeInput,
   type FanOutInvokeResult,
+  type RoundChildOutcome,
+  type RoundChildStatus,
+  type RoundChildSummary,
 } from './machine-builder.js';
 import type { CheckpointStore } from './checkpoint.js';
 import {
@@ -156,6 +159,22 @@ function truncateForTransition(text: string | null | undefined): string | undefi
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Narrows a finished child round actor's `snapshot.value` to the closed
+ * {@link RoundChildStatus} union. The child machine always terminates in one
+ * of its three synthetic terminals (`recorded`/`blocked`/`errored`), so this
+ * normally just confirms the name. An unrecognized terminal — which should be
+ * unreachable in a validated definition — is treated as `errored`, the
+ * conservative fail verdict, rather than silently passing as `recorded`.
+ */
+function toRoundChildStatus(value: unknown, index: number): RoundChildStatus {
+  if (value === 'recorded' || value === 'blocked' || value === 'errored') {
+    return value;
+  }
+  writeStderr(`[workflow] fan-out child ${index} ended in unexpected terminal "${String(value)}"; treating as errored`);
+  return 'errored';
 }
 
 /**
@@ -1854,7 +1873,14 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Actor setup helpers
   // -----------------------------------------------------------------------
 
-  /** Injects concrete agent/deterministic service implementations into the machine. */
+  /**
+   * Injects concrete service implementations into the machine: `agentService`
+   * and `deterministicService` for executable states, plus `fanOutService` —
+   * the invoke body of a `workers` fan-out state, which runs
+   * {@link runFanOutSegment} and is re-provided onto each child round machine
+   * (the children reuse the same agent/deterministic actors, lane-scoped via
+   * input).
+   */
   private provideActors(
     machine: AnyStateMachine,
     workflowId: WorkflowId,
@@ -2541,6 +2567,42 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Fan-out state execution
   // -----------------------------------------------------------------------
 
+  /**
+   * Runs one fan-out batch: the invoke body of the real `workers` state,
+   * registered as the `fanOutService` actor (see {@link provideActors}). For
+   * each worker it creates a free-standing child round actor, starts it, and
+   * barrier-joins on every child reaching a `final` state, then folds the lane
+   * verdicts into a single parent-edge result (§6.2).
+   *
+   * WHY free-standing `createActor` + `.start()` and NOT in-context `spawn`:
+   * this is a `fromPromise` invoke body (plain async TS), not an XState entry
+   * action — `spawn` is only callable from inside an action. A free-standing
+   * actor is its OWN root, so the parent's `snapshot.value` stays the string
+   * `"workers"` (single-active-state spine preserved, §6.4); the children's
+   * snapshots are their own, read here via {@link waitForRoundChild}. A
+   * `type:'parallel'` region would instead fold into the parent's `value` and
+   * make it an object — fatal to checkpoint/terminal/gate serialization (§6.4).
+   *
+   * WHY mint the scope bundle BEFORE fan-out: {@link preMintFanOutScopeBundle}
+   * runs `ensureBundleForScope` serially up front so the single shared
+   * container exists before any child's first `container:true` step. N children
+   * racing their first container step would each see an empty `bundlesByScope`
+   * and mint a SEPARATE container, defeating `sharedContainer` (§6.2 / §8.1;
+   * cross-ref the `ensureBundleForScope` check-then-act race comment).
+   *
+   * The `workers: 1` invariant is a deliberate hard stop, not a bug: this slice
+   * ships the fan-out MECHANISM (child machine, barrier, verdict fold) but not
+   * N>1 lane divergence (distinct sampling, lane-scoped working dirs §7). Any
+   * resolved count other than 1 fails fast here rather than silently running a
+   * single undiverged lane that looks like N.
+   *
+   * Never throws: every failure path — workflow gone, misconfigured segment,
+   * unsupported worker count, missing child machine — funnels through
+   * {@link fanOutErrorResult}, which yields a `result_file_error` verdict that
+   * the parent `workers` state routes to its `failed` edge. (The `fanOutService`
+   * wrapper in {@link provideActors} would also catch a thrown error, but the
+   * uniform result keeps the parent transition table verdict-driven.)
+   */
   private async runFanOutSegment(
     workflowId: WorkflowId,
     input: FanOutInvokeInput,
@@ -2574,11 +2636,12 @@ export class WorkflowOrchestrator implements WorkflowController {
       );
     }
 
+    // PRECONDITION: mint the shared-container bundle once, before any child.
     await this.preMintFanOutScopeBundle(instance, input.stateId, segment);
 
     instance.tab.write(`[fanout] Starting "${input.stateId}" with ${workers} worker`);
     const providedRoundMachine = this.provideActors(roundMachine, workflowId, definition, roundMachinesByState);
-    const childActors = Array.from({ length: workers }, (_unused, index) => {
+    const childActors = Array.from({ length: workers }, (_, index) => {
       const child = createActor(providedRoundMachine, { input: { context: input.context } });
       const done = this.waitForRoundChild(child, index);
       child.start();
@@ -2591,6 +2654,27 @@ export class WorkflowOrchestrator implements WorkflowController {
     return result;
   }
 
+  /**
+   * Mints the fan-out segment's shared-container bundle ONCE, before any child
+   * actor starts (the load-bearing precondition of {@link runFanOutSegment}).
+   *
+   * The mint precondition: only when the workflow actually uses a shared
+   * container (`shouldUseSharedContainer`) AND at least one segment member runs
+   * in-container. A segment with no container members needs no bundle and
+   * returns early.
+   *
+   * `ensureBundleForScope` is an unguarded check-then-act across awaits (its own
+   * doc flags the lazy-mint race): N children each hitting their first
+   * `container:true` step would each see `bundlesByScope.get(scope)` undefined
+   * and mint a SEPARATE container. Calling it once here, serially, closes that
+   * window — every child then borrows the already-minted bundle. Cross-ref the
+   * race comment on `ensureBundleForScope`.
+   *
+   * The multi-scope throw is a guardrail, not a supported path: this slice
+   * keeps the whole segment under one `containerScope` (single-policy
+   * homogeneity, §8.2). A segment spanning >1 scope is out of slice scope and
+   * fails fast rather than minting the wrong bundle.
+   */
   private async preMintFanOutScopeBundle(
     instance: WorkflowInstance,
     fanOutStateId: string,
@@ -2616,13 +2700,34 @@ export class WorkflowOrchestrator implements WorkflowController {
       );
     }
 
-    await this.ensureBundleForScope(instance, [...scopes][0] ?? DEFAULT_CONTAINER_SCOPE);
+    // size is exactly 1 here (the 0 and >1 cases returned/threw above), so the
+    // single-element destructure yields the one scope.
+    const [scope] = [...scopes];
+    await this.ensureBundleForScope(instance, scope);
   }
 
-  private waitForRoundChild(
-    actor: AnyActorRef,
-    index: number,
-  ): Promise<{ readonly index: number; readonly status: string; readonly context: WorkflowContext }> {
+  /**
+   * Barrier primitive for one lane: resolves when the child round actor
+   * reaches a `final` state (`status === 'done'`), carrying that terminal's
+   * name and the context the lane left behind. A free-standing child fires no
+   * parent-visible `onDone`, so the parent watches the child's OWN snapshot
+   * (§6.2) via subscribe-until-done rather than an `xstate.done.actor` event.
+   *
+   * After the child `onError` -> `errored` fix, a segment-member service
+   * rejection becomes a normal `errored` TERMINAL (status `done`, value
+   * `errored`) and resolves here; the `status === 'error'` branch is the
+   * residual safety net for an actor-level throw the `errored` terminal did not
+   * catch (e.g. an entry-action throw), which rejects so {@link joinFanOutBatch}
+   * folds it into a `result_file_error` verdict.
+   *
+   * The trailing `observe(actor.getSnapshot())` after `subscribe` guards the
+   * synchronous-settle-before-subscribe race: a child whose first state
+   * settles synchronously (e.g. a sync entry-action throw) can already be
+   * `done`/`error` by the time `.subscribe` returns, so the subscription would
+   * never deliver that final snapshot. Observing the current snapshot once,
+   * immediately, closes the lane in that case.
+   */
+  private waitForRoundChild(actor: AnyActorRef, index: number): Promise<RoundChildOutcome> {
     return new Promise((resolvePromise, reject) => {
       const observe = (snapshot: unknown): void => {
         const snap = snapshot as {
@@ -2635,7 +2740,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           subscription.unsubscribe();
           resolvePromise({
             index,
-            status: String(snap.value),
+            status: toRoundChildStatus(snap.value, index),
             context: snap.context as WorkflowContext,
           });
         } else if (snap.status === 'error') {
@@ -2649,13 +2754,31 @@ export class WorkflowOrchestrator implements WorkflowController {
     });
   }
 
+  /**
+   * Folds the settled lane outcomes into a single parent-edge result, applying
+   * a fixed verdict precedence (worst lane wins):
+   *   1. any rejected settle -> `result_file_error` (an actor-level throw the
+   *      `errored` terminal did not catch);
+   *   2. else any `blocked` lane -> `evaluator_blocked` (route to human review);
+   *   3. else any non-`recorded` lane -> `result_file_error` (an `errored`
+   *      terminal — a segment-member service rejection after the child
+   *      `onError` -> `errored` fix);
+   *   4. else all `recorded` -> `recorded` (the batch advanced).
+   *
+   * WHY `Promise.allSettled` (not `Promise.all`) upstream: one lane's rejection
+   * must not abandon its N-1 in-flight peers (FSM-S5). `all` would reject on the
+   * first throw and lose the other lanes' outcomes; `allSettled` lets every lane
+   * reach a terminal so the join sees the full batch and can drain peers.
+   *
+   * WHY the blocked/recorded branches read `first.context`: under the
+   * `workers: 1` invariant there is exactly one lane, so `first` IS that lane
+   * and threading its context onto the parent FSM is exact. This is sound ONLY
+   * under `workers: 1` — once N>1 lands, the join must choose which lane's
+   * context to promote (or merge), so revisit this when lifting the worker cap.
+   */
   private joinFanOutBatch(
     input: FanOutInvokeInput,
-    settled: readonly PromiseSettledResult<{
-      readonly index: number;
-      readonly status: string;
-      readonly context: WorkflowContext;
-    }>[],
+    settled: readonly PromiseSettledResult<RoundChildOutcome>[],
   ): FanOutInvokeResult {
     const rejected = settled.find((result) => result.status === 'rejected');
     if (rejected?.status === 'rejected') {
@@ -2669,24 +2792,31 @@ export class WorkflowOrchestrator implements WorkflowController {
       return result.value;
     });
     const first = children[0];
+    const childSummaries: RoundChildSummary[] = children.map((child) => ({ index: child.index, status: child.status }));
 
-    const childSummaries = children.map((child) => ({ index: child.index, status: child.status }));
     const blocked = children.find((child) => child.status === 'blocked');
     if (blocked) {
       return {
         passed: false,
         verdict: 'evaluator_blocked',
-        errors: blocked.context.lastError ?? undefined,
+        // `evaluate`'s `evaluator_blocked` writes the reason to
+        // `previousAgentOutput` (updateContextFromDeterministicResult); a
+        // blocked lane never trips `storeError`, so `lastError` stays null.
+        // Read previousAgentOutput first, with lastError as the fallback for
+        // any future block path that does set it.
+        errors: blocked.context.previousAgentOutput ?? blocked.context.lastError ?? undefined,
         context: blocked.context,
         children: childSummaries,
       };
     }
 
-    const errored = children.find((child) => child.status !== 'recorded');
+    const errored = children.find((child) => child.status === 'errored');
     if (errored) {
       return {
         passed: false,
         verdict: DETERMINISTIC_RESULT_ERROR_VERDICT,
+        // An `errored` lane DID trip `storeError` (its service rejection routed
+        // through `onError`), so `lastError` carries the message here.
         errors: errored.context.lastError ?? `fan-out child ${errored.index} ended in "${errored.status}"`,
         context: errored.context,
         children: childSummaries,
@@ -2701,6 +2831,11 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
+  /**
+   * The single terminal error channel from {@link runFanOutSegment} to the
+   * parent: a `result_file_error` verdict carrying `message`, which the parent
+   * `workers` state routes to its `failed` edge.
+   */
   private fanOutErrorResult(input: FanOutInvokeInput, message: string): FanOutInvokeResult {
     return {
       passed: false,

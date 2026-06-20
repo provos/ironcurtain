@@ -79,20 +79,58 @@ export interface DeterministicInvokeResult {
   readonly payload?: Record<string, unknown>;
 }
 
-/** Input provided to a parent fan-out state invoke. */
+/**
+ * Input provided to a parent fan-out state invoke. `stateConfig` carries the
+ * `fanOut`/`segment` markers the orchestrator reads to resolve the worker
+ * count and the round sub-chain; `context` is the parent's context at fan-out
+ * time, cloned into each lane's child actor.
+ */
 export interface FanOutInvokeInput {
   readonly stateId: string;
   readonly stateConfig: ExecutableStateDefinition;
   readonly context: WorkflowContext;
 }
 
-/** Result returned by the fan-out pump after all children have joined. */
+/**
+ * The three synthetic terminal states every child round machine carries
+ * (see `buildRoundChildDefinition`). They form the lane verdict surface the
+ * barrier joins on: a lane finishes in exactly one of these, and the parent
+ * maps each to a batch verdict (recorded -> continue, blocked -> escalate,
+ * errored -> fail). Typed as a closed union so the join's branches are
+ * exhaustive-checkable.
+ */
+export type RoundChildStatus = 'recorded' | 'blocked' | 'errored';
+
+/**
+ * The fully-resolved result of joining one child round actor: the terminal
+ * it reached plus the context it carried there. `context` is read by the
+ * parent to thread per-lane updates (e.g. the `evaluator_blocked` reason on
+ * `previousAgentOutput`) back onto the parent FSM after the barrier.
+ */
+export interface RoundChildOutcome {
+  readonly index: number;
+  readonly status: RoundChildStatus;
+  readonly context: WorkflowContext;
+}
+
+/** Per-lane summary surfaced on the fan-out result for observability. */
+export interface RoundChildSummary {
+  readonly index: number;
+  readonly status: RoundChildStatus;
+}
+
+/**
+ * Result returned by the fan-out pump after all children have joined. Shaped
+ * as a `DeterministicInvokeResult` so the parent `workers` state's transitions
+ * match on `verdict` exactly like a normal deterministic state. The verdict
+ * space is `recorded` (batch advanced) | `evaluator_blocked` (route to human
+ * review) | `result_file_error` (a lane errored / the segment was
+ * misconfigured). `context` is the joined context promoted onto the parent FSM;
+ * `children` is the per-lane status summary, for observability only.
+ */
 export interface FanOutInvokeResult extends DeterministicInvokeResult {
   readonly context: WorkflowContext;
-  readonly children?: readonly {
-    readonly index: number;
-    readonly status: string;
-  }[];
+  readonly children?: readonly RoundChildSummary[];
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +379,15 @@ function buildDeterministicState(
   };
 }
 
+/**
+ * Builds the parent `workers` state: a single XState invoke of `fanOutService`
+ * (the orchestrator's `runFanOutSegment`). From the parent FSM's vantage the
+ * whole batch is ONE invoke — the N child round actors live inside the invoke
+ * body, not in the parent's state value, so the parent's `snapshot.value` stays
+ * the string `"workers"` (single-active-state spine, §6.4). `onDone` runs
+ * `updateContextFromFanOutResult` (promote the joined context) then follows the
+ * verdict-matched edge; `onError` routes to the definition's error target.
+ */
 function buildFanOutState(stateId: string, config: ExecutableStateDefinition, definition: WorkflowDefinition): object {
   return {
     invoke: {
@@ -382,6 +429,28 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
   return { on };
 }
 
+/** The three synthetic terminal state names every child round machine carries. */
+const ROUND_CHILD_RECORDED = 'recorded';
+const ROUND_CHILD_BLOCKED = 'blocked';
+const ROUND_CHILD_ERRORED = 'errored';
+
+/**
+ * Factors a fan-out segment (the round sub-chain
+ * `sample -> researcher -> evaluate -> analysis_record`) into a standalone
+ * child machine definition. Each member is copied verbatim except for two
+ * rewrites: its out-of-segment transition targets are remapped to one of
+ * three synthetic terminals via {@link mapRoundChildTarget}, and the
+ * `fanOut`/`segment` markers are stripped so the recursive
+ * `buildWorkflowMachine` does not try to re-factor the member into yet
+ * another child.
+ *
+ * The three synthetic terminals (`recorded`, `blocked`, `errored`) are the
+ * lane verdict surface — every lane finishes in exactly one, and the parent
+ * barrier reads it to decide the batch verdict (§6.1). `initial: segment[0]`
+ * starts the child at the first segment member. `settings` are inherited from
+ * the parent so the child's per-lane `maxVisits` guard fires natively from the
+ * member's own declared limits (§6.1).
+ */
 function buildRoundChildDefinition(
   definition: WorkflowDefinition,
   fanOutStateId: string,
@@ -401,28 +470,26 @@ function buildRoundChildDefinition(
       to: mapRoundChildTarget(definition, transition, segmentSet),
     }));
 
-    if (member.type === 'agent') {
-      const { fanOut: _fanOut, segment: _segment, ...rest } = member;
-      void _fanOut;
-      void _segment;
-      states[memberId] = { ...rest, transitions };
-    } else {
-      const { fanOut: _fanOut, segment: _segment, ...rest } = member;
-      void _fanOut;
-      void _segment;
-      states[memberId] = { ...rest, transitions };
-    }
+    // The agent and deterministic arms produce byte-identical state objects
+    // (strip the fan-out markers, override transitions); the only difference
+    // is the discriminated-union narrowing of `member`, so one block covers
+    // both once the `type` guard above has run. `_fanOut`/`_segment` are
+    // destructured only to omit them from `rest`; `void` marks them used.
+    const { fanOut: _fanOut, segment: _segment, ...rest } = member;
+    void _fanOut;
+    void _segment;
+    states[memberId] = { ...rest, transitions };
   }
 
-  states.recorded = {
+  states[ROUND_CHILD_RECORDED] = {
     type: 'terminal',
     description: `Fan-out segment "${fanOutStateId}" recorded successfully.`,
   };
-  states.blocked = {
+  states[ROUND_CHILD_BLOCKED] = {
     type: 'terminal',
     description: `Fan-out segment "${fanOutStateId}" needs human review.`,
   };
-  states.errored = {
+  states[ROUND_CHILD_ERRORED] = {
     type: 'terminal',
     description: `Fan-out segment "${fanOutStateId}" failed.`,
   };
@@ -436,6 +503,19 @@ function buildRoundChildDefinition(
   };
 }
 
+/**
+ * Maps a segment member's transition target onto a child round-machine
+ * target. In-segment edges pass through unchanged; everything that would
+ * leave the segment is collapsed onto one of the three synthetic terminals.
+ *
+ * The mapping table:
+ *   - target is another segment member  -> passthrough (the target name)
+ *   - `when.verdict === 'recorded'`      -> `recorded`  (round committed a node)
+ *   - `when.verdict === 'evaluator_blocked'` -> `blocked` (needs human review)
+ *   - any other named verdict            -> `errored`   (unexpected verdict)
+ *   - target is a human_gate state       -> `blocked`   (escalation edge)
+ *   - else (bare fallthrough / failed)   -> `errored`
+ */
 function mapRoundChildTarget(
   definition: WorkflowDefinition,
   transition: AgentTransitionDefinition,
@@ -444,13 +524,13 @@ function mapRoundChildTarget(
   if (segment.has(transition.to)) return transition.to;
 
   const verdict = transition.when?.verdict;
-  if (verdict === 'recorded') return 'recorded';
-  if (verdict === 'evaluator_blocked') return 'blocked';
-  if (typeof verdict === 'string') return 'errored';
+  if (verdict === 'recorded') return ROUND_CHILD_RECORDED;
+  if (verdict === 'evaluator_blocked') return ROUND_CHILD_BLOCKED;
+  if (typeof verdict === 'string') return ROUND_CHILD_ERRORED;
 
   const targetState = definition.states[transition.to];
-  if (targetState.type === 'human_gate') return 'blocked';
-  return 'errored';
+  if (targetState.type === 'human_gate') return ROUND_CHILD_BLOCKED;
+  return ROUND_CHILD_ERRORED;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +540,16 @@ function mapRoundChildTarget(
 interface BuildWorkflowMachineOptions {
   readonly contextFromInput?: boolean;
   readonly buildRoundMachines?: boolean;
+  /**
+   * When set, every executable state's `onError` routes here instead of the
+   * `findErrorTarget` heuristic. Used by the child round-machine build: a
+   * child definition has no gate / `failed` / `aborted` terminal, so
+   * `findErrorTarget` would fall through to the first synthetic terminal
+   * (`recorded`) and silently treat a crashed lane as a recorded round.
+   * Forcing `onErrorTarget: 'errored'` makes a service rejection land in the
+   * `errored` lane-verdict terminal, where the barrier maps it to a fail.
+   */
+  readonly onErrorTarget?: string;
 }
 
 /**
@@ -489,13 +579,18 @@ export function buildWorkflowMachine(
   // from the map and the guard returns false for them.
   const maxVisitsByState = new Map<string, number>();
 
+  // For child round machines, every executable member's error path is forced
+  // to the synthetic `errored` terminal (see `onErrorTarget` doc above); the
+  // parent machine leaves it undefined and falls back to `findErrorTarget`.
+  const executableOptions: ExecutableStateBuildOptions = { onErrorTarget: options.onErrorTarget };
+
   for (const [stateId, stateDef] of Object.entries(definition.states)) {
     switch (stateDef.type) {
       case 'agent':
         states[stateId] =
           stateDef.fanOut !== undefined
             ? buildFanOutState(stateId, stateDef, definition)
-            : buildAgentState(stateId, stateDef, definition);
+            : buildAgentState(stateId, stateDef, definition, executableOptions);
         if (typeof stateDef.maxVisits === 'number') {
           maxVisitsByState.set(stateId, stateDef.maxVisits);
         }
@@ -504,7 +599,7 @@ export function buildWorkflowMachine(
         states[stateId] =
           stateDef.fanOut !== undefined
             ? buildFanOutState(stateId, stateDef, definition)
-            : buildDeterministicState(stateId, stateDef, definition);
+            : buildDeterministicState(stateId, stateDef, definition, executableOptions);
         break;
       case 'human_gate':
         states[stateId] = buildHumanGateState(stateId, stateDef);
@@ -528,6 +623,10 @@ export function buildWorkflowMachine(
       const child = buildWorkflowMachine(childDefinition, taskDescription, {
         contextFromInput: true,
         buildRoundMachines: false,
+        // A segment member's service rejection must land in the child's
+        // `errored` terminal, not fall through `findErrorTarget` to the
+        // first terminal (`recorded`). See `onErrorTarget` above.
+        onErrorTarget: ROUND_CHILD_ERRORED,
       });
       roundMachinesByState.set(stateId, child.machine);
     }
@@ -715,6 +814,13 @@ export function buildWorkflowMachine(
           previousStateName: stateId,
         };
       }),
+      // Promotes the batch's joined context onto the parent FSM after a
+      // fan-out invoke resolves (the parent was frozen at `workers` for the
+      // whole batch — see runFanOutSegment). The result already carries the
+      // chosen lane's full WorkflowContext, so this replaces context wholesale.
+      // `if (!result) return {}` keeps the existing context unchanged when the
+      // invoke produced no output — never blanks the parent context on a
+      // malformed/empty result.
       updateContextFromFanOutResult: assign(({ event }) => {
         const doneEvent = event as unknown as { output?: FanOutInvokeResult };
         const result = doneEvent.output;
