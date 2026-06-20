@@ -86,4 +86,26 @@ describe('nextStateSlug', () => {
     expect(() => nextStateSlug(dir, 'foo/bar')).toThrow(/Invalid state ID/);
     expect(() => nextStateSlug(dir, '')).toThrow(/Invalid state ID/);
   });
+
+  it('keys the slug on lane id so concurrent fan-out lanes never collide', () => {
+    // Each lane scans for its OWN `{stateId}_lane_{id}.` prefix, so N lanes
+    // entering the same state on a fresh dir each start at `.1` in a distinct
+    // namespace — no clobbered session.log / session-metadata.json (§5.4).
+    expect(nextStateSlug(dir, 'researcher', 0)).toBe('researcher_lane_0.1');
+    expect(nextStateSlug(dir, 'researcher', 1)).toBe('researcher_lane_1.1');
+    expect(nextStateSlug(dir, 'researcher', 2)).toBe('researcher_lane_2.1');
+  });
+
+  it('counts re-entries per lane independently of the bare and sibling-lane slugs', () => {
+    mkdirSync(join(dir, 'researcher.1')); // a workers:1 (no-lane) leg
+    mkdirSync(join(dir, 'researcher_lane_0.1'));
+    mkdirSync(join(dir, 'researcher_lane_0.2'));
+    mkdirSync(join(dir, 'researcher_lane_1.1'));
+
+    // Lane 0 has two prior legs -> .3; lane 1 has one -> .2; the bare slug is
+    // unaffected by any lane dir -> .2.
+    expect(nextStateSlug(dir, 'researcher', 0)).toBe('researcher_lane_0.3');
+    expect(nextStateSlug(dir, 'researcher', 1)).toBe('researcher_lane_1.2');
+    expect(nextStateSlug(dir, 'researcher')).toBe('researcher.2');
+  });
 });

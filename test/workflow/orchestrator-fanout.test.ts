@@ -324,6 +324,80 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     });
   });
 
+  it('computes the canonical stop_signals exactly once at the barrier for a workers:3 batch', async () => {
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    // A sample state whose run carries a real evolve_result.py command, so the
+    // orchestrator drives the barrier-side sample_batch AND compute_stop_signals
+    // through executeDeterministicState (the bare ['sample'] command in
+    // fanOutDefinition is not recognized as an evolve command, so neither fires).
+    const sampleCommand = [
+      '/opt/workflow-venv/bin/python',
+      '/workflow-scripts/evolve_result.py',
+      'sample',
+      '--run-dir',
+      '/workspace/.evolve_runs/main',
+      '--query-from-spec',
+      '--context-file',
+      '/workspace/.evolve_runs/main/current/context.json',
+      '--result-file',
+      '/workspace/.evolve_runs/main/current/sample.json',
+    ];
+    const evolveDefinition: WorkflowDefinition = {
+      ...fanOutDefinition,
+      settings: { ...fanOutDefinition.settings, workers: 3 },
+      states: {
+        ...fanOutDefinition.states,
+        sample: { ...fanOutDefinition.states.sample, run: [sampleCommand] },
+      },
+    };
+
+    let orchestratorTurn = 0;
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        orchestratorTurn += 1;
+        return makeVerdictResult(orchestratorTurn === 1 ? 'design' : 'finished');
+      }
+      return makeAgentResult();
+    };
+
+    const stopSignalsCalls: DeterministicInvokeInput[] = [];
+    const sampleBatchCalls: DeterministicInvokeInput[] = [];
+    const deterministicStub: DeterministicStub = async (input) => {
+      if (input.stateId === 'sample_batch') {
+        sampleBatchCalls.push(input);
+        // Return one prepared lane payload per worker so prepareFanOutLaneResults
+        // can hand each child its sample result.
+        return {
+          passed: true,
+          verdict: 'sample_batch_prepared',
+          payload: { lanes: [0, 1, 2].map((lane) => ({ lane, step_name: `step_0001_lane_${lane}` })) },
+        };
+      }
+      if (input.stateId === 'sample_stop_signals') {
+        stopSignalsCalls.push(input);
+        return { passed: true, verdict: 'stop_signals_computed', payload: { stop_reason: null } };
+      }
+      return recordedDeterministicStub(input);
+    };
+
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, evolveDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(actor.getSnapshot().value).toBe('done');
+    // The barrier owns the canonical stop_signals: exactly ONE compute per batch,
+    // not one per lane.
+    expect(stopSignalsCalls).toHaveLength(1);
+    expect(stopSignalsCalls[0].commands[0]).toEqual(
+      expect.arrayContaining(['compute_stop_signals', '--run-dir', '/workspace/.evolve_runs/main']),
+    );
+    // And the canonical file is the bare current/stop_signals.json the
+    // orchestrator routes on (no lane_ segment), written once.
+    expect(stopSignalsCalls[0].resultFile).not.toContain('lane_');
+    // The single barrier-side sample_batch fired once (not one sample per lane).
+    expect(sampleBatchCalls).toHaveLength(1);
+  });
+
   it('(b) a blocked child routes the parent to human_escalation with the reason surfaced', async () => {
     const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
 

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowContext } from '../../src/workflow/types.js';
 import {
+  EVOLVE_RESULT_SCRIPT,
   applyLaneTemplate,
+  evolveResultScriptIndex,
   laneScopeEvolveCurrentPath,
   templateLaneCommand,
 } from '../../src/workflow/lane-template.js';
@@ -87,5 +89,35 @@ describe('lane-template helpers', () => {
     expect(laneScopeEvolveCurrentPath('.evolve_runs/main/current/result.json', context)).toBe(
       '.evolve_runs/main/current/result.json',
     );
+  });
+
+  it('locates the bridge script by bare name or any path ending in it', () => {
+    expect(evolveResultScriptIndex(['python', EVOLVE_RESULT_SCRIPT, 'sample'])).toBe(1);
+    expect(evolveResultScriptIndex(['python', '/workflow-scripts/evolve_result.py', 'record'])).toBe(1);
+    expect(evolveResultScriptIndex(['python', 'evolve-eval', 'run'])).toBe(-1);
+    // Must not match a substring — only the exact basename segment.
+    expect(evolveResultScriptIndex(['python', 'not_evolve_result.python', 'x'])).toBe(-1);
+  });
+
+  it('is idempotent: an already lane-scoped path is not re-prefixed', () => {
+    const context = contextWithLane(2);
+
+    // A path whose suffix already starts with `lane_<n>/` must be returned
+    // unchanged — otherwise re-applying the rewrite would nest it into
+    // `current/lane_2/lane_5/…`. Covers both the bare-dir replacement and the
+    // `${laneId}` placeholder that applyLaneTemplate already expanded to lane_<n>.
+    expect(laneScopeEvolveCurrentPath('.evolve_runs/main/current/lane_5/result.json', context)).toBe(
+      '.evolve_runs/main/current/lane_5/result.json',
+    );
+    expect(laneScopeEvolveCurrentPath('/workspace/.evolve_runs/main/current/lane_5/result.json', context)).toBe(
+      '/workspace/.evolve_runs/main/current/lane_5/result.json',
+    );
+    // The lane's OWN scope (lane_2) is likewise left alone, not doubled.
+    expect(laneScopeEvolveCurrentPath('.evolve_runs/main/current/lane_2/result.json', context)).toBe(
+      '.evolve_runs/main/current/lane_2/result.json',
+    );
+    // And applying the rewrite twice is a no-op (true idempotency).
+    const once = laneScopeEvolveCurrentPath('.evolve_runs/main/current/result.json', context);
+    expect(laneScopeEvolveCurrentPath(once, context)).toBe(once);
   });
 });

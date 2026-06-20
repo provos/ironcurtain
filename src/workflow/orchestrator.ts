@@ -106,7 +106,7 @@ import {
   buildInvalidVerdictReprompt,
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
-import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR } from './lane-template.js';
+import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR, evolveResultScriptIndex } from './lane-template.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import {
   isSafeWorkspaceRelativePath,
@@ -214,6 +214,20 @@ function writeStderr(message: string): void {
 const STAGED_WORKFLOW_SKILLS_SUBDIR = 'workflow-skills';
 /** Per-run subdirectory name for the staged copy of workflow helper scripts. */
 const STAGED_WORKFLOW_SCRIPTS_SUBDIR = 'workflow-scripts';
+
+/**
+ * Workspace-relative segments of the evolve engine's per-step code directory:
+ * `<workspace>/.evolve_runs/main/steps/<step_name>/code`.
+ *
+ * This layout is OWNED by the Python bridge (`evolve_result.py` — the engine
+ * writes each candidate's source under `steps/<step_name>/code`, and
+ * `evolve-eval` reads it from there). The TS side only READS it host-side to
+ * content-hash fan-out candidates ({@link computeFanOutCandidateDuplicateStats}),
+ * so this const duplicates a path the Python defines. Keep the two in sync: if
+ * the engine's on-disk step layout changes, update both here and in the bridge.
+ */
+const EVOLVE_STEP_CODE_PATH_SEGMENTS = ['.evolve_runs', 'main', 'steps'] as const;
+const EVOLVE_STEP_CODE_FILENAME = 'code';
 
 /**
  * Stages the workflow package's `skills/` tree into the run directory
@@ -2189,7 +2203,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     let stateSlug: string | undefined;
     let workflowStateDir: string | undefined;
     if (bundle) {
-      stateSlug = nextStateSlug(getBundleStatesDir(instance.id, bundle.bundleId), stateId);
+      // Thread lane.id into the slug so N same-state fan-out lanes each get a
+      // distinct `{stateId}_lane_{id}.{N}` diagnostics dir. nextStateSlug is
+      // check-then-act, so N concurrent lanes sharing one `stateId` would
+      // otherwise compute the same slug and clobber each other's session.log /
+      // session-metadata.json (§5.4 — the one diagnostics-dir collision).
+      stateSlug = nextStateSlug(getBundleStatesDir(instance.id, bundle.bundleId), stateId, context.lane?.id);
       workflowStateDir = getInvocationDir(instance.id, bundle.bundleId, stateSlug);
       mkdirSync(workflowStateDir, { recursive: true });
     }
@@ -2342,6 +2361,12 @@ export class WorkflowOrchestrator implements WorkflowController {
       // (matching what the bridge registers below). Optional-chain because
       // builtin/per-state-container workflows have no shared `infra`.
       const agentSessionId = session.getInfo().id;
+      // Per-lane token ATTRIBUTION is best-effort under fan-out: N lanes share one
+      // long-lived MITM, so setTokenSessionId is racy across concurrent lanes and a
+      // given event may be attributed to whichever lane's session id is currently
+      // flipped. The AGGREGATE — instance.tokens.outputTokens, summed over every
+      // registered sessionId below — is authoritative for budget and the
+      // fan-out merge (mergeRecordedFanOutContext); the per-lane split is not.
       bundle?.setTokenSessionId(agentSessionId);
       // Trajectory-capture lifecycle: brackets the agent's run with a
       // begin/end pair on the bundle. The matching `endCaptureSession`
@@ -2653,9 +2678,100 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const settled = await Promise.allSettled(childActors);
     const result = this.joinFanOutBatch(instance, input, settled);
+    // Barrier-owned canonical stop_signals: with N lanes, each lane wrote only
+    // its lane-scoped stop_signals copy, so the single file the orchestrator
+    // routes on is computed ONCE here, post-barrier, over the N-grown nodes.json
+    // (SHOULD-FIX-1). At workers:1 the lone lane's attach_analysis already wrote
+    // the canonical bare file inline (byte-identical backward compat), so we skip.
+    if (workers > 1 && result.verdict === 'recorded') {
+      const stopSignalsError = await this.computeBarrierStopSignals(workflowId, definition, segment, input.context);
+      if (stopSignalsError !== undefined) {
+        return this.fanOutErrorResult(input, stopSignalsError);
+      }
+    }
     this.logFanOutJoin(instance, input.stateId, workers, result, settled);
     instance.tab.write(`[fanout] "${input.stateId}" joined: verdict=${result.verdict ?? 'none'}`);
     return result;
+  }
+
+  /**
+   * Computes the single canonical `current/stop_signals.json` ONCE at the
+   * barrier join by running the bridge's `compute_stop_signals` subcommand over
+   * the batch-grown `nodes.json`. The bridge writes the bare canonical file
+   * atomically (temp+rename); per-lane `attach_analysis` only ever wrote
+   * lane-scoped copies, so this is the sole writer of the routing input the
+   * orchestrator reads each batch (SHOULD-FIX-1).
+   *
+   * Derived from the segment head's declared `sample` command (the only segment
+   * member guaranteed to carry the `evolve_result.py` path and `--run-dir`), so
+   * it inherits the same container scope / timeout. Returns an error string on
+   * failure (the caller folds it into a `result_file_error`), or `undefined` on
+   * success — including the benign case where the segment has no recognizable
+   * evolve sample command (a non-evolve fan-out has no stop signals to compute).
+   */
+  private async computeBarrierStopSignals(
+    workflowId: WorkflowId,
+    definition: WorkflowDefinition,
+    segment: readonly string[],
+    context: WorkflowContext,
+  ): Promise<string | undefined> {
+    const sampleStateId = segment[0];
+    const sampleState = definition.states[sampleStateId];
+    if (sampleState.type !== 'deterministic') return undefined;
+
+    const input = this.buildEvolveStopSignalsInput(sampleStateId, sampleState, context);
+    if (!input) return undefined;
+
+    const result = await this.executeDeterministicState(workflowId, input);
+    if (!result.passed || result.verdict !== 'stop_signals_computed') {
+      return result.errors ?? `barrier stop_signals computation failed with verdict ${result.verdict ?? 'unknown'}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Derives the `compute_stop_signals` invoke input from the segment head's
+   * `sample` command: reuses its `evolve_result.py` path and `--run-dir`,
+   * rewrites the subcommand to `compute_stop_signals`, and points
+   * `--result-file` at the shared `current/stop_signals_compute.json` barrier
+   * artifact. Returns `undefined` when the command lacks the bridge path, a
+   * `--run-dir`, or a resolvable workspace-relative result path.
+   */
+  private buildEvolveStopSignalsInput(
+    stateId: string,
+    state: DeterministicStateDefinition,
+    context: WorkflowContext,
+  ): DeterministicInvokeInput | undefined {
+    const sampleCommand = state.run.find((command) => this.isEvolveSampleCommand(command));
+    if (!sampleCommand) return undefined;
+
+    const scriptIndex = evolveResultScriptIndex(sampleCommand);
+    if (scriptIndex < 0) return undefined;
+    const runDir = this.commandFlagValue(sampleCommand, '--run-dir');
+    if (!runDir) return undefined;
+
+    const resultFile = `${runDir}/current/stop_signals_compute.json`;
+    const workspaceRelativeResultFile = this.containerPathToWorkspaceRelative(resultFile);
+    if (!workspaceRelativeResultFile) return undefined;
+
+    const command = [
+      ...sampleCommand.slice(0, scriptIndex + 1),
+      'compute_stop_signals',
+      '--run-dir',
+      runDir,
+      '--result-file',
+      resultFile,
+    ];
+
+    return {
+      stateId: `${stateId}_stop_signals`,
+      commands: [command],
+      context,
+      container: state.container ?? false,
+      containerScope: state.containerScope,
+      timeoutMs: state.timeoutMs,
+      resultFile: workspaceRelativeResultFile,
+    };
   }
 
   /**
@@ -2728,6 +2844,29 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
+  /**
+   * Runs the ONE barrier-side `sample_batch(n=workers)` before fan-out and
+   * partitions its result into per-lane pre-computed `sample` results (keyed by
+   * lane id) that {@link executeDeterministicState} replays as each child's
+   * `sample` step.
+   *
+   * WHY one barrier-side `sample_batch(n=N)` and NOT N independent `sample()`
+   * calls: the divergence between lanes is INJECTED at sampling (§7.4). N
+   * independent `sample()` calls each reload the same `nodes.json` and, with a
+   * diversity-maintaining sampler, could draw the SAME parent into multiple
+   * lanes — collapsing the N-wide frontier into "N samples of one distribution"
+   * and producing near-duplicate candidates. A single `sample_batch` over the
+   * whole DB partitions N DISTINCT parents (one per lane) in one serialized,
+   * read-only DB touch, guaranteeing disjoint parent sets up front. The bridge
+   * uses a per-lane seed offset (`base_seed + laneId`) to decorrelate the lanes
+   * while keeping the partition reproducible, with a deterministic hash tiebreak
+   * so the assignment is stable across resume (§7.4).
+   *
+   * `workers === 1` short-circuits: the single lane uses the legacy inline
+   * `sample` step (byte-identical backward compat, gate item 1), so there is no
+   * batch to prepare. A non-deterministic or unrecognized sample state likewise
+   * returns an empty map (the child runs its own `sample`).
+   */
   private async prepareFanOutLaneResults(
     workflowId: WorkflowId,
     input: FanOutInvokeInput,
@@ -2779,6 +2918,17 @@ export class WorkflowOrchestrator implements WorkflowController {
     return { byLane };
   }
 
+  /**
+   * Derives the deterministic invoke input for the barrier-side `sample_batch`
+   * from the segment head's declared `sample` command: rewrites the `sample`
+   * subcommand to `sample_batch`, adds `--workers <N>`, carries over the
+   * query/top-k flags, and points `--result-file` at the shared
+   * `current/sample_batch.json` (the batch artifact is barrier-owned, not
+   * lane-scoped). Returns `undefined` (the caller then lets each child sample on
+   * its own) when the segment head is not a recognizable evolve `sample`
+   * command, has no `evolve_result.py` entry, or lacks a `--run-dir` / resolvable
+   * workspace-relative result path.
+   */
   private buildEvolveSampleBatchInput(
     stateId: string,
     state: DeterministicStateDefinition,
@@ -2788,7 +2938,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const sampleCommand = state.run.find((command) => this.isEvolveSampleCommand(command));
     if (!sampleCommand) return undefined;
 
-    const scriptIndex = this.evolveResultScriptIndex(sampleCommand);
+    const scriptIndex = evolveResultScriptIndex(sampleCommand);
     if (scriptIndex < 0) return undefined;
     const runDir = this.commandFlagValue(sampleCommand, '--run-dir');
     if (!runDir) return undefined;
@@ -2822,12 +2972,8 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   private isEvolveSampleCommand(command: readonly string[]): boolean {
-    const scriptIndex = this.evolveResultScriptIndex(command);
+    const scriptIndex = evolveResultScriptIndex(command);
     return scriptIndex >= 0 && command[scriptIndex + 1] === 'sample';
-  }
-
-  private evolveResultScriptIndex(command: readonly string[]): number {
-    return command.findIndex((arg) => arg === 'evolve_result.py' || arg.endsWith('/evolve_result.py'));
   }
 
   private commandFlagValue(command: readonly string[], flag: string): string | undefined {
@@ -2979,6 +3125,18 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
+  /**
+   * Promotes a SINGLE lane's context back onto the parent spine (the
+   * blocked/errored drain paths, and the `workers: 1` recorded path where there
+   * is exactly one lane). Strips the per-lane `lane` marker so the parent never
+   * carries a lane identity, restores the parent's authoritative `visitCounts`
+   * (the single-active-state spine owns visit accounting; a lane's own counts
+   * are a within-batch detail, §7.5), and reads `totalTokens` from the
+   * instance-level token accumulator (the aggregate over all lanes' registered
+   * sessionIds, which is the budget-authoritative figure, NOT the lane's local
+   * sum). The `lane === undefined` branch is the no-fan-out / `workers: 1` case:
+   * there is no lane marker to strip, so only the token figure is refreshed.
+   */
   private promoteFanOutContext(
     instance: WorkflowInstance,
     parentContext: WorkflowContext,
@@ -2998,6 +3156,43 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
+  /**
+   * Folds the N recorded lane contexts back into ONE parent-spine context at the
+   * barrier join (the recorded happy path for `workers > 1`). This is the
+   * highest-stakes merge in the fan-out: the parent FSM is single-active-state,
+   * so after the batch it must hold a single coherent context even though N
+   * child actors each evolved their own copy in parallel. Each field is merged
+   * by a rule chosen for WHY it is correct on the spine, NOT by a uniform
+   * strategy:
+   *
+   * - `visitCounts`: the PARENT's counts are authoritative and copied verbatim.
+   *   The spine has a single active state (`workers`), entered once per batch;
+   *   the children's per-lane visit counts are a within-batch bookkeeping detail
+   *   (§7.5) that must not leak onto the parent, or the global round-limit
+   *   backstop would see N× inflated counts.
+   * - `round`: SUM of each lane's POSITIVE delta over the parent baseline
+   *   (`max(0, child.round - parent.round)`). A batch advanced the search by as
+   *   many rounds as lanes that progressed; summing positive deltas counts each
+   *   advancing lane once and ignores any lane that did not move forward.
+   * - `reviewHistory`: SUFFIX-append only — each lane's entries BEYOND the shared
+   *   parent baseline are appended. Lanes start from the same parent
+   *   reviewHistory, so a naive concat would replay the baseline N times; taking
+   *   only the suffix past `parentContext.reviewHistory.length` avoids that N×
+   *   duplication while still capturing every lane's new review notes.
+   * - `humanPrompt`: NULLED. A human prompt is a single-turn directive consumed
+   *   by one state entry; it has no meaning fanned across N lanes and must not
+   *   survive the batch (a stale prompt would mis-route the next orchestrator
+   *   turn).
+   * - `totalTokens`: read from the instance-level accumulator (the aggregate over
+   *   all lanes' registered MITM sessionIds), NOT summed from the children here —
+   *   the accumulator is the budget-authoritative figure and already includes
+   *   every lane's spend.
+   * - `artifacts` / `previousOutputHashes` / `agentConversationsByState`: shallow
+   *   last-writer-wins merge over the parent baseline (lanes write disjoint,
+   *   lane-scoped keys, so collisions are not expected; the parent baseline is
+   *   the floor). The remaining scalar fields come from `last` (the
+   *   highest-index lane), an arbitrary-but-deterministic representative.
+   */
   private mergeRecordedFanOutContext(
     instance: WorkflowInstance,
     parentContext: WorkflowContext,
@@ -3081,6 +3276,29 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
   }
 
+  /**
+   * Measures effective lane diversity for one recorded batch by content-hashing
+   * each lane's candidate source and counting byte-identical collisions.
+   *
+   * WHY content-hash at fan-in (not assume effective-N = N): distinct sampled
+   * parents do NOT guarantee distinct candidates (§7.4). Convergent lanes — the
+   * researcher LLM collapsing two different parents into the same edit, or a
+   * degenerate sampler handing out overlapping parents — can produce
+   * byte-identical candidates, so "N lanes" can have an effective diversity
+   * below N. Hashing the recorded `steps/<step>/code` files surfaces that as an
+   * observable duplicate rate instead of pretending every lane added a distinct
+   * candidate; the operator reads it as a signal to tune the diversity knobs.
+   * It is a diagnostic, NOT a gate — duplicates are still recorded as distinct
+   * nodes (the engine assigns each its own id, §7.6).
+   *
+   * Every skip is best-effort, NOT an error: a missing step_name, a candidate
+   * file that does not exist yet, or a non-recorded lane is simply omitted from
+   * the sample rather than failing the join — a diagnostic must never block a
+   * batch that otherwise recorded cleanly. The `undefined` return is the
+   * "nothing measurable" contract: when no lane yielded a hashable candidate
+   * (every lane skipped), there is no diversity to report and the caller logs no
+   * duplicate stats at all (distinct from a measured `duplicateRate: 0`).
+   */
   private computeFanOutCandidateDuplicateStats(
     instance: WorkflowInstance,
     children: readonly RoundChildOutcome[],
@@ -3097,7 +3315,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       if (child.status !== 'recorded') continue;
       const stepName = child.context.lastDeterministicResult?.payload?.step_name;
       if (typeof stepName !== 'string' || stepName.length === 0) continue;
-      const candidatePath = resolve(instance.workspacePath, '.evolve_runs', 'main', 'steps', stepName, 'code');
+      // Path layout owned by the Python bridge — see EVOLVE_STEP_CODE_PATH_SEGMENTS.
+      const candidatePath = resolve(
+        instance.workspacePath,
+        ...EVOLVE_STEP_CODE_PATH_SEGMENTS,
+        stepName,
+        EVOLVE_STEP_CODE_FILENAME,
+      );
       if (!existsSync(candidatePath)) continue;
       hashes.push(createHash('sha256').update(readFileSync(candidatePath)).digest('hex'));
     }

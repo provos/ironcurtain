@@ -21,12 +21,26 @@ TARGET_RE = re.compile(
     r"^\s*([A-Za-z_]\w*)\s*(>=|>|==|<=|<)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
 )
 STOCHASTIC_SAMPLERS = {"random", "ucb1", "island"}
+# Step-name format seam: `step_<NNNN>` or `step_<NNNN>_lane_<k>`. The `lane_<k>`
+# directory half of this same convention lives on the TS side as
+# DEFAULT_EVOLVE_LANE_DIR in src/workflow/lane-template.ts — keep both in sync if
+# the lane/step naming ever changes.
 STEP_NAME_RE = re.compile(r"^step_(\d+)(?:_lane_\d+)?$")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    # Temp-file + os.replace so a concurrent reader (the orchestrator polling the
+    # canonical stop_signals.json at the barrier) never observes a half-written
+    # file. os.replace is atomic on the same filesystem.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _load_json(path: Path) -> Any:
@@ -72,8 +86,14 @@ def _current_dir(run_dir: Path, lane: int | None = None) -> Path:
     return base / f"lane_{lane}" if lane is not None else base
 
 
-def _stop_signals_path(run_dir: Path) -> Path:
-    return run_dir / "current" / "stop_signals.json"
+def _stop_signals_path(run_dir: Path, lane: int | None = None) -> Path:
+    # The CANONICAL stop_signals.json (the file the orchestrator reads once per
+    # batch to route continue/complete/escalate) is barrier-owned and lives at
+    # the bare `current/stop_signals.json` (lane is None). Under fan-out, the
+    # canonical file is computed exactly once at the join (the `compute_stop_signals`
+    # subcommand); per-lane `attach_analysis` writes only its OWN lane-scoped
+    # `current/lane_<k>/stop_signals.json` so N lanes never race the routing input.
+    return _current_dir(run_dir, lane) / "stop_signals.json"
 
 
 def _clear_current_round(run_dir: Path, lane: int | None = None) -> None:
@@ -173,6 +193,13 @@ def _node_count(run_dir: Path) -> int:
 
 
 def _next_batch_index(run_dir: Path) -> int:
+    """Return 1 + the highest batch index already recorded in nodes.json.
+
+    The batch index is the `step_NNNN` number parsed from each node's
+    `meta_info.step_name` (with or without a `_lane_<k>` suffix, per STEP_NAME_RE).
+    Monotonic across RECORDED batches only: a fully-drained (un-recorded) batch
+    reuses its index on resume, which is safe because lane-tagged step names keep
+    each lane's record independently idempotent."""
     highest = 0
     for node in _sorted_nodes(run_dir):
         meta = node.get("meta_info")
@@ -361,9 +388,12 @@ def _compute_stop_signals(run_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def _write_stop_signals(run_dir: Path) -> dict[str, Any]:
+def _write_stop_signals(run_dir: Path, lane: int | None = None) -> dict[str, Any]:
+    # Atomic so the orchestrator (which reads the canonical bare file once per
+    # batch) never sees a torn write. With lane=None this writes the canonical
+    # barrier-owned file; with a lane it writes that lane's private copy only.
     signals = _compute_stop_signals(run_dir)
-    _write_json(_stop_signals_path(run_dir), signals)
+    _write_json_atomic(_stop_signals_path(run_dir, lane), signals)
     return signals
 
 
@@ -442,11 +472,144 @@ def _run_seeded_helper(script_path: Path, helper_args: list[str], seed: int) -> 
     return _run_helper([sys.executable, "-c", preamble])
 
 
+def _parent_ids(parents: list[dict[str, Any]]) -> list[int]:
+    # Collect node ids from sampled parent dicts, dropping any that have no
+    # resolvable integer id. The empty fallback in _node_id(parent, "") means an
+    # id-less parent yields None, which is filtered out.
+    return [parent_id for parent_id in (_node_id(parent, "") for parent in parents) if parent_id is not None]
+
+
+def _run_cognition_seed_init(run_dir: Path, result_file: Path) -> tuple[dict[str, Any] | None, bool]:
+    # Seed the cognition store from cognition_seed.md on the first sample of a run
+    # (when the store is empty). Returns (seed_payload, ok): on a helper failure it
+    # writes the sample_error to result_file and returns (None, False) so the caller
+    # bails; on success or no-op it returns (payload-or-None, True).
+    if _cognition_item_count(run_dir) != 0:
+        return None, True
+    seed_file = run_dir / "cognition_seed.md"
+    if not seed_file.exists():
+        return None, True
+    seed_code, seed_payload, seed_error = _run_helper(
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "evolve-cognition"),
+            "init",
+            "--run-dir",
+            str(run_dir),
+            "--seed-file",
+            str(seed_file),
+        ]
+    )
+    if seed_code != 0 or not isinstance(seed_payload, dict):
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {"stage": "cognition_init", "error": seed_error},
+                "passed": False,
+            },
+        )
+        return None, False
+    return seed_payload, True
+
+
+def _run_db_sample(
+    run_dir: Path,
+    result_file: Path,
+    n: int,
+    sampling_algorithm: str,
+    sampling_seed: int | None,
+) -> dict[str, Any] | None:
+    # Run the db sampler for `n` parents. Stochastic samplers REQUIRE a seed for
+    # reproducibility — a missing seed is a hard error (written to result_file).
+    # On any failure this writes the sample_error and returns None; on success it
+    # returns the helper payload.
+    sample_helper = SCRIPT_DIR / "evolve-db"
+    sample_helper_args = ["sample", "--run-dir", str(run_dir), "--n", str(n)]
+    if sampling_algorithm in STOCHASTIC_SAMPLERS:
+        if sampling_seed is None:
+            seed_file = run_dir / "sampling_seed.txt"
+            detail = "exists but is not a single integer" if seed_file.exists() else "is missing"
+            _write_json(
+                result_file,
+                {
+                    "verdict": "sample_error",
+                    "payload": {
+                        "stage": "db_sample",
+                        "error": (
+                            f"stochastic sampler {sampling_algorithm} requires a sampling_seed.txt "
+                            f"with a single integer; the file {detail}"
+                        ),
+                    },
+                    "passed": False,
+                },
+            )
+            return None
+        sample_code, sample_payload, sample_error = _run_seeded_helper(sample_helper, sample_helper_args, sampling_seed)
+    else:
+        sample_code, sample_payload, sample_error = _run_helper([sys.executable, str(sample_helper), *sample_helper_args])
+    if sample_code != 0 or not isinstance(sample_payload, dict):
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {"stage": "db_sample", "error": sample_error},
+                "passed": False,
+            },
+        )
+        return None
+    return sample_payload
+
+
+def _run_cognition_search(run_dir: Path, result_file: Path, query: str, top_k: int) -> dict[str, Any] | None:
+    # Retrieve the top-k cognition matches for `query`. On failure this writes the
+    # sample_error and returns None; on success it returns the helper payload.
+    cognition_code, cognition_payload, cognition_error = _run_helper(
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "evolve-cognition"),
+            "search",
+            "--run-dir",
+            str(run_dir),
+            "--query",
+            query,
+            "--top-k",
+            str(top_k),
+        ]
+    )
+    if cognition_code != 0 or not isinstance(cognition_payload, dict):
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {"stage": "cognition_search", "error": cognition_error},
+                "passed": False,
+            },
+        )
+        return None
+    return cognition_payload
+
+
 def _partition_sampled_parents(
     parents: list[dict[str, Any]],
     workers: int,
     sampling_seed: int | None,
 ) -> list[list[dict[str, Any]]]:
+    """Assign each lane ONE distinct parent from a single batch-side sample.
+
+    WHY one barrier-side sample is partitioned here (rather than N independent
+    sample() draws): independent samples over the same DB could draw the same
+    parent into multiple lanes, collapsing lane diversity. sample_batch() draws
+    n=workers parents once, and this splits them one-per-lane so the lanes start
+    from disjoint parents.
+
+    The per-lane seed offset `sampling_seed + lane` decorrelates the lanes' picks
+    while staying reproducible (same seed -> same partition across resume). With a
+    seed, each lane deterministically picks the remaining parent whose
+    `sha256(lane_seed:node_id:index)` digest is smallest — a stable hash tiebreak
+    that gives a fixed, reproducible assignment independent of insertion order.
+    Without a seed the lanes just take parents in order (FIFO pop).
+    """
     remaining = list(parents)
     partitions: list[list[dict[str, Any]]] = []
     for lane in range(workers):
@@ -617,31 +780,9 @@ def sample(args: argparse.Namespace) -> int:
     current_dir.mkdir(parents=True, exist_ok=True)
     _clear_current_round(run_dir, lane)
 
-    seed_payload: dict[str, Any] | None = None
-    if _cognition_item_count(run_dir) == 0:
-        seed_file = run_dir / "cognition_seed.md"
-        if seed_file.exists():
-            seed_code, seed_payload, seed_error = _run_helper(
-                [
-                    sys.executable,
-                    str(SCRIPT_DIR / "evolve-cognition"),
-                    "init",
-                    "--run-dir",
-                    args.run_dir,
-                    "--seed-file",
-                    str(seed_file),
-                ]
-            )
-            if seed_code != 0 or not isinstance(seed_payload, dict):
-                _write_json(
-                    result_file,
-                    {
-                        "verdict": "sample_error",
-                        "payload": {"stage": "cognition_init", "error": seed_error},
-                        "passed": False,
-                    },
-                )
-                return 0
+    seed_payload, seed_ok = _run_cognition_seed_init(run_dir, result_file)
+    if not seed_ok:
+        return 0
 
     done_rounds = _node_count(run_dir)
     if lane is None:
@@ -653,79 +794,18 @@ def sample(args: argparse.Namespace) -> int:
     n = _sample_n_from_spec(run_dir) if args.n_from_spec else max(1, args.n)
     sampling_algorithm = _sampling_algorithm(run_dir)
     sampling_seed = _sampling_seed(run_dir)
-    sample_helper = SCRIPT_DIR / "evolve-db"
-    sample_helper_args = [
-        "sample",
-        "--run-dir",
-        args.run_dir,
-        "--n",
-        str(n),
-    ]
-    if sampling_algorithm in STOCHASTIC_SAMPLERS:
-        if sampling_seed is None:
-            seed_file = run_dir / "sampling_seed.txt"
-            detail = "exists but is not a single integer" if seed_file.exists() else "is missing"
-            _write_json(
-                result_file,
-                {
-                    "verdict": "sample_error",
-                    "payload": {
-                        "stage": "db_sample",
-                        "error": (
-                            f"stochastic sampler {sampling_algorithm} requires a sampling_seed.txt "
-                            f"with a single integer; the file {detail}"
-                        ),
-                    },
-                    "passed": False,
-                },
-            )
-            return 0
-        sample_code, sample_payload, sample_error = _run_seeded_helper(sample_helper, sample_helper_args, sampling_seed)
-    else:
-        sample_code, sample_payload, sample_error = _run_helper([sys.executable, str(sample_helper), *sample_helper_args])
-    if sample_code != 0 or not isinstance(sample_payload, dict):
-        _write_json(
-            result_file,
-            {
-                "verdict": "sample_error",
-                "payload": {"stage": "db_sample", "error": sample_error},
-                "passed": False,
-            },
-        )
+    sample_payload = _run_db_sample(run_dir, result_file, n, sampling_algorithm, sampling_seed)
+    if sample_payload is None:
         return 0
 
     query = _objective_query(run_dir) if args.query_from_spec else args.query
-    cognition_code, cognition_payload, cognition_error = _run_helper(
-        [
-            sys.executable,
-            str(SCRIPT_DIR / "evolve-cognition"),
-            "search",
-            "--run-dir",
-            args.run_dir,
-            "--query",
-            query,
-            "--top-k",
-            str(args.top_k),
-        ]
-    )
-    if cognition_code != 0 or not isinstance(cognition_payload, dict):
-        _write_json(
-            result_file,
-            {
-                "verdict": "sample_error",
-                "payload": {"stage": "cognition_search", "error": cognition_error},
-                "passed": False,
-            },
-        )
+    cognition_payload = _run_cognition_search(run_dir, result_file, query, args.top_k)
+    if cognition_payload is None:
         return 0
 
     sampled_nodes = sample_payload.get("nodes")
     parents = [node for node in sampled_nodes if isinstance(node, dict)] if isinstance(sampled_nodes, list) else []
-    parent_ids = [
-        parent_id
-        for parent_id in (_node_id(parent, "") for parent in parents)
-        if parent_id is not None
-    ]
+    parent_ids = _parent_ids(parents)
     matches = cognition_payload.get("matches")
     context = {
         "step_name": step_name,
@@ -759,10 +839,18 @@ def sample(args: argparse.Namespace) -> int:
 
 
 def sample_batch(args: argparse.Namespace) -> int:
+    """Barrier-side fan-out sampler: draw n=workers parents once, partition them
+    one-per-lane, and write each lane's `current/lane_<k>/` context + sample.json.
+
+    Verdict contract: `sample_batch_prepared` (passed) with a per-lane payload list
+    the orchestrator replays as each child's `sample` result, or `sample_error`
+    (not passed) when seeding/sampling/cognition fails, the sampler is greedy under
+    workers>1 (cannot yield distinct parents), or the draw cannot be partitioned
+    into `workers` distinct parents."""
     run_dir = Path(args.run_dir)
     result_file = Path(args.result_file)
     workers = max(1, args.workers)
-    (run_dir / "current").mkdir(parents=True, exist_ok=True)
+    _current_dir(run_dir, None).mkdir(parents=True, exist_ok=True)
     _clear_current_round(run_dir, None)
 
     sampling_algorithm = _sampling_algorithm(run_dir)
@@ -782,81 +870,18 @@ def sample_batch(args: argparse.Namespace) -> int:
         )
         return 0
 
-    seed_payload: dict[str, Any] | None = None
-    if _cognition_item_count(run_dir) == 0:
-        seed_file = run_dir / "cognition_seed.md"
-        if seed_file.exists():
-            seed_code, seed_payload, seed_error = _run_helper(
-                [
-                    sys.executable,
-                    str(SCRIPT_DIR / "evolve-cognition"),
-                    "init",
-                    "--run-dir",
-                    args.run_dir,
-                    "--seed-file",
-                    str(seed_file),
-                ]
-            )
-            if seed_code != 0 or not isinstance(seed_payload, dict):
-                _write_json(
-                    result_file,
-                    {
-                        "verdict": "sample_error",
-                        "payload": {"stage": "cognition_init", "error": seed_error},
-                        "passed": False,
-                    },
-                )
-                return 0
+    seed_payload, seed_ok = _run_cognition_seed_init(run_dir, result_file)
+    if not seed_ok:
+        return 0
 
     sampling_seed = _sampling_seed(run_dir)
-    sample_helper = SCRIPT_DIR / "evolve-db"
-    sample_helper_args = [
-        "sample",
-        "--run-dir",
-        args.run_dir,
-        "--n",
-        str(workers),
-    ]
-    if sampling_algorithm in STOCHASTIC_SAMPLERS:
-        if sampling_seed is None:
-            seed_file = run_dir / "sampling_seed.txt"
-            detail = "exists but is not a single integer" if seed_file.exists() else "is missing"
-            _write_json(
-                result_file,
-                {
-                    "verdict": "sample_error",
-                    "payload": {
-                        "stage": "db_sample",
-                        "error": (
-                            f"stochastic sampler {sampling_algorithm} requires a sampling_seed.txt "
-                            f"with a single integer; the file {detail}"
-                        ),
-                    },
-                    "passed": False,
-                },
-            )
-            return 0
-        sample_code, sample_payload, sample_error = _run_seeded_helper(sample_helper, sample_helper_args, sampling_seed)
-    else:
-        sample_code, sample_payload, sample_error = _run_helper([sys.executable, str(sample_helper), *sample_helper_args])
-    if sample_code != 0 or not isinstance(sample_payload, dict):
-        _write_json(
-            result_file,
-            {
-                "verdict": "sample_error",
-                "payload": {"stage": "db_sample", "error": sample_error},
-                "passed": False,
-            },
-        )
+    sample_payload = _run_db_sample(run_dir, result_file, workers, sampling_algorithm, sampling_seed)
+    if sample_payload is None:
         return 0
 
     sampled_nodes = sample_payload.get("nodes")
     parents = [node for node in sampled_nodes if isinstance(node, dict)] if isinstance(sampled_nodes, list) else []
-    parent_ids = [
-        parent_id
-        for parent_id in (_node_id(parent, "") for parent in parents)
-        if parent_id is not None
-    ]
+    parent_ids = _parent_ids(parents)
     distinct_parent_ids = set(parent_ids)
     available_parent_count = _node_count(run_dir)
     if len(distinct_parent_ids) != len(parent_ids) or (
@@ -880,28 +905,8 @@ def sample_batch(args: argparse.Namespace) -> int:
         return 0
 
     query = _objective_query(run_dir) if args.query_from_spec else args.query
-    cognition_code, cognition_payload, cognition_error = _run_helper(
-        [
-            sys.executable,
-            str(SCRIPT_DIR / "evolve-cognition"),
-            "search",
-            "--run-dir",
-            args.run_dir,
-            "--query",
-            query,
-            "--top-k",
-            str(args.top_k),
-        ]
-    )
-    if cognition_code != 0 or not isinstance(cognition_payload, dict):
-        _write_json(
-            result_file,
-            {
-                "verdict": "sample_error",
-                "payload": {"stage": "cognition_search", "error": cognition_error},
-                "passed": False,
-            },
-        )
+    cognition_payload = _run_cognition_search(run_dir, result_file, query, args.top_k)
+    if cognition_payload is None:
         return 0
 
     matches = cognition_payload.get("matches")
@@ -914,11 +919,7 @@ def sample_batch(args: argparse.Namespace) -> int:
         _clear_current_round(run_dir, lane)
         step_name = f"step_{batch_index:04d}_lane_{lane}"
         lane_parents = parent_partitions[lane]
-        lane_parent_ids = [
-            parent_id
-            for parent_id in (_node_id(parent, "") for parent in lane_parents)
-            if parent_id is not None
-        ]
+        lane_parent_ids = _parent_ids(lane_parents)
         context = {
             "step_name": step_name,
             "parents": lane_parents,
@@ -1026,9 +1027,13 @@ def attach_analysis(args: argparse.Namespace) -> int:
             "step_dir": str(run_dir / "steps" / step_name),
             "idempotent_skip": True,
         }
-        signals = _write_stop_signals(run_dir)
+        # Lane-scoped under fan-out (lane is not None): a lane writes only its
+        # OWN stop_signals copy and never the canonical bare file, which is
+        # barrier-owned (computed once at the join by `compute_stop_signals`).
+        # At workers:1 (lane is None) this stays the canonical bare write.
+        signals = _write_stop_signals(run_dir, lane)
         payload["stop_reason"] = signals.get("stop_reason")
-        payload["stop_signals_path"] = str(_stop_signals_path(run_dir))
+        payload["stop_signals_path"] = str(_stop_signals_path(run_dir, lane))
         if "target_parse_warning" in signals:
             payload["target_parse_warning"] = signals["target_parse_warning"]
         _write_json(result_file, {"verdict": "recorded", "payload": payload, "passed": True})
@@ -1079,9 +1084,12 @@ def attach_analysis(args: argparse.Namespace) -> int:
         passed = False
         payload["error"] = helper_error or f"evolve-db exited with code {helper_return_code}"
 
-    signals = _write_stop_signals(run_dir)
+    # See the idempotent-skip branch above: lane-scoped under fan-out, canonical
+    # bare write only at workers:1. The barrier's compute_stop_signals owns the
+    # single canonical file when workers > 1.
+    signals = _write_stop_signals(run_dir, lane)
     payload["stop_reason"] = signals.get("stop_reason")
-    payload["stop_signals_path"] = str(_stop_signals_path(run_dir))
+    payload["stop_signals_path"] = str(_stop_signals_path(run_dir, lane))
     if "target_parse_warning" in signals:
         payload["target_parse_warning"] = signals["target_parse_warning"]
     if verdict == "recorded" and payload.get("node_id") is not None:
@@ -1095,6 +1103,26 @@ def attach_analysis(args: argparse.Namespace) -> int:
         )
 
     _write_json(result_file, {"verdict": verdict, "payload": payload, "passed": passed})
+    return 0
+
+
+def compute_stop_signals(args: argparse.Namespace) -> int:
+    # Barrier-owned: compute the single canonical current/stop_signals.json ONCE
+    # at the fan-out join, over the nodes.json that grew by N this batch. Under
+    # fan-out the per-lane attach_analysis writes only lane-scoped copies, so this
+    # is the only writer of the bare file the orchestrator routes on (SHOULD-FIX-1).
+    # The write is atomic (temp+rename) so the orchestrator never reads a torn file.
+    run_dir = _run_dir(args)
+    result_file = Path(args.result_file)
+    signals = _write_stop_signals(run_dir, None)
+    payload: dict[str, Any] = {
+        "stop_reason": signals.get("stop_reason"),
+        "stop_signals_path": str(_stop_signals_path(run_dir, None)),
+        "done_rounds": signals.get("done_rounds"),
+    }
+    if "target_parse_warning" in signals:
+        payload["target_parse_warning"] = signals["target_parse_warning"]
+    _write_json(result_file, {"verdict": "stop_signals_computed", "payload": payload, "passed": True})
     return 0
 
 
@@ -1163,6 +1191,11 @@ def build_parser() -> argparse.ArgumentParser:
     attach_parser.add_argument("--analysis-file", required=True)
     attach_parser.add_argument("--result-file", required=True)
     attach_parser.set_defaults(func=attach_analysis)
+
+    stop_signals_parser = subparsers.add_parser("compute_stop_signals")
+    stop_signals_parser.add_argument("--run-dir", required=True)
+    stop_signals_parser.add_argument("--result-file", required=True)
+    stop_signals_parser.set_defaults(func=compute_stop_signals)
 
     return parser
 

@@ -363,6 +363,29 @@ describe('evolve_result.py bridge', () => {
     >;
   }
 
+  function attachForExistingStepLane(
+    scriptsDir: string,
+    runDir: string,
+    stepName: string,
+    lane: number,
+  ): Record<string, unknown> {
+    const laneDir = resolve(runDir, 'current', `lane_${lane}`);
+    mkdirSync(laneDir, { recursive: true });
+    const analysisFile = resolve(laneDir, 'analysis.md');
+    writeFileSync(analysisFile, 'lane analysis\n');
+    return runBridge(scriptsDir, [
+      'attach_analysis',
+      '--run-dir',
+      runDir,
+      '--lane',
+      String(lane),
+      '--step-name',
+      stepName,
+      '--analysis-file',
+      analysisFile,
+    ]).result;
+  }
+
   function realScriptsDir(): string {
     return resolve(WORKFLOW_DIR, 'scripts');
   }
@@ -1307,6 +1330,106 @@ describe('evolve_result.py bridge', () => {
         parent_ids: [0, 0, 2],
       },
     });
+  });
+
+  it('lane attach_analysis writes only its lane-scoped stop_signals, not the barrier-owned canonical file', () => {
+    // SHOULD-FIX-1: under fan-out the canonical current/stop_signals.json is the
+    // single routing input the orchestrator reads once per batch. A per-lane
+    // attach_analysis must NOT touch it — it writes only current/lane_<k>/
+    // stop_signals.json — or N lanes race the routing input. This test fails
+    // WITHOUT the fix: the old code wrote the bare current/stop_signals.json on
+    // every lane, clobbering the pre-seeded canonical contents below.
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'lane-stop-signals-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 5 });
+    writeNodes(runDir, [1, 2], 1);
+    // The step the lane re-records (idempotent skip) is one of the existing nodes.
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    const sentinel = '{"stop_reason":"barrier_owned_sentinel"}\n';
+    writeFileSync(resolve(runDir, 'current', 'stop_signals.json'), sentinel);
+
+    const result = attachForExistingStepLane(scriptsDir, runDir, 'step_0001', 0);
+
+    expect(result).toMatchObject({ verdict: 'recorded', payload: { idempotent_skip: true } });
+    // The lane wrote its OWN copy under current/lane_0/...
+    const laneSignals = JSON.parse(
+      readFileSync(resolve(runDir, 'current', 'lane_0', 'stop_signals.json'), 'utf-8'),
+    ) as Record<string, unknown>;
+    expect(laneSignals.stop_reason).toBeNull();
+    expect((result.payload as { stop_signals_path: string }).stop_signals_path).toContain('lane_0');
+    // ...and left the barrier-owned canonical file untouched.
+    expect(readFileSync(resolve(runDir, 'current', 'stop_signals.json'), 'utf-8')).toBe(sentinel);
+  });
+
+  it('compute_stop_signals writes the single canonical stop_signals once over the batch-grown nodes', () => {
+    // The barrier computes the canonical file exactly once at the join. It must
+    // reflect the FULL node set (the batch grew nodes.json by N), regardless of
+    // any stale per-lane copies, and write the bare current/stop_signals.json.
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'compute-stop-signals-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 3, patience: 5 });
+    writeNodes(runDir, [1, 2, 3], 1);
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    // Stale canonical + a leftover per-lane copy that must be ignored.
+    writeFileSync(resolve(runDir, 'current', 'stop_signals.json'), '{"stop_reason":"stale"}\n');
+    mkdirSync(resolve(runDir, 'current', 'lane_0'), { recursive: true });
+    writeFileSync(resolve(runDir, 'current', 'lane_0', 'stop_signals.json'), '{"stop_reason":"lane_local"}\n');
+
+    const { result } = runBridge(scriptsDir, ['compute_stop_signals', '--run-dir', runDir]);
+
+    expect(result).toMatchObject({
+      verdict: 'stop_signals_computed',
+      passed: true,
+      payload: { stop_reason: 'max_rounds', done_rounds: 3 },
+    });
+    const signals = readStopSignals(runDir);
+    expect(signals).toMatchObject({ done_rounds: 3, max_rounds: 3, stop_reason: 'max_rounds' });
+    // The barrier write is over ALL nodes, not the stale value.
+    expect(signals.stop_reason).not.toBe('stale');
+  });
+
+  it('two concurrent lane attach_analysis calls never clobber the barrier-owned canonical stop_signals', async () => {
+    // The race made concrete: two lanes recording at once, each with its own
+    // EVOLVE_LANE, both leave the canonical file's sentinel intact.
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'concurrent-lane-stop-signals-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 5 });
+    writeNodes(runDir, [1, 2], 1);
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    const sentinel = '{"stop_reason":"barrier_owned_sentinel"}\n';
+    writeFileSync(resolve(runDir, 'current', 'stop_signals.json'), sentinel);
+
+    const results = await Promise.all(
+      [0, 1].map((lane) => {
+        const laneDir = resolve(runDir, 'current', `lane_${lane}`);
+        mkdirSync(laneDir, { recursive: true });
+        const analysisFile = resolve(laneDir, 'analysis.md');
+        writeFileSync(analysisFile, `lane ${lane} analysis\n`);
+        return runBridgeAsync(
+          scriptsDir,
+          [
+            'attach_analysis',
+            '--run-dir',
+            runDir,
+            '--lane',
+            String(lane),
+            '--step-name',
+            `step_000${lane + 1}`,
+            '--analysis-file',
+            analysisFile,
+          ],
+          resolve(tmpDir, `stop-lane-${lane}.json`),
+          { EVOLVE_LANE: String(lane) },
+        );
+      }),
+    );
+
+    expect(results.map((r) => r.result.verdict)).toEqual(['recorded', 'recorded']);
+    expect(results.map((r) => r.stderr)).toEqual(['', '']);
+    expect(readFileSync(resolve(runDir, 'current', 'stop_signals.json'), 'utf-8')).toBe(sentinel);
+    for (const lane of [0, 1]) {
+      expect(existsSync(resolve(runDir, 'current', `lane_${lane}`, 'stop_signals.json'))).toBe(true);
+    }
   });
 
   it('samples with an empty DB without reseeding a non-empty cognition store', () => {
