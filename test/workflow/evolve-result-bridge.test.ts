@@ -47,7 +47,7 @@ describe('evolve workflow manifest', () => {
         };
         evaluate: { transitions: Array<{ to: string; when?: { verdict?: string } }> };
         researcher: { prompt: string; transitions: Array<{ to: string }> };
-        analyzer: { transitions: Array<{ to: string }> };
+        analyzer: { prompt: string; transitions: Array<{ to: string }> };
         analysis_record: { transitions: Array<{ to: string; when?: { verdict?: string } }> };
         preflight_review: {
           type: string;
@@ -93,11 +93,16 @@ describe('evolve workflow manifest', () => {
     // Linear round chain: sample -> researcher -> evaluate -> analyzer ->
     // analysis_record -> orchestrator. Only the durable record returns to the hub.
     expect(raw.states.researcher.transitions).toEqual([{ to: 'evaluate' }]);
+    expect(raw.states.researcher.prompt).toContain('{laneDir}/context.json');
+    expect(raw.states.researcher.prompt).not.toContain('/workspace/.evolve_runs/main/current/context.json');
     expect(raw.states.evaluate.transitions.find((t) => t.when?.verdict === 'evaluated')?.to).toBe('analyzer');
     expect(raw.states.evaluate.transitions.find((t) => t.when?.verdict === 'evaluator_blocked')?.to).toBe(
       'human_escalation',
     );
     expect(raw.states.analyzer.transitions).toEqual([{ to: 'analysis_record' }]);
+    expect(raw.states.analyzer.prompt).toContain('{laneDir}/result.json');
+    expect(raw.states.analyzer.prompt).toContain('{laneDir}/analysis.md');
+    expect(raw.states.analyzer.prompt).not.toContain('/workspace/.evolve_runs/main/current/result.json');
     expect(raw.states.analysis_record.transitions.find((t) => t.when?.verdict === 'recorded')?.to).toBe('orchestrator');
     expect(raw.states.preflight_review).toMatchObject({
       type: 'human_gate',
@@ -1188,6 +1193,120 @@ describe('evolve_result.py bridge', () => {
     expect(existsSync(resolve(laneDir, 'analysis.md'))).toBe(false);
     expect(existsSync(resolve(runDir, 'current', 'stop_signals.json'))).toBe(true);
     expect(existsSync(resolve(runDir, 'current', 'context.json'))).toBe(false);
+  });
+
+  it('sample_batch partitions distinct parents into per-lane current directories', () => {
+    const runDir = resolve(tmpDir, 'batch-sample-run');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      resolve(runDir, 'run_spec.yaml'),
+      JSON.stringify({
+        objective: 'solve batch target',
+        budget: { max_rounds: 3, patience: 2 },
+        sampling: { algorithm: 'island' },
+      }) + '\n',
+    );
+    writeFileSync(resolve(runDir, 'sampling_seed.txt'), '123\n');
+    writeNodes(runDir, [1, 2, 3]);
+    mkdirSync(resolve(runDir, 'current'), { recursive: true });
+    writeFileSync(resolve(runDir, 'current', 'stop_signals.json'), '{"stop_reason":"target_met"}\n');
+    const scriptsDir = writeHarness({
+      dbStub:
+        [
+          'import json, sys',
+          'from pathlib import Path',
+          "run_dir = Path(sys.argv[sys.argv.index('--run-dir') + 1])",
+          "(run_dir / 'calls.txt').write_text(' '.join(sys.argv[1:]) + '\\n', encoding='utf-8')",
+          "print(json.dumps({'nodes': [",
+          "  {'id': 0, 'score': 1, 'analysis': 'a'},",
+          "  {'id': 1, 'score': 2, 'analysis': 'b'},",
+          "  {'id': 2, 'score': 3, 'analysis': 'c'},",
+          ']}))',
+        ].join('\n') + '\n',
+    });
+
+    const { result } = runBridge(scriptsDir, [
+      'sample_batch',
+      '--run-dir',
+      runDir,
+      '--workers',
+      '3',
+      '--query-from-spec',
+    ]);
+
+    expect(result).toMatchObject({
+      verdict: 'sample_batch_prepared',
+      passed: true,
+      payload: {
+        workers: 3,
+        batch_index: 4,
+        parent_ids: [0, 1, 2],
+      },
+    });
+    expect(readFileSync(resolve(runDir, 'calls.txt'), 'utf-8')).toContain('--n 3');
+    expect(existsSync(resolve(runDir, 'current', 'stop_signals.json'))).toBe(false);
+    expect(existsSync(resolve(runDir, 'current', 'context.json'))).toBe(false);
+    const assignedParentIds: number[] = [];
+    for (const lane of [0, 1, 2]) {
+      const laneDir = resolve(runDir, 'current', `lane_${lane}`);
+      const context = JSON.parse(readFileSync(resolve(laneDir, 'context.json'), 'utf-8')) as {
+        step_name: string;
+        parents: Array<{ id: number }>;
+      };
+      const sample = JSON.parse(readFileSync(resolve(laneDir, 'sample.json'), 'utf-8')) as {
+        payload: { lane_seed: number; parent_ids: number[] };
+      };
+      expect(context.step_name).toBe(`step_0004_lane_${lane}`);
+      expect(context.parents).toHaveLength(1);
+      assignedParentIds.push(context.parents[0].id);
+      expect(sample.payload.parent_ids).toEqual([context.parents[0].id]);
+      expect(sample.payload.lane_seed).toBe(123 + lane);
+    }
+    expect(assignedParentIds.sort()).toEqual([0, 1, 2]);
+  });
+
+  it('sample_batch rejects duplicate parent partitions when enough parents exist', () => {
+    const runDir = resolve(tmpDir, 'batch-duplicate-parent-run');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      resolve(runDir, 'run_spec.yaml'),
+      JSON.stringify({
+        objective: 'solve duplicate target',
+        budget: { max_rounds: 3, patience: 2 },
+        sampling: { algorithm: 'island' },
+      }) + '\n',
+    );
+    writeFileSync(resolve(runDir, 'sampling_seed.txt'), '5\n');
+    writeNodes(runDir, [1, 2, 3]);
+    const scriptsDir = writeHarness({
+      dbStub:
+        [
+          'import json',
+          "print(json.dumps({'nodes': [",
+          "  {'id': 0, 'score': 1, 'analysis': 'a'},",
+          "  {'id': 0, 'score': 1, 'analysis': 'a again'},",
+          "  {'id': 2, 'score': 3, 'analysis': 'c'},",
+          ']}))',
+        ].join('\n') + '\n',
+    });
+
+    const { result } = runBridge(scriptsDir, [
+      'sample_batch',
+      '--run-dir',
+      runDir,
+      '--workers',
+      '3',
+      '--query-from-spec',
+    ]);
+
+    expect(result).toMatchObject({
+      verdict: 'sample_error',
+      passed: false,
+      payload: {
+        stage: 'db_sample',
+        parent_ids: [0, 0, 2],
+      },
+    });
   });
 
   it('samples with an empty DB without reseeding a non-empty cognition store', () => {

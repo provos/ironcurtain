@@ -398,7 +398,7 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
     expect(run.states.at(-1)).toBe('done');
     expect(Object.keys(nodes.nodes)).toEqual(['0', '1']);
     expect(signals.stop_reason).toBe('target_met');
-    expect(countStates(run.states, 'analysis_record')).toBe(2);
+    expect(countStates(run.states, 'workers')).toBe(2);
     expect(run.researcherTurns).toBe(2);
     expect(run.analyzerTurns).toBe(2);
   }, 300_000);
@@ -421,7 +421,7 @@ describe.skipIf(!dockerReady)('evolve correctness stop signals with real Docker 
     expect(Object.keys(nodes.nodes)).toEqual(['0', '1', '2', '3']);
     expect(signals.stop_reason).toBe('patience');
     expect(signals.rounds_since_improvement).toBe(2);
-    expect(countStates(run.states, 'analysis_record')).toBe(4);
+    expect(countStates(run.states, 'workers')).toBe(4);
   }, 300_000);
 
   it('resumes analysis_record without duplicating an already-recorded node', async () => {

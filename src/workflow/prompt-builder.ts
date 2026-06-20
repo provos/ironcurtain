@@ -6,6 +6,7 @@ import type {
   WorkflowStateDefinition,
 } from './types.js';
 import { WORKFLOW_ARTIFACT_DIR } from './types.js';
+import { applyLaneTemplate } from './lane-template.js';
 import { MINIMAL_STATUS_INSTRUCTIONS, buildConditionalStatusInstructions } from './status-parser.js';
 import { parseArtifactRef } from './validate.js';
 
@@ -82,7 +83,7 @@ function buildFirstVisitPrompt(
 
   appendInputArtifacts(sections, stateConfig.inputs);
 
-  sections.push(`## Your Role\n\n${stateConfig.prompt}`);
+  sections.push(`## Your Role\n\n${applyLaneTemplate(stateConfig.prompt, context)}`);
 
   appendExpectedOutputs(sections, stateConfig.outputs);
 

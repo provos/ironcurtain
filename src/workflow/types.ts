@@ -168,8 +168,8 @@ export type WorkflowStateDefinition =
 export interface FanOutDefinition {
   /**
    * Lane multiplicity. `'workers'` defers to `settings.workers`; the
-   * `number` branch is a reserved per-state override and is not consumed
-   * by the pump yet.
+   * `number` branch is a per-state override for workflows that want a
+   * fixed-width segment independent of the global worker count.
    */
   readonly count: 'workers' | number;
   /**
@@ -221,13 +221,13 @@ export interface AgentStateDefinition {
    */
   readonly worktree?: boolean;
   /**
-   * Marks this state as a member of a parent fan-out segment. Schema-only
-   * until consumed by the native fan-out pump in a later phase.
+   * Marks this state as a member of a parent fan-out segment. Parent fan-out
+   * states factor these members into child round machines at runtime.
    */
   readonly fanOutMember?: boolean;
-  /** Fan-out topology metadata. Schema-only until the native pump consumes it. */
+  /** Fan-out topology metadata for a parent segment driver state. */
   readonly fanOut?: FanOutDefinition;
-  /** Ordered fan-out segment member state IDs. Schema-only until consumed. */
+  /** Ordered fan-out segment member state IDs. */
   readonly segment?: readonly string[];
   /** Scheduling metadata for lane-local execution. Schema-only until Phase 8. */
   readonly schedule?: StateScheduleDefinition;
@@ -335,9 +335,9 @@ export interface DeterministicStateDefinition {
    * Container-only; see validate.ts for path and routing constraints.
    */
   readonly resultFile?: string;
-  /** Fan-out topology metadata. Schema-only until the native pump consumes it. */
+  /** Fan-out topology metadata for a parent segment driver state. */
   readonly fanOut?: FanOutDefinition;
-  /** Ordered fan-out segment member state IDs. Schema-only until consumed. */
+  /** Ordered fan-out segment member state IDs. */
   readonly segment?: readonly string[];
   /** Marks this state as a member of a parent fan-out segment. */
   readonly fanOutMember?: boolean;
@@ -488,8 +488,27 @@ export type WorkflowEvent =
 // Workflow context (XState context)
 // ---------------------------------------------------------------------------
 
+export interface WorkflowLanePreparedResult {
+  readonly passed: boolean;
+  readonly testCount?: number;
+  readonly errors?: string;
+  readonly verdict?: string;
+  readonly payload?: Record<string, unknown>;
+}
+
+export interface WorkflowLaneContext {
+  readonly id: number;
+  /** Container-absolute lane scratch directory, e.g. /workspace/.evolve_runs/main/current/lane_0. */
+  readonly dir: string;
+  /** Workspace-relative lane scratch directory, e.g. .evolve_runs/main/current/lane_0. */
+  readonly relativeDir: string;
+  /** Deterministic results prepared by the fan-out barrier before the child actor starts. */
+  readonly preparedResults?: Readonly<Record<string, WorkflowLanePreparedResult>>;
+}
+
 export interface WorkflowContext {
   readonly taskDescription: string;
+  readonly lane?: WorkflowLaneContext;
   readonly artifacts: Record<string, string>;
   readonly round: number;
   readonly maxRounds: number;

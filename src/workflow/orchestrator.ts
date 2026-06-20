@@ -106,6 +106,7 @@ import {
   buildInvalidVerdictReprompt,
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
+import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR } from './lane-template.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import {
   isSafeWorkspaceRelativePath,
@@ -2590,12 +2591,6 @@ export class WorkflowOrchestrator implements WorkflowController {
    * and mint a SEPARATE container, defeating `sharedContainer` (§6.2 / §8.1;
    * cross-ref the `ensureBundleForScope` check-then-act race comment).
    *
-   * The `workers: 1` invariant is a deliberate hard stop, not a bug: this slice
-   * ships the fan-out MECHANISM (child machine, barrier, verdict fold) but not
-   * N>1 lane divergence (distinct sampling, lane-scoped working dirs §7). Any
-   * resolved count other than 1 fails fast here rather than silently running a
-   * single undiverged lane that looks like N.
-   *
    * Never throws: every failure path — workflow gone, misconfigured segment,
    * unsupported worker count, missing child machine — funnels through
    * {@link fanOutErrorResult}, which yields a `result_file_error` verdict that
@@ -2621,11 +2616,8 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     const workers = fanOut.count === 'workers' ? (definition.settings?.workers ?? 1) : fanOut.count;
-    if (workers !== 1) {
-      return this.fanOutErrorResult(
-        input,
-        `State "${input.stateId}" resolved to ${workers} workers; this implementation slice only supports workers: 1.`,
-      );
+    if (!Number.isInteger(workers) || workers < 1) {
+      return this.fanOutErrorResult(input, `State "${input.stateId}" resolved to invalid worker count ${workers}.`);
     }
 
     const roundMachine = roundMachinesByState.get(input.stateId);
@@ -2639,17 +2631,29 @@ export class WorkflowOrchestrator implements WorkflowController {
     // PRECONDITION: mint the shared-container bundle once, before any child.
     await this.preMintFanOutScopeBundle(instance, input.stateId, segment);
 
-    instance.tab.write(`[fanout] Starting "${input.stateId}" with ${workers} worker`);
+    const preparedLaneResults = await this.prepareFanOutLaneResults(workflowId, input, definition, segment, workers);
+    if (preparedLaneResults.error !== undefined) {
+      return this.fanOutErrorResult(input, preparedLaneResults.error);
+    }
+
+    instance.tab.write(`[fanout] Starting "${input.stateId}" with ${workers} worker${workers === 1 ? '' : 's'}`);
     const providedRoundMachine = this.provideActors(roundMachine, workflowId, definition, roundMachinesByState);
     const childActors = Array.from({ length: workers }, (_, index) => {
-      const child = createActor(providedRoundMachine, { input: { context: input.context } });
+      const childContext = this.buildFanOutLaneContext(
+        input.context,
+        index,
+        workers,
+        preparedLaneResults.byLane[index],
+      );
+      const child = createActor(providedRoundMachine, { input: { context: childContext } });
       const done = this.waitForRoundChild(child, index);
       child.start();
       return done;
     });
 
     const settled = await Promise.allSettled(childActors);
-    const result = this.joinFanOutBatch(input, settled);
+    const result = this.joinFanOutBatch(instance, input, settled);
+    this.logFanOutJoin(instance, input.stateId, workers, result, settled);
     instance.tab.write(`[fanout] "${input.stateId}" joined: verdict=${result.verdict ?? 'none'}`);
     return result;
   }
@@ -2704,6 +2708,148 @@ export class WorkflowOrchestrator implements WorkflowController {
     // single-element destructure yields the one scope.
     const [scope] = [...scopes];
     await this.ensureBundleForScope(instance, scope);
+  }
+
+  private buildFanOutLaneContext(
+    context: WorkflowContext,
+    index: number,
+    workers: number,
+    preparedResults: Readonly<Record<string, DeterministicInvokeResult>> | undefined,
+  ): WorkflowContext {
+    if (workers === 1) return context;
+    return {
+      ...context,
+      lane: {
+        id: index,
+        dir: `${DEFAULT_EVOLVE_LANE_DIR}/lane_${index}`,
+        relativeDir: `${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/lane_${index}`,
+        ...(preparedResults !== undefined ? { preparedResults } : {}),
+      },
+    };
+  }
+
+  private async prepareFanOutLaneResults(
+    workflowId: WorkflowId,
+    input: FanOutInvokeInput,
+    definition: WorkflowDefinition,
+    segment: readonly string[],
+    workers: number,
+  ): Promise<{ byLane: Record<number, Readonly<Record<string, DeterministicInvokeResult>>>; error?: string }> {
+    if (workers === 1) return { byLane: {} };
+
+    const sampleStateId = segment[0];
+    const sampleState = definition.states[sampleStateId];
+    if (sampleState.type !== 'deterministic') return { byLane: {} };
+
+    const batchInput = this.buildEvolveSampleBatchInput(sampleStateId, sampleState, input.context, workers);
+    if (!batchInput) return { byLane: {} };
+
+    const result = await this.executeDeterministicState(workflowId, batchInput);
+    if (!result.passed || result.verdict !== 'sample_batch_prepared') {
+      return {
+        byLane: {},
+        error: result.errors ?? `fan-out sample batch failed with verdict ${result.verdict ?? 'unknown'}`,
+      };
+    }
+
+    const lanes = Array.isArray(result.payload?.lanes) ? result.payload.lanes : undefined;
+    if (!lanes) {
+      return { byLane: {}, error: 'fan-out sample batch did not return a lanes array' };
+    }
+
+    const byLane: Record<number, Readonly<Record<string, DeterministicInvokeResult>>> = {};
+    for (const lanePayload of lanes) {
+      if (!lanePayload || typeof lanePayload !== 'object' || Array.isArray(lanePayload)) continue;
+      const laneId = (lanePayload as { lane?: unknown }).lane;
+      if (typeof laneId !== 'number' || !Number.isInteger(laneId) || laneId < 0 || laneId >= workers) continue;
+      byLane[laneId] = {
+        [sampleStateId]: {
+          passed: true,
+          verdict: 'sampled',
+          payload: lanePayload as Record<string, unknown>,
+        },
+      };
+    }
+
+    const missing = Array.from({ length: workers }, (_, index) => index).filter((index) => !(index in byLane));
+    if (missing.length > 0) {
+      return { byLane: {}, error: `fan-out sample batch omitted lane(s): ${missing.join(', ')}` };
+    }
+
+    return { byLane };
+  }
+
+  private buildEvolveSampleBatchInput(
+    stateId: string,
+    state: DeterministicStateDefinition,
+    context: WorkflowContext,
+    workers: number,
+  ): DeterministicInvokeInput | undefined {
+    const sampleCommand = state.run.find((command) => this.isEvolveSampleCommand(command));
+    if (!sampleCommand) return undefined;
+
+    const scriptIndex = this.evolveResultScriptIndex(sampleCommand);
+    if (scriptIndex < 0) return undefined;
+    const runDir = this.commandFlagValue(sampleCommand, '--run-dir');
+    if (!runDir) return undefined;
+
+    const resultFile = `${runDir}/current/sample_batch.json`;
+    const workspaceRelativeResultFile = this.containerPathToWorkspaceRelative(resultFile);
+    if (!workspaceRelativeResultFile) return undefined;
+
+    const command = [
+      ...sampleCommand.slice(0, scriptIndex + 1),
+      'sample_batch',
+      '--run-dir',
+      runDir,
+      '--workers',
+      String(workers),
+      ...this.sampleQueryArgs(sampleCommand),
+      ...this.sampleTopKArgs(sampleCommand),
+      '--result-file',
+      resultFile,
+    ];
+
+    return {
+      stateId: `${stateId}_batch`,
+      commands: [command],
+      context,
+      container: state.container ?? false,
+      containerScope: state.containerScope,
+      timeoutMs: state.timeoutMs,
+      resultFile: workspaceRelativeResultFile,
+    };
+  }
+
+  private isEvolveSampleCommand(command: readonly string[]): boolean {
+    const scriptIndex = this.evolveResultScriptIndex(command);
+    return scriptIndex >= 0 && command[scriptIndex + 1] === 'sample';
+  }
+
+  private evolveResultScriptIndex(command: readonly string[]): number {
+    return command.findIndex((arg) => arg === 'evolve_result.py' || arg.endsWith('/evolve_result.py'));
+  }
+
+  private commandFlagValue(command: readonly string[], flag: string): string | undefined {
+    const index = command.indexOf(flag);
+    if (index < 0) return undefined;
+    return command[index + 1];
+  }
+
+  private sampleQueryArgs(command: readonly string[]): string[] {
+    if (command.includes('--query-from-spec')) return ['--query-from-spec'];
+    const query = this.commandFlagValue(command, '--query');
+    return query !== undefined ? ['--query', query] : [];
+  }
+
+  private sampleTopKArgs(command: readonly string[]): string[] {
+    const topK = this.commandFlagValue(command, '--top-k');
+    return topK !== undefined ? ['--top-k', topK] : [];
+  }
+
+  private containerPathToWorkspaceRelative(path: string): string | undefined {
+    const prefix = `${CONTAINER_WORKSPACE_DIR}/`;
+    return path.startsWith(prefix) ? path.slice(prefix.length) : undefined;
   }
 
   /**
@@ -2770,13 +2916,14 @@ export class WorkflowOrchestrator implements WorkflowController {
    * first throw and lose the other lanes' outcomes; `allSettled` lets every lane
    * reach a terminal so the join sees the full batch and can drain peers.
    *
-   * WHY the blocked/recorded branches read `first.context`: under the
-   * `workers: 1` invariant there is exactly one lane, so `first` IS that lane
-   * and threading its context onto the parent FSM is exact. This is sound ONLY
-   * under `workers: 1` — once N>1 lands, the join must choose which lane's
-   * context to promote (or merge), so revisit this when lifting the worker cap.
+   * For `workers: 1`, the recorded path still promotes the single child context
+   * exactly. For N>1, the recorded path folds lane contexts into a parent batch
+   * context: child artifacts/conversations merge, parent visit counts remain
+   * authoritative for the single-active-state spine, and total tokens fan in
+   * from the orchestrator's workflow-level token accumulator.
    */
   private joinFanOutBatch(
+    instance: WorkflowInstance,
     input: FanOutInvokeInput,
     settled: readonly PromiseSettledResult<RoundChildOutcome>[],
   ): FanOutInvokeResult {
@@ -2805,7 +2952,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         // Read previousAgentOutput first, with lastError as the fallback for
         // any future block path that does set it.
         errors: blocked.context.previousAgentOutput ?? blocked.context.lastError ?? undefined,
-        context: blocked.context,
+        context: this.promoteFanOutContext(instance, input.context, blocked.context),
         children: childSummaries,
       };
     }
@@ -2818,7 +2965,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         // An `errored` lane DID trip `storeError` (its service rejection routed
         // through `onError`), so `lastError` carries the message here.
         errors: errored.context.lastError ?? `fan-out child ${errored.index} ended in "${errored.status}"`,
-        context: errored.context,
+        context: this.promoteFanOutContext(instance, input.context, errored.context),
         children: childSummaries,
       };
     }
@@ -2826,8 +2973,143 @@ export class WorkflowOrchestrator implements WorkflowController {
     return {
       passed: true,
       verdict: 'recorded',
-      context: first.context,
+      context:
+        children.length === 1 ? first.context : this.mergeRecordedFanOutContext(instance, input.context, children),
       children: childSummaries,
+    };
+  }
+
+  private promoteFanOutContext(
+    instance: WorkflowInstance,
+    parentContext: WorkflowContext,
+    laneContext: WorkflowContext,
+  ): WorkflowContext {
+    if (laneContext.lane === undefined) {
+      return {
+        ...laneContext,
+        totalTokens: instance.tokens.outputTokens,
+      };
+    }
+    const withoutLane = this.withoutLaneContext(laneContext);
+    return {
+      ...withoutLane,
+      visitCounts: parentContext.visitCounts,
+      totalTokens: instance.tokens.outputTokens,
+    };
+  }
+
+  private mergeRecordedFanOutContext(
+    instance: WorkflowInstance,
+    parentContext: WorkflowContext,
+    children: readonly RoundChildOutcome[],
+  ): WorkflowContext {
+    const ordered = [...children].sort((a, b) => a.index - b.index);
+    const last = ordered[ordered.length - 1]?.context ?? parentContext;
+    const lastWithoutLane = this.withoutLaneContext(last);
+
+    const artifacts = ordered.reduce<Record<string, string>>((acc, child) => ({ ...acc, ...child.context.artifacts }), {
+      ...parentContext.artifacts,
+    });
+    const previousOutputHashes = ordered.reduce<Record<string, string>>(
+      (acc, child) => ({ ...acc, ...child.context.previousOutputHashes }),
+      { ...parentContext.previousOutputHashes },
+    );
+    const agentConversationsByState = ordered.reduce<Record<string, AgentConversationId>>(
+      (acc, child) => ({ ...acc, ...child.context.agentConversationsByState }),
+      { ...parentContext.agentConversationsByState },
+    );
+    const roundDelta = ordered.reduce((sum, child) => sum + Math.max(0, child.context.round - parentContext.round), 0);
+
+    return {
+      ...lastWithoutLane,
+      artifacts,
+      previousOutputHashes,
+      agentConversationsByState,
+      visitCounts: parentContext.visitCounts,
+      reviewHistory: ordered.reduce<readonly string[]>(
+        (acc, child) =>
+          child.context.reviewHistory.length > parentContext.reviewHistory.length
+            ? [...acc, ...child.context.reviewHistory.slice(parentContext.reviewHistory.length)]
+            : acc,
+        parentContext.reviewHistory,
+      ),
+      round: parentContext.round + roundDelta,
+      totalTokens: instance.tokens.outputTokens,
+      humanPrompt: null,
+    };
+  }
+
+  private withoutLaneContext(context: WorkflowContext): WorkflowContext {
+    const copy: WorkflowContext = { ...context };
+    delete (copy as { lane?: unknown }).lane;
+    return copy;
+  }
+
+  private logFanOutJoin(
+    instance: WorkflowInstance,
+    fanOutState: string,
+    workers: number,
+    result: FanOutInvokeResult,
+    settled: readonly PromiseSettledResult<RoundChildOutcome>[],
+  ): void {
+    const fulfilled = settled
+      .filter((entry): entry is PromiseFulfilledResult<RoundChildOutcome> => entry.status === 'fulfilled')
+      .map((entry) => entry.value);
+    const duplicateStats =
+      result.verdict === 'recorded' ? this.computeFanOutCandidateDuplicateStats(instance, fulfilled) : undefined;
+
+    instance.messageLog.append({
+      ...this.logBase(instance),
+      type: 'fanout_join',
+      fanOutState,
+      workers,
+      verdict: result.verdict ?? null,
+      ...(duplicateStats !== undefined ? duplicateStats : {}),
+      children:
+        result.children ??
+        fulfilled.map((child) => ({
+          index: child.index,
+          status: child.status,
+        })),
+    });
+
+    if (duplicateStats !== undefined) {
+      instance.tab.write(
+        `[fanout] "${fanOutState}" duplicate_rate=${duplicateStats.duplicateRate.toFixed(3)} ` +
+          `(${duplicateStats.duplicateCount}/${duplicateStats.candidateCount})`,
+      );
+    }
+  }
+
+  private computeFanOutCandidateDuplicateStats(
+    instance: WorkflowInstance,
+    children: readonly RoundChildOutcome[],
+  ):
+    | {
+        duplicateRate: number;
+        duplicateCount: number;
+        uniqueCandidates: number;
+        candidateCount: number;
+      }
+    | undefined {
+    const hashes: string[] = [];
+    for (const child of children) {
+      if (child.status !== 'recorded') continue;
+      const stepName = child.context.lastDeterministicResult?.payload?.step_name;
+      if (typeof stepName !== 'string' || stepName.length === 0) continue;
+      const candidatePath = resolve(instance.workspacePath, '.evolve_runs', 'main', 'steps', stepName, 'code');
+      if (!existsSync(candidatePath)) continue;
+      hashes.push(createHash('sha256').update(readFileSync(candidatePath)).digest('hex'));
+    }
+
+    if (hashes.length === 0) return undefined;
+    const uniqueCandidates = new Set(hashes).size;
+    const duplicateCount = hashes.length - uniqueCandidates;
+    return {
+      duplicateRate: duplicateCount / hashes.length,
+      duplicateCount,
+      uniqueCandidates,
+      candidateCount: hashes.length,
     };
   }
 
@@ -2853,6 +3135,11 @@ export class WorkflowOrchestrator implements WorkflowController {
     workflowId: WorkflowId,
     input: DeterministicInvokeInput,
   ): Promise<DeterministicInvokeResult> {
+    const preparedResult = input.context.lane?.preparedResults?.[input.stateId];
+    if (preparedResult !== undefined) {
+      return preparedResult;
+    }
+
     if (!input.container) {
       return this.runDeterministicHost(input.commands);
     }

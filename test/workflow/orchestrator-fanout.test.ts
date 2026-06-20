@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createActor, type AnyActorRef } from 'xstate';
+import { MessageLog } from '../../src/workflow/message-log.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -128,24 +129,40 @@ type ExecuteDeterministic = (id: WorkflowId, input: DeterministicInvokeInput) =>
  */
 function driveParent(
   orchestrator: WorkflowOrchestrator,
+  tmpDir: string,
   agentStub: AgentStub,
   deterministicStub: DeterministicStub,
+  definition: WorkflowDefinition = fanOutDefinition,
 ): { actor: AnyActorRef; visited: string[] } {
   const { machine, roundMachinesByState, gateStateNames, terminalStateNames } = buildWorkflowMachine(
-    fanOutDefinition,
+    definition,
     'task',
   );
 
   const instance = {
     id: WF_ID,
-    definition: fanOutDefinition,
+    definition,
+    definitionPath: join(tmpDir, 'workflow.yaml'),
+    workflowSkillsDir: undefined,
+    workflowScriptsDir: undefined,
+    containerSnapshots: undefined,
     roundMachinesByState,
     gateStateNames,
     terminalStateNames,
+    activeSessions: new Set(),
+    artifactDir: join(tmpDir, '.workflow'),
+    workspacePath: tmpDir,
     tab: createMockTab(),
+    transitionHistory: [],
+    currentState: 'orchestrator',
+    messageLog: new MessageLog(join(tmpDir, 'messages.jsonl')),
     bundlesByScope: new Map(),
+    policyDirByPersona: new Map(),
+    currentPersonaByBundle: new Map(),
+    mintedServersByBundle: new Map(),
     aborted: false,
-  };
+    tokens: { outputTokens: 0, sessionIds: new Set() },
+  } as Record<string, unknown> & { actor?: AnyActorRef; currentState: string };
   const internal = orchestrator as unknown as {
     workflows: Map<WorkflowId, unknown>;
     executeAgentState: ExecuteAgent;
@@ -165,11 +182,14 @@ function driveParent(
   internal.executeAgentState = (_id, input) => agentStub(input);
   internal.executeDeterministicState = (_id, input) => deterministicStub(input);
 
-  const provided = internal.provideActors(machine, WF_ID, fanOutDefinition, roundMachinesByState);
+  const provided = internal.provideActors(machine, WF_ID, definition, roundMachinesByState);
   const actor = createActor(provided as Parameters<typeof createActor>[0]);
+  instance.actor = actor as AnyActorRef;
   const visited: string[] = [];
   actor.subscribe((snap) => {
-    visited.push(String((snap as { value: unknown }).value));
+    const value = String((snap as { value: unknown }).value);
+    instance.currentState = value;
+    visited.push(value);
   });
   actor.start();
   return { actor: actor as AnyActorRef, visited };
@@ -210,7 +230,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
       return makeAgentResult(); // researcher
     };
 
-    const { actor, visited } = driveParent(orchestrator, agentStub, recordedDeterministicStub);
+    const { actor, visited } = driveParent(orchestrator, tmpDir, agentStub, recordedDeterministicStub);
     await settle();
 
     expect(actor.getSnapshot().status).toBe('done');
@@ -226,6 +246,84 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     expect(visited).not.toContain('researcher');
   });
 
+  it('runs three recorded lanes as three child rounds and joins once at the parent', async () => {
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    const parallelDefinition: WorkflowDefinition = {
+      ...fanOutDefinition,
+      settings: { ...fanOutDefinition.settings, workers: 3 },
+    };
+
+    let orchestratorTurn = 0;
+    let reenteredOrchestratorTokens: number | undefined;
+    const researcherLaneIds: number[] = [];
+    const deterministicCalls: Array<{ stateId: string; laneId: number | undefined }> = [];
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        orchestratorTurn += 1;
+        if (orchestratorTurn === 2) {
+          reenteredOrchestratorTokens = input.context.totalTokens;
+        }
+        return makeVerdictResult(orchestratorTurn === 1 ? 'design' : 'finished');
+      }
+      researcherLaneIds.push(input.context.lane?.id ?? -1);
+      const internal = orchestrator as unknown as {
+        workflows: Map<WorkflowId, { tokens: { outputTokens: number } }>;
+      };
+      const instance = internal.workflows.get(WF_ID);
+      if (!instance) throw new Error('fan-out test instance missing');
+      instance.tokens.outputTokens += 11;
+      return makeAgentResult({
+        outputHash: `researcher-${input.context.lane?.id ?? 'none'}`,
+        totalTokens: instance.tokens.outputTokens,
+      });
+    };
+    const deterministicStub: DeterministicStub = async (input) => {
+      deterministicCalls.push({ stateId: input.stateId, laneId: input.context.lane?.id });
+      return recordedDeterministicStub(input);
+    };
+
+    const { actor, visited } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, parallelDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(actor.getSnapshot().value).toBe('done');
+    expect(visited.filter((v) => v === 'orchestrator')).toHaveLength(2);
+    expect(visited.filter((v) => v === 'workers')).toHaveLength(1);
+    expect(reenteredOrchestratorTokens).toBe(33);
+    expect(researcherLaneIds.sort()).toEqual([0, 1, 2]);
+    expect(
+      deterministicCalls
+        .filter((call) => call.stateId === 'sample')
+        .map((call) => call.laneId)
+        .sort(),
+    ).toEqual([0, 1, 2]);
+    expect(
+      deterministicCalls
+        .filter((call) => call.stateId === 'evaluate')
+        .map((call) => call.laneId)
+        .sort(),
+    ).toEqual([0, 1, 2]);
+    expect(
+      deterministicCalls
+        .filter((call) => call.stateId === 'analysis_record')
+        .map((call) => call.laneId)
+        .sort(),
+    ).toEqual([0, 1, 2]);
+
+    const log = readFileSync(join(tmpDir, 'messages.jsonl'), 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; workers?: number; children?: unknown[] });
+    expect(log.find((entry) => entry.type === 'fanout_join')).toMatchObject({
+      workers: 3,
+      children: [
+        { index: 0, status: 'recorded' },
+        { index: 1, status: 'recorded' },
+        { index: 2, status: 'recorded' },
+      ],
+    });
+  });
+
   it('(b) a blocked child routes the parent to human_escalation with the reason surfaced', async () => {
     const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
 
@@ -239,7 +337,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
       return { passed: true, verdict: 'recorded' };
     };
 
-    const { actor } = driveParent(orchestrator, agentStub, deterministicStub);
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub);
     await settle();
 
     // Parent waits at the human gate; the gate is a non-final state.
@@ -258,7 +356,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
       throw new Error('researcher crashed'); // the lane's agent rejects
     };
 
-    const { actor } = driveParent(orchestrator, agentStub, recordedDeterministicStub);
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, recordedDeterministicStub);
     await settle();
 
     // Without the child onError -> errored fix, the crashed lane would land in
@@ -280,7 +378,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
       throw new Error('evaluate harness crashed'); // the lane's evaluate rejects
     };
 
-    const { actor } = driveParent(orchestrator, agentStub, deterministicStub);
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub);
     await settle();
 
     expect(actor.getSnapshot().value).toBe('failed');

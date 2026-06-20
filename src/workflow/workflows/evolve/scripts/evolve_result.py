@@ -21,6 +21,7 @@ TARGET_RE = re.compile(
     r"^\s*([A-Za-z_]\w*)\s*(>=|>|==|<=|<)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
 )
 STOCHASTIC_SAMPLERS = {"random", "ucb1", "island"}
+STEP_NAME_RE = re.compile(r"^step_(\d+)(?:_lane_\d+)?$")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -169,6 +170,20 @@ def _resolve_parent(args: argparse.Namespace) -> list[int]:
 
 def _node_count(run_dir: Path) -> int:
     return len(_nodes_payload(run_dir))
+
+
+def _next_batch_index(run_dir: Path) -> int:
+    highest = 0
+    for node in _sorted_nodes(run_dir):
+        meta = node.get("meta_info")
+        step_name = meta.get("step_name") if isinstance(meta, dict) else None
+        if not isinstance(step_name, str):
+            continue
+        match = STEP_NAME_RE.match(step_name)
+        if match is None:
+            continue
+        highest = max(highest, int(match.group(1)))
+    return highest + 1
 
 
 def _nodes_payload(run_dir: Path) -> dict[str, Any]:
@@ -425,6 +440,32 @@ def _run_seeded_helper(script_path: Path, helper_args: list[str], seed: int) -> 
         f"runpy.run_path({str(script_path)!r}, run_name='__main__')"
     )
     return _run_helper([sys.executable, "-c", preamble])
+
+
+def _partition_sampled_parents(
+    parents: list[dict[str, Any]],
+    workers: int,
+    sampling_seed: int | None,
+) -> list[list[dict[str, Any]]]:
+    remaining = list(parents)
+    partitions: list[list[dict[str, Any]]] = []
+    for lane in range(workers):
+        if not remaining:
+            partitions.append([])
+            continue
+        if sampling_seed is None:
+            partitions.append([remaining.pop(0)])
+            continue
+
+        lane_seed = sampling_seed + lane
+        selected_index = min(
+            range(len(remaining)),
+            key=lambda index: hashlib.sha256(
+                f"{lane_seed}:{_node_id(remaining[index], str(index))}:{index}".encode("utf-8")
+            ).hexdigest(),
+        )
+        partitions.append([remaining.pop(selected_index)])
+    return partitions
 
 
 def _promote_lesson(
@@ -717,6 +758,210 @@ def sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def sample_batch(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    result_file = Path(args.result_file)
+    workers = max(1, args.workers)
+    (run_dir / "current").mkdir(parents=True, exist_ok=True)
+    _clear_current_round(run_dir, None)
+
+    sampling_algorithm = _sampling_algorithm(run_dir)
+    if workers > 1 and sampling_algorithm == "greedy":
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {
+                    "stage": "db_sample",
+                    "error": "greedy sampling cannot provide distinct parents for workers > 1",
+                    "workers": workers,
+                    "sampling_algorithm": sampling_algorithm,
+                },
+                "passed": False,
+            },
+        )
+        return 0
+
+    seed_payload: dict[str, Any] | None = None
+    if _cognition_item_count(run_dir) == 0:
+        seed_file = run_dir / "cognition_seed.md"
+        if seed_file.exists():
+            seed_code, seed_payload, seed_error = _run_helper(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "evolve-cognition"),
+                    "init",
+                    "--run-dir",
+                    args.run_dir,
+                    "--seed-file",
+                    str(seed_file),
+                ]
+            )
+            if seed_code != 0 or not isinstance(seed_payload, dict):
+                _write_json(
+                    result_file,
+                    {
+                        "verdict": "sample_error",
+                        "payload": {"stage": "cognition_init", "error": seed_error},
+                        "passed": False,
+                    },
+                )
+                return 0
+
+    sampling_seed = _sampling_seed(run_dir)
+    sample_helper = SCRIPT_DIR / "evolve-db"
+    sample_helper_args = [
+        "sample",
+        "--run-dir",
+        args.run_dir,
+        "--n",
+        str(workers),
+    ]
+    if sampling_algorithm in STOCHASTIC_SAMPLERS:
+        if sampling_seed is None:
+            seed_file = run_dir / "sampling_seed.txt"
+            detail = "exists but is not a single integer" if seed_file.exists() else "is missing"
+            _write_json(
+                result_file,
+                {
+                    "verdict": "sample_error",
+                    "payload": {
+                        "stage": "db_sample",
+                        "error": (
+                            f"stochastic sampler {sampling_algorithm} requires a sampling_seed.txt "
+                            f"with a single integer; the file {detail}"
+                        ),
+                    },
+                    "passed": False,
+                },
+            )
+            return 0
+        sample_code, sample_payload, sample_error = _run_seeded_helper(sample_helper, sample_helper_args, sampling_seed)
+    else:
+        sample_code, sample_payload, sample_error = _run_helper([sys.executable, str(sample_helper), *sample_helper_args])
+    if sample_code != 0 or not isinstance(sample_payload, dict):
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {"stage": "db_sample", "error": sample_error},
+                "passed": False,
+            },
+        )
+        return 0
+
+    sampled_nodes = sample_payload.get("nodes")
+    parents = [node for node in sampled_nodes if isinstance(node, dict)] if isinstance(sampled_nodes, list) else []
+    parent_ids = [
+        parent_id
+        for parent_id in (_node_id(parent, "") for parent in parents)
+        if parent_id is not None
+    ]
+    distinct_parent_ids = set(parent_ids)
+    available_parent_count = _node_count(run_dir)
+    if len(distinct_parent_ids) != len(parent_ids) or (
+        available_parent_count >= workers and len(distinct_parent_ids) < workers
+    ):
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {
+                    "stage": "db_sample",
+                    "error": "sample_batch could not partition distinct parent IDs across lanes",
+                    "workers": workers,
+                    "parent_ids": parent_ids,
+                    "available_parent_count": available_parent_count,
+                    "sampling_algorithm": sampling_algorithm,
+                },
+                "passed": False,
+            },
+        )
+        return 0
+
+    query = _objective_query(run_dir) if args.query_from_spec else args.query
+    cognition_code, cognition_payload, cognition_error = _run_helper(
+        [
+            sys.executable,
+            str(SCRIPT_DIR / "evolve-cognition"),
+            "search",
+            "--run-dir",
+            args.run_dir,
+            "--query",
+            query,
+            "--top-k",
+            str(args.top_k),
+        ]
+    )
+    if cognition_code != 0 or not isinstance(cognition_payload, dict):
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {"stage": "cognition_search", "error": cognition_error},
+                "passed": False,
+            },
+        )
+        return 0
+
+    matches = cognition_payload.get("matches")
+    batch_index = _next_batch_index(run_dir)
+    parent_partitions = _partition_sampled_parents(parents, workers, sampling_seed)
+    lanes: list[dict[str, Any]] = []
+    for lane in range(workers):
+        current_dir = _current_dir(run_dir, lane)
+        current_dir.mkdir(parents=True, exist_ok=True)
+        _clear_current_round(run_dir, lane)
+        step_name = f"step_{batch_index:04d}_lane_{lane}"
+        lane_parents = parent_partitions[lane]
+        lane_parent_ids = [
+            parent_id
+            for parent_id in (_node_id(parent, "") for parent in lane_parents)
+            if parent_id is not None
+        ]
+        context = {
+            "step_name": step_name,
+            "parents": lane_parents,
+            "cognition": {
+                "query": query,
+                "matches": matches if isinstance(matches, list) else [],
+            },
+        }
+        (current_dir / "step_name").write_text(step_name + "\n", encoding="utf-8")
+        _write_json(current_dir / "context.json", context)
+        lane_payload: dict[str, Any] = {
+            "step_name": step_name,
+            "lane": lane,
+            "parent_ids": lane_parent_ids,
+            "batch_index": batch_index,
+            "sample_n": workers,
+            "sampling_algorithm": sampling_algorithm,
+            "sampling_seed": sampling_seed,
+            "lane_seed": sampling_seed + lane if sampling_seed is not None else None,
+            "cognition_seeded_items": seed_payload.get("total_items") if isinstance(seed_payload, dict) else None,
+            "cognition_matches": len(context["cognition"]["matches"]),
+        }
+        _write_json(current_dir / "sample.json", {"verdict": "sampled", "payload": lane_payload, "passed": True})
+        lanes.append(lane_payload)
+
+    _write_json(
+        result_file,
+        {
+            "verdict": "sample_batch_prepared",
+            "payload": {
+                "workers": workers,
+                "batch_index": batch_index,
+                "parent_ids": parent_ids,
+                "sampling_algorithm": sampling_algorithm,
+                "sampling_seed": sampling_seed,
+                "lanes": lanes,
+            },
+            "passed": True,
+        },
+    )
+    return 0
+
+
 def record(args: argparse.Namespace) -> int:
     # Validate --lane / EVOLVE_LANE up front and discard the value: record takes
     # explicit --step-name, so it never reads the lane, but validating here keeps
@@ -882,6 +1127,15 @@ def build_parser() -> argparse.ArgumentParser:
     sample_parser.add_argument("--context-file", required=True)
     sample_parser.add_argument("--result-file", required=True)
     sample_parser.set_defaults(func=sample)
+
+    sample_batch_parser = subparsers.add_parser("sample_batch")
+    sample_batch_parser.add_argument("--run-dir", required=True)
+    sample_batch_parser.add_argument("--workers", type=int, required=True)
+    sample_batch_parser.add_argument("--query", default="")
+    sample_batch_parser.add_argument("--query-from-spec", action="store_true")
+    sample_batch_parser.add_argument("--top-k", type=int, default=5)
+    sample_batch_parser.add_argument("--result-file", required=True)
+    sample_batch_parser.set_defaults(func=sample_batch)
 
     record_parser = subparsers.add_parser("record")
     add_lane_argument(record_parser)

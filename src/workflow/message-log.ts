@@ -64,6 +64,18 @@ export interface StateTransitionEntry extends BaseEntry {
   readonly event: string;
 }
 
+export interface FanOutJoinEntry extends BaseEntry {
+  readonly type: 'fanout_join';
+  readonly fanOutState: string;
+  readonly workers: number;
+  readonly verdict: string | null;
+  readonly duplicateRate?: number;
+  readonly duplicateCount?: number;
+  readonly uniqueCandidates?: number;
+  readonly candidateCount?: number;
+  readonly children: readonly { readonly index: number; readonly status: string }[];
+}
+
 /**
  * Emitted when the adapter detected upstream quota exhaustion and the
  * orchestrator halted the run instead of retrying. `resetAt` is the
@@ -100,6 +112,7 @@ export type MessageLogEntry =
   | GateResolvedEntry
   | ErrorEntry
   | StateTransitionEntry
+  | FanOutJoinEntry
   | QuotaExhaustedEntry
   | TransientFailureEntry;
 

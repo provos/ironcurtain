@@ -412,7 +412,7 @@ states:
     prompt: |
       Write exactly one candidate program for this round.
 
-      Read the round context at /workspace/.evolve_runs/main/current/context.json. It
+      Read the round context at {laneDir}/context.json. It
       contains:
         - step_name: the directory you must write the candidate into
         - parents: a list of sampled parent nodes, empty on round 1
@@ -474,12 +474,12 @@ states:
     prompt: |
       Analyze the round that just completed and write a SHORT transferable lesson.
 
-      Read /workspace/.evolve_runs/main/current/context.json, the just-evaluated
-      result at /workspace/.evolve_runs/main/current/result.json, and this round's
+      Read {laneDir}/context.json, the just-evaluated
+      result at {laneDir}/result.json, and this round's
       candidate at the step path named in context.json.
 
       Write a concise markdown lesson to:
-        /workspace/.evolve_runs/main/current/analysis.md
+        {laneDir}/analysis.md
       Keep it to a few sentences. Do not restate the score; capture the transferable insight.
       This lesson is promoted into the cognition store after the durable record,
       so write something future rounds can retrieve and apply.

@@ -16,6 +16,7 @@ import type { AgentConversationId } from '../session/types.js';
 import { guardImplementations } from './guards.js';
 import { stripStatusBlock } from './status-parser.js';
 import { isAgentInvocationError } from './errors.js';
+import { laneScopeEvolveCurrentPath, templateLaneCommand } from './lane-template.js';
 
 // ---------------------------------------------------------------------------
 // Invoke input/result types
@@ -363,12 +364,12 @@ function buildDeterministicState(
       src: 'deterministicService',
       input: ({ context }: { context: WorkflowContext }) => ({
         stateId,
-        commands: config.run,
+        commands: config.run.map((command) => templateLaneCommand(command, context)),
         context,
         container: config.container ?? false,
         containerScope: config.containerScope,
         timeoutMs: config.timeoutMs,
-        resultFile: config.resultFile,
+        resultFile: config.resultFile ? laneScopeEvolveCurrentPath(config.resultFile, context) : undefined,
       }),
       onDone: onDoneTransitions,
       onError: {
