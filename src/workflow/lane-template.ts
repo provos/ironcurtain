@@ -137,7 +137,11 @@ function replaceCurrentPrefix(value: string, currentDir: string, replacement: st
   // safe to apply more than once (e.g. an argv that was templated upstream and
   // re-templated here) and protects manifest paths that hardcode `lane_${laneId}`
   // — applyLaneTemplate already expanded those, so the literal `lane_<n>/` they
-  // produce must be left alone.
+  // produce must be left alone. The flip side: a manifest that hardcodes a literal
+  // `lane_<digit>/` (no `${laneId}` to expand) is left UNCHANGED by every lane and
+  // would clobber — the validator (`HARDCODED_LANE_RESULT_FILE_RE` in validate.ts)
+  // rejects exactly that, matching this guard's `/^lane_\d+\//` notion of "a lane
+  // segment"; the two must stay consistent.
   if (/^lane_\d+\//.test(suffix)) return value;
   return `${replacement}/${suffix}`;
 }

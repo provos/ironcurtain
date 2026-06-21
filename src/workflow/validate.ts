@@ -12,6 +12,7 @@ import type {
   HumanGateTransitionDefinition,
 } from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES, SKILLS_NONE } from './types.js';
+import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR } from './lane-template.js';
 import { REGISTERED_GUARDS } from './guards.js';
 import { looseModelId } from '../config/user-config.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
@@ -480,14 +481,24 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
       workers > 1 &&
       state.type === 'deterministic' &&
       state.fanOutMember === true &&
-      state.resultFile !== undefined &&
-      !isLaneScopedResultFile(state.resultFile)
+      state.resultFile !== undefined
     ) {
-      issues.push(
-        `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
-          `resultFile must be lane-scoped under a lane_\${laneId}/ segment (the pump substitutes lane_<digits> per lane, ` +
-          `for example current/lane_\${laneId}/result.json).`,
-      );
+      const verdict = classifyFanOutResultFile(state.resultFile);
+      if (verdict === 'hardcoded-lane') {
+        issues.push(
+          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
+            `a hardcoded lane_<N> segment is written by EVERY lane (the pump leaves an already-lane_-prefixed path ` +
+            `unchanged) and will clobber. Use the lane_\${laneId} placeholder (the pump substitutes it per lane) ` +
+            `or a bare ${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/ path (the pump lane-scopes it per lane).`,
+        );
+      } else if (verdict === 'unscoped') {
+        issues.push(
+          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
+            `resultFile must be per-lane-scoped: either rooted under the pump's current/ scratch dir (e.g. ` +
+            `${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/result.json, which the pump rewrites to current/lane_<digits>/ per lane) ` +
+            `or carry an explicit lane_\${laneId}/ segment.`,
+        );
+      }
     }
   }
 
@@ -529,23 +540,73 @@ function validateFanOutState(
   }
 }
 
-// Canonical lane-scoped form the pump emits at runtime: a `lane_<digits>`
-// path segment (e.g. current/lane_0/result.json). The `${laneId}` form is
-// the manifest-author placeholder the pump substitutes per lane. No other
-// spellings are accepted — the error message in validateFanOutScaffolding
-// advertises exactly these two.
-const LANE_SCOPED_RESULT_FILE_RE = /(?:^|\/)lane_(?:\$\{laneId\}|[0-9]+)(?:\/|$)/;
+// The `lane_${laneId}` PLACEHOLDER path segment (e.g. current/lane_${laneId}/
+// result.json). `applyLaneTemplate` expands this per lane BEFORE the pump's
+// `replaceCurrentPrefix` runs, so every lane gets its own distinct `lane_<k>/`
+// path. Safe author-written scoping.
+const LANE_PLACEHOLDER_RESULT_FILE_RE = /(?:^|\/)lane_\$\{laneId\}(?:\/|$)/;
+// A HARDCODED `lane_<digits>` path segment (e.g. current/lane_0/result.json).
+// This is the FOOTGUN: there is no `${laneId}` for `applyLaneTemplate` to
+// expand, and the pump's `replaceCurrentPrefix` idempotency guard
+// (`/^lane_\d+\//` in lane-template.ts) sees the already-`lane_`-prefixed suffix
+// and leaves it UNCHANGED — so all N lanes write the same literal `lane_<N>/...`
+// path and mutually clobber. Must be rejected even though the path "looks"
+// lane-scoped. Keep this in sync with that guard in lane-template.ts.
+const HARDCODED_LANE_RESULT_FILE_RE = /(?:^|\/)lane_[0-9]+(?:\/|$)/;
+
+type FanOutResultFileVerdict = 'safe' | 'hardcoded-lane' | 'unscoped';
 
 /**
- * Whether a fanOutMember's resultFile is lane-scoped (so concurrent lanes
- * don't clobber a shared file). This checks lane-scoping ONLY — path
- * containment safety (no leading `/`, no `..`) is enforced separately and
- * unconditionally for every deterministic resultFile by
- * `isSafeWorkspaceRelativePath` in `validateContainerScopes`, so there is
- * no need to re-check traversal here.
+ * Classifies whether a fanOutMember's resultFile is guaranteed per-lane-scoped at
+ * runtime, so concurrent lanes never clobber a shared file. Outcomes:
+ *
+ *  - `'safe'` — qualifies via ONE of:
+ *      1. A BARE path rooted under the pump's `current/` scratch dir
+ *         ({@link DEFAULT_EVOLVE_LANE_RELATIVE_DIR} / {@link DEFAULT_EVOLVE_LANE_DIR}).
+ *         The deterministic pump (`laneScopeEvolveCurrentPath` in machine-builder.ts)
+ *         idempotently rewrites that `current/` prefix to `current/lane_<k>/` for
+ *         every lane at workers>1, and leaves it as the bare `current/` path at
+ *         workers:1 — so the SAME bare manifest is correct at every worker count and
+ *         byte-identical at the shipped workers:1 default. This relaxes the former
+ *         strict requirement of a literal `lane_${laneId}/` segment, which forced
+ *         the manifest to leak a `lane_0/` segment at workers:1 (the placeholder
+ *         resolves to lane id 0 there) and so could not be both strict-lint-clean
+ *         and workers:1 byte-identical at once.
+ *      2. A `lane_${laneId}` PLACEHOLDER segment anywhere in the path — the author
+ *         opts into explicit scoping and the pump expands it per lane.
+ *
+ *  - `'hardcoded-lane'` — carries a HARDCODED `lane_<digits>` segment. This LOOKS
+ *    scoped but is a footgun: the pump's idempotency guard leaves an already-`lane_`
+ *    -prefixed path untouched, so every lane writes the same literal path and they
+ *    clobber. Rejected with a targeted diagnostic. (Checked first, so it overrides
+ *    a misleading "rooted under current/" match like current/lane_0/result.json.)
+ *
+ *  - `'unscoped'` — neither scoped form: the pump would not lane-scope it, so N
+ *    lanes would clobber one shared file.
+ *
+ * (Path-containment safety — no leading `/`, no `..` — is enforced separately and
+ * unconditionally for every deterministic resultFile by `isSafeWorkspaceRelativePath`
+ * in `validateContainerScopes`.)
  */
-function isLaneScopedResultFile(resultFile: string): boolean {
-  return LANE_SCOPED_RESULT_FILE_RE.test(pathPosix.normalize(resultFile));
+function classifyFanOutResultFile(resultFile: string): FanOutResultFileVerdict {
+  const normalized = pathPosix.normalize(resultFile);
+  if (HARDCODED_LANE_RESULT_FILE_RE.test(normalized)) return 'hardcoded-lane';
+  if (LANE_PLACEHOLDER_RESULT_FILE_RE.test(normalized)) return 'safe';
+  if (isRootedUnderPumpCurrentDir(normalized)) return 'safe';
+  return 'unscoped';
+}
+
+// True when `normalized` is rooted under the pump's `current/` scratch dir (the
+// prefix `laneScopeEvolveCurrentPath` idempotently lane-scopes at workers>1).
+// Mirrors the pump's two accepted prefixes — the container-absolute and the
+// workspace-relative forms — so the validator's notion of "the pump will scope
+// this" is exactly the pump's, not a looser re-spelling.
+function isRootedUnderPumpCurrentDir(normalized: string): boolean {
+  for (const currentDir of [DEFAULT_EVOLVE_LANE_RELATIVE_DIR, DEFAULT_EVOLVE_LANE_DIR]) {
+    const prefix = `${pathPosix.normalize(currentDir)}/`;
+    if (normalized.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 /**

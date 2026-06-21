@@ -7,7 +7,7 @@ import { parse as parseYaml } from 'yaml';
 import { isSafeWorkspaceRelativePath, validateDefinition } from '../../src/workflow/validate.js';
 import { lintWorkflow } from '../../src/workflow/lint.js';
 import { isWithinDirectory } from '../../src/types/argument-roles.js';
-import { writeEvolveLaneNodes } from './test-helpers.js';
+import { evolveNode, writeEvolveLaneNodes, writeNodesFile } from './test-helpers.js';
 
 const PYTHON = process.env.PYTHON ?? 'python3';
 const WORKFLOW_DIR = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'evolve');
@@ -166,9 +166,16 @@ describe('evolve workflow manifest', () => {
     expect(prompt).not.toContain('not a hard gate');
     expect(prompt).not.toContain('the run stops on max_rounds');
     expect(raw.states.orchestrator.prompt).toContain('stop_signals.json');
-    expect(raw.states.orchestrator.prompt).toContain('precomputed stop_reason');
+    // The orchestrator must read the precomputed stop decision, not recompute it,
+    // and must read round accounting (done_rounds = generations) from the signal
+    // file rather than counting nodes.json.
+    expect(raw.states.orchestrator.prompt).toContain('precomputed stop decision');
+    expect(raw.states.orchestrator.prompt).toContain('do NOT count nodes.json');
+    expect(raw.states.orchestrator.prompt).toContain('done_rounds = the number of GENERATIONS');
     expect(raw.states.final_summary.prompt).toContain('stop_signals.json');
     expect(raw.states.final_summary.prompt).toContain('The stop reason from stop_signals.json');
+    // final_summary likewise sources done_rounds from the signal file, not a node count.
+    expect(raw.states.final_summary.prompt).toContain('do NOT count');
     expect(prompt).toContain('SAMPLE_N');
     expect(prompt).toContain('SAMPLER');
     expect(prompt).toContain('sampling_seed.txt');
@@ -320,26 +327,20 @@ describe('evolve_result.py bridge', () => {
   }
 
   function writeNodes(runDir: string, scores: readonly number[], stepOffset = 1): void {
-    mkdirSync(resolve(runDir, 'database_data'), { recursive: true });
     const nodes = Object.fromEntries(
-      scores.map((score, index) => {
-        const id = index;
-        const stepName = `step_${String(index + stepOffset).padStart(4, '0')}`;
-        return [
-          String(id),
-          {
-            id,
-            name: `round-${index + stepOffset}`,
-            parent: index === 0 ? [] : [index - 1],
-            score,
-            results: { eval_score: score },
-            analysis: `analysis ${id}`,
-            meta_info: { step_name: stepName },
-          },
-        ];
-      }),
+      scores.map((score, index) => [
+        String(index),
+        evolveNode({
+          id: index,
+          name: `round-${index + stepOffset}`,
+          parent: index === 0 ? [] : [index - 1],
+          score,
+          analysis: `analysis ${index}`,
+          batchIndex: index + stepOffset,
+        }),
+      ]),
     );
-    writeFileSync(resolve(runDir, 'database_data', 'nodes.json'), JSON.stringify({ next_id: scores.length, nodes }));
+    writeNodesFile(resolve(runDir, 'database_data'), nodes, false);
   }
 
   function writeLaneNodes(runDir: string, lanes: readonly number[], batchIndex = 1): void {
@@ -1597,6 +1598,145 @@ describe('evolve_result.py bridge', () => {
     expect(signals).toMatchObject({ done_rounds: 3, max_rounds: 3, stop_reason: 'max_rounds' });
     // The barrier write is over ALL nodes, not the stale value.
     expect(signals.stop_reason).not.toBe('stale');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Generation-denominated stop conditions (Finding B). At workers:N one batch
+  // of N lanes is ONE generation, so patience/max_rounds must count batches, not
+  // nodes. At workers:1 every node is its own generation, so the counters stay
+  // byte-identical to the old node-denominated output.
+  // ---------------------------------------------------------------------------
+
+  // Writes a nodes.json from explicit (score, batchIndex, lane?) triples. A null
+  // lane is a legacy workers:1 `step_<batchIndex>` node (its own generation); an
+  // integer lane is a fan-out `step_<batchIndex>_lane_<k>` node (lanes of one
+  // batch share a generation). Node ids increase in listed order.
+  function writeGenerationNodes(
+    runDir: string,
+    triples: ReadonlyArray<readonly [score: number, batchIndex: number, lane?: number]>,
+  ): void {
+    const nodes = Object.fromEntries(
+      triples.map(([score, batchIndex, lane], index) => [
+        String(index),
+        evolveNode({
+          id: index,
+          name: `round-${batchIndex}`,
+          parent: index === 0 ? [] : [index - 1],
+          score,
+          analysis: `analysis ${index}`,
+          batchIndex,
+          lane,
+        }),
+      ]),
+    );
+    writeNodesFile(resolve(runDir, 'database_data'), nodes, false);
+  }
+
+  it('counts one workers:3 batch as a single generation: patience not tripped after one no-improvement batch', () => {
+    // Finding-B repro: 3 lane nodes step_0001_lane_0/1/2, identical score, no
+    // improvement over baseline. Node-denominated, this is 3 rounds and would
+    // trip patience:2; generation-denominated it is ONE generation, so
+    // rounds_since_improvement is 0/1 (the batch set the best) and patience holds.
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'gen-one-batch-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 2 });
+    writeGenerationNodes(runDir, [
+      [5, 1, 0],
+      [5, 1, 1],
+      [5, 1, 2],
+    ]);
+
+    const { result } = runBridge(scriptsDir, ['compute_stop_signals', '--run-dir', runDir]);
+    expect(result).toMatchObject({ verdict: 'stop_signals_computed', passed: true });
+
+    const signals = readStopSignals(runDir);
+    expect(signals).toMatchObject({
+      done_rounds: 1,
+      node_count: 3,
+      rounds_since_improvement: 0,
+      patience: 2,
+      patience_exceeded: false,
+      stop_reason: null,
+    });
+  });
+
+  it('resets the generation plateau counter when a later batch improves the running best', () => {
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'gen-improve-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 2 });
+    // Batch 1 (best 5) sets the running best; batch 2 (best 9) improves it.
+    writeGenerationNodes(runDir, [
+      [5, 1, 0],
+      [4, 1, 1],
+      [9, 2, 0],
+      [9, 2, 1],
+    ]);
+
+    runBridge(scriptsDir, ['compute_stop_signals', '--run-dir', runDir]);
+    const signals = readStopSignals(runDir);
+    expect(signals).toMatchObject({
+      done_rounds: 2,
+      node_count: 4,
+      best_score: 9,
+      rounds_since_improvement: 0,
+      patience_exceeded: false,
+      stop_reason: null,
+    });
+  });
+
+  it('trips patience after `patience` generations with no improvement, counting batches not nodes', () => {
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'gen-plateau-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 2 });
+    // 3 batches, none improves on batch 1's best 5. Generation-denominated:
+    // gen0 sets best (rsi=0), gen1 +1, gen2 +1 -> rsi=2 == patience -> trip.
+    writeGenerationNodes(runDir, [
+      [5, 1, 0],
+      [5, 1, 1],
+      [5, 2, 0],
+      [5, 2, 1],
+      [5, 3, 0],
+      [5, 3, 1],
+    ]);
+
+    runBridge(scriptsDir, ['compute_stop_signals', '--run-dir', runDir]);
+    const signals = readStopSignals(runDir);
+    expect(signals).toMatchObject({
+      done_rounds: 3,
+      node_count: 6,
+      rounds_since_improvement: 2,
+      patience_exceeded: true,
+      stop_reason: 'patience',
+    });
+  });
+
+  it('is byte-identical to node-denominated counters at workers:1 (every step_<N> node is its own generation)', () => {
+    // Backward-compat invariant: a legacy workers:1 sequence (all `step_<N>`, no
+    // lane suffix) yields generation-count == node-count and generations-since-
+    // improvement == nodes-since-improvement. Hand-computed node-denominated
+    // values: best 2 reached at node 1 (step_0002); nodes 2 and 3 do not improve,
+    // so rounds_since_improvement == 2 == patience -> patience. done_rounds == 4.
+    const scriptsDir = writeHarness({});
+    const runDir = resolve(tmpDir, 'gen-workers1-run');
+    writeStopRunSpec(runDir, { criterion: 'eval_score >= 99', maxRounds: 10, patience: 2 });
+    writeGenerationNodes(runDir, [
+      [1, 1],
+      [2, 2],
+      [2, 3],
+      [2, 4],
+    ]);
+
+    runBridge(scriptsDir, ['compute_stop_signals', '--run-dir', runDir]);
+    const signals = readStopSignals(runDir);
+    expect(signals).toMatchObject({
+      best_score: 2,
+      best_node_id: 1,
+      done_rounds: 4,
+      node_count: 4,
+      rounds_since_improvement: 2,
+      patience_exceeded: true,
+      stop_reason: 'patience',
+    });
   });
 
   it('two concurrent lane attach_analysis calls never clobber the barrier-owned canonical stop_signals', async () => {

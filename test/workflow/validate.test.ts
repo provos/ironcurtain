@@ -248,11 +248,53 @@ describe('validateDefinition', () => {
       expect(issuesFor(raw).some((issue) => issue.includes('cannot be used with greedy sampling'))).toBe(true);
     });
 
-    it('rejects unscoped result files for deterministic fan-out members when workers > 1', () => {
+    it('accepts a bare current/-rooted fan-out resultFile at both workers:1 and workers>1', () => {
+      // The runtime pump (laneScopeEvolveCurrentPath) idempotently rewrites a bare
+      // `current/` path to `current/lane_<k>/` per lane at workers>1, and leaves it
+      // bare at workers:1. So the SAME bare manifest is per-lane-safe at every
+      // worker count and byte-identical at the shipped workers:1 default — the
+      // validator must accept it at both, with no resultFile lane-scoping issue.
+      const bareResultFile = '.evolve_runs/main/current/result.json';
+      for (const workers of [1, 3]) {
+        // validateDefinition throws WorkflowValidationError on any issue, so a
+        // clean return is itself the assertion that no resultFile issue fired.
+        const def = validateDefinition(
+          fanOutDefinition({
+            settings: { workers },
+            sampleState: { resultFile: bareResultFile },
+          }),
+        );
+        expect(def.states.sample.resultFile).toBe(bareResultFile);
+      }
+    });
+
+    it('still accepts an explicit lane_${laneId}/ fan-out resultFile when workers > 1', () => {
+      const resultFile = '.evolve_runs/main/current/lane_${laneId}/result.json';
+      const def = validateDefinition(fanOutDefinition({ sampleState: { resultFile } }));
+      expect(def.states.sample.resultFile).toBe(resultFile);
+    });
+
+    it('rejects a fan-out resultFile the pump cannot lane-scope (not current/-rooted, no lane segment) when workers > 1', () => {
+      // A path outside the pump's `current/` scratch dir AND with no explicit
+      // lane_ segment would be clobbered by N concurrent lanes — the pump never
+      // rewrites it, so it must stay rejected.
       const raw = fanOutDefinition({
-        sampleState: { resultFile: '.evolve_runs/main/current/result.json' },
+        sampleState: { resultFile: '.evolve_runs/main/shared/result.json' },
       });
-      expect(issuesFor(raw).some((issue) => issue.includes('resultFile must be lane-scoped'))).toBe(true);
+      expect(issuesFor(raw).some((issue) => issue.includes('resultFile must be per-lane-scoped'))).toBe(true);
+    });
+
+    it('rejects a HARDCODED lane_<N> fan-out resultFile (every lane writes it -> clobber) when workers > 1', () => {
+      // current/lane_0/result.json LOOKS lane-scoped, but there is no ${laneId}
+      // to expand and the pump's idempotency guard (/^lane_\d+\//) leaves the
+      // already-`lane_`-prefixed path UNCHANGED — so all N lanes write the same
+      // lane_0/ path and clobber. The validator must reject it with a targeted
+      // diagnostic steering the author to the ${laneId} placeholder or a bare path.
+      const raw = fanOutDefinition({
+        sampleState: { resultFile: '.evolve_runs/main/current/lane_0/result.json' },
+      });
+      const issues = issuesFor(raw);
+      expect(issues.some((issue) => issue.includes('hardcoded lane_<N> segment is written by EVERY lane'))).toBe(true);
     });
 
     it('rejects schedule.pool eval on non-fanOutMember states', () => {

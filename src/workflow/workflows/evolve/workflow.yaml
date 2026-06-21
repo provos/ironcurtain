@@ -214,11 +214,13 @@ states:
          EVAL_TIMEOUT_SECS to 300 when nothing implies a different budget.
 
          If /workspace/initial_program exists, add 1 to MAX_ROUNDS before passing
-         it. The seed is copied verbatim as node 0 and the engine counts every
-         recorded node toward done_rounds, so without the +1 a request for N
-         rounds would yield only N-1 evolution rounds (the seed consumes one). The
-         +1 restores the requested number of evolution rounds. Do NOT add the +1
-         when no initial_program is seeded (node 0 is then a real first round).
+         it. The seed is copied verbatim as node 0, and done_rounds counts each
+         GENERATION toward the budget - at the workers:1 default every recorded node
+         is its own generation, so the seed consumes one generation. Without the +1
+         a request for N rounds would yield only N-1 evolution rounds (the seed
+         consumes one). The +1 restores the requested number of evolution rounds. Do
+         NOT add the +1 when no initial_program is seeded (node 0 is then a real
+         first round).
 
          /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
            --workspace-root /workspace \
@@ -317,12 +319,18 @@ states:
 
       Read these files first:
         - /workspace/.evolve_runs/main/run_spec.yaml - budget.max_rounds is N.
-        - /workspace/.evolve_runs/main/database_data/nodes.json - count its "nodes" map.
-          The file is absent before round 1, which means done_rounds = 0.
         - /workspace/.evolve_runs/main/current/stop_signals.json, if present. It
-          is written by analysis_record after the durable node record. Use its
-          precomputed stop_reason; do NOT recompute target, patience, or max-round
-          logic yourself.
+          is written by analysis_record after the durable node record and is the
+          single source of truth for round accounting. Read its precomputed fields
+          directly; do NOT count nodes.json or recompute anything yourself:
+            * done_rounds = the number of GENERATIONS recorded so far. One fan-out
+              batch of N lanes counts as ONE generation; at the workers:1 default
+              each round is one node and one generation, so done_rounds equals the
+              node tally there. The file is absent before round 1 (done_rounds = 0).
+            * node_count = the raw recorded-node tally (= done_rounds at workers:1,
+              and larger at workers>1 where a generation has multiple lane nodes).
+            * stop_reason = the precomputed stop decision. Use this verbatim; do NOT
+              recompute target, patience, or max-round logic yourself.
 
       Recovery after a human just approved an escalated round depends on the SCRATCH
       SHAPE, which the previous output states explicitly:
@@ -566,9 +574,14 @@ states:
         - /workspace/.evolve_runs/main/run_spec.yaml - the objective, evaluator, and
           budget.max_rounds (= N).
         - /workspace/.evolve_runs/main/database_data/nodes.json - every recorded node
-          (id, parent, score, analysis). Count its "nodes" map for done_rounds.
+          (id, parent, score, analysis). Use it for the per-node trajectory, NOT for
+          round counts.
         - /workspace/.evolve_runs/main/current/stop_signals.json - the precomputed
-          stop_reason and stop metrics. Use this file; do NOT recompute the stop
+          stop_reason and stop metrics, and the authoritative round accounting:
+          done_rounds (GENERATIONS recorded - one fan-out batch of N lanes is ONE
+          generation; equals the node tally at the workers:1 default) and node_count
+          (the raw recorded-node tally). Read done_rounds from here; do NOT count
+          nodes.json. Use this file's stop_reason; do NOT recompute the stop
           condition.
         - /workspace/.evolve_runs/main/best/ - the best snapshot per improving round;
           the highest-scoring node is the run's result.
@@ -579,7 +592,8 @@ states:
       Create the /workspace/.workflow/final_report/ directory if it does not exist.
       The report MUST contain, in this order:
         1. The objective (one line, from run_spec.yaml).
-        2. done_rounds vs budget.max_rounds.
+        2. done_rounds vs budget.max_rounds (done_rounds from stop_signals.json,
+           counting generations - one fan-out batch is one generation).
         3. The stop reason from stop_signals.json: target_met, patience, max_rounds,
            or the recorded null/unknown value if no stop signal is present.
         4. The best node: its id, its score, and its analysis/lesson.

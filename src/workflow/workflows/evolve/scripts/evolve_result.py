@@ -192,6 +192,24 @@ def _node_count(run_dir: Path) -> int:
     return len(_nodes_payload(run_dir))
 
 
+def _node_step_name(node: dict[str, Any]) -> str | None:
+    """Extract a recorded node's `meta_info.step_name`, or None if absent/wrong-typed."""
+    meta = node.get("meta_info")
+    step_name = meta.get("step_name") if isinstance(meta, dict) else None
+    return step_name if isinstance(step_name, str) else None
+
+
+def _parse_step_name(node: dict[str, Any]) -> re.Match[str] | None:
+    """Parse a recorded node's step_name into its STEP_NAME_RE match (batch + lane).
+
+    `match.group(1)` is the batch index; `match.group(2)` is the lane id (or None
+    for a legacy `step_<N>` node). Returns None when the node has no step_name or
+    it does not match the `step_<N>[_lane_<k>]` shape. Single source for the
+    extraction shared by `_next_batch_index` and `_generation_key`."""
+    step_name = _node_step_name(node)
+    return STEP_NAME_RE.match(step_name) if step_name is not None else None
+
+
 def _next_batch_index(run_dir: Path, workers: int | None = None) -> int:
     """Return the next batch index, or a partially recorded in-flight one.
 
@@ -207,11 +225,7 @@ def _next_batch_index(run_dir: Path, workers: int | None = None) -> int:
     highest = 0
     lanes_by_batch: dict[int, set[int]] = {}
     for node in _sorted_nodes(run_dir):
-        meta = node.get("meta_info")
-        step_name = meta.get("step_name") if isinstance(meta, dict) else None
-        if not isinstance(step_name, str):
-            continue
-        match = STEP_NAME_RE.match(step_name)
+        match = _parse_step_name(node)
         if match is None:
             continue
         batch_index = int(match.group(1))
@@ -264,8 +278,7 @@ def _sorted_nodes(run_dir: Path) -> list[dict[str, Any]]:
 
 def _find_recorded_node_for_step(run_dir: Path, step_name: str) -> dict[str, Any] | None:
     for node in _sorted_nodes(run_dir):
-        meta = node.get("meta_info")
-        if isinstance(meta, dict) and meta.get("step_name") == step_name:
+        if _node_step_name(node) == step_name:
             return node
     return None
 
@@ -339,6 +352,45 @@ def _target_is_met(best_score: float | None, target: dict[str, Any] | None) -> b
     return False
 
 
+def _generation_key(node: dict[str, Any], fallback_index: int) -> tuple[int, int]:
+    """Group key for the GENERATION (batch) a recorded node belongs to.
+
+    A generation is a distinct fan-out batch. The batch index is the `step_<N>`
+    number parsed from the node's `meta_info.step_name` via STEP_NAME_RE (the same
+    parse `_next_batch_index` uses). Lanes of one batch share `step_<N>_lane_<k>`,
+    so they share batch `N` and thus one generation. Legacy workers:1 nodes are
+    `step_<N>` with NO lane suffix — each is its OWN generation (batch index `N`,
+    one node per batch), which is what makes the generation-denominated stop
+    counters byte-identical to the old node-denominated ones at workers:1.
+
+    The returned key is `(batch_index, lane_tiebreak)` so the secondary slot only
+    ever disambiguates legacy/unparseable nodes that would otherwise collide on
+    the same batch number; lane-tagged nodes all carry tiebreak 0 so a whole batch
+    collapses to one generation. A node whose step_name is missing or unparseable
+    gets a UNIQUE key (negative batch sentinel keyed by its position) so it still
+    counts as its own generation rather than silently merging with another.
+    """
+    match = _parse_step_name(node)
+    if match is None:
+        # Unparseable/missing step_name: stand-alone generation, keyed off its
+        # sorted position so two such nodes never share a generation.
+        return (-1, fallback_index)
+    batch_index = int(match.group(1))
+    lane = match.group(2)
+    # Lane-tagged nodes of one batch share the generation (tiebreak 0). A legacy
+    # `step_<N>` node keeps a per-node tiebreak so two legacy nodes that happen to
+    # carry the same batch number stay distinct generations (the workers:1 case
+    # never collides in practice, but this keeps grouping injective).
+    #
+    # The `+ 1` keeps a legacy node's tiebreak strictly positive: within the same
+    # batch a lane-tagged node sits at tiebreak 0, so starting legacy tiebreaks at
+    # 1 (not 0) means a legacy `step_<N>` can never collide with lane 0's
+    # generation of batch N. (The unparseable `(-1, …)` sentinel space above is
+    # already disjoint from real batches by its first element, so it needs no such
+    # offset.) Do not "simplify" the `+ 1` away.
+    return (batch_index, 0 if lane is not None else fallback_index + 1)
+
+
 def _compute_stop_signals(run_dir: Path) -> dict[str, Any]:
     spec_path = run_dir / "run_spec.yaml"
     spec = _load_structured(spec_path) if spec_path.exists() else {}
@@ -351,24 +403,43 @@ def _compute_stop_signals(run_dir: Path) -> dict[str, Any]:
     patience = _safe_int(budget.get("patience"))
     nodes = _sorted_nodes(run_dir)
     warnings: list[str] = []
+
+    # Per-node warnings are emitted independently of generation grouping so the
+    # `warnings` payload stays byte-identical to the old node-denominated output.
+    for index, node in enumerate(nodes):
+        if _node_score(node) is None:
+            node_id = _node_id(node, str(index))
+            warnings.append(f"node {node_id if node_id is not None else index} has no numeric score; treated as -inf")
+
+    # Group nodes into GENERATIONS (batches) in generation order. The best score
+    # of a generation is the max lane score in its batch (the achieving node id is
+    # tracked so best_node_id stays meaningful). At workers:1 each generation is a
+    # single node, so this reduces to the old per-node walk exactly.
+    generations: dict[tuple[int, int], tuple[float | None, int | None]] = {}
+    for index, node in enumerate(nodes):
+        key = _generation_key(node, index)
+        score = _node_score(node)
+        node_id = _node_id(node, str(index))
+        gen_best, gen_best_id = generations.get(key, (None, None))
+        if score is not None and (gen_best is None or score > gen_best):
+            gen_best, gen_best_id = score, node_id
+        generations[key] = (gen_best, gen_best_id)
+
     best_score: float | None = None
     best_node_id: int | None = None
     rounds_since_improvement = 0
-
-    for index, node in enumerate(nodes):
-        node_id = _node_id(node, str(index))
-        score = _node_score(node)
-        if score is None:
-            warnings.append(f"node {node_id if node_id is not None else index} has no numeric score; treated as -inf")
-
-        if score is not None and (best_score is None or score > best_score + IMPROVEMENT_EPS):
-            best_score = score
-            best_node_id = node_id
+    for _key, (gen_best, gen_best_id) in sorted(generations.items()):
+        if gen_best is not None and (best_score is None or gen_best > best_score + IMPROVEMENT_EPS):
+            best_score = gen_best
+            best_node_id = gen_best_id
             rounds_since_improvement = 0
         elif best_node_id is not None:
             rounds_since_improvement += 1
 
-    done_rounds = len(nodes)
+    # done_rounds now counts GENERATIONS (distinct batches), not nodes. At
+    # workers:1 generation-count == node-count, so this is byte-identical there.
+    done_rounds = len(generations)
+    node_count = len(nodes)
     target_met = _target_is_met(best_score, target)
     patience_exceeded = patience > 0 and rounds_since_improvement >= patience
     max_rounds_reached = max_rounds > 0 and done_rounds >= max_rounds
@@ -391,6 +462,10 @@ def _compute_stop_signals(run_dir: Path) -> dict[str, Any]:
         "patience": patience,
         "patience_exceeded": patience_exceeded,
         "done_rounds": done_rounds,
+        # Generation-denominated counters (done_rounds/rounds_since_improvement)
+        # count BATCHES; node_count is the raw recorded-node tally for
+        # observability. At workers:1 the two coincide (one node per generation).
+        "node_count": node_count,
         "max_rounds": max_rounds,
         "stop_reason": stop_reason,
         "improvement_epsilon": IMPROVEMENT_EPS,
