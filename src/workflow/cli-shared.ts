@@ -97,6 +97,9 @@ export function runCliPreflightLint(definitionPath: string, mode: LintMode): Wor
 
 type ParseArgsConfig = Parameters<typeof parseArgs>[0];
 
+/** The `options` map accepted by {@link parseArgsStrict} / {@link parseArgsResult}. */
+export type ParseArgsOptions = NonNullable<NonNullable<ParseArgsConfig>['options']>;
+
 export function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnType<typeof parseArgs> {
   try {
     return parseArgs({ ...opts, strict: true });
@@ -105,5 +108,33 @@ export function parseArgsStrict(opts: Omit<ParseArgsConfig, 'strict'>): ReturnTy
     writeStderr(`${RED}${message}${RESET}`);
     writeStderr(`${DIM}Run with --help to see available options.${RESET}`);
     process.exit(1);
+  }
+}
+
+/**
+ * Outcome of {@link parseArgsResult}: either the parsed `values`/`positionals`,
+ * or a structured failure carrying the parse error message.
+ */
+export type ParseArgsResult =
+  | ({ readonly ok: true } & ReturnType<typeof parseArgs>)
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * Strict {@link parseArgs} that RETURNS a discriminated failure on an unknown/
+ * typo'd flag or a missing option value, instead of writing to stderr and
+ * calling `process.exit(1)` like {@link parseArgsStrict}.
+ *
+ * Kept as a separate sibling so the existing exit-on-error callers
+ * (`workflow-command`, `run-state-command`) are unaffected. Callers that own a
+ * structured output contract — e.g. the agent-facing daemon-gate commands,
+ * where every result must be a single JSON object on stdout with a
+ * usage-derived exit code — use this so a parse error can be reported on the
+ * right channel rather than crashing the process with a generic exit code.
+ */
+export function parseArgsResult(opts: Omit<ParseArgsConfig, 'strict'>): ParseArgsResult {
+  try {
+    return { ok: true, ...parseArgs({ ...opts, strict: true }) };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
 }

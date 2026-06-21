@@ -346,4 +346,35 @@ describe('daemon gate commands (command-layer integration)', () => {
     expect(bad.json.ok).toBe(false);
     expect(bad.json.error).toBe('INVALID_EVENT');
   }, 30_000);
+
+  it('unknown flag honors the JSON/exit-code contract instead of a bare exit 1', async () => {
+    // A typo'd flag is caught during arg parsing — BEFORE any daemon connect —
+    // so no server is booted. The failure must NOT escape the contract via a
+    // stderr-only `process.exit(1)`: with `--json` it is a single structured
+    // JSON object on stdout with the usage exit code (2), so an agent driving
+    // the CLI can parse it.
+    const bad = await runCommand('run', [FIXTURE_PATH, 'Draft a thing', '--jsno', '--json']);
+    expect(bad.exitCode).toBe(2);
+    expect(bad.json.ok).toBe(false);
+    expect(bad.json.error).toBe('INVALID_USAGE');
+    expect(typeof bad.json.message).toBe('string');
+
+    // Without `--json` the failure stays off stdout entirely (human stderr only),
+    // and the exit code is still the usage code (2), never the generic 1.
+    const quiet = await runCommand('status', ['some-id', '--bogus']);
+    expect(quiet.exitCode).toBe(2);
+    expect(quiet.stdout.trim()).toBe('');
+  });
+
+  it('does not treat a `--json` consumed as an option value as the JSON flag', async () => {
+    // Edge case: `--json` is the VALUE of the value-taking `--workspace` option,
+    // not a flag. When a later bad flag (`--bogus`) makes strict parsing fail,
+    // the channel must be chosen by a real parse — NOT a literal scan that would
+    // see `--json` in argv and wrongly emit machine JSON to stdout. The caller
+    // never requested JSON mode, so the failure stays on stderr (stdout empty),
+    // still with the usage exit code.
+    const masked = await runCommand('run', [FIXTURE_PATH, 'Draft a thing', '--workspace', '--json', '--bogus']);
+    expect(masked.exitCode).toBe(2);
+    expect(masked.stdout.trim()).toBe('');
+  });
 });
