@@ -47,3 +47,6 @@ playwright-report/
 
 # Generated docs (build.sh regenerates these)
 docs/vuln-discovery-onboarding/*.pdf
+
+# Local scratch / staged experiments — never committed
+donotcommit/
