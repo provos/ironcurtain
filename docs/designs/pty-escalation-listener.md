@@ -4,6 +4,8 @@
 **Date:** 2026-02-27
 **Author:** IronCurtain Engineering
 
+> Historical design note: this document describes the original raw PTY and separate escalation-listener design. Current user-facing guidance should prefer `ironcurtain mux`; raw `ironcurtain start --pty` is a low-level/debug path.
+
 ## 1. Overview
 
 Docker Agent Mode currently runs Claude Code inside a Docker container with `--network=none` and mediates all tool calls through IronCurtain's trusted process. However, the user experience is constrained: `sendMessage()` calls `docker exec` with a message, waits for the process to exit, and collects stdout -- there is no interactive terminal. The user cannot watch Claude Code think, cannot type follow-up messages mid-stream, and cannot see Claude Code's native TUI output (spinners, diffs, file previews).

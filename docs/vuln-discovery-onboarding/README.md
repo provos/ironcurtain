@@ -33,15 +33,21 @@ npx tsx src/cli.ts doctor
 
 This verifies your Node.js version, Docker, credentials, compiled policy, and MCP server liveness. Add `--check-api` to also exercise an agent-model API round-trip and an OAuth refresh probe. Each failing or warning check prints a one-line remediation hint — read those before re-running. The exit code is `0` if no check returned `fail` (warnings don't fail the run), so it's safe to wire into CI.
 
-## 3. Smoke-test the builtin agent
+## 3. Smoke-test the agent
 
-Before touching Docker or workflows, confirm the basic plumbing works:
+For an interactive smoke test from source, use the mux:
+
+```bash
+npx tsx src/cli.ts mux
+```
+
+For a non-interactive check that is easier to capture in logs, `start` is still available:
 
 ```bash
 npx tsx src/cli.ts start "say hi"
 ```
 
-Expected output:
+Expected output for the non-interactive check:
 
 ```
 % tsx src/cli.ts start "say hi"

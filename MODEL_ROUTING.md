@@ -70,10 +70,10 @@ export OPENROUTER_API_KEY=sk-or-v1-...
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:4000
-ironcurtain start "your task"
+ironcurtain mux
 ```
 
-Or set `anthropicBaseUrl` in `~/.ironcurtain/config.json` for persistence.
+Or set `anthropicBaseUrl` in `~/.ironcurtain/config.json` for persistence. One-shot `ironcurtain start "your task"` runs use the same routing when you need a scriptable check.
 
 ### 5. Verify
 

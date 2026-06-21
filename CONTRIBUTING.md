@@ -44,7 +44,8 @@ npm run build          # TypeScript compilation + copy config assets to dist/
 npm test               # Run all tests (vitest)
 npm run lint           # Run ESLint
 npm run format         # Format code with Prettier
-npm start "task"       # Run the agent with a task (dev mode, uses tsx)
+npx tsx src/cli.ts mux          # Recommended interactive run from source
+npx tsx src/cli.ts start "task" # One-shot smoke test from source
 ```
 
 Run a single test file or test by name:

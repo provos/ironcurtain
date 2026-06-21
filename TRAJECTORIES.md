@@ -40,10 +40,11 @@ allocations.
 **Per-invocation CLI flag** `--capture-traces` (long form only):
 
 ```sh
-ironcurtain start --capture-traces "your task"
-ironcurtain start -w ./repo --capture-traces "your task"
+ironcurtain mux --capture-traces
+ironcurtain start --capture-traces "your task"           # one-shot/scripted
+ironcurtain start -w ./repo --capture-traces "your task" # one-shot workspace
 ironcurtain workflow start <name> --capture-traces "your task"
-ironcurtain daemon --capture-traces --web-ui      # sticky default for every session this daemon launches
+ironcurtain daemon --capture-traces --web-ui              # sticky default for every session this daemon launches
 ```
 
 There is no `--no-capture-traces`; capture is opt-in only.

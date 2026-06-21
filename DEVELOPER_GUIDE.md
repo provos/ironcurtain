@@ -29,7 +29,7 @@ IronCurtain's Docker Agent Mode runs an external agent (Claude Code, Goose, etc.
 ironcurtain mux
 ```
 
-This spawns a new tab running `ironcurtain start --pty --agent claude-code` inside a Docker container, enters full-screen mode, and you're immediately in the agent's TUI.
+This opens a managed PTY tab for the configured Docker agent, enters full-screen mode, and you're immediately in the agent's TUI.
 
 ## The Two Input Modes
 
@@ -359,9 +359,9 @@ ironcurtain mux
 # Press Ctrl-A or Escape to return to PTY mode.
 ```
 
-## PTY Mode Without the Mux
+## Legacy Raw PTY Mode
 
-You can still use PTY mode with a separate escalation listener (the original two-terminal workflow):
+Raw PTY mode remains available for low-level debugging with a separate escalation listener, but it is not the recommended interactive workflow:
 
 ```bash
 # Terminal 1 — agent session
@@ -371,7 +371,7 @@ ironcurtain start --pty
 ironcurtain escalation-listener
 ```
 
-This workflow does not support trusted input or auto-approval for PTY sessions. The mux is the recommended approach.
+This workflow does not support trusted input or auto-approval for PTY sessions. Use `ironcurtain mux` for normal interactive work.
 
 ## Keyboard Reference
 

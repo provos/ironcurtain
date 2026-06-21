@@ -15,16 +15,20 @@ The mux supports session resume and persona selection through an interactive pic
 
 See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
 
-## Builtin Agent (Code Mode)
+## Non-Mux Start Sessions
+
+`ironcurtain start` remains useful for one-shot tasks, scripts, and explicit builtin-agent sessions. It is not the recommended interactive Docker-agent UI; use `ironcurtain mux` for that.
+
+### Builtin Agent (Code Mode)
 
 IronCurtain's own LLM agent writes TypeScript that executes in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine. Docker is not required.
 
-### Interactive mode
+### Builtin interactive mode
 
 A multi-turn session where you type tasks and the agent responds:
 
 ```bash
-ironcurtain start
+ironcurtain start --agent builtin
 ```
 
 Escalated tool calls pause the agent and prompt you with `/approve` or `/deny`.
@@ -61,7 +65,7 @@ Manage personas with the `ironcurtain persona` subcommand (`create`, `list`, `co
 
 ### Session resume
 
-Resume a previous session's conversation history:
+Resume a previous non-mux session's conversation history. In mux, use `/resume` from command mode.
 
 ```bash
 ironcurtain start --resume <session-id>
@@ -81,9 +85,9 @@ Commands available during an interactive or single-shot session:
 | `/logs`    | Display diagnostic events                       |
 | `/quit`    | End the session                                 |
 
-## PTY Mode (Docker Agent, separate escalation listener)
+## Legacy Raw PTY Mode (Docker Agent, separate escalation listener)
 
-An alternative to the mux — run a raw PTY session in one terminal and handle escalations in another:
+Raw PTY mode is a low-level debugging workflow. It requires two terminals and does not provide mux trusted input:
 
 ```bash
 # Terminal 1 — interactive agent session (e.g., Claude Code in Docker)
@@ -93,7 +97,7 @@ ironcurtain start --pty
 ironcurtain escalation-listener
 ```
 
-This workflow does not support trusted input or auto-approval for PTY sessions. The mux is recommended instead.
+This workflow does not support trusted input or auto-approval for PTY sessions. Use `ironcurtain mux` for normal interactive work.
 
 **Emergency exit and terminal recovery:** Press `Ctrl-\` to trigger a graceful shutdown of the PTY session. If the process is killed ungracefully, run `reset` in that terminal to restore normal terminal mode.
 

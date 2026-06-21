@@ -23,7 +23,7 @@ import type { AgentId } from './docker/agent-adapter.js';
 
 const startSpec: CommandSpec = {
   name: 'ironcurtain start',
-  description: 'Run the agent (interactive or single-shot)',
+  description: 'Run a one-shot or non-mux agent session',
   usage: ['ironcurtain start [options] [task]'],
   options: [
     { flag: 'resume', short: 'r', description: 'Resume a previous session', placeholder: '<id>' },
@@ -35,20 +35,23 @@ const startSpec: CommandSpec = {
     },
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
-    { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
+    {
+      flag: 'pty',
+      description: 'Legacy raw PTY/debug mode; use ironcurtain mux for normal interactive Docker sessions',
+    },
     { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
     { flag: 'capture-traces', description: 'Capture LLM API traces for this run (overrides config; Docker mode only)' },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
   examples: [
-    'ironcurtain start                              # Interactive session',
-    'ironcurtain start "Summarize files in ."       # Single-shot task',
-    'ironcurtain start --resume <session-id>        # Resume a session',
+    'ironcurtain start "Summarize files in ."       # Single-shot/non-mux task',
+    'ironcurtain start --agent builtin              # Local builtin REPL',
+    'ironcurtain start --resume <session-id>        # Resume a non-mux session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
     'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
-    'ironcurtain start --pty                        # PTY mode: interactive Docker terminal',
+    'ironcurtain start --pty                        # Legacy raw PTY/debug; prefer ironcurtain mux',
     'ironcurtain start --list-agents                # List available agents',
   ],
 };

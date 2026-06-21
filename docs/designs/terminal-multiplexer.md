@@ -4,6 +4,8 @@
 **Date:** 2026-03-02
 **Author:** IronCurtain Engineering
 
+> Implementation note: references to `ironcurtain start --pty` in this design describe the mux internals. User-facing guidance should present `ironcurtain mux` as the normal interactive command.
+
 ## 1. Problem Statement
 
 Docker Agent Mode's PTY support (`ironcurtain start --pty`) provides a native interactive experience where the user's terminal is attached directly to Claude Code inside a container. However, the current architecture has three significant limitations:

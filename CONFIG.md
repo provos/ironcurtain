@@ -112,10 +112,10 @@ IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth. To us
 ```bash
 export ANTHROPIC_API_KEY="<your-litellm-virtual-key>"
 export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
-ironcurtain start "your task"
+ironcurtain mux
 ```
 
-LiteLLM handles model-name translation (e.g. mapping `claude-sonnet-4-6` to your chosen OpenRouter / Bedrock / OpenAI model). See LiteLLM's docs for sidecar setup.
+LiteLLM handles model-name translation (e.g. mapping `claude-sonnet-4-6` to your chosen OpenRouter / Bedrock / OpenAI model). One-shot `ironcurtain start "your task"` runs use the same routing when you need a scriptable check. See LiteLLM's docs for sidecar setup.
 
 ## Memory
 

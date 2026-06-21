@@ -85,7 +85,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 You can also place keys in a `.env` file in the project root (loaded automatically via `dotenv`), or add them to `~/.ironcurtain/config.json` via `ironcurtain config`. Environment variables take precedence over config file values. Supported: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
 
-**2. Run the first-start wizard** (runs automatically on first `ironcurtain start`, or explicitly):
+**2. Run the first-start wizard** (run this explicitly before using the recommended mux path; it also runs automatically on first non-mux `ironcurtain start`):
 
 ```bash
 ironcurtain setup
@@ -114,20 +114,20 @@ ironcurtain mux
 
 See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
 
-### Builtin agent (no Docker required)
+### Non-mux sessions
 
-For quick tasks or environments without Docker, IronCurtain's builtin agent runs entirely locally in a V8 sandbox:
+Use `ironcurtain start` for quick one-shot tasks, scripts, or when you explicitly want the local builtin agent. For normal interactive Docker-agent work, use `ironcurtain mux`.
 
 ```bash
-ironcurtain start                                    # Interactive multi-turn session
 ironcurtain start "Summarize the files in ./src"     # Single-shot mode
-ironcurtain start -w ./my-project "Fix the tests"    # Workspace mode
+ironcurtain start -w ./my-project "Fix the tests"    # Single-shot workspace mode
+ironcurtain start --agent builtin                    # Local builtin REPL, no Docker
 ironcurtain start --persona my-assistant "Check my email"  # Use a persona
 ```
 
 ### Other running modes
 
-IronCurtain also supports PTY mode, session resume (`--resume <session-id>`), a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. The daemon has an optional [web UI](DAEMON.md#web-ui) (`--web-ui`) for browser-based monitoring and escalation handling. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
+IronCurtain also supports session resume (`--resume <session-id>`), a legacy raw PTY/debug mode, a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. The daemon has an optional [web UI](DAEMON.md#web-ui) (`--web-ui`) for browser-based monitoring and escalation handling. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
 
 ### Multi-agent workflows
 

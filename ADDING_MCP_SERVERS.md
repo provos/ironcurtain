@@ -114,9 +114,9 @@ After completing all steps:
 
 1. **Build:** `npm run build`
 2. **Test:** `npm test`
-3. **Manual check:** Start a session and verify the new server's tools appear and policy decisions are correct:
+3. **Manual check:** Start the mux and ask the agent to verify the new server's tools appear and policy decisions are correct:
    ```bash
-   ironcurtain start "list the tools available from my-server"
+   ironcurtain mux
    ```
 
 ## Quick Reference

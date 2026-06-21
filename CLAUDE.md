@@ -31,8 +31,9 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 
 **Development invocation.** When running the CLI from source (without an installed `ironcurtain` binary or after editing TS files without rebuilding), use `tsx src/cli.ts <subcommand> ...` — this runs the TypeScript entry point directly. Do NOT use `node dist/cli.js` after editing source unless you've rebuilt; do NOT use `tsx src/index.ts` (that's a different entry that spawns the agent). Examples: `tsx src/cli.ts workflow lint <path>`, `tsx src/cli.ts workflow list`.
 
-- `ironcurtain start "your task"` - run the agent with a task (or `npm start "your task"` during development)
-- `ironcurtain start -w ./path "task"` - run the agent in an existing directory instead of a fresh sandbox
+- `ironcurtain mux` - preferred interactive Docker-agent UI
+- `ironcurtain start "your task"` - run a one-shot/non-mux task (or `tsx src/cli.ts start "your task"` during development)
+- `ironcurtain start -w ./path "task"` - run a one-shot/non-mux task in an existing directory instead of a fresh sandbox
 - `ironcurtain config` - interactively edit `~/.ironcurtain/config.json` (or `npm run config`)
 - `ironcurtain annotate-tools --server <name>` - classify MCP tool arguments via LLM for a single server (or `npm run annotate-tools -- --server <name>`). Use `--all` to annotate all servers.
 - `ironcurtain compile-policy` - compile constitution into policy rules (or `npm run compile-policy`). Supports `--constitution <path>`, `--output-dir <path>`, and `--server <name>` flags for alternative constitutions, output directories, and single-server debugging. The read-only policy is compiled via `npm run compile-policy -- --no-mcp --constitution src/config/constitution-readonly.md --output-dir src/config/generated-readonly`.
