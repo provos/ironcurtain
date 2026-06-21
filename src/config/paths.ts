@@ -607,11 +607,19 @@ export function getInvocationDir(workflowId: string, bundleId: BundleId, stateSl
  * `{stateId}.{N}` computation races and clobbers each other's diagnostics. Keying
  * the prefix on `lane.id` gives each lane its own `{stateId}_lane_{id}.{N}`
  * namespace so per-lane `session.log` / `session-metadata.json` never collide.
- * `_lane_<id>` is path-safe (digits only), so the combined prefix still passes
- * the slug check.
+ *
+ * `laneId`, when supplied, MUST be a non-negative integer (the orchestrator
+ * assigns it as a fan-out loop index). It is interpolated into a directory-name
+ * prefix, so this is enforced as defense-in-depth on a path component: a
+ * non-integer or negative value throws (it would indicate an internal bug). A
+ * valid `laneId` renders as `_lane_<digits>`, which is path-safe and still
+ * passes the slug check.
  */
 export function nextStateSlug(statesDir: string, stateId: string, laneId?: number): string {
   assertPathSafeSlug('state ID', stateId);
+  if (laneId !== undefined && (!Number.isInteger(laneId) || laneId < 0)) {
+    throw new Error(`nextStateSlug: laneId must be a non-negative integer, got ${laneId}`);
+  }
   const prefixBase = laneId === undefined ? stateId : `${stateId}_lane_${laneId}`;
   let max = 0;
   if (existsSync(statesDir)) {

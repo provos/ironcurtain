@@ -1003,14 +1003,29 @@ describe('ToolCallCoordinator', () => {
           ),
         ).rejects.toThrow('escalation hook boom');
 
-        // 2. A subsequent allowed call must succeed -- proving no mutex or
+        // 2. Exactly ONE audit entry is written for the attempted call: the
+        //    escalation-wait throw is now audited (denied) before re-raising,
+        //    so the call is no longer silently unaudited. No double-audit (the
+        //    settled-decision branch never ran).
+        const afterThrow = readAudit(auditPath);
+        expect(afterThrow).toHaveLength(1);
+        expect(afterThrow[0]?.toolName).toBe('write_file');
+        const throwResult = afterThrow[0]?.result as { status?: string; error?: string };
+        expect(throwResult.status).toBe('denied');
+        expect(throwResult.error).toContain('escalation hook boom');
+
+        // 3. A subsequent allowed call must succeed -- proving no mutex or
         //    admission slot leaked from the thrown hook.
         const next = await coordinator.handleStructuredToolCall(
           makeRequest({ toolName: 'list_allowed_directories', arguments: {} }),
         );
         expect(next.status).toBe('success');
+
+        // The successful call adds exactly one more audit entry: still no
+        // double-audit of the thrown escalation.
+        expect(readAudit(auditPath)).toHaveLength(2);
       } finally {
-        // 3. close() must drain cleanly (activeToolCalls back to 0).
+        // 4. close() must drain cleanly (activeToolCalls back to 0).
         await coordinator.close();
       }
     });

@@ -905,10 +905,28 @@ export async function handleCallTool(
       // the error propagates out of `handleCallTool` and the coordinator's
       // `runEscalationWait` finally reacquires+releases the call mutex while
       // `leaveToolCall` returns the admission slot -- no leaked mutex/slot.
-      // Pre-existing gap: a thrown hook writes NO audit line for this
-      // escalation (the audit write happens only on a settled decision
-      // below). This is unchanged by the mutex-release refactor.
-      const waitResult = await (deps.runEscalationWait ?? ((wait) => wait()))(waitForDecision);
+      // We now ALSO write one audit line for the attempted call before
+      // re-raising, so a thrown hook no longer leaves the escalation
+      // unaudited. The catch fires ONLY on a throw, so it never overlaps
+      // the settled-decision audit below (no double-audit), and it
+      // re-raises the original error to preserve the exception contract
+      // callers depend on (the `runEscalationWait` finally + `leaveToolCall`
+      // still run).
+      let waitResult: Awaited<ReturnType<typeof waitForDecision>>;
+      try {
+        waitResult = await (deps.runEscalationWait ?? ((wait) => wait()))(waitForDecision);
+      } catch (escalationError) {
+        const escalationErrorText =
+          escalationError instanceof Error ? escalationError.message : String(escalationError);
+        const reason = `Escalation wait failed: ${escalationErrorText}`;
+        // Align the outer `policyDecision` (the object `logAudit` closes
+        // over) with the denied outcome we are auditing, mirroring the
+        // settled-denied branch below.
+        policyDecision.status = 'deny';
+        policyDecision.reason = reason;
+        logAudit({ status: 'denied', error: reason }, 0, 'denied');
+        throw escalationError;
+      }
 
       if (waitResult.kind === 'auto-approved') {
         autoApproved = true;

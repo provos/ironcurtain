@@ -315,6 +315,53 @@ describe('validateDefinition', () => {
       });
       expect(() => validateDefinition(raw)).toThrow(WorkflowValidationError);
     });
+
+    // A numeric `fanOut.count` override produces multiple lanes at runtime even
+    // when settings.workers is 1 (orchestrator resolves count===number directly).
+    // The resultFile/greedy checks must gate on the EFFECTIVE lane count, not on
+    // settings.workers, so this numeric override no longer bypasses them.
+    it('rejects an unscoped fanOutMember resultFile when fanOut.count=3 overrides settings.workers=1', () => {
+      const raw = fanOutDefinition({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 3, join: 'barrier' } },
+        sampleState: { resultFile: '.evolve_runs/main/shared/result.json' },
+      });
+      expect(issuesFor(raw).some((issue) => issue.includes('resultFile must be per-lane-scoped'))).toBe(true);
+    });
+
+    it('rejects a hardcoded lane_<N> resultFile when fanOut.count=3 overrides settings.workers=1', () => {
+      const raw = fanOutDefinition({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 3, join: 'barrier' } },
+        sampleState: { resultFile: '.evolve_runs/main/current/lane_0/result.json' },
+      });
+      expect(
+        issuesFor(raw).some((issue) => issue.includes('hardcoded lane_<N> segment is written by EVERY lane')),
+      ).toBe(true);
+    });
+
+    it('rejects a greedy sampler when fanOut.count=3 overrides settings.workers=1', () => {
+      const raw = fanOutDefinition({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 3, join: 'barrier' } },
+        startPrompt: 'run evolve-brief --sampling-algorithm greedy',
+      });
+      expect(issuesFor(raw).some((issue) => issue.includes('cannot be used with greedy sampling'))).toBe(true);
+    });
+
+    it('keeps a single-lane numeric count (count=1, workers=1) free of multi-lane resultFile/greedy checks', () => {
+      // count=1 resolves to one lane, so a bare unscoped resultFile + greedy text
+      // must NOT be flagged — the effective-lanes gate stays at 1 here.
+      const def = validateDefinition(
+        fanOutDefinition({
+          settings: { workers: 1 },
+          workersState: { fanOut: { count: 1, join: 'barrier' } },
+          sampleState: { resultFile: '.evolve_runs/main/shared/result.json' },
+          startPrompt: 'run evolve-brief --sampling-algorithm greedy',
+        }),
+      );
+      expect(def.states.sample.resultFile).toBe('.evolve_runs/main/shared/result.json');
+    });
   });
 
   describe('structural validation (Zod)', () => {

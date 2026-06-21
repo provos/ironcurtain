@@ -12,7 +12,7 @@ import type {
   HumanGateTransitionDefinition,
 } from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES, SKILLS_NONE } from './types.js';
-import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR } from './lane-template.js';
+import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR, resolveFanOutWorkers } from './lane-template.js';
 import { REGISTERED_GUARDS } from './guards.js';
 import { looseModelId } from '../config/user-config.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
@@ -465,8 +465,14 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
 }
 
 function validateFanOutScaffolding(definition: WorkflowDefinition, issues: string[]): void {
-  const workers = definition.settings?.workers ?? 1;
   const stateNames = new Set(Object.keys(definition.states));
+  // The GLOBAL checks below (fanOutMember resultFile scoping + greedy rejection)
+  // must fire whenever ANY fan-out segment runs multiple lanes at runtime — not
+  // just when settings.workers > 1. A numeric `fanOut.count` override produces
+  // multiple lanes even at settings.workers: 1 (the runtime resolves each state
+  // with `resolveFanOutWorkers`), so gate on the EFFECTIVE max across all
+  // fan-out states. Mirrors orchestrator.runFanOutSegment exactly.
+  const effectiveWorkers = computeEffectiveMaxWorkers(definition);
 
   for (const [stateId, state] of Object.entries(definition.states)) {
     if (isExecutableState(state) && state.fanOut !== undefined) {
@@ -478,7 +484,7 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
     }
 
     if (
-      workers > 1 &&
+      effectiveWorkers > 1 &&
       state.type === 'deterministic' &&
       state.fanOutMember === true &&
       state.resultFile !== undefined
@@ -486,14 +492,14 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
       const verdict = classifyFanOutResultFile(state.resultFile);
       if (verdict === 'hardcoded-lane') {
         issues.push(
-          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
+          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under ${effectiveWorkers} effective lanes; ` +
             `a hardcoded lane_<N> segment is written by EVERY lane (the pump leaves an already-lane_-prefixed path ` +
             `unchanged) and will clobber. Use the lane_\${laneId} placeholder (the pump substitutes it per lane) ` +
             `or a bare ${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/ path (the pump lane-scopes it per lane).`,
         );
       } else if (verdict === 'unscoped') {
         issues.push(
-          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under settings.workers=${workers}; ` +
+          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under ${effectiveWorkers} effective lanes; ` +
             `resultFile must be per-lane-scoped: either rooted under the pump's current/ scratch dir (e.g. ` +
             `${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/result.json, which the pump rewrites to current/lane_<digits>/ per lane) ` +
             `or carry an explicit lane_\${laneId}/ segment.`,
@@ -502,11 +508,28 @@ function validateFanOutScaffolding(definition: WorkflowDefinition, issues: strin
     }
   }
 
-  if (workers > 1 && workflowDeclaresGreedySampler(definition)) {
+  if (effectiveWorkers > 1 && workflowDeclaresGreedySampler(definition)) {
     issues.push(
-      `settings.workers=${workers} cannot be used with greedy sampling; multi-lane evolve runs must declare a stochastic sampler.`,
+      `A fan-out segment resolves to ${effectiveWorkers} lanes, which cannot be used with greedy sampling; ` +
+        `multi-lane evolve runs must declare a stochastic sampler.`,
     );
   }
+}
+
+/**
+ * The maximum effective lane count across all fan-out states, taking each
+ * state's resolved count (`resolveFanOutWorkers`) into account. A bare
+ * settings.workers floor is included so a `count: 'workers'` state still
+ * reports the global worker count even when no numeric override is present.
+ */
+function computeEffectiveMaxWorkers(definition: WorkflowDefinition): number {
+  let max = definition.settings?.workers ?? 1;
+  for (const state of Object.values(definition.states)) {
+    if (isExecutableState(state) && state.fanOut !== undefined) {
+      max = Math.max(max, resolveFanOutWorkers(state.fanOut, definition.settings));
+    }
+  }
+  return max;
 }
 
 function validateFanOutState(

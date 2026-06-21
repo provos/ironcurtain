@@ -23,6 +23,7 @@ import {
   parseArtifactRef,
   usesVerdictEdges,
 } from './validate.js';
+import { resolveFanOutWorkers } from './lane-template.js';
 import { getWorkflowPackageDir } from './discovery.js';
 import { ACTIONABLE_DISCOVERY_REASONS, discoverSkillsWithErrors } from '../skills/discovery.js';
 import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
@@ -538,20 +539,23 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
 // ---------------------------------------------------------------------------
 
 function checkFanOutBudget(def: WorkflowDefinition): Diagnostic[] {
-  const workers = def.settings?.workers ?? 1;
-  if (workers <= 1) return [];
   if (def.settings?.maxRounds === undefined) return [];
   const maxRounds = def.settings.maxRounds;
 
   const diagnostics: Diagnostic[] = [];
   for (const [stateId, state] of Object.entries(def.states)) {
     if (!isExecutableState(state) || state.fanOut === undefined) continue;
+    // Gate on THIS state's effective lane count (a numeric fanOut.count override
+    // multiplies the budget even when settings.workers is 1), and use it in the
+    // maxRounds × workers math. Mirrors orchestrator.runFanOutSegment.
+    const workers = resolveFanOutWorkers(state.fanOut, def.settings);
+    if (workers <= 1) continue;
     diagnostics.push({
       code: 'WF013',
       severity: 'warning',
       stateId,
       message:
-        `Fan-out state "${stateId}" runs with settings.workers=${workers}; settings.maxRounds=${maxRounds} ` +
+        `Fan-out state "${stateId}" runs with ${workers} lanes; settings.maxRounds=${maxRounds} ` +
         `now caps batches, so the candidate budget is maxRounds × workers = ${maxRounds * workers}.`,
       hint: 'If maxRounds is intended as a candidate budget, divide it by workers or set an explicit batch budget.',
     });
@@ -564,12 +568,12 @@ function checkFanOutBudget(def: WorkflowDefinition): Diagnostic[] {
 // ---------------------------------------------------------------------------
 
 function checkFanOutChildBounds(def: WorkflowDefinition): Diagnostic[] {
-  const workers = def.settings?.workers ?? 1;
-  if (workers <= 1) return [];
-
   const diagnostics: Diagnostic[] = [];
   for (const state of Object.values(def.states)) {
     if (!isExecutableState(state) || state.fanOut === undefined) continue;
+    // Gate on THIS state's effective lane count: a numeric fanOut.count override
+    // runs multiple lanes even at settings.workers: 1. Mirrors the runtime.
+    if (resolveFanOutWorkers(state.fanOut, def.settings) <= 1) continue;
     const segment = state.segment ?? [];
 
     const segmentSet = new Set(segment);

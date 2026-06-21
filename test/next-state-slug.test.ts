@@ -96,6 +96,17 @@ describe('nextStateSlug', () => {
     expect(nextStateSlug(dir, 'researcher', 2)).toBe('researcher_lane_2.1');
   });
 
+  it('accepts a valid non-negative integer laneId', () => {
+    expect(nextStateSlug(dir, 'researcher', 0)).toBe('researcher_lane_0.1');
+    expect(nextStateSlug(dir, 'researcher', 7)).toBe('researcher_lane_7.1');
+  });
+
+  it('rejects a non-integer or negative laneId (defense-in-depth on the path component)', () => {
+    expect(() => nextStateSlug(dir, 'researcher', -1)).toThrow(/non-negative integer/);
+    expect(() => nextStateSlug(dir, 'researcher', 1.5)).toThrow(/non-negative integer/);
+    expect(() => nextStateSlug(dir, 'researcher', Number.NaN)).toThrow(/non-negative integer/);
+  });
+
   it('counts re-entries per lane independently of the bare and sibling-lane slugs', () => {
     mkdirSync(join(dir, 'researcher.1')); // a workers:1 (no-lane) leg
     mkdirSync(join(dir, 'researcher_lane_0.1'));

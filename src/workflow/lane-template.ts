@@ -21,7 +21,22 @@
  * text into a prompt/argv. If you need to interpolate untrusted data, escape it
  * at the call site first; do not relax this module to do it for you.
  */
-import type { WorkflowContext } from './types.js';
+import type { WorkflowContext, FanOutDefinition, WorkflowSettings } from './types.js';
+
+/**
+ * Resolves the effective lane count for a fan-out state, exactly as the runtime
+ * does at `orchestrator.ts` (`runFanOutSegment`): `count: 'workers'` defers to
+ * `settings.workers` (default 1), while a numeric `count` is a per-state override
+ * independent of the global worker count.
+ *
+ * Single source of truth so the validator and linter gate their multi-lane
+ * safety checks on the SAME lane count the runtime will spin up — a numeric
+ * `count` override must not be able to bypass those checks just because
+ * `settings.workers` is 1. Keep in lockstep with the orchestrator's resolution.
+ */
+export function resolveFanOutWorkers(fanOut: FanOutDefinition, settings?: WorkflowSettings): number {
+  return fanOut.count === 'workers' ? (settings?.workers ?? 1) : fanOut.count;
+}
 
 // Lane-dir format seam: `current/lane_<k>`. The matching step-name half of this
 // convention lives on the Python side as STEP_NAME_RE in

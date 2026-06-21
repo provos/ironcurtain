@@ -1121,4 +1121,42 @@ describe('WF013/WF014 — fan-out scaffolding diagnostics', () => {
     expect(wf013).toHaveLength(1);
     expect(wf013[0]?.stateId).toBe('workers');
   });
+
+  // A numeric `fanOut.count` override runs multiple lanes at runtime even at
+  // settings.workers=1; WF013/WF014 gate per-state on the RESOLVED count, so the
+  // numeric override no longer bypasses them.
+  it('WF013/WF014 still fire when fanOut.count=3 overrides settings.workers=1', () => {
+    const result = lintWorkflow(
+      fanOutWorkflow({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 3, join: 'barrier' } },
+      }),
+      stubCtx,
+    );
+
+    const wf013 = result.filter((d) => d.code === 'WF013');
+    expect(wf013).toHaveLength(1);
+    expect(wf013[0]?.stateId).toBe('workers');
+    // Budget math uses the state's effective workers (3), not settings.workers (1):
+    // maxRounds(5) × workers(3) = 15.
+    expect(wf013[0]?.message).toContain('3 lanes');
+    expect(wf013[0]?.message).toContain('maxRounds × workers = 15');
+
+    const wf014 = result.filter((d) => d.code === 'WF014');
+    expect(wf014).toHaveLength(1);
+    expect(wf014[0]?.stateId).toBe('worker');
+  });
+
+  it('WF013/WF014 stay silent when a numeric count resolves to a single lane (count=1, workers=1)', () => {
+    const result = lintWorkflow(
+      fanOutWorkflow({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 1, join: 'barrier' } },
+      }),
+      stubCtx,
+    );
+
+    expect(result.filter((d) => d.code === 'WF013')).toHaveLength(0);
+    expect(result.filter((d) => d.code === 'WF014')).toHaveLength(0);
+  });
 });

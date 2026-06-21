@@ -111,6 +111,7 @@ import {
   DEFAULT_EVOLVE_LANE_RELATIVE_DIR,
   evolveResultScriptIndex,
   evolveStepName,
+  resolveFanOutWorkers,
 } from './lane-template.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import {
@@ -2723,7 +2724,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       return this.fanOutErrorResult(input, `State "${input.stateId}" is not a configured fan-out segment.`);
     }
 
-    const workers = fanOut.count === 'workers' ? (definition.settings?.workers ?? 1) : fanOut.count;
+    const workers = resolveFanOutWorkers(fanOut, definition.settings);
     if (!Number.isInteger(workers) || workers < 1) {
       return this.fanOutErrorResult(input, `State "${input.stateId}" resolved to invalid worker count ${workers}.`);
     }
