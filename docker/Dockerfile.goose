@@ -23,7 +23,9 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Entrypoint: bridges UDS proxy, writes Goose config, hands off to CMD
+# Entrypoint: bridges UDS proxy, writes Goose config, hands off to CMD.
+# It sources the shared UID/GID remap helper, so that must be present too.
+COPY entrypoint-uid-remap.sh /usr/local/bin/ironcurtain-uid-remap.sh
 COPY entrypoint-goose.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

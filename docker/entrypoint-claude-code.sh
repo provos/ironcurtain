@@ -4,51 +4,12 @@
 # Non-PTY mode: CMD is "sleep infinity" (agent commands arrive via docker exec).
 # PTY mode: CMD is the socat PTY command from buildPtyCommand().
 
-# Runtime UID remap (Linux only).
-#
-# Issue #232: when the host UID is not 1000, bind-mounted directories
-# (e.g., the conversation-state dir) appear inside the container owned
-# by the host UID, and the baked codespace user (UID 1000) cannot write
-# to them. The host-side launcher passes `--user 0:0` plus the host
-# UID/GID via IRONCURTAIN_AGENT_UID / IRONCURTAIN_AGENT_GID so this
-# block (running as root) can renumber the codespace account to match
-# the host before dropping privileges. On macOS, Docker Desktop's
-# VirtioFS translates UIDs transparently and the env vars are not set,
-# so this block is skipped.
-if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN_AGENT_GID" ]; then
-  if [ "$IRONCURTAIN_AGENT_UID" != "1000" ] || [ "$IRONCURTAIN_AGENT_GID" != "1000" ]; then
-    # Renumber the codespace user/group to the host UID/GID, then fix
-    # ownership on the baked home dir and workspace mount so the
-    # remapped codespace user can read/write them. Bind-mounted
-    # subdirectories (conversation state, sockets, orientation) keep
-    # their host-side ownership, which now matches codespace.
-    #
-    # FAIL HARD on remap errors. Previously these commands ran without
-    # return-code checks: if `usermod -u $HOST_UID codespace` collided
-    # with an existing image user (plausible for system UIDs like 33
-    # `www-data` or 100 `systemd-network`), the entrypoint would
-    # silently continue, then `chown` and `runuser -u codespace`
-    # would operate on the still-UID-1000 codespace — recreating the
-    # original issue #232 bug with no diagnostic. Abort with an explicit
-    # error instead so the operator sees what went wrong.
-    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace || {
-      echo "[ironcurtain] groupmod failed: cannot remap codespace group to GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
-      exit 1
-    }
-    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace || {
-      echo "[ironcurtain] usermod failed: cannot remap codespace user to UID $IRONCURTAIN_AGENT_UID (already in use?)" >&2
-      exit 1
-    }
-    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace || {
-      echo "[ironcurtain] chown failed: cannot reset ownership of /home/codespace and /workspace to $IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" >&2
-      exit 1
-    }
-  fi
-  # Re-exec the entrypoint as the (possibly remapped) codespace user.
-  # The remainder of this script runs under codespace, so $HOME and
-  # sudoers (which keys on the username) resolve correctly.
-  exec runuser -u codespace -- "$0" "$@"
-fi
+# Runtime UID/GID remap (Linux only). The shared helper renumbers the
+# baked codespace user/group to match the host UID/GID (issue #232) and
+# re-execs this entrypoint as codespace. Sourced so it shares this
+# script's $0/$@; see the helper for the full rationale (issues #232 and
+# #291). No-op on macOS and when already running as codespace.
+. /usr/local/bin/ironcurtain-uid-remap.sh
 
 # Bridge UDS to local TCP so HTTPS_PROXY works
 MITM_SOCK="/run/ironcurtain/mitm-proxy.sock"
