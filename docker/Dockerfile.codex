@@ -5,6 +5,9 @@ FROM ironcurtain-base:latest
 USER root
 RUN npm install -g @openai/codex
 
+# The entrypoint sources the shared UID/GID remap helper, so that must be
+# present in the image too.
+COPY entrypoint-uid-remap.sh /usr/local/bin/ironcurtain-uid-remap.sh
 COPY entrypoint-codex.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

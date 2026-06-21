@@ -5,7 +5,9 @@ USER root
 RUN npm install -g @anthropic-ai/claude-code
 
 # The entrypoint script copies runtime-generated config into the right
-# location before the agent is invoked via docker exec.
+# location before the agent is invoked via docker exec. It sources the
+# shared UID/GID remap helper, so that must be present too.
+COPY entrypoint-uid-remap.sh /usr/local/bin/ironcurtain-uid-remap.sh
 COPY entrypoint-claude-code.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

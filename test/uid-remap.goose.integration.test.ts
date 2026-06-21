@@ -81,6 +81,20 @@ const REMAP_UID = 1500;
 const COLLIDING_UID = 33;
 
 /**
+ * A GID known to already exist in the base image as the `users` group
+ * (GID 100 on the Debian-derived bases used for the agent images). This is
+ * the exact issue #291 scenario: on nixos/WSL and many Linux desktops the
+ * invoking user's primary group is GID 100, so the host passes
+ * IRONCURTAIN_AGENT_GID=100. A GID collision is benign — the entrypoint
+ * must reuse the existing group (via `usermod -g`) rather than aborting
+ * with the old unconditional `groupmod -g` which failed with "GID already
+ * exists". The reuse-branch assertion below verifies the group name is the
+ * pre-existing one, so this test fails loudly rather than silently routing
+ * through groupmod if a future base image ever stops shipping `users:x:100`.
+ */
+const EXISTING_GID = 100;
+
+/**
  * Polls until the entrypoint has finished running `usermod`/`groupmod`/`chown`
  * and has exec'd the CMD. The universal devcontainer image has a large
  * `/home/codespace` (Conda, NVM, Hugo, etc.) that `usermod -u` scans for
@@ -154,6 +168,7 @@ const gooseDockerReady =
 interface RemapObservations {
   idCodespaceUid?: string;
   idCodespaceGid?: string;
+  idCodespaceGidName?: string;
   passwdUid?: string;
   homeStatUid?: string;
   runuserUid?: string;
@@ -309,11 +324,147 @@ describe.skipIf(!gooseDockerReady)('Goose agent container UID/GID remap (issue #
   });
 
   /**
+   * Issue #291 success path: a GID collision is BENIGN and must NOT abort
+   * startup. We force a remap to a free UID (1500) but to GID 100
+   * (`users`), which the base image already bakes in. The old entrypoint
+   * ran `groupmod -g 100 codespace` unconditionally and died with
+   * "GID '100' already exists"; the fix detects the existing group and
+   * reuses it as codespace's primary group via `usermod -g 100`. The
+   * entrypoint must then chown /home/codespace and /workspace to
+   * REMAP_UID:100 and `runuser -u codespace` must land on REMAP_UID with
+   * primary group 100. Goose mirror of the Claude Code test.
+   */
+  describe('forced remap with a colliding GID (issue #291)', () => {
+    let homeDir: string;
+    let workspaceDir: string;
+    let containerName: string;
+    let originalUid: number;
+    let originalGid: number;
+    const observations: RemapObservations = {};
+
+    beforeAll(async () => {
+      // Capture the real UID/GID for the workspace chown-back during cleanup.
+      originalUid = process.getuid?.() ?? 1000;
+      originalGid = process.getgid?.() ?? 1000;
+
+      homeDir = mkdtempSync(join(tmpdir(), 'ironcurtain-uidremap-goose-gid-test-'));
+      workspaceDir = join(homeDir, 'workspace');
+      mkdirSync(workspaceDir, { recursive: true });
+      containerName = `ironcurtain-uidremap-goose-gid-${process.pid}-${Date.now()}`;
+
+      // Run the entrypoint as root with a free UID but a GID (100) that
+      // already exists in the image. CMD is `sleep 180` so the container
+      // stays up long enough for `docker exec` to inspect post-remap state.
+      await execFile(
+        'docker',
+        [
+          'run',
+          '--rm',
+          '-d',
+          '--name',
+          containerName,
+          '--user',
+          '0:0',
+          '-e',
+          `IRONCURTAIN_AGENT_UID=${REMAP_UID}`,
+          '-e',
+          `IRONCURTAIN_AGENT_GID=${EXISTING_GID}`,
+          '-v',
+          `${workspaceDir}:/workspace`,
+          IMAGE,
+          'sleep',
+          '180',
+        ],
+        { timeout: 30_000 },
+      );
+
+      // Wait for the full remap (including the recursive chown of
+      // /workspace) before reading state.
+      await waitForRemapComplete(containerName, REMAP_UID, 90_000);
+
+      // Capture the numeric primary GID and the group NAME: after
+      // `usermod -g 100` the name is the pre-existing group (`users`),
+      // whereas the old `groupmod -g` path would have left it as
+      // `codespace`. The name proves which branch ran (asserted below).
+      const idOut = await dockerExecAs(containerName, '0:0', 'id', 'codespace');
+      observations.idCodespaceUid = /uid=(\d+)\(codespace\)/.exec(idOut.stdout)?.[1];
+      const gidMatch = /gid=(\d+)\((\w+)\)/.exec(idOut.stdout);
+      observations.idCodespaceGid = gidMatch?.[1];
+      observations.idCodespaceGidName = gidMatch?.[2];
+
+      const passwdOut = await dockerExecAs(containerName, '0:0', 'sh', '-c', 'getent passwd codespace | cut -d: -f3');
+      observations.passwdUid = passwdOut.stdout.trim();
+
+      const homeStat = await dockerExecAs(containerName, '0:0', 'stat', '-c', '%u', '/home/codespace');
+      observations.homeStatUid = homeStat.stdout.trim();
+
+      const wsStat = await dockerExecAs(containerName, '0:0', 'stat', '-c', '%u', '/workspace');
+      observations.workspaceStatUid = wsStat.stdout.trim();
+
+      const runuserUid = await dockerExecAs(containerName, 'codespace', 'id', '-u');
+      const runuserName = await dockerExecAs(containerName, 'codespace', 'whoami');
+      observations.runuserUid = runuserUid.stdout.trim();
+      observations.runuserName = runuserName.stdout.trim();
+    }, 120_000);
+
+    afterAll(async () => {
+      // Restore workspace ownership BEFORE removing the container; the
+      // entrypoint's `chown -R ${REMAP_UID}:${EXISTING_GID} /workspace`
+      // propagates through the bind mount, so without this restore the
+      // host tempdir is left owned by REMAP_UID and rmSync fails EACCES.
+      if (containerName) {
+        try {
+          await dockerExecAs(containerName, '0:0', 'chown', '-R', `${originalUid}:${originalGid}`, '/workspace');
+        } catch {
+          /* container gone or chown failed */
+        }
+        try {
+          await execFile('docker', ['rm', '-f', containerName], { timeout: 10_000 });
+        } catch {
+          /* container already gone */
+        }
+      }
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    it(`renumbered codespace user to UID ${REMAP_UID} despite the GID collision`, () => {
+      expect(observations.idCodespaceUid).toBe(String(REMAP_UID));
+      expect(observations.passwdUid).toBe(String(REMAP_UID));
+    });
+
+    it(`reused existing group: codespace primary GID is ${EXISTING_GID} (usermod -g path, not groupmod)`, () => {
+      expect(observations.idCodespaceGid).toBe(String(EXISTING_GID));
+      // The group NAME proves which branch ran: `usermod -g` reuse points
+      // codespace at the pre-existing group (`users`); the free-GID
+      // `groupmod -g` path would show `codespace`. Asserting it is NOT
+      // `codespace` keeps the test honest if a future base image drops
+      // `users:x:100` (which would otherwise still pass green).
+      expect(observations.idCodespaceGidName).toBeDefined();
+      expect(observations.idCodespaceGidName).not.toBe('codespace');
+    });
+
+    it(`chown -R reset /home/codespace ownership to ${REMAP_UID}`, () => {
+      expect(observations.homeStatUid).toBe(String(REMAP_UID));
+    });
+
+    it(`chown -R reset /workspace ownership to ${REMAP_UID}`, () => {
+      expect(observations.workspaceStatUid).toBe(String(REMAP_UID));
+    });
+
+    it('dropping privileges via runuser/--user codespace lands on the remapped UID', () => {
+      expect(observations.runuserUid).toBe(String(REMAP_UID));
+      expect(observations.runuserName).toBe('codespace');
+    });
+  });
+
+  /**
    * Failure-diagnostic path: a UID collision (33 == `www-data` in the base
-   * image) makes `groupmod`/`usermod` fail. The entrypoint must exit
-   * non-zero and emit the `[ironcurtain] {usermod,groupmod} failed:`
-   * diagnostic so operators see what went wrong instead of silently
-   * running with a broken UID mapping.
+   * image) makes `usermod -u` fail. The entrypoint must exit non-zero and
+   * emit the `[ironcurtain] usermod failed:` diagnostic so operators see
+   * what went wrong instead of silently running with a broken UID mapping.
+   * (GID 33 also belongs to www-data, but a GID collision is now benign —
+   * the entrypoint reuses the group via `usermod -g` and proceeds to the
+   * UID remap, which is where the hard failure surfaces.)
    */
   describe('UID collision is reported as a hard error', () => {
     let containerName: string;
@@ -334,11 +485,13 @@ describe.skipIf(!gooseDockerReady)('Goose agent container UID/GID remap (issue #
 
     it(`entrypoint exits non-zero and logs a diagnostic when UID ${COLLIDING_UID} collides with a baked user`, async () => {
       // Run the entrypoint as root (`--user 0:0`) with a colliding
-      // IRONCURTAIN_AGENT_UID. `groupmod` runs first; gid 33 also
-      // belongs to `www-data`, so the diagnostic will be `groupmod
-      // failed:` (the entrypoint fails on the first collision). Either
-      // error proves the hard-error contract: silent fall-through is
-      // the regression we're guarding against.
+      // IRONCURTAIN_AGENT_UID. GID 33 (www-data) already exists, so the
+      // entrypoint treats the GID as a benign collision and reuses the
+      // group via `usermod -g 33`; the hard failure then surfaces on
+      // `usermod -u 33 codespace`, which collides with the baked
+      // www-data user. Either diagnostic proves the hard-error contract:
+      // silent fall-through to a broken UID mapping is the regression we
+      // guard against.
       let result: { stdout: string; stderr: string; exitCode: number };
       try {
         const ok = await execFile(
@@ -368,9 +521,11 @@ describe.skipIf(!gooseDockerReady)('Goose agent container UID/GID remap (issue #
       // Container must exit non-zero. The entrypoint script uses `exit 1`
       // explicitly on each failure branch.
       expect(result.exitCode).not.toBe(0);
-      // Stderr must contain one of the diagnostic lines — we accept
-      // either `usermod failed:` or `groupmod failed:` because groupmod
-      // runs first and gid 33 also collides with www-data.
+      // Stderr must contain one of the diagnostic lines. With the issue
+      // #291 fix the UID collision surfaces as `usermod failed:`; we keep
+      // the regex permissive (also matching `groupmod failed:`) so the
+      // contract assertion is robust to future ordering changes — silent
+      // fall-through is what we guard against.
       const combined = `${result.stdout}\n${result.stderr}`;
       expect(combined).toMatch(/\[ironcurtain\] (usermod|groupmod) failed:/);
     }, 60_000);

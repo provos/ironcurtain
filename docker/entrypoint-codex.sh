@@ -1,25 +1,11 @@
 #!/bin/bash
 # IronCurtain entrypoint for Codex CLI containers.
 
-# Runtime UID remap (Linux only). See entrypoint-claude-code.sh for the
-# detailed rationale.
-if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN_AGENT_GID" ]; then
-  if [ "$IRONCURTAIN_AGENT_UID" != "1000" ] || [ "$IRONCURTAIN_AGENT_GID" != "1000" ]; then
-    groupmod -g "$IRONCURTAIN_AGENT_GID" codespace || {
-      echo "[ironcurtain] groupmod failed: cannot remap codespace group to GID $IRONCURTAIN_AGENT_GID (already in use?)" >&2
-      exit 1
-    }
-    usermod -u "$IRONCURTAIN_AGENT_UID" -g "$IRONCURTAIN_AGENT_GID" codespace || {
-      echo "[ironcurtain] usermod failed: cannot remap codespace user to UID $IRONCURTAIN_AGENT_UID (already in use?)" >&2
-      exit 1
-    }
-    chown -R "$IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" /home/codespace /workspace || {
-      echo "[ironcurtain] chown failed: cannot reset ownership of /home/codespace and /workspace to $IRONCURTAIN_AGENT_UID:$IRONCURTAIN_AGENT_GID" >&2
-      exit 1
-    }
-  fi
-  exec runuser -u codespace -- "$0" "$@"
-fi
+# Runtime UID/GID remap (Linux only). Shared with the other agent
+# entrypoints so the remap logic cannot drift (issues #232 and #291).
+# Sourced so it shares this script's $0/$@; no-op on macOS and when
+# already running as codespace.
+. /usr/local/bin/ironcurtain-uid-remap.sh
 
 MITM_SOCK="/run/ironcurtain/mitm-proxy.sock"
 PROXY_PORT=18080
