@@ -18,6 +18,7 @@
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 
 import { resolveWorkflowPath } from './discovery.js';
 import {
@@ -95,13 +96,25 @@ type GateArgs =
   | { readonly ok: false; readonly exitCode: number };
 
 /**
- * Cheap pre-scan for the `--json` flag, used to pick the output channel when
- * strict parsing FAILS before {@link OutputMode} can be read from parsed
- * values. A typo'd flag must still honor the caller's `--json` choice so the
- * failure lands on the right channel (machine JSON on stdout vs human stderr).
+ * Picks the output channel when strict parsing FAILS, before {@link OutputMode}
+ * can be read from parsed values. A typo'd flag must still honor the caller's
+ * `--json` choice so the failure lands on the right channel (machine JSON on
+ * stdout vs human stderr).
+ *
+ * Uses a NON-strict re-parse — which never throws on the offending flag that
+ * triggered this path — rather than a literal `args.includes('--json')`. The
+ * loose parse still lets a known value-taking option consume its argument, so
+ * `--workspace --json` does NOT enable JSON mode (here `--json` is the
+ * workspace value, not a flag) and `--json=...` forms are handled. Falls back
+ * to a literal scan only if the loose parse itself cannot run.
  */
-function detectOutputMode(args: string[]): OutputMode {
-  return { json: args.includes('--json') };
+function detectOutputMode(args: string[], options: ParseArgsOptions): OutputMode {
+  try {
+    const { values } = parseArgs({ args, options, strict: false, allowPositionals: true });
+    return { json: values.json === true };
+  } catch {
+    return { json: args.includes('--json') };
+  }
 }
 
 /**
@@ -115,7 +128,7 @@ function detectOutputMode(args: string[]): OutputMode {
 function parseGateArgs(args: string[], options: ParseArgsOptions): GateArgs {
   const result = parseArgsResult({ args, options, allowPositionals: true });
   if (!result.ok) {
-    const mode = detectOutputMode(args);
+    const mode = detectOutputMode(args, options);
     return {
       ok: false,
       exitCode: fail(

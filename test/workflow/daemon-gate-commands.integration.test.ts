@@ -365,4 +365,16 @@ describe('daemon gate commands (command-layer integration)', () => {
     expect(quiet.exitCode).toBe(2);
     expect(quiet.stdout.trim()).toBe('');
   });
+
+  it('does not treat a `--json` consumed as an option value as the JSON flag', async () => {
+    // Edge case: `--json` is the VALUE of the value-taking `--workspace` option,
+    // not a flag. When a later bad flag (`--bogus`) makes strict parsing fail,
+    // the channel must be chosen by a real parse — NOT a literal scan that would
+    // see `--json` in argv and wrongly emit machine JSON to stdout. The caller
+    // never requested JSON mode, so the failure stays on stderr (stdout empty),
+    // still with the usage exit code.
+    const masked = await runCommand('run', [FIXTURE_PATH, 'Draft a thing', '--workspace', '--json', '--bogus']);
+    expect(masked.exitCode).toBe(2);
+    expect(masked.stdout.trim()).toBe('');
+  });
 });
