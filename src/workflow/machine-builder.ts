@@ -115,10 +115,16 @@ export interface RoundChildOutcome {
   readonly drainedBy?: { readonly index: number; readonly status: 'blocked' | 'errored'; readonly reason: string };
 }
 
-/** Per-lane summary surfaced on the fan-out result for observability. */
+/**
+ * Per-lane summary surfaced on the fan-out result for observability. When a lane
+ * was `drained` (stopped because a peer blocked/errored), `drainedBy` names the
+ * triggering peer and carries its reason, so the join log records WHICH lane's
+ * escalation stopped this one — signal the bare `drained` status alone lacks.
+ */
 export interface RoundChildSummary {
   readonly index: number;
   readonly status: RoundChildStatus;
+  readonly drainedBy?: { readonly index: number; readonly status: 'blocked' | 'errored'; readonly reason: string };
 }
 
 /**

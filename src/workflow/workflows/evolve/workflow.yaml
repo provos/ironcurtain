@@ -324,14 +324,17 @@ states:
           precomputed stop_reason; do NOT recompute target, patience, or max-round
           logic yourself.
 
-      One recovery case: if a human just approved an evaluator-blocked round, you are
-      entered mid-round with a candidate written but not yet scored. Detect this by
-      /workspace/.evolve_runs/main/current/context.json present AND result.json absent,
-      and emit evaluate to resume that round rather than starting a new one.
-      This recovery case is only for the legacy bare current/ files. If the previous
-      output says a fan-out batch escalated or drained lanes under current/lane_<k>/,
-      discard that lane scratch and re-decide normally; emit design for a fresh batch
-      unless stop_signals.json requires complete or the run is unrecoverable.
+      Recovery after a human just approved an escalated round depends on the SCRATCH
+      SHAPE, which the previous output states explicitly:
+        - Bare current/ (the message says "Scratch is the bare current/"): a single
+          candidate is written but not yet scored. Confirm with
+          /workspace/.evolve_runs/main/current/context.json present AND result.json
+          absent, and emit evaluate to RESUME that round in place. Do NOT discard it
+          or start a fresh batch.
+        - Lane-scoped under current/lane_<k>/ (the message says "Scratch is
+          lane-scoped"): a fan-out batch escalated or drained its lanes. Discard that
+          lane scratch and re-decide normally; emit design for a fresh batch unless
+          stop_signals.json requires complete or the run is unrecoverable.
 
       If a human directive in this message requests more rounds, that directive
       overrides any stop_reason for THIS turn only: emit design to start one more

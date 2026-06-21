@@ -178,10 +178,26 @@ function toRoundChildStatus(value: unknown, index: number): RoundChildStatus {
   return 'errored';
 }
 
+/**
+ * The settled outcome of the first lane to reach `blocked`/`errored`, passed to
+ * every un-settled peer so they can be drained (stopped) on its behalf. Carries
+ * the trigger's `index`/`status`/`context` plus the `reason` computed ONCE at
+ * the trigger source ({@link roundChildReason}) and threaded through, so neither
+ * the drain log nor each drained peer's `drainedBy` recomputes it.
+ */
 type RoundChildDrainTrigger = Pick<RoundChildOutcome, 'index' | 'status' | 'context'> & {
   readonly status: 'blocked' | 'errored';
+  readonly reason: string;
 };
 
+/**
+ * The two-phase join handle for one lane. `promise` resolves either by the
+ * child's own snapshot reaching a terminal (natural settle) or by an external
+ * {@link drain} call (a peer blocked/errored). `isSettled` is the first-wins
+ * guard the drain loop checks so a lane that already settled is never drained;
+ * `drain` is the external resolver that natural-settle alone cannot express
+ * (see {@link waitForRoundChild} for why `xstate.waitFor` does not fit).
+ */
 interface RoundChildWaiter {
   readonly index: number;
   readonly actor: AnyActorRef;
@@ -190,6 +206,11 @@ interface RoundChildWaiter {
   readonly drain: (trigger: RoundChildDrainTrigger) => void;
 }
 
+/**
+ * One blocked/errored lane as it appears in the aggregated gate's `issues`
+ * payload — the wire shape the human reviewer sees per offending lane. The
+ * `reason` is the lane's surfaced cause (see {@link roundChildReason}).
+ */
 interface FanOutIssue {
   readonly index: number;
   readonly status: 'blocked' | 'errored';
@@ -2683,12 +2704,33 @@ export class WorkflowOrchestrator implements WorkflowController {
     const providedRoundMachine = this.provideActors(roundMachine, workflowId, definition, roundMachinesByState);
     let drainTrigger: RoundChildDrainTrigger | undefined;
     const childActors: RoundChildWaiter[] = [];
+    // Drain-on-escalation trigger. WHAT: the FIRST lane to reach `blocked`/
+    // `errored` latches `drainTrigger`; the `!== undefined` guard makes this
+    // fire-once, so a later co-blocker never re-triggers. Every un-settled peer
+    // is then drained (stopped) on the trigger's behalf.
+    //
+    // WHY drain-first / discard healthy peers: a batch escalation re-decides the
+    // WHOLE round (the parent routes the whole batch to one human gate), so an
+    // in-flight peer's eventual `recorded` would be thrown away anyway — draining
+    // stops that wasted LLM spend instead of letting peers run to completion.
+    //
+    // WHY stop-at-boundary, NOT AbortSignal: there is no AbortSignal threaded
+    // into the executor layer (FSM-M3), so a lane can only be stopped at a state
+    // boundary via `actor.stop()`; an already-dispatched external service call
+    // may still finish out-of-band, which is why {@link waitForRoundChild}'s
+    // drain resolves the lane's outcome the moment it stops rather than awaiting
+    // the in-flight call.
+    //
+    // Skip edges: the trigger lane itself is skipped (it already settled with its
+    // own blocked/errored outcome), and any `isSettled()` peer is skipped — a peer
+    // that RECORDED before the drain reached it keeps its real outcome (it is not
+    // rewritten to `drained`). The SINGLE aggregated gate over all
+    // blocked/errored lanes is produced later, at {@link joinFanOutBatch}.
     const requestDrain = (trigger: RoundChildDrainTrigger): void => {
       if (drainTrigger !== undefined) return;
       drainTrigger = trigger;
       instance.tab.write(
-        `[fanout] "${input.stateId}" draining peers after lane ${trigger.index} ${trigger.status}: ` +
-          this.roundChildReason(trigger),
+        `[fanout] "${input.stateId}" draining peers after lane ${trigger.index} ${trigger.status}: ${trigger.reason}`,
       );
       for (const child of childActors) {
         if (child.index === trigger.index || child.isSettled()) continue;
@@ -2696,6 +2738,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       }
     };
 
+    // Two loops on purpose: construct ALL waiters before starting ANY actor, so
+    // an early-settling child's drain reaches peers that already have waiters
+    // (a child started in loop 1 could settle synchronously and call
+    // `requestDrain` before loop 2's later peers existed).
     for (let index = 0; index < workers; index += 1) {
       const childContext = this.buildFanOutLaneContext(
         input.context,
@@ -3158,11 +3204,25 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   /**
-   * Barrier primitive for one lane: resolves when the child round actor
-   * reaches a `final` state (`status === 'done'`), carrying that terminal's
-   * name and the context the lane left behind. A free-standing child fires no
-   * parent-visible `onDone`, so the parent watches the child's OWN snapshot
-   * (§6.2) via subscribe-until-done rather than an `xstate.done.actor` event.
+   * Barrier primitive for one lane. Returns a {@link RoundChildWaiter} (NOT a
+   * bare Promise): a two-phase handle whose `promise` resolves by EITHER of two
+   * routes, and whose `drain`/`isSettled` members let the fan-out pump stop and
+   * inspect the lane externally.
+   *
+   * The two resolution routes and the discriminator {@link joinFanOutBatch} reads:
+   * - NATURAL SETTLE — the child's own snapshot reaches a `final` state
+   *   (`status === 'done'`), resolving with `recorded`/`blocked`/`errored` and
+   *   `drainedBy: undefined`. A free-standing child fires no parent-visible
+   *   `onDone`, so the parent watches the child's OWN snapshot (§6.2) via
+   *   subscribe-until-done rather than an `xstate.done.actor` event.
+   * - DRAIN — an external `drain(trigger)` call (a peer blocked/errored) stops
+   *   the actor and resolves with status `drained` and a populated `drainedBy`.
+   *   `drainedBy` being set vs `undefined` is exactly how the join distinguishes
+   *   a drained peer from a naturally-settled lane.
+   *
+   * `isSettled` is first-wins: whichever route fires first latches `settled`, so
+   * a lane that RECORDED before the drain reached it keeps its real `recorded`
+   * outcome (the drain is a no-op on an already-settled lane).
    *
    * After the child `onError` -> `errored` fix, a segment-member service
    * rejection becomes a normal `errored` TERMINAL (status `done`, value
@@ -3171,6 +3231,13 @@ export class WorkflowOrchestrator implements WorkflowController {
    * catch (e.g. an entry-action throw), which resolves as an `errored` lane so
    * drain-on-escalation can still stop peers and the join can report the full
    * batch.
+   *
+   * WHY a hand-rolled subscribe loop and NOT `xstate`'s `waitFor`: `waitFor`
+   * resolves only when the actor's OWN snapshot stream matches a predicate. The
+   * drain route resolves the SAME promise from OUTSIDE that stream (the pump
+   * synthesizes a `drained` outcome the instant it stops the actor, without
+   * waiting for any in-flight external service call to settle, FSM-M3). `waitFor`
+   * cannot express that external resolver, so the two-phase waiter is kept.
    *
    * The trailing `observe(actor.getSnapshot())` after `subscribe` guards the
    * synchronous-settle-before-subscribe race: a child whose first state
@@ -3195,7 +3262,15 @@ export class WorkflowOrchestrator implements WorkflowController {
         subscription?.unsubscribe();
         resolvePromise(outcome);
         if (outcome.status === 'blocked' || outcome.status === 'errored') {
-          onDrainTrigger({ index: outcome.index, status: outcome.status, context: outcome.context });
+          // Compute the surfaced reason ONCE here, at the trigger source, and
+          // thread it on the trigger so the drain log and every drained peer's
+          // `drainedBy` reuse it rather than re-deriving (§ dedup).
+          onDrainTrigger({
+            index: outcome.index,
+            status: outcome.status,
+            context: outcome.context,
+            reason: this.roundChildReason(outcome),
+          });
         }
       };
       finishOutcome = finish;
@@ -3245,11 +3320,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           index,
           status: 'drained',
           context,
-          drainedBy: {
-            index: trigger.index,
-            status: trigger.status,
-            reason: this.roundChildReason(trigger),
-          },
+          drainedBy: { index: trigger.index, status: trigger.status, reason: trigger.reason },
         });
       },
     };
@@ -3294,7 +3365,16 @@ export class WorkflowOrchestrator implements WorkflowController {
       return result.value;
     });
     const first = children[0];
-    const childSummaries: RoundChildSummary[] = children.map((child) => ({ index: child.index, status: child.status }));
+    const childSummaries: RoundChildSummary[] = children.map((child) => ({
+      index: child.index,
+      status: child.status,
+      // Carry `drainedBy` through to the join log so observability records which
+      // lane's escalation stopped each drained peer (the bare `drained` status
+      // alone does not say). NOTE (drain-first, § consider): `issues` below is the
+      // blocked/errored-AT-DRAIN set only — a peer that WOULD have blocked but was
+      // drained first is reported here as `drained`, NOT as an issue in the gate.
+      ...(child.drainedBy !== undefined ? { drainedBy: child.drainedBy } : {}),
+    }));
     const issues = this.fanOutIssues(children);
 
     if (issues.some((issue) => issue.status === 'blocked')) {
@@ -3350,6 +3430,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
+  /**
+   * Projects the blocked/errored lanes (the offenders) into the {@link FanOutIssue}
+   * payload that lands in the aggregated gate. Drained peers are intentionally
+   * excluded — they are the drain-first collateral, not independent issues (§ the
+   * reason list is the blocked-at-drain set, not all-would-have-blocked).
+   */
   private fanOutIssues(children: readonly RoundChildOutcome[]): FanOutIssue[] {
     return children
       .filter((child) => child.status === 'blocked' || child.status === 'errored')
@@ -3360,6 +3446,20 @@ export class WorkflowOrchestrator implements WorkflowController {
       }));
   }
 
+  /**
+   * Surfaces a one-line human-readable cause for a blocked/errored lane, with an
+   * ASYMMETRIC fallback order per status — THE footgun this method guards:
+   *
+   * - `errored` prefers `lastError` then `previousAgentOutput`: an errored lane
+   *   DID trip `storeError`, so `lastError` is the populated, authoritative cause.
+   * - `blocked` prefers `previousAgentOutput` then `lastError`: a blocked lane
+   *   (evaluator_blocked) never trips `storeError`, so its `lastError` is null and
+   *   the real reason lives on `previousAgentOutput` (the evaluator's message).
+   *
+   * Do NOT collapse the two branches into one fallback chain: a unified order
+   * would surface a stale/null field for one of the two statuses. This rationale
+   * was deleted from the old call sites and is re-homed here on purpose.
+   */
   private roundChildReason(child: Pick<RoundChildOutcome, 'index' | 'status' | 'context'>): string {
     if (child.status === 'errored') {
       return (
@@ -3375,11 +3475,41 @@ export class WorkflowOrchestrator implements WorkflowController {
     );
   }
 
+  /** Renders an issue list as a header line plus one `- lane <i> <status>: <reason>` bullet per offending lane. */
   private formatFanOutIssues(header: string, issues: readonly FanOutIssue[]): string {
     if (issues.length === 0) return header;
     return [header, ...issues.map((issue) => `- lane ${issue.index} ${issue.status}: ${issue.reason}`)].join('\n');
   }
 
+  /**
+   * Builds the parent-spine context for a blocked/errored BATCH (the escalate and
+   * errored-only join branches). WHAT it folds:
+   * - the worst lane's context (`source`) promoted back onto the spine via
+   *   {@link promoteFanOutContext} (lane marker stripped, parent visit counts
+   *   restored, tokens from the accumulator);
+   * - an AGGREGATED multi-lane summary of every blocked/errored lane written to
+   *   `previousAgentOutput` (this is what the orchestrator reads on APPROVE→resume
+   *   and the human reads in the gate banner);
+   * - the same lanes as the structured `issues` payload on
+   *   `lastDeterministicResult` for the gate.
+   *
+   * WHY ONE gate, not one per offending lane: all blocked/errored reasons fold
+   * into a single payload so the human reviews the batch ONCE. The two verdict
+   * shapes differ only in `lastError`: `escalate` leaves `lastError` null (a
+   * blocked lane is recoverable, not an error), while the errored-only verdict
+   * mirrors the summary into `lastError` (the batch failed).
+   *
+   * SCRATCH-SHAPE TAG (workers:1 vs workers>1 disambiguator): the orchestrator's
+   * recovery prompt has two mutually-exclusive recoveries — legacy `evaluate`-
+   * resume of the one written-but-unscored candidate (bare `current/`) vs discard
+   * the lane scratch and start a fresh `design` batch (lane-scoped
+   * `current/lane_<k>/`). At `workers:1` the lane carries NO `lane` marker and the
+   * scratch is the BARE `current/`, so the legacy resume is the correct recovery;
+   * at `workers>1` the lane scratch is under `current/lane_<k>/` and must be
+   * discarded. The summary message alone ("Fan-out batch escalated…") would push
+   * the LLM toward discard in BOTH cases, so we append an explicit scratch-shape
+   * sentence derived from `source.context.lane` to steer the prompt's branch.
+   */
   private promoteFanOutIssueContext(
     instance: WorkflowInstance,
     parentContext: WorkflowContext,
@@ -3394,9 +3524,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         : 'Fan-out batch escalated after blocked lane(s):',
       issues,
     );
+    const scratchNote =
+      source.context.lane === undefined
+        ? '\nScratch is the bare current/ (a single candidate is written; result.json may be absent) — ' +
+          'resume the round in place; do NOT discard and start a fresh batch.'
+        : '\nScratch is lane-scoped under current/lane_<k>/ — discard the lane scratch and re-decide normally.';
     return {
       ...this.promoteFanOutContext(instance, parentContext, source.context),
-      previousAgentOutput: summary,
+      previousAgentOutput: `${summary}${scratchNote}`,
       previousAgentNotes: null,
       previousStateName: fanOutStateId,
       lastDeterministicResult: {
@@ -3866,7 +4001,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       previousState?.type === 'deterministic' ? context?.lastDeterministicResult?.verdict : undefined;
     const previousOutputSummary =
       context?.previousAgentOutput !== undefined && context.previousAgentOutput !== null
-        ? (truncateForTransition(context.previousAgentOutput) ?? '').replace(/\s+/g, ' ').trim()
+        ? // Collapse the multi-line aggregated fan-out reason to a single line so it
+          // surfaces inline in the one-line gate banner instead of wrapping mid-summary.
+          (truncateForTransition(context.previousAgentOutput) ?? '').replace(/\s+/g, ' ').trim()
         : undefined;
     const errorContext = context?.lastError
       ? ` (error: ${context.lastError})`

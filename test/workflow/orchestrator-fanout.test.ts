@@ -481,6 +481,100 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     });
   });
 
+  it('workers:1 escalation -> APPROVE routes to legacy evaluate-resume, NOT a fresh design batch', async () => {
+    // workers:1 is the SHIPPED default and still routes through runFanOutSegment.
+    // A blocked single lane yields verdict `escalate`, but at workers:1 the
+    // scratch is the BARE current/ (the lane carries no `lane` marker), so the
+    // correct recovery on APPROVE is the legacy evaluate-resume of the one
+    // written-but-unscored candidate — NOT discard + fresh design batch. The fix
+    // tags previousAgentOutput with the scratch shape; this test asserts the
+    // orchestrator routes on that tag to `evaluate`. The orchestrator stub models
+    // the LLM's prompt rule: bare-scratch tag -> evaluate, lane-scoped -> design.
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    const resumeDefinition: WorkflowDefinition = {
+      ...fanOutDefinition,
+      states: {
+        ...fanOutDefinition.states,
+        orchestrator: {
+          ...fanOutDefinition.states.orchestrator,
+          transitions: [
+            { to: 'workers', when: { verdict: 'design' } },
+            { to: 'evaluate', when: { verdict: 'evaluate' } },
+            { to: 'done' },
+          ],
+        },
+      },
+    };
+
+    let orchestratorTurn = 0;
+    const orchestratorMessages: Array<string | null | undefined> = [];
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        orchestratorTurn += 1;
+        if (orchestratorTurn === 1) return makeVerdictResult('design');
+        // Turn 2 = the post-APPROVE recovery decision; turn 3+ = after the resumed
+        // round records, so terminate the run.
+        if (orchestratorTurn >= 3) return makeVerdictResult('finished');
+        // Re-entry after APPROVE: route exactly as the prompt instructs, off the
+        // scratch-shape tag the fix writes onto previousAgentOutput.
+        const message = input.context.previousAgentOutput;
+        orchestratorMessages.push(message);
+        if (typeof message === 'string' && message.includes('Scratch is the bare current/')) {
+          return makeVerdictResult('evaluate');
+        }
+        if (typeof message === 'string' && message.includes('Scratch is lane-scoped')) {
+          return makeVerdictResult('design');
+        }
+        // No scratch-shape tag (the pre-fix message): the orchestrator cannot tell
+        // the scratch is bare, so it falls through to a fresh design batch — the
+        // wrong recovery this test guards against.
+        return makeVerdictResult('design');
+      }
+      return makeAgentResult();
+    };
+
+    let evaluateResumeRuns = 0;
+    const deterministicStub: DeterministicStub = async (input) => {
+      if (input.stateId === 'sample') return { passed: true, verdict: 'sampled' };
+      if (input.stateId === 'evaluate') {
+        // First entry (in-batch) blocks; the resume entry (standalone, no lane)
+        // succeeds, proving the candidate was re-evaluated rather than discarded.
+        if (input.context.lane === undefined && evaluateResumeRuns === 0) {
+          evaluateResumeRuns += 1;
+          return { passed: false, verdict: 'evaluator_blocked', errors: 'evaluator needs credentials' };
+        }
+        evaluateResumeRuns += 1;
+        return { passed: true, verdict: 'evaluated' };
+      }
+      return { passed: true, verdict: 'recorded' };
+    };
+
+    const { actor, visited } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, resumeDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().value).toBe('human_escalation');
+    expect(actor.getSnapshot().status).toBe('active');
+    // The escalation message carries the bare-scratch tag (the disambiguator).
+    expect(actor.getSnapshot().context.previousAgentOutput).toContain('Scratch is the bare current/');
+    expect(actor.getSnapshot().context.previousAgentOutput).not.toContain('Scratch is lane-scoped');
+
+    orchestrator.resolveGate(WF_ID, { type: 'APPROVE' });
+    await settle();
+
+    // The orchestrator routed to the legacy evaluate-resume (re-running the one
+    // blocked candidate standalone), NOT back into `workers` for a fresh batch.
+    expect(visited).toContain('evaluate');
+    expect(orchestratorMessages.some((m) => typeof m === 'string' && m.includes('Scratch is the bare current/'))).toBe(
+      true,
+    );
+    // `workers` ran exactly once (the initial batch); the resume did NOT re-enter it.
+    expect(visited.filter((state) => state === 'workers')).toHaveLength(1);
+    // The standalone evaluate re-ran and passed, so the round records and the run
+    // completes through orchestrator -> done.
+    expect(actor.getSnapshot().value).toBe('done');
+    expect(actor.getSnapshot().status).toBe('done');
+  });
+
   it('drains peer lanes on the first blocked child and opens one aggregated gate', async () => {
     const raiseGate = vi.fn();
     const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir, { raiseGate }));
