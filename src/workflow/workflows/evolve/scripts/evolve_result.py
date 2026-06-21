@@ -25,7 +25,7 @@ STOCHASTIC_SAMPLERS = {"random", "ucb1", "island"}
 # directory half of this same convention lives on the TS side as
 # DEFAULT_EVOLVE_LANE_DIR in src/workflow/lane-template.ts — keep both in sync if
 # the lane/step naming ever changes.
-STEP_NAME_RE = re.compile(r"^step_(\d+)(?:_lane_\d+)?$")
+STEP_NAME_RE = re.compile(r"^step_(\d+)(?:_lane_(\d+))?$")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -192,15 +192,20 @@ def _node_count(run_dir: Path) -> int:
     return len(_nodes_payload(run_dir))
 
 
-def _next_batch_index(run_dir: Path) -> int:
-    """Return 1 + the highest batch index already recorded in nodes.json.
+def _next_batch_index(run_dir: Path, workers: int | None = None) -> int:
+    """Return the next batch index, or a partially recorded in-flight one.
 
     The batch index is the `step_NNNN` number parsed from each node's
     `meta_info.step_name` (with or without a `_lane_<k>` suffix, per STEP_NAME_RE).
-    Monotonic across RECORDED batches only: a fully-drained (un-recorded) batch
-    reuses its index on resume, which is safe because lane-tagged step names keep
-    each lane's record independently idempotent."""
+    Completed batches advance to `1 + max(recorded batch_index)`.
+
+    Crash-resume of a fan-out batch is the exception: when the highest
+    lane-tagged batch has only some current-worker lanes recorded, that highest
+    index is the in-flight batch and must be reused so missing lanes write the
+    same `step_<batch>_lane_<k>` names. A fully-drained batch still has no
+    recorded lane-tagged nodes, so it naturally reuses its never-used index."""
     highest = 0
+    lanes_by_batch: dict[int, set[int]] = {}
     for node in _sorted_nodes(run_dir):
         meta = node.get("meta_info")
         step_name = meta.get("step_name") if isinstance(meta, dict) else None
@@ -209,7 +214,16 @@ def _next_batch_index(run_dir: Path) -> int:
         match = STEP_NAME_RE.match(step_name)
         if match is None:
             continue
-        highest = max(highest, int(match.group(1)))
+        batch_index = int(match.group(1))
+        highest = max(highest, batch_index)
+        lane = match.group(2)
+        if lane is not None:
+            lanes_by_batch.setdefault(batch_index, set()).add(int(lane))
+    if workers is not None and workers > 1 and highest > 0:
+        highest_lanes = lanes_by_batch.get(highest, set())
+        expected_lanes = set(range(workers))
+        if highest_lanes and not expected_lanes.issubset(highest_lanes):
+            return highest
     return highest + 1
 
 
@@ -594,6 +608,7 @@ def _partition_sampled_parents(
     parents: list[dict[str, Any]],
     workers: int,
     sampling_seed: int | None,
+    lane_ids: list[int] | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Assign each lane ONE distinct parent from a single batch-side sample.
 
@@ -609,10 +624,18 @@ def _partition_sampled_parents(
     `sha256(lane_seed:node_id:index)` digest is smallest — a stable hash tiebreak
     that gives a fixed, reproducible assignment independent of insertion order.
     Without a seed the lanes just take parents in order (FIFO pop).
+
+    `lane_ids` maps the positional partition slot to the lane's TRUE id for the
+    per-lane seed. On a fresh batch it is `range(workers)` (slot i == lane i), so
+    omitting it is equivalent. On a crash-resume that re-runs only the missing
+    lanes (`workers` here is `len(lane_ids)`), slot i may map to a non-contiguous
+    lane id (e.g. slot 0 -> lane 2), so passing `lane_ids` keeps each re-run lane's
+    `sampling_seed + lane` offset identical to its pre-crash value — without it,
+    the seed would key off the slot index and the re-drawn parent could differ.
     """
     remaining = list(parents)
     partitions: list[list[dict[str, Any]]] = []
-    for lane in range(workers):
+    for lane_index in range(workers):
         if not remaining:
             partitions.append([])
             continue
@@ -620,6 +643,7 @@ def _partition_sampled_parents(
             partitions.append([remaining.pop(0)])
             continue
 
+        lane = lane_ids[lane_index] if lane_ids is not None else lane_index
         lane_seed = sampling_seed + lane
         selected_index = min(
             range(len(remaining)),
@@ -875,17 +899,60 @@ def sample(args: argparse.Namespace) -> int:
 
 
 def sample_batch(args: argparse.Namespace) -> int:
-    """Barrier-side fan-out sampler: draw n=workers parents once, partition them
+    """Barrier-side fan-out sampler: draw one parent per active lane, partition them
     one-per-lane, and write each lane's `current/lane_<k>/` context + sample.json.
+
+    `--lane <k>` (repeatable) restricts the draw to a subset of lanes; absent, every
+    lane `0..workers-1` is drawn (the fresh-batch case). `--batch-index <n>` pins the
+    `step_<n>_lane_<k>` batch number instead of deriving it from nodes.json. Both are
+    set by the orchestrator's crash-resume path (reconstructFanOutBatchFromDb in
+    src/workflow/orchestrator.ts): on resume it passes ONLY the lanes that did not
+    record before the crash and pins the in-flight batch index so the re-run lanes
+    reuse their original `step_<batch>_lane_<k>` names. The pinned index must match
+    `_next_batch_index(run_dir, workers)`'s in-flight reuse rule — see that function
+    and the TS twin for the shared contract.
 
     Verdict contract: `sample_batch_prepared` (passed) with a per-lane payload list
     the orchestrator replays as each child's `sample` result, or `sample_error`
-    (not passed) when seeding/sampling/cognition fails, the sampler is greedy under
+    (not passed) when the requested lanes are out of range, `--batch-index` is not
+    positive, seeding/sampling/cognition fails, the sampler is greedy under
     workers>1 (cannot yield distinct parents), or the draw cannot be partitioned
-    into `workers` distinct parents."""
+    into one distinct parent per active lane."""
     run_dir = Path(args.run_dir)
     result_file = Path(args.result_file)
     workers = max(1, args.workers)
+    lane_ids = _dedupe_lanes(args.lane) if args.lane else list(range(workers))
+    invalid_lanes = [lane for lane in lane_ids if lane < 0 or lane >= workers]
+    if not lane_ids or invalid_lanes:
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {
+                    "stage": "db_sample",
+                    "error": "sample_batch lanes must be within the worker range",
+                    "workers": workers,
+                    "lanes": lane_ids,
+                    "invalid_lanes": invalid_lanes,
+                },
+                "passed": False,
+            },
+        )
+        return 0
+    if args.batch_index is not None and args.batch_index <= 0:
+        _write_json(
+            result_file,
+            {
+                "verdict": "sample_error",
+                "payload": {
+                    "stage": "db_sample",
+                    "error": "sample_batch --batch-index must be positive",
+                    "batch_index": args.batch_index,
+                },
+                "passed": False,
+            },
+        )
+        return 0
     _current_dir(run_dir, None).mkdir(parents=True, exist_ok=True)
     _clear_current_round(run_dir, None)
 
@@ -911,7 +978,7 @@ def sample_batch(args: argparse.Namespace) -> int:
         return 0
 
     sampling_seed = _sampling_seed(run_dir)
-    sample_payload = _run_db_sample(run_dir, result_file, workers, sampling_algorithm, sampling_seed)
+    sample_payload = _run_db_sample(run_dir, result_file, len(lane_ids), sampling_algorithm, sampling_seed)
     if sample_payload is None:
         return 0
 
@@ -921,7 +988,7 @@ def sample_batch(args: argparse.Namespace) -> int:
     distinct_parent_ids = set(parent_ids)
     available_parent_count = _node_count(run_dir)
     if len(distinct_parent_ids) != len(parent_ids) or (
-        available_parent_count >= workers and len(distinct_parent_ids) < workers
+        available_parent_count >= len(lane_ids) and len(distinct_parent_ids) < len(lane_ids)
     ):
         _write_json(
             result_file,
@@ -931,6 +998,7 @@ def sample_batch(args: argparse.Namespace) -> int:
                     "stage": "db_sample",
                     "error": "sample_batch could not partition distinct parent IDs across lanes",
                     "workers": workers,
+                    "lanes": lane_ids,
                     "parent_ids": parent_ids,
                     "available_parent_count": available_parent_count,
                     "sampling_algorithm": sampling_algorithm,
@@ -946,15 +1014,15 @@ def sample_batch(args: argparse.Namespace) -> int:
         return 0
 
     matches = cognition_payload.get("matches")
-    batch_index = _next_batch_index(run_dir)
-    parent_partitions = _partition_sampled_parents(parents, workers, sampling_seed)
+    batch_index = args.batch_index if args.batch_index is not None else _next_batch_index(run_dir, workers)
+    parent_partitions = _partition_sampled_parents(parents, len(lane_ids), sampling_seed, lane_ids)
     lanes: list[dict[str, Any]] = []
-    for lane in range(workers):
+    for partition_index, lane in enumerate(lane_ids):
         current_dir = _current_dir(run_dir, lane)
         current_dir.mkdir(parents=True, exist_ok=True)
         _clear_current_round(run_dir, lane)
         step_name = f"step_{batch_index:04d}_lane_{lane}"
-        lane_parents = parent_partitions[lane]
+        lane_parents = parent_partitions[partition_index]
         lane_parent_ids = _parent_ids(lane_parents)
         context = {
             "step_name": step_name,
@@ -971,7 +1039,15 @@ def sample_batch(args: argparse.Namespace) -> int:
             "lane": lane,
             "parent_ids": lane_parent_ids,
             "batch_index": batch_index,
-            "sample_n": workers,
+            # sample_n is the number of parents ACTUALLY drawn this invocation
+            # (== len(lane_ids)), not the configured worker count. On a fresh
+            # batch the two coincide; on a crash-resume that re-runs only the
+            # missing lanes they differ (e.g. workers=3 but only 2 lanes drawn),
+            # so reporting `workers` here would overstate the draw. `workers`
+            # remains available verbatim in the batch-level sample_batch_prepared
+            # payload for any consumer that wants the configured count.
+            "sample_n": len(lane_ids),
+            "active_lane_count": len(lane_ids),
             "sampling_algorithm": sampling_algorithm,
             "sampling_seed": sampling_seed,
             "lane_seed": sampling_seed + lane if sampling_seed is not None else None,
@@ -987,6 +1063,8 @@ def sample_batch(args: argparse.Namespace) -> int:
             "verdict": "sample_batch_prepared",
             "payload": {
                 "workers": workers,
+                "active_lanes": lane_ids,
+                "active_lane_count": len(lane_ids),
                 "batch_index": batch_index,
                 "parent_ids": parent_ids,
                 "sampling_algorithm": sampling_algorithm,
@@ -1292,6 +1370,8 @@ def build_parser() -> argparse.ArgumentParser:
     sample_batch_parser = subparsers.add_parser("sample_batch")
     sample_batch_parser.add_argument("--run-dir", required=True)
     sample_batch_parser.add_argument("--workers", type=int, required=True)
+    sample_batch_parser.add_argument("--lane", type=int, action="append")
+    sample_batch_parser.add_argument("--batch-index", type=int)
     sample_batch_parser.add_argument("--query", default="")
     sample_batch_parser.add_argument("--query-from-spec", action="store_true")
     sample_batch_parser.add_argument("--top-k", type=int, default=5)

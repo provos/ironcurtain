@@ -1,19 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createActor, type AnyActorRef } from 'xstate';
 import { MessageLog } from '../../src/workflow/message-log.js';
 import {
   buildWorkflowMachine,
+  createInitialContext,
   type AgentInvokeInput,
   type AgentInvokeResult,
   type DeterministicInvokeInput,
   type DeterministicInvokeResult,
 } from '../../src/workflow/machine-builder.js';
 import type { WorkflowDefinition, WorkflowId } from '../../src/workflow/types.js';
-import { WorkflowOrchestrator } from '../../src/workflow/orchestrator.js';
-import { createDeps, createMockTab } from './test-helpers.js';
+import { WorkflowOrchestrator, type CreateWorkflowInfrastructureInput } from '../../src/workflow/orchestrator.js';
+import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
+import {
+  createCheckpointStore,
+  createDeps,
+  createMockTab,
+  waitForCompletion,
+  writeEvolveLaneNodes,
+} from './test-helpers.js';
 import { makeAgentResult, makeVerdictResult, settle } from './machine-test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -207,6 +215,53 @@ const recordedDeterministicStub: DeterministicStub = async (input) => {
   return { passed: true, testCount: 10, verdict: verdicts[input.stateId] };
 };
 
+interface BarrierStubOptions {
+  /** Lanes echoed back in the `sample_batch_prepared` payload. */
+  readonly lanes: readonly number[];
+  /** Observe each barrier call in order (e.g. push to a `barrierOrder` array). */
+  readonly onBarrierCall?: (input: DeterministicInvokeInput) => void;
+  /**
+   * Owns the per-lane `analysis_record` verdict. When provided, the stub returns
+   * its result (the crash-resume tests use this to append a DB node + report a
+   * `node_id`); when omitted, `analysis_record` falls through to the happy-path
+   * `recordedDeterministicStub`.
+   */
+  readonly onAnalysisRecord?: (input: DeterministicInvokeInput) => DeterministicInvokeResult;
+}
+
+/**
+ * Builds the barrier-side {@link DeterministicStub} shared by the fan-out tests:
+ * it answers the three barrier subcommands (`sample_batch`,
+ * `analysis_record_promote_cognition`, `sample_stop_signals`) and delegates every
+ * non-barrier child-segment call to {@link recordedDeterministicStub}. The only
+ * per-test variation is the active `lanes` set and the optional
+ * `analysis_record` override, so those are the parameters.
+ */
+function makeBarrierDeterministicStub(options: BarrierStubOptions): DeterministicStub {
+  return async (input) => {
+    if (input.stateId === 'sample_batch') {
+      options.onBarrierCall?.(input);
+      return {
+        passed: true,
+        verdict: 'sample_batch_prepared',
+        payload: { lanes: options.lanes.map((lane) => ({ lane, step_name: `step_0001_lane_${lane}` })) },
+      };
+    }
+    if (input.stateId === 'analysis_record_promote_cognition') {
+      options.onBarrierCall?.(input);
+      return { passed: true, verdict: 'cognition_promoted', payload: { promoted_count: options.lanes.length } };
+    }
+    if (input.stateId === 'sample_stop_signals') {
+      options.onBarrierCall?.(input);
+      return { passed: true, verdict: 'stop_signals_computed', payload: { stop_reason: null } };
+    }
+    if (input.stateId === 'analysis_record' && options.onAnalysisRecord) {
+      return options.onAnalysisRecord(input);
+    }
+    return recordedDeterministicStub(input);
+  };
+}
+
 function deferred<T>(): Deferred<T> {
   let resolvePromise!: (value: T) => void;
   let rejectPromise!: (reason?: unknown) => void;
@@ -215,6 +270,89 @@ function deferred<T>(): Deferred<T> {
     rejectPromise = reject;
   });
   return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
+function evolveBarrierDefinition(workers: number, containerized = false): WorkflowDefinition {
+  const sampleCommand = [
+    '/opt/workflow-venv/bin/python',
+    '/workflow-scripts/evolve_result.py',
+    'sample',
+    '--run-dir',
+    '/workspace/.evolve_runs/main',
+    '--query-from-spec',
+    '--context-file',
+    '/workspace/.evolve_runs/main/current/context.json',
+    '--result-file',
+    '/workspace/.evolve_runs/main/current/sample.json',
+  ];
+  const attachCommand = [
+    '/opt/workflow-venv/bin/python',
+    '/workflow-scripts/evolve_result.py',
+    'attach_analysis',
+    '--run-dir',
+    '/workspace/.evolve_runs/main',
+    '--step-from-current',
+    '--analysis-file',
+    '/workspace/.evolve_runs/main/current/analysis.md',
+    '--result-file',
+    '/workspace/.evolve_runs/main/current/analysis_record.json',
+  ];
+  return {
+    ...fanOutDefinition,
+    settings: {
+      ...fanOutDefinition.settings,
+      workers,
+      ...(containerized ? { mode: 'docker' as const, dockerAgent: 'claude-code', sharedContainer: true } : {}),
+    },
+    states: {
+      ...fanOutDefinition.states,
+      sample: {
+        ...fanOutDefinition.states.sample,
+        run: [sampleCommand],
+        ...(containerized ? { container: true } : {}),
+      },
+      evaluate: { ...fanOutDefinition.states.evaluate, ...(containerized ? { container: true } : {}) },
+      analysis_record: {
+        ...fanOutDefinition.states.analysis_record,
+        run: [attachCommand],
+        ...(containerized ? { container: true } : {}),
+      },
+    },
+  };
+}
+
+function writeEvolveNodes(workspace: string, lanes: readonly number[], batchIndex = 1): void {
+  writeEvolveLaneNodes(join(workspace, '.evolve_runs', 'main', 'database_data'), lanes, batchIndex);
+}
+
+function appendEvolveNode(workspace: string, lane: number, batchIndex = 1): void {
+  const nodesPath = join(workspace, '.evolve_runs', 'main', 'database_data', 'nodes.json');
+  const parsed = JSON.parse(readFileSync(nodesPath, 'utf-8')) as {
+    next_id: number;
+    nodes: Record<string, { id: number; meta_info?: { step_name?: string } }>;
+  };
+  const stepName = `step_${String(batchIndex).padStart(4, '0')}_lane_${lane}`;
+  if (Object.values(parsed.nodes).some((node) => node.meta_info?.step_name === stepName)) {
+    throw new Error(`duplicate record for ${stepName}`);
+  }
+  const id = parsed.next_id;
+  parsed.nodes[String(id)] = {
+    id,
+    meta_info: { step_name: stepName },
+  };
+  parsed.next_id = id + 1;
+  writeFileSync(nodesPath, JSON.stringify(parsed, null, 2));
+}
+
+function makeStubInfrastructure(input: CreateWorkflowInfrastructureInput): DockerInfrastructure {
+  return {
+    __stub: true,
+    workflowId: input.workflowId,
+    bundleId: input.bundleId,
+    setTokenSessionId: () => {},
+    beginCaptureSession: () => {},
+    endCaptureSession: async () => {},
+  } as unknown as DockerInfrastructure;
 }
 
 describe('WorkflowOrchestrator fan-out join path', () => {
@@ -342,39 +480,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     // orchestrator drives the barrier-side sample_batch, promote_cognition, and
     // compute_stop_signals through executeDeterministicState (the bare commands
     // in fanOutDefinition are not recognized as evolve commands, so none fire).
-    const sampleCommand = [
-      '/opt/workflow-venv/bin/python',
-      '/workflow-scripts/evolve_result.py',
-      'sample',
-      '--run-dir',
-      '/workspace/.evolve_runs/main',
-      '--query-from-spec',
-      '--context-file',
-      '/workspace/.evolve_runs/main/current/context.json',
-      '--result-file',
-      '/workspace/.evolve_runs/main/current/sample.json',
-    ];
-    const attachCommand = [
-      '/opt/workflow-venv/bin/python',
-      '/workflow-scripts/evolve_result.py',
-      'attach_analysis',
-      '--run-dir',
-      '/workspace/.evolve_runs/main',
-      '--step-from-current',
-      '--analysis-file',
-      '/workspace/.evolve_runs/main/current/analysis.md',
-      '--result-file',
-      '/workspace/.evolve_runs/main/current/analysis_record.json',
-    ];
-    const evolveDefinition: WorkflowDefinition = {
-      ...fanOutDefinition,
-      settings: { ...fanOutDefinition.settings, workers: 3 },
-      states: {
-        ...fanOutDefinition.states,
-        sample: { ...fanOutDefinition.states.sample, run: [sampleCommand] },
-        analysis_record: { ...fanOutDefinition.states.analysis_record, run: [attachCommand] },
-      },
-    };
+    const evolveDefinition = evolveBarrierDefinition(3);
 
     let orchestratorTurn = 0;
     const agentStub: AgentStub = async (input) => {
@@ -385,38 +491,12 @@ describe('WorkflowOrchestrator fan-out join path', () => {
       return makeAgentResult();
     };
 
-    const stopSignalsCalls: DeterministicInvokeInput[] = [];
-    const promotionCalls: DeterministicInvokeInput[] = [];
-    const sampleBatchCalls: DeterministicInvokeInput[] = [];
-    const barrierOrder: string[] = [];
-    const deterministicStub: DeterministicStub = async (input) => {
-      if (input.stateId === 'sample_batch') {
-        barrierOrder.push(input.stateId);
-        sampleBatchCalls.push(input);
-        // Return one prepared lane payload per worker so prepareFanOutLaneResults
-        // can hand each child its sample result.
-        return {
-          passed: true,
-          verdict: 'sample_batch_prepared',
-          payload: { lanes: [0, 1, 2].map((lane) => ({ lane, step_name: `step_0001_lane_${lane}` })) },
-        };
-      }
-      if (input.stateId === 'analysis_record_promote_cognition') {
-        barrierOrder.push(input.stateId);
-        promotionCalls.push(input);
-        return {
-          passed: true,
-          verdict: 'cognition_promoted',
-          payload: { promoted_count: 3, duplicate_count: 0 },
-        };
-      }
-      if (input.stateId === 'sample_stop_signals') {
-        barrierOrder.push(input.stateId);
-        stopSignalsCalls.push(input);
-        return { passed: true, verdict: 'stop_signals_computed', payload: { stop_reason: null } };
-      }
-      return recordedDeterministicStub(input);
-    };
+    const barrierCalls: DeterministicInvokeInput[] = [];
+    const deterministicStub = makeBarrierDeterministicStub({
+      lanes: [0, 1, 2],
+      onBarrierCall: (input) => barrierCalls.push(input),
+    });
+    const callsFor = (stateId: string): DeterministicInvokeInput[] => barrierCalls.filter((c) => c.stateId === stateId);
 
     const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, evolveDefinition);
     await settle();
@@ -425,6 +505,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     expect(actor.getSnapshot().value).toBe('done');
     // Cognition promotion is barrier-owned: exactly ONE promote_cognition call
     // over all recorded lanes, before the single stop_signals recompute.
+    const promotionCalls = callsFor('analysis_record_promote_cognition');
     expect(promotionCalls).toHaveLength(1);
     expect(promotionCalls[0].commands[0]).toEqual(
       expect.arrayContaining([
@@ -442,6 +523,7 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     expect(promotionCalls[0].resultFile).toBe('.evolve_runs/main/current/cognition_promotion.json');
     // The barrier owns the canonical stop_signals: exactly ONE compute per batch,
     // not one per lane.
+    const stopSignalsCalls = callsFor('sample_stop_signals');
     expect(stopSignalsCalls).toHaveLength(1);
     expect(stopSignalsCalls[0].commands[0]).toEqual(
       expect.arrayContaining(['compute_stop_signals', '--run-dir', '/workspace/.evolve_runs/main']),
@@ -450,8 +532,266 @@ describe('WorkflowOrchestrator fan-out join path', () => {
     // orchestrator routes on (no lane_ segment), written once.
     expect(stopSignalsCalls[0].resultFile).not.toContain('lane_');
     // The single barrier-side sample_batch fired once (not one sample per lane).
+    expect(callsFor('sample_batch')).toHaveLength(1);
+    expect(barrierCalls.map((c) => c.stateId)).toEqual([
+      'sample_batch',
+      'analysis_record_promote_cognition',
+      'sample_stop_signals',
+    ]);
+  });
+
+  it('reconstructs a partially recorded batch and respawns only missing lanes', async () => {
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    const evolveDefinition = evolveBarrierDefinition(3);
+    writeEvolveNodes(tmpDir, [0], 1);
+
+    let orchestratorTurn = 0;
+    const researcherLaneIds: number[] = [];
+    const deterministicCalls: Array<{ stateId: string; laneId: number | undefined }> = [];
+    const barrierCalls: DeterministicInvokeInput[] = [];
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        orchestratorTurn += 1;
+        return makeVerdictResult(orchestratorTurn === 1 ? 'design' : 'finished');
+      }
+      researcherLaneIds.push(input.context.lane?.id ?? -1);
+      return makeAgentResult({ outputHash: `researcher-lane-${input.context.lane?.id ?? 'none'}` });
+    };
+    const barrierStub = makeBarrierDeterministicStub({
+      lanes: [1, 2],
+      onBarrierCall: (input) => barrierCalls.push(input),
+      onAnalysisRecord: (input) => {
+        const lane = input.context.lane?.id;
+        if (lane === undefined) throw new Error('analysis_record missing lane context');
+        appendEvolveNode(tmpDir, lane, 1);
+        return {
+          passed: true,
+          verdict: 'recorded',
+          payload: { step_name: `step_0001_lane_${lane}`, node_id: lane + 10 },
+        };
+      },
+    });
+    const deterministicStub: DeterministicStub = async (input) => {
+      deterministicCalls.push({ stateId: input.stateId, laneId: input.context.lane?.id });
+      return barrierStub(input);
+    };
+    const callsFor = (stateId: string): DeterministicInvokeInput[] => barrierCalls.filter((c) => c.stateId === stateId);
+
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, evolveDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(actor.getSnapshot().value).toBe('done');
+    expect(researcherLaneIds.sort()).toEqual([1, 2]);
+    expect(
+      deterministicCalls
+        .filter((call) => ['sample', 'evaluate', 'analysis_record'].includes(call.stateId))
+        .map((call) => `${call.stateId}:${call.laneId}`)
+        .sort(),
+    ).toEqual(['analysis_record:1', 'analysis_record:2', 'evaluate:1', 'evaluate:2', 'sample:1', 'sample:2']);
+    const sampleBatchCalls = callsFor('sample_batch');
     expect(sampleBatchCalls).toHaveLength(1);
-    expect(barrierOrder).toEqual(['sample_batch', 'analysis_record_promote_cognition', 'sample_stop_signals']);
+    expect(sampleBatchCalls[0].commands[0]).toEqual(
+      expect.arrayContaining(['--workers', '3', '--lane', '1', '--lane', '2', '--batch-index', '1']),
+    );
+    const promotionCalls = callsFor('analysis_record_promote_cognition');
+    expect(promotionCalls).toHaveLength(1);
+    expect(promotionCalls[0].commands[0]).toEqual(
+      expect.arrayContaining(['--lane', '0', '--lane', '1', '--lane', '2']),
+    );
+
+    const nodes = JSON.parse(
+      readFileSync(join(tmpDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'), 'utf-8'),
+    ) as { nodes: Record<string, { meta_info?: { step_name?: string } }> };
+    const stepNames = Object.values(nodes.nodes).map((node) => node.meta_info?.step_name);
+    expect(stepNames.sort()).toEqual(['step_0001_lane_0', 'step_0001_lane_1', 'step_0001_lane_2']);
+    expect(stepNames).not.toContain('step_0002_lane_1');
+  });
+
+  it('treats a fully-recorded highest batch as complete and starts a fresh batch (no index reuse, no synthesis)', async () => {
+    // Edge: every lane of batch 1 already recorded. Indistinguishable from
+    // nodes.json alone whether the crash hit AFTER the join completed (batch
+    // done) or before it. The reconstruction heuristic resolves this the safe
+    // way — a fully-present highest batch is COMPLETE, so resume advances to a
+    // FRESH batch 2 and re-runs every lane (idempotency lives in lane-tagged
+    // step names, not in skipping the re-run). The partial-recorded tests above
+    // cover the in-flight REUSE branch; this covers the advance branch.
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    const evolveDefinition = evolveBarrierDefinition(3);
+    writeEvolveNodes(tmpDir, [0, 1, 2], 1);
+
+    let orchestratorTurn = 0;
+    const researcherLaneIds: number[] = [];
+    const deterministicCalls: Array<{ stateId: string; laneId: number | undefined }> = [];
+    const barrierCalls: DeterministicInvokeInput[] = [];
+    const agentStub: AgentStub = async (input) => {
+      if (input.stateId === 'orchestrator') {
+        orchestratorTurn += 1;
+        return makeVerdictResult(orchestratorTurn === 1 ? 'design' : 'finished');
+      }
+      researcherLaneIds.push(input.context.lane?.id ?? -1);
+      return makeAgentResult({ outputHash: `researcher-lane-${input.context.lane?.id ?? 'none'}` });
+    };
+    const barrierStub = makeBarrierDeterministicStub({
+      lanes: [0, 1, 2],
+      onBarrierCall: (input) => barrierCalls.push(input),
+      onAnalysisRecord: (input) => {
+        const lane = input.context.lane?.id;
+        if (lane === undefined) throw new Error('analysis_record missing lane context');
+        // Fresh batch 2 records new lane-tagged nodes; no collision with batch 1.
+        appendEvolveNode(tmpDir, lane, 2);
+        return {
+          passed: true,
+          verdict: 'recorded',
+          payload: { step_name: `step_0002_lane_${lane}`, node_id: lane + 20 },
+        };
+      },
+    });
+    const deterministicStub: DeterministicStub = async (input) => {
+      deterministicCalls.push({ stateId: input.stateId, laneId: input.context.lane?.id });
+      return barrierStub(input);
+    };
+    const callsFor = (stateId: string): DeterministicInvokeInput[] => barrierCalls.filter((c) => c.stateId === stateId);
+
+    const { actor } = driveParent(orchestrator, tmpDir, agentStub, deterministicStub, evolveDefinition);
+    await settle();
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(actor.getSnapshot().value).toBe('done');
+    // Every lane re-ran fresh (nothing synthesized): all three researchers and
+    // all three segment deterministic calls fired.
+    expect(researcherLaneIds.sort()).toEqual([0, 1, 2]);
+    expect(
+      deterministicCalls
+        .filter((call) => ['sample', 'evaluate', 'analysis_record'].includes(call.stateId))
+        .map((call) => `${call.stateId}:${call.laneId}`)
+        .sort(),
+    ).toEqual([
+      'analysis_record:0',
+      'analysis_record:1',
+      'analysis_record:2',
+      'evaluate:0',
+      'evaluate:1',
+      'evaluate:2',
+      'sample:0',
+      'sample:1',
+      'sample:2',
+    ]);
+    // A fresh batch: sample_batch draws ALL lanes and pins NO --batch-index
+    // (recordedByLane was empty, so TS lets the bridge derive batch 2 itself).
+    const sampleBatchCalls = callsFor('sample_batch');
+    expect(sampleBatchCalls).toHaveLength(1);
+    expect(sampleBatchCalls[0].commands[0]).toEqual(
+      expect.arrayContaining(['--workers', '3', '--lane', '0', '--lane', '1', '--lane', '2']),
+    );
+    expect(sampleBatchCalls[0].commands[0]).not.toContain('--batch-index');
+    // The new batch promotes its three lanes; nodes.json now holds both batches.
+    expect(callsFor('analysis_record_promote_cognition')).toHaveLength(1);
+    const nodes = JSON.parse(
+      readFileSync(join(tmpDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'), 'utf-8'),
+    ) as { nodes: Record<string, { meta_info?: { step_name?: string } }> };
+    expect(
+      Object.values(nodes.nodes)
+        .map((node) => node.meta_info?.step_name)
+        .sort(),
+    ).toEqual([
+      'step_0001_lane_0',
+      'step_0001_lane_1',
+      'step_0001_lane_2',
+      'step_0002_lane_0',
+      'step_0002_lane_1',
+      'step_0002_lane_2',
+    ]);
+  });
+
+  it('resume replays workers and reconstructs a partially recorded batch from the DB', async () => {
+    const originalHome = process.env.IRONCURTAIN_HOME;
+    process.env.IRONCURTAIN_HOME = join(tmpDir, 'ironcurtain-home');
+    try {
+      const checkpointStore = createCheckpointStore(tmpDir);
+      const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => makeStubInfrastructure(input));
+      const destroyInfra = vi.fn(async () => {});
+      const orchestrator = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          createWorkflowInfrastructure: createInfra,
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
+      );
+      const evolveDefinition = evolveBarrierDefinition(3, true);
+      const definitionPath = join(tmpDir, 'workflow.json');
+      writeFileSync(definitionPath, JSON.stringify(evolveDefinition, null, 2));
+      writeEvolveNodes(tmpDir, [0], 1);
+      checkpointStore.save(WF_ID, {
+        machineState: 'workers',
+        context: {
+          ...createInitialContext(evolveDefinition),
+          taskDescription: 'resume fan-out batch',
+        },
+        timestamp: new Date().toISOString(),
+        transitionHistory: [],
+        definitionPath,
+        workspacePath: tmpDir,
+      });
+
+      const researcherLaneIds: number[] = [];
+      const deterministicCalls: Array<{ stateId: string; laneId: number | undefined }> = [];
+      const barrierCalls: DeterministicInvokeInput[] = [];
+      const internal = orchestrator as unknown as {
+        executeAgentState: ExecuteAgent;
+        executeDeterministicState: ExecuteDeterministic;
+      };
+      internal.executeAgentState = async (_id, input) => {
+        if (input.stateId === 'orchestrator') return makeVerdictResult('finished');
+        researcherLaneIds.push(input.context.lane?.id ?? -1);
+        return makeAgentResult({ outputHash: `resume-researcher-lane-${input.context.lane?.id ?? 'none'}` });
+      };
+      const barrierStub = makeBarrierDeterministicStub({
+        lanes: [1, 2],
+        onBarrierCall: (input) => barrierCalls.push(input),
+        onAnalysisRecord: (input) => {
+          const lane = input.context.lane?.id;
+          if (lane === undefined) throw new Error('analysis_record missing lane context');
+          appendEvolveNode(tmpDir, lane, 1);
+          return {
+            passed: true,
+            verdict: 'recorded',
+            payload: { step_name: `step_0001_lane_${lane}`, node_id: lane + 10 },
+          };
+        },
+      });
+      internal.executeDeterministicState = async (_id, input) => {
+        deterministicCalls.push({ stateId: input.stateId, laneId: input.context.lane?.id });
+        return barrierStub(input);
+      };
+
+      await orchestrator.resume(WF_ID);
+      await waitForCompletion(orchestrator, WF_ID);
+
+      expect(researcherLaneIds.sort()).toEqual([1, 2]);
+      expect(
+        deterministicCalls
+          .filter((call) => ['sample', 'evaluate', 'analysis_record'].includes(call.stateId))
+          .map((call) => `${call.stateId}:${call.laneId}`)
+          .sort(),
+      ).toEqual(['analysis_record:1', 'analysis_record:2', 'evaluate:1', 'evaluate:2', 'sample:1', 'sample:2']);
+      const sampleBatchCalls = barrierCalls.filter((c) => c.stateId === 'sample_batch');
+      expect(sampleBatchCalls).toHaveLength(1);
+      expect(sampleBatchCalls[0].commands[0]).toEqual(
+        expect.arrayContaining(['--workers', '3', '--lane', '1', '--lane', '2', '--batch-index', '1']),
+      );
+      const nodes = JSON.parse(
+        readFileSync(join(tmpDir, '.evolve_runs', 'main', 'database_data', 'nodes.json'), 'utf-8'),
+      ) as { nodes: Record<string, { meta_info?: { step_name?: string } }> };
+      expect(
+        Object.values(nodes.nodes)
+          .map((node) => node.meta_info?.step_name)
+          .sort(),
+      ).toEqual(['step_0001_lane_0', 'step_0001_lane_1', 'step_0001_lane_2']);
+    } finally {
+      if (originalHome === undefined) delete process.env.IRONCURTAIN_HOME;
+      else process.env.IRONCURTAIN_HOME = originalHome;
+    }
   });
 
   it('(b) a blocked child routes the parent to human_escalation with the reason surfaced', async () => {

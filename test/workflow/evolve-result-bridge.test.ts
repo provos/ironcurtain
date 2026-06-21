@@ -7,6 +7,7 @@ import { parse as parseYaml } from 'yaml';
 import { isSafeWorkspaceRelativePath, validateDefinition } from '../../src/workflow/validate.js';
 import { lintWorkflow } from '../../src/workflow/lint.js';
 import { isWithinDirectory } from '../../src/types/argument-roles.js';
+import { writeEvolveLaneNodes } from './test-helpers.js';
 
 const PYTHON = process.env.PYTHON ?? 'python3';
 const WORKFLOW_DIR = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'evolve');
@@ -339,6 +340,10 @@ describe('evolve_result.py bridge', () => {
       }),
     );
     writeFileSync(resolve(runDir, 'database_data', 'nodes.json'), JSON.stringify({ next_id: scores.length, nodes }));
+  }
+
+  function writeLaneNodes(runDir: string, lanes: readonly number[], batchIndex = 1): void {
+    writeEvolveLaneNodes(resolve(runDir, 'database_data'), lanes, batchIndex);
   }
 
   function attachForExistingStep(scriptsDir: string, runDir: string, stepName: string): Record<string, unknown> {
@@ -1419,6 +1424,79 @@ describe('evolve_result.py bridge', () => {
       expect(sample.payload.lane_seed).toBe(123 + lane);
     }
     expect(assignedParentIds.sort()).toEqual([0, 1, 2]);
+  });
+
+  it('sample_batch can prepare only missing lanes for a partially recorded batch', () => {
+    const runDir = resolve(tmpDir, 'batch-sample-resume-run');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      resolve(runDir, 'run_spec.yaml'),
+      JSON.stringify({
+        objective: 'resume batch target',
+        budget: { max_rounds: 3, patience: 2 },
+        sampling: { algorithm: 'island' },
+      }) + '\n',
+    );
+    writeFileSync(resolve(runDir, 'sampling_seed.txt'), '50\n');
+    writeLaneNodes(runDir, [0], 1);
+    const recordedLaneDir = resolve(runDir, 'current', 'lane_0');
+    mkdirSync(recordedLaneDir, { recursive: true });
+    writeFileSync(resolve(recordedLaneDir, 'analysis.md'), 'keep recorded analysis\n');
+    const scriptsDir = writeHarness({
+      dbStub:
+        [
+          'import json, sys',
+          'from pathlib import Path',
+          "run_dir = Path(sys.argv[sys.argv.index('--run-dir') + 1])",
+          "(run_dir / 'calls.txt').write_text(' '.join(sys.argv[1:]) + '\\n', encoding='utf-8')",
+          "print(json.dumps({'nodes': [",
+          "  {'id': 10, 'score': 1, 'analysis': 'a'},",
+          "  {'id': 11, 'score': 2, 'analysis': 'b'},",
+          ']}))',
+        ].join('\n') + '\n',
+    });
+
+    const { result } = runBridge(scriptsDir, [
+      'sample_batch',
+      '--run-dir',
+      runDir,
+      '--workers',
+      '3',
+      '--lane',
+      '1',
+      '--lane',
+      '2',
+      '--batch-index',
+      '1',
+      '--query-from-spec',
+    ]);
+
+    expect(result).toMatchObject({
+      verdict: 'sample_batch_prepared',
+      passed: true,
+      payload: {
+        workers: 3,
+        active_lanes: [1, 2],
+        active_lane_count: 2,
+        batch_index: 1,
+      },
+    });
+    const lanes = (result.payload as { lanes: Array<{ lane: number }> }).lanes;
+    expect(lanes.map((lane) => lane.lane)).toEqual([1, 2]);
+    expect(readFileSync(resolve(runDir, 'calls.txt'), 'utf-8')).toContain('--n 2');
+    expect(readFileSync(resolve(recordedLaneDir, 'analysis.md'), 'utf-8')).toBe('keep recorded analysis\n');
+    expect(existsSync(resolve(recordedLaneDir, 'context.json'))).toBe(false);
+    for (const lane of [1, 2]) {
+      const laneDir = resolve(runDir, 'current', `lane_${lane}`);
+      const context = JSON.parse(readFileSync(resolve(laneDir, 'context.json'), 'utf-8')) as {
+        step_name: string;
+      };
+      const sample = JSON.parse(readFileSync(resolve(laneDir, 'sample.json'), 'utf-8')) as {
+        payload: { lane_seed: number };
+      };
+      expect(context.step_name).toBe(`step_0001_lane_${lane}`);
+      expect(sample.payload.lane_seed).toBe(50 + lane);
+    }
   });
 
   it('sample_batch rejects duplicate parent partitions when enough parents exist', () => {

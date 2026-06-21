@@ -28,6 +28,23 @@ import type { WorkflowContext } from './types.js';
 // scripts/evolve_result.py (`step_<NNNN>_lane_<k>`) — keep both in sync if the
 // lane/step naming ever changes.
 export const DEFAULT_EVOLVE_LANE_DIR = '/workspace/.evolve_runs/main/current';
+
+/**
+ * Zero-pad width of the `step_<NNNN>` batch index. Mirrors the Python `:04d`
+ * format in `scripts/evolve_result.py` (`step_{batch_index:04d}_lane_{lane}`).
+ */
+export const EVOLVE_STEP_INDEX_WIDTH = 4;
+
+/**
+ * The single TS spelling of the fan-out step name `step_<NNNN>_lane_<k>` (the
+ * other half of the lane-dir seam above). The Python bridge writes the same
+ * literal at `f"step_{batch_index:04d}_lane_{lane}"`; the orchestrator parses it
+ * back with EVOLVE_LANE_STEP_RE. Keep all three (this fn, the Python f-string,
+ * the regex) in lockstep — they are one cross-language format contract.
+ */
+export function evolveStepName(batchIndex: number, lane: number): string {
+  return `step_${String(batchIndex).padStart(EVOLVE_STEP_INDEX_WIDTH, '0')}_lane_${lane}`;
+}
 export const DEFAULT_EVOLVE_LANE_RELATIVE_DIR = '.evolve_runs/main/current';
 
 /**

@@ -229,6 +229,36 @@ export function createArtifactAwareSession(
 }
 
 // ---------------------------------------------------------------------------
+// Evolve fan-out node fixtures
+// ---------------------------------------------------------------------------
+
+/**
+ * Writes a `nodes.json` engine-DB fixture with one recorded fan-out lane node
+ * per id in `lanes` (each tagged `step_<batchIndex>_lane_<k>`), into the given
+ * `database_data` directory. Shared by the bridge test (runDir/database_data)
+ * and the orchestrator fan-out test (workspace/.evolve_runs/main/database_data),
+ * which differ only in that base dir.
+ */
+export function writeEvolveLaneNodes(databaseDataDir: string, lanes: readonly number[], batchIndex = 1): void {
+  mkdirSync(databaseDataDir, { recursive: true });
+  const nodes = Object.fromEntries(
+    lanes.map((lane, index) => [
+      String(index),
+      {
+        id: index,
+        name: `lane-${lane}`,
+        parent: lane === 0 ? [] : [lane - 1],
+        score: lane + 1,
+        results: { eval_score: lane + 1 },
+        analysis: `analysis lane ${lane}`,
+        meta_info: { step_name: `step_${String(batchIndex).padStart(4, '0')}_lane_${lane}` },
+      },
+    ]),
+  );
+  writeFileSync(resolve(databaseDataDir, 'nodes.json'), JSON.stringify({ next_id: lanes.length, nodes }, null, 2));
+}
+
+// ---------------------------------------------------------------------------
 // Test infrastructure helpers
 // ---------------------------------------------------------------------------
 

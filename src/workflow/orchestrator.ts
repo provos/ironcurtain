@@ -106,7 +106,12 @@ import {
   buildInvalidVerdictReprompt,
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
-import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR, evolveResultScriptIndex } from './lane-template.js';
+import {
+  DEFAULT_EVOLVE_LANE_DIR,
+  DEFAULT_EVOLVE_LANE_RELATIVE_DIR,
+  evolveResultScriptIndex,
+  evolveStepName,
+} from './lane-template.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import {
   isSafeWorkspaceRelativePath,
@@ -216,6 +221,45 @@ interface FanOutIssue {
   readonly status: 'blocked' | 'errored';
   readonly reason: string;
 }
+
+interface EvolveRecordedLane {
+  readonly index: number;
+  readonly batchIndex: number;
+  readonly stepName: string;
+  readonly nodeId?: number;
+  readonly parent?: readonly number[];
+  readonly stepDir?: string;
+}
+
+interface FanOutDbReconstruction {
+  readonly batchIndex: number;
+  readonly recordedByLane: ReadonlyMap<number, EvolveRecordedLane>;
+  readonly missingLanes: readonly number[];
+  readonly runDir: string;
+}
+
+type FanOutDbReconstructionResult =
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'ready'; readonly reconstruction: FanOutDbReconstruction }
+  | { readonly kind: 'error'; readonly error: string };
+
+/**
+ * Crash-resume overrides threaded into the barrier `sample_batch`: `batchIndex`
+ * pins the in-flight `step_<batch>_lane_<k>` number (so re-run lanes reuse their
+ * pre-crash step names) and `lanes` restricts the draw to the lanes that did not
+ * record before the crash. Both default to "fresh batch" when omitted (bridge
+ * derives the index, draws all `workers` lanes). See {@link reconstructFanOutBatchFromDb}.
+ */
+interface FanOutBatchOptions {
+  readonly batchIndex?: number;
+  readonly lanes?: readonly number[];
+}
+
+// Parses the fan-out step name `step_<batch>(_lane_<k>)?`: group 1 = batch index,
+// group 2 = lane id (undefined for legacy non-lane `step_<batch>` nodes). The
+// TS twin of Python STEP_NAME_RE in scripts/evolve_result.py; the writer is
+// {@link evolveStepName} in lane-template.ts. All three move together.
+const EVOLVE_LANE_STEP_RE = /^step_(\d+)(?:_lane_(\d+))?$/;
 
 /**
  * Parses an agent_status block into one of three explicit states: `ok` with the
@@ -2695,7 +2739,22 @@ export class WorkflowOrchestrator implements WorkflowController {
     // PRECONDITION: mint the shared-container bundle once, before any child.
     await this.preMintFanOutScopeBundle(instance, input.stateId, segment);
 
-    const preparedLaneResults = await this.prepareFanOutLaneResults(workflowId, input, definition, segment, workers);
+    const reconstruction = this.reconstructFanOutBatchFromDb(instance, definition, segment, workers);
+    if (reconstruction.kind === 'error') {
+      return this.fanOutErrorResult(input, reconstruction.error);
+    }
+    const missingLanes =
+      reconstruction.kind === 'ready'
+        ? reconstruction.reconstruction.missingLanes
+        : Array.from({ length: workers }, (_, index) => index);
+
+    const preparedLaneResults = await this.prepareFanOutLaneResults(workflowId, input, definition, segment, workers, {
+      batchIndex:
+        reconstruction.kind === 'ready' && reconstruction.reconstruction.recordedByLane.size > 0
+          ? reconstruction.reconstruction.batchIndex
+          : undefined,
+      lanes: missingLanes,
+    });
     if (preparedLaneResults.error !== undefined) {
       return this.fanOutErrorResult(input, preparedLaneResults.error);
     }
@@ -2704,6 +2763,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const providedRoundMachine = this.provideActors(roundMachine, workflowId, definition, roundMachinesByState);
     let drainTrigger: RoundChildDrainTrigger | undefined;
     const childActors: RoundChildWaiter[] = [];
+    const lanePromises: Array<Promise<RoundChildOutcome>> = [];
     // Drain-on-escalation trigger. WHAT: the FIRST lane to reach `blocked`/
     // `errored` latches `drainTrigger`; the `!== undefined` guard makes this
     // fire-once, so a later co-blocker never re-triggers. Every un-settled peer
@@ -2743,6 +2803,22 @@ export class WorkflowOrchestrator implements WorkflowController {
     // (a child started in loop 1 could settle synchronously and call
     // `requestDrain` before loop 2's later peers existed).
     for (let index = 0; index < workers; index += 1) {
+      // Synthesize-vs-respawn fork. A lane whose node already recorded before the
+      // crash is DB-authoritative: synthesize its outcome from the durable node
+      // (no re-run, no fresh budget). A missing lane is RE-SPAWNED — and a
+      // re-spawned lane restarts with a fresh visit/token budget (its per-lane
+      // `maxVisits` resets, §6.1 / FSM-M1) and may drift to a different verdict
+      // than its pre-crash run would have produced (§11.2). Synthesized lanes are
+      // intentionally NOT pushed to `childActors`: they have no actor to drain, so
+      // the drain-on-escalation loop must never touch them.
+      const recordedLane =
+        reconstruction.kind === 'ready' ? reconstruction.reconstruction.recordedByLane.get(index) : undefined;
+      if (recordedLane !== undefined) {
+        lanePromises[index] = Promise.resolve(
+          this.synthesizeRecordedFanOutOutcome(input, segment, workers, recordedLane),
+        );
+        continue;
+      }
       const childContext = this.buildFanOutLaneContext(
         input.context,
         index,
@@ -2750,14 +2826,16 @@ export class WorkflowOrchestrator implements WorkflowController {
         preparedLaneResults.byLane[index],
       );
       const child = createActor(providedRoundMachine, { input: { context: childContext } });
-      childActors.push(this.waitForRoundChild(child, index, requestDrain));
+      const waiter = this.waitForRoundChild(child, index, requestDrain);
+      childActors.push(waiter);
+      lanePromises[index] = waiter.promise;
     }
 
     for (const child of childActors) {
       child.actor.start();
     }
 
-    const settled = await Promise.allSettled(childActors.map((child) => child.promise));
+    const settled = await Promise.allSettled(lanePromises);
     let result = this.joinFanOutBatch(instance, input, settled);
     if (workers > 1 && result.verdict === 'recorded') {
       const promotion = await this.promoteBarrierCognition(workflowId, definition, segment, result.context, settled);
@@ -3019,6 +3097,248 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   /**
+   * Reconstructs an in-flight evolve fan-out batch from the durable engine DB.
+   *
+   * This intentionally does NOT use XState child persistence. The checkpoint
+   * stores `{ machineState, context }` and `resolveState()` re-enters `workers`
+   * without live child ActorRefs; free-standing child actors created in the old
+   * process are gone. First-cut crash-resume therefore treats `nodes.json` as the
+   * source of truth: a recorded `step_<batch>_lane_<k>` means lane k is already
+   * done and must be synthesized, while every missing lane is re-spawned fresh
+   * from `sample`. That fresh re-run can produce a different verdict (§11.2
+   * verdict drift), which is acceptable for node-integrity but not a promise of
+   * batch-outcome reproducibility.
+   *
+   * Cross-language seam (deliberate, NOT accidental duplication). The batch-index
+   * reuse rule below re-implements Python `_next_batch_index(run_dir, workers)`.
+   * We re-derive it here rather than consume the bridge's `sample_batch_prepared`
+   * echo because the index is needed BEFORE `sample_batch` runs: TS must know it
+   * to decide synthesize-vs-respawn per lane AND to pin `--batch-index` into the
+   * very `sample_batch` call whose output would otherwise echo it. Having the
+   * bridge be authoritative would invert that ordering. So the two derivations
+   * MUST move together — TS pins `--batch-index` whenever any lane is recorded (so
+   * the bridge cannot diverge), and recomputes the identical number when none is.
+   * Both sides cite the shared `step_<batch>_lane_<k>` format (`evolveStepName` /
+   * the Python f-string) as the contract.
+   */
+  private reconstructFanOutBatchFromDb(
+    instance: WorkflowInstance,
+    definition: WorkflowDefinition,
+    segment: readonly string[],
+    workers: number,
+  ): FanOutDbReconstructionResult {
+    if (workers === 1) return { kind: 'unavailable' };
+
+    const runDir = this.evolveRunDirForFanOutSegment(definition, segment);
+    if (!runDir) return { kind: 'unavailable' };
+
+    const runDirRelative = this.containerPathToWorkspaceRelative(runDir);
+    if (!runDirRelative) return { kind: 'unavailable' };
+
+    const nodesPath = resolve(instance.workspacePath, runDirRelative, 'database_data', 'nodes.json');
+    const nodes = this.readEvolveNodes(nodesPath);
+    if (nodes.error !== undefined) return { kind: 'error', error: nodes.error };
+
+    const expectedLanes = Array.from({ length: workers }, (_, index) => index);
+    const lanesByBatch = new Map<number, Set<number>>();
+    const recordedByStep = new Map<string, EvolveRecordedLane>();
+    let highestBatch = 0;
+
+    for (const [nodeKey, rawNode] of nodes.entries) {
+      const node = this.asRecord(rawNode);
+      if (!node) continue;
+      const meta = this.asRecord(node.meta_info);
+      const stepName = typeof meta?.step_name === 'string' ? meta.step_name : undefined;
+      if (!stepName) continue;
+      const match = EVOLVE_LANE_STEP_RE.exec(stepName);
+      if (!match) continue;
+
+      const batchIndex = Number.parseInt(match[1], 10);
+      highestBatch = Math.max(highestBatch, batchIndex);
+      // Group 2 (the lane id) is undefined for a legacy non-lane `step_<batch>`
+      // node; only lane-tagged nodes participate in fan-out reconstruction.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- an unmatched optional regex group is `undefined` at runtime, but the type is `string`
+      if (match[2] === undefined) continue;
+
+      const lane = Number.parseInt(match[2], 10);
+      lanesByBatch.set(batchIndex, (lanesByBatch.get(batchIndex) ?? new Set<number>()).add(lane));
+      recordedByStep.set(stepName, {
+        index: lane,
+        batchIndex,
+        stepName,
+        nodeId: this.nodeIdFromRecord(node, nodeKey),
+        parent: this.nodeParentFromRecord(node),
+        stepDir: `${runDir}/steps/${stepName}`,
+      });
+    }
+
+    // Reuse-vs-advance heuristic — the crux of crash-resume, and the TS twin of
+    // Python `_next_batch_index(run_dir, workers)` (scripts/evolve_result.py).
+    // The highest lane-tagged batch whose CURRENT-worker lanes are only
+    // PARTIALLY present (some expected lane is missing) is the batch that was
+    // in flight when we crashed → REUSE its index, so the re-run lanes write the
+    // SAME `step_<batch>_lane_<k>` names and stay idempotent against the records
+    // that already landed. A fully-recorded highest batch (every expected lane
+    // present) or a fully-drained one (no lane-tagged nodes, so highestLanes is
+    // empty) is finished → advance to `highestBatch + 1`. This must match the
+    // Python reuse rule exactly: when recordedByLane is non-empty we PIN
+    // `--batch-index` to this value (so the bridge cannot diverge); when it is
+    // empty we pass no `--batch-index` and the bridge recomputes the same number.
+    // The shared `step_<batch>_lane_<k>` format (evolveStepName / the Python
+    // f-string) is the contract both sides cite; keep this block and
+    // `_next_batch_index` in lockstep — same seam as STEP_NAME_RE ↔ EVOLVE_LANE_STEP_RE.
+    const highestLanes = lanesByBatch.get(highestBatch) ?? new Set<number>();
+    const batchIndex =
+      highestBatch > 0 && highestLanes.size > 0 && expectedLanes.some((lane) => !highestLanes.has(lane))
+        ? highestBatch
+        : highestBatch + 1;
+    const recordedByLane = new Map<number, EvolveRecordedLane>();
+    for (const lane of expectedLanes) {
+      const recorded = recordedByStep.get(evolveStepName(batchIndex, lane));
+      if (recorded !== undefined) recordedByLane.set(lane, recorded);
+    }
+    const missingLanes = expectedLanes.filter((lane) => !recordedByLane.has(lane));
+
+    if (recordedByLane.size > 0) {
+      instance.tab.write(
+        `[fanout] Reconstructed "${segment[0]}" batch ${batchIndex}: ` +
+          `${recordedByLane.size} recorded, ${missingLanes.length} to re-run`,
+      );
+    }
+
+    return {
+      kind: 'ready',
+      reconstruction: {
+        batchIndex,
+        recordedByLane,
+        missingLanes,
+        runDir,
+      },
+    };
+  }
+
+  /**
+   * The evolve `--run-dir` for this fan-out segment's `sample` head, or
+   * `undefined` when the segment head is not a deterministic evolve sample
+   * command. `undefined` makes {@link reconstructFanOutBatchFromDb} return
+   * `unavailable`, so resume falls back to re-spawning all lanes fresh.
+   */
+  private evolveRunDirForFanOutSegment(definition: WorkflowDefinition, segment: readonly string[]): string | undefined {
+    const sampleStateId = segment[0];
+    const sampleState = definition.states[sampleStateId];
+    if (sampleState.type !== 'deterministic') return undefined;
+    const sampleCommand = sampleState.run.find((command) => this.isEvolveSampleCommand(command));
+    return sampleCommand ? this.commandFlagValue(sampleCommand, '--run-dir') : undefined;
+  }
+
+  /**
+   * Reads the engine `nodes.json` node map. Missing file ⇒ `{ entries: [] }`
+   * with NO error — a fresh batch (or a run that has not recorded any node yet)
+   * is a normal pre-crash state and must reconstruct as "nothing recorded". A
+   * read or JSON-parse failure ⇒ an `error`, which aborts the fan-out: a corrupt
+   * DB is NOT safe to treat as empty (we would re-run lanes that may already be
+   * recorded), so the missing-vs-corrupt distinction is load-bearing.
+   */
+  private readEvolveNodes(nodesPath: string): { entries: ReadonlyArray<readonly [string, unknown]>; error?: string } {
+    if (!existsSync(nodesPath)) return { entries: [] };
+    let raw: string;
+    try {
+      raw = readFileSync(nodesPath, 'utf-8');
+    } catch (err) {
+      return { entries: [], error: `could not read evolve nodes DB ${nodesPath}: ${errorMessage(err)}` };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      return { entries: [], error: `could not parse evolve nodes DB ${nodesPath}: ${errorMessage(err)}` };
+    }
+
+    const root = this.asRecord(parsed);
+    const nodes = this.asRecord(root?.nodes);
+    return { entries: nodes ? Object.entries(nodes) : [] };
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  }
+
+  private nodeIdFromRecord(node: Record<string, unknown>, fallback: string): number | undefined {
+    const raw = node.id;
+    if (typeof raw === 'number' && Number.isInteger(raw)) return raw;
+    const parsed = Number.parseInt(fallback, 10);
+    return Number.isInteger(parsed) ? parsed : undefined;
+  }
+
+  /**
+   * The node's parent lineage as a tri-state: `undefined` when the record has no
+   * `parent` array at all (omit the field from the synthesized payload — lineage
+   * unknown), `[]` for a root node (an explicit empty array — root, not omitted),
+   * and `[...ids]` for a child's parent ids. The empty-vs-undefined distinction
+   * is preserved deliberately so {@link synthesizeRecordedFanOutOutcome} can omit
+   * an unknown parent while still echoing an explicit root.
+   */
+  private nodeParentFromRecord(node: Record<string, unknown>): readonly number[] | undefined {
+    if (!Array.isArray(node.parent)) return undefined;
+    const parent = node.parent.filter((item): item is number => typeof item === 'number' && Number.isInteger(item));
+    return parent.length > 0 ? parent : [];
+  }
+
+  /**
+   * Builds the barrier outcome for a lane that already recorded before a crash.
+   * The durable node proves the lane advanced; the volatile child actor context
+   * (visit counts, token spend, in-flight state) is not recoverable without the
+   * deferred `getPersistedSnapshot()` + in-context spawn migration, so this is a
+   * minimal recorded context sufficient for join, promotion, and duplicate stats.
+   *
+   * Edge cases (the contract callers rely on):
+   * - Called ONLY for a lane the engine DB already recorded — i.e. the
+   *   just-before-crash case where the node landed but the process died before
+   *   the join. Every NOT-recorded lane is re-spawned instead (see the fork in
+   *   {@link runFanOutSegment}).
+   * - Does NOT rebuild on-disk artifacts. The lane's `analysis.md` /
+   *   `analysis_record.json` may be absent post-crash, but the durable node is
+   *   authoritative, so a fabricated `lastDeterministicResult` with
+   *   `{ verdict: 'recorded', idempotent_skip: true }` is sufficient — nothing
+   *   downstream re-reads those files for a recorded lane.
+   * - `idempotent_skip: true` is the marker that this outcome was synthesized
+   *   (vs produced by a live re-run); the returned `recorded` outcome is
+   *   otherwise indistinguishable to {@link joinFanOutBatch} from a live-recorded
+   *   lane, so the join, promotion, and duplicate-rate paths need no special case.
+   */
+  private synthesizeRecordedFanOutOutcome(
+    input: FanOutInvokeInput,
+    segment: readonly string[],
+    workers: number,
+    recorded: EvolveRecordedLane,
+  ): RoundChildOutcome {
+    const base = this.buildFanOutLaneContext(input.context, recorded.index, workers, undefined);
+    const payload: Record<string, unknown> = {
+      step_name: recorded.stepName,
+      idempotent_skip: true,
+      ...(recorded.nodeId !== undefined ? { node_id: recorded.nodeId } : {}),
+      ...(recorded.parent !== undefined ? { parent: [...recorded.parent] } : {}),
+      ...(recorded.stepDir !== undefined ? { step_dir: recorded.stepDir } : {}),
+    };
+    return {
+      index: recorded.index,
+      status: 'recorded',
+      context: {
+        ...base,
+        round: base.round + 1,
+        previousStateName: segment[segment.length - 1] ?? input.stateId,
+        lastDeterministicResult: {
+          verdict: 'recorded',
+          payload,
+        },
+      },
+    };
+  }
+
+  /**
    * Runs the ONE barrier-side `sample_batch(n=workers)` before fan-out and
    * partitions its result into per-lane pre-computed `sample` results (keyed by
    * lane id) that {@link executeDeterministicState} replays as each child's
@@ -3047,14 +3367,17 @@ export class WorkflowOrchestrator implements WorkflowController {
     definition: WorkflowDefinition,
     segment: readonly string[],
     workers: number,
+    options: FanOutBatchOptions = {},
   ): Promise<{ byLane: Record<number, Readonly<Record<string, DeterministicInvokeResult>>>; error?: string }> {
     if (workers === 1) return { byLane: {} };
+    const expectedLanes = options.lanes ?? Array.from({ length: workers }, (_, index) => index);
+    if (expectedLanes.length === 0) return { byLane: {} };
 
     const sampleStateId = segment[0];
     const sampleState = definition.states[sampleStateId];
     if (sampleState.type !== 'deterministic') return { byLane: {} };
 
-    const batchInput = this.buildEvolveSampleBatchInput(sampleStateId, sampleState, input.context, workers);
+    const batchInput = this.buildEvolveSampleBatchInput(sampleStateId, sampleState, input.context, workers, options);
     if (!batchInput) return { byLane: {} };
 
     const result = await this.executeDeterministicState(workflowId, batchInput);
@@ -3075,6 +3398,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       if (!lanePayload || typeof lanePayload !== 'object' || Array.isArray(lanePayload)) continue;
       const laneId = (lanePayload as { lane?: unknown }).lane;
       if (typeof laneId !== 'number' || !Number.isInteger(laneId) || laneId < 0 || laneId >= workers) continue;
+      if (!expectedLanes.includes(laneId)) continue;
       byLane[laneId] = {
         [sampleStateId]: {
           passed: true,
@@ -3084,7 +3408,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    const missing = Array.from({ length: workers }, (_, index) => index).filter((index) => !(index in byLane));
+    const missing = expectedLanes.filter((index) => !(index in byLane));
     if (missing.length > 0) {
       return { byLane: {}, error: `fan-out sample batch omitted lane(s): ${missing.join(', ')}` };
     }
@@ -3108,6 +3432,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     state: DeterministicStateDefinition,
     context: WorkflowContext,
     workers: number,
+    options: FanOutBatchOptions = {},
   ): DeterministicInvokeInput | undefined {
     const sampleCommand = state.run.find((command) => this.isEvolveSampleCommand(command));
     if (!sampleCommand) return undefined;
@@ -3118,6 +3443,8 @@ export class WorkflowOrchestrator implements WorkflowController {
       extraArgs: [
         '--workers',
         String(workers),
+        ...(options.lanes !== undefined ? options.lanes.flatMap((lane) => ['--lane', String(lane)]) : []),
+        ...(options.batchIndex !== undefined ? ['--batch-index', String(options.batchIndex)] : []),
         ...this.sampleQueryArgs(sampleCommand),
         ...this.sampleTopKArgs(sampleCommand),
       ],
