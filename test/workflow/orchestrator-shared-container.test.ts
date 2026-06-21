@@ -42,6 +42,10 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     __stub: true,
     workflowId,
     bundleId,
+    // Snapshotting is gated on the Docker runtime (apple-container has no image
+    // commit); these tests exercise the snapshot path, so the stub is a Docker
+    // bundle.
+    runtimeKind: 'docker',
     setTokenSessionId: () => {},
     beginCaptureSession: () => {},
     endCaptureSession: async () => {},
