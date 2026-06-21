@@ -3,7 +3,7 @@
  * runPtySession to avoid duplicating stop/remove/network-cleanup logic.
  */
 
-import type { DockerManager } from './types.js';
+import type { ContainerRuntime } from './types.js';
 
 /**
  * Stop and remove Docker containers and their per-session network in parallel.
@@ -11,7 +11,7 @@ import type { DockerManager } from './types.js';
  * doesn't prevent cleanup of the others.
  */
 export async function cleanupContainers(
-  docker: DockerManager,
+  docker: ContainerRuntime,
   opts: {
     containerId: string | null;
     sidecarContainerId: string | null;

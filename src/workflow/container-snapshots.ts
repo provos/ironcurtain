@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { DockerManager } from '../docker/types.js';
+import type { ContainerRuntime } from '../docker/types.js';
 import { createDockerManager } from '../docker/docker-manager.js';
+import { commandExists } from '../trusted-process/container-command.js';
 import * as logger from '../logger.js';
 import type { CheckpointStore } from './checkpoint.js';
 import { isCheckpointResumable } from './checkpoint.js';
@@ -46,7 +47,7 @@ export function getContainerSnapshotImages(checkpoint: WorkflowCheckpoint | unde
 }
 
 export async function commitContainerSnapshot(input: {
-  readonly docker: DockerManager;
+  readonly docker: ContainerRuntime;
   readonly workflowId: WorkflowId;
   readonly scope: string;
   readonly containerId: string;
@@ -72,7 +73,7 @@ export async function commitContainerSnapshot(input: {
 }
 
 export async function removeContainerSnapshotImages(
-  docker: DockerManager,
+  docker: ContainerRuntime,
   snapshots: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
 ): Promise<void> {
   await Promise.allSettled(uniqueSnapshotImages(snapshots).map((image) => docker.removeImage(image)));
@@ -88,14 +89,24 @@ export async function sweepContainerSnapshots(input: {
   readonly baseDir: string;
   readonly checkpointStore: CheckpointStore;
   readonly userConfig: ResolvedUserConfig;
-  readonly docker?: DockerManager;
+  readonly docker?: ContainerRuntime;
   readonly now?: Date;
 }): Promise<ContainerSnapshotGcResult> {
   if (!input.userConfig.snapshot.enabled) {
     return { removedImages: [], agedImages: [], orphanImages: [] };
   }
 
-  const docker = input.docker ?? createDockerManager();
+  // Container snapshots are a Docker-only feature. On a host without the Docker
+  // CLI (e.g. an Apple `container`-only machine) there are no snapshot images to
+  // collect — skip cleanly rather than spawning a missing `docker` binary and
+  // surfacing a caught ENOENT to every caller on each sweep.
+  let docker = input.docker;
+  if (!docker) {
+    if (!commandExists('docker')) {
+      return { removedImages: [], agedImages: [], orphanImages: [] };
+    }
+    docker = createDockerManager();
+  }
   const nowMs = (input.now ?? new Date()).getTime();
   const maxAgeMs =
     input.userConfig.snapshot.maxAgeDays === null ? null : input.userConfig.snapshot.maxAgeDays * 24 * 60 * 60 * 1000;

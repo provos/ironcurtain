@@ -84,7 +84,7 @@ import {
   ensureSecureBundleDir,
   type DockerInfrastructure,
 } from '../docker/docker-infrastructure.js';
-import type { DockerManager } from '../docker/types.js';
+import type { ContainerRuntime } from '../docker/types.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -813,7 +813,9 @@ interface WorkflowInstance {
    * per-run `--internal` Docker network. Note that `destroyWorkflowInfrastructure`
    * snapshot-and-clears `bundlesByScope` synchronously, so a redundant destroy
    * pass no-ops while the real work stays captured in this promise — awaiting
-   * it is the only way to observe teardown completion.
+   * it is the only way to observe teardown completion. The apple-container
+   * backend loses this race every time (its VM shutdown is slow), so draining
+   * the promise matters there in particular.
    */
   teardownPromise?: Promise<void>;
   /**
@@ -1185,11 +1187,25 @@ export class WorkflowOrchestrator implements WorkflowController {
    * `abort()` / `shutdownAll()` will propagate to their own caller (the
    * test or CLI layer), which is the intended signal.
    */
-  private async destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+  private destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
     // Set BEFORE any short-circuit: an in-flight `ensureBundleForScope`
     // that resumes from its `await factory(...)` must observe this flag
     // and tear down its own orphan rather than publishing into the map.
     instance.aborted = true;
+
+    // Join semantics: the first caller starts the teardown; concurrent
+    // and later callers await the SAME promise. This is what lets the
+    // CLI's shutdownAll() block until the fire-and-forget destroy from
+    // handleWorkflowComplete has actually finished, instead of bailing
+    // on the already-cleared map and letting process.exit() kill the
+    // teardown mid-flight (leaking the container, its network, and the
+    // MCP relay subprocesses).
+    instance.teardownPromise ??= this.runBundleTeardown(instance);
+    return instance.teardownPromise;
+  }
+
+  /** Body of the bundle teardown; only ever started once per instance. */
+  private async runBundleTeardown(instance: WorkflowInstance): Promise<void> {
     if (instance.bundlesByScope.size === 0) return;
 
     // Snapshot and clear BEFORE the awaits so a concurrent caller sees
@@ -1250,6 +1266,17 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const snapshots: Record<string, ContainerSnapshotRef> = {};
     for (const [scope, infra] of entries) {
+      // Container snapshots require Docker's commit/image APIs, which the Apple
+      // `container` runtime does not provide. Skip cleanly (the workflow stops
+      // without a resumable container snapshot) rather than attempting a commit
+      // that the runtime would reject.
+      if (infra.runtimeKind !== 'docker') {
+        writeStderr(
+          `[workflow] Container snapshots are not supported on the "${infra.runtimeKind}" runtime; ` +
+            `stopping ${instance.id} scope "${scope}" without a snapshot.`,
+        );
+        continue;
+      }
       try {
         snapshots[scope] = await commitContainerSnapshot({
           docker: infra.docker,
@@ -1266,7 +1293,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     return Object.keys(snapshots).length > 0 ? snapshots : undefined;
   }
 
-  private async dockerForSnapshotCleanup(instance: WorkflowInstance): Promise<DockerManager> {
+  private async dockerForSnapshotCleanup(instance: WorkflowInstance): Promise<ContainerRuntime> {
     if (instance.bundlesByScope.size > 0) {
       return [...instance.bundlesByScope.values()][0].docker;
     }
@@ -1275,7 +1302,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   private async removeSnapshotImagesAfterTeardown(
-    docker: DockerManager,
+    docker: ContainerRuntime,
     snapshots: Readonly<Record<string, ContainerSnapshotRef>> | undefined,
   ): Promise<void> {
     if (!snapshots || Object.keys(snapshots).length === 0) return;

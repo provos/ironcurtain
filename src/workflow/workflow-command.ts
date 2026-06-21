@@ -248,7 +248,8 @@ async function runStart(args: string[]): Promise<void> {
   // used to — terminates the process synchronously and cuts off the async
   // teardown in the finally, orphaning each run's per-session --internal
   // Docker network (which has no stale-reaper) until Docker's address pools
-  // are exhausted.
+  // are exhausted. The apple-container backend loses this race every time
+  // (slower VM shutdown), so the fix matters there in particular.
   // Definitely assigned before the post-finally `process.exit`: the only way
   // to skip that assignment is a throw, which propagates past it.
   let exitCode: number;
@@ -270,6 +271,8 @@ async function runStart(args: string[]): Promise<void> {
     exitCode = computeExitCode(orchestrator, workflowId, controller.signal);
   } finally {
     rl.close();
+    // Joins any in-flight teardown (see WorkflowInstance.teardownPromise)
+    // so the process.exit below never strands infrastructure.
     await orchestrator.shutdownAll().catch(() => {});
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }

@@ -1,5 +1,5 @@
 /**
- * Docker CLI wrapper implementing the DockerManager interface.
+ * Docker CLI wrapper implementing the ContainerRuntime interface.
  *
  * Uses child_process.execFile for all Docker CLI commands.
  * This keeps the implementation simple and avoids a dependency
@@ -11,15 +11,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { DockerContainerConfig, DockerExecResult, DockerImageInfo, DockerManager } from './types.js';
+import type { ContainerRuntime, DockerContainerConfig, DockerExecResult, DockerImageInfo } from './types.js';
 import * as logger from '../logger.js';
-import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
+import { checkDockerAvailable, type DockerAvailability } from './docker-probe.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 import { spawnWithIdleTimeout, type SpawnFn } from './spawn-with-idle-timeout.js';
 import {
   createDockerProgressSink,
   type CreateDockerProgressSinkOptions,
   type DockerProgressSink,
+  type DockerProgressOperation,
 } from './docker-progress-sink.js';
 
 /** Async exec function signature matching promisified execFile. */
@@ -277,36 +278,36 @@ export interface CreateDockerManagerOptions {
   progressSinkFactory?: (opts: CreateDockerProgressSinkOptions) => DockerProgressSink;
 }
 
-export function createDockerManager(
-  execFileFn?: ExecFileFn,
-  dockerAvailabilityProbe: () => Promise<DockerAvailability> = checkDockerAvailable,
-  spawnOpts?: CreateDockerManagerOptions,
-): DockerManager {
-  const exec = execFileFn ?? defaultExecFile;
-  const streamOpts = {
-    spawn: spawnOpts?.spawn,
-    stdoutSink: spawnOpts?.stdoutSink,
-    stderrSink: spawnOpts?.stderrSink,
-  };
-  const progressSinkFactory = spawnOpts?.progressSinkFactory ?? createDockerProgressSink;
+/** Streaming-sink options shared by the runtime managers' build/pull runner. */
+export interface StreamOpts {
+  spawn?: SpawnFn;
+  stdoutSink?: NodeJS.WritableStream;
+  stderrSink?: NodeJS.WritableStream;
+}
 
-  // Runs a `docker pull` / `docker build` invocation with the streaming
-  // idle-timeout primitive, wrapped in a progress sink that collapses the
-  // raw output flood into a single updating status line (TTY) or
-  // verbatim pass-through (non-TTY). When the test seam provides explicit
-  // sinks we honor them and skip the wrapper.
-  const runStreamed = async (params: {
-    operation: 'docker pull' | 'docker build';
-    args: readonly string[];
-    idleTimeoutMs: number;
-    env?: NodeJS.ProcessEnv;
-  }): Promise<void> => {
+/**
+ * Builds the streaming `pull`/`build` runner shared by the Docker and Apple
+ * `container` managers: it drives `spawnWithIdleTimeout` for `bin` and wraps the
+ * raw output flood in a progress sink (collapsed status line on a TTY, verbatim
+ * otherwise), bypassing the sink when the caller injected explicit sinks (tests).
+ */
+export function makeRunStreamed(
+  bin: string,
+  streamOpts: StreamOpts,
+  progressSinkFactory: (opts: CreateDockerProgressSinkOptions) => DockerProgressSink,
+): (params: {
+  operation: DockerProgressOperation;
+  args: readonly string[];
+  idleTimeoutMs: number;
+  env?: NodeJS.ProcessEnv;
+}) => Promise<void> {
+  return async (params) => {
     const hasInjectedSinks = streamOpts.stdoutSink !== undefined && streamOpts.stderrSink !== undefined;
     const progress: DockerProgressSink | undefined = hasInjectedSinks
       ? undefined
       : progressSinkFactory({ operation: params.operation });
     try {
-      await spawnWithIdleTimeout('docker', params.args, {
+      await spawnWithIdleTimeout(bin, params.args, {
         idleTimeoutMs: params.idleTimeoutMs,
         operation: params.operation,
         env: params.env,
@@ -321,6 +322,21 @@ export function createDockerManager(
       throw err;
     }
   };
+}
+
+export function createDockerManager(
+  execFileFn?: ExecFileFn,
+  dockerAvailabilityProbe: () => Promise<DockerAvailability> = checkDockerAvailable,
+  spawnOpts?: CreateDockerManagerOptions,
+): ContainerRuntime {
+  const exec = execFileFn ?? defaultExecFile;
+  const streamOpts = {
+    spawn: spawnOpts?.spawn,
+    stdoutSink: spawnOpts?.stdoutSink,
+    stderrSink: spawnOpts?.stderrSink,
+  };
+  const progressSinkFactory = spawnOpts?.progressSinkFactory ?? createDockerProgressSink;
+  const runStreamed = makeRunStreamed('docker', streamOpts, progressSinkFactory);
 
   return {
     async preflight(image: string): Promise<void> {
@@ -354,7 +370,7 @@ export function createDockerManager(
       workdir?: string,
     ): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-      // Resolve the `--user` flag (see DockerManager.exec JSDoc):
+      // Resolve the `--user` flag (see ContainerRuntime.exec JSDoc):
       //   undefined → 'codespace' (default for agent containers)
       //   string    → override
       //   null      → skip the flag entirely (non-agent containers
@@ -663,6 +679,22 @@ export function createDockerManager(
 
     async connectNetwork(networkName: string, containerId: string): Promise<void> {
       await exec('docker', ['network', 'connect', networkName, containerId], { timeout: 10_000 });
+    },
+
+    async getNetworkGateway(name: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec(
+          'docker',
+          ['network', 'inspect', '-f', '{{(index .IPAM.Config 0).Gateway}}', name],
+          {
+            timeout: 10_000,
+          },
+        );
+        const value = stdout.trim();
+        return value && value !== '<no value>' ? value : undefined;
+      } catch {
+        return undefined;
+      }
     },
 
     async getContainerIp(containerId: string, network: string): Promise<string> {

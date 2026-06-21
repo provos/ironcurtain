@@ -19,7 +19,7 @@ import type {
   DockerContainerConfig,
   DockerExecResult,
   DockerImageInfo,
-  DockerManager,
+  ContainerRuntime,
 } from '../../src/docker/types.js';
 
 /**
@@ -57,7 +57,7 @@ export function createDockerCallTracker(): DockerCallTracker {
 }
 
 /**
- * Builds a DockerManager mock suitable for both session and infrastructure
+ * Builds a ContainerRuntime mock suitable for both session and infrastructure
  * tests. When no tracker is passed, the mock behaves like a simple stub
  * (no call recording). When a tracker is passed, each relevant method
  * records its arguments so tests can assert on exact container
@@ -68,7 +68,7 @@ export function createDockerCallTracker(): DockerCallTracker {
  * subsequent `imageExists` checks return true, and `getImageLabel`
  * returns the stamped hash (enabling staleness-detection tests).
  */
-export function createMockDocker(options: CreateMockDockerOptions = {}): DockerManager {
+export function createMockDocker(options: CreateMockDockerOptions = {}): ContainerRuntime {
   const { tracker, exec: execOverride, create: createOverride } = options;
 
   // Track build-hash labels so ensureImage()'s staleness-detection path

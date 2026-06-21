@@ -162,14 +162,19 @@ export interface DockerImageInfo {
 }
 
 /**
- * Manages Docker container lifecycle for agent sessions.
+ * Manages container lifecycle for agent sessions.
  *
- * Uses the Docker CLI (not the Docker API) for simplicity.
- * The Docker socket is only accessed from the host process,
- * never from inside agent containers.
+ * Implementations wrap a specific container runtime CLI -- Docker today
+ * (`createDockerManager()` in docker-manager.ts), Apple `container` planned
+ * (see docs/designs/apple-container-runtime.md). Select via
+ * `createContainerRuntime()` in container-runtime.ts.
+ *
+ * Implementations use the runtime's CLI (not an engine API) for simplicity.
+ * The runtime is only invoked from the host process, never from inside
+ * agent containers.
  */
-export interface DockerManager {
-  /** Check that Docker is available and the image exists. */
+export interface ContainerRuntime {
+  /** Check that the runtime is available and the image exists. */
   preflight(image: string): Promise<void>;
 
   /** Create a container with the given configuration. Returns container ID. */
@@ -263,6 +268,14 @@ export interface DockerManager {
 
   /** Connect an existing container to a Docker network. */
   connectNetwork(networkName: string, containerId: string): Promise<void>;
+
+  /**
+   * Returns the host-side IPv4 gateway address of a network, or undefined
+   * if the network does not exist or has no gateway. Optional: only the
+   * tcp-hostonly topology consumes it (see network-topology.ts), and it
+   * falls back to deriving the gateway from the subnet when absent.
+   */
+  getNetworkGateway?(name: string): Promise<string | undefined>;
 
   /** Get a container's IP address on a specific network. */
   getContainerIp(containerId: string, network: string): Promise<string>;

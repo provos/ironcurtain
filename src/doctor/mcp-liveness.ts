@@ -11,6 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { permissiveJsonSchemaValidator } from '../trusted-process/permissive-output-validator.js';
+import { resolveContainerSpawnCommand } from '../trusted-process/container-command.js';
 import { VERSION } from '../version.js';
 
 /** Per-server probe deadline (covers connect + listTools combined). */
@@ -63,14 +64,25 @@ function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promis
  * can run multiple probes in parallel without a single failure aborting
  * the whole batch (Promise.all would otherwise reject on the first error).
  */
-export async function probeServer(name: string, config: MCPServerConfig): Promise<ProbeResult> {
+export async function probeServer(
+  name: string,
+  config: MCPServerConfig,
+  serverCredentials: Readonly<Record<string, string>> = {},
+): Promise<ProbeResult> {
   const start = Date.now();
   let client: Client | undefined;
   try {
+    // Same docker→container translation the MCP relay applies, so the
+    // probe exercises what sessions will actually spawn on machines
+    // using the Apple container runtime.
+    const spawnSpec = resolveContainerSpawnCommand(config.command, config.args);
     const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args,
-      env: { ...(process.env as Record<string, string>), ...(config.env ?? {}) },
+      command: spawnSpec.command,
+      args: spawnSpec.args,
+      // Credential injection mirrors the MCP relay: stored per-server
+      // credentials from ~/.ironcurtain/config.json win over inherited
+      // env, same as a real session.
+      env: { ...(process.env as Record<string, string>), ...(config.env ?? {}), ...serverCredentials },
       stderr: 'pipe',
     });
     if (transport.stderr) {

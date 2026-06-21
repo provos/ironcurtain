@@ -23,7 +23,7 @@ import {
   type SignalContainerConfig,
 } from './signal-container.js';
 import { SIGNAL_DEFAULTS, resolveSignalConfig, getSignalDataDir } from './signal-config.js';
-import { checkDockerAvailable } from '../session/preflight.js';
+import { checkDockerAvailable } from '../docker/docker-probe.js';
 
 // ---- Cancel handling ------------------------------------------------
 

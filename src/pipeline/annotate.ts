@@ -14,6 +14,7 @@ import type { LanguageModel } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { permissiveJsonSchemaValidator } from '../trusted-process/permissive-output-validator.js';
+import { resolveContainerSpawnCommand } from '../trusted-process/container-command.js';
 import chalk from 'chalk';
 import type { MCPServerConfig } from '../config/types.js';
 import { checkHelp, printHelp, type CommandSpec } from '../cli-help.js';
@@ -96,9 +97,16 @@ async function connectAndDiscoverTools(
         spinner.text = `[1/2] Connecting to MCP server: ${serverName}...`;
         let client: Client | undefined;
         try {
+          // Docker-based servers (e.g. github) hardcode `command: docker`.
+          // On an Apple `container` host there is no `docker` binary, so the
+          // verbatim spawn fails with ENOENT. Translate `docker run ...` to
+          // the `container` CLI exactly as the runtime relay does
+          // (container-command.ts); no-op when docker is present or the
+          // command isn't `docker run ...`.
+          const spawn = resolveContainerSpawnCommand(config.command, config.args);
           const transport = new StdioClientTransport({
-            command: config.command,
-            args: config.args,
+            command: spawn.command,
+            args: spawn.args,
             env: { ...(process.env as Record<string, string>), ...config.env },
             stderr: 'pipe',
           });

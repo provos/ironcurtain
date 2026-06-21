@@ -5,11 +5,11 @@
  * the signal-cli container is a long-lived background service that
  * needs network access to communicate with Signal servers.
  *
- * Delegates to DockerManager for all Docker CLI operations.
+ * Delegates to ContainerRuntime for all Docker CLI operations.
  */
 
 import { mkdirSync } from 'node:fs';
-import type { DockerManager } from '../docker/types.js';
+import type { ContainerRuntime } from '../docker/types.js';
 import { getSignalDataDir } from './signal-config.js';
 import * as logger from '../logger.js';
 
@@ -59,7 +59,7 @@ function sleep(ms: number): Promise<void> {
  * may restart the container but the bind mount shows an empty or partial
  * view of the host directory.
  */
-async function hasStaleBindMount(docker: DockerManager, containerName: string): Promise<boolean> {
+async function hasStaleBindMount(docker: ContainerRuntime, containerName: string): Promise<boolean> {
   try {
     // Pass `execUser: null` to skip `--user codespace`: the
     // bbernhard/signal-cli-rest-api image has no codespace account, and
@@ -75,7 +75,7 @@ async function hasStaleBindMount(docker: DockerManager, containerName: string): 
 }
 
 export function createSignalContainerManager(
-  docker: DockerManager,
+  docker: ContainerRuntime,
   config: SignalContainerConfig,
 ): SignalContainerManager {
   const resolvedDataDir = config.dataDir || getSignalDataDir();
@@ -135,7 +135,7 @@ export function createSignalContainerManager(
         }
       }
 
-      // Create new container via DockerManager.create()
+      // Create new container via ContainerRuntime.create()
       logger.info('[Signal Container] Creating new container...');
       mkdirSync(resolvedDataDir, { recursive: true });
       await docker.create({

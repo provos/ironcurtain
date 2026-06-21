@@ -3,7 +3,8 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } fro
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { REAL_TMP, testCompiledPolicy, testToolAnnotations } from '../fixtures/test-policy.js';
-import { isDockerAvailable, isDockerImageAvailable } from '../helpers/docker-available.js';
+import { isRuntimeAvailable, isRuntimeImageAvailable } from '../helpers/container-runtimes.js';
+import type { ContainerRuntimeKind } from '../../src/docker/container-runtime.js';
 import type { IronCurtainConfig } from '../../src/config/types.js';
 import {
   createDockerInfrastructure,
@@ -19,7 +20,12 @@ import type { SessionOptions } from '../../src/session/types.js';
 import { approvedResponse, createDeps, MockSession, waitForCompletion } from './test-helpers.js';
 
 const IMAGE = 'ironcurtain-claude-code:latest';
-const TEST_HOME = `${REAL_TMP}/ironcurtain-deterministic-verdict-${process.pid}`;
+
+// Matrix the suite over both container runtimes. Each lane is gated
+// independently on its runtime being reachable + the agent image being built
+// for it, so CI (Docker) runs the docker lane and skips apple-container, while
+// an Apple-silicon dev machine with the `container` CLI runs both.
+const RUNTIME_KINDS: readonly ContainerRuntimeKind[] = ['docker', 'apple-container'];
 
 function findHostCaDir(): string | null {
   const home = process.env.IRONCURTAIN_HOME ?? join(homedir(), '.ironcurtain');
@@ -28,10 +34,12 @@ function findHostCaDir(): string | null {
 }
 
 const hostCaDir = findHostCaDir();
-const dockerReady =
-  process.env.INTEGRATION_TEST === '1' && isDockerAvailable() && isDockerImageAvailable(IMAGE) && hostCaDir !== null;
 
-function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): IronCurtainConfig {
+function buildDockerSessionConfig(
+  workspaceDir: string,
+  generatedDir: string,
+  runtimeKind: ContainerRuntimeKind,
+): IronCurtainConfig {
   return {
     auditLogPath: join(workspaceDir, 'audit.jsonl'),
     allowedDirectory: workspaceDir,
@@ -72,140 +80,155 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
       },
       serverCredentials: {},
       dockerResources: { memoryMb: null, cpus: null },
+      // Pin the runtime per matrix lane. Without this it defaults to 'auto',
+      // which on a machine with the `container` CLI would resolve the "docker"
+      // lane to apple-container too.
+      containerRuntime: runtimeKind,
     },
   } as unknown as IronCurtainConfig;
 }
 
-describe.skipIf(!dockerReady)('deterministic-verdict-smoke with real Docker container', () => {
-  let tmpDir: string;
-  let originalHome: string | undefined;
-  let originalAuth: string | undefined;
-  let originalApiKey: string | undefined;
-  const liveBundles = new Set<DockerInfrastructure>();
+function defineSmokeSuite(runtimeKind: ContainerRuntimeKind): void {
+  const TEST_HOME = `${REAL_TMP}/ironcurtain-deterministic-verdict-${runtimeKind}-${process.pid}`;
+  const runtimeReady =
+    process.env.INTEGRATION_TEST === '1' &&
+    isRuntimeAvailable(runtimeKind) &&
+    isRuntimeImageAvailable(runtimeKind, IMAGE) &&
+    hostCaDir !== null;
 
-  beforeAll(() => {
-    originalHome = process.env.IRONCURTAIN_HOME;
-    originalAuth = process.env.IRONCURTAIN_DOCKER_AUTH;
-    originalApiKey = process.env.ANTHROPIC_API_KEY;
-    process.env.IRONCURTAIN_HOME = TEST_HOME;
-    process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey';
-    process.env.ANTHROPIC_API_KEY = 'test-fake-key-no-network';
-    mkdirSync(TEST_HOME, { recursive: true });
-    cpSync(hostCaDir as string, join(TEST_HOME, 'ca'), { recursive: true });
-  });
+  describe.skipIf(!runtimeReady)(`deterministic-verdict-smoke with real ${runtimeKind} container`, () => {
+    let tmpDir: string;
+    let originalHome: string | undefined;
+    let originalAuth: string | undefined;
+    let originalApiKey: string | undefined;
+    const liveBundles = new Set<DockerInfrastructure>();
 
-  afterAll(async () => {
-    for (const bundle of liveBundles) {
-      await destroyDockerInfrastructure(bundle).catch(() => {});
-    }
-    liveBundles.clear();
+    beforeAll(() => {
+      originalHome = process.env.IRONCURTAIN_HOME;
+      originalAuth = process.env.IRONCURTAIN_DOCKER_AUTH;
+      originalApiKey = process.env.ANTHROPIC_API_KEY;
+      process.env.IRONCURTAIN_HOME = TEST_HOME;
+      process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey';
+      process.env.ANTHROPIC_API_KEY = 'test-fake-key-no-network';
+      mkdirSync(TEST_HOME, { recursive: true });
+      cpSync(hostCaDir as string, join(TEST_HOME, 'ca'), { recursive: true });
+    });
 
-    if (originalHome === undefined) delete process.env.IRONCURTAIN_HOME;
-    else process.env.IRONCURTAIN_HOME = originalHome;
-    if (originalAuth === undefined) delete process.env.IRONCURTAIN_DOCKER_AUTH;
-    else process.env.IRONCURTAIN_DOCKER_AUTH = originalAuth;
-    if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = originalApiKey;
+    afterAll(async () => {
+      for (const bundle of liveBundles) {
+        await destroyDockerInfrastructure(bundle).catch(() => {});
+      }
+      liveBundles.clear();
 
-    rmSync(TEST_HOME, { recursive: true, force: true });
-  });
+      if (originalHome === undefined) delete process.env.IRONCURTAIN_HOME;
+      else process.env.IRONCURTAIN_HOME = originalHome;
+      if (originalAuth === undefined) delete process.env.IRONCURTAIN_DOCKER_AUTH;
+      else process.env.IRONCURTAIN_DOCKER_AUTH = originalAuth;
+      if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalApiKey;
 
-  beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'deterministic-verdict-smoke-'));
-  });
+      rmSync(TEST_HOME, { recursive: true, force: true });
+    });
 
-  afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'deterministic-verdict-smoke-'));
+    });
 
-  async function runSmoke(task: 'pass' | 'block' | 'error'): Promise<readonly string[]> {
-    const runDir = resolve(tmpDir, `run-${task}`);
-    const workspaceDir = resolve(tmpDir, `workspace-${task}`);
-    const generatedDir = resolve(TEST_HOME, `generated-${task}`);
-    mkdirSync(runDir, { recursive: true });
-    mkdirSync(workspaceDir, { recursive: true });
-    mkdirSync(generatedDir, { recursive: true });
-    writeFileSync(resolve(generatedDir, 'compiled-policy.json'), JSON.stringify(testCompiledPolicy));
-    writeFileSync(resolve(generatedDir, 'tool-annotations.json'), JSON.stringify(testToolAnnotations));
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
 
-    const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
-      const config = buildDockerSessionConfig(input.workspacePath, generatedDir);
-      const bundleDir = resolve(TEST_HOME, 'bundles', input.bundleId);
-      const escalationDir = resolve(bundleDir, 'escalations');
-      mkdirSync(bundleDir, { recursive: true });
-      mkdirSync(escalationDir, { recursive: true });
-      const bundle = await createDockerInfrastructure(
-        config,
-        { kind: 'docker', agent: 'claude-code' },
-        bundleDir,
-        input.workspacePath,
-        escalationDir,
-        input.bundleId,
-        input.workflowId,
-        input.scope,
-        input.resolvedSkills,
-        undefined,
-        input.workflowScriptsDir,
+    async function runSmoke(task: 'pass' | 'block' | 'error'): Promise<readonly string[]> {
+      const runDir = resolve(tmpDir, `run-${task}`);
+      const workspaceDir = resolve(tmpDir, `workspace-${task}`);
+      const generatedDir = resolve(TEST_HOME, `generated-${task}`);
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(workspaceDir, { recursive: true });
+      mkdirSync(generatedDir, { recursive: true });
+      writeFileSync(resolve(generatedDir, 'compiled-policy.json'), JSON.stringify(testCompiledPolicy));
+      writeFileSync(resolve(generatedDir, 'tool-annotations.json'), JSON.stringify(testToolAnnotations));
+
+      const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
+        const config = buildDockerSessionConfig(input.workspacePath, generatedDir, runtimeKind);
+        const bundleDir = resolve(TEST_HOME, 'bundles', input.bundleId);
+        const escalationDir = resolve(bundleDir, 'escalations');
+        mkdirSync(bundleDir, { recursive: true });
+        mkdirSync(escalationDir, { recursive: true });
+        const bundle = await createDockerInfrastructure(
+          config,
+          { kind: 'docker', agent: 'claude-code' },
+          bundleDir,
+          input.workspacePath,
+          escalationDir,
+          input.bundleId,
+          input.workflowId,
+          input.scope,
+          input.resolvedSkills,
+          undefined,
+          input.workflowScriptsDir,
+        );
+        liveBundles.add(bundle);
+        return bundle;
+      });
+
+      const destroyInfra = vi.fn(async (bundle: DockerInfrastructure) => {
+        liveBundles.delete(bundle);
+        await destroyDockerInfrastructure(bundle);
+      });
+
+      const createSession = vi.fn(async (options: SessionOptions) => {
+        const workspacePath = options.workspacePath;
+        if (!workspacePath) throw new Error('workflow agent session missing workspacePath');
+        writeFileSync(resolve(workspacePath, 'task.txt'), task);
+        return new MockSession({ responses: () => approvedResponse('task recorded') });
+      });
+
+      const orchestrator = new WorkflowOrchestrator(
+        createDeps(runDir, {
+          createSession,
+          createWorkflowInfrastructure: createInfra,
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
       );
-      liveBundles.add(bundle);
-      return bundle;
-    });
+      const states: string[] = [];
+      orchestrator.onEvent((event: WorkflowLifecycleEvent) => {
+        if (event.kind === 'state_entered') states.push(event.state);
+      });
 
-    const destroyInfra = vi.fn(async (bundle: DockerInfrastructure) => {
-      liveBundles.delete(bundle);
-      await destroyDockerInfrastructure(bundle);
-    });
+      const manifestPath = resolve(
+        process.cwd(),
+        'src',
+        'workflow',
+        'workflows',
+        'deterministic-verdict-smoke',
+        'workflow.yaml',
+      );
+      const workflowId = await orchestrator.start(manifestPath, task, workspaceDir);
+      await waitForCompletion(orchestrator, workflowId, 90_000);
+      await orchestrator.shutdownAll();
+      return states;
+    }
 
-    const createSession = vi.fn(async (options: SessionOptions) => {
-      const workspacePath = options.workspacePath;
-      if (!workspacePath) throw new Error('workflow agent session missing workspacePath');
-      writeFileSync(resolve(workspacePath, 'task.txt'), task);
-      return new MockSession({ responses: () => approvedResponse('task recorded') });
-    });
+    it('routes pass and block task inputs to distinct verdict terminals', async () => {
+      const passStates = await runSmoke('pass');
+      const blockStates = await runSmoke('block');
 
-    const orchestrator = new WorkflowOrchestrator(
-      createDeps(runDir, {
-        createSession,
-        createWorkflowInfrastructure: createInfra,
-        destroyWorkflowInfrastructure: destroyInfra,
-      }),
-    );
-    const states: string[] = [];
-    orchestrator.onEvent((event: WorkflowLifecycleEvent) => {
-      if (event.kind === 'state_entered') states.push(event.state);
-    });
+      expect(passStates.at(-1)).toBe('passed_terminal');
+      expect(blockStates.at(-1)).toBe('blocked_terminal');
+      expect(passStates).not.toContain('error_terminal');
+      expect(blockStates).not.toContain('error_terminal');
+    }, 240_000);
 
-    const manifestPath = resolve(
-      process.cwd(),
-      'src',
-      'workflow',
-      'workflows',
-      'deterministic-verdict-smoke',
-      'workflow.yaml',
-    );
-    const workflowId = await orchestrator.start(manifestPath, task, workspaceDir);
-    await waitForCompletion(orchestrator, workflowId, 90_000);
-    await orchestrator.shutdownAll();
-    return states;
-  }
+    it('routes a missing result file to the error terminal (result_file_error)', async () => {
+      // The helper exits 0 but writes no result.json, so applyResultFile must yield
+      // the reserved result_file_error verdict and the machine must route to error_terminal.
+      const errorStates = await runSmoke('error');
 
-  it('routes pass and block task inputs to distinct verdict terminals', async () => {
-    const passStates = await runSmoke('pass');
-    const blockStates = await runSmoke('block');
+      expect(errorStates.at(-1)).toBe('error_terminal');
+      expect(errorStates).not.toContain('passed_terminal');
+      expect(errorStates).not.toContain('blocked_terminal');
+    }, 240_000);
+  });
+}
 
-    expect(passStates.at(-1)).toBe('passed_terminal');
-    expect(blockStates.at(-1)).toBe('blocked_terminal');
-    expect(passStates).not.toContain('error_terminal');
-    expect(blockStates).not.toContain('error_terminal');
-  }, 240_000);
-
-  it('routes a missing result file to the error terminal (result_file_error)', async () => {
-    // The helper exits 0 but writes no result.json, so applyResultFile must yield
-    // the reserved result_file_error verdict and the machine must route to error_terminal.
-    const errorStates = await runSmoke('error');
-
-    expect(errorStates.at(-1)).toBe('error_terminal');
-    expect(errorStates).not.toContain('passed_terminal');
-    expect(errorStates).not.toContain('blocked_terminal');
-  }, 240_000);
-});
+for (const runtimeKind of RUNTIME_KINDS) defineSmokeSuite(runtimeKind);

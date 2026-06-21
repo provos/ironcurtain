@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sweepContainerSnapshots } from '../../src/workflow/container-snapshots.js';
+import { commandExists } from '../../src/trusted-process/container-command.js';
+import { createDockerManager } from '../../src/docker/docker-manager.js';
 import type { CheckpointStore } from '../../src/workflow/checkpoint.js';
 import type { ContainerSnapshotRef, WorkflowCheckpoint, WorkflowId } from '../../src/workflow/types.js';
-import type { DockerImageInfo, DockerManager } from '../../src/docker/types.js';
+import type { DockerImageInfo, ContainerRuntime } from '../../src/docker/types.js';
 import type { ResolvedUserConfig } from '../../src/config/user-config.js';
+
+// The default (no-`docker`-arg) sweep path resolves the Docker CLI lazily; mock
+// the probe + factory so we can assert it short-circuits on a Docker-less host.
+vi.mock('../../src/trusted-process/container-command.js', () => ({ commandExists: vi.fn(() => true) }));
+vi.mock('../../src/docker/docker-manager.js', () => ({ createDockerManager: vi.fn() }));
 
 const NOW = new Date('2026-06-18T12:00:00Z');
 const daysAgo = (d: number) => new Date(NOW.getTime() - d * 24 * 60 * 60 * 1000).toISOString();
@@ -25,7 +32,7 @@ function makeCheckpointStore(entries: Record<string, WorkflowCheckpoint>): Check
   } as unknown as CheckpointStore;
 }
 
-/** DockerManager stub exposing only the image methods the sweep uses. */
+/** ContainerRuntime stub exposing only the image methods the sweep uses. */
 function makeDocker(createdById: Record<string, string>) {
   const removeImage = vi.fn(async (ref: string) => {
     delete createdById[ref];
@@ -40,7 +47,7 @@ function makeDocker(createdById: Record<string, string>) {
       return created ? { id: ref, repoTags: [], labels: {}, created } : undefined;
     },
     removeImage,
-  } as unknown as DockerManager;
+  } as unknown as ContainerRuntime;
   return { docker, removeImage };
 }
 
@@ -49,6 +56,25 @@ function userConfig(snapshot: { enabled: boolean; maxAgeDays: number | null }): 
 }
 
 describe('sweepContainerSnapshots', () => {
+  it('skips cleanly without spawning docker when the Docker CLI is absent (apple-container host)', async () => {
+    vi.mocked(commandExists).mockReturnValue(false);
+    const checkpointStore = makeCheckpointStore({ wf: resumableCheckpoint(`sha256:${'a'.repeat(64)}`) });
+
+    // No `docker` arg → the default path; commandExists('docker') === false must
+    // short-circuit before createDockerManager() (which would spawn a missing CLI).
+    const result = await sweepContainerSnapshots({
+      baseDir: '/tmp/unused',
+      checkpointStore,
+      userConfig: userConfig({ enabled: true, maxAgeDays: 7 }),
+      now: NOW,
+    });
+
+    expect(result).toEqual({ removedImages: [], agedImages: [], orphanImages: [] });
+    expect(commandExists).toHaveBeenCalledWith('docker');
+    expect(createDockerManager).not.toHaveBeenCalled();
+    vi.mocked(commandExists).mockReturnValue(true);
+  });
+
   it('removes an aged referenced image but keeps a fresh one (image-only, checkpoint untouched)', async () => {
     const aged = `sha256:${'a'.repeat(64)}`;
     const fresh = `sha256:${'f'.repeat(64)}`;

@@ -25,7 +25,7 @@ vi.mock('@clack/prompts', () => ({
   },
 }));
 
-vi.mock('../../src/session/preflight.js', () => ({
+vi.mock('../../src/docker/docker-probe.js', () => ({
   checkDockerAvailable: vi.fn().mockResolvedValue({ available: true }),
 }));
 

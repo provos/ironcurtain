@@ -8,8 +8,6 @@
  * with remediation hints and the session refuses to start.
  */
 
-import { execFile as execFileCb } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
@@ -25,31 +23,10 @@ import {
   PROVIDER_ENV_VARS,
   type ProviderId,
 } from '../config/model-provider.js';
-import { isExecError, isExecTimeout } from '../utils/exec-error.js';
-
-const execFile = promisify(execFileCb);
-
-/**
- * Per-attempt timeout for `docker info`. The daemon call can be slow under
- * load (cold daemon, busy machine), so we use a generous timeout and retry
- * on timeout-class failures rather than tightening the bound.
- */
-const DOCKER_PROBE_TIMEOUT_MS = 10_000;
-
-/** Maximum number of additional attempts after the first one. */
-const DOCKER_PROBE_MAX_RETRIES = 2;
-
-const DOCKER_UNAVAILABLE_REASON = 'Docker not available';
-
-/**
- * Function signature for `execFile` injection in tests. Matches the shape of
- * `promisify(child_process.execFile)` for the subset of options we use.
- */
-export type ProbeExecFileFn = (
-  cmd: string,
-  args: readonly string[],
-  opts: { timeout: number },
-) => Promise<{ stdout: string; stderr: string }>;
+// The Docker availability probe lives in `docker/docker-probe.js` (a
+// dependency-free leaf) so runtime modules can use it without importing this
+// file. Import callers reference `docker-probe.js` directly.
+import { checkDockerAvailable, type DockerAvailability } from '../docker/docker-probe.js';
 
 /**
  * Thrown when explicit `--agent` prerequisites are not met, or when the
@@ -69,8 +46,6 @@ export interface PreflightResult {
   readonly reason: string;
 }
 
-export type DockerAvailability = { available: true } | { available: false; reason: string; detailedMessage: string };
-
 export interface PreflightOptions {
   config: IronCurtainConfig;
   /** The --agent flag value. undefined = use preferredMode from config. */
@@ -79,70 +54,6 @@ export interface PreflightOptions {
   isDockerAvailable?: () => Promise<DockerAvailability>;
   /** Dependency injection for tests. Defaults to real credential detection. */
   credentialSources?: CredentialSources;
-}
-
-function describeProbeFailure(err: unknown, fallback: string): string {
-  if (!isExecError(err)) return fallback;
-
-  if (err.code === 'ENOENT') {
-    return 'The "docker" command was not found in your PATH. Is Docker installed?';
-  }
-
-  const stderr = err.stderr.trim();
-  if (stderr.length === 0) return fallback;
-  if (stderr.includes('permission denied')) {
-    return 'Permission denied while connecting to the Docker daemon socket.\nIs your user in the "docker" group?';
-  }
-  if (stderr.includes('Cannot connect to the Docker daemon')) {
-    return (
-      'Cannot connect to the Docker daemon.\n' +
-      'Is the Docker service running? On macOS/Windows, ensure Docker Desktop is started.'
-    );
-  }
-  return stderr;
-}
-
-/**
- * Single canonical "is Docker available?" probe for the entire codebase. Other
- * modules MUST call this rather than re-implementing `docker info`.
- *
- * `docker info` can blow past a tight timeout on a cold/busy daemon, so we use
- * a generous 10s per attempt and retry on timeout-class failures. We do NOT
- * retry on deterministic failures (ENOENT, permission denied, "Cannot connect
- * to the Docker daemon") — those won't change between attempts and the
- * user-visible failure path should be fast.
- *
- * @param execFileFn Optional `execFile` implementation for tests.
- */
-export async function checkDockerAvailable(execFileFn: ProbeExecFileFn = execFile): Promise<DockerAvailability> {
-  const totalAttempts = DOCKER_PROBE_MAX_RETRIES + 1;
-  let lastErr: unknown;
-
-  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
-    try {
-      await execFileFn('docker', ['info'], { timeout: DOCKER_PROBE_TIMEOUT_MS });
-      return { available: true };
-    } catch (err: unknown) {
-      lastErr = err;
-      if (!isExecError(err) || !isExecTimeout(err)) {
-        return {
-          available: false,
-          reason: DOCKER_UNAVAILABLE_REASON,
-          detailedMessage: describeProbeFailure(err, err instanceof Error ? err.message : String(err)),
-        };
-      }
-    }
-  }
-
-  const baseMessage = lastErr instanceof Error ? lastErr.message : String(lastErr);
-  const timeoutSeconds = DOCKER_PROBE_TIMEOUT_MS / 1000;
-  return {
-    available: false,
-    reason: DOCKER_UNAVAILABLE_REASON,
-    detailedMessage:
-      `Docker daemon did not respond within ${timeoutSeconds}s after ${totalAttempts} attempts. ` +
-      `The daemon may be overloaded or starting up. Original error: ${baseMessage}`,
-  };
 }
 
 /** `anthropicOAuthOnly` is only meaningful for goose: it lets the goose
@@ -407,13 +318,29 @@ async function resolveDockerAgent(
  */
 export async function resolveSessionMode(options: PreflightOptions): Promise<PreflightResult> {
   const { config, requestedAgent, credentialSources } = options;
-  const isDockerAvailable = options.isDockerAvailable ?? checkDockerAvailable;
+  const isDockerAvailable = options.isDockerAvailable ?? (await resolveDefaultAvailabilityProbe(config));
 
   if (requestedAgent !== undefined) {
     return resolveExplicit(requestedAgent, config, isDockerAvailable, credentialSources);
   }
 
   return resolveDefaultMode(config, isDockerAvailable, credentialSources);
+}
+
+/**
+ * Picks the container-runtime availability probe matching the selected
+ * backend: apple-container sessions must probe the Apple `container`
+ * services, not Docker (the machine may not have Docker at all).
+ * The runtime backends are imported lazily so preflight does not eagerly
+ * pull in docker-manager / apple-container-manager on every load.
+ */
+async function resolveDefaultAvailabilityProbe(config: IronCurtainConfig): Promise<() => Promise<DockerAvailability>> {
+  const { resolveRuntimeKind } = await import('../docker/container-runtime.js');
+  if ((await resolveRuntimeKind(config.userConfig.containerRuntime)) === 'apple-container') {
+    const { checkAppleContainerAvailable } = await import('../docker/apple-container-manager.js');
+    return () => checkAppleContainerAvailable();
+  }
+  return checkDockerAvailable;
 }
 
 async function resolveExplicit(

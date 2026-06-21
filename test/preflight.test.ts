@@ -2,13 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import {
-  resolveSessionMode,
-  checkDockerAvailable,
-  PreflightError,
-  type DockerAvailability,
-  type ProbeExecFileFn,
-} from '../src/session/preflight.js';
+import { resolveSessionMode, PreflightError } from '../src/session/preflight.js';
+import { checkDockerAvailable, type DockerAvailability, type ProbeExecFileFn } from '../src/docker/docker-probe.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 import type { CredentialSources } from '../src/docker/oauth-credentials.js';

@@ -60,6 +60,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-pip && 
 
 RUN npm install -g node-gyp
 
+# Rust toolchain (rustc, cargo) + cargo-fuzz for the vuln-discovery workflow.
+# Containers run with --network=none, so the toolchain and the nightly
+# channel that cargo-fuzz invokes must be baked into the image. Installed
+# system-wide under /opt/rust so the codespace user inherits it via ENV.
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV CARGO_HOME=/opt/rust/cargo
+ENV PATH=/opt/rust/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal \
+            --component rust-src && \
+    rustup toolchain install nightly --profile minimal --component rust-src && \
+    cargo install cargo-fuzz && \
+    rm -rf /opt/rust/cargo/registry /opt/rust/cargo/git && \
+    chmod -R a+rX /opt/rust && \
+    chown -R codespace:codespace /opt/rust/rustup /opt/rust/cargo && \
+    printf 'export RUSTUP_HOME=/opt/rust/rustup\nexport CARGO_HOME=/opt/rust/cargo\nexport PATH=/opt/rust/cargo/bin:$PATH\n' \
+        > /etc/profile.d/rust.sh
+
 # Playwright + Chromium: pre-install so containers work with --network=none.
 # Install system deps as root, then browser to a shared path.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers

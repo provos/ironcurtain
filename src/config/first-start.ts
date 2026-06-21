@@ -31,7 +31,7 @@ import {
 } from '../docker/resource-limits.js';
 import { getAgent, registerBuiltinAdapters } from '../docker/agent-registry.js';
 import type { AgentId } from '../docker/agent-adapter.js';
-import { checkDockerAvailable } from '../session/preflight.js';
+import { checkDockerAvailable } from '../docker/docker-probe.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
