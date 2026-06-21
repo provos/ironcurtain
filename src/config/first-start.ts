@@ -21,7 +21,7 @@ import {
   type UserConfig,
   type WebSearchProvider,
 } from './user-config.js';
-import { parseModelId, type ProviderId } from './model-provider.js';
+import { parseModelId, PROVIDER_ENV_VARS, type ProviderId } from './model-provider.js';
 import {
   clampDockerResources,
   isImagePresent,
@@ -34,13 +34,6 @@ import type { AgentId } from '../docker/agent-adapter.js';
 import { checkDockerAvailable } from '../session/preflight.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/** Maps provider IDs to their expected environment variable names. */
-const PROVIDER_ENV_VARS: Record<ProviderId, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
-  openai: 'OPENAI_API_KEY',
-};
 
 /** Checks if a prompt result was cancelled and exits cleanly. */
 function handleCancel(value: unknown): void {

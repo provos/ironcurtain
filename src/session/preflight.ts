@@ -19,7 +19,12 @@ import {
   readOnlyCredentialSources,
   type CredentialSources,
 } from '../docker/oauth-credentials.js';
-import { resolveApiKeyForProvider, parseModelId, type ProviderId } from '../config/model-provider.js';
+import {
+  resolveApiKeyForProvider,
+  parseModelId,
+  PROVIDER_ENV_VARS,
+  type ProviderId,
+} from '../config/model-provider.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
 
 const execFile = promisify(execFileCb);
@@ -310,22 +315,26 @@ function dockerUnavailableMessage(detailedMessage: string): string {
   ].join('\n');
 }
 
-function builtinNeedsApiKeyMessage(provider: ProviderId): string {
-  const envVarMap: Record<ProviderId, string> = {
-    anthropic: 'ANTHROPIC_API_KEY',
-    openai: 'OPENAI_API_KEY',
-    google: 'GOOGLE_GENERATIVE_AI_API_KEY',
-  };
-  const envVar = envVarMap[provider];
-  return [
+function builtinNeedsApiKeyMessage(provider: ProviderId, qualifiedModelId: string): string {
+  const envVar = PROVIDER_ENV_VARS[provider];
+  const lines = [
     'Cannot start IronCurtain.',
     `preferredMode is "builtin" but no ${envVar} is configured.`,
-    `Builtin mode requires an API key for provider "${provider}".`,
+    `Builtin mode talks to the "${provider}" provider directly using an API key` +
+      ` (selected by your configured model "${qualifiedModelId}").`,
+  ];
+  // Anthropic users commonly have Claude OAuth credentials from `claude login`;
+  // call out that those do not work in builtin mode to avoid confusion.
+  if (provider === 'anthropic') {
+    lines.push('Claude OAuth credentials are not usable in builtin mode — an API key is required.');
+  }
+  lines.push(
     '',
     ...formatModeRemediation('docker'),
     '',
     `Set ${envVar} in your environment, or run \`ironcurtain config\`.`,
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /**
@@ -424,10 +433,11 @@ async function resolveDefaultMode(
 
   if (preferredMode === 'builtin') {
     // Fail before the Docker probe — fast feedback for missing keys.
-    const { provider } = parseModelId(config.userConfig.agentModelId);
+    const agentModelId = config.userConfig.agentModelId;
+    const { provider } = parseModelId(agentModelId);
     const apiKey = resolveApiKeyForProvider(provider, config.userConfig);
     if (apiKey.length === 0) {
-      throw new PreflightError(builtinNeedsApiKeyMessage(provider));
+      throw new PreflightError(builtinNeedsApiKeyMessage(provider, agentModelId));
     }
     return { mode: { kind: 'builtin' }, reason: 'preferredMode = builtin' };
   }

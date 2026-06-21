@@ -320,9 +320,34 @@ describe('resolveSessionMode', () => {
 
         await expect(promise).rejects.toThrow(PreflightError);
         await expect(promise).rejects.toThrow(/no OPENAI_API_KEY/);
+        // The message names the provider and the configured model that drove it,
+        // and omits the Anthropic-only OAuth caveat for non-Anthropic providers.
+        await expect(promise).rejects.toThrow(/"openai" provider/);
+        await expect(promise).rejects.toThrow(/openai:gpt-4o/);
+        await expect(promise).rejects.not.toThrow(/OAuth/);
         expect(dockerSpy).not.toHaveBeenCalled();
         expect(loadFromFile).not.toHaveBeenCalled();
         expect(loadFromKeychain).not.toHaveBeenCalled();
+      });
+
+      it('includes the Anthropic OAuth caveat when the configured provider is anthropic', async () => {
+        const dockerSpy = vi.fn(dockerAvailable);
+        const loadFromFile = vi.fn(() => null);
+        const loadFromKeychain = vi.fn(() => null);
+
+        const promise = resolveSessionMode({
+          config: createTestConfig({
+            anthropicApiKey: '',
+            preferredMode: 'builtin',
+            agentModelId: 'anthropic:claude-sonnet-4-6',
+          }),
+          isDockerAvailable: dockerSpy,
+          credentialSources: { loadFromFile, loadFromKeychain },
+        });
+
+        await expect(promise).rejects.toThrow(/no ANTHROPIC_API_KEY/);
+        await expect(promise).rejects.toThrow(/Claude OAuth credentials are not usable/);
+        expect(dockerSpy).not.toHaveBeenCalled();
       });
     });
 
