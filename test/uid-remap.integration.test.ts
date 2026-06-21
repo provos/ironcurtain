@@ -395,7 +395,7 @@ describe.skipIf(!dockerReady)('Agent container UID/GID remap (issue #232)', () =
       // name proves the reuse branch actually ran (see assertion below).
       const idOut = await dockerExecAs(containerName, '0:0', 'id', 'codespace');
       observations.idCodespaceUid = /uid=(\d+)\(codespace\)/.exec(idOut.stdout)?.[1];
-      const gidMatch = /gid=(\d+)\((\w+)\)/.exec(idOut.stdout);
+      const gidMatch = /gid=(\d+)\(([^)]+)\)/.exec(idOut.stdout);
       observations.idCodespaceGid = gidMatch?.[1];
       observations.idCodespaceGidName = gidMatch?.[2];
 

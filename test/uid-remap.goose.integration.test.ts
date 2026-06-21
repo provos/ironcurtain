@@ -388,7 +388,7 @@ describe.skipIf(!gooseDockerReady)('Goose agent container UID/GID remap (issue #
       // `codespace`. The name proves which branch ran (asserted below).
       const idOut = await dockerExecAs(containerName, '0:0', 'id', 'codespace');
       observations.idCodespaceUid = /uid=(\d+)\(codespace\)/.exec(idOut.stdout)?.[1];
-      const gidMatch = /gid=(\d+)\((\w+)\)/.exec(idOut.stdout);
+      const gidMatch = /gid=(\d+)\(([^)]+)\)/.exec(idOut.stdout);
       observations.idCodespaceGid = gidMatch?.[1];
       observations.idCodespaceGidName = gidMatch?.[2];
 
