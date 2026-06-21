@@ -19,6 +19,7 @@ import { dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { getUserWorkflowsDir } from '../config/paths.js';
+import { isWithinDirectory } from '../types/argument-roles.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +32,14 @@ export interface WorkflowEntry {
   readonly description: string;
   readonly path: string;
   readonly source: WorkflowSource;
+  /**
+   * Manifest `hidden: true` — the workflow is a smoke-test / fixture that
+   * should not surface in the web UI. The CLI still lists it. Defaults to
+   * false for manifests that omit the field.
+   */
+  readonly hidden: boolean;
+  /** A `README.md` is co-packaged alongside the manifest. */
+  readonly hasReadme: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -39,6 +48,12 @@ export interface WorkflowEntry {
 
 /** Manifest filenames probed inside a workflow package directory. */
 const MANIFEST_BASENAMES = ['workflow.yaml', 'workflow.yml'] as const;
+
+/** README filenames probed inside a workflow package directory (yaml-style precedence). */
+const README_BASENAMES = ['README.md', 'readme.md'] as const;
+
+/** Hard cap on README size returned to clients (defensive; READMEs are tiny). */
+const MAX_README_BYTES = 512 * 1024;
 
 /** Recognized YAML extensions for ad-hoc file-path workflow refs. */
 const YAML_EXTENSIONS = new Set(['.yaml', '.yml']);
@@ -97,17 +112,31 @@ export function getWorkflowPackageDir(workflowFilePath: string): string {
   return dirname(workflowFilePath);
 }
 
+/** Returns the first `<dir>/<basename>` that exists on disk, or `undefined`. */
+function findFirstExisting(dir: string, basenames: readonly string[]): string | undefined {
+  for (const basename of basenames) {
+    const candidate = resolve(dir, basename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
 /**
  * Locates the manifest file inside a workflow package directory.
  * Returns the absolute path to `workflow.yaml` or `workflow.yml` if
  * present (yaml takes precedence on collision), `undefined` otherwise.
  */
 function findManifest(packageDir: string): string | undefined {
-  for (const basename of MANIFEST_BASENAMES) {
-    const candidate = resolve(packageDir, basename);
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
+  return findFirstExisting(packageDir, MANIFEST_BASENAMES);
+}
+
+/**
+ * Locates a co-packaged README inside a workflow package directory.
+ * Returns the absolute path to `README.md` / `readme.md` if present,
+ * `undefined` otherwise.
+ */
+function findReadme(packageDir: string): string | undefined {
+  return findFirstExisting(packageDir, README_BASENAMES);
 }
 
 // ---------------------------------------------------------------------------
@@ -150,14 +179,17 @@ function scanDirectory(dir: string, source: WorkflowSource): WorkflowEntry[] {
     if (!manifest) continue;
 
     let description = '';
+    let hidden = false;
     try {
       const raw = parseDefinitionFile(manifest) as Record<string, unknown>;
       if (typeof raw.description === 'string') description = raw.description;
+      if (raw.hidden === true) hidden = true;
     } catch {
       // Skip packages with unparseable manifests
       continue;
     }
-    out.push({ name, description, path: manifest, source });
+    const hasReadme = findReadme(packageDir) !== undefined;
+    out.push({ name, description, path: manifest, source, hidden, hasReadme });
   }
 
   return out;
@@ -182,6 +214,43 @@ export function discoverWorkflows(): WorkflowEntry[] {
   }
 
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Finds a discovered workflow by its directory name (which, by convention,
+ * matches the manifest `name:` field — the value carried on workflow run
+ * records). Used to resolve a running/past workflow back to its source
+ * package (e.g. to read its README). User entries shadow bundled ones, per
+ * {@link discoverWorkflows}.
+ */
+export function findWorkflowByName(name: string): WorkflowEntry | undefined {
+  return discoverWorkflows().find((entry) => entry.name === name);
+}
+
+/**
+ * Reads the README.md co-packaged with a workflow, given the absolute path
+ * to its manifest. Returns the raw markdown, or `undefined` when no README
+ * is present, it resolves (via symlink) outside the workflow package, it
+ * exceeds {@link MAX_README_BYTES}, or it cannot be read.
+ *
+ * The containment check is the security boundary for `workflows.readme`: a
+ * symlinked README must not let the daemon serve arbitrary host files.
+ * `isWithinDirectory` resolves both paths to their canonical real form, so a
+ * symlink escaping the package dir is rejected while a legitimate in-package
+ * symlink still resolves.
+ */
+export function readWorkflowReadme(manifestPath: string): string | undefined {
+  const packageDir = getWorkflowPackageDir(manifestPath);
+  const readme = findReadme(packageDir);
+  if (!readme) return undefined;
+  if (!isWithinDirectory(readme, packageDir)) return undefined;
+  try {
+    const stats = statSync(readme);
+    if (!stats.isFile() || stats.size > MAX_README_BYTES) return undefined;
+    return readFileSync(readme, 'utf-8');
+  } catch {
+    return undefined;
+  }
 }
 
 /**

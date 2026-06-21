@@ -10,15 +10,19 @@ import type {
   AgentTransitionDefinition,
   WhenValue,
   WorkflowTransitionAction,
+  WorkflowStateDefinition,
 } from './types.js';
 import type { AgentConversationId } from '../session/types.js';
 import { guardImplementations } from './guards.js';
 import { stripStatusBlock } from './status-parser.js';
 import { isAgentInvocationError } from './errors.js';
+import { laneScopeEvolveCurrentPath, templateLaneCommand } from './lane-template.js';
 
 // ---------------------------------------------------------------------------
 // Invoke input/result types
 // ---------------------------------------------------------------------------
+
+type ExecutableStateDefinition = AgentStateDefinition | DeterministicStateDefinition;
 
 /** Input provided to each invoked agent service. */
 export interface AgentInvokeInput {
@@ -76,6 +80,67 @@ export interface DeterministicInvokeResult {
   readonly payload?: Record<string, unknown>;
 }
 
+/**
+ * Input provided to a parent fan-out state invoke. `stateConfig` carries the
+ * `fanOut`/`segment` markers the orchestrator reads to resolve the worker
+ * count and the round sub-chain; `context` is the parent's context at fan-out
+ * time, cloned into each lane's child actor.
+ */
+export interface FanOutInvokeInput {
+  readonly stateId: string;
+  readonly stateConfig: ExecutableStateDefinition;
+  readonly context: WorkflowContext;
+}
+
+/**
+ * The three synthetic terminal states every child round machine carries are
+ * `recorded`/`blocked`/`errored` (see `buildRoundChildDefinition`). `drained`
+ * is not a child terminal; it is the parent-side outcome synthesized for a
+ * peer actor stopped by drain-on-escalation after another child blocked or
+ * errored. Typed as a closed union so the join's branches are
+ * exhaustive-checkable.
+ */
+export type RoundChildStatus = 'recorded' | 'blocked' | 'errored' | 'drained';
+
+/**
+ * The fully-resolved result of joining one child round actor: the terminal
+ * it reached plus the context it carried there. `context` is read by the
+ * parent to thread per-lane updates (e.g. the `evaluator_blocked` reason on
+ * `previousAgentOutput`) back onto the parent FSM after the barrier.
+ */
+export interface RoundChildOutcome {
+  readonly index: number;
+  readonly status: RoundChildStatus;
+  readonly context: WorkflowContext;
+  readonly drainedBy?: { readonly index: number; readonly status: 'blocked' | 'errored'; readonly reason: string };
+}
+
+/**
+ * Per-lane summary surfaced on the fan-out result for observability. When a lane
+ * was `drained` (stopped because a peer blocked/errored), `drainedBy` names the
+ * triggering peer and carries its reason, so the join log records WHICH lane's
+ * escalation stopped this one — signal the bare `drained` status alone lacks.
+ */
+export interface RoundChildSummary {
+  readonly index: number;
+  readonly status: RoundChildStatus;
+  readonly drainedBy?: { readonly index: number; readonly status: 'blocked' | 'errored'; readonly reason: string };
+}
+
+/**
+ * Result returned by the fan-out pump after all children have joined. Shaped
+ * as a `DeterministicInvokeResult` so the parent `workers` state's transitions
+ * match on `verdict` exactly like a normal deterministic state. The verdict
+ * space is `recorded` (batch advanced) | `escalate` (at least one lane blocked;
+ * route to human review) | `result_file_error` (errored-only lane / segment
+ * misconfiguration). `context` is the joined context promoted onto the parent
+ * FSM; `children` is the per-lane status summary, for observability only.
+ */
+export interface FanOutInvokeResult extends DeterministicInvokeResult {
+  readonly context: WorkflowContext;
+  readonly children?: readonly RoundChildSummary[];
+}
+
 // ---------------------------------------------------------------------------
 // Build result
 // ---------------------------------------------------------------------------
@@ -83,6 +148,8 @@ export interface DeterministicInvokeResult {
 export interface BuildMachineResult {
   /** The XState machine (with placeholder actors). */
   readonly machine: AnyStateMachine;
+  /** Child round machines keyed by the parent fan-out state that invokes them. */
+  readonly roundMachinesByState: ReadonlyMap<string, AnyStateMachine>;
   /** Set of state names that are human gates (for snapshot.matches()). */
   readonly gateStateNames: ReadonlySet<string>;
   /** Set of state names that are terminal (for completion detection). */
@@ -157,8 +224,6 @@ export function createInitialContext(definition: WorkflowDefinition): Omit<Workf
     previousTestCount: null,
     humanPrompt: null,
     reviewHistory: [],
-    parallelResults: {},
-    worktreeBranches: [],
     totalTokens: 0,
     lastError: null,
     agentConversationsByState: {},
@@ -240,6 +305,7 @@ function compileAction(action: WorkflowTransitionAction): XStateActionEntry {
 function buildOnDoneTransitions(
   transitions: readonly AgentTransitionDefinition[],
   updateAction: string,
+  mapTarget: (transition: AgentTransitionDefinition) => string = (transition) => transition.to,
 ): readonly object[] {
   return transitions.map((t) => {
     let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
@@ -250,14 +316,24 @@ function buildOnDoneTransitions(
     }
 
     return {
-      target: t.to,
+      target: mapTarget(t),
       ...(guard ? { guard } : {}),
       actions: collectTransitionActions(t, updateAction),
     };
   });
 }
 
-function buildAgentState(stateId: string, config: AgentStateDefinition, definition: WorkflowDefinition): object {
+interface ExecutableStateBuildOptions {
+  readonly mapTransitionTarget?: (transition: AgentTransitionDefinition) => string;
+  readonly onErrorTarget?: string;
+}
+
+function buildAgentState(
+  stateId: string,
+  config: AgentStateDefinition,
+  definition: WorkflowDefinition,
+  options: ExecutableStateBuildOptions = {},
+): object {
   return {
     entry: [{ type: 'incrementVisitCount', params: { stateId } }],
     invoke: {
@@ -268,9 +344,9 @@ function buildAgentState(stateId: string, config: AgentStateDefinition, definiti
         stateConfig: config,
         context,
       }),
-      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromAgentResult'),
+      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromAgentResult', options.mapTransitionTarget),
       onError: {
-        target: findErrorTarget(config, definition),
+        target: options.onErrorTarget ?? findErrorTarget(config, definition),
         actions: ['storeError', 'updateContextFromAgentInvocationError'],
       },
     },
@@ -281,8 +357,13 @@ function buildDeterministicState(
   stateId: string,
   config: DeterministicStateDefinition,
   definition: WorkflowDefinition,
+  options: ExecutableStateBuildOptions = {},
 ): object {
-  const onDoneTransitions = buildOnDoneTransitions(config.transitions, 'updateContextFromDeterministicResult');
+  const onDoneTransitions = buildOnDoneTransitions(
+    config.transitions,
+    'updateContextFromDeterministicResult',
+    options.mapTransitionTarget,
+  );
 
   return {
     invoke: {
@@ -290,14 +371,42 @@ function buildDeterministicState(
       src: 'deterministicService',
       input: ({ context }: { context: WorkflowContext }) => ({
         stateId,
-        commands: config.run,
+        commands: config.run.map((command) => templateLaneCommand(command, context)),
         context,
         container: config.container ?? false,
         containerScope: config.containerScope,
         timeoutMs: config.timeoutMs,
-        resultFile: config.resultFile,
+        resultFile: config.resultFile ? laneScopeEvolveCurrentPath(config.resultFile, context) : undefined,
       }),
       onDone: onDoneTransitions,
+      onError: {
+        target: options.onErrorTarget ?? findErrorTarget(config, definition),
+        actions: ['storeError'],
+      },
+    },
+  };
+}
+
+/**
+ * Builds the parent `workers` state: a single XState invoke of `fanOutService`
+ * (the orchestrator's `runFanOutSegment`). From the parent FSM's vantage the
+ * whole batch is ONE invoke — the N child round actors live inside the invoke
+ * body, not in the parent's state value, so the parent's `snapshot.value` stays
+ * the string `"workers"` (single-active-state spine, §6.4). `onDone` runs
+ * `updateContextFromFanOutResult` (promote the joined context) then follows the
+ * verdict-matched edge; `onError` routes to the definition's error target.
+ */
+function buildFanOutState(stateId: string, config: ExecutableStateDefinition, definition: WorkflowDefinition): object {
+  return {
+    invoke: {
+      id: stateId,
+      src: 'fanOutService',
+      input: ({ context }: { context: WorkflowContext }) => ({
+        stateId,
+        stateConfig: config,
+        context,
+      }),
+      onDone: buildOnDoneTransitions(config.transitions, 'updateContextFromFanOutResult'),
       onError: {
         target: findErrorTarget(config, definition),
         actions: ['storeError'],
@@ -328,9 +437,128 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
   return { on };
 }
 
+/** The three synthetic terminal state names every child round machine carries. */
+const ROUND_CHILD_RECORDED = 'recorded';
+const ROUND_CHILD_BLOCKED = 'blocked';
+const ROUND_CHILD_ERRORED = 'errored';
+
+/**
+ * Factors a fan-out segment (the round sub-chain
+ * `sample -> researcher -> evaluate -> analysis_record`) into a standalone
+ * child machine definition. Each member is copied verbatim except for two
+ * rewrites: its out-of-segment transition targets are remapped to one of
+ * three synthetic terminals via {@link mapRoundChildTarget}, and the
+ * `fanOut`/`segment` markers are stripped so the recursive
+ * `buildWorkflowMachine` does not try to re-factor the member into yet
+ * another child.
+ *
+ * The three synthetic terminals (`recorded`, `blocked`, `errored`) are the
+ * lane verdict surface — every lane finishes in exactly one, and the parent
+ * barrier reads it to decide the batch verdict (§6.1). `initial: segment[0]`
+ * starts the child at the first segment member. `settings` are inherited from
+ * the parent so the child's per-lane `maxVisits` guard fires natively from the
+ * member's own declared limits (§6.1).
+ */
+function buildRoundChildDefinition(
+  definition: WorkflowDefinition,
+  fanOutStateId: string,
+  segment: readonly string[],
+): WorkflowDefinition {
+  const segmentSet = new Set(segment);
+  const states: Record<string, WorkflowStateDefinition> = {};
+
+  for (const memberId of segment) {
+    const member = definition.states[memberId];
+    if (member.type !== 'agent' && member.type !== 'deterministic') {
+      throw new Error(`fan-out state "${fanOutStateId}" segment member "${memberId}" is not executable`);
+    }
+
+    const transitions = member.transitions.map((transition) => ({
+      ...transition,
+      to: mapRoundChildTarget(definition, transition, segmentSet),
+    }));
+
+    // The agent and deterministic arms produce byte-identical state objects
+    // (strip the fan-out markers, override transitions); the only difference
+    // is the discriminated-union narrowing of `member`, so one block covers
+    // both once the `type` guard above has run. `_fanOut`/`_segment` are
+    // destructured only to omit them from `rest`; `void` marks them used.
+    const { fanOut: _fanOut, segment: _segment, ...rest } = member;
+    void _fanOut;
+    void _segment;
+    states[memberId] = { ...rest, transitions };
+  }
+
+  states[ROUND_CHILD_RECORDED] = {
+    type: 'terminal',
+    description: `Fan-out segment "${fanOutStateId}" recorded successfully.`,
+  };
+  states[ROUND_CHILD_BLOCKED] = {
+    type: 'terminal',
+    description: `Fan-out segment "${fanOutStateId}" needs human review.`,
+  };
+  states[ROUND_CHILD_ERRORED] = {
+    type: 'terminal',
+    description: `Fan-out segment "${fanOutStateId}" failed.`,
+  };
+
+  return {
+    name: `${definition.name}-${fanOutStateId}-round`,
+    description: `Child round machine for ${definition.name}.${fanOutStateId}`,
+    initial: segment[0],
+    settings: definition.settings,
+    states,
+  };
+}
+
+/**
+ * Maps a segment member's transition target onto a child round-machine
+ * target. In-segment edges pass through unchanged; everything that would
+ * leave the segment is collapsed onto one of the three synthetic terminals.
+ *
+ * The mapping table:
+ *   - target is another segment member  -> passthrough (the target name)
+ *   - `when.verdict === 'recorded'`      -> `recorded`  (round committed a node)
+ *   - `when.verdict === 'evaluator_blocked'` -> `blocked` (needs human review)
+ *   - any other named verdict            -> `errored`   (unexpected verdict)
+ *   - target is a human_gate state       -> `blocked`   (escalation edge)
+ *   - else (bare fallthrough / failed)   -> `errored`
+ */
+function mapRoundChildTarget(
+  definition: WorkflowDefinition,
+  transition: AgentTransitionDefinition,
+  segment: ReadonlySet<string>,
+): string {
+  if (segment.has(transition.to)) return transition.to;
+
+  const verdict = transition.when?.verdict;
+  if (verdict === 'recorded') return ROUND_CHILD_RECORDED;
+  if (verdict === 'evaluator_blocked') return ROUND_CHILD_BLOCKED;
+  if (typeof verdict === 'string') return ROUND_CHILD_ERRORED;
+
+  const targetState = definition.states[transition.to];
+  if (targetState.type === 'human_gate') return ROUND_CHILD_BLOCKED;
+  return ROUND_CHILD_ERRORED;
+}
+
 // ---------------------------------------------------------------------------
 // Machine builder
 // ---------------------------------------------------------------------------
+
+interface BuildWorkflowMachineOptions {
+  readonly contextFromInput?: boolean;
+  readonly buildRoundMachines?: boolean;
+  /**
+   * When set, every executable state's `onError` routes here instead of the
+   * `findErrorTarget` heuristic. Used by the child round-machine build: a
+   * child definition has no gate / `failed` / `aborted` terminal, so
+   * `findErrorTarget` would fall through to the first synthetic terminal
+   * (`recorded`) and silently treat a crashed lane as a recorded round.
+   * Forcing `onErrorTarget: 'errored'` makes a service rejection land in the
+   * `errored` lane-verdict terminal, where the barrier maps it to a fail.
+   */
+  readonly onErrorTarget?: string;
+}
 
 /**
  * Builds an XState v5 machine from a validated WorkflowDefinition.
@@ -343,8 +571,13 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
  * Guards are registered with concrete implementations from the guards
  * module. Actions for context updates are defined inline via `assign`.
  */
-export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescription: string): BuildMachineResult {
+export function buildWorkflowMachine(
+  definition: WorkflowDefinition,
+  taskDescription: string,
+  options: BuildWorkflowMachineOptions = {},
+): BuildMachineResult {
   const states: Record<string, object> = {};
+  const roundMachinesByState = new Map<string, AnyStateMachine>();
   const gateStateNames = new Set<string>();
   const terminalStateNames = new Set<string>();
 
@@ -354,16 +587,27 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   // from the map and the guard returns false for them.
   const maxVisitsByState = new Map<string, number>();
 
+  // For child round machines, every executable member's error path is forced
+  // to the synthetic `errored` terminal (see `onErrorTarget` doc above); the
+  // parent machine leaves it undefined and falls back to `findErrorTarget`.
+  const executableOptions: ExecutableStateBuildOptions = { onErrorTarget: options.onErrorTarget };
+
   for (const [stateId, stateDef] of Object.entries(definition.states)) {
     switch (stateDef.type) {
       case 'agent':
-        states[stateId] = buildAgentState(stateId, stateDef, definition);
+        states[stateId] =
+          stateDef.fanOut !== undefined
+            ? buildFanOutState(stateId, stateDef, definition)
+            : buildAgentState(stateId, stateDef, definition, executableOptions);
         if (typeof stateDef.maxVisits === 'number') {
           maxVisitsByState.set(stateId, stateDef.maxVisits);
         }
         break;
       case 'deterministic':
-        states[stateId] = buildDeterministicState(stateId, stateDef, definition);
+        states[stateId] =
+          stateDef.fanOut !== undefined
+            ? buildFanOutState(stateId, stateDef, definition)
+            : buildDeterministicState(stateId, stateDef, definition, executableOptions);
         break;
       case 'human_gate':
         states[stateId] = buildHumanGateState(stateId, stateDef);
@@ -373,6 +617,26 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         states[stateId] = { type: 'final' as const };
         terminalStateNames.add(stateId);
         break;
+    }
+  }
+
+  if (options.buildRoundMachines !== false) {
+    for (const [stateId, stateDef] of Object.entries(definition.states)) {
+      if ((stateDef.type !== 'agent' && stateDef.type !== 'deterministic') || stateDef.fanOut === undefined) {
+        continue;
+      }
+      const segment = stateDef.segment ?? [];
+      if (segment.length === 0) continue;
+      const childDefinition = buildRoundChildDefinition(definition, stateId, segment);
+      const child = buildWorkflowMachine(childDefinition, taskDescription, {
+        contextFromInput: true,
+        buildRoundMachines: false,
+        // A segment member's service rejection must land in the child's
+        // `errored` terminal, not fall through `findErrorTarget` to the
+        // first terminal (`recorded`). See `onErrorTarget` above.
+        onErrorTarget: ROUND_CHILD_ERRORED,
+      });
+      roundMachinesByState.set(stateId, child.machine);
     }
   }
 
@@ -475,6 +739,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
     types: {
       context: {} as WorkflowContext,
       events: {} as WorkflowEvent,
+      input: {} as { context?: WorkflowContext } | undefined,
     },
     actors: {
       agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(() => {
@@ -482,6 +747,9 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
       }),
       deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(() => {
         return Promise.reject(new Error('deterministicService must be provided via machine.provide()'));
+      }),
+      fanOutService: fromPromise<FanOutInvokeResult, FanOutInvokeInput>(() => {
+        return Promise.reject(new Error('fanOutService must be provided via machine.provide()'));
       }),
     },
     guards: xstateGuards,
@@ -554,6 +822,19 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
           previousStateName: stateId,
         };
       }),
+      // Promotes the batch's joined context onto the parent FSM after a
+      // fan-out invoke resolves (the parent was frozen at `workers` for the
+      // whole batch — see runFanOutSegment). The result already carries the
+      // chosen lane's full WorkflowContext, so this replaces context wholesale.
+      // `if (!result) return {}` keeps the existing context unchanged when the
+      // invoke produced no output — never blanks the parent context on a
+      // malformed/empty result.
+      updateContextFromFanOutResult: assign(({ event }) => {
+        const doneEvent = event as unknown as { output?: FanOutInvokeResult };
+        const result = doneEvent.output;
+        if (!result) return {};
+        return result.context;
+      }),
       storeHumanPrompt: assign(({ event }) => ({
         humanPrompt: (event as { prompt?: string }).prompt ?? null,
       })),
@@ -622,15 +903,24 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   }).createMachine({
     id: definition.name,
     initial: definition.initial,
-    context: (): WorkflowContext => ({
-      ...createInitialContext(definition),
-      taskDescription,
-    }),
+    context: ({ input }: { input?: { context?: WorkflowContext } }): WorkflowContext => {
+      if (options.contextFromInput) {
+        if (!input?.context) {
+          throw new Error(`machine "${definition.name}" requires input.context`);
+        }
+        return input.context;
+      }
+      return {
+        ...createInitialContext(definition),
+        taskDescription,
+      };
+    },
     states,
   });
 
   return {
     machine,
+    roundMachinesByState,
     gateStateNames,
     terminalStateNames,
   };

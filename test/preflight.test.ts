@@ -27,8 +27,13 @@ const oauthOnlySources: CredentialSources = {
 };
 
 function createTestConfig(
-  overrides: { anthropicApiKey?: string; preferredMode?: 'docker' | 'builtin' } = {},
+  overrides: {
+    anthropicApiKey?: string;
+    preferredMode?: 'docker' | 'builtin';
+    agentModelId?: string;
+  } = {},
 ): IronCurtainConfig {
+  const agentModelId = overrides.agentModelId ?? 'anthropic:claude-sonnet-4-6';
   return {
     auditLogPath: './audit.jsonl',
     allowedDirectory: TEST_SANDBOX_DIR,
@@ -38,14 +43,18 @@ function createTestConfig(
     protectedPaths: [],
     generatedDir: `${REAL_TMP}/test-generated`,
     constitutionPath: `${REAL_TMP}/test-constitution.md`,
-    agentModelId: 'anthropic:claude-sonnet-4-6',
+    agentModelId,
     escalationTimeoutSeconds: 300,
     userConfig: {
-      agentModelId: 'anthropic:claude-sonnet-4-6',
+      agentModelId,
       policyModelId: 'anthropic:claude-sonnet-4-6',
+      prefilterModelId: 'anthropic:claude-haiku-4-5',
       anthropicApiKey: overrides.anthropicApiKey ?? 'test-api-key',
       googleApiKey: '',
       openaiApiKey: '',
+      anthropicBaseUrl: '',
+      openaiBaseUrl: '',
+      googleBaseUrl: '',
       escalationTimeoutSeconds: 300,
       resourceBudget: {
         maxTotalTokens: 1_000_000,
@@ -62,11 +71,16 @@ function createTestConfig(
       },
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: true },
+      memory: { enabled: true, autoSave: true, llmBaseUrl: undefined, llmApiKey: undefined },
+      webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
       serverCredentials: {},
+      signal: null,
       gooseProvider: 'anthropic',
       gooseModel: 'claude-sonnet-4-20250514',
       preferredDockerAgent: 'claude-code',
       preferredMode: overrides.preferredMode ?? 'docker',
+      packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
+      dockerResources: { memoryMb: 8192, cpus: 4 },
     },
   };
 }
@@ -361,6 +375,53 @@ describe('resolveSessionMode', () => {
         expect(dockerSpy).not.toHaveBeenCalled();
         expect(loadFromFile).not.toHaveBeenCalled();
         expect(loadFromKeychain).not.toHaveBeenCalled();
+      });
+
+      it('uses the provider inferred from agentModelId for builtin API key validation', async () => {
+        const dockerSpy = vi.fn(dockerAvailable);
+        const loadFromFile = vi.fn(() => null);
+        const loadFromKeychain = vi.fn(() => null);
+
+        const promise = resolveSessionMode({
+          config: createTestConfig({
+            anthropicApiKey: '',
+            preferredMode: 'builtin',
+            agentModelId: 'openai:gpt-4o',
+          }),
+          isDockerAvailable: dockerSpy,
+          credentialSources: { loadFromFile, loadFromKeychain },
+        });
+
+        await expect(promise).rejects.toThrow(PreflightError);
+        await expect(promise).rejects.toThrow(/no OPENAI_API_KEY/);
+        // The message names the provider and the configured model that drove it,
+        // and omits the Anthropic-only OAuth caveat for non-Anthropic providers.
+        await expect(promise).rejects.toThrow(/"openai" provider/);
+        await expect(promise).rejects.toThrow(/openai:gpt-4o/);
+        await expect(promise).rejects.not.toThrow(/OAuth/);
+        expect(dockerSpy).not.toHaveBeenCalled();
+        expect(loadFromFile).not.toHaveBeenCalled();
+        expect(loadFromKeychain).not.toHaveBeenCalled();
+      });
+
+      it('includes the Anthropic OAuth caveat when the configured provider is anthropic', async () => {
+        const dockerSpy = vi.fn(dockerAvailable);
+        const loadFromFile = vi.fn(() => null);
+        const loadFromKeychain = vi.fn(() => null);
+
+        const promise = resolveSessionMode({
+          config: createTestConfig({
+            anthropicApiKey: '',
+            preferredMode: 'builtin',
+            agentModelId: 'anthropic:claude-sonnet-4-6',
+          }),
+          isDockerAvailable: dockerSpy,
+          credentialSources: { loadFromFile, loadFromKeychain },
+        });
+
+        await expect(promise).rejects.toThrow(/no ANTHROPIC_API_KEY/);
+        await expect(promise).rejects.toThrow(/Claude OAuth credentials are not usable/);
+        expect(dockerSpy).not.toHaveBeenCalled();
       });
     });
 

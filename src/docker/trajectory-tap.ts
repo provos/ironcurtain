@@ -23,7 +23,7 @@ import { randomUUID } from 'node:crypto';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { type Reassembler, redactHeaders } from './trajectory-types.js';
 import type { ExchangeRecord, PoisonReason } from './trajectory-types.js';
-import { createReassembler, providerForHost, ReassemblyError } from './trajectory-reassembler.js';
+import { createReassembler, providerForHost, ReassemblyError, TruncatedStreamError } from './trajectory-reassembler.js';
 import type { SessionId } from '../session/types.js';
 import * as logger from '../logger.js';
 
@@ -333,12 +333,20 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             });
             finishCompletion(true);
           } catch (err) {
-            // Reassembly failure: do NOT emit a partial record. Per §5
-            // and §9, the session is poisoned with `reassembly-failure`
-            // so the eventual `session-end` carries the reason.
+            // Do NOT emit a partial record. Distinguish a transport
+            // truncation (stream ended before the terminal event) from a
+            // genuine reassembly bug (a parse/dispatch/assembly failure):
+            // the former is an upstream abort that must NOT pollute
+            // reassembly-failure metrics. A clean `end()` with no terminal
+            // event reaches here e.g. when an upstream reset is flushed
+            // gracefully via `inlet.end()` (the gzip-tail recovery path).
             const msg = err instanceof ReassemblyError ? err.message : String(err);
-            logger.warn(`[trajectory-tap] reassembly failed (${inputs.host}): ${msg}`);
-            poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(msg));
+            if (err instanceof TruncatedStreamError) {
+              poisonAndAbort('mid-stream-abort', err);
+            } else {
+              logger.warn(`[trajectory-tap] reassembly failed (${inputs.host}): ${msg}`);
+              poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(msg));
+            }
           }
         } else {
           // No reassembler: capture the raw bytes verbatim. `streaming`

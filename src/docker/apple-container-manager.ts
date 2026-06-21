@@ -23,7 +23,7 @@
  */
 
 import { arch, platform, release } from 'node:os';
-import type { ContainerRuntime, DockerContainerConfig, DockerExecResult } from './types.js';
+import type { ContainerRuntime, DockerContainerConfig, DockerExecResult, DockerImageInfo } from './types.js';
 import * as logger from '../logger.js';
 import type { DockerAvailability } from './docker-probe.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
@@ -439,6 +439,34 @@ export function createAppleContainerManager(
       } catch {
         return undefined;
       }
+    },
+
+    // Workflow snapshot/image management (commit, removeImage, listImages,
+    // inspectImage) is Docker-only. The orchestrator's snapshot paths call
+    // createDockerManager() directly, so these are never reached on the
+    // apple-container backend; reject loudly rather than degrade silently.
+    commit(): Promise<string> {
+      return Promise.reject(
+        new Error('apple-container does not support image commit; use the Docker backend for workflow snapshots'),
+      );
+    },
+
+    removeImage(): Promise<boolean> {
+      return Promise.reject(
+        new Error('apple-container does not support image removal via this API; use the Docker backend'),
+      );
+    },
+
+    listImages(): Promise<readonly DockerImageInfo[]> {
+      return Promise.reject(
+        new Error('apple-container does not support image listing via this API; use the Docker backend'),
+      );
+    },
+
+    inspectImage(): Promise<DockerImageInfo | undefined> {
+      return Promise.reject(
+        new Error('apple-container does not support image inspection via this API; use the Docker backend'),
+      );
     },
 
     async getContainerLabel(container: string, label: string): Promise<string | undefined> {

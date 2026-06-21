@@ -508,6 +508,8 @@ export type InProcessEscalationFn = (
   whitelistCandidates?: readonly WhitelistCandidateIpc[],
 ) => Promise<InProcessEscalation>;
 
+export type EscalationWaitRunner = <T>(wait: () => Promise<T>) => Promise<T>;
+
 /** Dependencies injected into handleCallTool for testability. */
 export interface CallToolDeps {
   toolMap: Map<string, ProxiedTool>;
@@ -537,6 +539,13 @@ export interface CallToolDeps {
    * in-process caller knows the user's last message.
    */
   autoApproveUserMessage?: string;
+  /**
+   * Optional wrapper used by ToolCallCoordinator to release its call
+   * mutex while a policy escalation waits on auto-approval or a human.
+   * Direct pipeline callers omit this and keep legacy in-function
+   * behavior.
+   */
+  runEscalationWait?: EscalationWaitRunner;
   /**
    * Persona to stamp onto every audit entry emitted by this call.
    * Supplied by the coordinator from its `currentPersona` field (set by
@@ -798,66 +807,67 @@ export async function handleCallTool(
 
       const escalationId = uuidv4();
 
-      // Try auto-approve before falling through to human escalation.
-      // Prefer the caller-provided `autoApproveUserMessage` when set;
-      // otherwise fall back to the file-IPC user context.
-      if (deps.autoApproveModel) {
-        const userMessage =
-          deps.autoApproveUserMessage ??
-          (deps.escalationDir ? readUserContext(deps.escalationDir)?.userMessage : undefined);
+      // Capture the whitelist candidates and server context while the
+      // coordinator's call mutex is still held. The potentially slow
+      // auto-approval / human wait below can then run outside that mutex.
+      const { patterns: candidatePatterns, ipcs: candidateIpcs } = extractWhitelistCandidates(
+        toolInfo.serverName,
+        toolInfo.name,
+        argsForPolicy,
+        resolvedAnnotation,
+        evaluation.escalatedRoles,
+        escalationId,
+        evaluation.reason,
+      );
+      const escalationContext = formatServerContext(deps.serverContextMap, toolInfo.serverName);
 
-        if (userMessage !== undefined && userMessage !== '') {
-          // When using the file-IPC context, validate trust metadata
-          // the same way the legacy code did. Direct callers bypass
-          // this check (they establish trust out-of-band).
-          let trusted = true;
-          if (deps.autoApproveUserMessage === undefined && deps.escalationDir) {
-            const ctx = readUserContext(deps.escalationDir);
-            const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
-            trusted = ctx !== null && isUserContextTrusted(ctx, isPtySession);
-          }
+      const waitForDecision = async (): Promise<
+        | { readonly kind: 'auto-approved'; readonly reason: string }
+        | { readonly kind: 'human'; readonly response: InProcessEscalation }
+      > => {
+        // Try auto-approve before falling through to human escalation.
+        // Prefer the caller-provided `autoApproveUserMessage` when set;
+        // otherwise fall back to the file-IPC user context.
+        if (deps.autoApproveModel) {
+          const userMessage =
+            deps.autoApproveUserMessage ??
+            (deps.escalationDir ? readUserContext(deps.escalationDir)?.userMessage : undefined);
 
-          if (trusted) {
-            const autoResult = await autoApprove(
-              {
-                userMessage,
-                toolName: `${toolInfo.serverName}/${toolInfo.name}`,
-                escalationReason: evaluation.reason,
-                arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
-              },
-              deps.autoApproveModel,
-            );
+          if (userMessage !== undefined && userMessage !== '') {
+            // When using the file-IPC context, validate trust metadata
+            // the same way the legacy code did. Direct callers bypass
+            // this check (they establish trust out-of-band).
+            let trusted = true;
+            if (deps.autoApproveUserMessage === undefined && deps.escalationDir) {
+              const ctx = readUserContext(deps.escalationDir);
+              const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
+              trusted = ctx !== null && isUserContextTrusted(ctx, isPtySession);
+            }
 
-            if (autoResult.decision === 'approve') {
-              autoApproved = true;
-              escalationResult = 'approved';
-              policyDecision.status = 'allow';
-              policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+            if (trusted) {
+              const autoResult = await autoApprove(
+                {
+                  userMessage,
+                  toolName: `${toolInfo.serverName}/${toolInfo.name}`,
+                  escalationReason: evaluation.reason,
+                  arguments: extractArgsForAutoApprove(argsForPolicy, resolvedAnnotation),
+                },
+                deps.autoApproveModel,
+              );
+
+              if (autoResult.decision === 'approve') {
+                return { kind: 'auto-approved', reason: autoResult.reasoning };
+              }
             }
           }
         }
-      }
-
-      if (!autoApproved) {
-        // Extract whitelist candidates just before human escalation (avoids
-        // wasted work when auto-approve succeeds).
-        const { patterns: candidatePatterns, ipcs: candidateIpcs } = extractWhitelistCandidates(
-          toolInfo.serverName,
-          toolInfo.name,
-          argsForPolicy,
-          resolvedAnnotation,
-          evaluation.escalatedRoles,
-          escalationId,
-          evaluation.reason,
-        );
-        const escalationContext = formatServerContext(deps.serverContextMap, toolInfo.serverName);
 
         // One of these paths is guaranteed to be taken: we returned
         // early above when both `onEscalation` and `escalationDir`
         // were unset. Declare `response` with a default to satisfy
         // TS's control-flow analysis without weakening runtime
         // guarantees.
-        let response: { decision: 'approved' | 'denied'; whitelistSelection?: number } = {
+        let response: InProcessEscalation = {
           decision: 'denied',
         };
         if (deps.onEscalation) {
@@ -888,7 +898,43 @@ export async function handleCallTool(
             whitelistCandidates: candidateIpcs.length > 0 ? candidateIpcs : undefined,
           });
         }
+        return { kind: 'human', response };
+      };
 
+      // If `waitForDecision` throws (e.g. a faulty `onEscalation` hook),
+      // the error propagates out of `handleCallTool` and the coordinator's
+      // `runEscalationWait` finally reacquires+releases the call mutex while
+      // `leaveToolCall` returns the admission slot -- no leaked mutex/slot.
+      // We now ALSO write one audit line for the attempted call before
+      // re-raising, so a thrown hook no longer leaves the escalation
+      // unaudited. The catch fires ONLY on a throw, so it never overlaps
+      // the settled-decision audit below (no double-audit), and it
+      // re-raises the original error to preserve the exception contract
+      // callers depend on (the `runEscalationWait` finally + `leaveToolCall`
+      // still run).
+      let waitResult: Awaited<ReturnType<typeof waitForDecision>>;
+      try {
+        waitResult = await (deps.runEscalationWait ?? ((wait) => wait()))(waitForDecision);
+      } catch (escalationError) {
+        const escalationErrorText =
+          escalationError instanceof Error ? escalationError.message : String(escalationError);
+        const reason = `Escalation wait failed: ${escalationErrorText}`;
+        // Align the outer `policyDecision` (the object `logAudit` closes
+        // over) with the denied outcome we are auditing, mirroring the
+        // settled-denied branch below.
+        policyDecision.status = 'deny';
+        policyDecision.reason = reason;
+        logAudit({ status: 'denied', error: reason }, 0, 'denied');
+        throw escalationError;
+      }
+
+      if (waitResult.kind === 'auto-approved') {
+        autoApproved = true;
+        escalationResult = 'approved';
+        policyDecision.status = 'allow';
+        policyDecision.reason = `Auto-approved: ${waitResult.reason}`;
+      } else {
+        const { response } = waitResult;
         if (response.decision === 'denied') {
           const deniedDecision: PolicyDecision = {
             status: 'deny',

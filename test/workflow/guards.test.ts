@@ -16,8 +16,6 @@ function baseContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     previousTestCount: null,
     humanPrompt: null,
     reviewHistory: [],
-    parallelResults: {},
-    worktreeBranches: [],
     totalTokens: 0,
     lastError: null,
     agentConversationsByState: {},

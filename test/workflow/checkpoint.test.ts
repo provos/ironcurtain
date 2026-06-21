@@ -17,8 +17,6 @@ function makeCheckpoint(overrides?: Partial<WorkflowCheckpoint>): WorkflowCheckp
       previousTestCount: null,
       humanPrompt: null,
       reviewHistory: [],
-      parallelResults: {},
-      worktreeBranches: [],
       totalTokens: 500,
       lastError: null,
       agentConversationsByState: {},

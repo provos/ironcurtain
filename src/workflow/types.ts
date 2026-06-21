@@ -90,6 +90,13 @@ export function createWorkflowId(): WorkflowId {
 export interface WorkflowDefinition {
   readonly name: string;
   readonly description: string;
+  /**
+   * When true, the workflow is omitted from the web UI — both the start
+   * picker and the active/past-run tables. The CLI `workflow list` still
+   * shows it. Use for smoke-test / fixture workflows that should remain
+   * runnable from the CLI without cluttering the UI. Default: false.
+   */
+  readonly hidden?: boolean;
   readonly initial: string;
   readonly states: Record<string, WorkflowStateDefinition>;
   readonly settings?: WorkflowSettings;
@@ -104,8 +111,8 @@ export interface WorkflowSettings {
   readonly maxRounds?: number;
   /** Git repository path for worktree management. */
   readonly gitRepoPath?: string;
-  /** Max parallel agent sessions. Default: 3. */
-  readonly maxParallelism?: number;
+  /** Number of synchronous evolve workers. Default: 1. */
+  readonly workers?: number;
   /**
    * Optional system prompt text appended to the base system prompt
    * for ALL agent states in this workflow. Use for workspace
@@ -141,6 +148,12 @@ export interface WorkflowSettings {
    * Ignored for builtin workflows (no Docker infrastructure to share).
    */
   readonly sharedContainer?: boolean;
+  /**
+   * When true, aborted shared-container workflow stops snapshot each live
+   * container's writable layer so resume can recreate the scope from the
+   * recorded immutable image digest. Default: false.
+   */
+  readonly snapshotOnStop?: boolean;
 }
 
 /**
@@ -151,6 +164,32 @@ export type WorkflowStateDefinition =
   | HumanGateStateDefinition
   | DeterministicStateDefinition
   | TerminalStateDefinition;
+
+export interface FanOutDefinition {
+  /**
+   * Lane multiplicity. `'workers'` defers to `settings.workers`; the
+   * `number` branch is a per-state override for workflows that want a
+   * fixed-width segment independent of the global worker count.
+   */
+  readonly count: 'workers' | number;
+  /**
+   * Join discipline. Only barrier joins are supported today (every lane
+   * must complete before the segment exits); async joins are a future,
+   * deliberately reviewed extension.
+   */
+  readonly join: 'barrier';
+}
+
+export interface LaneResourceRequest {
+  readonly cpu?: number;
+  readonly mem?: string;
+  readonly gpu?: number;
+}
+
+export interface StateScheduleDefinition {
+  readonly pool: 'eval' | 'agent';
+  readonly resources?: LaneResourceRequest;
+}
 
 export interface AgentStateDefinition {
   readonly type: 'agent';
@@ -173,8 +212,25 @@ export interface AgentStateDefinition {
   readonly outputs: readonly string[];
   /** Transitions evaluated in order; first match wins. */
   readonly transitions: readonly AgentTransitionDefinition[];
-  /** When true, each parallel instance gets a dedicated git worktree. */
+  /**
+   * Legacy field from the old per-instance parallel model (one git
+   * worktree per parallel instance). Unused on the `workers`/lane path —
+   * native fan-out lanes are scheduled by the pump, not by per-state
+   * worktree opt-in. Retained for backward compatibility with existing
+   * manifests; do not wire new behavior to it.
+   */
   readonly worktree?: boolean;
+  /**
+   * Marks this state as a member of a parent fan-out segment. Parent fan-out
+   * states factor these members into child round machines at runtime.
+   */
+  readonly fanOutMember?: boolean;
+  /** Fan-out topology metadata for a parent segment driver state. */
+  readonly fanOut?: FanOutDefinition;
+  /** Ordered fan-out segment member state IDs. */
+  readonly segment?: readonly string[];
+  /** Scheduling metadata for lane-local execution. Schema-only until Phase 8. */
+  readonly schedule?: StateScheduleDefinition;
   /**
    * When false, re-invocations of this state resume the previous agent
    * session via --continue, receiving an abbreviated re-visit prompt.
@@ -279,6 +335,14 @@ export interface DeterministicStateDefinition {
    * Container-only; see validate.ts for path and routing constraints.
    */
   readonly resultFile?: string;
+  /** Fan-out topology metadata for a parent segment driver state. */
+  readonly fanOut?: FanOutDefinition;
+  /** Ordered fan-out segment member state IDs. */
+  readonly segment?: readonly string[];
+  /** Marks this state as a member of a parent fan-out segment. */
+  readonly fanOutMember?: boolean;
+  /** Scheduling metadata for lane-local execution. Schema-only until Phase 8. */
+  readonly schedule?: StateScheduleDefinition;
   readonly transitions: readonly AgentTransitionDefinition[];
 }
 
@@ -418,18 +482,33 @@ export type WorkflowEvent =
   | { readonly type: 'HUMAN_APPROVE'; readonly prompt?: string }
   | { readonly type: 'HUMAN_FORCE_REVISION'; readonly prompt?: string }
   | { readonly type: 'HUMAN_REPLAN'; readonly prompt?: string }
-  | { readonly type: 'HUMAN_ABORT' }
-  | { readonly type: 'PARALLEL_ALL_COMPLETED'; readonly results: readonly ParallelSlotResult[] }
-  | { readonly type: 'PARALLEL_SLOT_FAILED'; readonly key: string; readonly error: string }
-  | { readonly type: 'MERGE_SUCCEEDED' }
-  | { readonly type: 'MERGE_CONFLICT'; readonly conflictDetails: string };
+  | { readonly type: 'HUMAN_ABORT' };
 
 // ---------------------------------------------------------------------------
 // Workflow context (XState context)
 // ---------------------------------------------------------------------------
 
+export interface WorkflowLanePreparedResult {
+  readonly passed: boolean;
+  readonly testCount?: number;
+  readonly errors?: string;
+  readonly verdict?: string;
+  readonly payload?: Record<string, unknown>;
+}
+
+export interface WorkflowLaneContext {
+  readonly id: number;
+  /** Container-absolute lane scratch directory, e.g. /workspace/.evolve_runs/main/current/lane_0. */
+  readonly dir: string;
+  /** Workspace-relative lane scratch directory, e.g. .evolve_runs/main/current/lane_0. */
+  readonly relativeDir: string;
+  /** Deterministic results prepared by the fan-out barrier before the child actor starts. */
+  readonly preparedResults?: Readonly<Record<string, WorkflowLanePreparedResult>>;
+}
+
 export interface WorkflowContext {
   readonly taskDescription: string;
+  readonly lane?: WorkflowLaneContext;
   readonly artifacts: Record<string, string>;
   readonly round: number;
   readonly maxRounds: number;
@@ -442,8 +521,6 @@ export interface WorkflowContext {
   };
   readonly humanPrompt: string | null;
   readonly reviewHistory: readonly string[];
-  readonly parallelResults: Record<string, ParallelSlotResult>;
-  readonly worktreeBranches: readonly string[];
   readonly totalTokens: number;
   readonly lastError: string | null;
   /**
@@ -503,13 +580,6 @@ export interface AgentSlot {
 
 export interface WorkflowResult {
   readonly finalArtifacts: Record<string, string>;
-}
-
-export interface ParallelSlotResult {
-  readonly key: string;
-  readonly status: 'success' | 'failed';
-  readonly error?: string;
-  readonly worktreeBranch?: string;
 }
 
 export interface HumanGateRequest {
@@ -583,11 +653,22 @@ export interface WorkflowCheckpoint {
    */
   readonly workflowScriptsDir?: string;
   /**
+   * Per-containerScope Docker image snapshots captured at an aborted stop.
+   * `image` is the immutable sha256 image id and is the source of truth;
+   * `tag` is cosmetic only.
+   */
+  readonly containerSnapshots?: Readonly<Record<string, ContainerSnapshotRef>>;
+  /**
    * Terminal-phase status, populated only when the workflow has reached a terminal
    * phase (completed / aborted / failed / waiting_human). Absent for mid-run
    * checkpoints and for legacy retained checkpoints written before this field existed.
    */
   readonly finalStatus?: WorkflowStatus;
+}
+
+export interface ContainerSnapshotRef {
+  readonly image: string;
+  readonly tag?: string;
 }
 
 export interface TransitionRecord {

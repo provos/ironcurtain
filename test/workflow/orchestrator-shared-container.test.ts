@@ -16,6 +16,7 @@ import {
   waitForCompletion,
   stubPersonasForTest,
 } from './test-helpers.js';
+import { createMockDocker } from '../helpers/docker-mocks.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -357,6 +358,249 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     }
   });
 
+  it('snapshots live scoped containers on abort and restores from the recorded digest on resume', async () => {
+    const snapshotDef: WorkflowDefinition = {
+      name: 'docker-snapshot-resume',
+      description: 'Docker workflow with snapshot-on-stop enabled',
+      initial: 'first',
+      settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true, snapshotOnStop: true },
+      states: {
+        first: {
+          type: 'agent',
+          description: 'First agent',
+          persona: 'global',
+          prompt: 'You are first.',
+          inputs: [],
+          outputs: ['a'],
+          transitions: [{ to: 'second' }],
+        },
+        second: {
+          type: 'agent',
+          description: 'Second agent',
+          persona: 'global',
+          prompt: 'You are second.',
+          inputs: ['a'],
+          outputs: ['b'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'Done' },
+      },
+    };
+
+    const stubCleanup = stubPersonasForTest(tmpDir, snapshotDef);
+    try {
+      const defPath = writeDefinitionFile(tmpDir, snapshotDef);
+      const checkpointStore = createDeps(tmpDir).checkpointStore;
+      const snapshotDigest = `sha256:${'1'.repeat(64)}`;
+      const docker = {
+        ...createMockDocker(),
+        commit: vi.fn(async () => snapshotDigest),
+        removeImage: vi.fn(async () => true),
+        imageExists: vi.fn(async (image: string) => image === snapshotDigest),
+      };
+      const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
+        return {
+          ...makeStubInfrastructure(input.workflowId, input.bundleId),
+          docker,
+          containerId: `container-${input.bundleId}`,
+        } as DockerInfrastructure;
+      });
+      const destroyInfra = vi.fn(async () => {});
+
+      let secondSessionRequested!: () => void;
+      const secondSessionStarted = new Promise<void>((resolveStarted) => {
+        secondSessionRequested = resolveStarted;
+      });
+      let sessionCount = 0;
+      const sessionFactory = vi.fn(async () => {
+        sessionCount++;
+        if (sessionCount === 1) {
+          return createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['a'] }], tmpDir);
+        }
+        secondSessionRequested();
+        return new Promise<never>(() => {
+          /* keep second state active until abort */
+        });
+      });
+
+      const orchestrator = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          createSession: sessionFactory,
+          createWorkflowInfrastructure: createInfra,
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
+      );
+      activeOrchestrator = orchestrator;
+
+      const workflowId = await orchestrator.start(defPath, 'task');
+      await secondSessionStarted;
+
+      await orchestrator.abort(workflowId);
+      activeOrchestrator = undefined;
+
+      const checkpoint = checkpointStore.load(workflowId);
+      expect(checkpoint?.containerSnapshots?.primary.image).toBe(snapshotDigest);
+      expect(docker.commit).toHaveBeenCalledTimes(1);
+      expect(docker.removeImage).not.toHaveBeenCalled();
+
+      const resumeCreateInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
+        return {
+          ...makeStubInfrastructure(input.workflowId, input.bundleId),
+          docker,
+          containerId: `resume-container-${input.bundleId}`,
+        } as DockerInfrastructure;
+      });
+      const resumeSessionFactory = vi.fn(async () => {
+        return new Promise<never>(() => {
+          /* keep resumed second state active */
+        });
+      });
+      const resumed = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          createSession: resumeSessionFactory,
+          createWorkflowInfrastructure: resumeCreateInfra,
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
+      );
+      activeOrchestrator = resumed;
+
+      await resumed.resume(workflowId);
+
+      const start = Date.now();
+      while (resumeCreateInfra.mock.calls.length === 0 && Date.now() - start < 2000) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(resumeCreateInfra).toHaveBeenCalled();
+      expect(resumeCreateInfra.mock.calls[0][0].baseImageOverride).toBe(snapshotDigest);
+    } finally {
+      stubCleanup();
+    }
+  });
+
+  it('supersedes (removes) the previous snapshot digest on a resume-then-stop', async () => {
+    const snapshotDef: WorkflowDefinition = {
+      name: 'docker-snapshot-supersede',
+      description: 'Docker workflow with snapshot-on-stop enabled',
+      initial: 'first',
+      settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true, snapshotOnStop: true },
+      states: {
+        first: {
+          type: 'agent',
+          description: 'First agent',
+          persona: 'global',
+          prompt: 'You are first.',
+          inputs: [],
+          outputs: ['a'],
+          transitions: [{ to: 'second' }],
+        },
+        second: {
+          type: 'agent',
+          description: 'Second agent',
+          persona: 'global',
+          prompt: 'You are second.',
+          inputs: ['a'],
+          outputs: ['b'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'Done' },
+      },
+    };
+
+    const stubCleanup = stubPersonasForTest(tmpDir, snapshotDef);
+    try {
+      const defPath = writeDefinitionFile(tmpDir, snapshotDef);
+      const checkpointStore = createDeps(tmpDir).checkpointStore;
+      const digestA1 = `sha256:${'1'.repeat(64)}`;
+      const digestA2 = `sha256:${'2'.repeat(64)}`;
+      const committed = [digestA1, digestA2];
+      let commitSeq = 0;
+      const live = new Set<string>();
+      const docker = {
+        ...createMockDocker(),
+        commit: vi.fn(async () => {
+          const image = committed[commitSeq++];
+          live.add(image);
+          return image;
+        }),
+        removeImage: vi.fn(async (ref: string) => {
+          live.delete(ref);
+          return true;
+        }),
+        imageExists: vi.fn(async (image: string) => live.has(image)),
+      };
+      const makeInfra = (prefix: string) =>
+        vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
+          return {
+            ...makeStubInfrastructure(input.workflowId, input.bundleId),
+            docker,
+            containerId: `${prefix}-${input.bundleId}`,
+          } as DockerInfrastructure;
+        });
+      const destroyInfra = vi.fn(async () => {});
+
+      // First run: advance to the (blocking) second state, then abort.
+      let firstSecondStarted!: () => void;
+      const firstSecondActive = new Promise<void>((r) => (firstSecondStarted = r));
+      let firstCount = 0;
+      const firstSessions = vi.fn(async () => {
+        firstCount++;
+        if (firstCount === 1) {
+          return createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['a'] }], tmpDir);
+        }
+        firstSecondStarted();
+        return new Promise<never>(() => {});
+      });
+      const first = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          createSession: firstSessions,
+          createWorkflowInfrastructure: makeInfra('container'),
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
+      );
+      activeOrchestrator = first;
+      const workflowId = await first.start(defPath, 'task');
+      await firstSecondActive;
+      await first.abort(workflowId);
+      activeOrchestrator = undefined;
+
+      expect(checkpointStore.load(workflowId)?.containerSnapshots?.primary.image).toBe(digestA1);
+      expect(docker.removeImage).not.toHaveBeenCalled();
+
+      // Resume, advance to the blocking state again, then abort a second time.
+      const resumeCreateInfra = makeInfra('resume-container');
+      const resume = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          createSession: vi.fn(async () => new Promise<never>(() => {})),
+          createWorkflowInfrastructure: resumeCreateInfra,
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
+      );
+      activeOrchestrator = resume;
+      await resume.resume(workflowId);
+      const start = Date.now();
+      while (resumeCreateInfra.mock.calls.length === 0 && Date.now() - start < 2000) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(resumeCreateInfra.mock.calls[0][0].baseImageOverride).toBe(digestA1);
+
+      await resume.abort(workflowId);
+      activeOrchestrator = undefined;
+
+      // The second stop committed a fresh digest, recorded it, and removed the
+      // superseded one — never the live one.
+      expect(docker.commit).toHaveBeenCalledTimes(2);
+      expect(checkpointStore.load(workflowId)?.containerSnapshots?.primary.image).toBe(digestA2);
+      expect(docker.removeImage).toHaveBeenCalledWith(digestA1);
+      expect(docker.removeImage).not.toHaveBeenCalledWith(digestA2);
+    } finally {
+      stubCleanup();
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Test 5: shutdownAll destroys infra for every active workflow
   // -------------------------------------------------------------------------
@@ -443,6 +687,83 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     await orchestrator.shutdownAll();
     activeOrchestrator = undefined;
 
+    expect(destroyInfra).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 6b: shutdownAll drains the terminal handler's in-flight teardown
+  //
+  // Regression for the leaked-Docker-network bug: on a normal terminal,
+  // handleWorkflowComplete kicks off destroyWorkflowInfrastructure as a
+  // fire-and-forget (the actor subscription is synchronous). Because
+  // destroyWorkflowInfrastructure snapshot-and-clears bundlesByScope up
+  // front, shutdownAll's redundant destroy pass no-ops — so shutdownAll
+  // MUST await the retained teardownPromise, otherwise the CLI's
+  // process.exit() races the still-running `docker network rm` and orphans
+  // the per-run --internal network.
+  // -------------------------------------------------------------------------
+
+  it('shutdownAll awaits the in-flight teardown started by a normal terminal', async () => {
+    const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
+
+    const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+      makeStubInfrastructure(input.workflowId, input.bundleId),
+    );
+
+    // Gate the teardown so it cannot finish until we release it. This models
+    // the slow `docker stop`/`rm`/`network rm` calls inside cleanupContainers.
+    let releaseDestroy!: () => void;
+    const destroyGate = new Promise<void>((r) => {
+      releaseDestroy = r;
+    });
+    let destroyFinished = false;
+    const destroyInfra = vi.fn(async () => {
+      await destroyGate;
+      destroyFinished = true;
+    });
+
+    const sessionFactory = vi.fn(async () =>
+      createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['result'] }], tmpDir),
+    );
+
+    const orchestrator = new WorkflowOrchestrator(
+      createDeps(tmpDir, {
+        createSession: sessionFactory,
+        createWorkflowInfrastructure: createInfra,
+        destroyWorkflowInfrastructure: destroyInfra,
+      }),
+    );
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // The terminal handler has dispatched destroy, but it is blocked on the
+    // gate (still in flight).
+    const start = Date.now();
+    while (destroyInfra.mock.calls.length === 0 && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(destroyInfra).toHaveBeenCalledTimes(1);
+    expect(destroyFinished).toBe(false);
+
+    // shutdownAll must NOT resolve while the teardown is still running.
+    let shutdownResolved = false;
+    const shutdownPromise = orchestrator.shutdownAll().then(() => {
+      shutdownResolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(shutdownResolved).toBe(false);
+    expect(destroyFinished).toBe(false);
+
+    // Release the teardown; now shutdownAll can complete — and only after the
+    // teardown has fully finished.
+    releaseDestroy();
+    await shutdownPromise;
+    activeOrchestrator = undefined;
+
+    expect(shutdownResolved).toBe(true);
+    expect(destroyFinished).toBe(true);
     expect(destroyInfra).toHaveBeenCalledTimes(1);
   });
 

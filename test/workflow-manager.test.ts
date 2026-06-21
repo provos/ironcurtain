@@ -50,8 +50,6 @@ function makeContext(taskDescription: string): WorkflowContext {
     previousTestCount: null,
     humanPrompt: null,
     reviewHistory: [],
-    parallelResults: {},
-    worktreeBranches: [],
     totalTokens: 1000,
     lastError: null,
     agentConversationsByState: {},

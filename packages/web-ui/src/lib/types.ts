@@ -306,6 +306,8 @@ export type WorkflowDetailDto = WorkflowCardDto & {
   readonly context: WorkflowContextDto;
   readonly gate?: HumanGateRequestDto;
   readonly workspacePath: string;
+  /** True when the workflow's source package ships a `README.md` (fetch via `workflows.readme`). */
+  readonly hasReadme: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -447,6 +449,14 @@ export interface WorkflowDefinitionDto {
   readonly description: string;
   readonly path: string;
   readonly source: WorkflowSource;
+  /** True when the package ships a `README.md` (fetch with `workflows.readme`). */
+  readonly hasReadme: boolean;
+}
+
+/** README markdown for a workflow, returned by `workflows.readme`. */
+export interface WorkflowReadmeDto {
+  /** Raw markdown source; the client renders + sanitizes it. */
+  readonly content: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,8 @@ import {
   type LatestVerdictDto,
   type LiveWorkflowPhase,
   type PastRunPhase,
+  type WorkflowDefinitionDto,
+  type WorkflowReadmeDto,
   RpcError,
   MethodNotFoundError,
 } from '../web-ui-types.js';
@@ -42,6 +44,7 @@ import {
   summaryForId,
   type WorkflowRunSummary,
 } from '../../workflow/workflow-discovery.js';
+import { discoverWorkflows, findWorkflowByName, readWorkflowReadme } from '../../workflow/discovery.js';
 import { extractStateGraph } from '../state-graph.js';
 import type { StateGraphDto } from '../web-ui-types.js';
 import { isWithinDirectory } from '../../types/argument-roles.js';
@@ -132,7 +135,93 @@ const workflowMessageLogSchema = z.object({
   limit: z.number().int().positive().max(2000).optional(),
 });
 
+// `workflows.readme`: fetch a workflow's co-packaged README markdown. Address it
+// either by definition manifest path (Start picker, no running workflow) or by a
+// running/past workflow id (detail view). Exactly one must be provided.
+const workflowReadmeSchema = z
+  .object({
+    definitionPath: z.string().min(1).optional(),
+    workflowId: z.string().min(1).optional(),
+  })
+  .refine((v) => (v.definitionPath ? 1 : 0) + (v.workflowId ? 1 : 0) === 1, {
+    message: 'Provide exactly one of definitionPath or workflowId',
+  });
+
 const DEFAULT_MESSAGE_LOG_LIMIT = 200;
+
+/**
+ * Manifest names of workflows marked `hidden: true`. Used to suppress
+ * smoke-test / fixture workflows' *runs* from the web UI's active and
+ * past-run listings (the definition picker filters on the entry directly).
+ * Run records carry `definition.name`, which equals the discovery entry's
+ * directory name by convention — see {@link findWorkflowByName}.
+ */
+function hiddenWorkflowNames(): Set<string> {
+  return new Set(
+    discoverWorkflows()
+      .filter((entry) => entry.hidden)
+      .map((entry) => entry.name),
+  );
+}
+
+/** True when a workflow's source package ships a README (best-effort name lookup). */
+function workflowHasReadme(name: string): boolean {
+  return findWorkflowByName(name)?.hasReadme ?? false;
+}
+
+/** Reads README markdown for a discovered manifest, or throws `README_NOT_FOUND`. */
+function readmeDtoOrThrow(manifestPath: string, name: string): WorkflowReadmeDto {
+  const content = readWorkflowReadme(manifestPath);
+  if (content === undefined) {
+    throw new RpcError('README_NOT_FOUND', `Workflow "${name}" has no README`);
+  }
+  return { content };
+}
+
+/**
+ * Serves a README addressed by definition manifest path (Start picker).
+ * Only *discovered* workflows are served — never an arbitrary client path —
+ * which both validates the input and confines reads to the workflow trees.
+ */
+function readReadmeForDefinitionPath(definitionPath: string): WorkflowReadmeDto {
+  const target = resolve(definitionPath);
+  const entry = discoverWorkflows().find((e) => resolve(e.path) === target);
+  if (!entry) {
+    throw new RpcError('WORKFLOW_NOT_FOUND', `Unknown workflow definition: ${definitionPath}`);
+  }
+  return readmeDtoOrThrow(entry.path, entry.name);
+}
+
+/** Resolves a running/past workflow id to its definition name (manifest `name:`). */
+function resolveWorkflowName(
+  controller: ReturnType<WorkflowManager['getOrchestrator']>,
+  manager: WorkflowManager,
+  id: WorkflowId,
+): string | undefined {
+  const detail = controller.getDetail(id);
+  if (detail) return detail.definition.name;
+  const result = manager.loadPastRun(id);
+  if ('error' in result) return undefined;
+  return result.definition.name;
+}
+
+/** Serves a README addressed by running/past workflow id (detail view). */
+function readReadmeForWorkflowId(
+  controller: ReturnType<WorkflowManager['getOrchestrator']>,
+  manager: WorkflowManager,
+  id: WorkflowId,
+): WorkflowReadmeDto {
+  const name = resolveWorkflowName(controller, manager, id);
+  if (!name) {
+    throw new RpcError('WORKFLOW_NOT_FOUND', `Workflow ${id} not found`);
+  }
+  const entry = findWorkflowByName(name);
+  if (!entry) {
+    // Run references a workflow no longer discoverable (e.g. a one-off custom path).
+    throw new RpcError('README_NOT_FOUND', `No README available for workflow ${id}`);
+  }
+  return readmeDtoOrThrow(entry.path, entry.name);
+}
 
 // ---------------------------------------------------------------------------
 // Extended dispatch context
@@ -196,10 +285,35 @@ export async function workflowDispatch(
   method: string,
   params: Record<string, unknown>,
 ): Promise<unknown> {
-  // workflows.listDefinitions does not need a running workflow manager
+  // workflows.listDefinitions does not need a running workflow manager.
+  // `hidden` workflows (smoke tests / fixtures) are filtered out — they
+  // remain runnable from the CLI but never appear in the web UI picker.
   if (method === 'workflows.listDefinitions') {
-    const { discoverWorkflows } = await import('../../workflow/discovery.js');
-    return discoverWorkflows();
+    const definitions: WorkflowDefinitionDto[] = discoverWorkflows()
+      .filter((entry) => !entry.hidden)
+      .map((entry) => ({
+        name: entry.name,
+        description: entry.description,
+        path: entry.path,
+        source: entry.source,
+        hasReadme: entry.hasReadme,
+      }));
+    return definitions;
+  }
+
+  // workflows.readme is handled here, in one place: the definitionPath form
+  // (Start picker) needs no workflow manager, while the workflowId form
+  // (detail view) does. The schema's refine guarantees exactly one is set.
+  if (method === 'workflows.readme') {
+    const { definitionPath, workflowId } = validateParams(workflowReadmeSchema, params);
+    if (definitionPath) {
+      return readReadmeForDefinitionPath(definitionPath);
+    }
+    if (!ctx.workflowManager) {
+      throw new RpcError('INTERNAL_ERROR', 'Workflow system not available');
+    }
+    const mgr = ctx.workflowManager;
+    return readReadmeForWorkflowId(mgr.getOrchestrator(), mgr, workflowId as WorkflowId);
   }
 
   if (!ctx.workflowManager) {
@@ -211,12 +325,16 @@ export async function workflowDispatch(
   switch (method) {
     case 'workflows.list': {
       const activeIds = controller.listActive();
+      // Suppress hidden workflows' runs (smoke tests / fixtures) from the UI.
+      const hidden = hiddenWorkflowNames();
       const summaries: WorkflowSummaryDto[] = [];
       for (const id of activeIds) {
         const status = controller.getStatus(id);
         if (status) {
           const detail = controller.getDetail(id);
-          summaries.push(buildSummaryDto(id, status, detail));
+          const dto = buildSummaryDto(id, status, detail);
+          if (hidden.has(dto.name)) continue;
+          summaries.push(dto);
         }
       }
       return summaries;
@@ -248,6 +366,8 @@ export async function workflowDispatch(
         hasCheckpoint: false,
         hasDefinition: false,
         hasMessageLog: false,
+        hasSnapshot: false,
+        snapshotImages: [],
         mtime: new Date(),
       };
       return buildDetailFromPastRun(id, result, summary);
@@ -442,6 +562,7 @@ function buildDetailDto(id: WorkflowId, status: WorkflowStatus, detail?: Workflo
       : { taskDescription: '', round: 0, maxRounds: 0, totalTokens: 0, visitCounts: {} },
     gate: status.phase === 'waiting_human' ? toHumanGateRequestDto(status.gate) : undefined,
     workspacePath: detail?.workspacePath ?? '',
+    hasReadme: workflowHasReadme(base.name),
   };
 }
 
@@ -630,6 +751,7 @@ export function buildDetailFromPastRun(
       },
       gate: undefined,
       workspacePath: checkpoint.workspacePath ?? '',
+      hasReadme: workflowHasReadme(definition.name),
     };
   }
 
@@ -662,6 +784,7 @@ export function buildDetailFromPastRun(
     context: { taskDescription, round: 0, maxRounds: 0, totalTokens: 0, visitCounts: {} },
     gate: undefined,
     workspacePath: recoveredWorkspace,
+    hasReadme: workflowHasReadme(definition.name),
   };
 }
 
@@ -869,6 +992,8 @@ function buildResumableList(manager: WorkflowManager): PastRunDto[] {
   const baseDir = manager.getBaseDir();
   const runs = discoverWorkflowRuns(baseDir);
   const activeIds = new Set<WorkflowId>(controller.listActive());
+  // Suppress hidden workflows' past runs (smoke tests / fixtures) from the UI.
+  const hidden = hiddenWorkflowNames();
   const dtos: PastRunDto[] = [];
 
   for (const run of runs) {
@@ -882,7 +1007,9 @@ function buildResumableList(manager: WorkflowManager): PastRunDto[] {
       }
       continue;
     }
-    dtos.push(buildPastRunDto(run.workflowId, result, run));
+    const dto = buildPastRunDto(run.workflowId, result, run);
+    if (hidden.has(dto.name)) continue;
+    dtos.push(dto);
   }
 
   dtos.sort((a, b) => b.timestamp.localeCompare(a.timestamp));

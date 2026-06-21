@@ -18,10 +18,12 @@ import { GLOBAL_PERSONA, DEFAULT_CONTAINER_SCOPE } from './types.js';
 import {
   collectTransitionTargets,
   findReachableStates,
+  isExecutableState,
   iterateSkillRefIssues,
   parseArtifactRef,
   usesVerdictEdges,
 } from './validate.js';
+import { resolveFanOutWorkers } from './lane-template.js';
 import { getWorkflowPackageDir } from './discovery.js';
 import { ACTIONABLE_DISCOVERY_REASONS, discoverSkillsWithErrors } from '../skills/discovery.js';
 import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
@@ -57,6 +59,12 @@ import type { ResolvedSkill, SkillDiscoveryError } from '../skills/types.js';
  * Both concerns are skipped cleanly when the lint caller did not
  * supply a `workflowFilePath` (the package dir is the only place skill
  * manifests can live).
+ *
+ * WF013 (fan-out maxRounds budget) and WF014 (fan-out child-bounds) are
+ * sibling fan-out checks split apart so each carries one concern. WF014
+ * previously flagged non-barrier fan-out joins; that is now a parse-time
+ * rejection (`FanOutDefinition.join` is the literal `'barrier'`), so the
+ * lint became unreachable and the number was reclaimed for child-bounds.
  */
 export type DiagnosticCode =
   | 'WF001'
@@ -68,7 +76,9 @@ export type DiagnosticCode =
   | 'WF008'
   | 'WF010'
   | 'WF011'
-  | 'WF012';
+  | 'WF012'
+  | 'WF013'
+  | 'WF014';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -122,6 +132,8 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkVisitCapTransitionOrder(def),
     ...checkContainerScopePopulatedByAgent(def),
     ...checkVerdictEdgesHaveResultFile(def),
+    ...checkFanOutBudget(def),
+    ...checkFanOutChildBounds(def),
     ...checkSkillReferencesAndManifests(def, ctx),
   ];
 }
@@ -290,7 +302,7 @@ function checkMaxRoundsHasGuard(def: WorkflowDefinition): Diagnostic[] {
   if (def.settings?.maxRounds === undefined) return [];
 
   for (const state of Object.values(def.states)) {
-    if (state.type !== 'agent' && state.type !== 'deterministic') continue;
+    if (!isExecutableState(state)) continue;
     for (const t of state.transitions) {
       if (t.guard === ROUND_LIMIT_GUARD) return [];
     }
@@ -503,6 +515,7 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
 
   for (const [stateId, state] of Object.entries(def.states)) {
     if (state.type !== 'deterministic') continue;
+    if (state.fanOut !== undefined) continue;
     if (state.resultFile !== undefined) continue;
 
     if (!usesVerdictEdges(state.transitions)) continue;
@@ -519,6 +532,86 @@ function checkVerdictEdgesHaveResultFile(def: WorkflowDefinition): Diagnostic[] 
   }
 
   return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// WF013 — fan-out re-scopes the maxRounds budget from candidates to batches
+// ---------------------------------------------------------------------------
+
+function checkFanOutBudget(def: WorkflowDefinition): Diagnostic[] {
+  if (def.settings?.maxRounds === undefined) return [];
+  const maxRounds = def.settings.maxRounds;
+
+  const diagnostics: Diagnostic[] = [];
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if (!isExecutableState(state) || state.fanOut === undefined) continue;
+    // Gate on THIS state's effective lane count (a numeric fanOut.count override
+    // multiplies the budget even when settings.workers is 1), and use it in the
+    // maxRounds × workers math. Mirrors orchestrator.runFanOutSegment.
+    const workers = resolveFanOutWorkers(state.fanOut, def.settings);
+    if (workers <= 1) continue;
+    diagnostics.push({
+      code: 'WF013',
+      severity: 'warning',
+      stateId,
+      message:
+        `Fan-out state "${stateId}" runs with ${workers} lanes; settings.maxRounds=${maxRounds} ` +
+        `now caps batches, so the candidate budget is maxRounds × workers = ${maxRounds * workers}.`,
+      hint: 'If maxRounds is intended as a candidate budget, divide it by workers or set an explicit batch budget.',
+    });
+  }
+  return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// WF014 — self-loopable fan-out segment child lacks a per-lane visit bound
+// ---------------------------------------------------------------------------
+
+function checkFanOutChildBounds(def: WorkflowDefinition): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const state of Object.values(def.states)) {
+    if (!isExecutableState(state) || state.fanOut === undefined) continue;
+    // Gate on THIS state's effective lane count: a numeric fanOut.count override
+    // runs multiple lanes even at settings.workers: 1. Mirrors the runtime.
+    if (resolveFanOutWorkers(state.fanOut, def.settings) <= 1) continue;
+    const segment = state.segment ?? [];
+
+    const segmentSet = new Set(segment);
+    for (const memberId of segment) {
+      const member = def.states[memberId] as WorkflowStateDefinition | undefined;
+      if (member === undefined) continue;
+      if (!isSelfLoopableWithinSegment(def, memberId, segmentSet)) continue;
+      if (member.type === 'agent' && member.maxVisits !== undefined) continue;
+      diagnostics.push({
+        code: 'WF014',
+        severity: 'warning',
+        stateId: memberId,
+        message:
+          `Fan-out segment member "${memberId}" can loop within the segment but has no per-lane maxVisits bound; ` +
+          `the parent maxRounds guard is blind to lane-internal visits.`,
+        hint: 'Add maxVisits to the child state, or add an explicit child-level round-limit guard when the fan-out pump is implemented.',
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function isSelfLoopableWithinSegment(def: WorkflowDefinition, stateId: string, segment: ReadonlySet<string>): boolean {
+  const seen = new Set<string>();
+  const queue = collectTransitionTargets(def.states[stateId]).filter((target) => segment.has(target));
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) continue;
+    if (current === stateId) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const state = def.states[current] as WorkflowStateDefinition | undefined;
+    if (state === undefined) continue;
+    for (const target of collectTransitionTargets(state)) {
+      if (segment.has(target)) queue.push(target);
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

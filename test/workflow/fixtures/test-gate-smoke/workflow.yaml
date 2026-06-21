@@ -1,0 +1,46 @@
+name: test-gate-smoke
+description: 'TESTING ONLY - reaches a human_gate, routes on the event, terminates. Drives the agent-gate-loop integration test with no real LLM (builtin mode + stub session factory).'
+initial: produce
+
+settings:
+  mode: builtin
+  maxRounds: 3
+
+states:
+  produce:
+    type: agent
+    description: Produce a trivial artifact for review.
+    persona: global
+    prompt: |
+      Produce a trivial draft for review. Write a `.workflow/draft/` directory
+      with a `draft.md` file. Do not do anything else.
+    inputs: []
+    outputs:
+      - draft
+    transitions:
+      - to: review
+
+  review:
+    type: human_gate
+    description: Review the draft.
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - draft
+    transitions:
+      - to: done
+        event: APPROVE
+      - to: produce
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  done:
+    type: terminal
+    description: Approved.
+
+  aborted:
+    type: terminal
+    description: Aborted.

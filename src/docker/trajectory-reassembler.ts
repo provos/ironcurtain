@@ -26,6 +26,20 @@ export class ReassemblyError extends Error {
   }
 }
 
+/**
+ * Thrown by `finalize()` when the stream ended before the provider's
+ * terminal event was parsed. This is a transport truncation / upstream
+ * abort, NOT a reassembly bug — the caller should classify it as
+ * `mid-stream-abort` rather than `reassembly-failure` so disconnects don't
+ * pollute reassembly-failure metrics.
+ */
+export class TruncatedStreamError extends ReassemblyError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TruncatedStreamError';
+  }
+}
+
 export interface RawEvent {
   readonly eventType: string;
   readonly dataUtf8: string;
@@ -369,7 +383,7 @@ export abstract class AbstractSseReassembler implements Reassembler {
       throw new ReassemblyError(this.failureReason ?? 'reassembly failed');
     }
     if (!this.terminalSeen()) {
-      throw new ReassemblyError('stream ended without terminal event');
+      throw new TruncatedStreamError('stream ended without terminal event');
     }
     return this.assembleResult();
   }

@@ -595,17 +595,35 @@ export function getInvocationDir(workflowId: string, bundleId: BundleId, stateSl
 }
 
 /**
- * Picks the next available `{stateId}.{N}` slug in `statesDir`. Returns
- * `${stateId}.1` when no matching dir exists; otherwise the max existing
- * N plus 1. Used so every state entry (true logical re-visits AND resume
- * legs of a single visit) gets its own forensic dir — `session.log` and
+ * Picks the next available `{prefix}.{N}` slug in `statesDir`, where `prefix` is
+ * `stateId` or — when a fan-out `laneId` is supplied — `{stateId}_lane_{laneId}`.
+ * Returns `{prefix}.1` when no matching dir exists; otherwise the max existing
+ * N plus 1. Used so every state entry (true logical re-visits AND resume legs of
+ * a single visit) gets its own forensic dir — `session.log` and
  * `session-metadata.json` no longer interleave across resume attempts.
+ *
+ * The `laneId` parameter is the fix for the fan-out artifact-dir collision: N
+ * same-state lanes run concurrently and, sharing one `stateId`, the check-then-act
+ * `{stateId}.{N}` computation races and clobbers each other's diagnostics. Keying
+ * the prefix on `lane.id` gives each lane its own `{stateId}_lane_{id}.{N}`
+ * namespace so per-lane `session.log` / `session-metadata.json` never collide.
+ *
+ * `laneId`, when supplied, MUST be a non-negative integer (the orchestrator
+ * assigns it as a fan-out loop index). It is interpolated into a directory-name
+ * prefix, so this is enforced as defense-in-depth on a path component: a
+ * non-integer or negative value throws (it would indicate an internal bug). A
+ * valid `laneId` renders as `_lane_<digits>`, which is path-safe and still
+ * passes the slug check.
  */
-export function nextStateSlug(statesDir: string, stateId: string): string {
+export function nextStateSlug(statesDir: string, stateId: string, laneId?: number): string {
   assertPathSafeSlug('state ID', stateId);
+  if (laneId !== undefined && (!Number.isInteger(laneId) || laneId < 0)) {
+    throw new Error(`nextStateSlug: laneId must be a non-negative integer, got ${laneId}`);
+  }
+  const prefixBase = laneId === undefined ? stateId : `${stateId}_lane_${laneId}`;
   let max = 0;
   if (existsSync(statesDir)) {
-    const prefix = `${stateId}.`;
+    const prefix = `${prefixBase}.`;
     for (const entry of readdirSync(statesDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
       // Decimal-digit-only suffix; reject "1e6", "0x10", " 1 ", "01",
@@ -616,7 +634,7 @@ export function nextStateSlug(statesDir: string, stateId: string): string {
       if (n > max) max = n;
     }
   }
-  return `${stateId}.${max + 1}`;
+  return `${prefixBase}.${max + 1}`;
 }
 
 const DECIMAL_SUFFIX_RE = /^(?:0|[1-9]\d*)$/;

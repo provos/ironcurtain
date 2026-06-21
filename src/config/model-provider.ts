@@ -53,6 +53,20 @@ const DEFAULT_PROVIDER: ProviderId = 'anthropic';
 const KNOWN_PROVIDERS = new Set<string>(['anthropic', 'google', 'openai']);
 
 /**
+ * Environment variable that supplies each provider's API key.
+ *
+ * Single source of truth for the provider→env-var mapping. Declared as an
+ * exhaustive `Record<ProviderId, string>` so adding a provider to
+ * {@link ProviderId} forces a matching entry here at compile time. Must stay
+ * in sync with the env-var overrides applied in `resolveUserConfig()`.
+ */
+export const PROVIDER_ENV_VARS: Record<ProviderId, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
+  openai: 'OPENAI_API_KEY',
+};
+
+/**
  * Parsed model specifier. A "qualified model ID" has the form
  * "provider:model-name". A bare model ID defaults to Anthropic.
  */

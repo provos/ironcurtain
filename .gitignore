@@ -5,6 +5,10 @@ node_modules-linux/
 # Build output
 dist/
 
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+
 # Environment and secrets
 .env
 .env.*
@@ -40,3 +44,9 @@ coverage/
 # Playwright
 e2e-results/
 playwright-report/
+
+# Generated docs (build.sh regenerates these)
+docs/vuln-discovery-onboarding/*.pdf
+
+# Local scratch / staged experiments — never committed
+donotcommit/

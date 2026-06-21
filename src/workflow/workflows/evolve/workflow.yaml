@@ -1,27 +1,226 @@
 name: evolve
-description: 'Evolve - single-round evaluator-driven candidate search (first vertical slice).'
-initial: preflight
+description: 'Evolve - multi-round evaluator-driven candidate search: a linear per-round pipeline (sample, researcher, evaluate, analyzer, record) with a round-boundary orchestrator enforcing budget and stop conditions.'
+initial: provision
 
 settings:
   mode: docker
   dockerAgent: claude-code
   sharedContainer: true
+  workers: 1
   model: anthropic:claude-sonnet-4-6
+  # Safety backstop for a wedged round pipeline, NOT the round budget.
+  # isRoundLimitReached trips when the MAX visit count across all states reaches
+  # this number. On the happy path every state is entered once per evolution
+  # round, so this bounds a clean run at ~maxRounds rounds; mid-round recovery
+  # (evaluator_blocked -> human_escalation in the child segment, then APPROVE
+  # back to orchestrator) may revisit evaluate/orchestrator, so a run with many
+  # recoveries trips the backstop in fewer
+  # rounds. It is set well above run_spec.budget.max_rounds either way, so a
+  # legitimate run is never capped before the orchestrator emits `complete`; the
+  # real round budget is enforced by the orchestrator against
+  # run_spec.budget.max_rounds.
+  maxRounds: 200
 
 states:
-  preflight:
+  provision:
     type: agent
-    description: Define the run spec and initialize the evolve run.
+    description: >
+      Install the staged experiment's runtime dependencies into the persistent
+      workflow venv, once. Idempotent: skips when the venv is already provisioned.
     persona: global
     prompt: |
-      You are configuring a single-round Evolve experiment. The task describes a
-      program-search objective with an evaluator that prints a score.
+      You are provisioning the Python environment for an Evolve experiment BEFORE
+      any candidate is evaluated. The experiment's files (if this run was given one)
+      live at the WORKSPACE ROOT, /workspace - the experiment dir IS the run's
+      workspace. Treat the experiment's own source files (the evaluator, input.md,
+      initial_program, requirements) as READ-ONLY by convention: do NOT modify them.
+      Your run state goes under /workspace/.evolve_runs/ and /workspace/.workflow/.
+      The persistent virtual environment lives at /opt/workflow-venv (a SEPARATE
+      mount, not under /workspace) and ALREADY contains the workflow's base
+      dependencies (numpy, pyyaml).
 
-      Do BOTH of these, in order, then finish with the required agent_status block:
+      Your job: make sure every dependency the experiment's evaluator and its
+      candidates need is installed into /opt/workflow-venv, exactly once.
 
-      1. Initialize the run by executing the evolve-brief helper. The run lives under
-         /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE and EVAL_CMD
-         from the task:
+      DURABILITY MODEL (read first - it governs every step below). Two kinds of
+      install live in this container, and they survive a resume DIFFERENTLY:
+        - pip/uv installs into /opt/workflow-venv are RESUME-DURABLE: the venv is
+          a host-mounted directory, so on workflow resume the same venv is
+          re-mounted with its packages intact.
+        - apt / system-library installs are NOT resume-durable: resume mints a
+          FRESH container, so anything installed into the container filesystem
+          (apt packages, the .so files they drop) is GONE on resume.
+      Therefore the .provisioned marker gates ONLY the durable venv install. apt
+      steps are re-applied on EVERY entry to this state (they are no-ops within a
+      run when the lib is already present, and they reinstall into the fresh
+      container on resume). NEVER let the marker short-circuit an apt step.
+
+      1. DURABLE-VENV SKIP CHECK. First check for the marker file
+         /workspace/.evolve_runs/main/.provisioned. If it exists, the venv was
+         already provisioned on a prior run or a prior visit - do NOT re-run the
+         pip install. Verify the venv still imports the recorded packages (run
+         `/opt/workflow-venv/bin/python -c "import numpy"` plus any package names
+         listed in the marker). If they import, the durable venv is intact: SKIP
+         the pip install but STILL run the system-library step (step 3b) before
+         emitting verdict: ready (apt libs may have vanished on a resume).
+
+      2. INFER DEPENDENCIES. Look at the workspace root /workspace. If it holds no
+         experiment files (it is a fresh/empty sandbox - no evaluator, no input.md,
+         no manifest), there is nothing experiment-specific to install: the base
+         venv is sufficient - write the marker (step 4) and emit verdict: ready.
+         Otherwise read, in this order, whichever exist at the workspace root
+         /workspace (ignore the run-state subtrees .evolve_runs/ and .workflow/):
+           - requirements.txt / pyproject.toml / setup.cfg / setup.py
+           - README / README.md
+           - the evaluator and any cognition / init script source
+         Build the minimal set of third-party packages the EVALUATOR needs to run
+         and that CANDIDATES are expected to import. For circle packing this is
+         numpy (already present) plus scipy. scipy ships as a self-contained PyPI
+         wheel with bundled BLAS, so the circle-packing demo needs NO apt step.
+
+      3a. INSTALL THE DURABLE VENV DEPS (through the proxy). Skip this sub-step
+         entirely if step 1 already verified the marker. Otherwise, for each
+         needed package, install it into /opt/workflow-venv using uv:
+           UV_NATIVE_TLS=1 VIRTUAL_ENV=/opt/workflow-venv uv pip install <pkg> [<pkg> ...]
+         Network egress is mediated by the IronCurtain MITM proxy
+         (HTTPS_PROXY/HTTP_PROXY are already set); registries are reachable.
+         Prefer a requirements.txt install when the workspace ships one:
+           UV_NATIVE_TLS=1 VIRTUAL_ENV=/opt/workflow-venv uv pip install -r /workspace/requirements.txt
+
+      3b. RE-APPLY SYSTEM LIBRARIES (every entry, NOT gated by the marker). If -
+         and only if - a wheel genuinely needs an unbundled system library, run
+         `sudo apt-get install -y <lib>` on EVERY entry to this state, before the
+         import verification. Record apt package names in
+         /workspace/.evolve_runs/main/.apt-provisioned for your own reference, but
+         do NOT use that marker to skip the apt step. For circle packing there is
+         no apt step, so this sub-step is a no-op.
+
+      4. VERIFY + MARK. Confirm each needed package imports:
+           /opt/workflow-venv/bin/python -c "import scipy, numpy"
+         Then write /workspace/.evolve_runs/main/.provisioned containing one line
+         per VENV (pip) package name. The marker records only durable venv deps;
+         apt packages are tracked separately and are never marker-gated. Create
+         /workspace/.evolve_runs/main/ first if needed.
+
+      Finish with the required agent_status block:
+        - verdict: ready - the venv now has everything the experiment needs (or
+          the workspace holds no experiment files and the base venv suffices).
+        - verdict: blocked - a dependency cannot be installed (registry refuses
+          it, a system lib is unavailable, the experiment's deps are uninferable).
+          Put the specific failure in your status so a human can act on it.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: preflight
+        when: { verdict: ready }
+      - to: provision_review
+        when: { verdict: blocked }
+
+  provision_review:
+    type: human_gate
+    description: >
+      Human review when the experiment's dependencies could not be provisioned.
+      Approve to retry provisioning, force a revision to re-infer the deps, or abort.
+    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+    transitions:
+      - to: provision
+        event: APPROVE
+        actions:
+          - { type: resetVisitCounts, stateIds: [provision] }
+      - to: provision
+        event: FORCE_REVISION
+        actions:
+          - { type: resetVisitCounts, stateIds: [provision] }
+      - to: aborted
+        event: ABORT
+
+  preflight:
+    type: agent
+    description: Infer the experiment spec, initialize the run, and author the cognition seed.
+    persona: global
+    prompt: |
+      You are configuring a multi-round Evolve experiment. The workspace root is
+      /workspace. If /workspace contains experiment files, infer the objective,
+      evaluator command, cognition seed, and optional initial-program contract from
+      those files. If /workspace is a fresh sandbox with no experiment files,
+      fall back to authoring a toy run spec from the task string exactly as the
+      older workflow did.
+
+      Do ALL of these, in order, then finish with the required agent_status block:
+
+      1. Inspect /workspace, ignoring the run-state subtrees .evolve_runs/ and
+         .workflow/. Treat files such as input.md, README.md, evaluator.py,
+         initial_program, init_cognition.py, requirements.txt, pyproject.toml,
+         config.yaml, and prompts/ as experiment evidence. Do NOT modify the
+         experiment's source files; write only under .evolve_runs/ and .workflow/.
+
+      2. If experiment files are present, infer these values:
+         - OBJECTIVE from input.md or README.md. Keep it one line and faithful to
+           the experiment.
+         - EVAL_CMD from the experiment's evaluator. Prefer
+           /opt/workflow-venv/bin/python /workspace/evaluator.py {quoted_code_path} {quoted_results_path}
+           when evaluator.py has that CLI contract. The command must write JSON
+           containing an eval_score number at {quoted_results_path}.
+         - SUCCESS_CRITERION from the task's stated goal first. If the task names
+           a target (e.g. "toward the AlphaEvolve target"), resolve the concrete
+           number from the experiment brief (input.md/README) and use it, e.g.
+           eval_score >= 2.635. This MUST be the FIRST success_criteria entry in
+           canonical <core_score> <comparator> <number> form. Use only maximize
+           comparators >=, >, or ==. If the task names no target, fall back to the
+           experiment brief's stated target; use a generic eval_score >= 1.0 only
+           when neither states one. This is a hard early-stop target parsed after
+           each durable node record, so prefer an accurate target over a
+           conservative placeholder. Do not use prose, <, or <=.
+         - EVAL_TIMEOUT_SECS as a generous per-candidate evaluation budget in
+           seconds. Default to 300. Raise it (up to ~600) when the experiment or
+           task implies heavy evaluation (e.g. numerical optimization) or when the
+           experiment declares a larger per-candidate budget. A too-short timeout
+           truncates slow-but-valid candidates as failures.
+         - COGNITION_SEED from init_cognition.py, README.md, prompts/, and input.md.
+           If init_cognition.py contains CognitionItem-style heuristics, translate
+           their content/source/metadata into JSON seed objects. Do not execute
+           init_cognition.py.
+         - PRIMARY_TARGET as candidate.py unless the experiment clearly names a
+           different target. If /workspace/initial_program exists, note in the
+           cognition seed that round 1 should copy it verbatim; the researcher
+           prompt will do the actual copy.
+         - SAMPLE_N as the number of parent candidates to sample each round.
+           Default to 1 for from-scratch toy tasks. If the task or experiment
+           implies recombination/crossover search, or config.yaml declares
+           sample_n, use that value, commonly 3. Keep SAMPLE_N positive and at
+           most 5 so the researcher's context stays tractable.
+         - SAMPLER as the parent-selection strategy. Default to greedy. Choose
+           ucb1 when the search should balance exploiting high scores with
+           exploring under-visited parents, island when diversity across
+           sub-populations is wanted, or random only for a diversity baseline.
+           You may choose a non-greedy sampler only when you also write a
+           reproducibility seed to /workspace/.evolve_runs/main/sampling_seed.txt
+           as a single integer. Without that seed, use greedy. For island, add
+           --sampling-feature complexity --sampling-feature diversity
+           --sampling-feature-bins 10 unless the experiment specifies otherwise.
+
+      3. If no experiment files are present, infer OBJECTIVE and EVAL_CMD from the
+         task string. EVAL_CMD must read the candidate at {quoted_code_path}, run
+         it, and write JSON with an eval_score number at {quoted_results_path}.
+         Candidate files may be extensionless, so Python evaluators must load
+         them with runpy.run_path or exec(compile(...)); do not rely on
+         importlib.util.spec_from_file_location for {quoted_code_path}.
+
+      4. Initialize the run by executing the evolve-brief helper. The run lives
+         under /workspace/.evolve_runs/main/. Use these flags, filling OBJECTIVE,
+         EVAL_CMD, SUCCESS_CRITERION, EVAL_TIMEOUT_SECS, MAX_ROUNDS, PRIMARY_TARGET,
+         SAMPLER, and SAMPLE_N from the inference above. Set --max-rounds from the
+         task when it specifies a number of rounds; otherwise default to 3. Default
+         EVAL_TIMEOUT_SECS to 300 when nothing implies a different budget.
+
+         If /workspace/initial_program exists, add 1 to MAX_ROUNDS before passing
+         it. The seed is copied verbatim as node 0, and done_rounds counts each
+         GENERATION toward the budget - at the workers:1 default every recorded node
+         is its own generation, so the seed consumes one generation. Without the +1
+         a request for N rounds would yield only N-1 evolution rounds (the seed
+         consumes one). The +1 restores the requested number of evolution rounds. Do
+         NOT add the +1 when no initial_program is seeded (node 0 is then a real
+         first round).
 
          /opt/workflow-venv/bin/python /workflow-scripts/evolve-brief normalize \
            --workspace-root /workspace \
@@ -29,50 +228,227 @@ states:
            --objective "OBJECTIVE" \
            --core-score eval_score \
            --evaluation-command "EVAL_CMD" \
-           --evaluation-timeout-secs 30 \
-           --success-criterion "eval_score >= 1.0" \
-           --max-rounds 1 \
-           --patience 1 \
+           --evaluation-timeout-secs EVAL_TIMEOUT_SECS \
+           --success-criterion "SUCCESS_CRITERION" \
+           --max-rounds MAX_ROUNDS \
+           --patience 2 \
            --stop-condition "max_rounds" \
            --writable-path .evolve_runs \
-           --primary-target candidate.py \
-           --sampling-algorithm greedy \
-           --sample-n 1 \
-           --cognition-source-mode none \
+           --primary-target PRIMARY_TARGET \
+           --sampling-algorithm SAMPLER \
+           --sample-n SAMPLE_N \
+           --cognition-source-mode seed \
            --confirmed true
 
-         EVAL_CMD must be a shell command that reads the candidate at {quoted_code_path},
-         runs it, and writes a JSON file at {quoted_results_path} containing an
-         "eval_score" number. The helper substitutes {quoted_code_path} and
-         {quoted_results_path} at eval time.
+         If SAMPLER is island and feature dimensions are not already specified by
+         the experiment, include:
+           --sampling-feature complexity \
+           --sampling-feature diversity \
+           --sampling-feature-bins 10
 
-      2. Confirm the command exited 0 and that /workspace/.evolve_runs/main/run_spec.yaml exists.
+      5. If SAMPLER is not greedy, write /workspace/.evolve_runs/main/sampling_seed.txt
+         containing one integer seed on a single line. Use a stable seed inferred
+         from the task or experiment when one is declared; otherwise use 0. If you
+         cannot write a seed, switch SAMPLER back to greedy before normalizing.
 
-      If the task is missing an objective or an evaluator you cannot construct, set verdict: blocked.
+      6. Write a cognition seed file at /workspace/.evolve_runs/main/cognition_seed.md
+         containing one or more ```json fenced blocks of reusable domain heuristics
+         for this objective. Do not put round-by-round results here; only durable
+         knowledge. For a workspace experiment, preserve the experiment's own
+         heuristics and interface contract.
+
+      7. Copy the human-review artifacts into the workflow artifact directory:
+
+         mkdir -p /workspace/.workflow/run_spec /workspace/.workflow/cognition_seed
+         cp /workspace/.evolve_runs/main/run_spec.yaml /workspace/.workflow/run_spec/run_spec.md
+         cp /workspace/.evolve_runs/main/cognition_seed.md /workspace/.workflow/cognition_seed/cognition_seed.md
+
+      8. Confirm evolve-brief exited 0, run_spec.yaml exists, cognition_seed.md
+         exists, sampling_seed.txt exists when SAMPLER is non-greedy, and both
+         workflow artifact copies exist.
+
+      If a human directive is present at the top of this message, treat it as
+      authoritative. Adjust the objective, evaluator command, budget, or cognition
+      seed exactly as directed before re-emitting ready. FORCE_REVISION preserves
+      the validity of existing nodes; if the objective fundamentally changes, abort
+      this run and start a fresh one instead of reusing stale nodes.
+
+      If the task lacks an objective or an evaluator you cannot construct, set verdict: blocked.
       Otherwise set verdict: ready.
     inputs: []
-    outputs: []
+    outputs:
+      - run_spec
+      - cognition_seed
     transitions:
-      - to: researcher
+      - to: preflight_review
         when: { verdict: ready }
       - to: failed
         when: { verdict: blocked }
 
+  preflight_review:
+    type: human_gate
+    description: >
+      Human approval of the run spec, objective, evaluator command, and cognition
+      seed before the first evaluator runs.
+    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+    present:
+      - run_spec
+      - cognition_seed
+    transitions:
+      - to: orchestrator
+        event: APPROVE
+      - to: preflight
+        event: FORCE_REVISION
+        actions:
+          - { type: resetVisitCounts, stateIds: [preflight, orchestrator] }
+      - to: aborted
+        event: ABORT
+
+  orchestrator:
+    type: agent
+    description: Round-boundary controller - after each recorded round (and at the start) it enforces the budget and stop conditions, routing to continue, complete, or escalate.
+    persona: global
+    prompt: |
+      You are the Evolve orchestrator - the round-boundary controller for a bounded
+      multi-round search. You are entered at the start of the run and again after each
+      round is durably recorded; you read the durable run state and emit exactly ONE
+      routing verdict in your agent_status block. You do not write candidates, run
+      evaluators, or record nodes. The per-round pipeline runs on its own - sample ->
+      researcher -> evaluate -> analyzer -> analysis_record - and returns here only
+      once the round is committed.
+
+      Read these files first:
+        - /workspace/.evolve_runs/main/run_spec.yaml - budget.max_rounds is N.
+        - /workspace/.evolve_runs/main/current/stop_signals.json, if present. It
+          is written by analysis_record after the durable node record and is the
+          single source of truth for round accounting. Read its precomputed fields
+          directly; do NOT count nodes.json or recompute anything yourself:
+            * done_rounds = the number of GENERATIONS recorded so far. One fan-out
+              batch of N lanes counts as ONE generation; at the workers:1 default
+              each round is one node and one generation, so done_rounds equals the
+              node tally there. The file is absent before round 1 (done_rounds = 0).
+            * node_count = the raw recorded-node tally (= done_rounds at workers:1,
+              and larger at workers>1 where a generation has multiple lane nodes).
+            * stop_reason = the precomputed stop decision. Use this verbatim; do NOT
+              recompute target, patience, or max-round logic yourself.
+
+      Recovery after a human just approved an escalated round depends on the SCRATCH
+      SHAPE, which the previous output states explicitly:
+        - Bare current/ (the message says "Scratch is the bare current/"): a single
+          candidate is written but not yet scored. Confirm with
+          /workspace/.evolve_runs/main/current/context.json present AND result.json
+          absent, and emit evaluate to RESUME that round in place. Do NOT discard it
+          or start a fresh batch.
+        - Lane-scoped under current/lane_<k>/ (the message says "Scratch is
+          lane-scoped"): a fan-out batch escalated or drained its lanes. Discard that
+          lane scratch and re-decide normally; emit design for a fresh batch unless
+          stop_signals.json requires complete or the run is unrecoverable.
+
+      If a human directive in this message requests more rounds, that directive
+      overrides any stop_reason for THIS turn only: emit design to start one more
+      round instead of complete, even when stop_signals.json reports a stop. The
+      directive is present for a single turn; after that round records, route
+      normally on the freshly recomputed stop_signals.json — the human can request
+      another round at the next final_review gate. Do not rewrite run_spec.yaml;
+      extra rounds append new nodes to nodes.json like normal rounds.
+
+      Decide and emit one verdict:
+        - complete  - if stop_signals.json exists and its stop_reason is non-null,
+                      unless a human extension directive is still active.
+        - design    - to start the next round, when no active stop_reason should
+                      complete the run.
+        - evaluate  - only to resume an evaluator-blocked round (the recovery case
+                      above): a candidate is written but result.json is absent.
+        - escalate  - only if the run is unrecoverable.
+
+      Finish with the required agent_status block carrying exactly one of those verdicts.
+    inputs: []
+    outputs: []
+    transitions:
+      - to: failed
+        guard: isRoundLimitReached
+      - to: workers
+        when: { verdict: design }
+      - to: evaluate
+        when: { verdict: evaluate }
+      - to: final_summary
+        when: { verdict: complete }
+      - to: human_escalation
+        when: { verdict: escalate }
+
+  workers:
+    type: deterministic
+    description: Run one synchronous evolve round as a child FSM segment.
+    run: []
+    fanOut: { count: workers, join: barrier }
+    segment: [sample, researcher, evaluate, analyzer, analysis_record]
+    transitions:
+      - to: orchestrator
+        when: { verdict: recorded }
+      - to: human_escalation
+        when: { verdict: escalate }
+      - to: failed
+        when: { verdict: result_file_error }
+      - to: failed
+
+  sample:
+    type: deterministic
+    description: Sample parent nodes and retrieve cognition; seed cognition on first entry.
+    fanOutMember: true
+    container: true
+    resultFile: .evolve_runs/main/current/sample.json
+    run:
+      - [
+          '/opt/workflow-venv/bin/python',
+          '/workflow-scripts/evolve_result.py',
+          'sample',
+          '--run-dir',
+          '/workspace/.evolve_runs/main',
+          '--query-from-spec',
+          '--n-from-spec',
+          '--context-file',
+          '/workspace/.evolve_runs/main/current/context.json',
+          '--result-file',
+          '/workspace/.evolve_runs/main/current/sample.json',
+        ]
+    transitions:
+      - to: researcher
+        when: { verdict: sampled }
+      - to: failed
+        when: { verdict: sample_error }
+      - to: failed
+        when: { verdict: result_file_error }
+      - to: failed
+
   researcher:
     type: agent
-    description: Materialize one candidate program at the step code path.
+    description: Evolve one candidate from sampled parents and retrieved cognition.
+    fanOutMember: true
     persona: global
     prompt: |
       Write exactly one candidate program for this round.
 
+      Read the round context at {laneDir}/context.json. It
+      contains:
+        - step_name: the directory you must write the candidate into
+        - parents: a list of sampled parent nodes, empty on round 1
+        - cognition.matches: retrieved durable heuristics relevant to this objective
+
+      If parents is empty and /workspace/initial_program exists, copy it verbatim
+      as this round's candidate without modifying it - it is the experiment's
+      baseline, and the evaluator will score it as node 0. If parents is empty
+      and no initial_program exists, write a full candidate from scratch. If
+      parents has one node, evolve it using the cognition hints. If parents has
+      multiple nodes, produce a candidate that recombines their strengths: take
+      the best ideas from each parent's code and the cognition hints, then
+      synthesize one improved candidate. Do not merely concatenate; integrate.
+
       Write the COMPLETE candidate file to:
-        /workspace/.evolve_runs/main/steps/step_0001/code
+        /workspace/.evolve_runs/main/steps/<step_name>/code
+      substituting <step_name> from context.json. Create the directory if needed. Write
+      only that one file, no commentary in the file.
 
-      Create the directory if needed. Write only that one file, with no extra files
-      and no commentary in the file. The candidate must satisfy the objective in
-      /workspace/.evolve_runs/main/run_spec.yaml.
-
-      Finish with the required agent_status block.
+      Finish with the required agent_status block; your verdict is informational.
     inputs: []
     outputs: []
     maxVisits: 3
@@ -81,9 +457,10 @@ states:
 
   evaluate:
     type: deterministic
-    description: Run the configured evaluator on the candidate inside the shared container.
+    description: Run the configured evaluator on this round's candidate.
+    fanOutMember: true
     container: true
-    resultFile: .evolve_runs/main/steps/step_0001/result.json
+    resultFile: .evolve_runs/main/current/result.json
     run:
       - [
           '/opt/workflow-venv/bin/python',
@@ -91,47 +468,70 @@ states:
           'evaluate',
           '--run-dir',
           '/workspace/.evolve_runs/main',
-          '--step-name',
-          'step_0001',
-          '--code-path',
-          '.evolve_runs/main/steps/step_0001/code',
+          '--step-from-current',
+          '--code-from-current',
           '--result-file',
-          '/workspace/.evolve_runs/main/steps/step_0001/result.json',
+          '/workspace/.evolve_runs/main/current/result.json',
         ]
     transitions:
-      - to: record_node
+      - to: analyzer
         when: { verdict: evaluated }
-      - to: failed
+      - to: human_escalation
         when: { verdict: evaluator_blocked }
       - to: failed
         when: { verdict: result_file_error }
       - to: failed
 
-  record_node:
+  analyzer:
+    type: agent
+    description: Write a transferable lesson for the round.
+    fanOutMember: true
+    persona: global
+    prompt: |
+      Analyze the round that just completed and write a SHORT transferable lesson.
+
+      Read {laneDir}/context.json, the just-evaluated
+      result at {laneDir}/result.json, and this round's
+      candidate at the step path named in context.json.
+
+      Write a concise markdown lesson to:
+        {laneDir}/analysis.md
+      Keep it to a few sentences. Do not restate the score; capture the transferable insight.
+      This lesson is promoted into the cognition store after the durable record,
+      so write something future rounds can retrieve and apply.
+
+      Finish with the required agent_status block; your verdict is informational.
+    inputs: []
+    outputs: []
+    maxVisits: 3
+    transitions:
+      - to: analysis_record
+
+  analysis_record:
     type: deterministic
-    description: Commit the scored candidate as a node and update the best snapshot.
+    description: The single durable engine node-write; commit the round with its lesson and parents.
+    fanOutMember: true
     container: true
-    resultFile: .evolve_runs/main/steps/step_0001/record_result.json
+    resultFile: .evolve_runs/main/current/analysis_record.json
     run:
       - [
           '/opt/workflow-venv/bin/python',
           '/workflow-scripts/evolve_result.py',
-          'record',
+          'attach_analysis',
           '--run-dir',
           '/workspace/.evolve_runs/main',
-          '--step-name',
-          'step_0001',
-          '--name',
-          'round-1',
-          '--code-path',
-          '.evolve_runs/main/steps/step_0001/code',
-          '--results-file',
-          '.evolve_runs/main/steps/step_0001/results.json',
+          '--step-from-current',
+          '--name-from-current',
+          '--parent-from-current',
+          '--code-from-current',
+          '--results-from-current',
+          '--analysis-file',
+          '/workspace/.evolve_runs/main/current/analysis.md',
           '--result-file',
-          '/workspace/.evolve_runs/main/steps/step_0001/record_result.json',
+          '/workspace/.evolve_runs/main/current/analysis_record.json',
         ]
     transitions:
-      - to: done
+      - to: orchestrator
         when: { verdict: recorded }
       - to: failed
         when: { verdict: needs_repair }
@@ -139,10 +539,108 @@ states:
         when: { verdict: result_file_error }
       - to: failed
 
+  human_escalation:
+    type: human_gate
+    description: >
+      Human review when the orchestrator judges the run unrecoverable or the
+      evaluator blocked a round. Approve to resume, force a revision back to
+      preflight for evaluator/spec repair that preserves existing node validity,
+      or abort and start a fresh run if the objective must change.
+    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+    present:
+      - run_spec
+    transitions:
+      - to: orchestrator
+        event: APPROVE
+      - to: preflight
+        event: FORCE_REVISION
+        actions:
+          - { type: resetVisitCounts, stateIds: [preflight, orchestrator] }
+      - to: aborted
+        event: ABORT
+
+  final_summary:
+    type: agent
+    description: >
+      Read the durable run state and the best node, and write a human-readable
+      report summarizing the run for the final human review.
+    persona: global
+    prompt: |
+      The Evolve run has reached a stop condition. Produce a concise, human-readable
+      report of what the run found, for a human reviewer who will decide whether to
+      accept the result or request more rounds.
+
+      Read the durable run state:
+        - /workspace/.evolve_runs/main/run_spec.yaml - the objective, evaluator, and
+          budget.max_rounds (= N).
+        - /workspace/.evolve_runs/main/database_data/nodes.json - every recorded node
+          (id, parent, score, analysis). Use it for the per-node trajectory, NOT for
+          round counts.
+        - /workspace/.evolve_runs/main/current/stop_signals.json - the precomputed
+          stop_reason and stop metrics, and the authoritative round accounting:
+          done_rounds (GENERATIONS recorded - one fan-out batch of N lanes is ONE
+          generation; equals the node tally at the workers:1 default) and node_count
+          (the raw recorded-node tally). Read done_rounds from here; do NOT count
+          nodes.json. Use this file's stop_reason; do NOT recompute the stop
+          condition.
+        - /workspace/.evolve_runs/main/best/ - the best snapshot per improving round;
+          the highest-scoring node is the run's result.
+
+      Write a Markdown report to BOTH of these paths:
+        /workspace/.evolve_runs/main/final_report.md
+        /workspace/.workflow/final_report/final_report.md
+      Create the /workspace/.workflow/final_report/ directory if it does not exist.
+      The report MUST contain, in this order:
+        1. The objective (one line, from run_spec.yaml).
+        2. done_rounds vs budget.max_rounds (done_rounds from stop_signals.json,
+           counting generations - one fan-out batch is one generation).
+        3. The stop reason from stop_signals.json: target_met, patience, max_rounds,
+           or the recorded null/unknown value if no stop signal is present.
+        4. The best node: its id, its score, and its analysis/lesson.
+        5. The score trajectory across rounds (id -> score), so the reviewer can see
+           whether the search was still improving at the stop condition.
+        6. A one-paragraph recommendation: is the result acceptable, or would more
+           rounds plausibly help.
+
+      Do NOT re-run the evaluator, write candidates, or modify any node. You only read
+      durable state and write final_report.md.
+
+      Finish with the required agent_status block; your verdict is informational.
+    inputs:
+      - run_spec
+    outputs:
+      - final_report
+    transitions:
+      - to: final_review
+
+  final_review:
+    type: human_gate
+    description: >
+      Human review of the completed run. Approve to finish, force a revision to run
+      more rounds, or abort.
+    acceptedEvents: [APPROVE, FORCE_REVISION, ABORT]
+    present:
+      - final_report
+    transitions:
+      - to: done
+        event: APPROVE
+      - to: orchestrator
+        event: FORCE_REVISION
+        actions:
+          - { type: resetVisitCounts, stateIds: [orchestrator] }
+      - to: aborted
+        event: ABORT
+
   done:
     type: terminal
-    description: One candidate scored and recorded; best snapshot updated.
+    description: Round budget reached and human-approved; candidates scored and recorded.
 
   failed:
     type: terminal
-    description: Preflight blocked, evaluator failed, or record failed.
+    description: >
+      Mechanical failure - preflight blocked, sampler/engine crash, result-file
+      contract error, record failure, or round-limit wedge backstop.
+
+  aborted:
+    type: terminal
+    description: Operator aborted the run at a human gate.

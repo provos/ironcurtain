@@ -5,38 +5,77 @@
   let {
     workflowId,
     path,
+    refreshKey = '',
     fetchFileContent,
   }: {
     workflowId: string;
     path: string;
+    // Bumps whenever an external signal (workflow lifecycle event or a manual
+    // Refresh click) wants the open file re-read. A change to refreshKey alone
+    // triggers a *silent* refresh: the current content stays on screen and is
+    // swapped in place when the new fetch resolves, so there's no spinner flash.
+    refreshKey?: string | number;
     fetchFileContent: (workflowId: string, path: string) => Promise<FileContentResponseDto>;
   } = $props();
 
   let content = $state<FileContentResponseDto | null>(null);
   let loading = $state(true);
+  let refreshing = $state(false);
   let error = $state('');
   let fetchVersion = 0;
+  let lastId: string | undefined;
+  let lastPath: string | undefined;
+  let lastKey: string | number | undefined;
 
   $effect(() => {
     const id = workflowId;
     const filePath = path;
+    // refreshKey is read to register it as a reactive dependency so a bump
+    // re-reads the *same* file.
+    const key = refreshKey;
+    // A changed workflow/file is a hard reload (blank + spinner). Re-reading
+    // the same file (refreshKey bumped) is a silent refresh that keeps the old
+    // content visible until the new content arrives.
+    const isReload = id !== lastId || filePath !== lastPath;
+    const keyChanged = key !== lastKey;
+    // Guard against effect re-runs that change nothing relevant (e.g. an
+    // unrelated parent re-render): only fetch when the file or the refresh
+    // signal actually changed.
+    if (!isReload && !keyChanged) return;
+    lastId = id;
+    lastPath = filePath;
+    lastKey = key;
     const version = ++fetchVersion;
-    loading = true;
-    error = '';
-    content = null;
+    if (isReload) {
+      loading = true;
+      error = '';
+      content = null;
+      // Clear any leftover silent-refresh indicator from a pre-empted fetch so
+      // the header doesn't show "refreshing" during a full-load spinner.
+      refreshing = false;
+    } else {
+      refreshing = true;
+    }
 
     fetchFileContent(id, filePath)
       .then((res) => {
-        if (version === fetchVersion) {
-          content = res;
-          loading = false;
-        }
+        if (version !== fetchVersion) return;
+        content = res;
+        error = '';
+        loading = false;
+        refreshing = false;
       })
       .catch((err) => {
-        if (version === fetchVersion) {
+        if (version !== fetchVersion) return;
+        // Only surface errors on a hard reload. A transient silent-refresh
+        // failure keeps the last good content on screen rather than replacing
+        // it with an error banner.
+        if (isReload) {
           error = err instanceof Error ? err.message : String(err);
-          loading = false;
+          content = null;
         }
+        loading = false;
+        refreshing = false;
       });
   });
 </script>
@@ -45,6 +84,11 @@
   <!-- File path header -->
   <div class="flex items-center gap-2 px-3 py-2 border-b border-border bg-muted/30 shrink-0">
     <span class="text-xs text-muted-foreground font-mono truncate" title={path}>{path}</span>
+    {#if refreshing}
+      <span class="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground shrink-0" title="Reloading file">
+        <Spinner size="xs" /> refreshing
+      </span>
+    {/if}
   </div>
 
   <!-- Content area -->

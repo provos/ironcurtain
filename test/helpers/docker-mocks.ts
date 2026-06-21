@@ -15,7 +15,12 @@ import type { AgentAdapter, AgentId, AgentResponse } from '../../src/docker/agen
 import type { CertificateAuthority } from '../../src/docker/ca.js';
 import type { DockerProxy } from '../../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../../src/docker/mitm-proxy.js';
-import type { DockerContainerConfig, DockerExecResult, ContainerRuntime } from '../../src/docker/types.js';
+import type {
+  DockerContainerConfig,
+  DockerExecResult,
+  DockerImageInfo,
+  ContainerRuntime,
+} from '../../src/docker/types.js';
 
 /**
  * Call-tracking for `createMockDocker`. When a tracker is passed in,
@@ -69,7 +74,9 @@ export function createMockDocker(options: CreateMockDockerOptions = {}): Contain
   // Track build-hash labels so ensureImage()'s staleness-detection path
   // is testable: first build stamps a hash; subsequent calls see it.
   const labels = new Map<string, Record<string, string>>();
+  const imageIds = new Map<string, string>();
   let createSeq = 0;
+  let commitSeq = 0;
 
   return {
     async preflight() {},
@@ -98,10 +105,36 @@ export function createMockDocker(options: CreateMockDockerOptions = {}): Contain
     async imageExists(image: string) {
       // alpine/socat is always available (no build needed).
       if (image === 'alpine/socat') return true;
+      if (image.startsWith('sha256:')) return imageIds.has(image);
       // Other images "exist" once they have been built (have labels).
       // Tests that want all images to exist without building pass a
       // tracker + don't exercise the build path.
       return labels.has(image);
+    },
+    async commit(_containerId: string, commitOptions = {}) {
+      commitSeq++;
+      const image = `sha256:${String(commitSeq).padStart(64, '0')}`;
+      imageIds.set(image, image);
+      if (commitOptions.tag) {
+        labels.set(commitOptions.tag, {});
+      }
+      return image;
+    },
+    async removeImage(ref: string) {
+      imageIds.delete(ref);
+      labels.delete(ref);
+      return true;
+    },
+    async listImages() {
+      const images: DockerImageInfo[] = [];
+      for (const id of imageIds.keys()) {
+        images.push({ id, repoTags: [], labels: {}, created: new Date(0).toISOString() });
+      }
+      return images;
+    },
+    async inspectImage(ref: string) {
+      if (!imageIds.has(ref)) return undefined;
+      return { id: ref, repoTags: [], labels: {}, created: new Date(0).toISOString() };
     },
     async pullImage() {},
     async buildImage(tag: string, _df: string, _ctx: string, buildLabels?: Record<string, string>) {

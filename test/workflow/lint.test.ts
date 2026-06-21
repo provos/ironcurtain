@@ -928,6 +928,48 @@ describe('WF011 — container scope not populated by a prior agent', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bundled evolve manifest controls
+// ---------------------------------------------------------------------------
+
+describe('bundled evolve manifest', () => {
+  const manifestPath = resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'evolve', 'workflow.yaml');
+
+  function loadRaw(): Record<string, unknown> {
+    return parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }) as Record<string, unknown>;
+  }
+
+  it('lints clean with provision as the initial state', () => {
+    const def = validateDefinition(loadRaw());
+    const result = lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath });
+
+    expect(def.initial).toBe('provision');
+    expect(result.filter((d) => d.severity === 'error')).toEqual([]);
+  });
+
+  it('fails validation if the provision blocked edge points at a missing state', () => {
+    const raw = loadRaw();
+    const states = raw.states as Record<string, { transitions?: Array<Record<string, unknown>> }>;
+    const provision = states.provision;
+    if (!provision.transitions) throw new Error('evolve provision state missing transitions');
+    const blocked = provision.transitions.find((transition) => {
+      const when = transition.when as Record<string, unknown> | undefined;
+      return when?.verdict === 'blocked';
+    });
+    if (!blocked) throw new Error('evolve provision state missing blocked transition');
+    blocked.to = 'missing_state';
+
+    expect(() => validateDefinition(raw)).toThrow(/missing_state/);
+  });
+
+  it('fails validation if the initial state is missing', () => {
+    const raw = loadRaw();
+    raw.initial = 'missing_initial';
+
+    expect(() => validateDefinition(raw)).toThrow(/Initial state "missing_initial" does not exist/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // WF012 — deterministic verdict edges need a resultFile source
 // ---------------------------------------------------------------------------
 
@@ -988,5 +1030,133 @@ describe('WF012 — deterministic verdict edges without resultFile', () => {
     );
     const def = validateDefinition(parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }));
     expect(codes(lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath }))).not.toContain('WF012');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WF013 (fan-out budget) / WF014 (fan-out child-bounds) diagnostics
+// ---------------------------------------------------------------------------
+
+describe('WF013/WF014 — fan-out scaffolding diagnostics', () => {
+  function fanOutWorkflow(
+    overrides: {
+      settings?: Record<string, unknown>;
+      workersState?: Record<string, unknown>;
+      workerState?: Record<string, unknown>;
+    } = {},
+  ): WorkflowDefinition {
+    return validateDefinition({
+      name: 'fanout-lint',
+      description: 'd',
+      initial: 'start',
+      settings: {
+        mode: 'docker',
+        dockerAgent: 'claude-code',
+        sharedContainer: true,
+        workers: 3,
+        maxRounds: 5,
+        ...overrides.settings,
+      },
+      states: {
+        start: {
+          type: 'agent',
+          description: 'start',
+          persona: 'global',
+          prompt: 'start',
+          inputs: [],
+          outputs: [],
+          transitions: [{ to: 'workers' }],
+        },
+        workers: {
+          type: 'deterministic',
+          description: 'fan out',
+          run: [['true']],
+          fanOut: { count: 'workers', join: 'barrier' },
+          segment: ['worker'],
+          transitions: [{ to: 'done' }],
+          ...overrides.workersState,
+        },
+        worker: {
+          type: 'agent',
+          description: 'lane worker',
+          persona: 'global',
+          prompt: 'worker',
+          inputs: [],
+          outputs: [],
+          fanOutMember: true,
+          transitions: [{ to: 'worker', when: { verdict: 'retry' } }, { to: 'done' }],
+          ...overrides.workerState,
+        },
+        done: { type: 'terminal', description: 'done' },
+      },
+    });
+  }
+
+  it('WF013 warns the fan-out state that maxRounds caps batches, not candidates', () => {
+    const result = lintWorkflow(fanOutWorkflow(), stubCtx);
+    const wf013 = result.filter((d) => d.code === 'WF013');
+
+    expect(wf013).toHaveLength(1);
+    expect(wf013[0]?.severity).toBe('warning');
+    expect(wf013[0]?.stateId).toBe('workers');
+    expect(wf013[0]?.message).toContain('candidate budget');
+  });
+
+  it('WF014 warns a self-loopable segment child that lacks a per-lane maxVisits bound', () => {
+    const result = lintWorkflow(fanOutWorkflow(), stubCtx);
+    const wf014 = result.filter((d) => d.code === 'WF014');
+
+    expect(wf014).toHaveLength(1);
+    expect(wf014[0]?.severity).toBe('warning');
+    expect(wf014[0]?.stateId).toBe('worker');
+    expect(wf014[0]?.message).toContain('no per-lane maxVisits');
+  });
+
+  it('WF014 does not warn on child loops that have maxVisits', () => {
+    const result = lintWorkflow(fanOutWorkflow({ workerState: { maxVisits: 3 } }), stubCtx);
+
+    expect(result.filter((d) => d.code === 'WF014')).toHaveLength(0);
+    // WF013 (budget) still fires on the fan-out state itself.
+    const wf013 = result.filter((d) => d.code === 'WF013');
+    expect(wf013).toHaveLength(1);
+    expect(wf013[0]?.stateId).toBe('workers');
+  });
+
+  // A numeric `fanOut.count` override runs multiple lanes at runtime even at
+  // settings.workers=1; WF013/WF014 gate per-state on the RESOLVED count, so the
+  // numeric override no longer bypasses them.
+  it('WF013/WF014 still fire when fanOut.count=3 overrides settings.workers=1', () => {
+    const result = lintWorkflow(
+      fanOutWorkflow({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 3, join: 'barrier' } },
+      }),
+      stubCtx,
+    );
+
+    const wf013 = result.filter((d) => d.code === 'WF013');
+    expect(wf013).toHaveLength(1);
+    expect(wf013[0]?.stateId).toBe('workers');
+    // Budget math uses the state's effective workers (3), not settings.workers (1):
+    // maxRounds(5) × workers(3) = 15.
+    expect(wf013[0]?.message).toContain('3 lanes');
+    expect(wf013[0]?.message).toContain('maxRounds × workers = 15');
+
+    const wf014 = result.filter((d) => d.code === 'WF014');
+    expect(wf014).toHaveLength(1);
+    expect(wf014[0]?.stateId).toBe('worker');
+  });
+
+  it('WF013/WF014 stay silent when a numeric count resolves to a single lane (count=1, workers=1)', () => {
+    const result = lintWorkflow(
+      fanOutWorkflow({
+        settings: { workers: 1 },
+        workersState: { fanOut: { count: 1, join: 'barrier' } },
+      }),
+      stubCtx,
+    );
+
+    expect(result.filter((d) => d.code === 'WF013')).toHaveLength(0);
+    expect(result.filter((d) => d.code === 'WF014')).toHaveLength(0);
   });
 });

@@ -229,6 +229,86 @@ export function createArtifactAwareSession(
 }
 
 // ---------------------------------------------------------------------------
+// Evolve fan-out node fixtures
+// ---------------------------------------------------------------------------
+
+/**
+ * The engine's `meta_info.step_name` for a recorded node: `step_<4-digit-batch>`
+ * for a legacy workers:1 node, or `step_<4-digit-batch>_lane_<k>` for a fan-out
+ * lane node. Single source for the format that the Python bridge's STEP_NAME_RE
+ * parses, so every node-fixture builder agrees on the exact spelling.
+ */
+export function evolveStepName(batchIndex: number, lane?: number): string {
+  const batch = `step_${String(batchIndex).padStart(4, '0')}`;
+  return lane === undefined ? batch : `${batch}_lane_${lane}`;
+}
+
+/**
+ * Builds ONE engine-DB node object in the shape the bridge reads:
+ * `{ id, name, parent, score, results: { eval_score }, analysis, meta_info: { step_name } }`.
+ * The single spelling of that shape; the per-builder `name`/`parent`/`analysis`
+ * conventions are passed in so each builder keeps its existing fixture text.
+ */
+export function evolveNode(opts: {
+  id: number;
+  name: string;
+  parent: number[];
+  score: number;
+  analysis: string;
+  batchIndex: number;
+  lane?: number;
+}): Record<string, unknown> {
+  return {
+    id: opts.id,
+    name: opts.name,
+    parent: opts.parent,
+    score: opts.score,
+    results: { eval_score: opts.score },
+    analysis: opts.analysis,
+    meta_info: { step_name: evolveStepName(opts.batchIndex, opts.lane) },
+  };
+}
+
+/**
+ * Writes a `{ next_id, nodes }` engine-DB envelope to `<databaseDataDir>/nodes.json`,
+ * creating the directory. `pretty` matches the historical formatting each builder
+ * used (the bridge parses the file, so whitespace is behavior-irrelevant).
+ */
+export function writeNodesFile(databaseDataDir: string, nodes: Record<string, unknown>, pretty: boolean): void {
+  mkdirSync(databaseDataDir, { recursive: true });
+  const nextId = Object.keys(nodes).length;
+  const json = pretty
+    ? JSON.stringify({ next_id: nextId, nodes }, null, 2)
+    : JSON.stringify({ next_id: nextId, nodes });
+  writeFileSync(resolve(databaseDataDir, 'nodes.json'), json);
+}
+
+/**
+ * Writes a `nodes.json` engine-DB fixture with one recorded fan-out lane node
+ * per id in `lanes` (each tagged `step_<batchIndex>_lane_<k>`), into the given
+ * `database_data` directory. Shared by the bridge test (runDir/database_data)
+ * and the orchestrator fan-out test (workspace/.evolve_runs/main/database_data),
+ * which differ only in that base dir.
+ */
+export function writeEvolveLaneNodes(databaseDataDir: string, lanes: readonly number[], batchIndex = 1): void {
+  const nodes = Object.fromEntries(
+    lanes.map((lane, index) => [
+      String(index),
+      evolveNode({
+        id: index,
+        name: `lane-${lane}`,
+        parent: lane === 0 ? [] : [lane - 1],
+        score: lane + 1,
+        analysis: `analysis lane ${lane}`,
+        batchIndex,
+        lane,
+      }),
+    ]),
+  );
+  writeNodesFile(databaseDataDir, nodes, true);
+}
+
+// ---------------------------------------------------------------------------
 // Test infrastructure helpers
 // ---------------------------------------------------------------------------
 
@@ -296,12 +376,15 @@ export function makeTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}):
     gooseProvider: 'anthropic',
     gooseModel: 'claude-sonnet-4-20250514',
     preferredDockerAgent: 'claude-code',
+    preferredMode: 'docker',
     packageInstall: {
       enabled: true,
       quarantineDays: 2,
       allowedPackages: [],
       deniedPackages: [],
     },
+    dockerResources: { memoryMb: null, cpus: null },
+    snapshot: { enabled: true, maxAgeDays: 7, sweepIntervalHours: 24 },
     ...overrides,
   };
 }

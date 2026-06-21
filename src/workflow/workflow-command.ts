@@ -46,6 +46,8 @@ import {
   RESET,
 } from './cli-support.js';
 import { runRunState } from './run-state-command.js';
+import { runDaemonGateCommand } from './daemon-gate-commands.js';
+import { sweepContainerSnapshots } from './container-snapshots.js';
 import {
   formatDiagnostic,
   printDiagnostics,
@@ -68,14 +70,24 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow inspect <baseDir> [--all]',
     'ironcurtain workflow lint <name-or-path> [--strict]',
     'ironcurtain workflow run-state <name-or-path> <state> --artifacts <dir> [options]',
+    'ironcurtain workflow run <name-or-path> "task" [--workspace <path>] [--json] [--ensure-daemon]',
+    'ironcurtain workflow status <workflowId> [--json]',
+    'ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]',
+    'ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]',
+    'ironcurtain workflow show <workflowId> --artifact <name> [--json]',
   ],
   subcommands: [
     { name: 'list', description: 'List available workflow definitions' },
-    { name: 'start', description: 'Start a workflow by name or definition file path' },
+    { name: 'start', description: 'Start a workflow by name or definition file path (interactive)' },
     { name: 'resume', description: 'Resume a checkpointed workflow' },
     { name: 'inspect', description: 'Show workflow status, artifacts, and recent messages' },
     { name: 'lint', description: 'Run semantic checks on a workflow definition' },
     { name: 'run-state', description: 'Run a single agent state once against pre-staged artifacts' },
+    { name: 'run', description: 'Start a gated workflow on the daemon (non-interactive, machine-readable)' },
+    { name: 'status', description: 'Print a workflow status snapshot (poll)' },
+    { name: 'await', description: 'Block until a workflow reaches a gate or terminal' },
+    { name: 'gate', description: 'Resolve a human gate with an event (APPROVE/FORCE_REVISION/REPLAN/ABORT)' },
+    { name: 'show', description: 'Print a presented artifact for a gated workflow' },
   ],
   options: [
     { flag: 'model', description: 'Override the agent model (start, resume)', placeholder: '<model-id>' },
@@ -94,6 +106,23 @@ const workflowSpec: CommandSpec = {
     { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume)' },
     { flag: 'strict', description: 'Treat lint warnings as errors (lint only)' },
     { flag: 'capture-traces', description: 'Capture LLM API traces for this run (start only)' },
+    { flag: 'json', description: 'Emit machine-readable JSON to stdout (run, status, await, gate, show)' },
+    {
+      flag: 'ensure-daemon',
+      description: 'Auto-start a detached daemon if none is running (run, status, await, gate, show)',
+    },
+    {
+      flag: 'event',
+      description: 'Gate event: APPROVE | FORCE_REVISION | REPLAN | ABORT (gate only)',
+      placeholder: '<EVENT>',
+    },
+    {
+      flag: 'prompt',
+      description: 'Feedback for FORCE_REVISION/REPLAN gate events (gate only)',
+      placeholder: '<text>',
+    },
+    { flag: 'artifact', description: 'Artifact name to read (show only)', placeholder: '<name>' },
+    { flag: 'timeout', description: 'Max seconds to block (await only)', placeholder: '<sec>' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
@@ -106,6 +135,11 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow resume /tmp/workflow-abc123 --model anthropic:claude-sonnet-4-6',
     'ironcurtain workflow inspect /tmp/workflow-abc123',
     'ironcurtain workflow inspect /tmp/workflow-abc123 --all',
+    'ironcurtain workflow run design-and-code "Build a REST API" --json --ensure-daemon',
+    'ironcurtain workflow await wf-7a3 --json',
+    'ironcurtain workflow show wf-7a3 --artifact spec --json',
+    'ironcurtain workflow gate wf-7a3 --event FORCE_REVISION --prompt "tighten the intro" --json',
+    'ironcurtain workflow gate wf-7a3 --event APPROVE --json',
   ],
 };
 
@@ -181,6 +215,9 @@ async function runStart(args: string[]): Promise<void> {
   const gateHandler = createGateHandler();
   const sessionFactory = createWorkflowSessionFactory(modelOverride);
   const config = loadConfig();
+  await sweepContainerSnapshots({ baseDir, checkpointStore, userConfig: config.userConfig }).catch((err: unknown) => {
+    writeStderr(`[workflow] Container snapshot GC skipped: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
@@ -206,13 +243,15 @@ async function runStart(args: string[]): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-  // The exit happens AFTER the finally block: a process.exit() inside the
-  // try skips the finally entirely, so on the success path shutdownAll()
-  // never ran and the fire-and-forget infrastructure teardown from
-  // handleWorkflowComplete was killed mid-flight — stranding the
-  // container, its network, and the MCP relay subprocesses (observed on
-  // the apple-container backend, whose slower VM shutdown loses the race
-  // every time).
+  // Exit only AFTER the finally so workflow + Docker teardown (shutdownAll)
+  // fully drains first. Calling process.exit() inside the try — as this code
+  // used to — terminates the process synchronously and cuts off the async
+  // teardown in the finally, orphaning each run's per-session --internal
+  // Docker network (which has no stale-reaper) until Docker's address pools
+  // are exhausted. The apple-container backend loses this race every time
+  // (slower VM shutdown), so the fix matters there in particular.
+  // Definitely assigned before the post-finally `process.exit`: the only way
+  // to skip that assignment is a throw, which propagates past it.
   let exitCode: number;
   try {
     writeStdout(`${BOLD}${MAGENTA}Starting workflow${RESET}`);
@@ -299,6 +338,9 @@ async function runResume(args: string[]): Promise<void> {
   printResumeInfo(baseDir, selected.workflowId, selected.checkpoint);
 
   const config = loadConfig();
+  await sweepContainerSnapshots({ baseDir, checkpointStore, userConfig: config.userConfig }).catch((err: unknown) => {
+    writeStderr(`[workflow] Container snapshot GC skipped: ${err instanceof Error ? err.message : String(err)}`);
+  });
   const deps: WorkflowOrchestratorDeps = {
     createSession: sessionFactory,
     createWorkflowTab: (label: string): WorkflowTabHandle => createConsoleTab(label),
@@ -320,8 +362,10 @@ async function runResume(args: string[]): Promise<void> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-  // Exit after the finally block — see runStart for why a process.exit()
-  // inside the try strands in-flight infrastructure teardown.
+  // Exit only AFTER the finally so teardown (shutdownAll) fully drains first.
+  // See runStart for why process.exit() inside the try leaks Docker networks.
+  // Definitely assigned before the post-finally `process.exit`: the only way
+  // to skip that assignment is a throw, which propagates past it.
   let exitCode: number;
   try {
     writeStdout(`${BOLD}${MAGENTA}Resuming...${RESET}`);
@@ -439,9 +483,23 @@ function runInspect(args: string[]): void {
         ? `${BOLD}${stateStr}${RESET} ${DIM}\u2014 "${desc}"${RESET}`
         : `${BOLD}${stateStr}${RESET}`;
       writeStdout(`  State: ${stateLabel}`);
+      if (checkpoint.finalStatus) {
+        writeStdout(`  Final: ${BOLD}${checkpoint.finalStatus.phase}${RESET}`);
+        const terminalState = checkpoint.transitionHistory.at(-1)?.to;
+        if (terminalState && terminalState !== stateStr) {
+          const terminalDesc = stateDescriptions?.get(terminalState);
+          const terminalLabel = terminalDesc
+            ? `${BOLD}${terminalState}${RESET} ${DIM}\u2014 "${terminalDesc}"${RESET}`
+            : `${BOLD}${terminalState}${RESET}`;
+          writeStdout(`  Terminal state: ${terminalLabel}`);
+        }
+      }
       writeStdout(`  Timestamp: ${checkpoint.timestamp}`);
       if (checkpoint.context.lastError) {
         writeStdout(`  Error: ${RED}${checkpoint.context.lastError}${RESET}`);
+      }
+      if (checkpoint.containerSnapshots && Object.keys(checkpoint.containerSnapshots).length > 0) {
+        writeStdout(`  Container snapshots: ${Object.keys(checkpoint.containerSnapshots).length}`);
       }
       writeStdout(`  Task: ${checkpoint.context.taskDescription.slice(0, 100)}`);
     } else {
@@ -650,9 +708,21 @@ function runList(): void {
   const header = `${'NAME'.padEnd(nameWidth)}  ${'SOURCE'.padEnd(sourceWidth)}  DESCRIPTION`;
   writeStdout(`${BOLD}${header}${RESET}`);
 
+  let anyHidden = false;
   for (const wf of workflows) {
-    const line = `${wf.name.padEnd(nameWidth)}  ${wf.source.padEnd(sourceWidth)}  ${wf.description}`;
+    // `hidden` workflows are runnable from the CLI but suppressed in the web
+    // UI; flag them here so CLI users know which ones won't appear there.
+    const marker = wf.hidden ? ` ${DIM}(hidden from web UI)${RESET}` : '';
+    if (wf.hidden) anyHidden = true;
+    const line = `${wf.name.padEnd(nameWidth)}  ${wf.source.padEnd(sourceWidth)}  ${wf.description}${marker}`;
     writeStdout(line);
+  }
+
+  if (anyHidden) {
+    writeStdout('');
+    writeStdout(
+      `${DIM}Workflows marked "hidden from web UI" run from the CLI but are excluded from the daemon web UI.${RESET}`,
+    );
   }
 }
 
@@ -689,6 +759,21 @@ export async function main(args: string[]): Promise<void> {
     case 'run-state':
       await runRunState(subArgs);
       break;
+    case 'run':
+    case 'status':
+    case 'await':
+    case 'gate':
+    case 'show': {
+      // Daemon-backed, non-interactive commands. They own all stdout/stderr and
+      // return an exit code derived from the workflow phase (or a CLI error).
+      if (subArgs.includes('--help') || subArgs.includes('-h')) {
+        process.stderr.write(formatHelp(workflowSpec) + '\n');
+        return;
+      }
+      const code = await runDaemonGateCommand(subcommand, subArgs);
+      process.exit(code);
+      break;
+    }
     default:
       writeStderr(`${RED}Unknown workflow subcommand: ${subcommand}${RESET}`);
       process.stderr.write(formatHelp(workflowSpec) + '\n');

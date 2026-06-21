@@ -13,7 +13,6 @@ import {
   readdirSync,
   readFileSync,
   copyFileSync,
-  cpSync,
   mkdtempSync,
   rmSync,
   mkdirSync,
@@ -52,6 +51,7 @@ import { clampDockerResources } from './resource-limits.js';
 import { errorMessage } from '../utils/error-message.js';
 import { createCachedStager } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
+import { withProvisionLock } from './provision-lock.js';
 import * as logger from '../logger.js';
 
 /**
@@ -212,6 +212,19 @@ export interface PreContainerInfrastructure {
     readonly hostDir: string;
     readonly target: string;
   };
+  /** Host-side cached Python venv mounted at /opt/workflow-venv for workflow helpers. */
+  readonly workflowPythonVenvMount?: {
+    readonly hostDir: string;
+    readonly target: string;
+    readonly cacheKey: string;
+  };
+  /** Host-side cached node_modules mounted for workflow helper scripts. */
+  readonly workflowNodeModulesMount?: {
+    readonly hostDir: string;
+    readonly target: string;
+    readonly cacheKey: string;
+    readonly hasPackageLock: boolean;
+  };
   /**
    * Re-stages the bundle's skills with the given resolved set.
    * No-op when `skillsMount` is undefined or when the set is byte-identical
@@ -311,6 +324,12 @@ const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
 /** Bundle-relative subdir name for the skills staging dir. */
 const BUNDLE_SKILLS_SUBDIR = 'skills';
+
+/** Container path for runtime-provisioned workflow Python dependencies. */
+const WORKFLOW_PYTHON_VENV_DIR = '/opt/workflow-venv';
+
+/** Container path for runtime-provisioned workflow Node dependencies. */
+const WORKFLOW_NODE_MODULES_DIR = '/opt/workflow-node_modules';
 
 /**
  * Prepares the shared (non-container) parts of Docker session infrastructure.
@@ -680,9 +699,13 @@ export async function prepareDockerInfrastructure(
     const proxyAddress = useTcp && proxy.port !== undefined ? `${proxyHost}:${proxy.port}` : undefined;
     const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, workspaceDir, proxyAddress);
 
-    // Ensure Docker image is built and up-to-date
+    // Ensure the stock agent image is built and up-to-date. Workflow
+    // dependencies are provisioned at runtime into mounted caches below;
+    // they are no longer baked into per-workflow Docker images.
     const agentImage = await adapter.getImage();
-    const image = await ensureWorkflowImage(agentImage, scriptsDir, docker, ca);
+    const agentBuildHash = await ensureImage(agentImage, docker, ca);
+    const image = agentImage;
+    const workflowDependencyMounts = prepareWorkflowDependencyMounts(agentBuildHash, scriptsDir, getIronCurtainHome());
 
     const orientationDir = resolve(bundleDir, 'orientation');
 
@@ -750,6 +773,7 @@ export async function prepareDockerInfrastructure(
       conversationStateConfig,
       skillsMount,
       scriptsMount,
+      ...workflowDependencyMounts,
       restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
@@ -815,6 +839,7 @@ export async function createDockerInfrastructure(
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
+  options?: CreateDockerInfrastructureOptions,
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -830,13 +855,24 @@ export async function createDockerInfrastructure(
     scriptsDir,
   );
 
+  let containerResources: ContainerResources | undefined;
   try {
-    const containerResources = await createSessionContainers(core, config);
-    return { ...core, ...containerResources };
+    containerResources = await createSessionContainers(core, config, options);
+    const infra = { ...core, ...containerResources };
+    await provisionWorkflowDependencies(infra, config.userConfig.packageInstall.enabled);
+    return infra;
   } catch (error) {
     // Any partial container/sidecar/network cleanup happened inside
-    // createSessionContainers(). Here we just tear down the proxies that
-    // prepareDockerInfrastructure() started, to avoid leaking them.
+    // createSessionContainers(). If provisioning failed after a complete
+    // container bundle was created, clean that bundle here before tearing
+    // down the proxies.
+    if (containerResources) {
+      await cleanupContainers(core.docker, {
+        containerId: containerResources.containerId,
+        sidecarContainerId: containerResources.sidecarContainerId ?? null,
+        networkName: containerResources.internalNetwork ?? null,
+      });
+    }
     await core.mitmProxy.stop().catch(() => {});
     await core.proxy.stop().catch(() => {});
     throw error;
@@ -988,6 +1024,15 @@ export interface ContainerResources {
   readonly internalNetwork?: string;
 }
 
+export interface CreateDockerInfrastructureOptions {
+  /**
+   * Optional immutable image ref used only for the main container's
+   * `docker create`. The normal agent image is still ensured first so
+   * workflow dependency caches keep their base-image hash.
+   */
+  readonly baseImageOverride?: string;
+}
+
 /**
  * Creates and starts the main agent container (plus TCP-mode sidecar and
  * internal network on macOS). Cleans up any partially-created resources
@@ -1000,6 +1045,7 @@ export interface ContainerResources {
 export async function createSessionContainers(
   core: PreContainerInfrastructure,
   config: IronCurtainConfig,
+  options?: CreateDockerInfrastructureOptions,
 ): Promise<ContainerResources> {
   const shortId = getBundleShortId(core.bundleId);
   const mainContainerName = `${CONTAINER_NAME_PREFIX}${shortId}`;
@@ -1020,6 +1066,11 @@ export async function createSessionContainers(
   let internalNetwork: string | undefined;
 
   try {
+    const mainImage =
+      options?.baseImageOverride && (await core.docker.imageExists(options.baseImageOverride))
+        ? options.baseImageOverride
+        : core.image;
+
     // Base mounts shared by TCP and UDS modes: the sandbox as the
     // workspace and the orientation dir. Mode-specific mounts (apt proxy
     // config, sockets dir, conversation state) are appended below.
@@ -1174,6 +1225,20 @@ export async function createSessionContainers(
     if (core.scriptsMount) {
       mounts.push({ source: core.scriptsMount.hostDir, target: core.scriptsMount.target, readonly: true });
     }
+    if (core.workflowPythonVenvMount) {
+      mounts.push({
+        source: core.workflowPythonVenvMount.hostDir,
+        target: core.workflowPythonVenvMount.target,
+        readonly: false,
+      });
+    }
+    if (core.workflowNodeModulesMount) {
+      mounts.push({
+        source: core.workflowNodeModulesMount.hostDir,
+        target: core.workflowNodeModulesMount.target,
+        readonly: false,
+      });
+    }
 
     // Linux-only UID-remap wiring (issue #232). On Linux, run the
     // container as root and pass the host UID/GID via env so the
@@ -1190,11 +1255,22 @@ export async function createSessionContainers(
     const { effective: containerResources } = clampDockerResources(config.userConfig.dockerResources);
 
     mainContainerId = await core.docker.create({
-      image: core.image,
+      image: mainImage,
       name: mainContainerName,
       network: network ?? 'none',
       mounts,
-      env: { ...env, ...uidRemap.env },
+      env: {
+        ...env,
+        // Do NOT override PATH here. Docker `-e PATH=...` REPLACES the image's
+        // PATH (it does not append), which would discard the base image's real
+        // PATH — including the NVM directory where `node`/`npm` live on the x86
+        // devcontainer base. Bare-`node` workflow helpers would then fail to
+        // resolve. The workflow venv bin is instead prepended to the live
+        // `$PATH` at exec time (see buildWorkflowExecCommand), which is
+        // base-image-agnostic and preserves the image's own PATH.
+        ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
+        ...uidRemap.env,
+      },
       user: uidRemap.user,
       command: ['sleep', 'infinity'],
       ...bundleLabels,
@@ -1488,12 +1564,9 @@ export async function ensureDockerImage(agentId: AgentId, userConfig: ResolvedUs
  * agent-specific image. Content-hash labels on each image drive staleness
  * detection so repeated calls skip rebuilds when nothing has changed.
  */
-// Merge resolution: param keeps apple-container's `ContainerRuntime`
-// generalization; return type takes master's `Promise<string>` (the
-// agent build hash, consumed by `ensureWorkflowImage`). master's
-// `ensureWorkflowImage` was likewise retyped from `DockerManager` to
-// `ContainerRuntime` since this file no longer imports `DockerManager`.
-async function ensureImage(image: string, docker: ContainerRuntime, ca: CertificateAuthority): Promise<string> {
+// `docker` is typed `ContainerRuntime` (the apple-container generalization of
+// the former `DockerManager`); exported because callers/tests import it.
+export async function ensureImage(image: string, docker: ContainerRuntime, ca: CertificateAuthority): Promise<string> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const dockerDir = resolve(packageRoot, 'docker');
 
@@ -1530,60 +1603,7 @@ async function ensureImage(image: string, docker: ContainerRuntime, ca: Certific
   return agentBuildHash;
 }
 
-export async function ensureWorkflowImage(
-  agentImage: string,
-  scriptsDir: string | undefined,
-  docker: ContainerRuntime,
-  ca: CertificateAuthority,
-): Promise<string> {
-  const agentBuildHash = await ensureImage(agentImage, docker, ca);
-  if (scriptsDir === undefined || !existsSync(scriptsDir)) return agentImage;
-
-  const requirementsPath = resolve(scriptsDir, 'requirements.txt');
-  const packageJsonPath = resolve(scriptsDir, 'package.json');
-  const hasPythonManifest = existsSync(requirementsPath);
-  const hasNodeManifest = existsSync(packageJsonPath);
-  if (!hasPythonManifest && !hasNodeManifest) return agentImage;
-
-  const workflowHash = computeWorkflowImageHash(agentBuildHash, scriptsDir);
-  const workflowImage = `ironcurtain-wf-${workflowHash.slice(0, 12)}:latest`;
-  if (!(await isImageStale(workflowImage, docker, workflowHash))) return workflowImage;
-
-  logger.info(`Building workflow dependency image ${workflowImage}...`);
-  const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-workflow-build-'));
-  try {
-    cpSync(scriptsDir, tmpContext, { recursive: true });
-    const dockerfile = [
-      `FROM ${agentImage}`,
-      'USER root',
-      'COPY . /opt/workflow-scripts-build',
-      'RUN if [ -f /opt/workflow-scripts-build/requirements.txt ]; then ' +
-        'uv venv /opt/workflow-venv && ' +
-        'VIRTUAL_ENV=/opt/workflow-venv uv pip install -r /opt/workflow-scripts-build/requirements.txt; ' +
-        'fi',
-      'RUN if [ -f /opt/workflow-scripts-build/package.json ]; then ' +
-        'cd /opt/workflow-scripts-build && ' +
-        'if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi && ' +
-        'mv node_modules /opt/workflow-node_modules; ' +
-        'fi',
-      'ENV PATH=/opt/workflow-venv/bin:${PATH}',
-      'ENV NODE_PATH=/opt/workflow-node_modules',
-      'USER codespace',
-      '',
-    ].join('\n');
-    const dockerfilePath = resolve(tmpContext, 'Dockerfile');
-    writeFileSync(dockerfilePath, dockerfile);
-    await docker.buildImage(workflowImage, dockerfilePath, tmpContext, {
-      'ironcurtain.build-hash': workflowHash,
-    });
-  } finally {
-    rmSync(tmpContext, { recursive: true, force: true });
-  }
-  logger.info(`Workflow dependency image ${workflowImage} built successfully`);
-  return workflowImage;
-}
-
-export function computeWorkflowImageHash(agentBuildHash: string, scriptsDir: string): string {
+export function computeWorkflowDependencyHash(agentBuildHash: string, scriptsDir: string): string {
   const hash = createHash('sha256');
   hash.update(`agent:${agentBuildHash}\n`);
   for (const manifest of ['requirements.txt', 'package.json', 'package-lock.json']) {
@@ -1594,6 +1614,195 @@ export function computeWorkflowImageHash(agentBuildHash: string, scriptsDir: str
     hash.update('\n');
   }
   return hash.digest('hex');
+}
+
+/**
+ * Wraps an in-container command so the workflow dependency bins are prepended
+ * to the container's LIVE `$PATH` at exec time, rather than replacing the
+ * image's PATH at container-creation time.
+ *
+ * Why a runtime shell instead of an `-e PATH=...` env: Docker `-e` REPLACES the
+ * image PATH (it does not append), which would discard the base image's own
+ * PATH — including the NVM directory where `node`/`npm` live on the x86
+ * devcontainer base. Expanding `$PATH` inside the container at exec time is
+ * base-image-agnostic: it preserves whatever PATH the image ships and merely
+ * prepends the workflow venv bin (for bare `python`) and the installed Node
+ * package bins (`node_modules/.bin`).
+ *
+ * Returns the original command unchanged when neither dependency mount is
+ * present, so non-dependency workflows keep the plain exec path.
+ *
+ * Shell-safety: the only interpolated values are the hardcoded container
+ * constants `WORKFLOW_PYTHON_VENV_DIR` / `WORKFLOW_NODE_MODULES_DIR`. The
+ * caller's command and its arguments are passed verbatim as positional
+ * parameters consumed by `exec "$@"` — never string-interpolated — so no
+ * word-splitting or injection is possible.
+ */
+export function buildWorkflowExecCommand(
+  bundle: Pick<DockerInfrastructure, 'workflowPythonVenvMount' | 'workflowNodeModulesMount'>,
+  command: readonly string[],
+): readonly string[] {
+  const prefixDirs: string[] = [];
+  if (bundle.workflowPythonVenvMount) prefixDirs.push(`${WORKFLOW_PYTHON_VENV_DIR}/bin`);
+  if (bundle.workflowNodeModulesMount) prefixDirs.push(`${WORKFLOW_NODE_MODULES_DIR}/.bin`);
+  if (prefixDirs.length === 0 || command.length === 0) return command;
+
+  const pathPrefix = prefixDirs.join(':');
+  // `exec "$@"` runs the original argv verbatim; the leading `sh` is $0.
+  return ['/bin/sh', '-lc', `export PATH=${pathPrefix}:"$PATH"; exec "$@"`, 'sh', ...command];
+}
+
+interface WorkflowDependencyMounts {
+  readonly workflowPythonVenvMount?: PreContainerInfrastructure['workflowPythonVenvMount'];
+  readonly workflowNodeModulesMount?: PreContainerInfrastructure['workflowNodeModulesMount'];
+}
+
+function prepareWorkflowDependencyMounts(
+  agentBuildHash: string,
+  scriptsDir: string | undefined,
+  ironcurtainHome: string,
+): WorkflowDependencyMounts {
+  if (scriptsDir === undefined || !existsSync(scriptsDir)) return {};
+
+  const requirementsPath = resolve(scriptsDir, 'requirements.txt');
+  const packageJsonPath = resolve(scriptsDir, 'package.json');
+  const packageLockPath = resolve(scriptsDir, 'package-lock.json');
+  const hasPythonManifest = existsSync(requirementsPath);
+  const hasNodeManifest = existsSync(packageJsonPath);
+  if (!hasPythonManifest && !hasNodeManifest) return {};
+
+  const dependencyHash = computeWorkflowDependencyHash(agentBuildHash, scriptsDir);
+  const cacheRoot = resolve(ironcurtainHome, 'workflow-deps', dependencyHash.slice(0, 24));
+  mkdirSync(cacheRoot, { recursive: true, mode: 0o700 });
+
+  let workflowPythonVenvMount: PreContainerInfrastructure['workflowPythonVenvMount'];
+  let workflowNodeModulesMount: PreContainerInfrastructure['workflowNodeModulesMount'];
+  if (hasPythonManifest) {
+    const hostDir = resolve(cacheRoot, 'python-venv');
+    mkdirSync(hostDir, { recursive: true, mode: 0o700 });
+    workflowPythonVenvMount = {
+      hostDir,
+      target: WORKFLOW_PYTHON_VENV_DIR,
+      cacheKey: dependencyHash,
+    };
+  }
+  if (hasNodeManifest) {
+    const hostDir = resolve(cacheRoot, 'node_modules');
+    mkdirSync(hostDir, { recursive: true, mode: 0o700 });
+    workflowNodeModulesMount = {
+      hostDir,
+      target: WORKFLOW_NODE_MODULES_DIR,
+      cacheKey: dependencyHash,
+      hasPackageLock: existsSync(packageLockPath),
+    };
+  }
+  return {
+    ...(workflowPythonVenvMount ? { workflowPythonVenvMount } : {}),
+    ...(workflowNodeModulesMount ? { workflowNodeModulesMount } : {}),
+  };
+}
+
+async function provisionWorkflowDependencies(
+  infra: DockerInfrastructure,
+  packageInstallEnabled: boolean,
+): Promise<void> {
+  if (!infra.workflowPythonVenvMount && !infra.workflowNodeModulesMount) return;
+
+  // Runtime provisioning installs through the MITM registry proxy, which is
+  // only wired when packageInstall is enabled (see prepareDockerInfrastructure
+  // — `registries`/`packageValidation` are left undefined otherwise). The
+  // mounts above only exist when the workflow actually ships a
+  // requirements.txt / package.json, so reaching here with package install
+  // disabled means the run genuinely needs deps it can never fetch under
+  // `--network=none`. Fail fast with an actionable message rather than letting
+  // `uv pip install` / `npm install` die with an opaque network error.
+  if (!packageInstallEnabled) {
+    throw new Error(
+      'This workflow requires installing dependencies at runtime ' +
+        '(a requirements.txt and/or package.json is present in its scripts), ' +
+        'but packageInstall is disabled. Enable packageInstall in your IronCurtain ' +
+        'config to run workflows that declare runtime dependencies.',
+    );
+  }
+
+  if (infra.workflowPythonVenvMount) {
+    await provisionWorkflowPythonDependencies(infra);
+  }
+  if (infra.workflowNodeModulesMount) {
+    await provisionWorkflowNodeDependencies(infra);
+  }
+}
+
+async function provisionWorkflowPythonDependencies(infra: DockerInfrastructure): Promise<void> {
+  const mount = infra.workflowPythonVenvMount;
+  if (!mount) return;
+  const sentinel = `${mount.target}/.ironcurtain-provisioned-${mount.cacheKey}`;
+  const command = [
+    'set -eu',
+    `if [ -f ${quote([sentinel])} ]; then exit 0; fi`,
+    `find ${quote([mount.target])} -mindepth 1 -maxdepth 1 -exec rm -rf {} +`,
+    `UV_NATIVE_TLS=1 uv venv ${quote([mount.target])}`,
+    `VIRTUAL_ENV=${quote([mount.target])} UV_NATIVE_TLS=1 uv pip install -r ${quote([`${CONTAINER_SCRIPTS_DIR}/requirements.txt`])}`,
+    `touch ${quote([sentinel])}`,
+  ].join('\n');
+
+  // Serialize concurrent provisioning of this content-keyed cache across runs.
+  // The lock is host-side because in-container flock does not propagate across
+  // containers on a Docker Desktop bind mount; the in-shell sentinel check
+  // provides the short-circuit, the host lock makes the second run wait for the
+  // first so it observes the populated cache instead of racing on the clean.
+  await withProvisionLock(mount.hostDir, async () => {
+    logger.info(`Provisioning workflow Python dependencies into ${mount.target}`);
+    const result = await infra.docker.exec(
+      infra.containerId,
+      ['/bin/sh', '-lc', command],
+      1_200_000,
+      'codespace',
+      CONTAINER_WORKSPACE_DIR,
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Workflow Python dependency provisioning failed: ${result.stderr || result.stdout}`);
+    }
+  });
+}
+
+async function provisionWorkflowNodeDependencies(infra: DockerInfrastructure): Promise<void> {
+  const mount = infra.workflowNodeModulesMount;
+  if (!mount) return;
+  const sentinel = `${mount.target}/.ironcurtain-provisioned-${mount.cacheKey}`;
+  const installCommand = mount.hasPackageLock ? 'npm ci --omit=dev' : 'npm install --omit=dev';
+  const command = [
+    'set -eu',
+    `if [ -f ${quote([sentinel])} ]; then exit 0; fi`,
+    'tmp="$(mktemp -d)"',
+    'cleanup() { rm -rf "$tmp"; }',
+    'trap cleanup EXIT',
+    `cp ${quote([`${CONTAINER_SCRIPTS_DIR}/package.json`])} "$tmp/package.json"`,
+    mount.hasPackageLock ? `cp ${quote([`${CONTAINER_SCRIPTS_DIR}/package-lock.json`])} "$tmp/package-lock.json"` : '',
+    'cd "$tmp"',
+    installCommand,
+    `find ${quote([mount.target])} -mindepth 1 -maxdepth 1 -exec rm -rf {} +`,
+    `cp -a node_modules/. ${quote([mount.target])}/`,
+    `touch ${quote([sentinel])}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  // Host-side serialization of this content-keyed cache (see the Python path
+  // for the bind-mount-flock rationale).
+  await withProvisionLock(mount.hostDir, async () => {
+    logger.info(`Provisioning workflow Node dependencies into ${mount.target}`);
+    const result = await infra.docker.exec(
+      infra.containerId,
+      ['/bin/sh', '-lc', command],
+      1_200_000,
+      'codespace',
+      CONTAINER_WORKSPACE_DIR,
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Workflow Node dependency provisioning failed: ${result.stderr || result.stdout}`);
+    }
+  });
 }
 
 async function ensureBaseImage(

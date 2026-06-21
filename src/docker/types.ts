@@ -137,6 +137,30 @@ export interface DockerExecResult {
   readonly stderr: string;
 }
 
+export interface DockerCommitOptions {
+  readonly tag?: string;
+  readonly changes?: readonly string[];
+  readonly pause?: boolean;
+  readonly timeoutMs?: number;
+  /**
+   * When true, snapshot through docker export/import instead of docker commit
+   * so the resulting image is flattened and does not retain the source image
+   * as an inspectable parent (a superseded snapshot digest can then be
+   * force-removed without a dependent-child-image conflict). Intended for
+   * workflow resume snapshots. The image Config that export/import would
+   * otherwise drop (ENTRYPOINT/CMD/WORKDIR/USER/ENV) is re-baked from the
+   * source container, so a flattened image still behaves like its source.
+   */
+  readonly flatten?: boolean;
+}
+
+export interface DockerImageInfo {
+  readonly id: string;
+  readonly repoTags: readonly string[];
+  readonly labels: Readonly<Record<string, string>>;
+  readonly created: string;
+}
+
 /**
  * Manages container lifecycle for agent sessions.
  *
@@ -195,6 +219,18 @@ export interface ContainerRuntime {
 
   /** Check if a Docker image exists locally. */
   imageExists(image: string): Promise<boolean>;
+
+  /** Commit a container writable layer to an image and return its immutable sha256 image ID. */
+  commit(containerId: string, options?: DockerCommitOptions): Promise<string>;
+
+  /** Remove a Docker image by digest or tag. Returns true when a removal was attempted successfully. */
+  removeImage(ref: string): Promise<boolean>;
+
+  /** List local Docker images, optionally filtered by label. */
+  listImages(options?: { readonly labelFilter?: string }): Promise<readonly DockerImageInfo[]>;
+
+  /** Inspect one local Docker image. Returns undefined when the image does not exist. */
+  inspectImage(ref: string): Promise<DockerImageInfo | undefined>;
 
   /** Build a Docker image from a Dockerfile. Optional labels are stamped on the image. */
   buildImage(tag: string, dockerfilePath: string, contextDir: string, labels?: Record<string, string>): Promise<void>;

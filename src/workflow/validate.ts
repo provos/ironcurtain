@@ -12,6 +12,7 @@ import type {
   HumanGateTransitionDefinition,
 } from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES, SKILLS_NONE } from './types.js';
+import { DEFAULT_EVOLVE_LANE_DIR, DEFAULT_EVOLVE_LANE_RELATIVE_DIR, resolveFanOutWorkers } from './lane-template.js';
 import { REGISTERED_GUARDS } from './guards.js';
 import { looseModelId } from '../config/user-config.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
@@ -51,6 +52,25 @@ const humanGateTransitionSchema = z.object({
  */
 const CONTAINER_SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
+const fanOutSchema = z.object({
+  count: z.union([z.literal('workers'), z.number().int().positive()]),
+  // Literal, not z.string(): only barrier joins are supported, and the
+  // literal makes a non-barrier join a parse-time rejection (matching the
+  // FanOutDefinition.join type). Async joins are a future, reviewed extension.
+  join: z.literal('barrier'),
+});
+
+const laneResourceRequestSchema = z.object({
+  cpu: z.number().positive().optional(),
+  mem: z.string().min(1).optional(),
+  gpu: z.number().int().min(0).optional(),
+});
+
+const scheduleSchema = z.object({
+  pool: z.enum(['eval', 'agent']),
+  resources: laneResourceRequestSchema.optional(),
+});
+
 const agentStateSchema = z.object({
   type: z.literal('agent'),
   description: z.string().min(1),
@@ -60,6 +80,10 @@ const agentStateSchema = z.object({
   outputs: z.array(z.string()),
   transitions: z.array(agentTransitionSchema).min(1),
   worktree: z.boolean().optional(),
+  fanOutMember: z.boolean().optional(),
+  fanOut: fanOutSchema.optional(),
+  segment: z.array(z.string()).min(1).optional(),
+  schedule: scheduleSchema.optional(),
   freshSession: z.boolean().optional(),
   model: looseModelId.optional(),
   maxVisits: z.number().int().positive().optional(),
@@ -83,6 +107,10 @@ const deterministicStateSchema = z.object({
   containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
   timeoutMs: z.number().int().positive().optional(),
   resultFile: z.string().min(1).optional(),
+  fanOut: fanOutSchema.optional(),
+  segment: z.array(z.string()).min(1).optional(),
+  fanOutMember: z.boolean().optional(),
+  schedule: scheduleSchema.optional(),
   transitions: z.array(agentTransitionSchema).min(1),
 });
 
@@ -106,18 +134,20 @@ const workflowSettingsSchema = z
     dockerAgent: z.string().optional(),
     maxRounds: z.number().int().positive().optional(),
     gitRepoPath: z.string().optional(),
-    maxParallelism: z.number().int().positive().optional(),
+    workers: z.number().int().positive().optional(),
     systemPrompt: z.string().optional(),
     maxSessionSeconds: z.number().positive().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
     model: looseModelId.optional(),
     sharedContainer: z.boolean().optional(),
+    snapshotOnStop: z.boolean().optional(),
   })
   .optional();
 
 const workflowDefinitionSchema = z.object({
   name: z.string().min(1),
   description: z.string(),
+  hidden: z.boolean().optional(),
   initial: z.string(),
   states: z.record(z.string(), stateDefinitionSchema),
   settings: workflowSettingsSchema,
@@ -146,6 +176,9 @@ const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
 function validateRawInput(raw: unknown): string[] {
   const issues: string[] = [];
   if (!isPlainObject(raw)) return issues;
+  if (isPlainObject(raw.settings) && 'maxParallelism' in raw.settings) {
+    issues.push('settings.maxParallelism is retired; use settings.workers instead.');
+  }
   if (!isPlainObject(raw.states)) return issues;
 
   for (const [stateId, stateValue] of Object.entries(raw.states)) {
@@ -205,6 +238,22 @@ export class WorkflowValidationError extends Error {
 // Semantic validation
 // ---------------------------------------------------------------------------
 
+/**
+ * The two state types that run an ordered `transitions` list with
+ * agent-style `guard`/`when` routing (agent + deterministic). Human-gate
+ * transitions use a different (event-keyed) shape, so they are excluded.
+ */
+export type ExecutableState = Extract<WorkflowStateDefinition, { readonly type: 'agent' | 'deterministic' }>;
+
+/**
+ * True for {@link ExecutableState}s. Narrows the union so call sites can
+ * read `state.transitions` / `state.segment` without re-spelling the
+ * `Extract<...>` longhand.
+ */
+export function isExecutableState(state: WorkflowStateDefinition): state is ExecutableState {
+  return state.type === 'agent' || state.type === 'deterministic';
+}
+
 export function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
   switch (state.type) {
     case 'agent':
@@ -237,7 +286,7 @@ export function parseArtifactRef(ref: string): { readonly name: string; readonly
 }
 
 function collectGuardNames(state: WorkflowStateDefinition): string[] {
-  if (state.type === 'agent' || state.type === 'deterministic') {
+  if (isExecutableState(state)) {
     return state.transitions.filter((t): t is typeof t & { guard: string } => t.guard != null).map((t) => t.guard);
   }
   return [];
@@ -268,6 +317,13 @@ export function findReachableStates(initial: string, states: Record<string, Work
     for (const target of collectTransitionTargets(state)) {
       if (!reachable.has(target)) {
         queue.push(target);
+      }
+    }
+    if (isExecutableState(state) && state.segment !== undefined) {
+      for (const target of state.segment) {
+        if (!reachable.has(target)) {
+          queue.push(target);
+        }
       }
     }
   }
@@ -315,7 +371,7 @@ function describeRuntimeType(value: unknown): string {
 function collectTransitionsWithActions(
   state: WorkflowStateDefinition,
 ): readonly (AgentTransitionDefinition | HumanGateTransitionDefinition)[] {
-  if (state.type === 'agent' || state.type === 'deterministic') {
+  if (isExecutableState(state)) {
     return state.transitions;
   }
   if (state.type === 'human_gate') {
@@ -408,6 +464,215 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
   }
 }
 
+function validateFanOutScaffolding(definition: WorkflowDefinition, issues: string[]): void {
+  const stateNames = new Set(Object.keys(definition.states));
+  // The GLOBAL checks below (fanOutMember resultFile scoping + greedy rejection)
+  // must fire whenever ANY fan-out segment runs multiple lanes at runtime — not
+  // just when settings.workers > 1. A numeric `fanOut.count` override produces
+  // multiple lanes even at settings.workers: 1 (the runtime resolves each state
+  // with `resolveFanOutWorkers`), so gate on the EFFECTIVE max across all
+  // fan-out states. Mirrors orchestrator.runFanOutSegment exactly.
+  const effectiveWorkers = computeEffectiveMaxWorkers(definition);
+
+  for (const [stateId, state] of Object.entries(definition.states)) {
+    if (isExecutableState(state) && state.fanOut !== undefined) {
+      validateFanOutState(definition, stateId, state, stateNames, issues);
+    }
+
+    if (isExecutableState(state) && state.schedule?.pool === 'eval' && state.fanOutMember !== true) {
+      issues.push(`State "${stateId}" declares schedule.pool: eval but is not fanOutMember: true.`);
+    }
+
+    if (
+      effectiveWorkers > 1 &&
+      state.type === 'deterministic' &&
+      state.fanOutMember === true &&
+      state.resultFile !== undefined
+    ) {
+      const verdict = classifyFanOutResultFile(state.resultFile);
+      if (verdict === 'hardcoded-lane') {
+        issues.push(
+          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under ${effectiveWorkers} effective lanes; ` +
+            `a hardcoded lane_<N> segment is written by EVERY lane (the pump leaves an already-lane_-prefixed path ` +
+            `unchanged) and will clobber. Use the lane_\${laneId} placeholder (the pump substitutes it per lane) ` +
+            `or a bare ${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/ path (the pump lane-scopes it per lane).`,
+        );
+      } else if (verdict === 'unscoped') {
+        issues.push(
+          `State "${stateId}" is a fanOutMember with resultFile "${state.resultFile}" under ${effectiveWorkers} effective lanes; ` +
+            `resultFile must be per-lane-scoped: either rooted under the pump's current/ scratch dir (e.g. ` +
+            `${DEFAULT_EVOLVE_LANE_RELATIVE_DIR}/result.json, which the pump rewrites to current/lane_<digits>/ per lane) ` +
+            `or carry an explicit lane_\${laneId}/ segment.`,
+        );
+      }
+    }
+  }
+
+  if (effectiveWorkers > 1 && workflowDeclaresGreedySampler(definition)) {
+    issues.push(
+      `A fan-out segment resolves to ${effectiveWorkers} lanes, which cannot be used with greedy sampling; ` +
+        `multi-lane evolve runs must declare a stochastic sampler.`,
+    );
+  }
+}
+
+/**
+ * The maximum effective lane count across all fan-out states, taking each
+ * state's resolved count (`resolveFanOutWorkers`) into account. A bare
+ * settings.workers floor is included so a `count: 'workers'` state still
+ * reports the global worker count even when no numeric override is present.
+ */
+function computeEffectiveMaxWorkers(definition: WorkflowDefinition): number {
+  let max = definition.settings?.workers ?? 1;
+  for (const state of Object.values(definition.states)) {
+    if (isExecutableState(state) && state.fanOut !== undefined) {
+      max = Math.max(max, resolveFanOutWorkers(state.fanOut, definition.settings));
+    }
+  }
+  return max;
+}
+
+function validateFanOutState(
+  definition: WorkflowDefinition,
+  stateId: string,
+  state: ExecutableState,
+  stateNames: ReadonlySet<string>,
+  issues: string[],
+): void {
+  const segment = state.segment ?? [];
+  if (segment.length === 0) {
+    issues.push(`State "${stateId}" declares fanOut but has no non-empty segment list.`);
+    return;
+  }
+
+  for (const memberId of segment) {
+    if (!stateNames.has(memberId)) {
+      issues.push(`State "${stateId}" fanOut segment references unknown state "${memberId}".`);
+      continue;
+    }
+    const member = definition.states[memberId];
+    if (member.type === 'human_gate') {
+      issues.push(
+        `State "${stateId}" fanOut segment includes human gate "${memberId}", but gates inside a fan-out segment are unreachable; aggregate to a gate outside the segment instead.`,
+      );
+      continue;
+    }
+    if ((member.type !== 'agent' && member.type !== 'deterministic') || member.fanOutMember !== true) {
+      issues.push(`State "${stateId}" fanOut segment member "${memberId}" must declare fanOutMember: true.`);
+    }
+  }
+}
+
+// The `lane_${laneId}` PLACEHOLDER path segment (e.g. current/lane_${laneId}/
+// result.json). `applyLaneTemplate` expands this per lane BEFORE the pump's
+// `replaceCurrentPrefix` runs, so every lane gets its own distinct `lane_<k>/`
+// path. Safe author-written scoping.
+const LANE_PLACEHOLDER_RESULT_FILE_RE = /(?:^|\/)lane_\$\{laneId\}(?:\/|$)/;
+// A HARDCODED `lane_<digits>` path segment (e.g. current/lane_0/result.json).
+// This is the FOOTGUN: there is no `${laneId}` for `applyLaneTemplate` to
+// expand, and the pump's `replaceCurrentPrefix` idempotency guard
+// (`/^lane_\d+\//` in lane-template.ts) sees the already-`lane_`-prefixed suffix
+// and leaves it UNCHANGED — so all N lanes write the same literal `lane_<N>/...`
+// path and mutually clobber. Must be rejected even though the path "looks"
+// lane-scoped. Keep this in sync with that guard in lane-template.ts.
+const HARDCODED_LANE_RESULT_FILE_RE = /(?:^|\/)lane_[0-9]+(?:\/|$)/;
+
+type FanOutResultFileVerdict = 'safe' | 'hardcoded-lane' | 'unscoped';
+
+/**
+ * Classifies whether a fanOutMember's resultFile is guaranteed per-lane-scoped at
+ * runtime, so concurrent lanes never clobber a shared file. Outcomes:
+ *
+ *  - `'safe'` — qualifies via ONE of:
+ *      1. A BARE path rooted under the pump's `current/` scratch dir
+ *         ({@link DEFAULT_EVOLVE_LANE_RELATIVE_DIR} / {@link DEFAULT_EVOLVE_LANE_DIR}).
+ *         The deterministic pump (`laneScopeEvolveCurrentPath` in machine-builder.ts)
+ *         idempotently rewrites that `current/` prefix to `current/lane_<k>/` for
+ *         every lane at workers>1, and leaves it as the bare `current/` path at
+ *         workers:1 — so the SAME bare manifest is correct at every worker count and
+ *         byte-identical at the shipped workers:1 default. This relaxes the former
+ *         strict requirement of a literal `lane_${laneId}/` segment, which forced
+ *         the manifest to leak a `lane_0/` segment at workers:1 (the placeholder
+ *         resolves to lane id 0 there) and so could not be both strict-lint-clean
+ *         and workers:1 byte-identical at once.
+ *      2. A `lane_${laneId}` PLACEHOLDER segment anywhere in the path — the author
+ *         opts into explicit scoping and the pump expands it per lane.
+ *
+ *  - `'hardcoded-lane'` — carries a HARDCODED `lane_<digits>` segment. This LOOKS
+ *    scoped but is a footgun: the pump's idempotency guard leaves an already-`lane_`
+ *    -prefixed path untouched, so every lane writes the same literal path and they
+ *    clobber. Rejected with a targeted diagnostic. (Checked first, so it overrides
+ *    a misleading "rooted under current/" match like current/lane_0/result.json.)
+ *
+ *  - `'unscoped'` — neither scoped form: the pump would not lane-scope it, so N
+ *    lanes would clobber one shared file.
+ *
+ * (Path-containment safety — no leading `/`, no `..` — is enforced separately and
+ * unconditionally for every deterministic resultFile by `isSafeWorkspaceRelativePath`
+ * in `validateContainerScopes`.)
+ */
+function classifyFanOutResultFile(resultFile: string): FanOutResultFileVerdict {
+  const normalized = pathPosix.normalize(resultFile);
+  if (HARDCODED_LANE_RESULT_FILE_RE.test(normalized)) return 'hardcoded-lane';
+  if (LANE_PLACEHOLDER_RESULT_FILE_RE.test(normalized)) return 'safe';
+  if (isRootedUnderPumpCurrentDir(normalized)) return 'safe';
+  return 'unscoped';
+}
+
+// True when `normalized` is rooted under the pump's `current/` scratch dir (the
+// prefix `laneScopeEvolveCurrentPath` idempotently lane-scopes at workers>1).
+// Mirrors the pump's two accepted prefixes — the container-absolute and the
+// workspace-relative forms — so the validator's notion of "the pump will scope
+// this" is exactly the pump's, not a looser re-spelling.
+function isRootedUnderPumpCurrentDir(normalized: string): boolean {
+  for (const currentDir of [DEFAULT_EVOLVE_LANE_RELATIVE_DIR, DEFAULT_EVOLVE_LANE_DIR]) {
+    const prefix = `${pathPosix.normalize(currentDir)}/`;
+    if (normalized.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+/**
+ * Heuristic detection of a greedy sampler declared anywhere in the manifest.
+ * This encodes the inverse of the Python source of truth `STOCHASTIC_SAMPLERS`
+ * (`scripts/evolve_result.py`) across the language boundary: greedy is the one
+ * non-stochastic sampler, so a `workers>1` run that declares it is rejected.
+ *
+ * The detection is deliberately fragile: it scrapes manifest prompt/argv text
+ * for `--sampling-algorithm greedy`-style flags because the host validator runs
+ * at lint time, before any run-spec exists on disk — there is no authoritative
+ * `sampling.algorithm` field to read. A future move of the sampler decision into
+ * a manifest field would let this be exact; until then this is a best-effort guard.
+ */
+function workflowDeclaresGreedySampler(definition: WorkflowDefinition): boolean {
+  for (const state of Object.values(definition.states)) {
+    if (state.type === 'agent' && declaresGreedySamplerText(state.prompt)) {
+      return true;
+    }
+    if (state.type !== 'deterministic') continue;
+    for (const argv of state.run) {
+      if (declaresGreedySamplerArgv(argv)) return true;
+    }
+  }
+  return false;
+}
+
+function declaresGreedySamplerText(text: string): boolean {
+  return (
+    /--sampling-algorithm(?:=|\s+)["']?greedy\b/i.test(text) ||
+    /\bsampling[_\-. ]algorithm\s*[:=]\s*["']?greedy\b/i.test(text)
+  );
+}
+
+function declaresGreedySamplerArgv(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (/^--sampling-algorithm=greedy$/i.test(arg)) return true;
+    if (arg === '--sampling-algorithm' && /^greedy$/i.test(argv[i + 1] ?? '')) return true;
+  }
+  return false;
+}
+
 function validateSemantics(definition: WorkflowDefinition): void {
   const issues: string[] = [];
   const stateNames = new Set(Object.keys(definition.states));
@@ -466,6 +731,10 @@ function validateSemantics(definition: WorkflowDefinition): void {
   // containerScope usage: gated on sharedContainer + charset.
   validateContainerScopes(definition, issues);
 
+  // Fan-out scaffold usage: schema-only fields are parsed now so later phases
+  // can consume them without silent stripping.
+  validateFanOutScaffolding(definition, issues);
+
   if (issues.length > 0) {
     throw new WorkflowValidationError(issues);
   }
@@ -517,7 +786,10 @@ function validateContainerScopes(definition: WorkflowDefinition, issues: string[
     if (state.containerScope !== undefined && state.container !== true) {
       issues.push(`State "${stateId}" declares containerScope but is not container: true`);
     }
-    if ((state.resultFile !== undefined || usesVerdictEdges(state.transitions)) && state.container !== true) {
+    if (
+      (state.resultFile !== undefined || (state.fanOut === undefined && usesVerdictEdges(state.transitions))) &&
+      state.container !== true
+    ) {
       issues.push(
         `State "${stateId}" uses resultFile / when:{verdict} routing but is not container: true. ` +
           `Structured deterministic result routing is container-only.`,

@@ -1,7 +1,22 @@
 # IronCurtain Clean Implementer Memory
 
+## Agent-driven workflow gates (daemon WS client + CLI)
+- [Daemon WS JSON-RPC client](daemon-ws-jsonrpc-client.md) — wire protocol, workflow RPC methods, the terminal-event-vs-phase mismatch (gate ABORT fires `completed` event but phase `aborted`; RPC abort fires `failed` event but phase `aborted`), the WorkflowManager session-factory DI seam, and the builtin-mode test fixture pattern.
+
 ## Bug surface notes
 - [Docker bind mount staleness](docker-bind-mount-staleness.md) — Linux bind mounts break if the source dir is rmSync'd+recreated; per-child wipe in stageSkillsToBundle preserves the parent inode. Independent: nested bind mounts (one mount target inside another) are unreliable on Docker Desktop / macOS.
+- [Git stash baseline hazard](git-stash-baseline-hazard.md) — never `git stash pop` for baseline diffing when other stashes exist (pops the top, which may not be yours, and untracked files are skipped by `stash push --`). Recover conflicts via `git checkout HEAD -- <files>`; use `git show HEAD:<file>` for baselines instead.
+
+## Test typechecking does NOT gate structural mock completeness
+- The project gates are `npm run build` (`tsc -p tsconfig.json`, which **excludes `test/`**), `npm run lint` (eslint, which does NOT do whole-program structural assignability checks), and `npm test` (vitest = esbuild per-file transpile, strips types without checking). So a test mock typed `: DockerInfrastructure` that is missing required interface members compiles/lints/runs fine until the missing member is actually called at runtime.
+- `tsconfig.eslint.json` includes `test/**` but has `rootDir: src`, so running plain `tsc -p tsconfig.eslint.json` floods TS6059 "not under rootDir" errors and over-reports pre-existing structural mock gaps (e.g. mocks already missing `restageSkills`/`setTokenSessionId`). Use `--rootDir .` to silence TS6059, then `grep` for the SPECIFIC symbol you changed to separate your regressions from baseline noise; confirm against a baseline by running the analyzer on `git show HEAD:<file>` (NOT `git stash` — see [git-stash-baseline-hazard](git-stash-baseline-hazard.md)). For a coordinator test, the benign baseline noise is `ToolAnnotationsFile` vs `StoredToolAnnotationsFile` on EVERY `new ToolCallCoordinator({ toolAnnotations: testToolAnnotations })` — not a regression.
+- When flipping an interface member from optional to required (to make "forgot to wire it" a compile error), the real surfacing comes from: (1) `--rootDir .` tsc grep for the member name, AND (2) `npm test` runtime failures `X.method is not a function` for `as unknown as`-cast stubs (which tsc can NEVER catch). Fix BOTH: production factory + every annotated mock (tsc) + every `as unknown as`-cast stub (vitest runtime). The cast stubs are the ones tsc hides.
+
+## Branded-type casting between ID types
+- `SessionId`, `BundleId`, `WorkflowId` are all `string & { __brand: '<name>' }` with distinct brand strings in `src/session/types.ts` and `src/workflow/types.ts`.
+- TypeScript rejects direct casts between them (`sessionId as BundleId` → TS2352: "neither type sufficiently overlaps"). The double cast `as unknown as BundleId` is required at the identity boundary — do NOT simplify it.
+- A single cast compiles only when the source is plain `string` (e.g., `pty-session.ts` where `effectiveSessionId` comes from `options.resumeSessionId ?? sessionId` and `resumeSessionId?: string` widens the union to string).
+- Before agreeing to "simplify the double cast," verify the apparent counter-example actually has a branded source type, not a widened string.
 
 ## Project Architecture
 - **Pipeline types**: `src/pipeline/types.ts` -- shared types for all pipeline modules

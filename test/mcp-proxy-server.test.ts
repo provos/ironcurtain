@@ -53,6 +53,11 @@ vi.mock('../src/trusted-process/path-utils.js', () => ({
 vi.mock('../src/trusted-process/policy-engine.js', () => ({
   PolicyEngine: vi.fn(),
   extractAnnotatedPaths: vi.fn(() => []),
+  // Reached via the escalation whitelist-candidate path
+  // (tool-call-pipeline -> extractWhitelistCandidates -> collectDistinctRoles)
+  // after the Phase 0 mutex/escalation refactor; the roots-race tests don't
+  // exercise whitelist extraction, so an empty-roles stub is sufficient.
+  collectDistinctRoles: vi.fn(() => []),
 }));
 
 // ── Existing addRootToClient tests ─────────────────────────────────────

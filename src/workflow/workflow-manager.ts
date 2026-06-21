@@ -31,6 +31,7 @@ import { findLatestResumableCheckpoint } from './checkpoint-selection.js';
 import { loadDefinition } from './definition-loader.js';
 import type { TypedEventBus } from '../event-bus/typed-event-bus.js';
 import type { WebEventMap } from '../web-ui/web-event-bus.js';
+import type { Session, SessionOptions } from '../session/types.js';
 import { getIronCurtainHome } from '../config/paths.js';
 import { loadConfig } from '../config/index.js';
 import {
@@ -40,6 +41,8 @@ import {
   type WorkflowCheckpoint,
   type WorkflowDefinition,
 } from './types.js';
+import { sweepContainerSnapshots } from './container-snapshots.js';
+import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // loadPastRun result types
@@ -110,6 +113,18 @@ export interface WorkflowManagerOptions {
    * resolution point); leaving it `undefined` falls back to config.
    */
   readonly captureTraces?: boolean;
+  /**
+   * Optional override for the session factory wired into the orchestrator's
+   * `deps.createSession`. Defaults to {@link createWorkflowSessionFactory}.
+   *
+   * This is a narrow dependency-injection seam: it lets tests drive the full
+   * daemon → dispatch → orchestrator path with a deterministic stub session
+   * (no real LLM / Docker), while production callers leave it unset and get the
+   * real session factory. The type matches `WorkflowOrchestratorDeps.createSession`.
+   */
+  readonly sessionFactoryOverride?: (options: SessionOptions) => Promise<Session>;
+  /** Enable daemon-mode startup and periodic workflow container snapshot GC. */
+  readonly enableSnapshotGc?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,11 +136,16 @@ export class WorkflowManager {
   private readonly eventBus: TypedEventBus<WebEventMap>;
   private readonly baseDirOverride: string | undefined;
   private readonly captureTraces: boolean | undefined;
+  private readonly sessionFactoryOverride: ((options: SessionOptions) => Promise<Session>) | undefined;
+  private readonly enableSnapshotGc: boolean;
+  private snapshotGcTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: WorkflowManagerOptions) {
     this.eventBus = options.eventBus;
     this.baseDirOverride = options.baseDirOverride;
     this.captureTraces = options.captureTraces;
+    this.sessionFactoryOverride = options.sessionFactoryOverride;
+    this.enableSnapshotGc = options.enableSnapshotGc ?? false;
   }
 
   /** Lazily creates the orchestrator on first use. */
@@ -136,8 +156,26 @@ export class WorkflowManager {
     return this.orchestrator;
   }
 
+  /**
+   * Eagerly starts background maintenance (snapshot GC startup sweep +
+   * periodic timer) at daemon boot rather than lazily on the first workflow
+   * request. Without this, a long-lived daemon that never receives a workflow
+   * request would never reclaim aged or orphaned snapshot images. No-op unless
+   * snapshot GC is enabled for this manager.
+   */
+  startBackgroundTasks(): void {
+    if (this.enableSnapshotGc) {
+      // Forcing orchestrator creation runs startSnapshotGc (sweep + timer).
+      this.getOrchestrator();
+    }
+  }
+
   /** Clean shutdown of all workflows. */
   async shutdown(): Promise<void> {
+    if (this.snapshotGcTimer !== undefined) {
+      clearInterval(this.snapshotGcTimer);
+      this.snapshotGcTimer = undefined;
+    }
     if (this.orchestrator) {
       await this.orchestrator.shutdownAll();
       this.orchestrator = null;
@@ -323,8 +361,11 @@ export class WorkflowManager {
     const baseDir = this.getBaseDir();
     const checkpointStore = new FileCheckpointStore(baseDir);
     this._checkpointStore = checkpointStore;
-    const sessionFactory = createWorkflowSessionFactory();
+    const sessionFactory = this.sessionFactoryOverride ?? createWorkflowSessionFactory();
     const config = loadConfig();
+    if (this.enableSnapshotGc) {
+      this.startSnapshotGc(baseDir, checkpointStore, config.userConfig);
+    }
 
     const deps: WorkflowOrchestratorDeps = {
       createSession: sessionFactory,
@@ -350,6 +391,32 @@ export class WorkflowManager {
     const orchestrator = new WorkflowOrchestrator(deps);
     orchestrator.onEvent((event) => this.forwardLifecycleEvent(event));
     return orchestrator;
+  }
+
+  private startSnapshotGc(
+    baseDir: string,
+    checkpointStore: FileCheckpointStore,
+    userConfig: ReturnType<typeof loadConfig>['userConfig'],
+  ): void {
+    if (this.snapshotGcTimer !== undefined) return;
+    const runSweep = (): void => {
+      // The sweep absorbs the expected "Docker absent" case internally; a
+      // rejection here is genuinely unexpected, so surface it rather than
+      // letting GC die silently.
+      sweepContainerSnapshots({ baseDir, checkpointStore, userConfig }).catch((err: unknown) => {
+        logger.warn(`[workflow] snapshot GC sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    };
+    runSweep();
+    // Node stores a timer delay in a signed 32-bit int; a delay over ~24.8 days
+    // (2^31-1 ms) overflows and fires every 1ms. Clamp to the max safe delay.
+    const MAX_TIMER_DELAY_MS = 2_147_483_647;
+    const intervalMs = Math.min(
+      MAX_TIMER_DELAY_MS,
+      Math.max(1, userConfig.snapshot.sweepIntervalHours) * 60 * 60 * 1000,
+    );
+    this.snapshotGcTimer = setInterval(runSweep, intervalMs);
+    this.snapshotGcTimer.unref();
   }
 
   private createNoOpTab(): WorkflowTabHandle {

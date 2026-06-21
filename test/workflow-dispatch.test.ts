@@ -54,8 +54,6 @@ function makeContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     previousTestCount: null,
     humanPrompt: null,
     reviewHistory: [],
-    parallelResults: {},
-    worktreeBranches: [],
     totalTokens: 1234,
     lastError: null,
     agentConversationsByState: {},
