@@ -36,8 +36,9 @@ import type { MemoryRow } from '../../packages/memory-mcp-server/src/storage/dat
 import { vectorSearch, ftsSearch } from '../../packages/memory-mcp-server/src/storage/queries.js';
 import { hybridScoreFusion } from '../../packages/memory-mcp-server/src/retrieval/scoring.js';
 import { embedQuery } from '../../packages/memory-mcp-server/src/embedding/embedder.js';
-import { getLLMClient } from '../../packages/memory-mcp-server/src/llm/client.js';
+import { llmComplete } from '../../packages/memory-mcp-server/src/llm/client.js';
 
+import { requireValue, parsePositiveInt, wireMemoryLlmEnv } from './corpus-lib.js';
 import {
   summarizeRecency,
   summarizeImportance,
@@ -109,19 +110,6 @@ function parseArgs(argv: readonly string[]): DiagnoseArgs {
   return args;
 }
 
-function requireValue(argv: readonly string[], index: number, flag: string): string {
-  if (index >= argv.length) throw new Error(`Flag ${flag} requires a value`);
-  const value = argv[index];
-  if (value.startsWith('--')) throw new Error(`Flag ${flag} requires a value`);
-  return value;
-}
-
-function parsePositiveInt(raw: string, flag: string): number {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) throw new Error(`Flag ${flag} requires a positive integer, got: ${raw}`);
-  return n;
-}
-
 function parseIntFlag(raw: string, flag: string): number {
   const n = Number(raw);
   if (!Number.isInteger(n)) throw new Error(`Flag ${flag} requires an integer, got: ${raw}`);
@@ -163,18 +151,7 @@ function printHelp(): void {
 
 /** Wire MEMORY_* env so the engine helpers (embedder, LLM client) load Haiku. */
 function buildConfig(args: DiagnoseArgs): MemoryConfig {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      'ANTHROPIC_API_KEY is required for the recall probe (Haiku question generation). ' +
-        'Run with `--import dotenv/config` or export it.',
-    );
-  }
-  process.env.MEMORY_LLM_BASE_URL = 'https://api.anthropic.com/v1/';
-  process.env.MEMORY_LLM_API_KEY = apiKey;
-  process.env.MEMORY_LLM_MODEL = process.env.MEMORY_LLM_MODEL ?? 'claude-haiku-4-5-20251001';
-  process.env.MEMORY_NAMESPACE = args.namespace;
-  process.env.MEMORY_RERANKER_ENABLED = 'false';
+  wireMemoryLlmEnv(args.namespace);
   return loadConfig();
 }
 
@@ -264,27 +241,14 @@ const QUESTION_SYSTEM_PROMPT =
   'Given a single fact, output ONLY a short, natural question that a user might ask ' +
   'which this fact answers. No preamble, no quotes, no explanation — just the question.';
 
-/** One Haiku call: fact text in, a natural question out. Returns null on failure. */
+/**
+ * One Haiku call: fact text in, a natural question out. Returns null on failure
+ * or when no LLM is configured. `llmComplete` already returns null on error and
+ * logs only a PII-safe error shape (never the fact prompt or SDK body).
+ */
 async function generateQuestion(config: MemoryConfig, factContent: string): Promise<string | null> {
-  const client = getLLMClient(config);
-  if (!client) return null;
-  try {
-    const response = await client.chat.completions.create({
-      model: config.llmModel,
-      messages: [
-        { role: 'system', content: QUESTION_SYSTEM_PROMPT },
-        { role: 'user', content: factContent },
-      ],
-      max_tokens: 60,
-      temperature: 0,
-    });
-    const text = response.choices[0]?.message?.content?.trim();
-    return text && text.length > 0 ? text : null;
-  } catch {
-    // Content-free: never log the prompt (the fact) or the SDK error body.
-    process.stderr.write('  question generation failed for one fact (skipping)\n');
-    return null;
-  }
+  const q = await llmComplete(config, QUESTION_SYSTEM_PROMPT, factContent, { maxTokens: 60 });
+  return q?.trim() || null;
 }
 
 /**

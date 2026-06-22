@@ -112,16 +112,19 @@ function coerceFact(item: unknown): ExtractedFact | null {
  * Parse the model's text response into ExtractedFact[]. Pure & defensive,
  * mirroring `parseBatchJudgments`.
  *
- * On a parse miss it returns [] and NEVER echoes `raw` (A6) — the caller logs a
- * content-free shape.
+ * Returns `null` on a PARSE FAILURE — no JSON array found, invalid JSON, or a
+ * non-array payload — which the caller treats as a chunk failure. Returns a
+ * (possibly empty) array on a successful parse; an empty array is a VALID
+ * outcome meaning the model reported no durable facts (the prompt instructs it
+ * to emit `[]` in that case), NOT a failure. NEVER echoes `raw` (A6).
  */
-export function parseExtractedFacts(raw: string): ExtractedFact[] {
+export function parseExtractedFacts(raw: string): ExtractedFact[] | null {
   try {
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) return [];
+    if (!jsonMatch) return null;
 
     const parsed = JSON.parse(jsonMatch[0]) as unknown;
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) return null;
 
     const facts: ExtractedFact[] = [];
     const seen = new Set<string>();
@@ -135,7 +138,7 @@ export function parseExtractedFacts(raw: string): ExtractedFact[] {
     }
     return facts;
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -252,10 +255,13 @@ export function chunkBlob(blob: string): string[] {
  * Extract atomic durable facts from a single chunk via one LLM call.
  *
  * Returns:
- *   - ExtractedFact[]  on success (may be [] if the model found nothing durable),
- *   - null             when no LLM is configured or the call hard-failed.
+ *   - ExtractedFact[]  on a successful parse — may be [] when the model parsed
+ *                      fine but reported no durable facts (a VALID outcome, NOT
+ *                      a failure),
+ *   - null             when no LLM is configured, the call hard-failed, or the
+ *                      response was unparseable.
  *
- * The caller treats both `null` and `[]` as a chunk failure for diagnostics.
+ * The caller treats only `null` as a chunk failure for diagnostics.
  * PII-safe: never logs the chunk or the raw response.
  */
 export async function extractFacts(
@@ -268,9 +274,10 @@ export async function extractFacts(
   if (raw === null) return null;
 
   const facts = parseExtractedFacts(raw);
-  if (facts.length === 0) {
-    // Content-free failure shape only (A6).
-    console.error(`[memory-server] extraction: no facts parsed from ${raw.length}-char response`);
+  if (facts === null) {
+    // Genuine parse failure — content-free failure shape only (A6).
+    console.error(`[memory-server] extraction: unparseable ${raw.length}-char response`);
+    return null;
   }
   return facts;
 }

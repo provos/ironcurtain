@@ -132,7 +132,6 @@ describe('handleIngest routing', () => {
     const result: IngestResult = {
       created: 2,
       merged: 1,
-      ingested: 2,
       memory_ids: ['a1b2c3d4e5', 'f6g7h8i9j0', 'k1l2m3n4o5'],
       facts: [{ fact: 'f1' }, { fact: 'f2' }, { fact: 'f3' }],
     };
@@ -161,69 +160,95 @@ describe('handleIngest routing', () => {
 
 describe('formatIngestResult', () => {
   it('renders a normal result reporting created and merged separately (A7)', () => {
-    const text = formatIngestResult({
-      created: 6,
-      merged: 1,
-      ingested: 6,
-      memory_ids: ['aaaaaaaa11', 'bbbbbbbb22'],
-      facts: Array.from({ length: 7 }, (_, i) => ({ fact: `f${i}` })),
-    });
+    const text = formatIngestResult(
+      {
+        created: 6,
+        merged: 1,
+        memory_ids: ['aaaaaaaa11', 'bbbbbbbb22'],
+        facts: Array.from({ length: 7 }, (_, i) => ({ fact: `f${i}` })),
+      },
+      false,
+    );
     expect(text).toContain('Ingested 7 atomic fact');
     expect(text).toContain('6 new memories');
     expect(text).toContain('1 merged into existing');
     expect(text).toContain('aaaaaaaa…');
   });
 
+  it('renders a clean empty result as a 0-fact ingest, not a dry run or failure', () => {
+    const text = formatIngestResult({ created: 0, merged: 0, memory_ids: [], facts: [] }, false);
+    expect(text).toContain('Ingested 0 atomic fact');
+    expect(text).not.toContain('Dry run');
+    expect(text).not.toContain('failed');
+  });
+
   it('renders a dry_run preview with per-fact importance', () => {
-    const text = formatIngestResult({
-      created: 0,
-      merged: 0,
-      ingested: 0,
-      memory_ids: [],
-      facts: [{ fact: 'First fact', importance: 0.9 }, { fact: 'Second fact' }],
-    });
+    const text = formatIngestResult(
+      {
+        created: 0,
+        merged: 0,
+        memory_ids: [],
+        facts: [{ fact: 'First fact', importance: 0.9 }, { fact: 'Second fact' }],
+      },
+      true,
+    );
     expect(text).toContain('Dry run — nothing written.');
     expect(text).toContain('1. First fact (importance: 0.9)');
     expect(text).toContain('2. Second fact');
   });
 
+  it('flags an incomplete dry_run preview when a chunk failed (A3/A4)', () => {
+    const text = formatIngestResult(
+      {
+        created: 0,
+        merged: 0,
+        memory_ids: [],
+        facts: [{ fact: 'Only fact from the good chunk' }],
+        chunks: 2,
+        failed_chunks: 1,
+        partial: true,
+      },
+      true,
+    );
+    expect(text).toContain('Dry run — nothing written.');
+    expect(text).toContain('1 of 2 chunks failed extraction');
+    expect(text).toMatch(/incomplete|missing facts/i);
+  });
+
   it('renders a partial result', () => {
-    const text = formatIngestResult({
-      created: 3,
-      merged: 1,
-      ingested: 3,
-      memory_ids: ['id1', 'id2', 'id3', 'id4'],
-      facts: Array.from({ length: 4 }, (_, i) => ({ fact: `f${i}` })),
-      chunks: 3,
-      failed_chunks: 1,
-      degraded: true,
-      partial: true,
-    });
+    const text = formatIngestResult(
+      {
+        created: 3,
+        merged: 1,
+        memory_ids: ['id1', 'id2', 'id3', 'id4'],
+        facts: Array.from({ length: 4 }, (_, i) => ({ fact: `f${i}` })),
+        chunks: 3,
+        failed_chunks: 1,
+        degraded: true,
+        partial: true,
+      },
+      false,
+    );
     expect(text).toContain('Ingested 4 atomic fact');
     expect(text).toContain('1 of 3 chunks failed extraction — partial result.');
   });
 
   it('renders a full degrade (single-blob store)', () => {
-    const text = formatIngestResult({
-      created: 1,
-      merged: 0,
-      ingested: 1,
-      memory_ids: ['deadbeef99'],
-      facts: [{ fact: 'the whole blob', importance: 0.5 }],
-      degraded: true,
-    });
+    const text = formatIngestResult(
+      {
+        created: 1,
+        merged: 0,
+        memory_ids: ['deadbeef99'],
+        facts: [{ fact: 'the whole blob', importance: 0.5 }],
+        degraded: true,
+      },
+      false,
+    );
     expect(text).toContain('stored the blob as a single memory deadbeef…');
   });
 
   it('renders a skipped result', () => {
-    const text = formatIngestResult({
-      created: 0,
-      merged: 0,
-      ingested: 0,
-      memory_ids: [],
-      facts: [],
-      skipped: true,
-    });
+    const text = formatIngestResult({ created: 0, merged: 0, memory_ids: [], facts: [], skipped: true }, false);
     expect(text).toContain('nothing written');
     expect(text).toContain('skip');
   });

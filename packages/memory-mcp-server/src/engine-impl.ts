@@ -148,7 +148,9 @@ async function extractAllFacts(
 
   for (const chunk of chunks) {
     const chunkFacts = await extractFacts(config, chunk, mode);
-    if (chunkFacts === null || chunkFacts.length === 0) {
+    // Only `null` is a real failure (no LLM / hard-fail / unparseable). An empty
+    // array means the model validly found nothing durable — not a failed chunk.
+    if (chunkFacts === null) {
       failedChunks += 1;
       continue;
     }
@@ -186,17 +188,33 @@ export async function ingestBlob(
       createdAt,
     });
 
+  // Shared shape for the "nothing written" returns (clean-empty and skip).
+  const emptyResult = (extra?: Partial<IngestResult>): IngestResult => ({
+    created: 0,
+    merged: 0,
+    memory_ids: [],
+    facts: [],
+    ...extra,
+  });
+
   const chunks = chunkBlob(content);
   const { facts, totalChunks, failedChunks } = await extractAllFacts(config, chunks, mode);
   const multiChunk = totalChunks > 1;
 
-  // ---- All chunks failed (no LLM / hard failure / unparseable everywhere) ----
+  // ---- Empty fact union ----
   if (facts.length === 0) {
+    // No failures, just nothing durable: extraction SUCCEEDED and the model
+    // reported no durable facts. Write nothing and report a clean empty ingest —
+    // this is not a failure, so it never triggers the degrade/skip/error path.
+    if (failedChunks === 0) {
+      return emptyResult();
+    }
+    // Real failures produced no usable facts → on_extraction_failure path.
     if (onFailure === 'error') {
       throw new Error(`memory_ingest: extraction produced no facts (${failedChunks}/${totalChunks} chunks failed)`);
     }
     if (onFailure === 'skip') {
-      return { created: 0, merged: 0, ingested: 0, memory_ids: [], facts: [], skipped: true };
+      return emptyResult({ skipped: true });
     }
     // 'degrade': store the blob as a single memory (product behavior).
     const truncated = content.length > MAX_CONTENT_LENGTH ? content.slice(0, MAX_CONTENT_LENGTH) : content;
@@ -204,7 +222,6 @@ export async function ingestBlob(
       return {
         created: 0,
         merged: 0,
-        ingested: 0,
         memory_ids: [],
         facts: [{ fact: truncated, importance: seedImportance }],
         degraded: true,
@@ -214,7 +231,6 @@ export async function ingestBlob(
     return {
       created: 1,
       merged: 0,
-      ingested: 1,
       memory_ids: [result.id],
       facts: [{ fact: truncated, importance: seedImportance }],
       degraded: true,
@@ -229,7 +245,7 @@ export async function ingestBlob(
 
   // ---- Dry run: preview without writing ----
   if (dryRun) {
-    return { created: 0, merged: 0, ingested: 0, memory_ids: [], facts, ...diagnostics };
+    return { created: 0, merged: 0, memory_ids: [], facts, ...diagnostics };
   }
 
   // ---- Write each fact through the existing store pipeline ----
@@ -246,7 +262,7 @@ export async function ingestBlob(
     }
   }
 
-  return { created, merged, ingested: created, memory_ids: memoryIds, facts, ...diagnostics };
+  return { created, merged, memory_ids: memoryIds, facts, ...diagnostics };
 }
 
 // ---------- Context ----------

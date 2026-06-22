@@ -43,13 +43,16 @@ describe('parseExtractedFacts', () => {
     expect(facts).toEqual([{ fact: 'Extracted from prose', importance: 0.4 }]);
   });
 
-  it('returns [] for non-array JSON', () => {
-    expect(parseExtractedFacts('{"fact": "not an array"}')).toEqual([]);
+  it('returns null for non-array JSON (parse failure)', () => {
+    expect(parseExtractedFacts('{"fact": "not an array"}')).toBeNull();
   });
 
-  it('returns [] for empty/junk input', () => {
-    expect(parseExtractedFacts('')).toEqual([]);
-    expect(parseExtractedFacts('not json at all')).toEqual([]);
+  it('returns null for unparseable input — no JSON array found', () => {
+    expect(parseExtractedFacts('')).toBeNull();
+    expect(parseExtractedFacts('not json at all')).toBeNull();
+  });
+
+  it('returns [] for a valid empty array (model validly found nothing durable)', () => {
     expect(parseExtractedFacts('[]')).toEqual([]);
   });
 
@@ -109,7 +112,7 @@ describe('parseExtractedFacts', () => {
       vi.restoreAllMocks();
     });
 
-    it('returns [] on a non-JSON response and never echoes the sensitive substring on ANY channel', () => {
+    it('returns null on a non-JSON response and never echoes the sensitive substring on ANY channel', () => {
       // Widened beyond console.error to also cover process.stderr.write and
       // console.warn — future-proofs the guarantee against a regression that emits
       // via a different channel (T3).
@@ -121,7 +124,7 @@ describe('parseExtractedFacts', () => {
 
       const facts = parseExtractedFacts(raw);
 
-      expect(facts).toEqual([]);
+      expect(facts).toBeNull();
       // parseExtractedFacts itself logs nothing, but assert defensively that nothing
       // it might emit on any stderr channel carries the substring.
       const allLogs = [...errorSpy.mock.calls, ...warnSpy.mock.calls, ...stderrSpy.mock.calls]

@@ -12,7 +12,6 @@ function createMockEngine(overrides: Partial<MemoryEngine> = {}): MemoryEngine {
     ingest: vi.fn().mockResolvedValue({
       created: 1,
       merged: 0,
-      ingested: 1,
       memory_ids: ['abc123'],
       facts: [{ fact: 'A fact', importance: 0.5 }],
     }),

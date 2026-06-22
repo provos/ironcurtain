@@ -1,7 +1,11 @@
 /**
  * memory_ingest tool handler.
- * Validates/normalizes input, delegates to the engine, and renders a content-free
- * result string. PII-safe: NEVER echoes raw content or model output.
+ * Validates/normalizes input, delegates to the engine, and renders the result.
+ * PII note: the non-dry-run renderings are content-free (ids + counts only), but
+ * `dry_run` intentionally returns a PREVIEW of the extracted fact text (model
+ * output) so callers can inspect the decomposition before writing — so a dry-run
+ * response is NOT content-free, and MCP clients that log tool output will capture
+ * that fact text.
  */
 
 import type { MemoryEngine, IngestOptions } from '../engine.js';
@@ -51,6 +55,19 @@ function normalizeAsOf(value: unknown): number | undefined {
   return ms;
 }
 
+/**
+ * Validate an optional enum-valued arg: undefined passes through, otherwise the
+ * value must be one of `allowed` (throws `errorMsg` if not). Returns the value
+ * narrowed to `T` without the caller needing a double cast.
+ */
+function optEnum<T>(value: unknown, allowed: readonly T[], errorMsg: string): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new Error(errorMsg);
+  }
+  return value as T;
+}
+
 export function validateIngestInput(args: Record<string, unknown>): IngestInput {
   const content = args.content;
   if (typeof content !== 'string' || content.trim().length === 0) {
@@ -62,13 +79,7 @@ export function validateIngestInput(args: Record<string, unknown>): IngestInput 
     throw new Error('source must be a string');
   }
 
-  let mode: IngestMode = 'conversation';
-  if (args.mode !== undefined) {
-    if (typeof args.mode !== 'string' || !INGEST_MODES.includes(args.mode as IngestMode)) {
-      throw new Error("mode must be 'conversation' or 'document'");
-    }
-    mode = args.mode as IngestMode;
-  }
+  const mode = optEnum(args.mode, INGEST_MODES, "mode must be 'conversation' or 'document'") ?? 'conversation';
 
   const tags = validateTags(args.tags);
 
@@ -84,16 +95,12 @@ export function validateIngestInput(args: Record<string, unknown>): IngestInput 
     throw new Error('dry_run must be a boolean');
   }
 
-  let onExtractionFailure: OnExtractionFailure = 'degrade';
-  if (args.on_extraction_failure !== undefined) {
-    if (
-      typeof args.on_extraction_failure !== 'string' ||
-      !ON_EXTRACTION_FAILURES.includes(args.on_extraction_failure as OnExtractionFailure)
-    ) {
-      throw new Error("on_extraction_failure must be 'degrade', 'skip', or 'error'");
-    }
-    onExtractionFailure = args.on_extraction_failure as OnExtractionFailure;
-  }
+  const onExtractionFailure =
+    optEnum(
+      args.on_extraction_failure,
+      ON_EXTRACTION_FAILURES,
+      "on_extraction_failure must be 'degrade', 'skip', or 'error'",
+    ) ?? 'degrade';
 
   const asOf = normalizeAsOf(args.as_of);
 
@@ -113,19 +120,29 @@ function truncateId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
+/** One-line "N of M chunks failed" suffix, or '' when extraction was complete. */
+function partialSuffix(result: IngestResult): string {
+  if (!result.partial) return '';
+  return ` ${result.failed_chunks ?? 0} of ${result.chunks ?? 0} chunks failed extraction`;
+}
+
 /**
- * Render the result as a content-free human-readable string. NEVER echoes raw
- * content or model output beyond the extracted facts the caller already provided.
+ * Render the dry-run preview. Unlike the other renderings this DOES include the
+ * extracted fact text (model output) — see the handler doc. Appends the partial
+ * warning so a preview built from an incomplete extraction is not mistaken for
+ * the full decomposition.
  */
 function renderDryRunPreview(result: IngestResult): string {
   const lines = result.facts.map((f, i) => {
     const imp = f.importance !== undefined ? ` (importance: ${f.importance})` : '';
     return `${i + 1}. ${f.fact}${imp}`;
   });
-  return [`Dry run — nothing written. ${result.facts.length} fact(s) proposed:`, ...lines].join('\n');
+  const header = `Dry run — nothing written. ${result.facts.length} fact(s) proposed:`;
+  const warning = result.partial ? `\n(incomplete —${partialSuffix(result)}; preview may be missing facts.)` : '';
+  return [header, ...lines].join('\n') + warning;
 }
 
-export function formatIngestResult(result: IngestResult): string {
+export function formatIngestResult(result: IngestResult, dryRun: boolean): string {
   if (result.skipped) {
     return 'Extraction failed and on_extraction_failure=skip — nothing written.';
   }
@@ -133,7 +150,7 @@ export function formatIngestResult(result: IngestResult): string {
   // Full degrade (no decomposition): set by the engine only when the fact union
   // was empty. `partial` distinguishes this from "some chunks failed but we got facts".
   if (result.degraded && !result.partial) {
-    if (result.created === 0) {
+    if (dryRun) {
       return 'No LLM configured or extraction failed — dry run, nothing written (no decomposition).';
     }
     const id = result.memory_ids[0] ?? '?';
@@ -141,7 +158,7 @@ export function formatIngestResult(result: IngestResult): string {
   }
 
   // Dry run preview (facts extracted, nothing written).
-  if (result.created === 0 && result.merged === 0 && result.memory_ids.length === 0) {
+  if (dryRun) {
     return renderDryRunPreview(result);
   }
 
@@ -153,9 +170,7 @@ export function formatIngestResult(result: IngestResult): string {
     '.';
 
   if (result.partial) {
-    const failed = result.failed_chunks ?? 0;
-    const total = result.chunks ?? 0;
-    return `${base} ${failed} of ${total} chunks failed extraction — partial result.`;
+    return `${base}${partialSuffix(result)} — partial result.`;
   }
 
   return base;
@@ -173,5 +188,5 @@ export async function handleIngest(engine: MemoryEngine, args: Record<string, un
     on_extraction_failure: input.on_extraction_failure,
   };
   const result = await engine.ingest(input.content, opts);
-  return formatIngestResult(result);
+  return formatIngestResult(result, input.dry_run);
 }

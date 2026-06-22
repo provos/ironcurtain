@@ -95,7 +95,6 @@ describe('engine.ingest', () => {
     const result = await engine.ingest('conversation blob', { mode: 'document' });
 
     expect(result.created).toBe(3);
-    expect(result.ingested).toBe(3);
     expect(result.merged).toBe(0);
     expect(result.memory_ids).toHaveLength(3);
 
@@ -290,7 +289,6 @@ describe('engine.ingest', () => {
 
     expect(result.created).toBe(2);
     expect(result.merged).toBe(1);
-    expect(result.ingested).toBe(2);
     expect(result.memory_ids).toHaveLength(3);
   });
 
@@ -338,6 +336,21 @@ describe('engine.ingest', () => {
       expect(result.degraded).toBe(true);
       expect(result.created).toBe(1);
       expect(getNamespaceStats(db, NAMESPACE).total_memories).toBe(1);
+    });
+
+    it('a valid empty extraction ([]) is a clean 0-fact ingest, NOT a failure (no degrade/skip)', async () => {
+      // The prompt instructs the model to emit [] when nothing durable is present.
+      // That is a successful parse, so it must not inflate failed_chunks, must not
+      // degrade to a single-blob store, and must write nothing.
+      setResponses('[]');
+      const result = await engine.ingest('chit-chat with no durable facts', {});
+
+      expect(result.created).toBe(0);
+      expect(result.facts).toEqual([]);
+      expect(result.degraded).toBeFalsy();
+      expect(result.skipped).toBeFalsy();
+      expect(result.partial).toBeFalsy();
+      expect(getNamespaceStats(db, NAMESPACE).total_memories).toBe(0);
     });
   });
 

@@ -30,8 +30,6 @@ export interface IngestResult {
   created: number;
   /** Facts that hit an existing row (merged_duplicate / contradiction_resolved). */
   merged: number;
-  /** ALIAS for `created`, kept for back-compat of the v1 field name. */
-  ingested: number;
   /** Ids of all touched rows (created + merged); empty when dry_run. */
   memory_ids: string[];
 

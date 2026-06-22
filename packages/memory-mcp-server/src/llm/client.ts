@@ -6,16 +6,22 @@ import type { MemoryConfig } from '../config.js';
  *
  * The OpenAI SDK error embeds the request body (= the prompt, which for
  * `memory_ingest` is raw sensitive content) and/or the response body in its
- * `.message`, so we log ONLY the error name plus any numeric status/code — never
- * the message, the request, or the response. Used by every llmComplete caller
- * (extraction, compaction, consolidation), so the guarantee holds package-wide.
+ * `.message`, so we log ONLY the error name, the numeric status, and the short
+ * enum-like `code` (e.g. "invalid_api_key") — never the message, the request, or
+ * the response. Used by every llmComplete caller (extraction, compaction,
+ * consolidation), so the guarantee holds package-wide.
  */
 function describeLlmError(err: unknown): string {
   if (err instanceof Error) {
     const parts = [err.name];
     const withFields = err as { status?: unknown; code?: unknown };
     if (typeof withFields.status === 'number') parts.push(`status=${withFields.status}`);
-    if (typeof withFields.code === 'number') parts.push(`code=${withFields.code}`);
+    // `code` is a short enum-like string (e.g. "invalid_api_key") or a number —
+    // content-free either way. Bound the string length as a defensive guard
+    // against a pathological SDK that stuffs response content into it.
+    const code = withFields.code;
+    if (typeof code === 'number') parts.push(`code=${code}`);
+    else if (typeof code === 'string' && code.length > 0 && code.length <= 40) parts.push(`code=${code}`);
     return parts.join(' ');
   }
   // Non-Error throw: report only its primitive type, never its serialized value.

@@ -156,6 +156,33 @@ export function computeResumeSet(records: readonly ProgressRecord[]): Set<string
   return skip;
 }
 
+// ---------- Engine env wiring ----------
+
+/**
+ * Wire the `MEMORY_*` env vars that point the engine's LLM client at Anthropic's
+ * Haiku, plus the namespace and a disabled reranker. Both drivers call this
+ * BEFORE `loadConfig()`. Requires `ANTHROPIC_API_KEY` (we REQUIRE the LLM for the
+ * corpus/diagnostic — no silent degrade) and throws a clear error if it's absent.
+ *
+ * The base URL and default model are pinned here so the two drivers can never
+ * drift apart. Determinism vars (db path, maintenance interval, decay threshold)
+ * are the build driver's concern and stay there.
+ */
+export function wireMemoryLlmEnv(namespace: string): void {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'ANTHROPIC_API_KEY is required (the corpus needs the LLM). ' +
+        'Run with `--import dotenv/config` or export it in the environment.',
+    );
+  }
+  process.env.MEMORY_LLM_BASE_URL = 'https://api.anthropic.com/v1/';
+  process.env.MEMORY_LLM_API_KEY = apiKey;
+  process.env.MEMORY_LLM_MODEL = process.env.MEMORY_LLM_MODEL ?? 'claude-haiku-4-5-20251001';
+  process.env.MEMORY_NAMESPACE = namespace;
+  process.env.MEMORY_RERANKER_ENABLED = 'false';
+}
+
 // ---------- Argument parsing ----------
 
 export interface CliArgs {
@@ -228,7 +255,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   return args;
 }
 
-function requireValue(argv: readonly string[], index: number, flag: string): string {
+/**
+ * Read the value following a flag at `index`, or throw if absent / itself a flag.
+ * Shared by both driver scripts' `parseArgs`.
+ */
+export function requireValue(argv: readonly string[], index: number, flag: string): string {
   if (index >= argv.length) {
     throw new Error(`Flag ${flag} requires a value`);
   }
@@ -239,7 +270,8 @@ function requireValue(argv: readonly string[], index: number, flag: string): str
   return value;
 }
 
-function parsePositiveInt(raw: string, flag: string): number {
+/** Parse a strictly-positive integer flag value, or throw. Shared by both drivers. */
+export function parsePositiveInt(raw: string, flag: string): number {
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`Flag ${flag} requires a positive integer, got: ${raw}`);

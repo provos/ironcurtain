@@ -32,6 +32,7 @@ import { getNamespaceStats } from '../../packages/memory-mcp-server/src/storage/
 
 import {
   parseArgs,
+  wireMemoryLlmEnv,
   assembleTranscript,
   isEmptyConversation,
   buildSource,
@@ -51,23 +52,12 @@ import {
  * ANTHROPIC_API_KEY (we REQUIRE the LLM for the corpus — no silent degrade).
  */
 function buildConfig(args: CliArgs): MemoryConfig {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      'ANTHROPIC_API_KEY is required (the corpus needs the LLM). ' +
-        'Run with `--import dotenv/config` or export it in the environment.',
-    );
-  }
+  wireMemoryLlmEnv(args.namespace);
 
-  process.env.MEMORY_LLM_BASE_URL = 'https://api.anthropic.com/v1/';
-  process.env.MEMORY_LLM_API_KEY = apiKey;
-  process.env.MEMORY_LLM_MODEL = process.env.MEMORY_LLM_MODEL ?? 'claude-haiku-4-5-20251001';
   process.env.MEMORY_DB_PATH = resolve(args.dbPath);
-  process.env.MEMORY_NAMESPACE = args.namespace;
   // Determinism: never let per-store maintenance (which runs DECAY) fire mid-bulk.
   process.env.MEMORY_MAINTENANCE_INTERVAL = '100000000';
   process.env.MEMORY_DECAY_THRESHOLD = '0';
-  process.env.MEMORY_RERANKER_ENABLED = 'false';
 
   return loadConfig();
 }
@@ -95,9 +85,11 @@ function selectConversations(conversations: ExportConversation[], args: CliArgs)
     return conversations;
   }
   const selected: ExportConversation[] = [];
+  let nonEmptyCount = 0;
   for (const conv of conversations) {
-    if (selected.filter((c) => !isEmptyConversation(c)).length >= args.limit) break;
+    if (nonEmptyCount >= args.limit) break;
     selected.push(conv);
+    if (!isEmptyConversation(conv)) nonEmptyCount += 1;
   }
   return selected;
 }
