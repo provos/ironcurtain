@@ -1,12 +1,16 @@
 /**
- * Step 9b — post-dedup parent re-expansion ("return coarse").
+ * Step 9b — post-dedup parent re-expansion ("return coarse"), AUGMENT semantics.
  *
  * This is NOT the candidate ranker. It runs strictly AFTER the pipeline has
  * selected and ordered its kept facts (steps 1–9). It only reshapes the RETURNED
- * unit: when several kept facts share one source segment, it emits a single
- * query-relevant PASSAGE of that segment in place of the redundant headlines.
- * It never touches the candidate set, the fusion/composite/rerank scores, or the
- * order in which facts were selected.
+ * unit set: it keeps EVERY kept fact (breadth-first — exactly what `expand:'none'`
+ * returns) and APPENDS the query-relevant source PASSAGE(s) of shared segments
+ * AFTER all the facts. Passages are supplementary, not a replacement: because the
+ * greedy skip-not-break `packToBudget` packs in order, facts are packed first and a
+ * passage only ever consumes leftover budget — so auto-expansion can never evict a
+ * fact that `expand:'none'` would have kept. Parent-dedup applies to PASSAGES (one
+ * passage per segment), never to facts. It never touches the candidate set, the
+ * fusion/composite/rerank scores, or the order in which facts were selected.
  */
 
 import type Database from 'better-sqlite3';
@@ -30,14 +34,16 @@ export interface ExpansionResult {
 }
 
 /**
- * Build the ordered display list from the post-dedup kept facts (§5.3).
+ * Build the display list from the post-dedup kept facts (§5.3), AUGMENT semantics.
  *
  * - `expand === 'none'`: byte-for-byte pass-through — every kept fact stays a fact.
- * - `expand === 'auto'`: expand a parent only when ≥2 kept facts share it.
- * - `expand === 'parent'`: expand the parent of every kept fact that has one.
+ * - `expand === 'auto'`: keep all facts; append the shared-parent passage(s) (a
+ *   segment is shared when ≥2 kept facts point at it) after the facts.
+ * - `expand === 'parent'`: keep all facts; append the parent passage of every kept
+ *   fact that has one (the ≥2 gate is dropped) after the facts.
  *
- * Expansion replaces a fact with its segment's query-ranked passage at the fact's
- * best position; parent-deduped siblings collapse into that one passage.
+ * Expansion never drops or reorders a fact; it only APPENDS supplementary passages
+ * after all the facts, in segment-best-rank order, capped at `maxExpandPassages`.
  */
 export async function expandKeptFacts(
   db: Database.Database,
@@ -68,17 +74,11 @@ export async function expandKeptFacts(
   const segments = getSegmentsByIds(db, config.namespace, segmentIdsToExpand);
   const segmentById = new Map(segments.map((s) => [s.id, s]));
 
-  // 4. Per expandable segment, split-and-rank to a chosen passage (capped count).
-  const chosenPassageBySegment = await choosePassages(
-    config,
-    segmentIdsToExpand,
-    segmentById,
-    queryEmbedding,
-    maxExpandPassages,
-  );
+  // 4. Per expandable segment, split-and-rank to a chosen passage (segment-best-rank order).
+  const chosenPassageBySegment = await choosePassages(config, segmentIdsToExpand, segmentById, queryEmbedding);
 
-  // 5. Walk kept in score order, emitting passages once (parent-dedup) and facts otherwise.
-  return buildDisplayList(kept, chosenPassageBySegment);
+  // 5. Keep all facts (breadth-first); append the chosen passages after them, capped.
+  return buildDisplayList(kept, segmentIdsToExpand, groups, chosenPassageBySegment, maxExpandPassages);
 }
 
 /** A fact emitted verbatim (not expanded). */
@@ -104,26 +104,24 @@ function groupBySegment(kept: ScoredMemory[]): Map<string, ScoredMemory[]> {
 /**
  * For each expandable segment, split its content into passages, embed them, and pick
  * the passage most similar to the query embedding. Returns the chosen passage text per
- * segment id. A segment with no row (forgotten parent) or no passages is skipped — its
- * facts then fall back to fact emission.
+ * segment id, keyed in segment-best-rank order. A segment with no row (forgotten parent)
+ * or no passages is skipped — its facts are simply not augmented with a passage.
  *
- * The global `maxExpandPassages` count cap is honored here: segments are visited in the
- * order they were selected (score order of their best fact) and once the cap is reached,
- * no further segment gets a passage (its facts fall back to facts).
+ * The `maxExpandPassages` cap is NOT applied here: it caps the passages that SURVIVE
+ * overlap-dedup in `buildDisplayList`, so a passage dropped as an overlap duplicate does
+ * not waste a cap slot.
  */
 async function choosePassages(
   config: MemoryConfig,
   segmentIdsToExpand: string[],
   segmentById: Map<string, SegmentRow>,
   queryEmbedding: Float32Array,
-  maxExpandPassages: number,
 ): Promise<Map<string, string>> {
   const chosen = new Map<string, string>();
 
   for (const segmentId of segmentIdsToExpand) {
-    if (chosen.size >= maxExpandPassages) break;
     const segment = segmentById.get(segmentId);
-    if (!segment) continue; // forgotten/missing parent → fall back to facts
+    if (!segment) continue; // forgotten/missing parent → no passage to append
 
     const passage = await rankBestPassage(config, segment.content, queryEmbedding);
     if (passage !== null) chosen.set(segmentId, passage);
@@ -160,39 +158,53 @@ async function rankBestPassage(
 }
 
 /**
- * Walk kept facts in score order. The FIRST fact of an expanded segment becomes the
- * passage unit (carrying that fact's date/importance so rendering is unchanged); later
- * facts sharing the same segment are dropped (parent-dedup). A fact whose segment was
- * not chosen for a passage (lone parent under auto, forgotten parent, or null segment)
- * is emitted verbatim. Overlap dedup drops a passage whose text is a near-substring of
- * an already-emitted passage (§5.3.2).
+ * Build the AUGMENT display list. First emit EVERY kept fact verbatim in score order —
+ * byte-for-byte what `expand:'none'` returns, so breadth is never lost. THEN append the
+ * chosen passages, one per shared segment, in segment-best-rank order. Because the
+ * downstream greedy skip-not-break `packToBudget` packs in order, placing passages last
+ * means facts are packed first and a passage only consumes leftover budget — auto-expand
+ * never evicts a fact `expand:'none'` would have kept.
+ *
+ * Each appended passage rides on its segment's best-ranked fact (carrying that fact's
+ * date/importance so rendering is unchanged) but gets a DISTINCT synthetic id: the
+ * host fact is also emitted, so a shared id would make id-keyed dedup/clustering
+ * (extractive-summary clustering, access-stat counting) treat the passage as a
+ * duplicate of its host fact and silently drop it. Parent-dedup applies to PASSAGES
+ * here (one passage per segment), never to facts. Overlap dedup drops a passage whose
+ * text is a near-substring of an already-appended passage (§5.3.2); the
+ * `maxExpandPassages` cap limits the passages that SURVIVE that dedup.
  */
-function buildDisplayList(kept: ScoredMemory[], chosenPassageBySegment: Map<string, string>): ExpansionResult {
-  const units: DisplayUnit[] = [];
-  const emittedSegments = new Set<string>();
+function buildDisplayList(
+  kept: ScoredMemory[],
+  segmentIdsToExpand: string[],
+  groups: Map<string, ScoredMemory[]>,
+  chosenPassageBySegment: Map<string, string>,
+  maxExpandPassages: number,
+): ExpansionResult {
+  // Breadth-first: keep every fact, in score order (identical to expand:'none').
+  const units: DisplayUnit[] = kept.map(toFactUnit);
+
   const emittedPassages: string[] = [];
   const expandedSegmentIds: string[] = [];
 
-  for (const mem of kept) {
-    const segmentId = mem.segment_id;
-    const passage = segmentId !== null ? chosenPassageBySegment.get(segmentId) : undefined;
+  // Append passages AFTER all facts, in segment-best-rank order, deduped and capped.
+  for (const segmentId of segmentIdsToExpand) {
+    if (expandedSegmentIds.length >= maxExpandPassages) break;
 
-    // Not an expanded segment → emit the fact verbatim.
-    if (segmentId === null || passage === undefined) {
-      units.push(toFactUnit(mem));
-      continue;
-    }
+    const passage = chosenPassageBySegment.get(segmentId);
+    // group[0] is the segment's best-ranked fact (groups preserve score order); the
+    // appended passage rides on it so date/importance/id rendering is unchanged.
+    const bestFact = groups.get(segmentId)?.[0];
+    if (passage === undefined || bestFact === undefined) continue;
 
-    // Expanded segment already emitted → parent-dedup, drop this sibling.
-    if (emittedSegments.has(segmentId)) continue;
-    emittedSegments.add(segmentId);
-
-    // Overlap dedup: skip a passage that is a near-substring of an already-emitted one.
+    // Overlap dedup: skip a passage that is a near-substring of an already-appended one.
     if (isOverlapping(passage, emittedPassages)) continue;
 
     emittedPassages.push(passage);
     expandedSegmentIds.push(segmentId);
-    units.push({ ...mem, content: passage, expanded: true });
+    // Distinct id (host fact id + segment) so the passage is its own display unit, not
+    // an id-collision duplicate of the host fact (which is also emitted, see above).
+    units.push({ ...bestFact, id: `${bestFact.id}#seg:${segmentId}`, content: passage, expanded: true });
   }
 
   return { units, expandedSegmentIds };

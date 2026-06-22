@@ -148,20 +148,37 @@ describe('parent re-expansion (Bandalert contract)', () => {
     expect(result.created).toBe(7);
   }
 
-  it('auto-expands a shared parent BY DEFAULT (no expand arg) and returns the $250k clause that was never a fact', async () => {
+  it('auto-expands a shared parent BY DEFAULT (no expand arg): AUGMENTs the facts with the $250k clause that was never a fact', async () => {
     await ingestContract();
 
     // A DEFAULT recall — no `expand` argument at all.
     const result = await engine.recall({ query: 'Bandalert distribution agreement cap and revenue', format: 'list' });
 
     expect(result.expanded).toBe(true);
-    // Exactly one parent appears once (parent-dedup).
+    // PASSAGE parent-dedup: the one shared parent contributes exactly one passage.
     expect(result.expanded_segment_ids).toHaveLength(1);
 
-    // The returned content carries the $250k clause — which was NEVER an extracted fact.
+    // AUGMENT, not replace: the passage carries the $250k clause that was NEVER a fact …
     expect(result.content).toContain('$250k');
     const allHeadlineText = HEADLINE_FACTS.map((f) => f.fact).join(' ');
     expect(allHeadlineText).not.toContain('$250k'); // sanity: the clause is not a fact
+
+    // … AND the breadth facts are PRESERVED, not collapsed into the passage. Compare
+    // against expand:'none' at the SAME budget (the ranker is identical, so 'none' is
+    // the breadth baseline): every fact 'none' returns is still present under 'auto'.
+    // (Under the old REPLACE semantics these sibling facts were dropped — this is the
+    // assertion that would have failed then.) The full superset guarantee is asserted
+    // exhaustively in the breadth-preservation regression test below.
+    const none = await engine.recall({
+      query: 'Bandalert distribution agreement cap and revenue',
+      format: 'raw',
+      expand: 'none',
+    });
+    const noneFacts = (JSON.parse(none.content) as Array<{ content: string }>).map((i) => i.content);
+    expect(noneFacts.length).toBeGreaterThan(1); // several headline facts co-retrieve
+    for (const fact of noneFacts) {
+      expect(result.content).toContain(fact);
+    }
   });
 
   it('the expanded unit is a passage that fits the default 800 budget AND leaves room for ≥1 fact', async () => {
@@ -180,6 +197,65 @@ describe('parent re-expansion (Bandalert contract)', () => {
     const lines = result.content.split('\n').filter((l) => l.trim().length > 0);
     const factLines = lines.filter((l) => !l.includes('$250k'));
     expect(factLines.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('AUGMENT is breadth-preserving: every fact expand:none keeps is also kept under auto, and a passage is appended only on leftover budget (regression: passages must be LOWER priority than facts)', async () => {
+    await ingestContract();
+
+    const query = 'Bandalert distribution agreement cap and revenue';
+
+    // Raw format exposes each unit's `expanded` flag, so fact units and the appended
+    // passage unit can be separated cleanly. Helper: the set of FACT-unit contents.
+    const factContents = (raw: { content: string }): Set<string> => {
+      const items = JSON.parse(raw.content) as Array<{ content: string; expanded: boolean }>;
+      return new Set(items.filter((i) => !i.expanded).map((i) => i.content));
+    };
+    const passageCount = (raw: { content: string }): number => {
+      const items = JSON.parse(raw.content) as Array<{ expanded: boolean }>;
+      return items.filter((i) => i.expanded).length;
+    };
+
+    // --- Generous budget: facts are a SUPERSET of none's, AND the passage is appended. ---
+    const wideBudget = 800;
+    const noneWide = await engine.recall({ query, format: 'raw', expand: 'none', token_budget: wideBudget });
+    const autoWide = await engine.recall({ query, format: 'raw', expand: 'auto', token_budget: wideBudget });
+
+    const noneFacts = factContents(noneWide);
+    const autoFacts = factContents(autoWide);
+    expect(noneFacts.size).toBeGreaterThan(0); // the query genuinely retrieves facts
+
+    // EVERY fact expand:none returns is ALSO returned under expand:auto (the superset
+    // property — auto never silently drops a breadth fact). This is the assertion that
+    // would FAIL if expansion REPLACED sibling facts with the passage.
+    for (const fact of noneFacts) {
+      expect(autoFacts.has(fact)).toBe(true);
+    }
+    // … and on top of the full fact set, the passage is appended.
+    expect(autoWide.expanded).toBe(true);
+    expect(passageCount(autoWide)).toBe(1);
+    expect(autoWide.content).toContain('$250k');
+
+    // --- Tight budget: the DISCRIMINATING zone for pack order. Size the budget to
+    //     `passageTokens + allFactTokens - 1`: it fits ALL facts (facts-last leaves the
+    //     passage one token short, so the passage is skipped and every fact survives),
+    //     but it is also large enough that a HIGH-priority passage WOULD fit first and
+    //     then evict a breadth fact (passage-first leaves allFactTokens-1 of budget,
+    //     one token shy of the full fact set). The packer estimates tokens off each
+    //     unit's `content`, so measure those directly from a wide auto recall. ---
+    const wideItems = JSON.parse(autoWide.content) as Array<{ content: string; expanded: boolean }>;
+    const allFactTokens = wideItems.filter((i) => !i.expanded).reduce((sum, i) => sum + estimateTokens(i.content), 0);
+    const passageTokens = wideItems.filter((i) => i.expanded).reduce((sum, i) => sum + estimateTokens(i.content), 0);
+    const tightBudget = passageTokens + allFactTokens - 1;
+
+    const noneTight = await engine.recall({ query, format: 'raw', expand: 'none', token_budget: tightBudget });
+    const autoTight = await engine.recall({ query, format: 'raw', expand: 'auto', token_budget: tightBudget });
+
+    // Same fact set under both — auto did NOT evict a fact to make room for a passage.
+    // (With a HIGH-priority passage this set would be a strict subset of none's.)
+    expect(factContents(autoTight)).toEqual(factContents(noneTight));
+    // … and the passage is the thing that was skipped (not a fact).
+    expect(passageCount(autoTight)).toBe(0);
+    expect(autoTight.expanded).toBe(false);
   });
 
   it('picks the query-relevant passage (IP query → IP passage, not the cap passage)', async () => {

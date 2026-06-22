@@ -113,8 +113,12 @@ storage + post-ranking-expansion change that leaves the ranker byte-for-byte unc
    the query embedding are returned, up to budget. Storage may keep `segment = chunk`; only the
    *returned* unit is passage-sized. Chosen **recall-time split-and-rank** over ingest-time
    pre-split — simpler storage, only fires on auto-expand, reuses the step-1 query embedding. (§5.3)
-5. **When several top facts share a parent, the parent's passage is emitted once** and the duplicate
-   facts collapse into it (parent-dedup). (§5.3)
+5. **Passages AUGMENT the facts; they do not replace them (breadth-first).** All kept facts are
+   returned exactly as `expand:'none'` would return them; the expanded passage(s) are **appended
+   after** all the facts, in segment-best-rank order. Parent-dedup applies to **passages** (one
+   passage per shared parent), **never to facts** — auto-expand never evicts a fact `expand:'none'`
+   would have kept. Because the greedy skip-not-break packer packs in order, a passage only ever
+   consumes leftover budget. (§5.3)
 6. **Budget machinery is simplified.** Passage-sized returns make the v1 two-tier
    `expand_budget_fraction` unnecessary (its only job was to *reject* the oversized segment).
    Expanded passages and facts share the budget under the existing greedy skip-not-break
@@ -371,10 +375,20 @@ notice the headline is thin and ask a follow-up — so it gets the same auto-exp
 **800** (`CONTEXT_DEFAULT_BUDGET`, `engine-impl.ts:270`), which a ~300-token passage comfortably
 fits alongside facts.
 
-### 5.3 Step 9b — parent re-expansion (passage return + parent-dedup)
+### 5.3 Step 9b — parent re-expansion (passage AUGMENTs the facts; passage-only parent-dedup)
 
 Input: `kept` (the post-dedup `ScoredMemory[]`, `pipeline.ts:114`), already sorted by score, plus
 `queryEmbedding` (already computed at step 1, `pipeline.ts:43`).
+
+> **AUGMENT, not replace.** An earlier draft had an expanded segment's chosen passage *replace* its
+> sibling facts (the facts "collapsed into" the one passage). That is wrong for a multi-term source:
+> a contract segment's facts are about **different** terms (ownership, valuation, profit-sharing,
+> governance, execution), so collapsing them into one passage about **one** term destroys breadth —
+> on the live corpus, a "key terms" survey query returned a *worse* answer with `expand:'auto'` than
+> with `expand:'none'` (five distinct key-term facts evicted for one execution-terms passage). The
+> corrected design **keeps every fact** and treats the passage as **supplementary**: passages are
+> appended *after* all the facts. **Parent-dedup applies to passages (one per shared parent), never
+> to facts.**
 
 ```
 if expand === 'none': proceed to packToBudget as today.   // unchanged path
@@ -384,31 +398,31 @@ if expand === 'none': proceed to packToBudget as today.   // unchanged path
 2. Decide which segments to EXPAND:
      - expand === 'parent'  → every group with a non-null segment_id (size ≥1)
      - expand === 'auto'    → only groups whose size is ≥2 (a SHARED parent)
-   Groups not selected for expansion keep emitting their facts as today.
 3. Fetch the selected segments by id in one query (getSegmentsByIds(db, ns, ids)).
 4. For each expanded segment, SPLIT-AND-RANK to a passage (§5.3.1):
      - split segment.content into coherent passages (paragraph/turn/sentence boundaries,
        each capped ~300–400 tokens);
      - embed each passage and rank by cosine similarity to queryEmbedding;
-     - take the top passage(s) up to max_expand_passages and the budget (§5.4).
-5. Build an ORDERED display list, walking `kept` in score order:
-     - fact in an EXPANDED group: at the position of its best-ranked fact, emit the segment's
-       chosen PASSAGE(s) once; mark the segment emitted so the other facts sharing it are
-       SKIPPED (parent-dedup);
-     - fact in a non-expanded group (auto, lone parent): emit the FACT itself;
-     - fact with segment_id == null (store-path / degrade — a row that has no parent): emit the
-       FACT (it is its own parent, §4.3);
-     - fact whose segment_id is non-null but whose segment row is missing (forgotten parent,
-       §6.3): fall back to emitting the FACT.
-6. The result is a heterogeneous, score-ordered list of {passage | fact} display units, with each
-   expanded parent appearing at most once.
+     - choose the top passage per segment.
+5. Build the display list as AUGMENT:
+     a. Emit EVERY kept fact as a fact unit, in score order — byte-for-byte what `expand:'none'`
+        returns. No fact is ever dropped, skipped, or reordered by expansion. (store-path / degrade
+        NULL-segment facts and forgotten-parent facts are just normal facts here.)
+     b. APPEND the chosen passages AFTER all the facts, in segment-best-rank order (each passage
+        rides on its segment's best-ranked fact for date/importance rendering, with a distinct id
+        so it is not an id-collision duplicate of that fact). Apply passage parent-dedup (one
+        passage per segment), passage overlap-dedup (§5.3.2), and the max_expand_passages cap
+        (§5.4) to the appended passages only.
+6. The result is a score-ordered list of fact units followed by ≤max_expand_passages passage units.
 ```
 
-Parent-dedup is the answer to "several top facts share one parent": in the contract case, the
-~7 headline facts all carry the same `segment_id`, so step 5 emits the **one** contract segment's
-chosen passage once (carrying the relevant clause) and drops the 6 redundant headlines. The user
-gets the clause instead of 7 lossy headlines — **the exact fix for the Bandalert failure, on a
-default `'auto'` recall with no flag.**
+Because the unchanged greedy skip-not-break `packToBudget` packs the display list **in order**,
+putting passages **last** means the breadth facts are packed first and a passage only ever consumes
+**leftover** budget. **This is the load-bearing property: auto-expand can never evict a fact that
+`expand:'none'` would have kept.** In the contract case the ~7 headline facts (about different
+terms) are all preserved AND the query-relevant clause passage (carrying e.g. the `$250k` cap, never
+a fact) is appended when budget allows — **the fix for the Bandalert failure, on a default `'auto'`
+recall with no flag, without sacrificing breadth.**
 
 #### 5.3.1 Split-and-rank: the returned unit is a query-relevant passage, not the chunk
 
@@ -454,11 +468,12 @@ emitted passages, not an embedding pass. It is a no-op for the common single-exp
 
 **Default budget is bumped 500 → 800 so the system returns useful context with zero configuration.**
 The out-of-the-box directive requires that a *default* recall return the relevant passage **plus**
-a couple of facts. A passage is ~300–400 tokens and a fact ~150; at the old default of **500** a
-single ~400-token passage leaves only ~100 tokens — not even one more fact — so a shared-parent
-auto-expansion would crowd out the supporting facts. Bumping `MEMORY_DEFAULT_TOKEN_BUDGET`
-(`config.ts:70`) to **800** comfortably fits one ~300–400-token passage **and** 2–3 facts
-(~400 + 3×150 ≈ 850, packed greedily to ≤ 800), which is exactly the desired shape. `memory_context`
+a couple of facts. A passage is ~300–400 tokens and a fact ~150; at the old default of **500**,
+once the facts have packed first (AUGMENT) a single ~400-token passage rarely has room to ride
+along — so the shared-parent depth would simply not surface (auto ≈ none). Bumping
+`MEMORY_DEFAULT_TOKEN_BUDGET` (`config.ts:70`) to **800** comfortably fits 2–3 facts **and** one
+~300–400-token passage (~3×150 + 400 ≈ 850, packed greedily to ≤ 800), which is exactly the desired
+shape. `memory_context`
 stays **800** (`engine-impl.ts:270`); the two default budgets are now equal, which is intentional —
 both paths want the same "one passage + a few facts" envelope. **No flag and no config tuning are
 needed** to get parent context on shared-parent queries.
@@ -473,8 +488,9 @@ budget machinery is simplified:
   (`scoring.ts:200-212`): walk the score-ordered display list; include a unit if it fits the
   remaining budget, else `continue` (skip, don't break). No segment sub-budget, no second pass.
 - The only added guard is a small **count cap**: at most `max_expand_passages` (default **2**)
-  passages may be emitted across the whole result, so auto-expansion cannot turn a result into all
-  passages and evict every fact.
+  passages may be appended across the whole result. With AUGMENT the cap is belt-and-suspenders
+  (passages are appended *after* the facts and only consume leftover budget, so they cannot evict a
+  fact regardless of the cap); it mainly bounds explicit `'parent'` calls with a raised budget.
 
 **Why a count cap of 2 against budget=800 with ~300–400-token passages and ~150-token facts.** One
 ~300–400-token passage leaves ~400–500 tokens — room for 2–3 facts; two passages (~600–800 tokens)
@@ -486,9 +502,17 @@ the supporting facts. A single dominant passage (the contract clause) plus the f
 is exactly the desired out-of-the-box shape.
 
 The `expand:'none'` path calls `packToBudget` with the unchanged fact list — **byte-for-byte today's
-behavior** (at whatever `token_budget` the caller passes; only the *default* changed). Expansion only
-ever *substitutes* a passage for a fact at that fact's position and *drops* parent-deduped siblings;
-it never relaxes the skip-not-break rule, so a budget that fits N facts is never overrun.
+behavior** (at whatever `token_budget` the caller passes; only the *default* changed). Under AUGMENT,
+expansion only ever **appends** passages after the full fact list and never relaxes the skip-not-break
+rule, so a budget that fits N facts always still fits those N facts — the passage is the unit that
+gets skipped, never a fact.
+
+**Trade-off (intended).** Because passages are appended last, the budget governs *depth*, not
+breadth: at a **tight** budget the passage may not fit at all, so `expand:'auto'` degrades to
+`expand:'none'` (all the facts, no passage) rather than dropping a fact — a strict no-regression
+floor. A **larger** budget simply surfaces more depth (the clause passage, then a second if
+`max_expand_passages` and budget allow). Breadth is constant across budgets; only how much parent
+context rides along varies.
 
 ### 5.5 Formatting + expansion metadata in every format
 

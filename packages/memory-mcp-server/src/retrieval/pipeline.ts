@@ -156,7 +156,9 @@ export async function recall(
   }
   const text = await formatMemories(selected, selectedEmbeddings, query, tokenBudget, format, config);
 
-  // 11. Update access stats for returned memories.
+  // 11. Update access stats for returned memories. An appended passage unit carries a
+  //     synthetic id (no matching memories row), so it no-ops here — only real fact ids
+  //     bump their access_count, exactly once each.
   const returnedIds = selected.map((m) => m.id);
   updateAccessStats(db, config.namespace, returnedIds);
 
