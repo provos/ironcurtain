@@ -21,6 +21,7 @@ function makeScored(overrides: Partial<MemoryRow & ScoredMemory> = {}): ScoredMe
     consolidated: overrides.consolidated ?? 1,
     source: overrides.source ?? null,
     metadata: overrides.metadata ?? null,
+    segment_id: overrides.segment_id ?? null,
     fusionScore: overrides.fusionScore ?? 0.5,
     compositeScore: overrides.compositeScore ?? 0.5,
     vectorDistance: overrides.vectorDistance,

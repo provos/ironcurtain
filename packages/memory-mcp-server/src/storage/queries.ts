@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { MemoryRow, VectorSearchResult, FtsSearchResult } from './database.js';
+import type { MemoryRow, SegmentRow, VectorSearchResult, FtsSearchResult } from './database.js';
 import { randomBytes } from 'node:crypto';
 
 export function generateId(): string {
@@ -22,6 +22,11 @@ export interface InsertMemoryParams {
    * to this value (the `as_of` mechanism). Absent ⇒ Date.now() (unchanged behavior).
    */
   createdAt?: number;
+  /**
+   * FK to the source segment (`memory_ingest` only). Absent ⇒ bound as NULL,
+   * exactly as the store path / degrade path require (a row with no parent).
+   */
+  segmentId?: string;
 }
 
 export function insertMemory(db: Database.Database, params: InsertMemoryParams, embedding: Float32Array): void {
@@ -29,8 +34,8 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
   const txn = db.transaction(() => {
     db.prepare(
       `INSERT INTO memories (id, namespace, content, tags, importance,
-         created_at, updated_at, last_accessed_at, source, metadata, consolidated)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         created_at, updated_at, last_accessed_at, source, metadata, consolidated, segment_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       params.id,
       params.namespace,
@@ -43,6 +48,7 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
       params.source ?? null,
       params.metadata ? JSON.stringify(params.metadata) : null,
       params.consolidated === false ? 0 : 1,
+      params.segmentId ?? null,
     );
 
     db.prepare(`INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)`).run(
@@ -51,6 +57,90 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
     );
   });
   txn();
+}
+
+// ---------- Segments ----------
+
+export interface InsertSegmentParams {
+  id?: string;
+  namespace: string;
+  content: string;
+  source?: string;
+  mode?: string;
+  createdAt?: number;
+  factCount: number;
+}
+
+/**
+ * Insert one source segment and return its id. Mirrors `insertMemory`'s shape
+ * (`createdAt ?? Date.now()`). Segments are off the retrieval index — no vec/FTS write.
+ */
+export function insertSegment(db: Database.Database, params: InsertSegmentParams): string {
+  const id = params.id ?? generateId();
+  const now = params.createdAt ?? Date.now();
+  db.prepare(
+    `INSERT INTO segments (id, namespace, content, source, mode, created_at, fact_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, params.namespace, params.content, params.source ?? null, params.mode ?? null, now, params.factCount);
+  return id;
+}
+
+/** Batch fetch segments by primary key for recall-time re-expansion. */
+export function getSegmentsByIds(db: Database.Database, namespace: string, ids: string[]): SegmentRow[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return db
+    .prepare(`SELECT * FROM segments WHERE namespace = ? AND id IN (${placeholders})`)
+    .all(namespace, ...ids) as SegmentRow[];
+}
+
+/**
+ * Repoint a merged survivor's `segment_id` to the RICHER parent (A4, §6.2), so a
+ * later, richer ingest of the same fact is not discarded purely by ingest order.
+ * Runs ONLY when `incomingSegmentId` is set (non-ingest merges are unchanged):
+ *   - survivor has no parent (NULL)  → adopt the incoming segment;
+ *   - else keep whichever segment has the higher `fact_count`; a tie keeps the
+ *     existing (stable, order-independent given equal richness).
+ */
+export function updateMemorySegmentIfRicher(
+  db: Database.Database,
+  namespace: string,
+  survivorId: string,
+  incomingSegmentId: string,
+): void {
+  const row = db
+    .prepare(`SELECT segment_id FROM memories WHERE id = ? AND namespace = ?`)
+    .get(survivorId, namespace) as { segment_id: string | null } | undefined;
+  if (!row) return;
+
+  const existingSegmentId = row.segment_id;
+
+  // No existing parent → adopt the incoming one.
+  if (existingSegmentId === null) {
+    db.prepare(`UPDATE memories SET segment_id = ? WHERE id = ? AND namespace = ?`).run(
+      incomingSegmentId,
+      survivorId,
+      namespace,
+    );
+    return;
+  }
+
+  // Already pointing at the incoming segment → nothing to do.
+  if (existingSegmentId === incomingSegmentId) return;
+
+  const counts = getSegmentsByIds(db, namespace, [existingSegmentId, incomingSegmentId]);
+  const factCountById = new Map(counts.map((s) => [s.id, s.fact_count]));
+  const existingCount = factCountById.get(existingSegmentId) ?? 0;
+  const incomingCount = factCountById.get(incomingSegmentId) ?? 0;
+
+  // Keep the richer parent; ties keep the existing (order-independent).
+  if (incomingCount > existingCount) {
+    db.prepare(`UPDATE memories SET segment_id = ? WHERE id = ? AND namespace = ?`).run(
+      incomingSegmentId,
+      survivorId,
+      namespace,
+    );
+  }
 }
 
 // ---------- Update ----------

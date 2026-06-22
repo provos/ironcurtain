@@ -13,7 +13,7 @@ describe('loadConfig', () => {
     expect(config.decayThreshold).toBe(0.05);
     expect(config.maintenanceInterval).toBe(50);
     expect(config.compactionMinGroup).toBe(10);
-    expect(config.defaultTokenBudget).toBe(500);
+    expect(config.defaultTokenBudget).toBe(800);
     expect(config.dbPath).toContain('memory-mcp');
   });
 

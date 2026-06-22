@@ -14,6 +14,7 @@ import {
 import { deduplicateByEmbedding } from './dedup.js';
 import { rerank } from './reranker.js';
 import { formatMemories } from './formatting.js';
+import { expandKeptFacts } from './expansion.js';
 import { parseTags } from '../utils/tags.js';
 
 const DEFAULT_CANDIDATE_LIMIT = 50;
@@ -21,12 +22,19 @@ const DEFAULT_CANDIDATE_LIMIT = 50;
  *  0.9 = cosine similarity > 0.1; generous enough for vague queries while filtering pure noise. */
 const MAX_VECTOR_DISTANCE = 0.9;
 
+/** Default cap on expanded passages across one result (§5.4). */
+const DEFAULT_MAX_EXPAND_PASSAGES = 2;
+
 /** Internal result from the retrieval pipeline, richer than the public RecallResult. */
 export interface PipelineRecallResult {
   text: string;
   memoryIds: string[];
   totalCandidates: number;
   selectedCount: number;
+  /** True when any returned display unit was an expanded parent passage. */
+  expanded: boolean;
+  /** The segment_ids that were expanded (empty when none). */
+  expandedSegmentIds: string[];
 }
 
 /**
@@ -38,7 +46,14 @@ export async function recall(
   config: MemoryConfig,
   options: Omit<RecallOptions, 'namespace'>,
 ): Promise<PipelineRecallResult> {
-  const { query, token_budget: tokenBudget = config.defaultTokenBudget, tags, format = 'summary' } = options;
+  const {
+    query,
+    token_budget: tokenBudget = config.defaultTokenBudget,
+    tags,
+    format = 'summary',
+    expand = 'auto',
+    max_expand_passages: maxExpandPassages = DEFAULT_MAX_EXPAND_PASSAGES,
+  } = options;
 
   // 1. Embed query (with asymmetric prefix for retrieval-optimized embedding)
   const queryEmbedding = await embedQuery(query, config);
@@ -63,6 +78,8 @@ export async function recall(
       memoryIds: [],
       totalCandidates: 0,
       selectedCount: 0,
+      expanded: false,
+      expandedSegmentIds: [],
     };
   }
 
@@ -113,10 +130,25 @@ export async function recall(
   // 8. Dedup
   const { kept } = deduplicateByEmbedding(afterRerankerFilter, embeddings);
 
-  // 9. Token budget packing
-  const selected = packToBudget(kept, tokenBudget);
+  // 9b. Parent re-expansion (return-shaping only; the ranker above is untouched).
+  //     For expand:'none' this is a byte-for-byte pass-through of `kept` as facts.
+  const { units, expandedSegmentIds } = await expandKeptFacts(
+    db,
+    config,
+    kept,
+    queryEmbedding,
+    expand,
+    maxExpandPassages,
+  );
 
-  // 10. Format — reuse embeddings already loaded for dedup
+  // 9. Token budget packing (passage units pack exactly like fact units).
+  const selected = packToBudget(units, tokenBudget);
+
+  // 10. Format — reuse embeddings already loaded for dedup. An expanded passage unit
+  //     keeps its best-ranked fact's `id` (the passage text rides on that fact), so its
+  //     entry in `selectedEmbeddings` is that fact's embedding. The no-LLM extractive
+  //     summary path therefore clusters the passage by its fact's embedding — benign,
+  //     since the passage's whole point is to be the relevant slice of that fact's parent.
   const selectedIds = new Set(selected.map((m) => m.id));
   const selectedEmbeddings = new Map<string, Float32Array>();
   for (const [id, emb] of embeddings) {
@@ -124,14 +156,22 @@ export async function recall(
   }
   const text = await formatMemories(selected, selectedEmbeddings, query, tokenBudget, format, config);
 
-  // 11. Update access stats for returned memories
+  // 11. Update access stats for returned memories.
   const returnedIds = selected.map((m) => m.id);
   updateAccessStats(db, config.namespace, returnedIds);
+
+  // A passage may have been packed out by the budget; only report segments whose
+  // expanded unit actually survived into the returned set.
+  const expandedInResult = expandedSegmentIds.filter((segId) =>
+    selected.some((u) => u.expanded && u.segment_id === segId),
+  );
 
   return {
     text,
     memoryIds: returnedIds,
     totalCandidates: allMemories.size,
     selectedCount: selected.length,
+    expanded: expandedInResult.length > 0,
+    expandedSegmentIds: expandedInResult,
   };
 }

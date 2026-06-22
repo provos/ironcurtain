@@ -67,7 +67,7 @@ export function loadConfig(env: EnvSource = process.env): MemoryConfig {
 
     consolidationBatchSize: envInt(env, 'MEMORY_CONSOLIDATION_BATCH_SIZE', 50),
 
-    defaultTokenBudget: envInt(env, 'MEMORY_DEFAULT_TOKEN_BUDGET', 500),
+    defaultTokenBudget: envInt(env, 'MEMORY_DEFAULT_TOKEN_BUDGET', 800),
 
     rerankerModel: env.MEMORY_RERANKER_MODEL ?? 'Xenova/ms-marco-MiniLM-L-6-v2',
     rerankerEnabled: env.MEMORY_RERANKER_ENABLED !== 'false',

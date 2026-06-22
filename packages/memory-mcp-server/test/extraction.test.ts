@@ -2,7 +2,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   parseExtractedFacts,
   chunkBlob,
+  splitToPassages,
   MAX_INGEST_CHUNK_TOKENS,
+  MAX_PASSAGE_TOKENS,
   MAX_FACTS_PER_INGEST,
   MAX_INGEST_CHUNKS,
 } from '../src/storage/extraction.js';
@@ -214,5 +216,66 @@ describe('chunkBlob', () => {
     const blob = bigBlob(20000);
     const chunks = chunkBlob(blob);
     expect(chunks.length).toBeLessThanOrEqual(MAX_INGEST_CHUNKS);
+  });
+});
+
+describe('splitToPassages', () => {
+  it('returns [] for empty / whitespace-only input', () => {
+    expect(splitToPassages('')).toEqual([]);
+    expect(splitToPassages('   \n  \n ')).toEqual([]);
+  });
+
+  it('returns a single passage for short text', () => {
+    const passages = splitToPassages('Contract clause: the distribution cap is $250k.');
+    expect(passages).toHaveLength(1);
+    expect(passages[0]).toContain('$250k');
+  });
+
+  it('caps every passage at ~MAX_PASSAGE_TOKENS', () => {
+    // ~12 paragraphs of ~120 tokens each → must split into several bounded passages.
+    const para = (n: number): string =>
+      `Section ${n}. ` + 'This sentence carries roughly a dozen tokens of synthetic legal prose. '.repeat(8);
+    const text = Array.from({ length: 12 }, (_, i) => para(i)).join('\n\n');
+
+    const passages = splitToPassages(text);
+    expect(passages.length).toBeGreaterThan(1);
+    for (const passage of passages) {
+      expect(estimateTokens(passage)).toBeLessThanOrEqual(MAX_PASSAGE_TOKENS);
+    }
+  });
+
+  it('splits on paragraph boundaries, keeping coherent blocks together', () => {
+    const text = ['Clause A: distribution cap is $250k.', 'Clause B: IP reverts to the author.'].join('\n\n');
+    const passages = splitToPassages(text);
+    // Both short clauses fit one passage; the boundary is preserved within it.
+    expect(passages.join(' ')).toContain('$250k');
+    expect(passages.join(' ')).toContain('IP reverts');
+  });
+
+  it('falls back to sentence boundaries for an oversized paragraph', () => {
+    const sentence = 'This is a synthetic sentence with a handful of tokens. ';
+    const oneBigParagraph = sentence.repeat(60); // > cap, no paragraph breaks
+    const passages = splitToPassages(oneBigParagraph);
+    expect(passages.length).toBeGreaterThan(1);
+    for (const passage of passages) {
+      expect(estimateTokens(passage)).toBeLessThanOrEqual(MAX_PASSAGE_TOKENS);
+    }
+  });
+
+  it('char-cuts a whitespace-free oversized single token as a last resort (hardCutToPassageChars)', () => {
+    // A single giant token with NO whitespace and NO sentence boundary (e.g. a base64
+    // blob / minified payload). Paragraph- and sentence-splitting cannot break it, so
+    // the char-bounded hard cut is the only path that keeps each passage under the cap.
+    const giantToken = 'x'.repeat(MAX_PASSAGE_TOKENS * 4 + 200);
+    expect(estimateTokens(giantToken)).toBeGreaterThan(MAX_PASSAGE_TOKENS);
+
+    const passages = splitToPassages(giantToken);
+
+    // It MUST split (one whole-token passage would blow the cap) and every emitted
+    // passage stays at or under the budget — the hard bound, no slack.
+    expect(passages.length).toBeGreaterThan(1);
+    for (const passage of passages) {
+      expect(estimateTokens(passage)).toBeLessThanOrEqual(MAX_PASSAGE_TOKENS);
+    }
   });
 });

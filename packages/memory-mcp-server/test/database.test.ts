@@ -307,4 +307,122 @@ describe('database', () => {
     expect(stats1.total_memories).toBe(1);
     expect(stats2.total_memories).toBe(1);
   });
+
+  describe('canonical schema & stale-DB rebuild (§4)', () => {
+    function columnNames(database: Database.Database, table: string): string[] {
+      const cols = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      return cols.map((c) => c.name);
+    }
+
+    function tableNames(database: Database.Database): string[] {
+      const rows = database.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all() as Array<{
+        name: string;
+      }>;
+      return rows.map((r) => r.name);
+    }
+
+    function schemaVersion(database: Database.Database): string | undefined {
+      const row = database.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as
+        | { value: string }
+        | undefined;
+      return row?.value;
+    }
+
+    it('is born with the segments table, the segment_id column, and version 4', () => {
+      // beforeEach already opened a fresh DB via initDatabase.
+      expect(tableNames(db)).toContain('segments');
+      expect(columnNames(db, 'memories')).toContain('segment_id');
+      expect(schemaVersion(db)).toBe('4');
+    });
+
+    it('drops-and-recreates a stale v3-shaped DB cleanly (no `no such column`, old data gone)', async () => {
+      const staleDir = mkdtempSync(join(tmpdir(), 'memory-stale-'));
+      const stalePath = join(staleDir, 'stale.db');
+
+      // Build a v3-shaped DB by hand: a `memories` table WITHOUT segment_id, a
+      // schema_meta stamped '3', and one pre-change row.
+      const Database = (await import('better-sqlite3')).default;
+      const stale = new Database(stalePath);
+      stale.exec(`
+        CREATE TABLE memories (
+          id TEXT PRIMARY KEY,
+          namespace TEXT NOT NULL DEFAULT 'default',
+          content TEXT NOT NULL,
+          tags TEXT,
+          importance REAL NOT NULL DEFAULT 0.5,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_accessed_at INTEGER NOT NULL,
+          access_count INTEGER NOT NULL DEFAULT 0,
+          is_compacted INTEGER NOT NULL DEFAULT 0,
+          source TEXT,
+          metadata TEXT,
+          consolidated INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
+        INSERT INTO memories (id, namespace, content, created_at, updated_at, last_accessed_at)
+          VALUES ('old-row', 'test', 'stale pre-change row', 1, 1, 1);
+      `);
+      stale.close();
+
+      // Reopen via initDatabase: must self-heal (drop-and-recreate), not crash.
+      const reopened = initDatabase(stalePath, TEST_MODEL);
+      try {
+        expect(tableNames(reopened)).toContain('segments');
+        expect(columnNames(reopened, 'memories')).toContain('segment_id');
+        expect(schemaVersion(reopened)).toBe('4');
+
+        // A `segment_id` SELECT must NOT throw `no such column`.
+        const selectSegment = (): unknown =>
+          reopened.prepare(`SELECT segment_id FROM memories WHERE namespace = ?`).all('test');
+        expect(selectSegment).not.toThrow();
+
+        // The pre-change row was discarded by the rebuild.
+        const oldRow = getMemoriesByIds(reopened, 'test', ['old-row']);
+        expect(oldRow).toHaveLength(0);
+
+        // The rebuilt DB round-trips store/recall (insert + read back).
+        const id = generateId();
+        insertMemory(
+          reopened,
+          { id, namespace: 'test', content: 'fresh after rebuild', tags: undefined, importance: 0.5 },
+          randomEmbedding(),
+        );
+        const back = getMemoriesByIds(reopened, 'test', [id]);
+        expect(back).toHaveLength(1);
+        expect(back[0].content).toBe('fresh after rebuild');
+        expect(back[0].segment_id).toBeNull();
+      } finally {
+        reopened.close();
+        rmSync(staleDir, { recursive: true, force: true });
+      }
+    });
+
+    it('re-opening a current (v4) DB is a no-op (no drop, no throw)', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'memory-reopen-'));
+      const path = join(dir, 'reopen.db');
+
+      const first = initDatabase(path, TEST_MODEL);
+      const id = generateId();
+      insertMemory(
+        first,
+        { id, namespace: 'test', content: 'survives reopen', tags: undefined, importance: 0.5 },
+        randomEmbedding(),
+      );
+      first.close();
+
+      const second = initDatabase(path, TEST_MODEL);
+      try {
+        expect(schemaVersion(second)).toBe('4');
+        // The row from the first open is still present (no drop happened).
+        const back = getMemoriesByIds(second, 'test', [id]);
+        expect(back).toHaveLength(1);
+        expect(back[0].content).toBe('survives reopen');
+      } finally {
+        second.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });

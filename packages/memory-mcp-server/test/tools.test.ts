@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { MemoryEngine } from '../src/engine.js';
 import { validateStoreInput, handleStore, formatStoreResult } from '../src/tools/store.js';
 import { validateRecallInput, handleRecall } from '../src/tools/recall.js';
+import { validateExpandInput, handleExpand } from '../src/tools/expand.js';
 import { validateContextInput, handleContext } from '../src/tools/context.js';
 import { validateForgetInput, handleForget } from '../src/tools/forget.js';
 import { validateInspectInput, handleInspect } from '../src/tools/inspect.js';
@@ -31,6 +32,11 @@ function createMockEngine(overrides: Partial<MemoryEngine> = {}): MemoryEngine {
       newest_memory: '2026-03-11T00:00:00Z',
       storage_bytes: 1048576,
       top_tags: [{ tag: 'preference', count: 42 }],
+    }),
+    expand: vi.fn().mockResolvedValue({
+      segment_id: 'seg-1',
+      passages: ['Source passage one.', 'Source passage two.'],
+      found: true,
     }),
     close: vi.fn(),
     ...overrides,
@@ -181,6 +187,36 @@ describe('memory_recall', () => {
     it('rejects invalid format', () => {
       expect(() => validateRecallInput({ query: 'q', format: 'xml' })).toThrow('format must be one of');
     });
+
+    it("defaults expand to 'auto'", () => {
+      const result = validateRecallInput({ query: 'q' });
+      expect(result.expand).toBe('auto');
+    });
+
+    it("accepts 'none' / 'auto' / 'parent' for expand", () => {
+      expect(validateRecallInput({ query: 'q', expand: 'none' }).expand).toBe('none');
+      expect(validateRecallInput({ query: 'q', expand: 'auto' }).expand).toBe('auto');
+      expect(validateRecallInput({ query: 'q', expand: 'parent' }).expand).toBe('parent');
+    });
+
+    it('rejects an out-of-enum expand value', () => {
+      expect(() => validateRecallInput({ query: 'q', expand: 'all' })).toThrow('expand must be one of');
+      expect(() => validateRecallInput({ query: 'q', expand: 5 })).toThrow('expand must be one of');
+    });
+
+    it('validates max_expand_passages bounds', () => {
+      expect(validateRecallInput({ query: 'q', max_expand_passages: 3 }).max_expand_passages).toBe(3);
+      expect(validateRecallInput({ query: 'q' }).max_expand_passages).toBeUndefined();
+      expect(() => validateRecallInput({ query: 'q', max_expand_passages: 0 })).toThrow(
+        'max_expand_passages must be a positive integer',
+      );
+      expect(() => validateRecallInput({ query: 'q', max_expand_passages: 1.5 })).toThrow(
+        'max_expand_passages must be a positive integer',
+      );
+      expect(() => validateRecallInput({ query: 'q', max_expand_passages: 999 })).toThrow(
+        'max_expand_passages exceeds maximum',
+      );
+    });
   });
 
   describe('handleRecall', () => {
@@ -192,6 +228,8 @@ describe('memory_recall', () => {
         token_budget: undefined,
         tags: undefined,
         format: 'raw',
+        expand: 'auto',
+        max_expand_passages: undefined,
       });
     });
 
@@ -211,6 +249,63 @@ describe('memory_recall', () => {
       const engine = createMockEngine();
       const result = await handleRecall(engine, { query: 'test' });
       expect(result).toBe('Recalled content');
+    });
+
+    it('threads expand and max_expand_passages through to the engine', async () => {
+      const engine = createMockEngine();
+      await handleRecall(engine, { query: 'test', expand: 'parent', max_expand_passages: 3 });
+      expect(engine.recall).toHaveBeenCalledWith({
+        query: 'test',
+        token_budget: undefined,
+        tags: undefined,
+        format: undefined,
+        expand: 'parent',
+        max_expand_passages: 3,
+      });
+    });
+  });
+});
+
+// ── memory_expand validation ─────────────────────────────────────────
+
+describe('memory_expand', () => {
+  describe('validateExpandInput', () => {
+    it('accepts a segment_id', () => {
+      expect(validateExpandInput({ segment_id: 'seg-1' })).toEqual({ segment_id: 'seg-1', query: undefined });
+    });
+
+    it('accepts an optional query', () => {
+      const result = validateExpandInput({ segment_id: 'seg-1', query: 'cap clause' });
+      expect(result.query).toBe('cap clause');
+    });
+
+    it('rejects a missing/empty segment_id', () => {
+      expect(() => validateExpandInput({})).toThrow('segment_id is required');
+      expect(() => validateExpandInput({ segment_id: '  ' })).toThrow('segment_id is required');
+    });
+  });
+
+  describe('handleExpand', () => {
+    it("returns the parent's ranked passages joined", async () => {
+      const engine = createMockEngine({
+        expand: vi.fn().mockResolvedValue({
+          segment_id: 'seg-1',
+          passages: ['Cap clause: $250k.', 'IP clause: reverts.'],
+          found: true,
+        }),
+      });
+      const result = await handleExpand(engine, { segment_id: 'seg-1', query: 'cap' });
+      expect(engine.expand).toHaveBeenCalledWith('seg-1', 'cap');
+      expect(result).toContain('$250k');
+      expect(result).toContain('reverts');
+    });
+
+    it('reports not-found for an unknown segment id', async () => {
+      const engine = createMockEngine({
+        expand: vi.fn().mockResolvedValue({ segment_id: 'nope', passages: [], found: false }),
+      });
+      const result = await handleExpand(engine, { segment_id: 'nope' });
+      expect(result).toContain('No source segment found');
     });
   });
 });

@@ -53,6 +53,7 @@ describe('computeVitality', () => {
       consolidated: 1,
       source: null,
       metadata: null,
+      segment_id: null,
     };
 
     const vitality = computeVitality(mem, now);
@@ -75,6 +76,7 @@ describe('computeVitality', () => {
       consolidated: 1,
       source: null,
       metadata: null,
+      segment_id: null,
     };
 
     const vitality = computeVitality(mem, now);
@@ -96,6 +98,7 @@ describe('computeVitality', () => {
       consolidated: 1,
       source: null,
       metadata: null,
+      segment_id: null,
     };
 
     const highImp = computeVitality({ ...base, importance: 0.9 }, now);
@@ -119,6 +122,7 @@ describe('computeVitality', () => {
       consolidated: 1,
       source: null,
       metadata: null,
+      segment_id: null,
     };
 
     const accessed = computeVitality({ ...base, access_count: 10 }, now);
@@ -143,6 +147,7 @@ describe('computeVitality', () => {
       consolidated: 1,
       source: null,
       metadata: null,
+      segment_id: null,
     };
 
     expect(computeVitality(mem, now)).toBe(0);

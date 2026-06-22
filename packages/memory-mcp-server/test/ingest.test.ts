@@ -25,6 +25,7 @@ vi.mock('../src/llm/client.js', () => ({
 }));
 
 import { initDatabase } from '../src/storage/database.js';
+import type { SegmentRow } from '../src/storage/database.js';
 import { getNamespaceStats, getMemoriesByIds } from '../src/storage/queries.js';
 import { createMemoryEngineFromConfig } from '../src/engine-impl.js';
 import type { MemoryEngine } from '../src/engine.js';
@@ -413,6 +414,220 @@ describe('engine.ingest', () => {
       expect(result.degraded).toBe(true);
       expect(result.failed_chunks).toBeGreaterThanOrEqual(1);
       expect(result.chunks).toBeGreaterThan(1);
+    });
+  });
+
+  describe('segment linking (parent-context retention)', () => {
+    function allSegments(): SegmentRow[] {
+      return db.prepare(`SELECT * FROM segments WHERE namespace = ?`).all(NAMESPACE) as SegmentRow[];
+    }
+
+    it('stores one segment, links every fact to it, and reports segments_created', async () => {
+      setResponses(
+        factsJson([
+          { fact: 'The user is named Alice', importance: 0.9 },
+          { fact: 'Alice prefers dark mode', importance: 0.6 },
+          { fact: 'Alice works on the Iron project', importance: 0.5 },
+        ]),
+      );
+
+      const blob = 'Conversation: Alice said she is Alice, prefers dark mode, works on Iron.';
+      const result = await engine.ingest(blob, { mode: 'document' });
+
+      expect(result.segments_created).toBe(1);
+
+      const segments = allSegments();
+      expect(segments).toHaveLength(1);
+      expect(segments[0].content).toBe(blob);
+      expect(segments[0].fact_count).toBe(3);
+
+      const rows = getMemoriesByIds(db, NAMESPACE, result.memory_ids);
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(row.segment_id).toBe(segments[0].id);
+      }
+    });
+
+    it('multi-chunk: writes a segment per chunk; a boundary-deduped fact stays on its first chunk', async () => {
+      function bigBlob(): string {
+        const line = 'sentence words here '.repeat(8).trim();
+        return Array.from({ length: 250 }, (_, i) => `${i}: ${line}`).join('\n');
+      }
+      // First chunk yields fact A (and a SHARED fact); every later chunk re-emits the
+      // SHARED fact (deduped away) plus its own distinct fact.
+      const responses: string[] = [factsJson([{ fact: 'chunk-0 distinct fact' }, { fact: 'SHARED boundary fact' }])];
+      for (let i = 1; i < 50; i++) {
+        responses.push(factsJson([{ fact: 'SHARED boundary fact' }, { fact: `chunk-${i} distinct fact` }]));
+      }
+      setResponses(...responses);
+
+      const result = await engine.ingest(bigBlob(), { mode: 'document' });
+
+      const segments = allSegments();
+      expect(segments.length).toBeGreaterThanOrEqual(2);
+      expect(result.segments_created).toBe(segments.length);
+
+      // The shared boundary fact must be linked to exactly ONE segment (the first
+      // chunk's), not duplicated across the chunks that re-emitted it.
+      const rows = getMemoriesByIds(db, NAMESPACE, result.memory_ids);
+      const sharedRows = rows.filter((r) => r.content === 'SHARED boundary fact');
+      expect(sharedRows).toHaveLength(1);
+
+      // Its parent is the FIRST chunk's segment (the one whose other fact is chunk-0's).
+      const chunk0Row = rows.find((r) => r.content === 'chunk-0 distinct fact');
+      expect(chunk0Row).toBeDefined();
+      expect(sharedRows[0].segment_id).toBe(chunk0Row?.segment_id);
+    });
+
+    it('backdates the segment created_at to as_of (matches the facts)', async () => {
+      const T_OLD = Date.parse('2023-03-01T00:00:00.000Z');
+      setResponses(factsJson([{ fact: 'Backdated fact', importance: 0.5 }]));
+
+      const result = await engine.ingest('historical blob', { as_of: T_OLD });
+
+      const segments = allSegments();
+      expect(segments).toHaveLength(1);
+      expect(segments[0].created_at).toBe(T_OLD);
+
+      const [row] = getMemoriesByIds(db, NAMESPACE, result.memory_ids);
+      expect(row.created_at).toBe(T_OLD);
+    });
+
+    it('degrade single-blob writes a fact with NULL segment and NO segment row', async () => {
+      disableLLM();
+      const result = await engine.ingest('unstructured content, no LLM', {});
+
+      expect(result.degraded).toBe(true);
+      expect(result.created).toBe(1);
+      expect(result.segments_created).toBeUndefined();
+      expect(allSegments()).toHaveLength(0);
+
+      const [row] = getMemoriesByIds(db, NAMESPACE, result.memory_ids);
+      expect(row.segment_id).toBeNull();
+    });
+
+    it('dry_run writes neither facts nor segments', async () => {
+      setResponses(factsJson([{ fact: 'Preview fact', importance: 0.5 }]));
+      const result = await engine.ingest('blob', { dry_run: true });
+
+      expect(result.facts).toHaveLength(1);
+      expect(result.segments_created).toBeUndefined();
+      expect(allSegments()).toHaveLength(0);
+      expect(getNamespaceStats(db, NAMESPACE).total_memories).toBe(0);
+    });
+
+    describe('merge repoints survivor to the richer parent (A4)', () => {
+      const FACT = 'Distribution cap is $250k';
+
+      // A 1-fact segment then a 5-fact segment (or vice-versa); the survivor must end
+      // up pointing at the 5-fact (richer) segment regardless of ingest order.
+      async function ingestPoorSegment(): Promise<string[]> {
+        setResponses(factsJson([{ fact: FACT, importance: 0.5 }]));
+        const r = await engine.ingest('poor blob', {});
+        return r.memory_ids;
+      }
+
+      async function ingestRichSegment(): Promise<void> {
+        setResponses(
+          factsJson([
+            { fact: FACT, importance: 0.5 }, // the duplicate that merges
+            { fact: 'Rich extra fact 1' },
+            { fact: 'Rich extra fact 2' },
+            { fact: 'Rich extra fact 3' },
+            { fact: 'Rich extra fact 4' },
+          ]),
+        );
+        await engine.ingest('rich blob with many clauses', {});
+      }
+
+      function richSegmentId(): string {
+        const segs = db.prepare(`SELECT * FROM segments WHERE namespace = ?`).all(NAMESPACE) as SegmentRow[];
+        const rich = segs.find((s) => s.fact_count === 5);
+        expect(rich).toBeDefined();
+        return rich?.id ?? '';
+      }
+
+      it('poor-then-rich: survivor adopts the richer (5-fact) parent', async () => {
+        const [survivorId] = await ingestPoorSegment();
+        await ingestRichSegment();
+
+        const [row] = getMemoriesByIds(db, NAMESPACE, [survivorId]);
+        expect(row.segment_id).toBe(richSegmentId());
+      });
+
+      it('rich-then-poor: survivor keeps the richer (5-fact) parent (order-independent)', async () => {
+        await ingestRichSegment();
+        // The rich ingest created the survivor row already; capture it.
+        const richRows = db
+          .prepare(`SELECT id FROM memories WHERE namespace = ? AND content = ?`)
+          .all(NAMESPACE, FACT) as Array<{ id: string }>;
+        expect(richRows).toHaveLength(1);
+        const survivorId = richRows[0].id;
+        const richId = richSegmentId();
+
+        // Now a poorer (1-fact) ingest of the same fact merges — it must NOT downgrade.
+        setResponses(factsJson([{ fact: FACT, importance: 0.5 }]));
+        await engine.ingest('poor blob', {});
+
+        const [row] = getMemoriesByIds(db, NAMESPACE, [survivorId]);
+        expect(row.segment_id).toBe(richId);
+      });
+
+      function survivorRowId(): string {
+        const rows = db
+          .prepare(`SELECT id FROM memories WHERE namespace = ? AND content = ?`)
+          .all(NAMESPACE, FACT) as Array<{ id: string }>;
+        expect(rows).toHaveLength(1);
+        return rows[0].id;
+      }
+
+      it('equal fact_count tie keeps the ORIGINAL parent (does not repoint to the incoming)', async () => {
+        // First ingest: a 2-fact segment carrying FACT (fact_count = 2).
+        setResponses(factsJson([{ fact: FACT, importance: 0.5 }, { fact: 'First-segment extra fact' }]));
+        await engine.ingest('first blob with two facts', {});
+        const survivorId = survivorRowId();
+        const firstSegmentId = getMemoriesByIds(db, NAMESPACE, [survivorId])[0].segment_id;
+        expect(firstSegmentId).not.toBeNull();
+
+        // Second ingest from a DIFFERENT segment, also fact_count = 2, re-emitting FACT
+        // (exact-dedup merge) → a TIE on fact_count.
+        setResponses(factsJson([{ fact: FACT, importance: 0.5 }, { fact: 'Second-segment extra fact' }]));
+        const second = await engine.ingest('second blob with two facts', {});
+        expect(second.merged).toBe(1);
+
+        // Sanity: two distinct segments exist, both with fact_count = 2 (genuine tie).
+        const segs = db.prepare(`SELECT * FROM segments WHERE namespace = ?`).all(NAMESPACE) as SegmentRow[];
+        expect(segs).toHaveLength(2);
+        expect(segs.every((s) => s.fact_count === 2)).toBe(true);
+        const incomingSegmentId = segs.find((s) => s.id !== firstSegmentId)?.id;
+        expect(incomingSegmentId).toBeDefined();
+
+        // Tie → survivor keeps its ORIGINAL parent, NOT the incoming one (read back the row).
+        const [row] = getMemoriesByIds(db, NAMESPACE, [survivorId]);
+        expect(row.segment_id).toBe(firstSegmentId);
+        expect(row.segment_id).not.toBe(incomingSegmentId);
+      });
+
+      it('a NULL-parent (store-path) survivor adopts the incoming segment on merge', async () => {
+        // store() never sets a segment_id → the survivor starts with segment_id = NULL.
+        const stored = await engine.store(FACT, { importance: 0.5 });
+        const survivorId = stored.id;
+        expect(getMemoriesByIds(db, NAMESPACE, [survivorId])[0].segment_id).toBeNull();
+
+        // An ingest re-emitting FACT writes a segment and merges into the store-path row.
+        setResponses(factsJson([{ fact: FACT, importance: 0.5 }, { fact: 'Incoming extra fact' }]));
+        const result = await engine.ingest('blob carrying a segment', {});
+        expect(result.merged).toBe(1);
+
+        const incomingSegmentId = (
+          db.prepare(`SELECT * FROM segments WHERE namespace = ?`).all(NAMESPACE) as SegmentRow[]
+        ).find((s) => s.fact_count === 2)?.id;
+        expect(incomingSegmentId).toBeDefined();
+
+        // Was NULL, now repointed to the incoming segment (read back from the DB).
+        const [row] = getMemoriesByIds(db, NAMESPACE, [survivorId]);
+        expect(row.segment_id).toBe(incomingSegmentId);
+      });
     });
   });
 

@@ -19,6 +19,7 @@ function makeScoredMemory(id: string, content: string = 'test'): ScoredMemory {
     consolidated: 1,
     source: null,
     metadata: null,
+    segment_id: null,
     fusionScore: 0.5,
     compositeScore: 0.5,
   };

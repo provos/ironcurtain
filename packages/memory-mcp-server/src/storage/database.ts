@@ -17,6 +17,23 @@ export interface MemoryRow {
   consolidated: number;
   source: string | null;
   metadata: string | null;
+  /** FK to the source segment a `memory_ingest` fact was extracted from. NULL for store-path / degrade-path rows. */
+  segment_id: string | null;
+}
+
+/**
+ * A source chunk `memory_ingest` extracted facts from. Off the retrieval index by
+ * construction: never embedded, never in `vec_memories`/`memories_fts`. Fetched
+ * only by primary key during recall-time re-expansion ("index fine, return coarse").
+ */
+export interface SegmentRow {
+  id: string;
+  namespace: string;
+  content: string;
+  source: string | null;
+  mode: string | null;
+  created_at: number;
+  fact_count: number;
 }
 
 export interface VectorSearchResult extends MemoryRow {
@@ -27,7 +44,7 @@ export interface FtsSearchResult extends MemoryRow {
   bm25_score: number;
 }
 
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 const EMBEDDING_DIMENSIONS = 768;
 
 /**
@@ -43,14 +60,58 @@ export function initDatabase(dbPath: string, embeddingModel: string): Database.D
 
   sqliteVec.load(db);
 
+  // Self-heal a stale on-disk schema BEFORE createSchema runs. A pre-`'4'` DB has an
+  // old `memories` table without `segment_id`; `CREATE TABLE IF NOT EXISTS` would no-op
+  // on it and the first `segment_id` access would throw `no such column`. Under the
+  // back-compat-free directive we drop-and-recreate (deliberately discarding old data).
+  dropStaleSchema(db);
+
   createSchema(db);
   ensureSchemaMeta(db, embeddingModel);
 
   return db;
 }
 
+/**
+ * Read the on-disk `schema_version` stamp (defensively — the table may not exist on a
+ * fresh DB) and, when it is PRESENT and OLDER than SCHEMA_VERSION, drop the schema so
+ * `createSchema` rebuilds it from scratch. A fresh DB (no stamp) and a current DB
+ * (stamp === SCHEMA_VERSION) both skip the drop.
+ */
+function dropStaleSchema(db: Database.Database): void {
+  const hasSchemaMeta = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'`).get();
+  if (!hasSchemaMeta) return; // fresh DB — nothing to drop
+
+  const stamp = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as
+    | { value: string }
+    | undefined;
+  if (!stamp || stamp.value === SCHEMA_VERSION) return; // fresh or current — keep
+
+  // Stale stamp present: rebuild. Drop the virtual tables first (their shadow tables
+  // depend on nothing else), then the base tables.
+  db.exec(`
+    DROP TABLE IF EXISTS vec_memories;
+    DROP TABLE IF EXISTS memories_fts;
+    DROP TABLE IF EXISTS memories;
+    DROP TABLE IF EXISTS segments;
+    DROP TABLE IF EXISTS schema_meta;
+  `);
+}
+
 function createSchema(db: Database.Database): void {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS segments (
+      id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      namespace   TEXT NOT NULL DEFAULT 'default',
+      content     TEXT NOT NULL,
+      source      TEXT,
+      mode        TEXT,
+      created_at  INTEGER NOT NULL,
+      fact_count  INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_segments_namespace ON segments(namespace);
+
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       namespace TEXT NOT NULL DEFAULT 'default',
@@ -64,7 +125,8 @@ function createSchema(db: Database.Database): void {
       is_compacted INTEGER NOT NULL DEFAULT 0,
       source TEXT,
       metadata TEXT,
-      consolidated INTEGER NOT NULL DEFAULT 1
+      consolidated INTEGER NOT NULL DEFAULT 1,
+      segment_id TEXT REFERENCES segments(id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
@@ -73,6 +135,8 @@ function createSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_memories_accessed ON memories(namespace, last_accessed_at);
     CREATE INDEX IF NOT EXISTS idx_memories_unconsolidated
       ON memories(namespace, created_at) WHERE consolidated = 0;
+    CREATE INDEX IF NOT EXISTS idx_memories_segment
+      ON memories(segment_id) WHERE segment_id IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS schema_meta (
       key TEXT PRIMARY KEY,

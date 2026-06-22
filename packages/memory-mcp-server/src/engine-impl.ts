@@ -14,6 +14,7 @@ import type {
   InspectOptions,
   Memory,
   MemoryStats,
+  ExpandResult,
 } from './types.js';
 import type { MemoryConfig } from './config.js';
 import type { MemoryRow } from './storage/database.js';
@@ -21,8 +22,11 @@ import { initDatabase } from './storage/database.js';
 import {
   generateId,
   insertMemory,
+  insertSegment,
+  getSegmentsByIds,
   updateMemoryContent,
   updateMemoryTimestampsOnMerge,
+  updateMemorySegmentIfRicher,
   vectorSearch,
   deleteMemories,
   findMemoriesByTags,
@@ -34,15 +38,18 @@ import {
   updateAccessStats,
 } from './storage/queries.js';
 import { maybeRunMaintenance, runMaintenance } from './storage/maintenance.js';
-import { embed, embedQuery } from './embedding/embedder.js';
+import { embed, embedQuery, cosineSimilarity } from './embedding/embedder.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
 import { estimateTokens } from './retrieval/scoring.js';
 import { EXACT_DEDUP_DISTANCE } from './storage/constants.js';
 import { MAX_CONTENT_LENGTH } from './tools/validation.js';
-import { chunkBlob, extractFacts } from './storage/extraction.js';
+import { chunkBlob, extractFacts, splitToPassages } from './storage/extraction.js';
 import type { ExtractedFact, IngestMode } from './storage/extraction.js';
 import { parseTags } from './utils/tags.js';
 import type Database from 'better-sqlite3';
+
+/** Cap on whole-segment passages returned by `memory_expand` when no query is given. */
+const MAX_EXPAND_PASSAGES_NO_QUERY = 3;
 
 // ---------- Row <-> Memory conversion ----------
 
@@ -71,6 +78,7 @@ function rowToMemory(row: MemoryRow): Memory {
       ((safeParseJson(row.metadata) as Record<string, unknown> | null)?.compacted_from as string[] | undefined) ?? null,
     source: row.source,
     metadata: safeParseJson(row.metadata) as Record<string, unknown> | null,
+    segment_id: row.segment_id,
   };
 }
 
@@ -104,6 +112,11 @@ async function storeImmediate(
     if (opts.createdAt !== undefined) {
       updateMemoryTimestampsOnMerge(db, namespace, exactMatch.id, opts.createdAt);
     }
+    // Repoint the survivor to the RICHER parent (A4). Only runs when an ingest
+    // segmentId is present; store-path merges (no segmentId) are unchanged.
+    if (opts.segmentId !== undefined) {
+      updateMemorySegmentIfRicher(db, namespace, exactMatch.id, opts.segmentId);
+    }
     return { id: exactMatch.id, action: 'merged_duplicate' };
   }
 
@@ -120,6 +133,7 @@ async function storeImmediate(
       source: opts.source,
       consolidated: false,
       createdAt: opts.createdAt,
+      segmentId: opts.segmentId,
     },
     embedding,
   );
@@ -132,18 +146,26 @@ async function storeImmediate(
 
 const DEFAULT_SEED_IMPORTANCE = 0.5;
 
+/** One source chunk and the facts extracted from it (the chunk→fact mapping). */
+interface ChunkGroup {
+  chunkText: string;
+  facts: ExtractedFact[];
+}
+
 /**
- * Extract facts from each chunk and union them, dropping exact-`fact`-string
- * duplicates across windows (first occurrence keeps its importance). Tracks how
- * many chunks returned null/[] for diagnostics (A3).
+ * Extract facts per chunk, KEEPING the chunk→fact mapping so each fact can be
+ * linked to its source segment (§6.1). Exact-`fact`-string duplicates across
+ * windows are still dropped, but the dedup keeps the FIRST occurrence — so a fact
+ * deduped away in a later chunk stays attached to its first chunk's group (no
+ * second parent link). Tracks how many chunks returned null for diagnostics (A3).
  */
 async function extractAllFacts(
   config: MemoryConfig,
   chunks: string[],
   mode: IngestMode,
-): Promise<{ facts: ExtractedFact[]; totalChunks: number; failedChunks: number }> {
+): Promise<{ groups: ChunkGroup[]; totalChunks: number; failedChunks: number }> {
   const seen = new Set<string>();
-  const facts: ExtractedFact[] = [];
+  const groups: ChunkGroup[] = [];
   let failedChunks = 0;
 
   for (const chunk of chunks) {
@@ -154,14 +176,21 @@ async function extractAllFacts(
       failedChunks += 1;
       continue;
     }
+    const ownedFacts: ExtractedFact[] = [];
     for (const fact of chunkFacts) {
-      if (seen.has(fact.fact)) continue;
+      if (seen.has(fact.fact)) continue; // already owned by an earlier chunk's group
       seen.add(fact.fact);
-      facts.push(fact);
+      ownedFacts.push(fact);
     }
+    groups.push({ chunkText: chunk, facts: ownedFacts });
   }
 
-  return { facts, totalChunks: chunks.length, failedChunks };
+  return { groups, totalChunks: chunks.length, failedChunks };
+}
+
+/** Flatten the per-chunk groups back to a single fact list (for diagnostics/preview). */
+function flattenGroups(groups: ChunkGroup[]): ExtractedFact[] {
+  return groups.flatMap((g) => g.facts);
 }
 
 /**
@@ -180,12 +209,13 @@ export async function ingestBlob(
   const createdAt = opts.as_of;
   const dryRun = opts.dry_run ?? false;
 
-  const store = (factContent: string, importance: number): Promise<StoreResult> =>
+  const store = (factContent: string, importance: number, segmentId?: string): Promise<StoreResult> =>
     storeImmediate(db, config, factContent, {
       tags: opts.tags,
       importance,
       source: opts.source,
       createdAt,
+      segmentId,
     });
 
   // Shared shape for the "nothing written" returns (clean-empty and skip).
@@ -198,7 +228,8 @@ export async function ingestBlob(
   });
 
   const chunks = chunkBlob(content);
-  const { facts, totalChunks, failedChunks } = await extractAllFacts(config, chunks, mode);
+  const { groups, totalChunks, failedChunks } = await extractAllFacts(config, chunks, mode);
+  const facts = flattenGroups(groups);
   const multiChunk = totalChunks > 1;
 
   // ---- Empty fact union ----
@@ -248,21 +279,85 @@ export async function ingestBlob(
     return { created: 0, merged: 0, memory_ids: [], facts, ...diagnostics };
   }
 
-  // ---- Write each fact through the existing store pipeline ----
+  // ---- Write one segment per non-empty chunk-group, then link its facts ----
   let created = 0;
   let merged = 0;
+  let segmentsCreated = 0;
   const memoryIds: string[] = [];
-  for (const fact of facts) {
-    const result = await store(fact.fact, fact.importance ?? seedImportance);
-    memoryIds.push(result.id);
-    if (result.action === 'created') {
-      created += 1;
-    } else {
-      merged += 1;
+  for (const group of groups) {
+    if (group.facts.length === 0) continue;
+
+    // One source segment per chunk that produced ≥1 fact. createdAt flows to both
+    // the segment and its facts so a segment's created_at matches its facts'.
+    const segmentId = insertSegment(db, {
+      namespace: config.namespace,
+      content: group.chunkText,
+      source: opts.source,
+      mode,
+      createdAt,
+      factCount: group.facts.length,
+    });
+    segmentsCreated += 1;
+
+    for (const fact of group.facts) {
+      const result = await store(fact.fact, fact.importance ?? seedImportance, segmentId);
+      memoryIds.push(result.id);
+      if (result.action === 'created') {
+        created += 1;
+      } else {
+        merged += 1;
+      }
     }
   }
 
-  return { created, merged, memory_ids: memoryIds, facts, ...diagnostics };
+  return {
+    created,
+    merged,
+    memory_ids: memoryIds,
+    facts,
+    ...diagnostics,
+    ...(segmentsCreated > 0 ? { segments_created: segmentsCreated } : {}),
+  };
+}
+
+// ---------- Expand (on-demand parent fetch) ----------
+
+/**
+ * Fetch a source segment by id and return its query-ranked passages (§9.4). With a
+ * `query`, passages are ranked by cosine similarity to the query embedding; without
+ * one, the first few passages of the segment are returned (whole-segment fetch). A
+ * missing/forgotten segment returns `{ found: false, passages: [] }`.
+ */
+async function expandSegment(
+  db: Database.Database,
+  config: MemoryConfig,
+  segmentId: string,
+  query?: string,
+): Promise<ExpandResult> {
+  const segments = getSegmentsByIds(db, config.namespace, [segmentId]);
+  if (segments.length === 0) {
+    return { segment_id: segmentId, passages: [], found: false };
+  }
+  const segment = segments[0];
+
+  const passages = splitToPassages(segment.content);
+  if (passages.length === 0) {
+    return { segment_id: segmentId, passages: [], found: true };
+  }
+
+  if (query === undefined) {
+    return { segment_id: segmentId, passages: passages.slice(0, MAX_EXPAND_PASSAGES_NO_QUERY), found: true };
+  }
+
+  const queryEmbedding = await embedQuery(query, config);
+  const scored: Array<{ passage: string; sim: number }> = [];
+  for (const passage of passages) {
+    const passageEmbedding = await embed(passage, config);
+    scored.push({ passage, sim: cosineSimilarity(passageEmbedding, queryEmbedding) });
+  }
+  scored.sort((a, b) => b.sim - a.sim);
+
+  return { segment_id: segmentId, passages: scored.map((s) => s.passage), found: true };
 }
 
 // ---------- Context ----------
@@ -280,6 +375,9 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
       query: opts.task,
       token_budget: Math.floor(totalBudget * CONTEXT_TASK_BUDGET_FRACTION),
       format: 'summary',
+      // The no-human-in-loop briefing path is where missing a clause is most costly,
+      // so it gets the same auto-expansion as a default recall (§5.2).
+      expand: 'auto',
     });
     if (taskResult.memoryIds.length > 0) {
       sections.push(`## Task-Relevant Context\n\n${taskResult.text}`);
@@ -457,12 +555,16 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
         token_budget: opts.token_budget ?? config.defaultTokenBudget,
         tags: opts.tags,
         format: opts.format ?? 'summary',
+        expand: opts.expand ?? 'auto',
+        max_expand_passages: opts.max_expand_passages,
       });
 
       return {
         content: result.text,
         memories_used: result.selectedCount,
         total_matches: result.totalCandidates,
+        expanded: result.expanded,
+        expanded_segment_ids: result.expandedSegmentIds,
       };
     },
 
@@ -476,6 +578,10 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
 
     inspect(opts: InspectOptions): Promise<MemoryStats | Memory[] | string> {
       return Promise.resolve(inspectMemories(db, config, opts));
+    },
+
+    async expand(segmentId: string, query?: string): Promise<ExpandResult> {
+      return expandSegment(db, config, segmentId, query);
     },
 
     close(): void {
@@ -494,6 +600,7 @@ export interface EngineModules {
   context(opts: ContextOptions): Promise<string>;
   forget(opts: ForgetOptions): Promise<ForgetResult>;
   inspect(opts: InspectOptions): Promise<MemoryStats | Memory[] | string>;
+  expand(segmentId: string, query?: string): Promise<ExpandResult>;
   close(): void;
 }
 
@@ -505,6 +612,7 @@ export function createMemoryEngine(modules: EngineModules): MemoryEngine {
     context: (...args) => modules.context(...args),
     forget: (...args) => modules.forget(...args),
     inspect: (...args) => modules.inspect(...args),
+    expand: (...args) => modules.expand(...args),
     close: () => modules.close(),
   };
 }

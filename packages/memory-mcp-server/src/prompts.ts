@@ -159,7 +159,15 @@ export const TOOL_DESCRIPTIONS = {
     'Recall memories relevant to a query. Returns a pre-summarized context block optimized ' +
     'for your context window. Uses hybrid semantic + keyword search. Use format="answer" to get ' +
     'a direct answer to a question from stored memories. Use this when you need ' +
-    'context from prior sessions or before making recommendations that might conflict with stored preferences.',
+    'context from prior sessions or before making recommendations that might conflict with stored preferences. ' +
+    "`expand` defaults to 'auto', which returns the relevant source passage when several matched facts come " +
+    "from the same source (e.g. a contract's clauses); use 'none' for strictly pinpoint facts, or 'parent' to " +
+    'force the source passage for every match.',
+
+  memory_expand:
+    'Fetch the source passage(s) a recalled fact was extracted from, given a segment_id surfaced by a prior ' +
+    'memory_recall (in expanded_segment_ids or a raw result). Pass a query to get the most relevant passage ' +
+    'of that source; omit it to get the whole source. Use this to read the detail behind a thin headline fact.',
 
   memory_context:
     'Get a session briefing of relevant memories. Call this FIRST at the beginning of every ' +

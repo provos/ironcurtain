@@ -9,6 +9,7 @@ export const MAX_TAGS = 50;
 export const MAX_TAG_LENGTH = 100;
 export const MAX_IDS = 100;
 export const MAX_LIMIT = 1000;
+export const MAX_EXPAND_PASSAGES = 20;
 
 /**
  * Validate and return a tags array, or undefined if not provided.
@@ -51,6 +52,20 @@ export function validateTokenBudget(value: unknown): number | undefined {
   }
   if (value > MAX_TOKEN_BUDGET) {
     throw new Error(`token_budget exceeds maximum of ${MAX_TOKEN_BUDGET}`);
+  }
+  return value;
+}
+
+/**
+ * Validate and return `max_expand_passages`, or undefined if not provided.
+ */
+export function validateMaxExpandPassages(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new Error('max_expand_passages must be a positive integer');
+  }
+  if (value > MAX_EXPAND_PASSAGES) {
+    throw new Error(`max_expand_passages exceeds maximum of ${MAX_EXPAND_PASSAGES}`);
   }
   return value;
 }

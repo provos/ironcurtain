@@ -11,6 +11,7 @@ function createMockEngine(ingestResult: IngestResult): MemoryEngine {
     context: vi.fn(),
     forget: vi.fn(),
     inspect: vi.fn(),
+    expand: vi.fn(),
     close: vi.fn(),
   };
 }

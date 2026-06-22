@@ -30,6 +30,11 @@ function createMockEngine(): MemoryEngine {
       storage_bytes: 4096,
       top_tags: [],
     }),
+    expand: vi.fn().mockResolvedValue({
+      segment_id: 'seg-1',
+      passages: ['Source passage one.', 'Source passage two.'],
+      found: true,
+    }),
     close: vi.fn(),
   };
 }
@@ -46,7 +51,7 @@ async function createConnectedClient(engine: MemoryEngine) {
 }
 
 describe('MCP server', () => {
-  it('lists all 6 memory tools', async () => {
+  it('lists all 7 memory tools', async () => {
     const engine = createMockEngine();
     const { client } = await createConnectedClient(engine);
 
@@ -55,6 +60,7 @@ describe('MCP server', () => {
 
     expect(toolNames).toEqual([
       'memory_context',
+      'memory_expand',
       'memory_forget',
       'memory_ingest',
       'memory_inspect',
@@ -149,6 +155,8 @@ describe('MCP server', () => {
       token_budget: undefined,
       tags: undefined,
       format: undefined,
+      expand: 'auto',
+      max_expand_passages: undefined,
     });
     expect(result.content).toEqual([{ type: 'text', text: 'test recall' }]);
   });

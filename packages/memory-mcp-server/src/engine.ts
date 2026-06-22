@@ -15,6 +15,7 @@ import type {
   InspectOptions,
   Memory,
   MemoryStats,
+  ExpandResult,
 } from './types.js';
 
 export interface StoreOptions {
@@ -27,6 +28,11 @@ export interface StoreOptions {
    * value at insert time (the `as_of` backdate mechanism). Absent ⇒ Date.now().
    */
   createdAt?: number;
+  /**
+   * FK to the source segment. Set ONLY by `ingest`; the LLM-free `store` path
+   * never sets it, so its rows keep `segment_id = NULL`.
+   */
+  segmentId?: string;
 }
 
 export interface IngestOptions {
@@ -49,5 +55,11 @@ export interface MemoryEngine {
   context(opts: ContextOptions): Promise<string>;
   forget(opts: ForgetOptions): Promise<ForgetResult>;
   inspect(opts: InspectOptions): Promise<MemoryStats | Memory[] | string>;
+  /**
+   * Fetch a source segment's query-ranked passages on demand (the agentic
+   * "I got a headline, give me THIS fact's parent" follow-up, §9.4). With no
+   * `query`, returns the whole segment's passages up to a cap.
+   */
+  expand(segmentId: string, query?: string): Promise<ExpandResult>;
   close(): void;
 }

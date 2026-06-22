@@ -1,6 +1,6 @@
 /**
  * MCP server definition and tool registration.
- * Registers all 5 memory tools with their input schemas from the design spec.
+ * Registers all 7 memory tools with their input schemas from the design spec.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -10,6 +10,7 @@ import { FORMAT_MODES } from './retrieval/formatting.js';
 import { handleStore } from './tools/store.js';
 import { handleIngest } from './tools/ingest.js';
 import { handleRecall } from './tools/recall.js';
+import { handleExpand } from './tools/expand.js';
 import { handleContext } from './tools/context.js';
 import { handleForget } from './tools/forget.js';
 import { handleInspect } from './tools/inspect.js';
@@ -132,7 +133,7 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
         .int()
         .positive()
         .optional()
-        .describe('Maximum approximate tokens in the response. Default: 500.'),
+        .describe('Maximum approximate tokens in the response. Default: 800.'),
       tags: z.array(z.string()).optional().describe('Only search memories with ALL of these tags.'),
       format: z
         .enum(FORMAT_MODES)
@@ -140,10 +141,48 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
         .describe(
           "'summary': compressed narrative (default). 'list': bullet points. 'raw': full JSON objects. 'answer': directly answer the query from memories (requires LLM, falls back to list).",
         ),
+      expand: z
+        .enum(['none', 'auto', 'parent'])
+        .optional()
+        .describe(
+          "'auto' (default): return the relevant source passage when several matched facts share a source " +
+            "(e.g. a contract's clauses). 'none': strictly pinpoint facts. 'parent': force the source passage for every match.",
+        ),
+      max_expand_passages: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Maximum source passages to return across the whole result. Default: 2.'),
     },
     async (args) => {
       try {
         const text = await handleRecall(engine, args);
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: formatError(err) }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.tool(
+    'memory_expand',
+    TOOL_DESCRIPTIONS.memory_expand,
+    {
+      segment_id: z
+        .string()
+        .describe("A source segment id from a prior recall (expanded_segment_ids or a raw result's segment_id)."),
+      query: z
+        .string()
+        .optional()
+        .describe('Optional query to rank the source passages by relevance. Omit to get the whole source.'),
+    },
+    async (args) => {
+      try {
+        const text = await handleExpand(engine, args);
         return { content: [{ type: 'text' as const, text }] };
       } catch (err) {
         return {

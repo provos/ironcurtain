@@ -1,4 +1,5 @@
 import type { ScoredMemory } from './scoring.js';
+import type { DisplayUnit } from './expansion.js';
 import type { MemoryConfig } from '../config.js';
 import { llmComplete } from '../llm/client.js';
 import { clusterByEmbeddingSimilarity } from './dedup.js';
@@ -8,10 +9,13 @@ export const FORMAT_MODES = ['summary', 'list', 'raw', 'answer'] as const;
 export type FormatMode = (typeof FORMAT_MODES)[number];
 
 /**
- * Format scored memories according to the requested format mode.
+ * Format display units according to the requested format mode. Units may be facts
+ * verbatim or expanded parent passages; an expanded unit's `content` is already the
+ * chosen passage text, while it keeps the best fact's date/importance so the
+ * `[date] … (importance:)` rendering is unchanged.
  */
 export async function formatMemories(
-  memories: ScoredMemory[],
+  memories: DisplayUnit[],
   embeddings: Map<string, Float32Array>,
   query: string,
   tokenBudget: number,
@@ -28,6 +32,24 @@ export async function formatMemories(
     case 'raw':
       return formatAsRaw(memories);
   }
+}
+
+function formatAsRaw(memories: DisplayUnit[]): string {
+  const items = memories.map((m) => ({
+    id: m.id,
+    content: m.content,
+    tags: parseTags(m.tags),
+    importance: m.importance,
+    created_at: m.created_at,
+    updated_at: m.updated_at,
+    last_accessed_at: m.last_accessed_at,
+    access_count: m.access_count,
+    is_compacted: m.is_compacted === 1,
+    source: m.source,
+    segment_id: m.segment_id,
+    expanded: m.expanded,
+  }));
+  return JSON.stringify(items, null, 2);
 }
 
 async function formatAsSummary(
@@ -125,20 +147,4 @@ function formatAsList(memories: ScoredMemory[]): string {
   });
 
   return lines.join('\n');
-}
-
-function formatAsRaw(memories: ScoredMemory[]): string {
-  const items = memories.map((m) => ({
-    id: m.id,
-    content: m.content,
-    tags: parseTags(m.tags),
-    importance: m.importance,
-    created_at: m.created_at,
-    updated_at: m.updated_at,
-    last_accessed_at: m.last_accessed_at,
-    access_count: m.access_count,
-    is_compacted: m.is_compacted === 1,
-    source: m.source,
-  }));
-  return JSON.stringify(items, null, 2);
 }

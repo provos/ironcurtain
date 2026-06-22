@@ -196,9 +196,12 @@ export function filterByRerankerScore(ranked: ScoredMemory[]): ScoredMemory[] {
 /**
  * Greedily select memories by score until the token budget is filled.
  * Uses skip (not break) so smaller memories further down can still fit.
+ *
+ * Generic over `ScoredMemory` so it preserves the caller's subtype (e.g. the
+ * recall pipeline's expanded `DisplayUnit`s). The packing logic is unchanged.
  */
-export function packToBudget(ranked: ScoredMemory[], budget: number): ScoredMemory[] {
-  const selected: ScoredMemory[] = [];
+export function packToBudget<T extends ScoredMemory>(ranked: T[], budget: number): T[] {
+  const selected: T[] = [];
   let usedTokens = 0;
 
   for (const mem of ranked) {

@@ -17,7 +17,12 @@ export interface Memory {
   compacted_from: string[] | null;
   source: string | null;
   metadata: Record<string, unknown> | null;
+  /** FK to the source segment a `memory_ingest` fact was extracted from. NULL otherwise. */
+  segment_id: string | null;
 }
+
+/** A recall-time return unit: either a fact verbatim or an expanded parent passage. */
+export type ExpandMode = 'none' | 'auto' | 'parent';
 
 export interface StoreResult {
   id: string;
@@ -48,6 +53,9 @@ export interface IngestResult {
   partial?: boolean;
   /** True when on_extraction_failure='skip' wrote nothing. */
   skipped?: boolean;
+
+  /** Count of `segments` rows written (omitted when 0 / dry_run). */
+  segments_created?: number;
 }
 
 export interface RecallOptions {
@@ -55,12 +63,34 @@ export interface RecallOptions {
   token_budget?: number;
   tags?: string[];
   format?: import('./retrieval/formatting.js').FormatMode;
+  /**
+   * Parent re-expansion mode (§5.2), default `'auto'`:
+   *   - `'auto'`   — expand a parent when ≥2 kept facts share it (the shared-parent signature);
+   *   - `'none'`   — force off (byte-for-byte today's facts-only behavior);
+   *   - `'parent'` — force-expand the parent of every kept fact that has one.
+   */
+  expand?: ExpandMode;
+  /** Cap on returned expanded passages across the whole result (§5.4). Default 2. */
+  max_expand_passages?: number;
 }
 
 export interface RecallResult {
   content: string;
   memories_used: number;
   total_matches: number;
+  /** True when any returned unit was an expanded parent passage (every format). */
+  expanded?: boolean;
+  /** The segment_ids that were expanded (every format; omitted/[] when none). */
+  expanded_segment_ids?: string[];
+}
+
+/** Result of `memory_expand`: the parent segment's query-ranked passages. */
+export interface ExpandResult {
+  segment_id: string;
+  /** Query-ranked passages of the parent (or whole-segment passages when no query). */
+  passages: string[];
+  /** False when the segment_id has no segment row (forgotten/never-ingested parent). */
+  found: boolean;
 }
 
 export interface ContextOptions {

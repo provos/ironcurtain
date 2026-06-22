@@ -26,6 +26,7 @@ function makeMemory(overrides: Partial<MemoryRow> = {}): MemoryRow {
     consolidated: overrides.consolidated ?? 1,
     source: overrides.source ?? null,
     metadata: overrides.metadata ?? null,
+    segment_id: overrides.segment_id ?? null,
   };
 }
 

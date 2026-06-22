@@ -43,6 +43,13 @@ const MAX_INGEST_CHUNK_CHARS = MAX_INGEST_CHUNK_TOKENS * 4;
 /** Fraction of a window's lines re-fed at the head of the next window (A5). */
 const CHUNK_OVERLAP_FRACTION = 0.12;
 
+/**
+ * Target token size for a recall-time passage (§5.3.1). A passage is the *returned*
+ * unit on auto-expansion: small enough to fit the recall budget (default 800) with
+ * room for supporting facts, large enough to carry a coherent clause.
+ */
+export const MAX_PASSAGE_TOKENS = 350;
+
 // ---------- Prompts ----------
 
 const SHARED_RULES =
@@ -247,6 +254,90 @@ export function chunkBlob(blob: string): string[] {
   }
 
   return chunks.slice(0, MAX_INGEST_CHUNKS);
+}
+
+// ---------- Passage splitting (recall-time return shaping) ----------
+
+/**
+ * Split a segment into COHERENT passages of at most ~MAX_PASSAGE_TOKENS, on
+ * meaning-preserving boundaries (paragraph breaks / conversation turns first,
+ * sentence boundaries as a fallback). Pure & unit-testable; used at recall time
+ * (§5.3.1) to return a query-relevant slice of an expanded parent rather than the
+ * whole 6000-token chunk.
+ *
+ * Greedy accumulation: pack atomic units (paragraphs, then sentences for an
+ * oversized paragraph) into a passage until the next unit would overflow the token
+ * cap, then start a new passage. An empty/whitespace-only input yields `[]`.
+ */
+export function splitToPassages(text: string): string[] {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return [];
+
+  const units = toAtomicUnits(trimmed);
+  return packUnitsToPassages(units);
+}
+
+/**
+ * Break text into atomic units no larger than the passage cap: paragraph/turn
+ * blocks first, splitting any block still over the cap into sentences (and, as a
+ * last resort for a giant sentence, a char-bounded cut so a unit never exceeds the
+ * cap).
+ */
+function toAtomicUnits(text: string): string[] {
+  const blocks = text
+    .split(/\n\s*\n+/)
+    .map((b) => b.trim())
+    .filter((b) => b.length > 0);
+  const units: string[] = [];
+  for (const block of blocks) {
+    if (estimateTokens(block) <= MAX_PASSAGE_TOKENS) {
+      units.push(block);
+      continue;
+    }
+    for (const sentence of splitIntoSentences(block)) {
+      if (estimateTokens(sentence) <= MAX_PASSAGE_TOKENS) {
+        units.push(sentence);
+      } else {
+        units.push(...hardCutToPassageChars(sentence));
+      }
+    }
+  }
+  return units;
+}
+
+/** Split a block into sentences on `.`/`!`/`?` + whitespace, keeping the punctuation. */
+function splitIntoSentences(block: string): string[] {
+  return block
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** Last-resort char-bounded cut for a single oversized sentence (no usable boundary). */
+function hardCutToPassageChars(text: string): string[] {
+  const maxChars = MAX_PASSAGE_TOKENS * 4;
+  const pieces: string[] = [];
+  for (let i = 0; i < text.length; i += maxChars) {
+    pieces.push(text.slice(i, i + maxChars).trim());
+  }
+  return pieces.filter((p) => p.length > 0);
+}
+
+/** Greedily accumulate atomic units into passages bounded by the token cap. */
+function packUnitsToPassages(units: string[]): string[] {
+  const passages: string[] = [];
+  let current = '';
+  for (const unit of units) {
+    const candidate = current.length === 0 ? unit : `${current}\n\n${unit}`;
+    if (current.length > 0 && estimateTokens(candidate) > MAX_PASSAGE_TOKENS) {
+      passages.push(current);
+      current = unit;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) passages.push(current);
+  return passages;
 }
 
 // ---------- LLM call ----------
