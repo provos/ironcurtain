@@ -48,8 +48,11 @@ const CHUNK_OVERLAP_FRACTION = 0.12;
 const SHARED_RULES =
   '- Output ONLY a JSON array of objects, each { "fact": "<self-contained fact>", ' +
   '"importance": <0.0-1.0> }. One atomic fact per element — never combine two facts with "and".\n' +
-  '- Each fact must be self-contained: resolve pronouns to names, include the subject ' +
-  '("The user prefers dark mode", not "prefers dark mode").\n' +
+  '- Each fact must be self-contained: resolve pronouns to names and include the subject ' +
+  '("The user prefers dark mode", not "prefers dark mode"), AND name the specific thing the ' +
+  'fact is about — the project, product, document, game, or entity ("The user wants players to ' +
+  'pay off all loans before winning Debt Quest", not "...before winning the game"). If a fact ' +
+  'would be ambiguous out of context, name its referent.\n' +
   '- Extract only DURABLE facts worth remembering beyond this conversation: stable ' +
   'preferences, identity, project facts, decisions, learned constraints.\n' +
   '- SKIP ephemeral / session-local state: transient errors, one-off debugging steps, ' +
