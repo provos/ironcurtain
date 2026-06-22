@@ -45,7 +45,11 @@ export interface IngestResult {
   // ---- diagnostics ----
   /** Number of LLM windows used (omitted when 1). */
   chunks?: number;
-  /** Chunks that returned null/[] (omitted when 0). */
+  /**
+   * Chunks that FAILED extraction — returned `null` (no LLM / hard error / unparseable).
+   * A parsed empty array `[]` is a valid "nothing durable" result, NOT a failed chunk.
+   * Omitted when 0.
+   */
   failed_chunks?: number;
   /** True when we fell back to single-blob store, OR a partial failure occurred. */
   degraded?: boolean;

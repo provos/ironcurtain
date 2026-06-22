@@ -91,6 +91,12 @@ describe('validateIngestInput', () => {
       expect(typeof input.as_of).toBe('number');
     });
 
+    it('truncates a fractional epoch ms to an integer (INTEGER column)', () => {
+      const input = validateIngestInput({ content: 'x', as_of: 1_700_000_000_000.5 });
+      expect(input.as_of).toBe(1_700_000_000_000);
+      expect(Number.isInteger(input.as_of)).toBe(true);
+    });
+
     it('rejects an empty / whitespace-only as_of string (P2 — Number("") is 0, must stay unparseable)', () => {
       expect(() => validateIngestInput({ content: 'x', as_of: '' })).toThrow('as_of');
       expect(() => validateIngestInput({ content: 'x', as_of: '   ' })).toThrow('as_of');

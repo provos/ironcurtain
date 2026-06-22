@@ -19,7 +19,7 @@ import { TOOL_DESCRIPTIONS } from './prompts.js';
 export function createServer(engine: MemoryEngine): McpServer {
   const server = new McpServer({
     name: 'memory',
-    version: '0.1.0',
+    version: '0.2.0',
   });
 
   registerTools(server, engine);

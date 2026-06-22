@@ -30,8 +30,9 @@ export interface IngestInput {
 }
 
 /**
- * Normalize `as_of` (epoch ms number, numeric string, OR ISO 8601 string) to epoch ms.
- * Rejects non-finite / negative results.
+ * Normalize `as_of` (epoch ms number, numeric string, OR ISO 8601 string) to an
+ * INTEGER epoch ms. Rejects non-finite / negative results; truncates any fractional
+ * ms so the value round-trips through the SQLite `INTEGER` timestamp columns.
  */
 function normalizeAsOf(value: unknown): number | undefined {
   if (value === undefined) return undefined;
@@ -52,7 +53,7 @@ function normalizeAsOf(value: unknown): number | undefined {
   if (!Number.isFinite(ms) || ms < 0) {
     throw new Error('as_of must resolve to a non-negative epoch-ms timestamp');
   }
-  return ms;
+  return Math.floor(ms);
 }
 
 /**
