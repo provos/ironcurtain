@@ -215,7 +215,12 @@ function buildPassageUnits(
     emittedPassages.push(passage);
     // Distinct id (host fact id + segment) so the passage is its own display unit, not
     // an id-collision duplicate of the host fact (which is also emitted, see above).
-    passageUnits.push({ ...bestFact, id: `${bestFact.id}#seg:${segmentId}`, content: passage, expanded: true });
+    passageUnits.push({
+      ...bestFact,
+      id: `${bestFact.id}${SEGMENT_UNIT_MARKER}${segmentId}`,
+      content: passage,
+      expanded: true,
+    });
   }
 
   return passageUnits;
@@ -281,11 +286,24 @@ function packHybrid(factUnits: DisplayUnit[], passageUnits: DisplayUnit[], budge
   return { units: selected, expandedSegmentIds };
 }
 
+/** Separates a passage unit's host-fact id from its segment id: `<factId>#seg:<segId>`. */
+const SEGMENT_UNIT_MARKER = '#seg:';
+
+/**
+ * The real `memories.id` behind a display unit. A passage unit's id is the synthetic
+ * `<factId>#seg:<segId>` (so it isn't an id-collision duplicate of its host fact); this
+ * strips the suffix back to the host fact's id. A plain fact unit returns its own id.
+ * Used by the pipeline to resolve embeddings and access-stat updates to real rows.
+ */
+export function realMemoryId(unitId: string): string {
+  const idx = unitId.indexOf(SEGMENT_UNIT_MARKER);
+  return idx === -1 ? unitId : unitId.slice(0, idx);
+}
+
 /** Recover the segment id a passage unit was built from (it rides the `#seg:<id>` suffix). */
 function segmentIdOf(passageUnit: DisplayUnit): string {
-  const marker = '#seg:';
-  const idx = passageUnit.id.indexOf(marker);
-  return idx === -1 ? (passageUnit.segment_id ?? '') : passageUnit.id.slice(idx + marker.length);
+  const idx = passageUnit.id.indexOf(SEGMENT_UNIT_MARKER);
+  return idx === -1 ? (passageUnit.segment_id ?? '') : passageUnit.id.slice(idx + SEGMENT_UNIT_MARKER.length);
 }
 
 /** Normalize whitespace for overlap comparison. */

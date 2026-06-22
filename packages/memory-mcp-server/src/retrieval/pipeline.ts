@@ -8,7 +8,7 @@ import { hybridScoreFusion, computeCompositeScore, filterByRelevance, filterByRe
 import { deduplicateByEmbedding } from './dedup.js';
 import { rerank } from './reranker.js';
 import { formatMemories } from './formatting.js';
-import { expandKeptFacts } from './expansion.js';
+import { expandKeptFacts, realMemoryId } from './expansion.js';
 import { parseTags } from '../utils/tags.js';
 
 const DEFAULT_CANDIDATE_LIMIT = 50;
@@ -139,29 +139,28 @@ export async function recall(
     tokenBudget,
   );
 
-  // 10. Format — reuse embeddings already loaded for dedup. An expanded passage unit
-  //     keeps its best-ranked fact's `id` (the passage text rides on that fact), so its
-  //     entry in `selectedEmbeddings` is that fact's embedding. The no-LLM extractive
-  //     summary path therefore clusters the passage by its fact's embedding — benign,
-  //     since the passage's whole point is to be the relevant slice of that fact's parent.
-  const selectedIds = new Set(selected.map((m) => m.id));
+  // 10. Format — reuse embeddings already loaded for dedup. A passage unit carries the
+  //     synthetic id `<factId>#seg:<segId>`, so resolve each selected unit to its REAL
+  //     memory id to fetch the embedding, keyed by the unit's own id — so the no-LLM
+  //     extractive-clustering path still clusters the passage by its host fact's vector.
   const selectedEmbeddings = new Map<string, Float32Array>();
-  for (const [id, emb] of embeddings) {
-    if (selectedIds.has(id)) selectedEmbeddings.set(id, emb);
+  for (const unit of selected) {
+    const emb = embeddings.get(realMemoryId(unit.id));
+    if (emb !== undefined) selectedEmbeddings.set(unit.id, emb);
   }
   const text = await formatMemories(selected, selectedEmbeddings, query, tokenBudget, format, config);
 
-  // 11. Update access stats for returned memories. An appended passage unit carries a
-  //     synthetic id (no matching memories row), so it no-ops here — only real fact ids
-  //     bump their access_count, exactly once each.
-  const returnedIds = selected.map((m) => m.id);
-  updateAccessStats(db, config.namespace, returnedIds);
+  // 11. Update access stats. Resolve passage units' synthetic ids back to their host fact's
+  //     real memory id and de-duplicate — so a fact present as both a fact unit and a passage
+  //     unit is counted once, and the host fact is still counted when only the passage fit.
+  const realIds = [...new Set(selected.map((m) => realMemoryId(m.id)))];
+  updateAccessStats(db, config.namespace, realIds);
 
   // `expandKeptFacts` packs facts + passages itself, so `expandedSegmentIds` already
   // reflects only the passages that survived into the returned set.
   return {
     text,
-    memoryIds: returnedIds,
+    memoryIds: realIds,
     totalCandidates: allMemories.size,
     selectedCount: selected.length,
     expanded: expandedSegmentIds.length > 0,

@@ -260,9 +260,11 @@ export async function ingestBlob(
       };
     }
     const result = await store(truncated, seedImportance);
+    // The degraded blob can exact-dedup into an existing memory; report the real action.
+    const created = result.action === 'created' ? 1 : 0;
     return {
-      created: 1,
-      merged: 0,
+      created,
+      merged: 1 - created,
       memory_ids: [result.id],
       facts: [{ fact: truncated, importance: seedImportance }],
       degraded: true,

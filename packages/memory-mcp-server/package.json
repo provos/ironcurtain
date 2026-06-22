@@ -1,6 +1,6 @@
 {
   "name": "@provos/memory-mcp-server",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "type": "module",
   "description": "Persistent memory MCP server with semantic search, LLM summarization, and automatic compaction",
   "license": "Apache-2.0",
@@ -18,7 +18,9 @@
     ".": "./dist/index.js",
     "./prompts": "./dist/prompts.js"
   },
-  "files": ["dist/"],
+  "files": [
+    "dist/"
+  ],
   "publishConfig": {
     "access": "public"
   },

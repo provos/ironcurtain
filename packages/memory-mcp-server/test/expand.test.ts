@@ -31,10 +31,19 @@ import type { MemoryEngine } from '../src/engine.js';
 import type { MemoryConfig } from '../src/config.js';
 import { loadConfig } from '../src/config.js';
 import { estimateTokens } from '../src/retrieval/scoring.js';
-import { rankSegmentPassages } from '../src/retrieval/expansion.js';
+import { rankSegmentPassages, realMemoryId } from '../src/retrieval/expansion.js';
 import { embedQuery } from '../src/embedding/embedder.js';
 
 const NAMESPACE = 'test';
+
+describe('realMemoryId', () => {
+  it('strips the #seg: suffix back to the host fact id', () => {
+    expect(realMemoryId('fact-abc#seg:seg-xyz')).toBe('fact-abc');
+  });
+  it('returns a plain (non-passage) id unchanged', () => {
+    expect(realMemoryId('fact-abc')).toBe('fact-abc');
+  });
+});
 
 function setResponses(...responses: Array<string | null>): void {
   llmMock.responses = responses;

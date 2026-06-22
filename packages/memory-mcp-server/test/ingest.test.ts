@@ -307,6 +307,20 @@ describe('engine.ingest', () => {
       expect(row.content).toBe(blob);
     });
 
+    it('degrade reports merged (not created) when the blob exact-dedups into an existing memory', async () => {
+      disableLLM();
+      const blob = 'identical degraded blob with no durable facts';
+      const first = await engine.ingest(blob, {});
+      expect(first.created).toBe(1);
+      expect(first.merged).toBe(0);
+
+      const second = await engine.ingest(blob, {}); // same content → exact-dedup merge
+      expect(second.created).toBe(0);
+      expect(second.merged).toBe(1);
+      expect(second.degraded).toBe(true);
+      expect(getNamespaceStats(db, NAMESPACE).total_memories).toBe(1); // merged, not a 2nd row
+    });
+
     it("'skip' writes nothing and reports skipped without throwing", async () => {
       disableLLM();
       const result = await engine.ingest('blob', { on_extraction_failure: 'skip' });
