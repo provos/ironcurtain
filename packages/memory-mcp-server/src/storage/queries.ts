@@ -17,10 +17,15 @@ export interface InsertMemoryParams {
   source?: string;
   metadata?: Record<string, unknown>;
   consolidated?: boolean;
+  /**
+   * Epoch ms backdate. When present, stamps created_at/updated_at/last_accessed_at
+   * to this value (the `as_of` mechanism). Absent ⇒ Date.now() (unchanged behavior).
+   */
+  createdAt?: number;
 }
 
 export function insertMemory(db: Database.Database, params: InsertMemoryParams, embedding: Float32Array): void {
-  const now = Date.now();
+  const now = params.createdAt ?? Date.now();
   const txn = db.transaction(() => {
     db.prepare(
       `INSERT INTO memories (id, namespace, content, tags, importance,
@@ -115,6 +120,33 @@ export function updateMemoryContent(
     ).run(Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength), id, namespace);
   });
   txn();
+}
+
+/**
+ * Reconcile a merged row's timestamps order-independently against a backdated
+ * `as_of` (A1). Additive — does NOT touch `updateMemoryContent`, which is shared
+ * with the consolidation contradiction path.
+ *
+ *   created_at       = MIN(created_at, asOf)   // true first-seen
+ *   last_accessed_at = MAX(last_accessed_at, asOf)
+ *   updated_at       = MAX(updated_at, asOf)
+ *
+ * Computed in SQL so the merge is atomic and order-independent regardless of
+ * which insert wins the race.
+ */
+export function updateMemoryTimestampsOnMerge(
+  db: Database.Database,
+  namespace: string,
+  id: string,
+  asOf: number,
+): void {
+  db.prepare(
+    `UPDATE memories
+        SET created_at       = MIN(created_at, ?),
+            last_accessed_at = MAX(last_accessed_at, ?),
+            updated_at       = MAX(updated_at, ?)
+      WHERE id = ? AND namespace = ?`,
+  ).run(asOf, asOf, asOf, id, namespace);
 }
 
 export function updateAccessStats(db: Database.Database, namespace: string, ids: string[]): void {

@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { MemoryEngine } from './engine.js';
 import { FORMAT_MODES } from './retrieval/formatting.js';
 import { handleStore } from './tools/store.js';
+import { handleIngest } from './tools/ingest.js';
 import { handleRecall } from './tools/recall.js';
 import { handleContext } from './tools/context.js';
 import { handleForget } from './tools/forget.js';
@@ -50,6 +51,67 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
     async (args) => {
       try {
         const text = await handleStore(engine, args);
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: formatError(err) }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.tool(
+    'memory_ingest',
+    TOOL_DESCRIPTIONS.memory_ingest,
+    {
+      content: z.string().describe('Raw blob to decompose: a conversation transcript, document, or session summary.'),
+      source: z
+        .string()
+        .optional()
+        .describe("Provenance, e.g. 'session:abc', 'document', 'conversation'. Stored on each fact."),
+      mode: z
+        .enum(['conversation', 'document'])
+        .optional()
+        .describe(
+          "'conversation' (default): STRICT — only DURABLE facts explicitly stated, no inference. " +
+            "'document': broader — DURABLE facts with reasonable inference allowed. " +
+            'Both modes keep stable preferences/identity/project facts/decisions and skip ' +
+            'ephemeral task chatter. Use document for conversation transcripts.',
+        ),
+      tags: z.array(z.string()).optional().describe('Optional seed tags applied to EVERY extracted fact.'),
+      importance: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          'SEED importance 0-1, used as the fallback when the extraction model does not emit a ' +
+            'per-fact importance. Default: 0.5. Per-fact importance (when the model provides it) wins.',
+        ),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe('If true, run extraction and RETURN the facts WITHOUT writing anything. Default: false.'),
+      on_extraction_failure: z
+        .enum(['degrade', 'skip', 'error'])
+        .optional()
+        .describe(
+          'How to handle a chunk/call that yields no facts (no LLM, LLM error, or unparseable). ' +
+            "'degrade' (default): store the blob as a single memory (product behavior). " +
+            "'skip': write nothing, return ingested 0. 'error': throw, so a bulk driver can retry.",
+        ),
+      as_of: z
+        .union([z.number(), z.string()])
+        .optional()
+        .describe(
+          'Backdate: stamp created_at/last_accessed_at of every extracted fact to this time ' +
+            '(epoch ms or ISO 8601) instead of now. For ingesting historical exports.',
+        ),
+    },
+    async (args) => {
+      try {
+        const text = await handleIngest(engine, args);
         return { content: [{ type: 'text' as const, text }] };
       } catch (err) {
         return {

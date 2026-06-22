@@ -24,6 +24,34 @@ export interface StoreResult {
   action: 'created' | 'merged_duplicate' | 'contradiction_resolved';
 }
 
+export interface IngestResult {
+  // ---- honest write stats ----
+  /** Rows newly created (action === 'created'). */
+  created: number;
+  /** Facts that hit an existing row (merged_duplicate / contradiction_resolved). */
+  merged: number;
+  /** ALIAS for `created`, kept for back-compat of the v1 field name. */
+  ingested: number;
+  /** Ids of all touched rows (created + merged); empty when dry_run. */
+  memory_ids: string[];
+
+  // ---- substance ----
+  /** The extracted atomic facts + their importance (always populated). */
+  facts: import('./storage/extraction.js').ExtractedFact[];
+
+  // ---- diagnostics ----
+  /** Number of LLM windows used (omitted when 1). */
+  chunks?: number;
+  /** Chunks that returned null/[] (omitted when 0). */
+  failed_chunks?: number;
+  /** True when we fell back to single-blob store, OR a partial failure occurred. */
+  degraded?: boolean;
+  /** True when SOME (not all) chunks failed but others produced facts. */
+  partial?: boolean;
+  /** True when on_extraction_failure='skip' wrote nothing. */
+  skipped?: boolean;
+}
+
 export interface RecallOptions {
   query: string;
   token_budget?: number;

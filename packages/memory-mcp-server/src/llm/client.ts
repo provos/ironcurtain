@@ -1,6 +1,27 @@
 import OpenAI from 'openai';
 import type { MemoryConfig } from '../config.js';
 
+/**
+ * Describe an LLM error as a CONTENT-FREE shape for logging.
+ *
+ * The OpenAI SDK error embeds the request body (= the prompt, which for
+ * `memory_ingest` is raw sensitive content) and/or the response body in its
+ * `.message`, so we log ONLY the error name plus any numeric status/code — never
+ * the message, the request, or the response. Used by every llmComplete caller
+ * (extraction, compaction, consolidation), so the guarantee holds package-wide.
+ */
+function describeLlmError(err: unknown): string {
+  if (err instanceof Error) {
+    const parts = [err.name];
+    const withFields = err as { status?: unknown; code?: unknown };
+    if (typeof withFields.status === 'number') parts.push(`status=${withFields.status}`);
+    if (typeof withFields.code === 'number') parts.push(`code=${withFields.code}`);
+    return parts.join(' ');
+  }
+  // Non-Error throw: report only its primitive type, never its serialized value.
+  return `non-error throw (${typeof err})`;
+}
+
 let llmClient: OpenAI | null = null;
 let clientConfig: { baseUrl: string | null; apiKey: string | null } | null = null;
 
@@ -54,7 +75,9 @@ export async function llmComplete(
     });
     return response.choices[0]?.message?.content ?? null;
   } catch (err) {
-    console.error('[memory-server] LLM call failed:', err);
+    // PII-safe: log a content-free error shape only — the SDK error can embed the
+    // prompt/response body, which for memory_ingest is raw sensitive content.
+    console.error('[memory-server] LLM call failed:', describeLlmError(err));
     return null;
   }
 }

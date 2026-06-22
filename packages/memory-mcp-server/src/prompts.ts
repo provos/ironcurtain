@@ -145,6 +145,16 @@ export const TOOL_DESCRIPTIONS = {
     'and deduplicated. Use this PROACTIVELY whenever the user shares facts, preferences, ' +
     'decisions, or anything worth remembering across sessions. Store atomic facts — one idea per memory.',
 
+  memory_ingest:
+    'Ingest a raw blob (conversation, document, or session summary) and decompose it into atomic, ' +
+    'DURABLE memories via an LLM (extracts stable preferences/identity/project facts/decisions; skips ' +
+    'ephemeral task chatter). Unlike memory_store (one pre-formed fact), this extracts many facts from ' +
+    "one input, each with its own importance. Use mode='conversation' for strict explicit-only " +
+    "extraction or mode='document' to allow reasonable inference (better for conversation transcripts); " +
+    'dry_run=true to preview the decomposition (note: dry_run still sends the blob to the configured LLM ' +
+    '— it only skips local persistence). By default falls back to a single store if no LLM is configured; ' +
+    'set on_extraction_failure to skip or error to change that.',
+
   memory_recall:
     'Recall memories relevant to a query. Returns a pre-summarized context block optimized ' +
     'for your context window. Uses hybrid semantic + keyword search. Use format="answer" to get ' +

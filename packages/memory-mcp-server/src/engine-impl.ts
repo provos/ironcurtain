@@ -2,9 +2,10 @@
  * MemoryEngine implementation that wires together the engine modules.
  */
 
-import type { MemoryEngine, StoreOptions } from './engine.js';
+import type { MemoryEngine, StoreOptions, IngestOptions } from './engine.js';
 import type {
   StoreResult,
+  IngestResult,
   RecallOptions,
   RecallResult,
   ContextOptions,
@@ -21,6 +22,7 @@ import {
   generateId,
   insertMemory,
   updateMemoryContent,
+  updateMemoryTimestampsOnMerge,
   vectorSearch,
   deleteMemories,
   findMemoriesByTags,
@@ -36,6 +38,9 @@ import { embed, embedQuery } from './embedding/embedder.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
 import { estimateTokens } from './retrieval/scoring.js';
 import { EXACT_DEDUP_DISTANCE } from './storage/constants.js';
+import { MAX_CONTENT_LENGTH } from './tools/validation.js';
+import { chunkBlob, extractFacts } from './storage/extraction.js';
+import type { ExtractedFact, IngestMode } from './storage/extraction.js';
 import { parseTags } from './utils/tags.js';
 import type Database from 'better-sqlite3';
 
@@ -94,6 +99,11 @@ async function storeImmediate(
     const mergedTags = [...new Set([...existingTags, ...newTags])];
 
     updateMemoryContent(db, namespace, exactMatch.id, content, embedding, importance, exactMatch.content, mergedTags);
+    // Order-independent timestamp reconciliation for backdated (`as_of`) merges (A1).
+    // Only runs when createdAt is set; non-`as_of` merges are byte-for-byte unchanged.
+    if (opts.createdAt !== undefined) {
+      updateMemoryTimestampsOnMerge(db, namespace, exactMatch.id, opts.createdAt);
+    }
     return { id: exactMatch.id, action: 'merged_duplicate' };
   }
 
@@ -107,13 +117,136 @@ async function storeImmediate(
       content,
       tags: opts.tags,
       importance,
+      source: opts.source,
       consolidated: false,
+      createdAt: opts.createdAt,
     },
     embedding,
   );
 
   await maybeRunMaintenance(db, config);
   return { id, action: 'created' };
+}
+
+// ---------- Ingest (LLM-backed fact decomposition) ----------
+
+const DEFAULT_SEED_IMPORTANCE = 0.5;
+
+/**
+ * Extract facts from each chunk and union them, dropping exact-`fact`-string
+ * duplicates across windows (first occurrence keeps its importance). Tracks how
+ * many chunks returned null/[] for diagnostics (A3).
+ */
+async function extractAllFacts(
+  config: MemoryConfig,
+  chunks: string[],
+  mode: IngestMode,
+): Promise<{ facts: ExtractedFact[]; totalChunks: number; failedChunks: number }> {
+  const seen = new Set<string>();
+  const facts: ExtractedFact[] = [];
+  let failedChunks = 0;
+
+  for (const chunk of chunks) {
+    const chunkFacts = await extractFacts(config, chunk, mode);
+    if (chunkFacts === null || chunkFacts.length === 0) {
+      failedChunks += 1;
+      continue;
+    }
+    for (const fact of chunkFacts) {
+      if (seen.has(fact.fact)) continue;
+      seen.add(fact.fact);
+      facts.push(fact);
+    }
+  }
+
+  return { facts, totalChunks: chunks.length, failedChunks };
+}
+
+/**
+ * Decompose a blob into atomic-fact memories via the LLM, writing each fact
+ * through the existing `store` pipeline. PII-safe: never logs raw content.
+ */
+async function ingestBlob(
+  db: Database.Database,
+  config: MemoryConfig,
+  content: string,
+  opts: IngestOptions,
+): Promise<IngestResult> {
+  const seedImportance = opts.importance ?? DEFAULT_SEED_IMPORTANCE;
+  const mode: IngestMode = opts.mode ?? 'conversation';
+  const onFailure = opts.on_extraction_failure ?? 'degrade';
+  const createdAt = opts.as_of;
+  const dryRun = opts.dry_run ?? false;
+
+  const store = (factContent: string, importance: number): Promise<StoreResult> =>
+    storeImmediate(db, config, factContent, {
+      tags: opts.tags,
+      importance,
+      source: opts.source,
+      createdAt,
+    });
+
+  const chunks = chunkBlob(content);
+  const { facts, totalChunks, failedChunks } = await extractAllFacts(config, chunks, mode);
+  const multiChunk = totalChunks > 1;
+
+  // ---- All chunks failed (no LLM / hard failure / unparseable everywhere) ----
+  if (facts.length === 0) {
+    if (onFailure === 'error') {
+      throw new Error(`memory_ingest: extraction produced no facts (${failedChunks}/${totalChunks} chunks failed)`);
+    }
+    if (onFailure === 'skip') {
+      return { created: 0, merged: 0, ingested: 0, memory_ids: [], facts: [], skipped: true };
+    }
+    // 'degrade': store the blob as a single memory (product behavior).
+    const truncated = content.length > MAX_CONTENT_LENGTH ? content.slice(0, MAX_CONTENT_LENGTH) : content;
+    if (dryRun) {
+      return {
+        created: 0,
+        merged: 0,
+        ingested: 0,
+        memory_ids: [],
+        facts: [{ fact: truncated, importance: seedImportance }],
+        degraded: true,
+      };
+    }
+    const result = await store(truncated, seedImportance);
+    return {
+      created: 1,
+      merged: 0,
+      ingested: 1,
+      memory_ids: [result.id],
+      facts: [{ fact: truncated, importance: seedImportance }],
+      degraded: true,
+    };
+  }
+
+  const partial = failedChunks > 0;
+  const diagnostics: Pick<IngestResult, 'chunks' | 'failed_chunks' | 'degraded' | 'partial'> = {
+    ...(multiChunk ? { chunks: totalChunks } : {}),
+    ...(partial ? { failed_chunks: failedChunks, degraded: true, partial: true } : {}),
+  };
+
+  // ---- Dry run: preview without writing ----
+  if (dryRun) {
+    return { created: 0, merged: 0, ingested: 0, memory_ids: [], facts, ...diagnostics };
+  }
+
+  // ---- Write each fact through the existing store pipeline ----
+  let created = 0;
+  let merged = 0;
+  const memoryIds: string[] = [];
+  for (const fact of facts) {
+    const result = await store(fact.fact, fact.importance ?? seedImportance);
+    memoryIds.push(result.id);
+    if (result.action === 'created') {
+      created += 1;
+    } else {
+      merged += 1;
+    }
+  }
+
+  return { created, merged, ingested: created, memory_ids: memoryIds, facts, ...diagnostics };
 }
 
 // ---------- Context ----------
@@ -298,6 +431,10 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
       return storeImmediate(db, config, content, opts);
     },
 
+    async ingest(content: string, opts: IngestOptions): Promise<IngestResult> {
+      return ingestBlob(db, config, content, opts);
+    },
+
     async recall(opts: RecallOptions): Promise<RecallResult> {
       const result = await retrievalRecall(db, config, {
         query: opts.query,
@@ -336,6 +473,7 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
  */
 export interface EngineModules {
   store(content: string, opts: StoreOptions): Promise<StoreResult>;
+  ingest(content: string, opts: IngestOptions): Promise<IngestResult>;
   recall(opts: RecallOptions): Promise<RecallResult>;
   context(opts: ContextOptions): Promise<string>;
   forget(opts: ForgetOptions): Promise<ForgetResult>;
@@ -346,6 +484,7 @@ export interface EngineModules {
 export function createMemoryEngine(modules: EngineModules): MemoryEngine {
   return {
     store: (...args) => modules.store(...args),
+    ingest: (...args) => modules.ingest(...args),
     recall: (...args) => modules.recall(...args),
     context: (...args) => modules.context(...args),
     forget: (...args) => modules.forget(...args),

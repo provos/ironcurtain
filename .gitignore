@@ -50,3 +50,10 @@ docs/vuln-discovery-onboarding/*.pdf
 
 # Local scratch / staged experiments — never committed
 donotcommit/
+
+# Claude conversation exports + ingested memory DBs (SENSITIVE — never commit)
+**/claude-export/
+**/conversations.json
+**/memories.json
+*.memdb
+*.memdb-*

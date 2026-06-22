@@ -9,6 +9,13 @@ import { validateInspectInput, handleInspect } from '../src/tools/inspect.js';
 function createMockEngine(overrides: Partial<MemoryEngine> = {}): MemoryEngine {
   return {
     store: vi.fn().mockResolvedValue({ id: 'abc123', action: 'created' }),
+    ingest: vi.fn().mockResolvedValue({
+      created: 1,
+      merged: 0,
+      ingested: 1,
+      memory_ids: ['abc123'],
+      facts: [{ fact: 'A fact', importance: 0.5 }],
+    }),
     recall: vi.fn().mockResolvedValue({
       content: 'Recalled content',
       memories_used: 3,

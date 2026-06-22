@@ -1,0 +1,177 @@
+/**
+ * memory_ingest tool handler.
+ * Validates/normalizes input, delegates to the engine, and renders a content-free
+ * result string. PII-safe: NEVER echoes raw content or model output.
+ */
+
+import type { MemoryEngine, IngestOptions } from '../engine.js';
+import type { IngestResult } from '../types.js';
+import { validateTags } from './validation.js';
+
+export type IngestMode = 'conversation' | 'document';
+export type OnExtractionFailure = 'degrade' | 'skip' | 'error';
+
+const INGEST_MODES: readonly IngestMode[] = ['conversation', 'document'];
+const ON_EXTRACTION_FAILURES: readonly OnExtractionFailure[] = ['degrade', 'skip', 'error'];
+
+export interface IngestInput {
+  content: string;
+  source?: string;
+  mode: IngestMode;
+  tags?: string[];
+  importance?: number;
+  dry_run: boolean;
+  on_extraction_failure: OnExtractionFailure;
+  as_of?: number;
+}
+
+/**
+ * Normalize `as_of` (epoch ms number, numeric string, OR ISO 8601 string) to epoch ms.
+ * Rejects non-finite / negative results.
+ */
+function normalizeAsOf(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+
+  let ms: number;
+  if (typeof value === 'number') {
+    ms = value;
+  } else if (typeof value === 'string') {
+    // A bare numeric string (e.g. "1700000000000") is epoch ms; otherwise parse as ISO.
+    // Guard empty/whitespace-only: Number('') is 0 (would slip through as epoch 0),
+    // but it was unparseable before — keep rejecting it via Date.parse → NaN.
+    const asNumber = value.trim().length === 0 ? NaN : Number(value);
+    ms = Number.isFinite(asNumber) ? asNumber : Date.parse(value);
+  } else {
+    throw new Error('as_of must be an epoch-ms number or an ISO 8601 string');
+  }
+
+  if (!Number.isFinite(ms) || ms < 0) {
+    throw new Error('as_of must resolve to a non-negative epoch-ms timestamp');
+  }
+  return ms;
+}
+
+export function validateIngestInput(args: Record<string, unknown>): IngestInput {
+  const content = args.content;
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    throw new Error('content is required and must be a non-empty string');
+  }
+
+  const source = args.source;
+  if (source !== undefined && typeof source !== 'string') {
+    throw new Error('source must be a string');
+  }
+
+  let mode: IngestMode = 'conversation';
+  if (args.mode !== undefined) {
+    if (typeof args.mode !== 'string' || !INGEST_MODES.includes(args.mode as IngestMode)) {
+      throw new Error("mode must be 'conversation' or 'document'");
+    }
+    mode = args.mode as IngestMode;
+  }
+
+  const tags = validateTags(args.tags);
+
+  const importance = args.importance;
+  if (importance !== undefined) {
+    if (typeof importance !== 'number' || !Number.isFinite(importance) || importance < 0 || importance > 1) {
+      throw new Error('importance must be a number between 0 and 1');
+    }
+  }
+
+  const dryRun = args.dry_run;
+  if (dryRun !== undefined && typeof dryRun !== 'boolean') {
+    throw new Error('dry_run must be a boolean');
+  }
+
+  let onExtractionFailure: OnExtractionFailure = 'degrade';
+  if (args.on_extraction_failure !== undefined) {
+    if (
+      typeof args.on_extraction_failure !== 'string' ||
+      !ON_EXTRACTION_FAILURES.includes(args.on_extraction_failure as OnExtractionFailure)
+    ) {
+      throw new Error("on_extraction_failure must be 'degrade', 'skip', or 'error'");
+    }
+    onExtractionFailure = args.on_extraction_failure as OnExtractionFailure;
+  }
+
+  const asOf = normalizeAsOf(args.as_of);
+
+  return {
+    content: content.trim(),
+    source,
+    mode,
+    tags,
+    importance,
+    dry_run: dryRun ?? false,
+    on_extraction_failure: onExtractionFailure,
+    as_of: asOf,
+  };
+}
+
+function truncateId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+/**
+ * Render the result as a content-free human-readable string. NEVER echoes raw
+ * content or model output beyond the extracted facts the caller already provided.
+ */
+function renderDryRunPreview(result: IngestResult): string {
+  const lines = result.facts.map((f, i) => {
+    const imp = f.importance !== undefined ? ` (importance: ${f.importance})` : '';
+    return `${i + 1}. ${f.fact}${imp}`;
+  });
+  return [`Dry run — nothing written. ${result.facts.length} fact(s) proposed:`, ...lines].join('\n');
+}
+
+export function formatIngestResult(result: IngestResult): string {
+  if (result.skipped) {
+    return 'Extraction failed and on_extraction_failure=skip — nothing written.';
+  }
+
+  // Full degrade (no decomposition): set by the engine only when the fact union
+  // was empty. `partial` distinguishes this from "some chunks failed but we got facts".
+  if (result.degraded && !result.partial) {
+    if (result.created === 0) {
+      return 'No LLM configured or extraction failed — dry run, nothing written (no decomposition).';
+    }
+    const id = result.memory_ids[0] ?? '?';
+    return `No LLM configured or extraction failed — stored the blob as a single memory ${truncateId(id)}.`;
+  }
+
+  // Dry run preview (facts extracted, nothing written).
+  if (result.created === 0 && result.merged === 0 && result.memory_ids.length === 0) {
+    return renderDryRunPreview(result);
+  }
+
+  const idList = result.memory_ids.map(truncateId).join(', ');
+  const base =
+    `Ingested ${result.facts.length} atomic fact(s): ` +
+    `${result.created} new memor${result.created === 1 ? 'y' : 'ies'}, ${result.merged} merged into existing` +
+    (idList.length > 0 ? ` (ids: ${idList})` : '') +
+    '.';
+
+  if (result.partial) {
+    const failed = result.failed_chunks ?? 0;
+    const total = result.chunks ?? 0;
+    return `${base} ${failed} of ${total} chunks failed extraction — partial result.`;
+  }
+
+  return base;
+}
+
+export async function handleIngest(engine: MemoryEngine, args: Record<string, unknown>): Promise<string> {
+  const input = validateIngestInput(args);
+  const opts: IngestOptions = {
+    source: input.source,
+    mode: input.mode,
+    tags: input.tags,
+    importance: input.importance,
+    dry_run: input.dry_run,
+    as_of: input.as_of,
+    on_extraction_failure: input.on_extraction_failure,
+  };
+  const result = await engine.ingest(input.content, opts);
+  return formatIngestResult(result);
+}

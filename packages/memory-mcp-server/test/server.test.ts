@@ -7,6 +7,13 @@ import { createServer } from '../src/server.js';
 function createMockEngine(): MemoryEngine {
   return {
     store: vi.fn().mockResolvedValue({ id: 'test-id', action: 'created' }),
+    ingest: vi.fn().mockResolvedValue({
+      created: 1,
+      merged: 0,
+      ingested: 1,
+      memory_ids: ['test-id'],
+      facts: [{ fact: 'A fact', importance: 0.5 }],
+    }),
     recall: vi.fn().mockResolvedValue({
       content: 'test recall',
       memories_used: 1,
@@ -40,14 +47,21 @@ async function createConnectedClient(engine: MemoryEngine) {
 }
 
 describe('MCP server', () => {
-  it('lists all 5 memory tools', async () => {
+  it('lists all 6 memory tools', async () => {
     const engine = createMockEngine();
     const { client } = await createConnectedClient(engine);
 
     const { tools } = await client.listTools();
     const toolNames = tools.map((t) => t.name).sort();
 
-    expect(toolNames).toEqual(['memory_context', 'memory_forget', 'memory_inspect', 'memory_recall', 'memory_store']);
+    expect(toolNames).toEqual([
+      'memory_context',
+      'memory_forget',
+      'memory_ingest',
+      'memory_inspect',
+      'memory_recall',
+      'memory_store',
+    ]);
   });
 
   it('memory_store tool has correct schema', async () => {
@@ -72,6 +86,25 @@ describe('MCP server', () => {
     expect(recallTool).toBeDefined();
     expect(recallTool!.description).toContain('Recall memories');
     expect(recallTool!.inputSchema.required).toContain('query');
+  });
+
+  it('memory_ingest tool has correct schema', async () => {
+    const engine = createMockEngine();
+    const { client } = await createConnectedClient(engine);
+
+    const { tools } = await client.listTools();
+    const ingestTool = tools.find((t) => t.name === 'memory_ingest');
+
+    expect(ingestTool).toBeDefined();
+    expect(ingestTool!.inputSchema.required).toContain('content');
+
+    // Everything except `content` is optional.
+    const required = ingestTool!.inputSchema.required ?? [];
+    const properties = ingestTool!.inputSchema.properties ?? {};
+    for (const optional of ['mode', 'dry_run', 'as_of', 'on_extraction_failure', 'tags', 'importance', 'source']) {
+      expect(properties).toHaveProperty(optional);
+      expect(required).not.toContain(optional);
+    }
   });
 
   it('memory_context tool has no required params', async () => {
