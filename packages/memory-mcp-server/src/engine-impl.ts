@@ -166,7 +166,7 @@ async function extractAllFacts(
  * Decompose a blob into atomic-fact memories via the LLM, writing each fact
  * through the existing `store` pipeline. PII-safe: never logs raw content.
  */
-async function ingestBlob(
+export async function ingestBlob(
   db: Database.Database,
   config: MemoryConfig,
   content: string,
