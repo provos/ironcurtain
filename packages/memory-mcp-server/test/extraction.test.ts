@@ -97,6 +97,13 @@ describe('parseExtractedFacts', () => {
     expect(facts[0].fact.length).toBe(MAX_CONTENT_LENGTH);
   });
 
+  it('caps an over-long BARE-STRING fact at MAX_CONTENT_LENGTH', () => {
+    const longFact = 'y'.repeat(MAX_CONTENT_LENGTH + 500);
+    const facts = parseExtractedFacts(JSON.stringify([longFact]));
+    expect(facts).toHaveLength(1);
+    expect(facts[0].fact.length).toBe(MAX_CONTENT_LENGTH);
+  });
+
   it('caps the number of facts at MAX_FACTS_PER_INGEST', () => {
     const many = Array.from({ length: MAX_FACTS_PER_INGEST + 50 }, (_, i) => ({ fact: `fact ${i}` }));
     const facts = parseExtractedFacts(JSON.stringify(many));

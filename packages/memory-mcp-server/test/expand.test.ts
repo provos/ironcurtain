@@ -31,6 +31,8 @@ import type { MemoryEngine } from '../src/engine.js';
 import type { MemoryConfig } from '../src/config.js';
 import { loadConfig } from '../src/config.js';
 import { estimateTokens } from '../src/retrieval/scoring.js';
+import { rankSegmentPassages } from '../src/retrieval/expansion.js';
+import { embedQuery } from '../src/embedding/embedder.js';
 
 const NAMESPACE = 'test';
 
@@ -199,63 +201,96 @@ describe('parent re-expansion (Bandalert contract)', () => {
     expect(factLines.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('AUGMENT is breadth-preserving: every fact expand:none keeps is also kept under auto, and a passage is appended only on leftover budget (regression: passages must be LOWER priority than facts)', async () => {
+  // Raw format exposes each unit's `expanded` flag, so fact units and the appended
+  // passage unit can be separated cleanly. Helpers shared by the hybrid tests below.
+  const rawFactContents = (raw: { content: string }): string[] => {
+    const items = JSON.parse(raw.content) as Array<{ content: string; expanded: boolean }>;
+    return items.filter((i) => !i.expanded).map((i) => i.content);
+  };
+  const rawPassageCount = (raw: { content: string }): number => {
+    const items = JSON.parse(raw.content) as Array<{ expanded: boolean }>;
+    return items.filter((i) => i.expanded).length;
+  };
+
+  it('HYBRID win: at a budget facts alone would fill, the top passage is STILL guaranteed by reservation while the TOP breadth facts survive (F1 — fails under pure-AUGMENT passage-last)', async () => {
     await ingestContract();
 
     const query = 'Bandalert distribution agreement cap and revenue';
 
-    // Raw format exposes each unit's `expanded` flag, so fact units and the appended
-    // passage unit can be separated cleanly. Helper: the set of FACT-unit contents.
-    const factContents = (raw: { content: string }): Set<string> => {
-      const items = JSON.parse(raw.content) as Array<{ content: string; expanded: boolean }>;
-      return new Set(items.filter((i) => !i.expanded).map((i) => i.content));
-    };
-    const passageCount = (raw: { content: string }): number => {
-      const items = JSON.parse(raw.content) as Array<{ expanded: boolean }>;
-      return items.filter((i) => i.expanded).length;
-    };
+    // Measure the real fact + passage token sizes from a wide auto recall (the packer
+    // estimates tokens off each unit's `content`).
+    const autoWide = await engine.recall({ query, format: 'raw', expand: 'auto', token_budget: 4000 });
+    const wideItems = JSON.parse(autoWide.content) as Array<{ content: string; expanded: boolean }>;
+    const factTokens = wideItems.filter((i) => !i.expanded).map((i) => estimateTokens(i.content));
+    const passageTokens = wideItems.filter((i) => i.expanded).reduce((sum, i) => sum + estimateTokens(i.content), 0);
+    const allFactTokens = factTokens.reduce((a, b) => a + b, 0);
+    const smallestFactTokens = Math.min(...factTokens);
+    expect(wideItems.filter((i) => i.expanded).length).toBe(1); // exactly one shared parent
+    expect(factTokens.length).toBeGreaterThanOrEqual(2); // ≥2 facts co-retrieve
 
-    // --- Generous budget: facts are a SUPERSET of none's, AND the passage is appended. ---
+    // Size the budget so facts ALONE would fill it (every fact fits, no spare room for a
+    // passage if facts were packed first — the pure-AUGMENT skip-the-passage zone), yet
+    // the reservation still fits the passage by displacing only the lowest-priority TAIL
+    // fact: budget = allFactTokens + passageTokens − smallestFactTokens. Facts-first packs
+    // all facts (allFactTokens ≤ budget) leaving only passageTokens − smallestFactTokens
+    // of room — one token short of the passage, so pure-AUGMENT would SKIP it. Hybrid
+    // reserves the passage, packs facts into budget − passageTokens (which is
+    // allFactTokens − smallestFactTokens — every fact but the smallest), and force-includes
+    // the passage. Require the smallest fact to be the strict minimum so exactly one is
+    // displaced.
+    expect(factTokens.filter((t) => t === smallestFactTokens)).toHaveLength(1);
+    const budget = allFactTokens + passageTokens - smallestFactTokens;
+    expect(allFactTokens).toBeLessThanOrEqual(budget); // facts alone all fit (would fill it)
+
+    const auto = await engine.recall({ query, format: 'raw', expand: 'auto', token_budget: budget });
+    const none = await engine.recall({ query, format: 'raw', expand: 'none', token_budget: budget });
+
+    // (a) DEPTH guaranteed: the single top passage is included even though facts could
+    //     have filled the budget. This is the assertion that FAILS under pure-AUGMENT
+    //     (passage-last), where the passage is skipped and `expanded` is false.
+    expect(auto.expanded).toBe(true);
+    expect(rawPassageCount(auto)).toBe(1);
+    expect(auto.content).toContain('$250k');
+
+    // (b) BREADTH preserved: every fact EXCEPT the displaced lowest-priority tail is still
+    //     present. `none` returns all facts in score order; the passage displaced only the
+    //     last (lowest-priority) one, so the TOP facts (all but the last) survive under auto.
+    const noneFacts = rawFactContents(none);
+    const autoFacts = new Set(rawFactContents(auto));
+    expect(noneFacts.length).toBeGreaterThanOrEqual(2);
+    const topFacts = noneFacts.slice(0, noneFacts.length - 1); // all but the displaced tail
+    for (const fact of topFacts) {
+      expect(autoFacts.has(fact)).toBe(true);
+    }
+    // Exactly one fact was displaced to make room for the guaranteed passage.
+    expect(autoFacts.size).toBe(noneFacts.length - 1);
+  });
+
+  it('no wholesale eviction: the passage displaces at most the lowest-priority tail fact(s); the facts above the tail are a SUPERSET kept (regression — passage must NOT get top priority and evict breadth)', async () => {
+    await ingestContract();
+
+    const query = 'Bandalert distribution agreement cap and revenue';
+
+    // Generous budget: facts AND the passage all fit — auto is a strict SUPERSET of none.
     const wideBudget = 800;
     const noneWide = await engine.recall({ query, format: 'raw', expand: 'none', token_budget: wideBudget });
     const autoWide = await engine.recall({ query, format: 'raw', expand: 'auto', token_budget: wideBudget });
 
-    const noneFacts = factContents(noneWide);
-    const autoFacts = factContents(autoWide);
-    expect(noneFacts.size).toBeGreaterThan(0); // the query genuinely retrieves facts
+    const noneFacts = rawFactContents(noneWide);
+    const autoFacts = new Set(rawFactContents(autoWide));
+    expect(noneFacts.length).toBeGreaterThan(0); // the query genuinely retrieves facts
 
     // EVERY fact expand:none returns is ALSO returned under expand:auto (the superset
-    // property — auto never silently drops a breadth fact). This is the assertion that
-    // would FAIL if expansion REPLACED sibling facts with the passage.
+    // property at a budget where everything fits — auto never silently drops a breadth
+    // fact). This FAILS if expansion REPLACED sibling facts with the passage, or if the
+    // passage were given TOP priority and evicted breadth.
     for (const fact of noneFacts) {
       expect(autoFacts.has(fact)).toBe(true);
     }
-    // … and on top of the full fact set, the passage is appended.
+    // … and on top of the full fact set, exactly the top passage is appended.
     expect(autoWide.expanded).toBe(true);
-    expect(passageCount(autoWide)).toBe(1);
+    expect(rawPassageCount(autoWide)).toBe(1);
     expect(autoWide.content).toContain('$250k');
-
-    // --- Tight budget: the DISCRIMINATING zone for pack order. Size the budget to
-    //     `passageTokens + allFactTokens - 1`: it fits ALL facts (facts-last leaves the
-    //     passage one token short, so the passage is skipped and every fact survives),
-    //     but it is also large enough that a HIGH-priority passage WOULD fit first and
-    //     then evict a breadth fact (passage-first leaves allFactTokens-1 of budget,
-    //     one token shy of the full fact set). The packer estimates tokens off each
-    //     unit's `content`, so measure those directly from a wide auto recall. ---
-    const wideItems = JSON.parse(autoWide.content) as Array<{ content: string; expanded: boolean }>;
-    const allFactTokens = wideItems.filter((i) => !i.expanded).reduce((sum, i) => sum + estimateTokens(i.content), 0);
-    const passageTokens = wideItems.filter((i) => i.expanded).reduce((sum, i) => sum + estimateTokens(i.content), 0);
-    const tightBudget = passageTokens + allFactTokens - 1;
-
-    const noneTight = await engine.recall({ query, format: 'raw', expand: 'none', token_budget: tightBudget });
-    const autoTight = await engine.recall({ query, format: 'raw', expand: 'auto', token_budget: tightBudget });
-
-    // Same fact set under both — auto did NOT evict a fact to make room for a passage.
-    // (With a HIGH-priority passage this set would be a strict subset of none's.)
-    expect(factContents(autoTight)).toEqual(factContents(noneTight));
-    // … and the passage is the thing that was skipped (not a fact).
-    expect(passageCount(autoTight)).toBe(0);
-    expect(autoTight.expanded).toBe(false);
   });
 
   it('picks the query-relevant passage (IP query → IP passage, not the cap passage)', async () => {
@@ -604,5 +639,35 @@ describe('memory_context auto-expands a shared-parent corpus', () => {
     const briefing = await engine.context({ task: 'Bandalert distribution agreement cap and revenue' });
 
     expect(briefing).toContain('$250k');
+  });
+});
+
+// `rankSegmentPassages` is the shared split→embed→rank helper (F6), used by BOTH recall
+// expansion (limit 1 per segment) and `engine.expand`/`memory_expand` (all passages).
+describe('rankSegmentPassages (shared split-and-rank helper)', () => {
+  const config = testConfig(join(tmpdir(), 'rank-helper-unused.db'));
+
+  it('ranks the query-relevant passage first and honors the limit', async () => {
+    const queryEmbedding = await embedQuery('intellectual property reversion publishing rights', config);
+
+    const all = await rankSegmentPassages(config, CONTRACT_SEGMENT, queryEmbedding);
+    // The whole segment splits into multiple coherent passages …
+    expect(all.length).toBeGreaterThan(1);
+    // … and the IP query ranks the IP passage first (not the $250k cap passage).
+    expect(all[0]).toContain('intellectual property');
+    expect(all[0]).not.toContain('$250k');
+
+    // The limit truncates to the top-N (the same best-first order recall expansion uses).
+    const topOne = await rankSegmentPassages(config, CONTRACT_SEGMENT, queryEmbedding, 1);
+    expect(topOne).toEqual(all.slice(0, 1));
+  });
+
+  it('returns [] for an empty segment and the lone passage for a short one', async () => {
+    const queryEmbedding = await embedQuery('anything', config);
+
+    expect(await rankSegmentPassages(config, '   ', queryEmbedding)).toEqual([]);
+
+    const short = 'A single short coherent sentence about nothing in particular.';
+    expect(await rankSegmentPassages(config, short, queryEmbedding)).toEqual([short]);
   });
 });

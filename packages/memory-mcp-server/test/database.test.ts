@@ -424,5 +424,46 @@ describe('database', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it('fails closed on a NEWER (v5) DB: throws and does NOT drop the data', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'memory-newer-'));
+      const path = join(dir, 'newer.db');
+
+      // Build a current v4 DB, insert a row, then bump its stamp to a future '5' to
+      // simulate a DB written by a newer binary being opened by this older one.
+      const seeded = initDatabase(path, TEST_MODEL);
+      const id = generateId();
+      insertMemory(
+        seeded,
+        { id, namespace: 'test', content: 'newer-schema row must survive', tags: undefined, importance: 0.5 },
+        randomEmbedding(),
+      );
+      seeded.prepare(`UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'`).run();
+      seeded.close();
+
+      try {
+        // Opening must fail closed: throw a clear error, never drop.
+        expect(() => initDatabase(path, TEST_MODEL)).toThrow(/newer than/);
+
+        // The newer DB was left untouched: reopen it directly (bypassing the guard)
+        // and confirm the schema_meta stamp and the data both survive.
+        const Database = (await import('better-sqlite3')).default;
+        const survivor = new Database(path);
+        try {
+          const stamp = survivor.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as {
+            value: string;
+          };
+          expect(stamp.value).toBe('5');
+          const row = survivor.prepare(`SELECT content FROM memories WHERE id = ?`).get(id) as
+            | { content: string }
+            | undefined;
+          expect(row?.content).toBe('newer-schema row must survive');
+        } finally {
+          survivor.close();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });

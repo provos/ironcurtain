@@ -10,7 +10,7 @@ import 'dotenv/config';
 import { loadConfig } from '../src/config/index.js';
 import { toCallableName, extractRequiredParams } from '../src/sandbox/index.js';
 import { buildSystemPrompt } from '../src/session/prompts.js';
-import { claudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
+import { createClaudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { extractAllowedDomains } from '../src/docker/orientation.js';
 import { CONTAINER_WORKSPACE_DIR, type OrientationContext } from '../src/docker/agent-adapter.js';
 import { discoverTools, buildServerListings } from './mcp-discovery.js';
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     allowedDomains: extractAllowedDomains(config),
     networkMode: 'none',
   };
-  const dockerPrompt = claudeCodeAdapter.buildSystemPrompt(orientationContext);
+  const dockerPrompt = createClaudeCodeAdapter().buildSystemPrompt(orientationContext);
 
   // --- Print all ---
   const separator = '='.repeat(72);

@@ -157,8 +157,19 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
     },
     async (args) => {
       try {
-        const text = await handleRecall(engine, args);
-        return { content: [{ type: 'text' as const, text }] };
+        const result = await handleRecall(engine, args);
+        // Surface the recall metadata (expansion segment handles) as structured
+        // content so MCP callers can drive the memory_expand follow-up loop in
+        // every format, while preserving the human-readable text exactly.
+        return {
+          content: [{ type: 'text' as const, text: result.text }],
+          structuredContent: {
+            memories_used: result.memories_used,
+            total_matches: result.total_matches,
+            expanded: result.expanded,
+            expanded_segment_ids: result.expanded_segment_ids,
+          },
+        };
       } catch (err) {
         return {
           content: [{ type: 'text' as const, text: formatError(err) }],

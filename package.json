@@ -65,6 +65,7 @@
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
     "check:cycles": "madge --circular --extensions ts --ts-config tsconfig.json src",
     "format": "prettier --log-level=warn --write 'src/**/*.ts' 'test/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",

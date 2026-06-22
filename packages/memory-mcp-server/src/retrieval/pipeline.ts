@@ -4,13 +4,7 @@ import type { MemoryConfig } from '../config.js';
 import type { RecallOptions } from '../types.js';
 import { vectorSearch, ftsSearch, updateAccessStats, getEmbeddingsForMemories } from '../storage/queries.js';
 import { embedQuery } from '../embedding/embedder.js';
-import {
-  hybridScoreFusion,
-  computeCompositeScore,
-  filterByRelevance,
-  filterByRerankerScore,
-  packToBudget,
-} from './scoring.js';
+import { hybridScoreFusion, computeCompositeScore, filterByRelevance, filterByRerankerScore } from './scoring.js';
 import { deduplicateByEmbedding } from './dedup.js';
 import { rerank } from './reranker.js';
 import { formatMemories } from './formatting.js';
@@ -130,19 +124,20 @@ export async function recall(
   // 8. Dedup
   const { kept } = deduplicateByEmbedding(afterRerankerFilter, embeddings);
 
-  // 9b. Parent re-expansion (return-shaping only; the ranker above is untouched).
-  //     For expand:'none' this is a byte-for-byte pass-through of `kept` as facts.
-  const { units, expandedSegmentIds } = await expandKeptFacts(
+  // 9b + 9. Parent re-expansion AND budget packing (return-shaping only; the ranker
+  //     above is untouched). For expand:'none' this is a byte-for-byte `packToBudget`
+  //     over `kept` as facts. For expand:'auto'|'parent' it reserves budget for the top
+  //     passage so depth is guaranteed, packs the breadth facts into the remainder so the
+  //     top facts are never evicted, then fills leftover — returning the final packed list.
+  const { units: selected, expandedSegmentIds } = await expandKeptFacts(
     db,
     config,
     kept,
     queryEmbedding,
     expand,
     maxExpandPassages,
+    tokenBudget,
   );
-
-  // 9. Token budget packing (passage units pack exactly like fact units).
-  const selected = packToBudget(units, tokenBudget);
 
   // 10. Format — reuse embeddings already loaded for dedup. An expanded passage unit
   //     keeps its best-ranked fact's `id` (the passage text rides on that fact), so its
@@ -162,18 +157,14 @@ export async function recall(
   const returnedIds = selected.map((m) => m.id);
   updateAccessStats(db, config.namespace, returnedIds);
 
-  // A passage may have been packed out by the budget; only report segments whose
-  // expanded unit actually survived into the returned set.
-  const expandedInResult = expandedSegmentIds.filter((segId) =>
-    selected.some((u) => u.expanded && u.segment_id === segId),
-  );
-
+  // `expandKeptFacts` packs facts + passages itself, so `expandedSegmentIds` already
+  // reflects only the passages that survived into the returned set.
   return {
     text,
     memoryIds: returnedIds,
     totalCandidates: allMemories.size,
     selectedCount: selected.length,
-    expanded: expandedInResult.length > 0,
-    expandedSegmentIds: expandedInResult,
+    expanded: expandedSegmentIds.length > 0,
+    expandedSegmentIds,
   };
 }

@@ -8,9 +8,10 @@
 
 > **v3 changelog (back-compat-free simplification).** Product directive: **we do NOT care about
 > backwards compatibility; the system must work correctly out of the box.** v2's retrieval substrate
-> is unchanged — this is purely a *storage/migration* simplification plus a defaults sanity-check:
+> is unchanged — this is purely a _storage/migration_ simplification plus a defaults sanity-check:
+>
 > 1. **The migration runner is DELETED.** v2 carried a version-guarded `runMigrations(db)` with a
->    `PRAGMA table_info` idempotency guard whose *only* job was to upgrade pre-existing v3 DBs
+>    `PRAGMA table_info` idempotency guard whose _only_ job was to upgrade pre-existing v3 DBs
 >    in place. With no back-compat that machinery is gone. The `segments` table and
 >    `memories.segment_id` column are now part of the **canonical schema** that `createSchema`
 >    builds with `CREATE TABLE IF NOT EXISTS` for a fresh DB. There is no in-place migration. (§4)
@@ -70,12 +71,12 @@ Bandalert loss had no flag):
 
 ### Why this is the right shape (research grounding)
 
-- **Atomic/proposition decomposition as the *sole* stored unit is disfavored.** The flagship
+- **Atomic/proposition decomposition as the _sole_ stored unit is disfavored.** The flagship
   pro-proposition paper, **Dense X Retrieval (Chen et al., EMNLP 2024, arXiv:2312.06648)**, shows
-  propositions help only weak/zero-shot retrievers, rare-entity factoids, and *under a fixed
-  token budget*; the gains are flat for strong retrievers. It is a token-density argument, not
+  propositions help only weak/zero-shot retrievers, rare-entity factoids, and _under a fixed
+  token budget_; the gains are flat for strong retrievers. It is a token-density argument, not
   "context-free storage is free." **Decomposition Dilemmas (NAACL 2025, arXiv:2411.02400)** names
-  the exact failure modes we hit: *omission-of-context* and *over-decomposition*.
+  the exact failure modes we hit: _omission-of-context_ and _over-decomposition_.
 - **The dominant trend is the opposite — re-attach context.** **Anthropic Contextual Retrieval
   (Sept 2024)** prepends LLM-generated context to chunks (−35% to −67% retrieval-failure rate);
   **Jina Late Chunking (arXiv:2409.04701)** embeds-then-splits to preserve cross-references;
@@ -87,8 +88,8 @@ Bandalert loss had no flag):
   enriches notes with context + links, **TriMem** keeps multi-granularity records.
 - **Do not touch the ranker.** Our retrieval stack is already SOTA-aligned (hybrid dense+BM25 in
   `hybridScoreFusion` → composite scoring → cross-encoder rerank in `reranker.ts`; "ranking beats
-  structure," SmartSearch 2026). The lesson is *expand after ranking*, not *re-rank on a coarser
-  unit*. Re-expansion in this design happens strictly **after** step 9 of the pipeline.
+  structure," SmartSearch 2026). The lesson is _expand after ranking_, not _re-rank on a coarser
+  unit_. Re-expansion in this design happens strictly **after** step 9 of the pipeline.
 
 The contract failure is therefore a **storage** bug, not a retrieval bug, and the fix is a
 storage + post-ranking-expansion change that leaves the ranker byte-for-byte unchanged.
@@ -107,25 +108,41 @@ storage + post-ranking-expansion change that leaves the ranker byte-for-byte unc
    when **≥2 kept facts share it** — the Bandalert signature — so pinpoint queries (1 fact → no
    expand) are never regressed, and the evidenced loss is fixed with **no flag and no query
    classifier**. `'none'` force-off and `'parent'` force-expand-every-parent are explicit
-   overrides. `buildContext`/`memory_context` is also wired to `'auto'`. (§5.2)
+   overrides. `buildContext`/`memory_context`'s **task** (query-driven) branch is also wired to
+   `'auto'`; its no-task recent/important briefing has no query, so it returns facts only and does
+   not expand. (§5.2)
 4. **The RETURNED unit is a query-ranked ~300–400-token PASSAGE, not the 6000-token chunk.** On
    expansion, the shared segment is split into coherent passages and the passage(s) most similar to
    the query embedding are returned, up to budget. Storage may keep `segment = chunk`; only the
-   *returned* unit is passage-sized. Chosen **recall-time split-and-rank** over ingest-time
+   _returned_ unit is passage-sized. Chosen **recall-time split-and-rank** over ingest-time
    pre-split — simpler storage, only fires on auto-expand, reuses the step-1 query embedding. (§5.3)
-5. **Passages AUGMENT the facts; they do not replace them (breadth-first).** All kept facts are
-   returned exactly as `expand:'none'` would return them; the expanded passage(s) are **appended
-   after** all the facts, in segment-best-rank order. Parent-dedup applies to **passages** (one
-   passage per shared parent), **never to facts** — auto-expand never evicts a fact `expand:'none'`
-   would have kept. Because the greedy skip-not-break packer packs in order, a passage only ever
-   consumes leftover budget. (§5.3)
-6. **Budget machinery is simplified.** Passage-sized returns make the v1 two-tier
-   `expand_budget_fraction` unnecessary (its only job was to *reject* the oversized segment).
-   Expanded passages and facts share the budget under the existing greedy skip-not-break
-   `packToBudget`, with a small cap (`max_expand_passages`, default 2) so expansion can't evict every
-   fact. The `expand:'none'` path uses `packToBudget` byte-for-byte. The default recall budget is
-   **bumped 500 → 800** (`MEMORY_DEFAULT_TOKEN_BUDGET`) so a ~300–400-token passage plus a couple of
-   facts fits out of the box; `memory_context` is already 800. No flag, no tuning. (§5.4)
+5. **HYBRID expansion: breadth facts + one GUARANTEED passage (supersedes pure-AUGMENT).** An
+   earlier draft appended the passage(s) strictly **last**, lowest-priority, so the passage rode
+   only leftover budget. That made depth **budget-dependent**: if the breadth facts filled the
+   default budget, the passage was skipped and `expand:'auto'` silently degraded to `'none'` (the
+   lossy headlines the feature exists to fix). The corrected HYBRID rule **reserves budget for the
+   single highest-ranked passage so depth is guaranteed**: facts are packed into `budget − reserve`
+   (so the **top** facts are never evicted), then the top passage is force-included (it always fits
+   its reservation), then leftover budget is filled with the remaining facts + any further passages.
+   The passage displaces only the **lowest-priority tail** facts — every fact ranking above the
+   displaced tail is still returned (this preserves breadth, the original REPLACE-regression
+   guarantee). Additional passages beyond the first (and `parent` mode's extra parents) are
+   **supplementary** — leftover budget only, capped at `max_expand_passages`, never displacing a
+   fact. Parent-dedup applies to **passages** (one per shared parent), **never to facts**.
+   `expand:'none'` is byte-for-byte unchanged (no reservation, today's `packToBudget` over the fact
+   list). Edge: if even the one passage cannot fit the whole budget, fall back to facts only
+   (`expanded` false — no infinite reserve); at the default 800 a ~300–400-token passage + the top
+   facts both appear. The HYBRID packing does **not** change `packToBudget`'s own logic. (§5.3)
+6. **Budget machinery is simplified, with one reservation.** Passage-sized returns make the v1
+   two-tier `expand_budget_fraction` unnecessary (its only job was to _reject_ the oversized
+   segment). Facts and passages share the budget under the existing greedy skip-not-break
+   `packToBudget` — **unchanged**. The HYBRID change (decision 5) is purely a packing _orchestration_
+   around it: reserve `estimateTokens(topPassage)`, pack facts into `budget − reserve`, force-include
+   the top passage, fill leftover. The small cap (`max_expand_passages`, default 2) bounds the
+   supplementary passages. The `expand:'none'` path uses `packToBudget` byte-for-byte. The default
+   recall budget is **bumped 500 → 800** (`MEMORY_DEFAULT_TOKEN_BUDGET`) so a ~300–400-token passage
+   plus a couple of facts fits out of the box; `memory_context` is already 800. No flag, no tuning.
+   (§5.4)
 7. **The schema is canonical — there is no in-place migration.** The `segments` table and the
    `memories.segment_id` column are part of the schema `createSchema` builds with
    `CREATE TABLE IF NOT EXISTS` for a fresh DB. `SCHEMA_VERSION` bumps `'3' → '4'` as a plain
@@ -133,7 +150,7 @@ storage + post-ranking-expansion change that leaves the ranker byte-for-byte unc
    when it is older than `SCHEMA_VERSION` (a stale pre-change DB is rebuilt, not upgraded —
    acceptable under the back-compat-free directive, and self-healing with no manual step). A row
    with no parent simply has `segment_id = NULL` and recall returns the fact. (§4)
-8. **On exact-dedup merge, the survivor repoints to the *richer* parent** (the segment with the
+8. **On exact-dedup merge, the survivor repoints to the _richer_ parent** (the segment with the
    higher `fact_count`), so a later, richer ingest of the same fact is not discarded by ingest
    order. The merge path must read both segments' `fact_count`. (§6.2)
 9. **Expansion metadata is surfaced in every format.** `RecallResult` carries `expanded` and the
@@ -142,7 +159,7 @@ storage + post-ranking-expansion change that leaves the ranker byte-for-byte unc
 10. **The LLM-free `store` path is untouched.** Only `ingest` writes segments. `store` rows have
     `segment_id = NULL` forever and behave exactly as today. (§3.3)
 11. **Phase 2 (optional, deferred): contextualized embedding** — prepend a one-line segment
-    context to each fact *before embedding* (Anthropic-style). Designed in §7, gated behind ingest
+    context to each fact _before embedding_ (Anthropic-style). Designed in §7, gated behind ingest
     so `store` stays LLM-free. Unlike v1, Phase 1 now actually fixes the evidenced failure on a
     default recall, so Phase 2 is a pure recall-rate optimization. (§7, §11)
 
@@ -154,14 +171,14 @@ storage + post-ranking-expansion change that leaves the ranker byte-for-byte unc
 
 Three options were considered:
 
-| Option | What it is | Verdict |
-|---|---|---|
+| Option                                                  | What it is                                                                                                                      | Verdict    |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | **A. `segments` table + `segment_id` FK on `memories`** | New table `segments(id, namespace, content, source, created_at, …)`; each fact row gets a nullable `segment_id` pointing at it. | **CHOSEN** |
-| B. Self-referential `parent_id` on `memories` | The segment is itself a `memories` row; facts point at it via `parent_id`. | Rejected |
-| C. Metadata JSON pointer | Store the parent text (or an id) inside the existing `metadata` JSON column. | Rejected |
+| B. Self-referential `parent_id` on `memories`           | The segment is itself a `memories` row; facts point at it via `parent_id`.                                                      | Rejected   |
+| C. Metadata JSON pointer                                | Store the parent text (or an id) inside the existing `metadata` JSON column.                                                    | Rejected   |
 
 **Why A over B.** If the segment were a `memories` row it would land in **both** index structures,
-each by a *different* mechanism: `memories_fts` is populated by the `memories_ai` AFTER-INSERT
+each by a _different_ mechanism: `memories_fts` is populated by the `memories_ai` AFTER-INSERT
 trigger (`database.ts:111-114`, which writes **only** to `memories_fts`), while the `vec_memories`
 row is written **explicitly** inside `insertMemory` (`queries.ts:48-51`) — there is no trigger for
 the vector table. (v1 mis-stated that the trigger populates both; corrected here. The conclusion is
@@ -176,7 +193,7 @@ It also avoids overloading `memories`' lifecycle columns (`importance`, `is_comp
 `consolidated`, decay) — a segment is provenance, not a recallable memory, and shouldn't decay,
 consolidate, or compact.
 
-**Why A over C.** Metadata-JSON would duplicate a ~6000-token segment into *every* fact's
+**Why A over C.** Metadata-JSON would duplicate a ~6000-token segment into _every_ fact's
 `metadata` blob (7 facts → 7 copies of the same chunk), bloating each `memories` row, every
 `SELECT m.*` in `queries.ts`, and every `rowToMemory` parse (`engine-impl.ts:73`). Normalizing
 the segment into one row referenced by N facts is the obvious relational fit and makes
@@ -186,7 +203,7 @@ parent-dedup (§5.3) a trivial `GROUP BY segment_id`.
 
 Both of these are part of the canonical schema a fresh DB is born with — `createSchema`
 (`database.ts`) builds them in its existing `CREATE TABLE IF NOT EXISTS` style alongside
-`memories`. There is **no** `ALTER TABLE`/migration step; `memories` is *defined* with
+`memories`. There is **no** `ALTER TABLE`/migration step; `memories` is _defined_ with
 `segment_id` (§4).
 
 ```sql
@@ -222,8 +239,8 @@ Notes:
   800-token default budget.
 - **`fact_count`** is a cheap denormalization that lets recall decide whether expanding is
   worthwhile (a segment whose only fact is the one that matched adds little; a segment with 7
-  facts where only the headline was indexed is exactly the contract case). Optional to *use* in
-  phase 1; cheap to *populate*.
+  facts where only the headline was indexed is exactly the contract case). Optional to _use_ in
+  phase 1; cheap to _populate_.
 - **`REFERENCES segments(id)`** declares the FK. `foreign_keys = ON` is already set
   (`database.ts:42`). The reference is **not** `ON DELETE CASCADE` deliberately — see §6.3
   (forget/decay must null the pointer or orphan-collect, not cascade-delete facts).
@@ -280,7 +297,7 @@ This mirrors exactly how the schema is already declared: one body of
 
 `SCHEMA_VERSION` bumps **`'3' → '4'`** (`database.ts:30`). It remains a plain version stamp,
 written by the existing `ensureSchemaMeta` upsert (`upsert.run('schema_version', SCHEMA_VERSION)`)
-— **no migration logic reads it to transform data.** But it *is* read for one purpose: to detect
+— **no migration logic reads it to transform data.** But it _is_ read for one purpose: to detect
 and discard a stale on-disk schema so the system self-heals.
 
 The hazard: a pre-change DB has an **old `memories` table without `segment_id`**. `createSchema`'s
@@ -298,10 +315,10 @@ drop. This reuses the `SELECT … FROM sqlite_master` / `SELECT value FROM schem
 already in the file (`ensureSchemaMeta` already reads `schema_meta` for the embedding model).
 
 > **This deliberately discards old data.** Under the back-compat-free directive that is acceptable
-> and explicitly intended: a stale DB is *rebuilt*, not migrated. The corpus DB is regenerated via
+> and explicitly intended: a stale DB is _rebuilt_, not migrated. The corpus DB is regenerated via
 > `scripts/memory-corpus/build-corpus.ts` (which re-ingests, so segments get populated); user/session
 > DBs are recreated empty on first open. Option (b) — "document that old DB files must be deleted by
-> hand" — is rejected as the default because it is *not* out-of-the-box-correct: it requires a manual
+> hand" — is rejected as the default because it is _not_ out-of-the-box-correct: it requires a manual
 > step and the un-deleted DB crashes with `no such column`. The stamp-gated drop self-heals with zero
 > operator action, which is exactly the directive's bar.
 
@@ -323,16 +340,16 @@ The ~11-step `recall` pipeline (`pipeline.ts:36-125`) is **untouched** through d
 → vector KNN + FTS → `hybridScoreFusion` → tag filter → `computeCompositeScore` →
 `filterByRelevance` → `rerank` → `filterByRerankerScore` → load embeddings →
 `deduplicateByEmbedding` (`pipeline.ts:114`). The candidate set, scores, and ordering are identical
-to today. Re-expansion is inserted as a new **step 9b**, strictly *after* `deduplicateByEmbedding`
-and *before* `packToBudget` (`:117`) / `formatMemories` (`:125`).
+to today. Re-expansion is inserted as a new **step 9b**, strictly _after_ `deduplicateByEmbedding`
+and _before_ `packToBudget` (`:117`) / `formatMemories` (`:125`).
 
-**Passage ranking is NOT a change to the candidate ranker.** Step 9b ranks *passages of an
-already-selected segment* by similarity to the query embedding, to decide which slice of a parent
+**Passage ranking is NOT a change to the candidate ranker.** Step 9b ranks _passages of an
+already-selected segment_ by similarity to the query embedding, to decide which slice of a parent
 to **return**. This is a post-retrieval, return-shaping operation on a single segment's text — it
 never touches the candidate set, the fusion scores, the reranker, or the order of the kept facts.
 "Do not touch the ranker" (steps 1–9, byte-for-byte) and "rank passages on return" are orthogonal:
-the first is about *which memories win*; the second is about *which slice of a winner's parent to
-show*. The reused query embedding (from step 1, `embedQuery`, `pipeline.ts:43`) is a read of an
+the first is about _which memories win_; the second is about _which slice of a winner's parent to
+show_. The reused query embedding (from step 1, `embedQuery`, `pipeline.ts:43`) is a read of an
 existing value, not a re-run of any ranking stage.
 
 ### 5.2 The expansion option — `expand: 'none' | 'auto' | 'parent'`, default `'auto'`
@@ -348,17 +365,17 @@ max_expand_passages?: number;          // cap on returned passages, default 2 (�
 `expand` enum and `max_expand_passages` number, both passed through `handleRecall` →
 `engine.recall` → `retrievalRecall`.
 
-| Mode | Behavior |
-|---|---|
+| Mode                   | Behavior                                                                                                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **`'auto'` (default)** | After dedup (step 9b), if **≥2 kept facts share a non-null `segment_id`**, expand that shared parent (return its query-ranked passages). A single fact with a lone parent stays a fact (no expansion). |
-| **`'none'`** | Force off. Facts are returned, no segment lookup, no extra query, no budget change — **byte-for-byte today's** behavior. |
-| **`'parent'`** | Force expand: emit the parent passage for **every** kept fact that has a non-null `segment_id`, even a lone one. |
+| **`'none'`**           | Force off. Facts are returned, no segment lookup, no extra query, no budget change — **byte-for-byte today's** behavior.                                                                               |
+| **`'parent'`**         | Force expand: emit the parent passage for **every** kept fact that has a non-null `segment_id`, even a lone one.                                                                                       |
 
 **Why `'auto'` is the default (the off-by-default fix).** The Bandalert loss occurred on an
 **ordinary recall with no flag** — so an opt-in `'none'` default (v1) could never have fixed it; the
 load-bearing behavior was deferred out of the default path. `'auto'` fixes the evidenced failure on
-a default call, and it needs **no query classifier**: the discriminator is purely structural — *do
-≥2 of the kept facts point at the same parent?* That shared-parent grouping is the exact contract
+a default call, and it needs **no query classifier**: the discriminator is purely structural — _do
+≥2 of the kept facts point at the same parent?_ That shared-parent grouping is the exact contract
 signature (7 headline facts, one shared segment) and is **already computed** for parent-dedup
 (§5.3), so `'auto'` adds no new machinery. It does **not** regress pinpoint queries: a pinpoint
 recall returns one matched fact, which has at most one parent and therefore one fact per
@@ -369,60 +386,83 @@ answer ("what's my Anthropic API key var name?") into a passage lookup for no be
 evicting other facts under the default budget. `'auto'`'s ≥2-shared-parent gate is the minimal
 trigger that catches the contract case while leaving pinpoint recall untouched.
 
-**`buildContext`/`memory_context` is wired to `'auto'` too** (`engine-impl.ts:279`). The briefing
-path is the **no-human-in-loop** place where missing a clause is most costly — there is no agent to
-notice the headline is thin and ask a follow-up — so it gets the same auto-expansion. Its budget is
-**800** (`CONTEXT_DEFAULT_BUDGET`, `engine-impl.ts:270`), which a ~300-token passage comfortably
-fits alongside facts.
+**`buildContext`/`memory_context`'s task branch is wired to `'auto'` too** (`engine-impl.ts:373`).
+Auto-expansion applies to the **query-driven** recall path: when a `task` is supplied,
+`buildContext` runs a real `recall` against it with `expand:'auto'`, so the briefing's
+**no-human-in-loop** place — where missing a clause is most costly, since there is no agent to
+notice a thin headline and ask a follow-up — gets the same expansion. Its budget is **800**
+(`CONTEXT_DEFAULT_BUDGET`, `engine-impl.ts:365`), which a ~300-token passage comfortably fits
+alongside facts.
 
-### 5.3 Step 9b — parent re-expansion (passage AUGMENTs the facts; passage-only parent-dedup)
+**The no-task briefing returns facts only — it cannot expand.** When no `task` is given, the
+recent/important section (`engine-impl.ts:387`–`419`) is a direct SQL list built from
+`getRecentMemories`/`getImportantMemories`, formatted as bullet lines. There is **no query** in
+that path, so there is nothing to rank a segment's passages against; auto-expansion is a
+query-driven step and therefore does not run. "Wired to `'auto'`" means the query-driven (task)
+recall expands — it does **not** mean every `memory_context` path expands. A no-task briefing
+surfaces fact headlines only.
+
+### 5.3 Step 9b — parent re-expansion (HYBRID: breadth facts + one reserved passage; passage-only parent-dedup)
 
 Input: `kept` (the post-dedup `ScoredMemory[]`, `pipeline.ts:114`), already sorted by score, plus
-`queryEmbedding` (already computed at step 1, `pipeline.ts:43`).
+`queryEmbedding` (already computed at step 1, `pipeline.ts:43`), plus the recall `budget`. Step 9b
+**absorbs the budget pack** (the pipeline no longer calls `packToBudget` itself for the expand
+path): it returns the final packed, ordered display units. `rankSegmentPassages` (the
+split→embed→rank helper) is **shared** with `engine.expand`/`memory_expand` (§9.4).
 
-> **AUGMENT, not replace.** An earlier draft had an expanded segment's chosen passage *replace* its
-> sibling facts (the facts "collapsed into" the one passage). That is wrong for a multi-term source:
-> a contract segment's facts are about **different** terms (ownership, valuation, profit-sharing,
-> governance, execution), so collapsing them into one passage about **one** term destroys breadth —
-> on the live corpus, a "key terms" survey query returned a *worse* answer with `expand:'auto'` than
-> with `expand:'none'` (five distinct key-term facts evicted for one execution-terms passage). The
-> corrected design **keeps every fact** and treats the passage as **supplementary**: passages are
-> appended *after* all the facts. **Parent-dedup applies to passages (one per shared parent), never
-> to facts.**
+> **HYBRID, not pure-AUGMENT (and not REPLACE).** Two earlier drafts were both wrong at the edges.
+> (1) **REPLACE** had a chosen passage _replace_ its sibling facts — wrong for a multi-term source: a
+> contract segment's facts are about **different** terms (ownership, valuation, profit-sharing,
+> governance, execution), so collapsing them into one passage about **one** term destroys breadth (a
+> "key terms" survey query returned a _worse_ answer than `expand:'none'`). (2) **pure-AUGMENT** fixed
+> that by appending the passage strictly **last**, lowest-priority, riding only leftover budget — but
+> that made depth **budget-dependent**: if the breadth facts filled the default 800 budget, the
+> passage was skipped, `expanded` was false, and `expand:'auto'` silently degraded to the lossy
+> headlines the feature exists to fix. The corrected **HYBRID** keeps the breadth facts AND
+> **reserves budget for the one top passage so depth is guaranteed**, displacing only the
+> lowest-priority tail facts — never the top facts. **Parent-dedup applies to passages (one per shared
+> parent), never to facts.**
 
 ```
-if expand === 'none': proceed to packToBudget as today.   // unchanged path
+if expand === 'none': packToBudget(factUnits, budget) as today.   // unchanged path
 
 // expand === 'auto' | 'parent':
 1. Group kept facts by non-null segment_id, recording each group's best-ranked-fact position.
 2. Decide which segments to EXPAND:
      - expand === 'parent'  → every group with a non-null segment_id (size ≥1)
      - expand === 'auto'    → only groups whose size is ≥2 (a SHARED parent)
+   (no expandable segment → packToBudget(factUnits, budget); identical to 'none'.)
 3. Fetch the selected segments by id in one query (getSegmentsByIds(db, ns, ids)).
-4. For each expanded segment, SPLIT-AND-RANK to a passage (§5.3.1):
+4. For each expanded segment, SPLIT-AND-RANK to a passage via rankSegmentPassages (§5.3.1):
      - split segment.content into coherent passages (paragraph/turn/sentence boundaries,
        each capped ~300–400 tokens);
      - embed each passage and rank by cosine similarity to queryEmbedding;
      - choose the top passage per segment.
-5. Build the display list as AUGMENT:
-     a. Emit EVERY kept fact as a fact unit, in score order — byte-for-byte what `expand:'none'`
-        returns. No fact is ever dropped, skipped, or reordered by expansion. (store-path / degrade
-        NULL-segment facts and forgotten-parent facts are just normal facts here.)
-     b. APPEND the chosen passages AFTER all the facts, in segment-best-rank order (each passage
-        rides on its segment's best-ranked fact for date/importance rendering, with a distinct id
-        so it is not an id-collision duplicate of that fact). Apply passage parent-dedup (one
-        passage per segment), passage overlap-dedup (§5.3.2), and the max_expand_passages cap
-        (§5.4) to the appended passages only.
-6. The result is a score-ordered list of fact units followed by ≤max_expand_passages passage units.
+5. Build the candidate passage units, in segment-best-rank order: each rides its segment's
+   best-ranked fact for date/importance rendering, with a distinct id so it is not an
+   id-collision duplicate of that fact. Apply passage parent-dedup (one passage per segment),
+   passage overlap-dedup (§5.3.2), and the max_expand_passages cap (§5.4) here.
+6. HYBRID pack (does NOT change packToBudget's own logic — it orchestrates it):
+     - topPassage = passageUnits[0]; reserve = estimateTokens(topPassage).
+     - if no passage, or reserve > budget → packToBudget(factUnits, budget), expanded=false
+       (no infinite reserve; at a pathologically tiny budget auto≈none is acceptable).
+     - else: packedFacts = packToBudget(factUnits, budget − reserve)   // top facts never evicted
+             force-include topPassage                                   // depth guaranteed
+             fill leftover greedily (skip-not-break) with the not-yet-packed facts
+               + the supplementary passages (passageUnits[1..], already capped).
+7. The result is score-ordered facts, then the guaranteed top passage, then any supplementary
+   passages — facts above the displaced tail are all still present.
 ```
 
-Because the unchanged greedy skip-not-break `packToBudget` packs the display list **in order**,
-putting passages **last** means the breadth facts are packed first and a passage only ever consumes
-**leftover** budget. **This is the load-bearing property: auto-expand can never evict a fact that
-`expand:'none'` would have kept.** In the contract case the ~7 headline facts (about different
-terms) are all preserved AND the query-relevant clause passage (carrying e.g. the `$250k` cap, never
-a fact) is appended when budget allows — **the fix for the Bandalert failure, on a default `'auto'`
-recall with no flag, without sacrificing breadth.**
+The **reservation** is the load-bearing property: because the top facts are packed into
+`budget − reserve` _before_ the passage is force-included, the top facts are never evicted to fit
+the passage, yet the passage is **guaranteed** whenever it fits the whole budget — depth no longer
+degrades to `'none'` at the default budget. The passage displaces only the lowest-priority tail
+facts (the ones that did not fit `budget − reserve`); every fact ranking above the displaced tail is
+still returned. In the contract case the top headline facts (about different terms) are preserved
+AND the query-relevant clause passage (carrying e.g. the `$250k` cap, never a fact) is guaranteed at
+the default 800 budget — **the fix for the Bandalert failure, on a default `'auto'` recall with no
+flag, without sacrificing the top facts.**
 
 #### 5.3.1 Split-and-rank: the returned unit is a query-relevant passage, not the chunk
 
@@ -452,12 +492,12 @@ total recalls (only shared-parent groups). Ingest-time pre-split would precomput
 embeddings and avoid the recall-time embed, but adds a passages table and write-path cost on every
 ingest for a path that fires occasionally. Recall-time is the simpler default; ingest-time pre-split
 is a noted optimization (§8) if profiling shows the recall-time passage embed is hot. Either way the
-**storage unit may remain `segment = chunk`**; only the *returned* unit is passage-sized.
+**storage unit may remain `segment = chunk`**; only the _returned_ unit is passage-sized.
 
 #### 5.3.2 Overlap dedup (A6, minor)
 
 `chunkBlob` windows overlap ~10–15% (`extraction.ts` `chunkBlob` comment; the overlap preserves
-cross-references at chunk boundaries). If two *adjacent* segments are both expanded in one result —
+cross-references at chunk boundaries). If two _adjacent_ segments are both expanded in one result —
 e.g. a fact from each side of a boundary shares text — their chosen passages may contain the same
 sentences. Because the returned unit is now a **passage**, a cheap **passage-text overlap dedup**
 handles this: when emitting passages, drop a passage whose normalized text is a (near-)substring of
@@ -467,30 +507,34 @@ emitted passages, not an embedding pass. It is a no-op for the common single-exp
 ### 5.4 Budget accounting (simplified — passages are fact-sized, not chunk-sized) + out-of-the-box defaults
 
 **Default budget is bumped 500 → 800 so the system returns useful context with zero configuration.**
-The out-of-the-box directive requires that a *default* recall return the relevant passage **plus**
-a couple of facts. A passage is ~300–400 tokens and a fact ~150; at the old default of **500**,
-once the facts have packed first (AUGMENT) a single ~400-token passage rarely has room to ride
-along — so the shared-parent depth would simply not surface (auto ≈ none). Bumping
-`MEMORY_DEFAULT_TOKEN_BUDGET` (`config.ts:70`) to **800** comfortably fits 2–3 facts **and** one
-~300–400-token passage (~3×150 + 400 ≈ 850, packed greedily to ≤ 800), which is exactly the desired
-shape. `memory_context`
-stays **800** (`engine-impl.ts:270`); the two default budgets are now equal, which is intentional —
-both paths want the same "one passage + a few facts" envelope. **No flag and no config tuning are
-needed** to get parent context on shared-parent queries.
+The out-of-the-box directive requires that a _default_ recall return the relevant passage **plus**
+a couple of facts. A passage is ~300–400 tokens and a fact ~150. The HYBRID reservation (§5.3)
+guarantees the passage even when facts could fill the budget, so the bump is about leaving room for
+**enough facts alongside** the reserved passage: at **800**, reserving ~400 for the passage still
+packs 2–3 facts into the remaining ~400, which is exactly the desired shape. (At the old **500**,
+after a ~400-token reservation only ~100 tokens remain — barely one fact — so the breadth would be
+too thin even though depth was guaranteed.) Bumping `MEMORY_DEFAULT_TOKEN_BUDGET` (`config.ts:70`) to
+**800** fits 2–3 facts **and** one ~300–400-token passage. `memory_context` stays **800**
+(`engine-impl.ts:270`); the two default budgets are now equal, which is intentional — both paths want
+the same "one passage + a few facts" envelope. **No flag and no config tuning are needed** to get
+parent context on shared-parent queries.
 
-v1's elaborate two-tier `expand_budget_fraction` existed for **one** reason — to *reject* a
+v1's elaborate two-tier `expand_budget_fraction` existed for **one** reason — to _reject_ a
 6000-token segment that could never fit — and passage return removes that reason entirely. So the
 budget machinery is simplified:
 
-- Re-expansion produces display units that each carry their own `displayContent` (a chosen passage
-  for an expanded unit, fact text otherwise) and `displayTokens = estimateTokens(displayContent)`.
-- Packing reuses the **existing** `packToBudget` greedy *skip-not-break* discipline
-  (`scoring.ts:200-212`): walk the score-ordered display list; include a unit if it fits the
-  remaining budget, else `continue` (skip, don't break). No segment sub-budget, no second pass.
+- Re-expansion produces display units whose `content` is the chosen display text (a passage for an
+  expanded unit, fact text otherwise); the packer estimates tokens off that `content`.
+- Packing reuses the **existing** `packToBudget` greedy _skip-not-break_ discipline
+  (`scoring.ts:200-212`) **unchanged**, called twice by the HYBRID orchestration: once over the facts
+  into `budget − reserve`, then over the leftover (remaining facts + supplementary passages). The
+  top passage is force-included between those calls. No segment sub-budget; `packToBudget`'s own
+  logic is untouched.
 - The only added guard is a small **count cap**: at most `max_expand_passages` (default **2**)
-  passages may be appended across the whole result. With AUGMENT the cap is belt-and-suspenders
-  (passages are appended *after* the facts and only consume leftover budget, so they cannot evict a
-  fact regardless of the cap); it mainly bounds explicit `'parent'` calls with a raised budget.
+  passages across the whole result, applied when the passage units are built (so an overlap-dropped
+  passage does not waste a cap slot). Under HYBRID only the **first** passage is reserved/guaranteed;
+  the rest are supplementary (leftover budget only, never displacing a fact), so the cap mainly
+  bounds explicit `'parent'` calls with a raised budget.
 
 **Why a count cap of 2 against budget=800 with ~300–400-token passages and ~150-token facts.** One
 ~300–400-token passage leaves ~400–500 tokens — room for 2–3 facts; two passages (~600–800 tokens)
@@ -502,17 +546,20 @@ the supporting facts. A single dominant passage (the contract clause) plus the f
 is exactly the desired out-of-the-box shape.
 
 The `expand:'none'` path calls `packToBudget` with the unchanged fact list — **byte-for-byte today's
-behavior** (at whatever `token_budget` the caller passes; only the *default* changed). Under AUGMENT,
-expansion only ever **appends** passages after the full fact list and never relaxes the skip-not-break
-rule, so a budget that fits N facts always still fits those N facts — the passage is the unit that
-gets skipped, never a fact.
+behavior** (at whatever `token_budget` the caller passes; only the _default_ changed). Under HYBRID,
+the top facts are packed into `budget − reserve` before the passage is force-included, so the **top**
+facts are never evicted to fit the passage; only the lowest-priority tail facts (the ones that did
+not fit `budget − reserve`) are displaced. Every fact ranking above the displaced tail is still
+returned.
 
-**Trade-off (intended).** Because passages are appended last, the budget governs *depth*, not
-breadth: at a **tight** budget the passage may not fit at all, so `expand:'auto'` degrades to
-`expand:'none'` (all the facts, no passage) rather than dropping a fact — a strict no-regression
-floor. A **larger** budget simply surfaces more depth (the clause passage, then a second if
-`max_expand_passages` and budget allow). Breadth is constant across budgets; only how much parent
-context rides along varies.
+**Trade-off (intended).** The budget governs how many facts ride **alongside** the guaranteed
+passage, not whether depth appears at all. At a **default-ish** budget the top passage is reserved
+and guaranteed, displacing only the lowest-priority tail fact(s); a **larger** budget keeps more of
+those tail facts (and may surface a second passage if `max_expand_passages` and budget allow); only
+at a **pathologically tiny** budget — one that cannot fit even the single passage — does
+`expand:'auto'` fall back to `expand:'none'` (facts only, `expanded` false), the strict
+no-regression floor. So depth is guaranteed across the realistic budget range; what varies is how
+many breadth facts accompany it.
 
 ### 5.5 Formatting + expansion metadata in every format
 
@@ -532,11 +579,11 @@ which hides exactly the ids an agent needs to follow up. v2 surfaces, on the str
 - `expanded_segment_ids: string[]` — the `segment_id`s that were expanded (empty when none);
 - per-unit, in `raw` mode, the `segment_id` and an `expanded` flag (as v1).
 
-The `summary`/`answer` *text* is unchanged in shape; the structured fields ride alongside it.
+The `summary`/`answer` _text_ is unchanged in shape; the structured fields ride alongside it.
 
 **Agentic follow-up — the "get headlines → expand the one that matters" loop.** The realistic
 agentic usage is: a default `'auto'` recall returns mostly facts (no shared parent) plus maybe one
-expanded passage; the agent reads a headline fact, decides *that* one needs detail, and fetches its
+expanded passage; the agent reads a headline fact, decides _that_ one needs detail, and fetches its
 parent. Two affordances support this, both driven by the now-visible ids:
 
 - **`memory_expand(segment_id)`** — a small new tool that returns the parent segment's
@@ -555,8 +602,9 @@ unique among the kept set → the ≥2-shared-parent gate does **not** fire → 
 returned, identical to today. Auto-expansion only triggers when several kept facts genuinely share a
 parent — the briefing/contract shape, where the coarse passage is what the user wanted. Existing
 callers that need byte-for-byte-today behavior can pass `expand:'none'`; `buildContext`/
-`memory_context` deliberately uses `'auto'` (§5.2) because its no-human-in-loop briefings are
-exactly the shared-parent case. The pinpoint case is never *worse* than today.
+`memory_context`'s **task** (query-driven) branch deliberately uses `'auto'` (§5.2) because its
+no-human-in-loop briefings are exactly the shared-parent case. (The no-task recent/important
+briefing has no query and returns facts only.) The pinpoint case is never _worse_ than today.
 
 ---
 
@@ -592,7 +640,7 @@ for each chunk-group g with g.facts.length > 0:
 
 - `store` (`storeImmediate`) gains an optional `segmentId` in `StoreOptions`, forwarded into
   `insertMemory`'s new `segmentId` param (§3.3).
-- **On exact-dedup merge, repoint the survivor to the *richer* parent (order-independence, A4).**
+- **On exact-dedup merge, repoint the survivor to the _richer_ parent (order-independence, A4).**
   When a fact **merges** into an existing row (exact-dedup branch, `engine-impl.ts:95-108`), v1 kept
   the survivor's **first** `segment_id`. That makes the parent depend on ingest order: a later,
   richer ingest of the same fact — whose segment carries more clauses — would be discarded purely
@@ -618,7 +666,7 @@ for each chunk-group g with g.facts.length > 0:
   - `dry_run`: no segment and no fact rows written (today's behavior, `engine-impl.ts:247-249`).
   - `degrade` single-blob (`engine-impl.ts:219-238`): the blob is stored as one fact with
     `segment_id = NULL` — there was no decomposition, so there is no parent to retain. (The blob
-    *is* the content; re-expansion treats it as its own parent, §4.3.) **No segment row** for the
+    _is_ the content; re-expansion treats it as its own parent, §4.3.) **No segment row** for the
     degrade path.
   - `skip`: nothing written (unchanged).
 - **`maybeRunMaintenance`** still fires inside `storeImmediate` as today; segments are inert to
@@ -636,9 +684,9 @@ fact is forgotten (siblings may still reference it). Rules:
   has been independently removed falls back to emitting the fact (§5.3 step 3, missing-segment
   case) — robust to dangling pointers.
 - **Orphan collection (deferred, §8):** a maintenance sweep can `DELETE FROM segments WHERE id
-  NOT IN (SELECT segment_id FROM memories WHERE segment_id IS NOT NULL)`. Not required for phase 1
+NOT IN (SELECT segment_id FROM memories WHERE segment_id IS NOT NULL)`. Not required for phase 1
   (orphans are inert and cheap); listed as a follow-up. Because the FK is **not** `ON DELETE
-  CASCADE`, deleting facts never deletes segments and deleting a segment is only ever the explicit
+CASCADE`, deleting facts never deletes segments and deleting a segment is only ever the explicit
   orphan sweep.
 - **Decay/compaction** don't delete rows, so segment links survive; an expanded recall of a
   decayed fact still has its parent (though a decayed fact rarely surfaces, since its vector is
@@ -650,7 +698,7 @@ fact is forgotten (siblings may still reference it). Rules:
 
 **Idea (Anthropic Contextual Retrieval).** Before embedding a fact, prepend a short context
 string derived from its segment (a one-line topic, e.g. "Context: the Bandalert distribution
-contract. Fact: …"), so the fact's *vector* carries cross-reference signal it otherwise lacks.
+contract. Fact: …"), so the fact's _vector_ carries cross-reference signal it otherwise lacks.
 This improves the **retrieval key** (the embedded fact), distinct from §5 which improves the
 **returned unit**.
 
@@ -671,11 +719,11 @@ This improves the **retrieval key** (the embedded fact), distinct from §5 which
   return + auto-expansion are both in Phase 1, §11), so phase 1 actually solves the evidenced
   problem on its own. (This corrects v1, which claimed "phase 1 solves it" while the load-bearing
   behavior — expansion on a default recall — had been deferred behind an opt-in `'none'` default.)
-  Phase 2 is therefore a pure *recall-rate* optimization to layer on later behind a config flag
+  Phase 2 is therefore a pure _recall-rate_ optimization to layer on later behind a config flag
   (`MEMORY_INGEST_CONTEXTUALIZE_EMBEDDING`, default off).
 
-**Tradeoff stated:** phase 2 buys better *retrieval* of detail-bearing facts (the fact is more
-findable); phase 1 buys *returnability* of detail that was never a fact at all (the clause is in
+**Tradeoff stated:** phase 2 buys better _retrieval_ of detail-bearing facts (the fact is more
+findable); phase 1 buys _returnability_ of detail that was never a fact at all (the clause is in
 the segment). They are complementary; the evidenced loss is a returnability problem, so phase 1
 is mandatory and phase 2 is optional.
 
@@ -684,7 +732,7 @@ is mandatory and phase 2 is optional.
 ## 8. Reference-document handling & `mode='document'`
 
 - **Parent retention fixes the contract case even if decomposition stays lossy.** The headline
-  facts ("there is a distribution contract", "it has a buyout clause") are enough to *retrieve*
+  facts ("there is a distribution contract", "it has a buyout clause") are enough to _retrieve_
   the right segment; the **un-decomposed clauses** ($250k cap, IP terms, NDA) ride along in
   `segments.content` and are returned — as the query-relevant **passage** (§5.3) — on a default
   `'auto'` recall (the shared-parent gate fires because all the headline facts point at the one
@@ -695,8 +743,8 @@ is mandatory and phase 2 is optional.
   low-importance near-duplicate facts that muddy the index — the opposite of the ingest tool's
   design intent. With parent retention, the clauses are **recoverable** without being indexed.
   `mode='document'` keeps its current explicit-vs-inference contract (`extraction.ts:71-75`); the
-  segment carries the detail. (A future, *separate* "exhaustive reference mode" could be added if
-  evidence shows clause-level *retrieval* — not just return — is needed; explicitly out of scope.)
+  segment carries the detail. (A future, _separate_ "exhaustive reference mode" could be added if
+  evidence shows clause-level _retrieval_ — not just return — is needed; explicitly out of scope.)
 
 ---
 
@@ -759,9 +807,9 @@ Both are additive and optional — the `store`/`memory_store` contract is unchan
 `server.ts` `memory_recall` Zod block + `tools/recall.ts` `validateRecallInput` gain `expand`
 (enum `'none' | 'auto' | 'parent'`, optional, **default `'auto'`**) and `max_expand_passages`
 (positive int, optional, default `2`, validated like `validateTokenBudget` bounds). The tool
-description gains one sentence: *"`expand` defaults to `'auto'`, which returns the relevant source
+description gains one sentence: _"`expand` defaults to `'auto'`, which returns the relevant source
 passage when several matched facts come from the same source (e.g. a contract's clauses); use
-`'none'` for strictly pinpoint facts, or `'parent'` to force the source passage for every match."*
+`'none'` for strictly pinpoint facts, or `'parent'` to force the source passage for every match."_
 
 **New `memory_expand(segment_id, query?)` tool** (the agentic follow-up affordance, §5.5).
 Following the package's `server.tool()` idiom (deprecated but used uniformly under the file's
@@ -769,9 +817,12 @@ eslint-disable block — match it; do not migrate to `registerTool` piecemeal), 
 new `MemoryEngine.expand(segmentId, query?)` method (the only seam holding both `db` and `config`,
 per the package's config-injection constraint — a handler-local function cannot reach the embedder):
 fetch the segment by id, split-and-rank its passages against `query` (or return the whole segment up
-to a cap when `query` is absent), and return them. This is the "I got a headline, give me *this*
+to a cap when `query` is absent), and return them. This is the "I got a headline, give me _this_
 fact's parent" call; `expanded_segment_ids`/per-unit `segment_id` from the prior `recall` supply the
-id.
+id. The `query` path's split→embed→rank is the **shared `rankSegmentPassages` helper** (exported from
+`retrieval/expansion.ts`) — the same one recall expansion (§5.3) uses (it takes the top 1 per
+segment); `memory_expand` ranks all passages of the one segment. (DRY: one split/rank implementation,
+not two.)
 
 ### 9.5 What existing callers see
 
@@ -784,20 +835,20 @@ id.
   unchanged. **Conflict + resolution:** two defaults changed that the diagnostic must pin to keep
   its GO/NO-GO verdict comparable to its historical baseline — (1) the default `expand` is now
   `'auto'` (not `'none'`), and (2) the default `token_budget` is now **800** (not 500, §5.4). Both
-  affect the *packed output* without touching the candidate **ranker** (the candidate set, fusion,
+  affect the _packed output_ without touching the candidate **ranker** (the candidate set, fusion,
   composite, rerank and dedup are byte-for-byte unchanged; only the post-dedup display units and how
   many of them fit differ). To keep the verdict in `memory-corpus-and-diagnostic.md` measuring the
   same thing, the diagnostic must **pass `expand:'none'` AND its own explicit `token_budget`** (the
   value it baselined on) rather than inheriting the new defaults — which restores byte-for-byte its
-  prior packed output. (This is the one place the `'auto'`/800 defaults are *not* what we want: the
+  prior packed output. (This is the one place the `'auto'`/800 defaults are _not_ what we want: the
   diagnostic grades the ranker, not the return shape or the budget envelope.) Pinned that way the
   verdict is undisturbed; separate `expand:'auto'` / budget-800 diagnostic passes can later measure
   passage-return quality at the out-of-the-box settings.
 - **External MCP clients**: additive only — a tri-state `expand` recall option (defaulting to
-  `'auto'`, which can change the *returned* unit for shared-parent queries vs. v0 facts-only),
+  `'auto'`, which can change the _returned_ unit for shared-parent queries vs. v0 facts-only),
   `expanded`/`expanded_segment_ids` on `RecallResult` in every format, and the new
-  `memory_expand` tool. The candidate ranking they observe is unchanged; the *coarser return on
-  shared-parent queries* is the intended behavior change.
+  `memory_expand` tool. The candidate ranking they observe is unchanged; the _coarser return on
+  shared-parent queries_ is the intended behavior change.
 
 ---
 
@@ -805,7 +856,7 @@ id.
 
 Follow the existing harness exactly: `mkdtempSync(tmpdir(), 'memory-test-')` + `initDatabase(path,
 TEST_MODEL)` (`test/database.test.ts:41-44`), real small embedder under the 30s timeout, and the
-`vi.mock('../src/llm/client.js', …)` queue from `test/ingest.test.ts:11-26` so the *real*
+`vi.mock('../src/llm/client.js', …)` queue from `test/ingest.test.ts:11-26` so the _real_
 store/segment pipeline runs while extraction returns canned facts.
 
 ### 10.1 Canonical schema / stale-DB rebuild (`test/database.test.ts` extension)
@@ -815,9 +866,9 @@ are **deleted**. What remains is the canonical-schema assertion plus the stale-D
 
 - **Fresh DB is born with the canonical schema:** open a brand-new path via `initDatabase` →
   `segments` table exists, `memories` has a `segment_id` column, `schema_meta['schema_version']
-  === '4'`. (No migration step ran; `createSchema` built it directly.)
+=== '4'`. (No migration step ran; `createSchema` built it directly.)
 - **Stale DB (older `SCHEMA_VERSION`) is recreated cleanly:** build a DB with the **v3** shape
-  (create `memories` *without* `segment_id`, set `schema_meta['schema_version']='3'`, insert a row),
+  (create `memories` _without_ `segment_id`, set `schema_meta['schema_version']='3'`, insert a row),
   reopen via `initDatabase`, and assert: the schema is rebuilt (the `segment_id` column now exists,
   `segments` table exists), the version stamp is now `'4'`, the open does **not** throw
   `no such column: segment_id`, and the pre-change row is **gone** (drop-and-recreate deliberately
@@ -838,7 +889,7 @@ are **deleted**. What remains is the canonical-schema assertion plus the stale-D
   segment row; `segments_created` omitted/0.
 - **dry_run:** no segment rows, no fact rows (unchanged), `facts` still previewed.
 - **Merge repoints to richer parent (A4):** ingest a fact whose segment has `fact_count = 1`, then
-  ingest a duplicate (exact-dedup merge) from a *different* segment with `fact_count = 5` →
+  ingest a duplicate (exact-dedup merge) from a _different_ segment with `fact_count = 5` →
   survivor's `segment_id` is repointed to the **richer** (5-fact) segment, **regardless of ingest
   order** (run the test both orders; same result). A `NULL`-parent survivor adopts the incoming
   segment; a tie keeps the existing.
@@ -884,13 +935,15 @@ are **deleted**. What remains is the canonical-schema assertion plus the stale-D
   raw), not just `raw`; per-unit `segment_id` still appears in `raw`.
 - **`memory_expand(segment_id)`:** returns the parent's query-ranked passages for the id from a
   prior recall; with no `query`, returns the segment (up to a cap).
-- **`memory_context` auto-expands:** a `buildContext`/`memory_context` call over a shared-parent
-  corpus returns the passage (asserts the briefing path is wired to `'auto'`, budget 800).
+- **`memory_context` (task) auto-expands:** a `buildContext`/`memory_context` call **with a `task`**
+  over a shared-parent corpus returns the passage (asserts the query-driven briefing path is wired
+  to `'auto'`, budget 800). The no-task recent/important briefing has no query and returns facts
+  only — it does not expand.
 
 ### 10.5 Content-free fixtures
 
 Any expansion/segment fixtures that touch real corpus shape stay **content-free** (ids, counts,
-token estimates) per the sensitive-data rule; segment *text* in tests is synthetic
+token estimates) per the sensitive-data rule; segment _text_ in tests is synthetic
 ("Contract clause: distribution cap is $250k. …"), never private export content.
 
 ---
@@ -906,12 +959,13 @@ fix the evidenced loss; corrected here).
 1. **Phase 1 (this design, mandatory):** `segments` table + `segment_id` column as part of the
    canonical `createSchema` (no migration runner; stale DBs drop-and-recreate, §4) + ingest
    writes/links segments + **default `expand:'auto'`** re-expansion with **passage split-and-rank**
-   + parent-dedup + simplified passage-budget cap (default budget bumped to **800**, §5.4) + A4
-   richer-parent merge repoint + metadata in every format + `memory_expand` + `memory_context`
-   wired to `'auto'`. **Fixes the evidenced contract loss on a default recall, out of the box.**
+   - parent-dedup + simplified passage-budget cap (default budget bumped to **800**, §5.4) + A4
+     richer-parent merge repoint + metadata in every format + `memory_expand` + `memory_context`'s
+     task (query-driven) branch wired to `'auto'` (the no-task briefing has no query and returns facts
+     only). **Fixes the evidenced contract loss on a default recall, out of the box.**
 2. **Phase 2 (optional, deferred, §7):** contextualized embedding behind
-   `MEMORY_INGEST_CONTEXTUALIZE_EMBEDDING` (default off). Improves *retrieval* of detail-bearing
-   facts; requires a corpus rebuild. Phase 1 already fixes *return* of un-decomposed clauses.
+   `MEMORY_INGEST_CONTEXTUALIZE_EMBEDDING` (default off). Improves _retrieval_ of detail-bearing
+   facts; requires a corpus rebuild. Phase 1 already fixes _return_ of un-decomposed clauses.
 3. **Phase 3 (optional, deferred, §6.3/§8):** orphan-segment collection in maintenance;
    **ingest-time passage pre-split** (precompute + persist passages/embeddings if the recall-time
    passage embed proves hot); a possible exhaustive reference mode.
@@ -924,8 +978,8 @@ fix the evidenced loss; corrected here).
   → composite → rerank → dedup) and the existing `scoring.ts` functions are byte-for-byte unchanged;
   the candidate set, fusion, composite, rerank, and dedup are identical. **Passage split-and-rank
   (§5.3.1) is a post-retrieval, return-shaping step on an already-selected segment — it ranks
-  *passages of a winner's parent* by the reused query embedding to decide what to *show*, never
-  *which memories win*.** The two are orthogonal; "ranker untouched" holds.
+  _passages of a winner's parent_ by the reused query embedding to decide what to _show_, never
+  _which memories win_.** The two are orthogonal; "ranker untouched" holds.
 - **NOT making decomposition exhaustive.** `mode='document'` keeps its current contract; clauses
   are recovered via the passage, not via more facts (§8).
 - **The returned unit is a passage, not the raw 6000-token segment.** A whole-chunk return is
@@ -935,7 +989,7 @@ fix the evidenced loss; corrected here).
 - **NOT re-embedding facts.** Phase 1 adds no new fact-vector dimension and changes no existing
   embedding path; parent-less facts (the NULL-segment case, §4.3) work without an embedding change.
   (Passage embeddings are computed transiently at recall time and not persisted in Phase 1.) Note
-  this is orthogonal to the stale-DB rebuild (§4.2): the rebuild *re-ingests* the corpus from
+  this is orthogonal to the stale-DB rebuild (§4.2): the rebuild _re-ingests_ the corpus from
   scratch via `build-corpus.ts`, which embeds each fact through the normal path — it does not
   "re-embed in place."
 - **`'auto'` is on by default by design.** Auto-expansion fires only on the ≥2-shared-parent
@@ -946,19 +1000,21 @@ fix the evidenced loss; corrected here).
 
 ## 12. File-change summary
 
-| File | Change |
-|---|---|
-| `src/storage/database.ts` | `SCHEMA_VERSION '3'→'4'` (plain stamp); add `segments` table + inline `segment_id` column to the canonical `createSchema` (**no `runMigrations`, no `ALTER TABLE`**); in `initDatabase`, read on-disk `schema_meta['schema_version']` and **drop-and-recreate** the schema when older than `SCHEMA_VERSION` (stale-DB self-heal, §4.2); `MemoryRow.segment_id`; `SegmentRow` type. |
-| `src/config.ts` | Bump `MEMORY_DEFAULT_TOKEN_BUDGET` **500 → 800** (`config.ts:70`) so a passage + a couple of facts fit out of the box (§5.4); `memory_context` budget already 800 (`engine-impl.ts:270`), now equal. |
-| `src/storage/queries.ts` | `InsertMemoryParams.segmentId?`; `insertMemory` binds it (else NULL); new `insertSegment`, `getSegmentsByIds`, **`updateMemorySegmentIfRicher`** (A4 merge repoint, §6.2); (deferred) `deleteOrphanSegments`. |
-| `src/storage/extraction.ts` | Reuse `chunkBlob` output as segment content (no change to chunking); new **`splitToPassages(text)`** helper (coherent ~300–400-token passages) for recall-time split (§5.3.1). |
-| `src/engine.ts` | `StoreOptions.segmentId?`; new **`MemoryEngine.expand(segmentId, query?)`** method (powers `memory_expand`, §9.4); `RecallOptions`/`IngestResult` additions live in `types.ts`. |
-| `src/types.ts` | `RecallOptions.expand: 'none'\|'auto'\|'parent'` (default `'auto'`) + `max_expand_passages` (**replaces** `expand_budget_fraction`); `IngestResult.segments_created?`; `RecallResult.expanded?` + `expanded_segment_ids?` (**all formats**); `Memory.segment_id`. |
-| `src/engine-impl.ts` | `storeImmediate` forwards `segmentId` + calls `updateMemorySegmentIfRicher` on merge; `extractAllFacts` returns per-chunk groups; `ingestBlob` writes one segment per non-empty chunk and links facts; `rowToMemory` maps `segment_id`; `recall` threads `expand`/`max_expand_passages`; **`buildContext`/`memory_context` (`:279`) passes `expand:'auto'`**; new `expand()` impl. |
-| `src/retrieval/pipeline.ts` | Insert **step 9b** (auto/parent re-expansion: shared-parent grouping + passage split-and-rank against the reused step-1 query embedding + parent-dedup + overlap dedup) after dedup, before `packToBudget`; gate on `expand`. |
-| `src/retrieval/scoring.ts` | **Unchanged** `packToBudget` reused for both paths (passage units pack like facts); the v1 two-tier variant is dropped. Only addition: `max_expand_passages` count cap applied before packing. |
-| `src/retrieval/formatting.ts` | Display-unit content selection (passage vs fact); surface `expanded` + `expanded_segment_ids` in **every** format; per-unit `segment_id` in `raw`. |
-| `src/tools/recall.ts`, `src/server.ts` | `expand` (tri-state) + `max_expand_passages` schema + validation + description sentence; **new `memory_expand` tool** (`server.tool()` idiom) routed to `engine.expand`. |
-| `test/database.test.ts`, `test/ingest.test.ts`, `test/expand.test.ts`, recall-tool tests | New/extended per §10 (fresh DB born with canonical schema; **stale-DB drop-and-recreate**, no `test/migration.test.ts`; auto-fires-by-default; passage fits default budget 800 + leaves room for a fact + contains clause; passage query-relevant; merge repoints to richer; pinpoint does NOT expand; `memory_expand`; `memory_context` auto-expands). |
+| File                                                                                     | Change                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/storage/database.ts`                                                                | `SCHEMA_VERSION '3'→'4'` (plain stamp); add `segments` table + inline `segment_id` column to the canonical `createSchema` (**no `runMigrations`, no `ALTER TABLE`**); in `initDatabase`, read on-disk `schema_meta['schema_version']` and **drop-and-recreate** the schema when older than `SCHEMA_VERSION` (stale-DB self-heal, §4.2); `MemoryRow.segment_id`; `SegmentRow` type. |
+| `src/config.ts`                                                                          | Bump `MEMORY_DEFAULT_TOKEN_BUDGET` **500 → 800** (`config.ts:70`) so a passage + a couple of facts fit out of the box (§5.4); `memory_context` budget already 800 (`engine-impl.ts:270`), now equal.                                                                                                                                                                               |
+| `src/storage/queries.ts`                                                                 | `InsertMemoryParams.segmentId?`; `insertMemory` binds it (else NULL); new `insertSegment`, `getSegmentsByIds`, **`updateMemorySegmentIfRicher`** (A4 merge repoint, §6.2); (deferred) `deleteOrphanSegments`.                                                                                                                                                                      |
+| `src/storage/extraction.ts`                                                              | Reuse `chunkBlob` output as segment content (no change to chunking); new **`splitToPassages(text)`** helper (coherent ~300–400-token passages) for recall-time split (§5.3.1).                                                                                                                                                                                                     |
+| `src/engine.ts`                                                                          | `StoreOptions.segmentId?`; new **`MemoryEngine.expand(segmentId, query?)`** method (powers `memory_expand`, §9.4; its `query` path uses the shared `rankSegmentPassages`); `RecallOptions`/`IngestResult` additions live in `types.ts`.                                                                                                                                            |
+| `src/types.ts`                                                                           | `RecallOptions.expand: 'none'\|'auto'\|'parent'` (default `'auto'`) + `max_expand_passages` (**replaces** `expand_budget_fraction`); `IngestResult.segments_created?`; `RecallResult.expanded?` + `expanded_segment_ids?` (**all formats**); `Memory.segment_id`.                                                                                                                  |
+| `src/engine-impl.ts`                                                                     | `storeImmediate` forwards `segmentId` + calls `updateMemorySegmentIfRicher` on merge; `extractAllFacts` returns per-chunk groups; `ingestBlob` writes one segment per non-empty chunk and links facts; `rowToMemory` maps `segment_id`; `recall` threads `expand`/`max_expand_passages`; **`buildContext`/`memory_context` (`:279`) passes `expand:'auto'`**; new `expand()` impl. |
+| `src/retrieval/pipeline.ts`                                                              | Call **step 9b** (`expandKeptFacts`) after dedup; it now **absorbs the budget pack** (pass `tokenBudget` in, no separate `packToBudget` call) and returns the final packed units + surviving `expandedSegmentIds`. Gate on `expand`.                                                                                                                                               |
+| `src/retrieval/expansion.ts`                                                             | **HYBRID** packing (§5.3): shared-parent grouping + passage split-and-rank + parent/overlap dedup + cap, then reserve the top passage's tokens, pack facts into `budget − reserve`, force-include the top passage, fill leftover. Export **`rankSegmentPassages`** (shared split→embed→rank helper, also used by `engine.expand`).                                                 |
+| `src/retrieval/scoring.ts`                                                               | **Unchanged** `packToBudget` (and `estimateTokens`) reused by the HYBRID orchestration (called twice: facts into `budget − reserve`, then leftover); its own logic is untouched. The v1 two-tier variant is dropped.                                                                                                                                                               |
+| `src/retrieval/formatting.ts`                                                            | Display-unit content selection (passage vs fact); surface `expanded` + `expanded_segment_ids` in **every** format; per-unit `segment_id` in `raw`.                                                                                                                                                                                                                                 |
+| `src/tools/recall.ts`, `src/server.ts`                                                   | `expand` (tri-state) + `max_expand_passages` schema + validation + description sentence; **new `memory_expand` tool** (`server.tool()` idiom) routed to `engine.expand`.                                                                                                                                                                                                           |
+| `test/database.test.ts`, `test/ingest.test.ts`, `test/expand.test.ts`, recall-tool tests | New/extended per §10 (fresh DB born with canonical schema; **stale-DB drop-and-recreate**, no `test/migration.test.ts`; auto-fires-by-default; passage fits default budget 800 + leaves room for a fact + contains clause; passage query-relevant; merge repoints to richer; pinpoint does NOT expand; `memory_expand`; `memory_context` auto-expands).                            |
+
 </content>
 </invoke>

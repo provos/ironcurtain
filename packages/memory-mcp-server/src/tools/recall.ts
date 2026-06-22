@@ -58,7 +58,20 @@ export function validateRecallInput(args: Record<string, unknown>): RecallInput 
   };
 }
 
-export async function handleRecall(engine: MemoryEngine, args: Record<string, unknown>): Promise<string> {
+/**
+ * Structured result of a `memory_recall` call. `text` is the human-readable
+ * payload; the remaining fields are the recall metadata an agent needs to drive
+ * the `memory_expand` follow-up loop (which segments were auto-expanded).
+ */
+export interface RecallToolResult {
+  text: string;
+  memories_used: number;
+  total_matches: number;
+  expanded: boolean;
+  expanded_segment_ids: string[];
+}
+
+export async function handleRecall(engine: MemoryEngine, args: Record<string, unknown>): Promise<RecallToolResult> {
   const input = validateRecallInput(args);
   const result = await engine.recall({
     query: input.query,
@@ -69,9 +82,13 @@ export async function handleRecall(engine: MemoryEngine, args: Record<string, un
     max_expand_passages: input.max_expand_passages,
   });
 
-  if (result.memories_used === 0) {
-    return 'No relevant memories found.';
-  }
+  const text = result.memories_used === 0 ? 'No relevant memories found.' : result.content;
 
-  return result.content;
+  return {
+    text,
+    memories_used: result.memories_used,
+    total_matches: result.total_matches,
+    expanded: result.expanded ?? false,
+    expanded_segment_ids: result.expanded_segment_ids ?? [],
+  };
 }

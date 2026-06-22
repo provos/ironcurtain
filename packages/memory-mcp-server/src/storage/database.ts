@@ -74,9 +74,18 @@ export function initDatabase(dbPath: string, embeddingModel: string): Database.D
 
 /**
  * Read the on-disk `schema_version` stamp (defensively — the table may not exist on a
- * fresh DB) and, when it is PRESENT and OLDER than SCHEMA_VERSION, drop the schema so
- * `createSchema` rebuilds it from scratch. A fresh DB (no stamp) and a current DB
- * (stamp === SCHEMA_VERSION) both skip the drop.
+ * fresh DB) and reconcile it against the current SCHEMA_VERSION using a NUMERIC compare:
+ *
+ *   - absent stamp (fresh DB)      → no-op (createSchema builds from scratch)
+ *   - on-disk  <  current          → drop-and-recreate (deliberately discard old data)
+ *   - on-disk  === current         → no-op (keep)
+ *   - on-disk  >  current          → THROW (fail closed): an older binary must NOT
+ *                                    destroy a newer DB it can't understand
+ *   - present-but-unparseable      → drop (treat as stale; it is not a recognizable
+ *                                    newer version)
+ *
+ * A pre-numeric string compare silently dropped a FUTURE schema opened by an older
+ * binary (downgrade data loss); numeric compare + fail-closed prevents that.
  */
 function dropStaleSchema(db: Database.Database): void {
   const hasSchemaMeta = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'`).get();
@@ -85,10 +94,38 @@ function dropStaleSchema(db: Database.Database): void {
   const stamp = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as
     | { value: string }
     | undefined;
-  if (!stamp || stamp.value === SCHEMA_VERSION) return; // fresh or current — keep
+  if (!stamp) return; // fresh — no stamp to compare
 
-  // Stale stamp present: rebuild. Drop the virtual tables first (their shadow tables
-  // depend on nothing else), then the base tables.
+  const current = Number(SCHEMA_VERSION);
+  const onDisk = Number(stamp.value);
+
+  // A present-but-unparseable stamp is not a recognizable newer version: treat it as
+  // stale and rebuild (matches the absent-`segment_id` self-heal intent).
+  if (Number.isNaN(onDisk)) {
+    rebuildSchema(db);
+    return;
+  }
+
+  if (onDisk === current) return; // current — keep
+
+  if (onDisk > current) {
+    // Fail closed: refuse to open (and never drop) a DB written by a newer binary.
+    throw new Error(
+      `Refusing to open memory database: on-disk schema version ${stamp.value} is newer than ` +
+        `this binary's schema version ${SCHEMA_VERSION}. Upgrade the memory server or point at a ` +
+        `compatible database; the newer database was left untouched.`,
+    );
+  }
+
+  // on-disk < current: stale older DB — drop-and-recreate.
+  rebuildSchema(db);
+}
+
+/**
+ * Drop the schema so `createSchema` rebuilds it from scratch. Drops the virtual tables
+ * first (their shadow tables depend on nothing else), then the base tables.
+ */
+function rebuildSchema(db: Database.Database): void {
   db.exec(`
     DROP TABLE IF EXISTS vec_memories;
     DROP TABLE IF EXISTS memories_fts;

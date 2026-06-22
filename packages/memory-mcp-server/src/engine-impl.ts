@@ -38,8 +38,9 @@ import {
   updateAccessStats,
 } from './storage/queries.js';
 import { maybeRunMaintenance, runMaintenance } from './storage/maintenance.js';
-import { embed, embedQuery, cosineSimilarity } from './embedding/embedder.js';
+import { embed, embedQuery } from './embedding/embedder.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
+import { rankSegmentPassages } from './retrieval/expansion.js';
 import { estimateTokens } from './retrieval/scoring.js';
 import { EXACT_DEDUP_DISTANCE } from './storage/constants.js';
 import { MAX_CONTENT_LENGTH } from './tools/validation.js';
@@ -340,24 +341,17 @@ async function expandSegment(
   }
   const segment = segments[0];
 
-  const passages = splitToPassages(segment.content);
-  if (passages.length === 0) {
-    return { segment_id: segmentId, passages: [], found: true };
-  }
-
+  // No query: return the first few passages of the segment (whole-segment fetch).
   if (query === undefined) {
+    const passages = splitToPassages(segment.content);
     return { segment_id: segmentId, passages: passages.slice(0, MAX_EXPAND_PASSAGES_NO_QUERY), found: true };
   }
 
+  // With a query: split-and-rank by similarity to the query embedding (the shared helper,
+  // also used by recall expansion). All passages, best-first.
   const queryEmbedding = await embedQuery(query, config);
-  const scored: Array<{ passage: string; sim: number }> = [];
-  for (const passage of passages) {
-    const passageEmbedding = await embed(passage, config);
-    scored.push({ passage, sim: cosineSimilarity(passageEmbedding, queryEmbedding) });
-  }
-  scored.sort((a, b) => b.sim - a.sim);
-
-  return { segment_id: segmentId, passages: scored.map((s) => s.passage), found: true };
+  const passages = await rankSegmentPassages(config, segment.content, queryEmbedding);
+  return { segment_id: segmentId, passages, found: true };
 }
 
 // ---------- Context ----------

@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { MemoryEngine } from '../src/engine.js';
 import { createServer } from '../src/server.js';
 
-function createMockEngine(): MemoryEngine {
+function createMockEngine(overrides: Partial<MemoryEngine> = {}): MemoryEngine {
   return {
     store: vi.fn().mockResolvedValue({ id: 'test-id', action: 'created' }),
     ingest: vi.fn().mockResolvedValue({
@@ -36,6 +36,7 @@ function createMockEngine(): MemoryEngine {
       found: true,
     }),
     close: vi.fn(),
+    ...overrides,
   };
 }
 
@@ -159,6 +160,35 @@ describe('MCP server', () => {
       max_expand_passages: undefined,
     });
     expect(result.content).toEqual([{ type: 'text', text: 'test recall' }]);
+  });
+
+  it('surfaces expansion metadata in the memory_recall tool result', async () => {
+    const engine = createMockEngine({
+      recall: vi.fn().mockResolvedValue({
+        content: 'expanded recall',
+        memories_used: 3,
+        total_matches: 12,
+        expanded: true,
+        expanded_segment_ids: ['seg-a', 'seg-b'],
+      }),
+    });
+    const { client } = await createConnectedClient(engine);
+
+    const result = await client.callTool({
+      name: 'memory_recall',
+      arguments: { query: 'contract clauses' },
+    });
+
+    // Human-readable text is preserved exactly as the recall content.
+    expect(result.content).toEqual([{ type: 'text', text: 'expanded recall' }]);
+    // The agent-facing expansion handles ride on structuredContent, available in
+    // every format (the engine-only metadata is now reachable by MCP callers).
+    expect(result.structuredContent).toEqual({
+      memories_used: 3,
+      total_matches: 12,
+      expanded: true,
+      expanded_segment_ids: ['seg-a', 'seg-b'],
+    });
   });
 
   it('calls engine.context via memory_context tool', async () => {

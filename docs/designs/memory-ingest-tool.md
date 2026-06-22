@@ -84,10 +84,13 @@ facts pre-write.
 
 6. **Malformed model output never throws (by default).** Parsing follows the
    `parseBatchJudgments`-style defensive approach already in `llm/client.ts`: extract a JSON
-   array, validate each item, drop junk. If parsing yields **zero** facts, the default
+   array, validate each item, drop junk. If a chunk **fails to parse** (no JSON array / invalid
+   JSON / non-array → `null`) and no usable facts result, the default
    (`on_extraction_failure='degrade'`) falls back to the single-blob store (same as the no-LLM
    path) so the tool never returns "ingested 0" silently on a parse failure. `'error'` mode
-   surfaces the failure instead.
+   surfaces the failure instead. (A successfully parsed empty array `[]` — the model validly found
+   nothing durable — is **not** a parse failure: it writes nothing and returns a clean empty
+   result, never the degrade/error path.)
 
 7. **(A2) Per-fact importance is assigned at extraction.** The extraction schema is an array of
    `{ fact, importance? }`, not bare strings. The extraction LLM already reads every fact, so
@@ -98,14 +101,17 @@ facts pre-write.
 
 8. **(A1) Merge timestamps are order-independent for backdated ingests.** Dedup is content-
    similarity, **not** time-aware, and a multi-year export may be ingested in any order. When a
-   backdated (`as_of`) fact merges into an existing row, the surviving row's timestamps are
-   reconciled with `min`/`max` (true first-seen / true last-touched), not left to whichever
-   insert happened to land first. v1's "skip the existing row's `created_at` on merge" rule let
+   backdated (`as_of`) fact merges into an existing row, `created_at` (`min`, true first-seen) and
+   `last_accessed_at` (`max`, historical recency) are reconciled order-independently, not left to
+   whichever insert happened to land first. (`updated_at` stays at the local row-mutation time —
+   see §5.4.) v1's "skip the existing row's `created_at` on merge" rule let
    ingest **order** decide the surviving timestamp, flattening recency precisely for the most-
    repeated (hence most-important) facts. Normal non-`as_of` stores are unchanged. See §5.4.
 
 9. **(A3) Partial extraction is observable, never silent.** If any chunk of a multi-chunk call
-   returns null/`[]`, the result reports `degraded: true` and a `failed_chunks` count. v1's
+   **fails** (returns `null` — no LLM, hard error, or unparseable response; a parsed empty `[]`
+   is a clean "nothing durable" result, not a failure), the result reports `degraded: true` and a
+   `failed_chunks` count. v1's
    silent "that chunk contributes nothing, the call still looks fully successful" path is a
    corpus-contamination hazard; v2 eliminates the silence.
 
@@ -233,7 +239,8 @@ export interface IngestResult {
 
   // ---- diagnostics (A3) ----
   chunks?: number;         // number of LLM windows used (omitted when 1)
-  failed_chunks?: number;  // chunks that returned null/[] (omitted when 0)
+  failed_chunks?: number;  // chunks that returned null (no LLM / hard fail / unparseable);
+                           // a parsed [] is NOT a failure. Omitted when 0.
   degraded?: boolean;      // true when we fell back to single-blob store, OR a partial failure
   partial?: boolean;       // true when SOME (not all) chunks failed but others produced facts
   skipped?: boolean;       // true when on_extraction_failure='skip' wrote nothing
@@ -371,9 +378,9 @@ The model returns text. Parse defensively, mirroring `parseBatchJudgments`, into
 `ExtractedFact[]`:
 
 ```
-export function parseExtractedFacts(raw: string): ExtractedFact[] {
-  // 1. Find the first JSON array via /\[[\s\S]*\]/.
-  // 2. JSON.parse; if not an array → return [].
+export function parseExtractedFacts(raw: string): ExtractedFact[] | null {
+  // 1. Find the first JSON array via /\[[\s\S]*\]/; if none → return null (PARSE FAILURE).
+  // 2. JSON.parse; if it throws or the payload is not an array → return null (PARSE FAILURE).
   // 3. For each item, accept EITHER:
   //      - an object { fact: string, importance?: number }  → preferred (A2), OR
   //      - a bare string                                     → treat as { fact, importance: undefined }
@@ -383,13 +390,17 @@ export function parseExtractedFacts(raw: string): ExtractedFact[] {
   //    CLAMP it to [0, 1].
   // 5. Cap count at MAX_FACTS_PER_INGEST (e.g. 200) to bound a runaway response.
   // 6. De-dupe exact-`fact`-string repeats within the batch (keep the first occurrence's importance).
-  // catch → return [].
+  // → return the (possibly EMPTY) array. An empty `[]` is a VALID parse meaning the model
+  //   reported no durable facts (the prompt instructs `[]` in that case) — it is NOT a failure.
 }
 ```
 
-`parseExtractedFacts` is pure and exported → directly unit-testable with canned strings. **(A6)**
-On a parse miss it must not echo `raw` — return `[]` and let the caller log a content-free shape
-(e.g. `"no JSON array found in N-char response"`); see §4.4.
+`parseExtractedFacts` is pure and exported → directly unit-testable with canned strings. It returns
+`ExtractedFact[] | null`: `null` only on a genuine parse failure (no JSON array found, invalid
+JSON, or a non-array payload), and a (possibly empty) array on any successful parse — a parsed `[]`
+is a clean "nothing durable" result, not a failure. **(A6)** On a parse miss it must not echo
+`raw` — return `null` and let the caller log a content-free shape (e.g. `"no JSON array found in
+N-char response"`); see §4.4.
 
 ### 4.4 Retry / error handling (A3 + A6)
 
@@ -397,8 +408,11 @@ On a parse miss it must not echo `raw` — return `[]` and let the caller log a 
   returns `null`. **No new retry loop** — the package has no retry anywhere and a single Haiku
   call is cheap; adding retries would be inconsistent over-engineering. Retry, when wanted, is
   the **driver's** job via `on_extraction_failure='error'`.
-- A malformed-but-non-null response → `parseExtractedFacts` returns `[]`. Both `null` and `[]`
-  count as a **chunk failure** for diagnostics.
+- An **unparseable** response (no JSON array / invalid JSON / non-array) → `parseExtractedFacts`
+  returns `null`, and `extractFacts` returns `null` → counted as a **chunk failure** for
+  diagnostics. A successfully parsed **empty array** `[]` is **not** a failure: it is a clean
+  "model found nothing durable" result and is **not** counted in `failed_chunks`. Only `null` (no
+  LLM configured, a hard LLM/API failure, or an unparseable response) is a chunk failure.
 - **Per-chunk failures are tracked, not swallowed (A3).** The engine counts failed chunks. After
   all chunks run:
   - If **every** chunk failed (or no LLM) → the union is empty → apply `on_extraction_failure`:
@@ -425,10 +439,18 @@ On a parse miss it must not echo `raw` — return `[]` and let the caller log a 
 1. Normalize seed `importance` (default 0.5), `mode` (default `'conversation'`),
    `on_extraction_failure` (default `'degrade'`), `as_of` → epoch ms.
 2. Chunk the blob (§6, with overlap per §7). For each chunk, `extractFacts(config, chunk, mode)`.
-   - Count `failedChunks` = chunks returning `null` **or** `[]` (A3). Track `totalChunks`.
+   - Count `failedChunks` = chunks returning `null` (no LLM / hard fail / unparseable) (A3). A
+     chunk returning a parsed `[]` contributed no facts but **did not fail** — do not count it.
+     Track `totalChunks`.
 3. Union the `ExtractedFact[]` across chunks (preserve order; drop exact-`fact`-string dups
    across chunks — the first occurrence keeps its `importance`).
-4. **If the union is empty** (no LLM, all chunks failed) → apply `on_extraction_failure` (A3):
+4. **If the union is empty:**
+   - **No failures** (`failedChunks === 0`) → extraction **succeeded** and the model reported no
+     durable facts. Write nothing and return a clean empty result (`created: 0, merged: 0,
+     memory_ids: [], facts: []`). This is **not** a failure, so it never enters the
+     `on_extraction_failure` path.
+   - **Otherwise** (some/all chunks returned `null` so no usable facts) → apply
+     `on_extraction_failure` (A3):
    - `'error'` → throw a content-free error (A6) so the driver can retry.
    - `'skip'` → return `{ created: 0, merged: 0, ingested: 0, memory_ids: [], facts: [],
      skipped: true }` (when `dry_run`, same but the lone preview "fact" may be omitted).
@@ -532,9 +554,18 @@ row, reconcile timestamps **order-independently**:
 
 ```
 created_at        = min(existing.created_at,        incoming as_of)   // true first-seen
-last_accessed_at  = max(existing.last_accessed_at,  incoming as_of)   // true last-touched
-updated_at        = max(existing.updated_at,        incoming as_of)   // true last-touched
+last_accessed_at  = max(existing.last_accessed_at,  incoming as_of)   // historical recency
+updated_at        = local row-mutation time (when this row was last written), NOT a historical max
 ```
+
+`created_at` (true first-seen) and `last_accessed_at` (historical recency) are the
+order-independent reconciled values. `updated_at` is **not** a historical max: it is the row's
+last-mutation time. The exact-dedup merge first calls `updateMemoryContent`, which unconditionally
+stamps `updated_at = Date.now()`; the subsequent `updateMemoryTimestampsOnMerge` then runs
+`updated_at = MAX(updated_at, as_of)`, and for a backdated (past) `as_of` that `MAX` is the
+just-written `now`. So a historical backfill leaves `updated_at` at the local mutation time — by
+design, `updated_at` tracks when the row was last written while `last_accessed_at` carries the
+recency signal.
 
 Implementation:
 
@@ -550,7 +581,10 @@ Implementation:
   ```
   (Three `?`-bindings of `asOf`.) This is additive — `updateMemoryContent` is unchanged, so the
   consolidation-path caller of `updateMemoryContent` is unaffected. The min/max are computed in
-  SQL so the merge is atomic and order-independent regardless of which insert wins the race.
+  SQL so the `created_at`/`last_accessed_at` reconciliation is atomic and order-independent
+  regardless of which insert wins the race. `updated_at` resolves to the row's last-mutation time
+  (`updateMemoryContent` set it to `now` immediately before, so `MAX(now, as_of)` is `now` for a
+  backdated `as_of`), not a historical max — see the note above.
 - **Non-`as_of` merges are unchanged.** When `opts.createdAt` is absent, the new query is **not**
   called; `updateMemoryContent`'s existing `updated_at = now` behavior stands, byte-for-byte.
 
@@ -678,13 +712,15 @@ File: `test/extraction.test.ts`. Mirrors `parseBatchJudgments` coverage in
 `test/llm-client.test.ts` style.
 - `parseExtractedFacts`: valid array of objects → `ExtractedFact[]` with trimmed `fact` and
   preserved `importance`; **bare-string items tolerated** → `{ fact, importance: undefined }`
-  (A2); non-array JSON → `[]`; prose-wrapped array → extracted; empty/junk → `[]`; over-long
-  `fact` truncated; count capped; intra-batch exact-`fact` dups dropped (first keeps importance).
+  (A2); a parsed empty array `[]` → `[]` (valid "nothing durable", **not** `null`); non-array
+  JSON → `null`; prose-wrapped array → extracted; no-JSON-array / unparseable junk → `null`;
+  over-long `fact` truncated; count capped; intra-batch exact-`fact` dups dropped (first keeps
+  importance).
 - **Per-fact importance parsing (A2):** `importance` out of `[0,1]` → **clamped**; non-finite /
   non-number `importance` → **dropped to undefined**; missing `importance` → undefined (caller
   falls back to seed).
 - **PII-safe parse (A6):** `parseExtractedFacts` on a non-JSON response containing a known
-  sensitive substring returns `[]` and the function/caller log does not contain that substring —
+  sensitive substring returns `null` and the function/caller log does not contain that substring —
   only a content-free shape (`"no JSON array found in N-char response"`).
 - `chunkBlob`: short blob → 1 chunk; long blob → N chunks split on newlines; **adjacent chunks
   overlap by ~10–15% of lines (A5)** — assert the tail lines of chunk N reappear at the head of
@@ -716,9 +752,13 @@ Assertions:
   `getMemoriesByIds`. Also assert that omitting `as_of` yields `created_at ≈ Date.now()`.
 - **Order-independent merge timestamps (A1):** store a fact at `as_of = T_old`, then ingest a
   duplicate fact (same content → exact-dedup merge) at `as_of = T_new > T_old`; assert the
-  surviving row has `created_at === T_old` (`min`), `last_accessed_at === T_new` and
-  `updated_at === T_new` (`max`). Then run the **reverse order** (ingest `T_new` first, merge
-  `T_old` second) and assert the **same** surviving timestamps — proving order-independence.
+  surviving row has `created_at === T_old` (`min`) and `last_accessed_at === T_new` (`max`).
+  `updated_at` lands at `~now` (local mutation time), **not** `T_new`: `updateMemoryContent`
+  stamps `updated_at = now` immediately before, so for these past `as_of` values
+  `MAX(now, as_of) === now`. Then run the **reverse order** (ingest `T_new` first, merge `T_old`
+  second) and assert the **same** surviving `created_at`/`last_accessed_at` — proving
+  order-independence for the reconciled values. A separate case uses a **future** `as_of`
+  (`> now`) to prove the `MAX(updated_at, ?)` clause is live and can move `updated_at` forward.
   Also assert a non-`as_of` merge leaves `created_at` untouched and only bumps `updated_at`
   (the new query is not called).
 - **Merge importance composes (A1/A2):** merging a higher-importance duplicate raises the

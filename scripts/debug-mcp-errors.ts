@@ -65,8 +65,9 @@ console.log('══════════════════════�
 console.log('Part 2: End-to-end through handleCallTool');
 console.log('═══════════════════════════════════════════════════\n');
 
-// Dynamically import handleCallTool (avoids top-level env var requirements)
-const { handleCallTool } = await import('../src/trusted-process/mcp-proxy-server.js');
+// Dynamically import handleCallTool (avoids top-level env var requirements).
+// It lives in the security pipeline; mcp-proxy-server is now a pure relay.
+const { handleCallTool } = await import('../src/trusted-process/tool-call-pipeline.js');
 
 // Build minimal mock deps (same pattern as unit tests)
 function createE2EDeps(mockClient: { callTool: (...args: unknown[]) => Promise<unknown> }) {
@@ -103,6 +104,9 @@ function createE2EDeps(mockClient: { callTool: (...args: unknown[]) => Promise<u
     circuitBreaker: { check: () => ({ allowed: true }) } as unknown as Parameters<
       typeof handleCallTool
     >[2]['circuitBreaker'],
+    whitelist: { match: () => undefined, add: () => {} } as unknown as Parameters<
+      typeof handleCallTool
+    >[2]['whitelist'],
     clientStates,
     resolvedSandboxConfigs,
     allowedDirectory: undefined,

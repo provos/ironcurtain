@@ -109,6 +109,7 @@ function candidateToRow(c: FixtureCandidate): MemoryRow {
     consolidated: 1,
     source: null,
     metadata: null,
+    segment_id: null,
   };
 }
 

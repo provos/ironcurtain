@@ -242,13 +242,32 @@ describe('memory_recall', () => {
         }),
       });
       const result = await handleRecall(engine, { query: 'test' });
-      expect(result).toBe('No relevant memories found.');
+      expect(result.text).toBe('No relevant memories found.');
+      expect(result.memories_used).toBe(0);
+      expect(result.expanded).toBe(false);
+      expect(result.expanded_segment_ids).toEqual([]);
     });
 
     it('returns content when memories found', async () => {
       const engine = createMockEngine();
       const result = await handleRecall(engine, { query: 'test' });
-      expect(result).toBe('Recalled content');
+      expect(result.text).toBe('Recalled content');
+    });
+
+    it('surfaces expansion metadata from the engine', async () => {
+      const engine = createMockEngine({
+        recall: vi.fn().mockResolvedValue({
+          content: 'Recalled content',
+          memories_used: 3,
+          total_matches: 10,
+          expanded: true,
+          expanded_segment_ids: ['seg-1', 'seg-2'],
+        }),
+      });
+      const result = await handleRecall(engine, { query: 'test' });
+      expect(result.expanded).toBe(true);
+      expect(result.expanded_segment_ids).toEqual(['seg-1', 'seg-2']);
+      expect(result.total_matches).toBe(10);
     });
 
     it('threads expand and max_expand_passages through to the engine', async () => {

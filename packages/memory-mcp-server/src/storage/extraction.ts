@@ -92,27 +92,31 @@ interface RawFactObject {
   importance?: unknown;
 }
 
+/** Trim and hard-cap a fact's text at MAX_CONTENT_LENGTH (applies to BOTH shapes). */
+function capFactText(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > MAX_CONTENT_LENGTH ? trimmed.slice(0, MAX_CONTENT_LENGTH) : trimmed;
+}
+
 function coerceFact(item: unknown): ExtractedFact | null {
   // Accept a bare string OR an object { fact, importance? }.
   if (typeof item === 'string') {
-    const fact = item.trim();
+    const fact = capFactText(item);
     return fact.length > 0 ? { fact } : null;
   }
   if (item === null || typeof item !== 'object') return null;
 
   const obj = item as RawFactObject;
   if (typeof obj.fact !== 'string') return null;
-  const fact = obj.fact.trim();
+  const fact = capFactText(obj.fact);
   if (fact.length === 0) return null;
-
-  const capped = fact.length > MAX_CONTENT_LENGTH ? fact.slice(0, MAX_CONTENT_LENGTH) : fact;
 
   let importance: number | undefined;
   if (typeof obj.importance === 'number' && Number.isFinite(obj.importance)) {
     importance = Math.min(1, Math.max(0, obj.importance));
   }
 
-  return importance === undefined ? { fact: capped } : { fact: capped, importance };
+  return importance === undefined ? { fact } : { fact, importance };
 }
 
 /**
