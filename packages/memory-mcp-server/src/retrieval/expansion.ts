@@ -63,11 +63,13 @@ export async function rankSegmentPassages(
   // Single passage: no ranking needed; it is trivially the best (and only) one.
   if (passages.length === 1) return passages;
 
-  const scored: Array<{ passage: string; sim: number }> = [];
-  for (const passage of passages) {
-    const passageEmbedding = await embed(passage, config);
-    scored.push({ passage, sim: cosineSimilarity(passageEmbedding, queryEmbedding) });
-  }
+  // Embed passages concurrently (each a single call → identical vectors to
+  // sequential) rather than awaiting one at a time.
+  const passageEmbeddings = await Promise.all(passages.map((passage) => embed(passage, config)));
+  const scored = passages.map((passage, i) => ({
+    passage,
+    sim: cosineSimilarity(passageEmbeddings[i], queryEmbedding),
+  }));
   scored.sort((a, b) => b.sim - a.sim);
 
   const ranked = scored.map((s) => s.passage);

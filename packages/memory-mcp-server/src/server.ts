@@ -7,6 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { MemoryEngine } from './engine.js';
 import { FORMAT_MODES } from './retrieval/formatting.js';
+import { MAX_EXPAND_PASSAGES } from './tools/validation.js';
 import { handleStore } from './tools/store.js';
 import { handleIngest } from './tools/ingest.js';
 import { handleRecall } from './tools/recall.js';
@@ -152,8 +153,9 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
         .number()
         .int()
         .positive()
+        .max(MAX_EXPAND_PASSAGES)
         .optional()
-        .describe('Maximum source passages to return across the whole result. Default: 2.'),
+        .describe(`Maximum source passages to return across the whole result (1-${MAX_EXPAND_PASSAGES}). Default: 2.`),
     },
     async (args) => {
       try {
