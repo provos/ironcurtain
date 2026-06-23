@@ -68,6 +68,25 @@ sampling.{algorithm,sample_n,...}; cognition.{source_mode,seed_files,seed_notes}
 ## Daemon path resolution: definitionPath vs workspacePath
 - `daemon-gate-commands.ts`: `definitionPath` is resolved client-side before RPC (`:307` resolveWorkflowPath). `workspacePath` is forwarded RAW (`:321`, no resolve()). For any new daemon path arg, copy definitionPath's pattern, NOT workspace's.
 
+## Sampler determinism + concurrency (verified by reading engine — for search-quality slice)
+- `evolve_core/algorithms/`: **greedy** deterministic (pure `sorted` by score, greedy.py:14-17); **ucb1** stochastic ONLY at cold start (`random.sample` when total_visits==0, ucb1.py:25,32), deterministic sort after; **random** fully stochastic (random.py:18); **island** fully stochastic (`random.random/choice/choices`, island.py:72-80) + `hash()`/`time.time()` for diversity cache only.
+- ALL stochastic draws use Python's GLOBAL `random` module (not per-sampler Random(), not numpy). ONE RNG to seed. Engine NEVER calls `random.seed` (grep-confirmed: no random.seed/np.random anywhere in evolve_core). Samplers take no seed in __init__; factory.py passes none.
+- `PYTHONHASHSEED=0` (bridge DETERMINISTIC_ENV, evolve_result.py:17) does NOT seed `random` — only `hash()`. So it makes Tier-0 fallback embeddings deterministic (embedding.py:72 uses hash(token)) but NOT samplers.
+- `sampling_config.py`: `DEFAULT_SAMPLING_ALGORITHM="ucb1"`, `DEFAULT_SAMPLE_N=3` (engine defaults richer than FSM's greedy/1). `SAMPLING_CONFIG_IMMUTABLE_ERROR` (cli.py:202-205): sampler fingerprint (algorithm/feature_dims/feature_bins/custom_*, NOT sample_n) cannot change once nodes exist → sampler must be chosen at preflight.
+- **Durable DB (database.py) IS cross-process safe**: every mutation via `_database_guard` → `InterProcessFileLock(.database.lock)` (database.py:206-215) + atomic `os.replace` save (:162). Multi-parent record + db sample already parallelism-safe. Test env `EVOLVE_DB_TEST_HOLD_LOCK_MS` (:212).
+- **Cognition store (cognition.py) is NOT cross-process safe**: only in-process RLock (:30), plain non-atomic `json.dump` save (:103-112), no file lock. `evolve-cognition add` (cmd_cognition_add cli.py:362-389: --item/--json-file/--kind/--source, no dedup, always add_batch) is the Fix-1 surface but a future parallel-workers slice must add a bridge-side lock around it.
+
+## Multi-parent + cognition seams (for search-quality slice)
+- `cmd_db_sample` (cli.py:406-414): `n = args.n or configured_sample_n(spec)`; returns `{"nodes":[...]}` list; round-log records algorithm (:413). `Node.parent: List[int]` native (structures.py:16). `cmd_db_record` sets `node.parent = args.parent or []` (cli.py:464); `--parent` repeatable.
+- Bridge `sample` (evolve_result.py:432-543) truncates to `sampled_nodes[0]` (:516-517), writes single `parent` dict to context.json. `_resolve_parent` (:130-140) reads context["parent"] dict → returns [id]. `attach_analysis` ALREADY loops `for parent_id in parents` (:635-636) — record path is multi-parent-ready; narrowing is upstream in sample + researcher prompt (:369-379).
+- Analyzer lesson → current/analysis.md (workflow.yaml:431) → recorded only into node.analysis (cli.py:454,468) + that node's vector. NEVER promoted to cognition store (seeded once at round 1 via evolve-cognition init, evolve_result.py:439-463). Fix 1 = add `evolve-cognition add` in attach_analysis post-record (genuine-record path only, not idempotent-skip).
+- preflight authors `--sampling-algorithm greedy` (workflow.yaml:216) + `--sample-n 1` (:217) as HARDCODED literals in prompt command template.
+
+## Design doc: docs/designs/evolve-search-quality-slice.md (designed 2026-06-17)
+- Three fixes, ALL in workflow.yaml/bridge/preflight, engine byte-verbatim. (1) cognition promotion (biggest lever, ENHANCEMENT beyond standalone parity), (2) multi-parent sample_n>1, (3) sampler selectability.
+- Determinism resolution (central decision): ship greedy+sample_n>1+cognition DETERMINISTICALLY first (Phase A, zero risk); gate ucb1/island/random behind M1 seed mechanism (Phase B). M1 = bridge spawns `python -c "random.seed(S); runpy.run_path('evolve-db', run_name='__main__')"` — engine-untouched. Seed source = preflight-authored sidecar sampling_seed.txt (run-spec field would need engine flag = forbidden). M1 viability is the central OPEN QUESTION.
+- Parallelism explicitly NON-GOAL (maintainer's next follow-up). Only Fix 1 has a real parallelism caveat (cognition store not cross-process safe); mitigation = bridge-side file lock, no engine change.
+
 ## Reference experiment (circle_packing_demo, `donotcommit/ASI-Evolve/experiments/`)
 - `evaluator.py`: CLI `python evaluator.py <code_file> <output_json>`; needs numpy always; candidates need scipy.optimize. Emits eval_score = combined_score = sum_radii; loads candidate via exec(code) (extensionless ok). Validates 26 circles in unit square.
 - `initial_program`: single-file `construct_packing() -> (centers, radii, sum)`, numpy-only.

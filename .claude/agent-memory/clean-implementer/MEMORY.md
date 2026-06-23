@@ -3,6 +3,19 @@
 ## Agent-driven workflow gates (daemon WS client + CLI)
 - [Daemon WS JSON-RPC client](daemon-ws-jsonrpc-client.md) — wire protocol, workflow RPC methods, the terminal-event-vs-phase mismatch (gate ABORT fires `completed` event but phase `aborted`; RPC abort fires `failed` event but phase `aborted`), the WorkflowManager session-factory DI seam, and the builtin-mode test fixture pattern.
 
+## Evolve workflow
+- [Evolve N-way fan-out](evolve-fanout.md) — lane-template/orchestrator/bridge layering, barrier-owned stop_signals, per-lane slug collision fix, `ruff check`-only Python gate, best-effort token attribution.
+- [Evolve memory-fusion dogfood](evolve-memory-fusion-dogfood.md) — `IRONCURTAIN_MITM_ALLOW_ALL_HOSTS=1` lets HF model download through the proxy in-container (proven); dump-tap src/rootDir layering + MEMORY_FIXTURE_DUMP_MODULE abs-path; LoCoMo cat-5 has evidence (exclude by category not empty-gold); fixture builder via MemoryEngine directly.
+
+## memory-mcp-server package
+- [memory-mcp-server](memory-mcp-server.md) — MemoryEngine/EngineModules seam (config-free handlers, engine closure owns db+LLM), store/insert/merge internals (updateMemoryContent stamps updated_at=now & MAX importance), real-embedder+mocked-LLM test pattern (vi.mock llm/client.js + vi.hoisted), and the memory-ingest §5.4/§11 updated_at internal inconsistency (max(now,asOf)=now, not T_NEW).
+
+## scripts/ tooling boundaries + corpus driver pattern
+- [scripts dir tooling](scripts-dir-tooling.md) — `scripts/*.ts` are tsx-run and OUTSIDE eslint+all tsconfigs (no gate typechecks/lints them); how to verify them out-of-band; driver-owns-db corpus pattern incl. the `NaN as_of` (Date.parse) created_at-corruption trap and the high-maintenance-interval + decay-off + consolidation-only determinism recipe.
+
+## Docker image build
+- [Docker build context & UID remap](docker-build-context.md) — clean-context whole-dir copy, build-hash auto-includes all `*.sh`, shared sourced entrypoint helper (`$0/$@` propagate), lint-staged ignores `.sh`; issue #232/#291 GID-benign/UID-fatal remap semantics + integration test contract.
+
 ## Bug surface notes
 - [Docker bind mount staleness](docker-bind-mount-staleness.md) — Linux bind mounts break if the source dir is rmSync'd+recreated; per-child wipe in stageSkillsToBundle preserves the parent inode. Independent: nested bind mounts (one mount target inside another) are unreliable on Docker Desktop / macOS.
 - [Git stash baseline hazard](git-stash-baseline-hazard.md) — never `git stash pop` for baseline diffing when other stashes exist (pops the top, which may not be yours, and untracked files are skipped by `stash push --`). Recover conflicts via `git checkout HEAD -- <files>`; use `git show HEAD:<file>` for baselines instead.
