@@ -100,6 +100,12 @@ export interface WebEventMap {
   };
   'persona.compile.done': { name: string; operationId: string; result: PersonaCompileResultDto };
   'persona.compile.failed': { name: string; operationId: string; code: ErrorCode; error: string };
+
+  // Persona CRUD change notification (Phase 1c). Emitted by the mutation
+  // methods (create / editConstitution / setMemory / delete /
+  // setBroadPolicyOptIn) so connected clients refresh the persona list,
+  // mirroring `job.list_changed`. Carries no payload.
+  'personas.changed': Record<string, never>;
 }
 
 export type WebEventName = keyof WebEventMap;

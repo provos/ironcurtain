@@ -56,6 +56,14 @@ export interface IronCurtainDaemonOptions {
    * See docs/designs/mitm-token-trajectory-capture.md §10.
    */
   readonly captureTracesDefault?: boolean;
+
+  /**
+   * Enables the persona policy-mutation methods over the web UI. Set via the
+   * daemon CLI `--allow-policy-mutation` flag. Off by default; CLI-only (not
+   * config-persisted). When off, every web-UI persona-mutation method returns
+   * POLICY_MUTATION_FORBIDDEN. See docs/designs/web-ui-policy-persona-management.md §7.
+   */
+  readonly allowPolicyMutation?: boolean;
 }
 
 /**
@@ -111,6 +119,9 @@ export class IronCurtainDaemon {
   /** Daemon-process-wide capture-traces default (set via CLI). */
   private readonly captureTracesDefault: boolean;
 
+  /** Persona policy-mutation kill switch (set via CLI `--allow-policy-mutation`). */
+  private readonly allowPolicyMutation: boolean;
+
   /** Control request handler (saved for web UI reuse). */
   private controlRequestHandler: ControlRequestHandler | null = null;
 
@@ -137,6 +148,7 @@ export class IronCurtainDaemon {
     this.noSignal = options.noSignal ?? false;
     this.webUiOptions = options.webUi;
     this.captureTracesDefault = options.captureTracesDefault ?? false;
+    this.allowPolicyMutation = options.allowPolicyMutation ?? false;
     this.scheduler = createCronScheduler();
   }
 
@@ -749,6 +761,7 @@ export class IronCurtainDaemon {
       maxConcurrentWebSessions: 5,
       devMode: this.webUiOptions?.devMode,
       captureTracesDefault: this.captureTracesDefault,
+      allowPolicyMutation: this.allowPolicyMutation,
     });
     const workflowManager = new WorkflowManager({
       eventBus: server.getEventBus(),

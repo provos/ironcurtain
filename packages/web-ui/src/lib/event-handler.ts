@@ -107,6 +107,11 @@ export interface AppStateLike {
 /** Side effects that handleEvent may request. */
 export interface EventSideEffects {
   refreshJobs(): void;
+  /**
+   * Refresh the persona list (and any open persona detail). Invoked on every
+   * `personas.changed` event, mirroring `refreshJobs` for `job.list_changed`.
+   */
+  refreshPersonas(): void;
   assignDisplayNumber(escalationId: string): number;
 }
 
@@ -177,7 +182,8 @@ export type WebEvent =
   | { event: 'persona.compile.started'; payload: PersonaCompileStartedEvent }
   | { event: 'persona.compile.progress'; payload: PersonaCompileProgressEvent }
   | { event: 'persona.compile.done'; payload: PersonaCompileDoneEvent }
-  | { event: 'persona.compile.failed'; payload: PersonaCompileFailedEvent };
+  | { event: 'persona.compile.failed'; payload: PersonaCompileFailedEvent }
+  | { event: 'personas.changed'; payload: Record<string, never> };
 
 /**
  * Parse a raw event name + payload into a typed WebEvent.
@@ -256,6 +262,8 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
       return { event, payload: data as unknown as PersonaCompileDoneEvent };
     case 'persona.compile.failed':
       return { event, payload: data as unknown as PersonaCompileFailedEvent };
+    case 'personas.changed':
+      return { event, payload: {} as Record<string, never> };
     default:
       return undefined;
   }
@@ -570,6 +578,12 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
       return true;
     }
+
+    // Persona CRUD change notification (Phase 1c): refresh the persona list,
+    // mirroring how `job.list_changed` triggers `refreshJobs`.
+    case 'personas.changed':
+      effects.refreshPersonas();
+      return true;
 
     default:
       return false;

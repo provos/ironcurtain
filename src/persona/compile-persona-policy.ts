@@ -60,6 +60,14 @@ export interface CompilePersonaOptions {
    */
   readonly allowedDirectory?: string;
   /**
+   * Optional validation hook invoked on the in-memory compiled policy BEFORE any
+   * artifact is written (threads through to `PipelineRunner.run`). Throwing
+   * rejects the compile and leaves prior artifacts intact. Phase 1c uses this to
+   * enforce the broad-policy invariant (reject `'*'` domains/lists or
+   * out-of-workspace `paths.within` unless the persona is opted in).
+   */
+  readonly validateCompiled?: (policy: CompiledPolicyFile) => void;
+  /**
    * TEST-ONLY injection seam: pre-built PipelineModels (fake LLM). When absent,
    * `createPipelineModels` is called (real provider). Production callers never
    * pass this.
@@ -123,5 +131,6 @@ export async function compilePersonaPolicy(
     ...(opts.signal ? { signal: opts.signal } : {}),
     ...(opts.quiet !== undefined ? { quiet: opts.quiet } : {}),
     ...(opts.allowMcpLists !== undefined ? { allowMcpLists: opts.allowMcpLists } : {}),
+    ...(opts.validateCompiled ? { validateCompiled: opts.validateCompiled } : {}),
   });
 }

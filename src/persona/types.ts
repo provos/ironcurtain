@@ -65,4 +65,17 @@ export interface PersonaDefinition {
    * choice, persisted across upgrades.
    */
   readonly memory?: PersonaMemoryConfig;
+
+  /**
+   * Whether this persona is authorized to compile a "broad" policy. When
+   * absent or false, the Phase-1c broad-policy validator (run as the
+   * compile orchestrator's `validateCompiled` hook) rejects any compiled
+   * policy whose rules contain a `'*'` entry in `domains.allowed` or a
+   * `lists[].allowed`, or a `paths.within` resolving outside the persona's
+   * workspace dir. Set ONLY via the gated `personas.setBroadPolicyOptIn`
+   * (`setPersonaBroadPolicyOptIn`) flow — it is NEVER inferred from the
+   * constitution text. This is the opt-in that defeats constitution
+   * prompt-injection toward an over-permissive policy. Added in Phase 1c.
+   */
+  readonly allowBroadPolicy?: boolean;
 }

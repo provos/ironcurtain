@@ -90,6 +90,7 @@ let displayNumberCounter = 0;
 function createMockEffects(): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
+    refreshPersonas: vi.fn(),
     assignDisplayNumber: vi.fn(() => ++displayNumberCounter),
   };
 }
@@ -385,6 +386,14 @@ describe('handleEvent', () => {
     const effects = createMockEffects();
     handleEvent(state, effects, 'job.started', {});
     expect(effects.refreshJobs).toHaveBeenCalledOnce();
+  });
+
+  it('calls refreshPersonas for personas.changed', () => {
+    const state = createMockState();
+    const effects = createMockEffects();
+    const handled = handleEvent(state, effects, 'personas.changed', {});
+    expect(handled).toBe(true);
+    expect(effects.refreshPersonas).toHaveBeenCalledOnce();
   });
 
   it('returns false for unknown events', () => {

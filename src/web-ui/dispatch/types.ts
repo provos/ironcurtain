@@ -41,12 +41,20 @@ export interface DispatchContext {
    */
   readonly captureTracesDefault?: boolean;
   /**
-   * Phase 1b authz gate (minimal form). When false (the DEFAULT), the
-   * policy-mutation surface does not exist: `personas.compileStream` returns
-   * `POLICY_MUTATION_FORBIDDEN`. Read methods (`getCompile`/`listCompiles`)
-   * stay ungated. The full 4-hop `--allow-policy-mutation` daemon flag, the
-   * broad-policy validator, audit, and the constitution-editing mutation
-   * methods are Phase 1c — only this single gate field lands in 1b.
+   * Policy-mutation authz gate. When false (the DEFAULT), the policy-mutation
+   * surface does not exist: every persona-mutation method
+   * (`compileStream` / `create` / `editConstitution` / `setMemory` / `delete` /
+   * `setBroadPolicyOptIn`) returns `POLICY_MUTATION_FORBIDDEN`. Read methods
+   * (`list` / `get` / `getCompile` / `listCompiles`) stay ungated.
+   *
+   * Wired (Phase 1c) via the 4-hop `--allow-policy-mutation` daemon flag,
+   * mirroring `captureTracesDefault`:
+   *   daemon-command.ts (CommandSpec option + parseArgs + read + pass)
+   *   -> IronCurtainDaemonOptions.allowPolicyMutation
+   *   -> WebUiServerOptions.allowPolicyMutation
+   *   -> dispatchCtx.allowPolicyMutation (web-ui-server.ts).
+   * Surfaced to the UI via `DaemonStatusDto.allowPolicyMutation` so the UI
+   * hides mutation controls. Off by default, CLI-only, not config-persisted.
    */
   readonly allowPolicyMutation?: boolean;
 }
@@ -109,5 +117,9 @@ export function buildStatusDto(ctx: DispatchContext): DaemonStatusDto {
     webUiListening: true,
     activeSessions: ctx.sessionManager.size,
     nextFireTime: status.nextFireTime?.toISOString() ?? null,
+    // Phase 1c: surface the policy-mutation kill switch so the UI can hide
+    // mutation controls. Defaults to false (off) when the daemon was not
+    // launched with `--allow-policy-mutation`.
+    allowPolicyMutation: ctx.allowPolicyMutation ?? false,
   };
 }

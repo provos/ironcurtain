@@ -138,6 +138,97 @@ describe('happy path', () => {
   });
 });
 
+describe('broad-policy validator + ruleDelta wiring', () => {
+  /**
+   * A compile impl that returns the given policy AND invokes the orchestrator's
+   * validateCompiled hook on it (the real pipeline runs this hook before any
+   * write; the fake must mirror that so the broad-policy gate is exercised).
+   */
+  function validatingCompile(
+    policy: CompiledPolicyFile,
+  ): (name: PersonaName, opts: CompilePersonaOptions) => Promise<CompiledPolicyFile> {
+    return async (_name, opts) => {
+      opts.validateCompiled?.(policy);
+      return policy;
+    };
+  }
+
+  function makePolicy(rules: CompiledPolicyFile['rules']): CompiledPolicyFile {
+    return { generatedAt: '', constitutionHash: 'h', inputHash: 'i', rules };
+  }
+
+  function writePersonaJson(name: string, extra: Record<string, unknown> = {}): void {
+    writeFileSync(
+      resolve(TEST_HOME, 'personas', name, 'persona.json'),
+      JSON.stringify({ name, description: 'x', createdAt: new Date().toISOString(), ...extra }),
+    );
+  }
+
+  it('rejects a wildcard-domain compile (BROAD_POLICY_REJECTED) when not opted in', async () => {
+    const name = makePersonaDir('narrow');
+    const bus = new WebEventBus();
+    const { events } = captureEvents(bus);
+    const broadPolicy = makePolicy([
+      { name: 'r1', description: 'd', if: { domains: { roles: [], allowed: ['*'] } }, then: 'allow', reason: 'r' },
+    ]);
+    const orch = new PersonaCompileOrchestrator({ compileImpl: validatingCompile(broadPolicy) });
+
+    const ack = orch.startCompile(name, 'cli', bus);
+    await waitFor(() => events.some((e) => e.name === 'persona.compile.failed'));
+
+    const failed = events.find((e) => e.name === 'persona.compile.failed')
+      ?.payload as WebEventMap['persona.compile.failed'];
+    expect(failed.code).toBe('BROAD_POLICY_REJECTED');
+    expect(orch.getCompile(ack.operationId)?.phase).toBe('failed');
+  });
+
+  it('allows a broad compile when the persona is opted in (allowBroadPolicy:true)', async () => {
+    const name = makePersonaDir('broad');
+    writePersonaJson('broad', { allowBroadPolicy: true });
+    const bus = new WebEventBus();
+    const { events } = captureEvents(bus);
+    const broadPolicy = makePolicy([
+      { name: 'r1', description: 'd', if: { domains: { roles: [], allowed: ['*'] } }, then: 'allow', reason: 'r' },
+    ]);
+    const orch = new PersonaCompileOrchestrator({ compileImpl: validatingCompile(broadPolicy) });
+
+    orch.startCompile(name, 'cli', bus);
+    await waitFor(() => events.some((e) => e.name === 'persona.compile.done'));
+    const done = events.find((e) => e.name === 'persona.compile.done')?.payload as WebEventMap['persona.compile.done'];
+    expect(done.result.success).toBe(true);
+  });
+
+  it('omits ruleDelta on the first compile and includes it once a prior policy exists', async () => {
+    const name = makePersonaDir('coder');
+    const bus1 = new WebEventBus();
+    const { events: e1 } = captureEvents(bus1);
+    const p1 = makePolicy([
+      { name: 'a', description: 'd', if: { server: ['filesystem'] }, then: 'allow', reason: 'r' },
+    ]);
+    const orch = new PersonaCompileOrchestrator({ compileImpl: validatingCompile(p1) });
+    orch.startCompile(name, 'cli', bus1);
+    await waitFor(() => e1.some((e) => e.name === 'persona.compile.done'));
+    const done1 = e1.find((e) => e.name === 'persona.compile.done')?.payload as WebEventMap['persona.compile.done'];
+    expect(done1.result.ruleDelta).toBeUndefined();
+
+    // Persist the first policy so the second compile has a prior to diff.
+    writeFileSync(resolve(personaGeneratedDir('coder'), 'compiled-policy.json'), JSON.stringify(p1));
+
+    const bus2 = new WebEventBus();
+    const { events: e2 } = captureEvents(bus2);
+    const p2 = makePolicy([
+      { name: 'a', description: 'd', if: { server: ['filesystem'] }, then: 'allow', reason: 'r' },
+      { name: 'b', description: 'd', if: { server: ['git'] }, then: 'allow', reason: 'r' },
+    ]);
+    const orch2 = new PersonaCompileOrchestrator({ compileImpl: validatingCompile(p2) });
+    orch2.startCompile(name, 'cli', bus2);
+    await waitFor(() => e2.some((e) => e.name === 'persona.compile.done'));
+    const done2 = e2.find((e) => e.name === 'persona.compile.done')?.payload as WebEventMap['persona.compile.done'];
+    expect(done2.result.ruleDelta).toBeDefined();
+    expect(done2.result.ruleDelta?.added).toBe(1);
+  });
+});
+
 describe('COMPILE_IN_PROGRESS dedup', () => {
   it('rejects a second compile of the same persona while the first runs', async () => {
     const name = makePersonaDir('coder');

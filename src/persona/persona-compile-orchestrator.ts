@@ -28,10 +28,13 @@ import { openSync, closeSync, writeSync, readFileSync, unlinkSync, existsSync, r
 import { resolve } from 'node:path';
 import pLimit from 'p-limit';
 
-import { getPersonaGeneratedDir, getPersonasDir } from './resolve.js';
+import { getPersonaGeneratedDir, getPersonaWorkspaceDir, getPersonasDir, loadPersona } from './resolve.js';
 import { createPersonaName, type PersonaName } from './types.js';
 import { EventBusProgressReporter } from './event-bus-progress-reporter.js';
 import type { EventBusProgressReporterContext } from './event-bus-progress-reporter.js';
+import { makeBroadPolicyValidator, BroadPolicyRejectedError } from './broad-policy-validator.js';
+import { computeRuleDelta } from './rule-delta.js';
+import { policyMutationAuditLog } from './policy-mutation-audit.js';
 // NOTE: EventBusProgressReporter carries ONLY type-only pipeline imports, so a
 // static VALUE import of it does not violate the import boundary (the boundary
 // forbids reaching pipeline-runner.ts / pipeline-shared.ts VALUES).
@@ -246,6 +249,21 @@ export class PersonaCompileOrchestrator {
     record.phase = 'running';
 
     try {
+      // Persona-bound inputs for the broad-policy validator + ruleDelta. The
+      // workspace dir is the containment authority for path checks; the opt-in
+      // flag is read from persona.json (NEVER inferred from the constitution).
+      const workspaceDir = getPersonaWorkspaceDir(name);
+      let allowBroadPolicy = false;
+      try {
+        allowBroadPolicy = loadPersona(name).allowBroadPolicy ?? false;
+      } catch {
+        // Persona missing/unreadable — leave allowBroadPolicy false (most
+        // restrictive). The compile itself will fail downstream with a clearer
+        // error if the persona truly does not exist.
+      }
+      const validateCompiled = makeBroadPolicyValidator(workspaceDir, allowBroadPolicy);
+      const previousPolicy = readPreviousCompiledPolicy(name);
+
       const compileImpl = this.deps.compileImpl ?? defaultCompileImpl;
       const reporterFactory = (serverName: string) => {
         const ctx: EventBusProgressReporterContext = {
@@ -270,9 +288,24 @@ export class PersonaCompileOrchestrator {
         quiet: true,
         operationId,
         allowMcpLists: false,
+        validateCompiled,
       });
 
-      record.result = { success: true, ruleCount: policy.rules.length };
+      // ruleDelta is omitted on the first compile (no previous policy to diff).
+      const ruleDelta = previousPolicy ? computeRuleDelta(previousPolicy, policy, workspaceDir) : undefined;
+      record.result = {
+        success: true,
+        ruleCount: policy.rules.length,
+        ...(ruleDelta ? { ruleDelta } : {}),
+      };
+
+      // Audit the successful compile at the service layer (covers WS/CLI/cron).
+      policyMutationAuditLog.append(record.actor, 'compilePersonaPolicy', name, {
+        constitutionHash: policy.constitutionHash,
+        ruleCountDelta: policy.rules.length - (previousPolicy?.rules.length ?? 0),
+        broadened: !!ruleDelta && (ruleDelta.broadenedDomains.length > 0 || ruleDelta.outOfWorkspacePaths.length > 0),
+        operationId,
+      });
     } catch (err) {
       record.error = classifyError(err);
     } finally {
@@ -454,8 +487,28 @@ function toDto(rec: OperationRecord): PersonaCompileOperationDto {
  * / MCP-list / broad-policy / orchestrator errors carry their codes; everything
  * else maps to INTERNAL_ERROR with an operator-safe message.
  */
+/**
+ * Reads the persona's previous `compiled-policy.json` for ruleDelta computation.
+ * Returns undefined when absent/unparseable (the first compile, or a corrupted
+ * prior artifact) so the caller omits the delta.
+ */
+function readPreviousCompiledPolicy(name: PersonaName): CompiledPolicyFile | undefined {
+  const path = resolve(getPersonaGeneratedDir(name), 'compiled-policy.json');
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as CompiledPolicyFile;
+  } catch {
+    return undefined;
+  }
+}
+
 function classifyError(err: unknown): { code: ErrorCode; message: string } {
   if (err instanceof CompileOrchestratorError) {
+    return { code: err.code, message: err.message };
+  }
+  // Broad-policy validator rejection (constitution-injection defense). Surfaced
+  // terminally as BROAD_POLICY_REJECTED on the failed event.
+  if (err instanceof BroadPolicyRejectedError) {
     return { code: err.code, message: err.message };
   }
   // Discriminant string from the pipeline (McpListsDisallowedError) — detected

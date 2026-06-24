@@ -64,6 +64,14 @@ export interface WebUiServerOptions {
    * present. See docs/designs/mitm-token-trajectory-capture.md §10.
    */
   readonly captureTracesDefault?: boolean;
+  /**
+   * Persona policy-mutation kill switch inherited from the daemon CLI
+   * `--allow-policy-mutation` flag (Phase 1c). Threaded into
+   * `dispatchCtx.allowPolicyMutation`. Off by default; when off, every
+   * persona-mutation method returns POLICY_MUTATION_FORBIDDEN and the UI
+   * hides mutation controls (via `DaemonStatusDto.allowPolicyMutation`).
+   */
+  readonly allowPolicyMutation?: boolean;
 }
 
 export class WebUiServer {
@@ -104,6 +112,7 @@ export class WebUiServer {
       sessionQueues: new Map(),
       workflowManager: options.workflowManager,
       captureTracesDefault: options.captureTracesDefault ?? false,
+      allowPolicyMutation: options.allowPolicyMutation ?? false,
     };
 
     // Subscribe to own event bus and broadcast to WS clients

@@ -79,6 +79,13 @@ export interface DaemonStatusDto {
   readonly webUiListening: boolean;
   readonly activeSessions: number;
   readonly nextFireTime: string | null;
+  /**
+   * Whether the daemon was launched with `--allow-policy-mutation` (Phase 1c).
+   * The UI hides all persona-mutation controls when this is false. Optional in
+   * the mirror so pre-1c daemons (which omit it) deserialize cleanly; treat
+   * `undefined` as `false` (no mutation controls).
+   */
+  readonly allowPolicyMutation?: boolean;
 }
 
 export interface JobDefinition {
@@ -473,6 +480,13 @@ export interface PersonaDetailDto {
   readonly policyRuleCount?: number;
   /** Whether persistent memory is enabled (persona.memory?.enabled ?? true). */
   readonly memory?: boolean;
+  /**
+   * Whether this persona may compile a broad policy (persona.allowBroadPolicy
+   * ?? false). Set only via the gated `personas.setBroadPolicyOptIn`. Drives
+   * the broad-policy opt-in control + the BROAD_POLICY_REJECTED affordance.
+   * Added in Phase 1c. Optional in the mirror for pre-1c back-compat.
+   */
+  readonly allowBroadPolicy?: boolean;
 }
 
 /** Slim list-row returned by `personas.list`. Mirrors backend PersonaListDto. */
@@ -486,16 +500,6 @@ export interface PersonaListDto {
 /** Result of editing a persona constitution. Mirrors backend PersonaEditResultDto. */
 export interface PersonaEditResultDto {
   readonly stale: boolean;
-}
-
-/**
- * Back-compat result shape for the BLOCKING `personas.compile` method.
- * Mirrors backend PersonaBlockingCompileResultDto.
- */
-export interface PersonaBlockingCompileResultDto {
-  readonly success: boolean;
-  readonly ruleCount: number;
-  readonly errors?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -529,12 +533,29 @@ export type PersonaCompileErrorCode =
   | 'LIST_REQUIRES_MCP'
   | 'POLICY_MUTATION_FORBIDDEN'
   | 'PERSONA_NOT_FOUND'
-  | 'INVALID_PARAMS';
+  | 'INVALID_PARAMS'
+  // Phase 1c persona-CRUD error codes (mirror src/web-ui/web-ui-types.ts).
+  | 'PERSONA_EXISTS'
+  | 'BROAD_POLICY_REJECTED';
+
+/**
+ * Compile-time rule diff vs the persona's previous compiled policy (Phase 1c).
+ * Mirrors backend RuleDeltaDto. Shown on the `done` card.
+ */
+export interface RuleDeltaDto {
+  readonly added: number;
+  readonly loosened: number;
+  readonly removed: number;
+  readonly broadenedDomains: readonly string[];
+  readonly outOfWorkspacePaths: readonly string[];
+}
 
 /** Success-only compile result carried by a `done` record/event. */
 export interface PersonaCompileResultDto {
   readonly success: true;
   readonly ruleCount: number;
+  /** Compile-time diff vs the previous policy (absent on first compile). */
+  readonly ruleDelta?: RuleDeltaDto;
 }
 
 /** Snapshot of a streamed compile operation (getCompile / listCompiles). */
@@ -600,3 +621,10 @@ export interface PersonaCompileFailedEvent {
   readonly code: string;
   readonly error: string;
 }
+
+/**
+ * Persona CRUD change notification (Phase 1c). Mirrors WebEventMap's
+ * `personas.changed` (empty payload). Handled by refreshing the persona list,
+ * mirroring `job.list_changed -> refreshJobs`.
+ */
+export type PersonaChangedEvent = Record<string, never>;

@@ -22,22 +22,43 @@ const mockListPersonas = vi.fn<() => Promise<PersonaListItem[]>>();
 const mockGetPersonaDetail = vi.fn<(name: string) => Promise<PersonaDetailDto>>();
 const mockStartPersonaCompile = vi.fn<(name: string) => Promise<PersonaCompileStreamAckDto>>();
 const mockHydratePersonaCompiles = vi.fn<() => Promise<Set<string>>>();
+const mockCreatePersona = vi.fn();
+const mockEditPersonaConstitution = vi.fn();
+const mockSetPersonaMemory = vi.fn();
+const mockSetPersonaBroadPolicyOptIn = vi.fn();
+const mockDeletePersona = vi.fn();
 
-const appStateMock = {
+// Default to mutation-allowed so the existing compile/edit suites can exercise
+// the gated controls. The flag-OFF (controls hidden) path is covered by the
+// Playwright e2e against the mock WS server.
+const appStateMock: {
+  personaCompiles: Map<string, PersonaCompileOperationDto>;
+  daemonStatus: { allowPolicyMutation: boolean } | null;
+} = {
   personaCompiles: new Map<string, PersonaCompileOperationDto>(),
+  daemonStatus: { allowPolicyMutation: true },
 };
 const connectionGenerationMock = { value: 0 };
+const personasChangedGenerationMock = { value: 0 };
 
 vi.mock('$lib/stores.svelte.js', () => ({
   listPersonas: (...args: unknown[]) => mockListPersonas(...(args as [])),
   getPersonaDetail: (...args: unknown[]) => mockGetPersonaDetail(...(args as [string])),
   startPersonaCompile: (...args: unknown[]) => mockStartPersonaCompile(...(args as [string])),
   hydratePersonaCompiles: (...args: unknown[]) => mockHydratePersonaCompiles(...(args as [])),
+  createPersona: (...args: unknown[]) => mockCreatePersona(...args),
+  editPersonaConstitution: (...args: unknown[]) => mockEditPersonaConstitution(...args),
+  setPersonaMemory: (...args: unknown[]) => mockSetPersonaMemory(...args),
+  setPersonaBroadPolicyOptIn: (...args: unknown[]) => mockSetPersonaBroadPolicyOptIn(...args),
+  deletePersona: (...args: unknown[]) => mockDeletePersona(...args),
   get appState() {
     return appStateMock;
   },
   get connectionGeneration() {
     return connectionGenerationMock;
+  },
+  get personasChangedGeneration() {
+    return personasChangedGenerationMock;
   },
 }));
 
@@ -79,7 +100,9 @@ describe('Personas', () => {
     mockListPersonas.mockResolvedValue([]);
     mockHydratePersonaCompiles.mockResolvedValue(new Set());
     appStateMock.personaCompiles = new Map();
+    appStateMock.daemonStatus = { allowPolicyMutation: true };
     connectionGenerationMock.value = 0;
+    personasChangedGenerationMock.value = 0;
   });
 
   async function renderAndNavigateToDetail(
@@ -104,7 +127,17 @@ describe('Personas', () => {
     await vi.waitFor(() => {
       expect(screen.getByText(/No personas found/)).toBeTruthy();
     });
+    // With mutation enabled the empty state points at the New persona button.
+    expect(screen.getByTestId('new-persona-button')).toBeTruthy();
+  });
 
+  it('shows the CLI create hint in the empty state on a read-only daemon', async () => {
+    appStateMock.daemonStatus = { allowPolicyMutation: false };
+    render(Personas);
+
+    await vi.waitFor(() => {
+      expect(screen.getByText(/No personas found/)).toBeTruthy();
+    });
     expect(screen.getByText('ironcurtain persona create')).toBeTruthy();
   });
 
@@ -232,7 +265,10 @@ describe('Personas', () => {
 
   // ── Detail view: constitution with markdown ───────────────────────
 
-  it('renders constitution markdown with prose-markdown class', async () => {
+  it('renders constitution markdown with prose-markdown class (read-only daemon)', async () => {
+    // The prose-markdown render only applies when mutation is disabled; with
+    // mutation on, the constitution is shown as an editable textarea.
+    appStateMock.daemonStatus = { allowPolicyMutation: false };
     await renderAndNavigateToDetail({ constitution: '# Research Rules\n\nAlways **cite** sources.' });
 
     await vi.waitFor(() => {
@@ -247,7 +283,8 @@ describe('Personas', () => {
     expect(markdownContainer?.querySelector('strong')?.textContent).toBe('cite');
   });
 
-  it('shows "No constitution defined yet." when constitution is empty', async () => {
+  it('shows "No constitution defined yet." when constitution is empty (read-only daemon)', async () => {
+    appStateMock.daemonStatus = { allowPolicyMutation: false };
     await renderAndNavigateToDetail({ constitution: '' });
 
     await vi.waitFor(() => {
@@ -355,7 +392,8 @@ describe('Personas', () => {
 
   // ── Detail view: constitution with undefined ───────────────────
 
-  it('shows "No constitution defined yet." when constitution is undefined', async () => {
+  it('shows "No constitution defined yet." when constitution is undefined (read-only daemon)', async () => {
+    appStateMock.daemonStatus = { allowPolicyMutation: false };
     await renderAndNavigateToDetail({ constitution: undefined as unknown as string });
 
     await vi.waitFor(() => {
@@ -389,6 +427,194 @@ describe('Personas', () => {
 
     await vi.waitFor(() => {
       expect(screen.getByText('Recompile Policy')).toBeTruthy();
+    });
+  });
+
+  // ── Phase 1c: kill-switch gating ──────────────────────────────────
+
+  it('hides the New persona button when policy mutation is disabled', async () => {
+    appStateMock.daemonStatus = { allowPolicyMutation: false };
+    mockListPersonas.mockResolvedValue([makePersona()]);
+    render(Personas);
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('researcher')).toBeTruthy();
+    });
+    expect(screen.queryByTestId('new-persona-button')).toBeNull();
+  });
+
+  it('hides compile/delete/edit controls in detail view when mutation is disabled', async () => {
+    appStateMock.daemonStatus = { allowPolicyMutation: false };
+    await renderAndNavigateToDetail();
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('A research-focused persona')).toBeTruthy();
+    });
+    expect(screen.queryByTestId('compile-button')).toBeNull();
+    expect(screen.queryByTestId('delete-button')).toBeNull();
+    expect(screen.queryByTestId('constitution-editor')).toBeNull();
+    expect(screen.queryByTestId('memory-toggle')).toBeNull();
+    expect(screen.queryByTestId('broad-policy-toggle')).toBeNull();
+  });
+
+  it('shows the New persona button when mutation is enabled', async () => {
+    mockListPersonas.mockResolvedValue([makePersona()]);
+    render(Personas);
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('new-persona-button')).toBeTruthy();
+    });
+  });
+
+  // ── Phase 1c: create form ─────────────────────────────────────────
+
+  it('creates a persona via the New persona form (servers omitted = all servers)', async () => {
+    mockListPersonas.mockResolvedValue([]);
+    mockCreatePersona.mockResolvedValue(makeDetail({ name: 'newbie' }));
+    mockGetPersonaDetail.mockResolvedValue(makeDetail({ name: 'newbie' }));
+    render(Personas);
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('new-persona-button')).toBeTruthy();
+    });
+    await fireEvent.click(screen.getByTestId('new-persona-button'));
+
+    await fireEvent.input(screen.getByTestId('new-persona-name'), { target: { value: 'newbie' } });
+    await fireEvent.input(screen.getByTestId('new-persona-description'), { target: { value: 'A new persona' } });
+    await fireEvent.click(screen.getByTestId('create-persona-button'));
+
+    await vi.waitFor(() => {
+      expect(mockCreatePersona).toHaveBeenCalledWith({
+        name: 'newbie',
+        description: 'A new persona',
+        servers: undefined,
+        memoryEnabled: true,
+      });
+    });
+  });
+
+  it('passes the narrowed server list when "Narrow to specific servers" is chosen', async () => {
+    mockListPersonas.mockResolvedValue([]);
+    mockCreatePersona.mockResolvedValue(makeDetail({ name: 'narrow' }));
+    mockGetPersonaDetail.mockResolvedValue(makeDetail({ name: 'narrow' }));
+    render(Personas);
+
+    await vi.waitFor(() => expect(screen.getByTestId('new-persona-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('new-persona-button'));
+    await fireEvent.input(screen.getByTestId('new-persona-name'), { target: { value: 'narrow' } });
+    await fireEvent.input(screen.getByTestId('new-persona-description'), { target: { value: 'desc' } });
+    await fireEvent.click(screen.getByTestId('new-persona-narrow-servers'));
+    await fireEvent.click(screen.getByTestId('new-persona-server-filesystem'));
+    await fireEvent.click(screen.getByTestId('create-persona-button'));
+
+    await vi.waitFor(() => {
+      expect(mockCreatePersona).toHaveBeenCalledWith(expect.objectContaining({ servers: ['filesystem'] }));
+    });
+  });
+
+  it('shows an inline PERSONA_EXISTS error on the name field', async () => {
+    mockListPersonas.mockResolvedValue([]);
+    mockCreatePersona.mockRejectedValue({ code: 'PERSONA_EXISTS', message: 'exists' });
+    render(Personas);
+
+    await vi.waitFor(() => expect(screen.getByTestId('new-persona-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('new-persona-button'));
+    await fireEvent.input(screen.getByTestId('new-persona-name'), { target: { value: 'dup' } });
+    await fireEvent.input(screen.getByTestId('new-persona-description'), { target: { value: 'desc' } });
+    await fireEvent.click(screen.getByTestId('create-persona-button'));
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('new-persona-name-error')).toBeTruthy();
+    });
+  });
+
+  // ── Phase 1c: edit constitution + stale badge ─────────────────────
+
+  it('shows the stale badge after a constitution edit reports stale', async () => {
+    mockEditPersonaConstitution.mockResolvedValue({ stale: true });
+    await renderAndNavigateToDetail({ hasPolicy: true, policyRuleCount: 4 }, { compiled: true });
+
+    await vi.waitFor(() => expect(screen.getByTestId('constitution-editor')).toBeTruthy());
+    await fireEvent.input(screen.getByTestId('constitution-editor'), { target: { value: '# Changed' } });
+    await fireEvent.click(screen.getByTestId('save-constitution-button'));
+
+    await vi.waitFor(() => {
+      expect(mockEditPersonaConstitution).toHaveBeenCalledWith('researcher', '# Changed');
+      expect(screen.getByTestId('stale-badge')).toBeTruthy();
+    });
+  });
+
+  // ── Phase 1c: memory toggle ───────────────────────────────────────
+
+  it('toggles persona memory via setPersonaMemory', async () => {
+    mockSetPersonaMemory.mockResolvedValue(makeDetail({ memory: false }));
+    await renderAndNavigateToDetail({ memory: true });
+
+    await vi.waitFor(() => expect(screen.getByTestId('memory-toggle')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('memory-toggle'));
+
+    await vi.waitFor(() => {
+      expect(mockSetPersonaMemory).toHaveBeenCalledWith('researcher', false);
+    });
+  });
+
+  // ── Phase 1c: broad-policy opt-in ─────────────────────────────────
+
+  it('toggles broad-policy opt-in via setPersonaBroadPolicyOptIn', async () => {
+    mockSetPersonaBroadPolicyOptIn.mockResolvedValue(makeDetail({ allowBroadPolicy: true }));
+    await renderAndNavigateToDetail({ allowBroadPolicy: false });
+
+    await vi.waitFor(() => expect(screen.getByTestId('broad-policy-toggle')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('broad-policy-toggle'));
+
+    await vi.waitFor(() => {
+      expect(mockSetPersonaBroadPolicyOptIn).toHaveBeenCalledWith('researcher', true);
+    });
+  });
+
+  // ── Phase 1c: delete confirm + force ──────────────────────────────
+
+  it('soft-deletes a persona via the confirm dialog', async () => {
+    mockDeletePersona.mockResolvedValue({ deleted: true });
+    await renderAndNavigateToDetail();
+
+    await vi.waitFor(() => expect(screen.getByTestId('delete-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('delete-button'));
+    await vi.waitFor(() => expect(screen.getByTestId('confirm-delete-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('confirm-delete-button'));
+
+    await vi.waitFor(() => {
+      expect(mockDeletePersona).toHaveBeenCalledWith('researcher', undefined);
+    });
+  });
+
+  it('force-deletes a persona when the revoke checkbox is checked', async () => {
+    mockDeletePersona.mockResolvedValue({ deleted: true });
+    await renderAndNavigateToDetail();
+
+    await vi.waitFor(() => expect(screen.getByTestId('delete-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('delete-button'));
+    await vi.waitFor(() => expect(screen.getByTestId('delete-force')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('delete-force'));
+    await fireEvent.click(screen.getByTestId('confirm-delete-button'));
+
+    await vi.waitFor(() => {
+      expect(mockDeletePersona).toHaveBeenCalledWith('researcher', { force: true });
+    });
+  });
+
+  // ── Phase 1c: broad-policy-rejected affordance on compile failure ─
+
+  it('surfaces a BROAD_POLICY_REJECTED affordance pointing at the opt-in', async () => {
+    mockStartPersonaCompile.mockRejectedValue({ code: 'BROAD_POLICY_REJECTED', message: 'too broad' });
+    await renderAndNavigateToDetail();
+
+    await vi.waitFor(() => expect(screen.getByTestId('compile-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('compile-button'));
+
+    await vi.waitFor(() => {
+      expect(screen.getByTestId('compile-error-code').textContent).toBe('BROAD_POLICY_REJECTED');
+      expect(screen.getByText(/Enable "Allow broad policy" for this persona/)).toBeTruthy();
     });
   });
 });

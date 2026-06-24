@@ -12,9 +12,10 @@
  * enforced by the Phase-0 ESLint no-restricted-imports rule and
  * test/pipeline-import-boundary.test.ts.
  *
- * The `actor` parameter on the mutating functions is accepted for
- * forward-compatibility with Phase 1c audit logging but is intentionally unused
- * in Phase 1a. TODO(Phase 1c): emit a tamper-evident audit record per mutation.
+ * The `actor` parameter on the mutating functions is USED as of Phase 1c: each
+ * mutation appends a tamper-evident record to the policy-mutation audit log
+ * (src/persona/policy-mutation-audit.ts), so CLI / cron / WS callers are all
+ * captured at the service layer.
  *
  * @see docs/designs/web-ui-policy-persona-management.md §4.1
  */
@@ -24,6 +25,7 @@ import { resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import { atomicWriteTextSync } from '../util/atomic-write.js';
+import { getIronCurtainHome } from '../config/paths.js';
 import {
   getPersonaDir,
   getPersonaGeneratedDir,
@@ -35,6 +37,7 @@ import {
 import { createPersonaName } from './types.js';
 import type { PersonaName, PersonaDefinition } from './types.js';
 import { scanPersonas } from '../mux/persona-scanner.js';
+import { policyMutationAuditLog } from './policy-mutation-audit.js';
 // Type-only imports — no runtime edge to pipeline / web-ui layers.
 import type { CompiledPolicyFile } from '../pipeline/types.js';
 import type { PersonaDetailDto, PersonaListDto, PersonaEditResultDto } from '../web-ui/web-ui-types.js';
@@ -99,13 +102,9 @@ function constitutionFileContent(text: string): string {
  * On any failure the temp dir is removed (no half-persona on disk).
  * Does NOT compile the policy — compilation remains the CLI's responsibility.
  *
- * @param actor caller identity ('cli' | WS connId). Unused in Phase 1a.
- *   TODO(Phase 1c): write audit record.
+ * @param actor caller identity ('cli' | WS connId). Recorded in the audit log.
  */
 export function createPersona(input: CreatePersonaInput, actor: string): PersonaDetailDto {
-  // actor reserved for Phase 1c audit — intentionally unused in 1a.
-  void actor;
-
   const name = createPersonaName(input.name); // throws on bad slug (path-traversal guard)
   const description = input.description.trim();
 
@@ -146,6 +145,12 @@ export function createPersona(input: CreatePersonaInput, actor: string): Persona
     throw err;
   }
 
+  policyMutationAuditLog.append(actor, 'createPersona', name, {
+    constitutionHash: createHash('sha256')
+      .update(constitutionFileContent(input.constitution ?? ''))
+      .digest('hex'),
+  });
+
   return getPersonaDetail(name);
 }
 
@@ -163,11 +168,9 @@ export function createPersona(input: CreatePersonaInput, actor: string): Persona
  * verbatim, no trim). We therefore hash the exact bytes we write. Missing or
  * unparseable policy → stale:true (conservative).
  *
- * @param actor caller identity. Unused in Phase 1a. TODO(Phase 1c) audit.
+ * @param actor caller identity. Recorded in the audit log.
  */
 export function setPersonaConstitution(name: PersonaName, text: string, actor: string): PersonaEditResultDto {
-  void actor;
-
   const personaDir = getPersonaDir(name);
   if (!existsSync(personaDir)) {
     throw Object.assign(new Error(`Persona "${name}" not found.`), { code: 'PERSONA_NOT_FOUND' });
@@ -176,6 +179,9 @@ export function setPersonaConstitution(name: PersonaName, text: string, actor: s
   const constitutionPath = getPersonaConstitutionPath(name);
   const content = constitutionFileContent(text);
   atomicWriteTextSync(constitutionPath, content);
+
+  const newHash = createHash('sha256').update(content).digest('hex');
+  policyMutationAuditLog.append(actor, 'setPersonaConstitution', name, { constitutionHash: newHash });
 
   // Stale detection: compare against the compiled policy's constitutionHash.
   const policyPath = resolve(getPersonaGeneratedDir(name), 'compiled-policy.json');
@@ -186,7 +192,6 @@ export function setPersonaConstitution(name: PersonaName, text: string, actor: s
     if (!compiled.constitutionHash) return { stale: true };
     // Hash the raw file content — the pipeline hashes config.constitutionInput,
     // which is the verbatim file read (text + '\n' for non-empty).
-    const newHash = createHash('sha256').update(content).digest('hex');
     return { stale: newHash !== compiled.constitutionHash };
   } catch {
     return { stale: true };
@@ -201,42 +206,89 @@ export function setPersonaConstitution(name: PersonaName, text: string, actor: s
  *   enable  → DROP the memory key entirely (default-on semantics)
  *   disable → memory: { enabled: false }
  *
- * @param actor caller identity. Unused in Phase 1a. TODO(Phase 1c) audit.
+ * @param actor caller identity. Recorded in the audit log.
  */
 export function setPersonaMemory(name: PersonaName, enabled: boolean, actor: string): void {
-  void actor;
-
   const persona = loadPersona(name); // throws 'not found' if missing
   // Verbatim destructure-omit from persona-command.ts.
   const { memory: _omit, ...rest } = persona;
   void _omit;
   const updated: PersonaDefinition = !enabled ? { ...rest, memory: { enabled: false } } : rest;
   atomicWriteJsonSync(getPersonaDefinitionPath(name), updated);
+  policyMutationAuditLog.append(actor, 'setPersonaMemory', name, { enabled });
+}
+
+/** Options for {@link deletePersona}. */
+export interface DeletePersonaOptions {
+  /**
+   * When true, the persona directory is HARD-removed (rmSync recursive+force),
+   * permanently revoking the compiled policy. When false/absent (the DEFAULT),
+   * the directory is SOFT-deleted: renamed into a trash dir OUTSIDE
+   * getPersonasDir() so it is recoverable and is never listed/resolved.
+   */
+  readonly force?: boolean;
+}
+
+/** Returns the persona trash base dir: {home}/.persona-trash/ (outside personas/). */
+function getPersonaTrashDir(): string {
+  return resolve(getIronCurtainHome(), '.persona-trash');
 }
 
 /**
- * Hard-deletes a persona directory (rmSync recursive+force).
+ * Deletes a persona. SOFT by default (recoverable), HARD when `opts.force`.
  *
- * Preserves EXACTLY the current CLI behavior. No soft-delete / .persona-trash
- * (that is a Phase 1c concern, out of scope for 1a).
+ * Soft delete renames the persona directory to
+ *   {home}/.persona-trash/<name>-<ISO-ts>/
+ * which lives OUTSIDE getPersonasDir(), so scanPersonas / resolvePersona (which
+ * only look under personas/) never list or resolve a tombstoned persona. Hard
+ * delete (`force: true`) permanently removes the directory (the legacy CLI
+ * behavior), revoking the compiled policy.
  *
- * @param actor caller identity. Unused in Phase 1a. TODO(Phase 1c) audit.
+ * @param actor caller identity. Recorded in the audit log.
  */
-export function deletePersona(name: PersonaName, actor: string): void {
-  void actor;
-
+export function deletePersona(name: PersonaName, actor: string, opts: DeletePersonaOptions = {}): void {
   const personaDir = getPersonaDir(name);
   if (!existsSync(personaDir)) {
     throw Object.assign(new Error(`Persona "${name}" not found.`), { code: 'PERSONA_NOT_FOUND' });
   }
-  rmSync(personaDir, { recursive: true, force: true });
+
+  if (opts.force) {
+    rmSync(personaDir, { recursive: true, force: true });
+  } else {
+    const trashDir = getPersonaTrashDir();
+    mkdirSync(trashDir, { recursive: true });
+    // Colons are invalid in some filesystems; use a filesystem-safe timestamp.
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    renameSync(personaDir, resolve(trashDir, `${name}-${ts}`));
+  }
+
+  policyMutationAuditLog.append(actor, 'deletePersona', name, { hardDelete: opts.force === true });
+}
+
+/**
+ * Sets the persona's `allowBroadPolicy` opt-in flag (Phase 1c). This is the ONLY
+ * way to set the flag — it is NEVER inferred from the constitution text. When
+ * true, the broad-policy validator permits the persona to compile a policy with
+ * `'*'` domains/lists or out-of-workspace `paths.within`.
+ *
+ * @param actor caller identity. Recorded in the audit log.
+ */
+export function setPersonaBroadPolicyOptIn(name: PersonaName, enabled: boolean, actor: string): PersonaDetailDto {
+  const persona = loadPersona(name); // throws 'not found' if missing
+  // Drop the key when disabling (default-off semantics, exactOptionalPropertyTypes).
+  const { allowBroadPolicy: _omit, ...rest } = persona;
+  void _omit;
+  const updated: PersonaDefinition = enabled ? { ...rest, allowBroadPolicy: true } : rest;
+  atomicWriteJsonSync(getPersonaDefinitionPath(name), updated);
+  policyMutationAuditLog.append(actor, 'setPersonaBroadPolicyOptIn', name, { enabled, broadened: enabled });
+  return getPersonaDetail(name);
 }
 
 /**
  * Returns full detail for a persona, including constitution text and whether
  * the compiled policy exists. Lifted from persona-dispatch.ts and extended with
- * the `memory` flag (persona.memory?.enabled ?? true). No allowBroadPolicy yet
- * (Phase 1c).
+ * the `memory` flag (persona.memory?.enabled ?? true) and the `allowBroadPolicy`
+ * flag (persona.allowBroadPolicy ?? false, Phase 1c).
  *
  * @throws if the persona does not exist.
  */
@@ -273,6 +325,7 @@ export function getPersonaDetail(name: PersonaName): PersonaDetailDto {
     hasPolicy,
     policyRuleCount,
     memory: persona.memory?.enabled ?? true,
+    allowBroadPolicy: persona.allowBroadPolicy ?? false,
   };
 }
 

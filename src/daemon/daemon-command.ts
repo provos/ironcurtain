@@ -44,6 +44,10 @@ const daemonSpec: CommandSpec = {
     { flag: 'web-port', description: 'Web UI port (default: 7400)', placeholder: '<port>' },
     { flag: 'web-ui-dev', description: 'Skip Origin validation (for Vite dev server)' },
     { flag: 'capture-traces', description: 'Capture LLM API traces for every session this daemon launches' },
+    {
+      flag: 'allow-policy-mutation',
+      description: 'Enable persona policy-mutation methods over the web UI (off by default)',
+    },
     { flag: 'runs', description: 'Number of recent runs to show (for logs)', placeholder: '<N>' },
   ],
 };
@@ -96,6 +100,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
         'web-port': { type: 'string' },
         'web-ui-dev': { type: 'boolean' },
         'capture-traces': { type: 'boolean' },
+        'allow-policy-mutation': { type: 'boolean' },
         force: { type: 'boolean', short: 'f' },
         runs: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -132,11 +137,13 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     const webUiDev = values['web-ui-dev'] as boolean | undefined;
 
     const captureTracesDefault = (values['capture-traces'] as boolean | undefined) ?? false;
+    const allowPolicyMutation = (values['allow-policy-mutation'] as boolean | undefined) ?? false;
     const daemon = new IronCurtainDaemon({
       mode,
       noSignal: values['no-signal'] as boolean | undefined,
       webUi: webUiEnabled ? { port: webPort, devMode: webUiDev } : undefined,
       captureTracesDefault,
+      allowPolicyMutation,
     });
 
     // Handle shutdown signals

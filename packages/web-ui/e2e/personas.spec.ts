@@ -76,3 +76,122 @@ test.describe('Persona streamed compile', () => {
     await expect(page.getByTestId('compile-error')).toContainText('credentials are missing');
   });
 });
+
+test.describe('Persona CRUD (Phase 1c)', () => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
+    await connectWithToken(page);
+  });
+
+  test('create a persona -> it appears in the list', async ({ page }) => {
+    await navigateTo(page, 'Personas');
+    await expect(page.getByRole('heading', { name: 'Personas', exact: true })).toBeVisible({ timeout: 10_000 });
+
+    await page.getByTestId('new-persona-button').click();
+    await page.getByTestId('new-persona-name').fill('quality-eng');
+    await page.getByTestId('new-persona-description').fill('Quality engineering persona');
+    await page.getByTestId('create-persona-button').click();
+
+    // The create flow drills into the new persona's detail view.
+    await expect(page.getByRole('heading', { name: 'quality-eng', exact: true })).toBeVisible({ timeout: 10_000 });
+
+    // Back to the list: the persona is present (driven by personas.changed refresh).
+    await page.getByRole('button', { name: /Back/ }).click();
+    await expect(page.locator('tr', { hasText: 'quality-eng' })).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('duplicate name shows an inline PERSONA_EXISTS error', async ({ page }) => {
+    await navigateTo(page, 'Personas');
+    await expect(page.getByRole('heading', { name: 'Personas', exact: true })).toBeVisible({ timeout: 10_000 });
+
+    await page.getByTestId('new-persona-button').click();
+    await page.getByTestId('new-persona-name').fill('default'); // already exists
+    await page.getByTestId('new-persona-description').fill('dup');
+    await page.getByTestId('create-persona-button').click();
+
+    await expect(page.getByTestId('new-persona-name-error')).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('edit constitution on a compiled persona shows the stale badge', async ({ page }) => {
+    await openPersonaDetail(page, 'default'); // default has a compiled policy
+    await expect(page.getByText('Policy compiled', { exact: true })).toBeVisible();
+
+    const editor = page.getByTestId('constitution-editor');
+    await editor.fill('# Default Persona (edited)\n\n- Allow read operations\n');
+    await page.getByTestId('save-constitution-button').click();
+
+    await expect(page.getByTestId('stale-badge')).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('memory toggle persists via setMemory', async ({ page }) => {
+    await openPersonaDetail(page, 'default');
+    const toggle = page.getByTestId('memory-toggle');
+    await expect(toggle).toBeChecked(); // default memory = true
+    await toggle.click();
+    await expect(toggle).not.toBeChecked();
+  });
+
+  test('broad-policy opt-in toggle persists', async ({ page }) => {
+    await openPersonaDetail(page, 'default');
+    const toggle = page.getByTestId('broad-policy-toggle');
+    await expect(toggle).not.toBeChecked();
+    await toggle.click();
+    await expect(toggle).toBeChecked();
+  });
+
+  test('soft-delete removes the persona from the list', async ({ page }) => {
+    await openPersonaDetail(page, 'researcher');
+    await page.getByTestId('delete-button').click();
+    await expect(page.getByTestId('confirm-delete-button')).toBeVisible({ timeout: 5_000 });
+    await page.getByTestId('confirm-delete-button').click();
+
+    // Returns to the list; researcher is gone.
+    await expect(page.getByRole('heading', { name: 'Personas', exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('tr', { hasText: 'researcher' })).toHaveCount(0, { timeout: 10_000 });
+  });
+
+  test('force-delete revokes (removes) the persona', async ({ page }) => {
+    await openPersonaDetail(page, 'researcher');
+    await page.getByTestId('delete-button').click();
+    await page.getByTestId('delete-force').check();
+    await page.getByTestId('confirm-delete-button').click();
+
+    await expect(page.getByRole('heading', { name: 'Personas', exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('tr', { hasText: 'researcher' })).toHaveCount(0, { timeout: 10_000 });
+  });
+
+  test('ruleDelta is shown on the done card after a recompile', async ({ page }) => {
+    // `default` already has a compiled policy, so a recompile emits a ruleDelta.
+    await openPersonaDetail(page, 'default');
+    await page.getByTestId('compile-button').click();
+
+    await expect(page.getByTestId('compile-success')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('rule-delta')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('rule-delta')).toContainText('added');
+  });
+});
+
+test.describe('Persona mutation gating (flag OFF)', () => {
+  test.beforeEach(async ({ page, request }) => {
+    // Simulate a daemon launched WITHOUT --allow-policy-mutation.
+    await resetMockServer(request, { allowPolicyMutation: false });
+    await connectWithToken(page);
+  });
+
+  test('mutation controls are hidden when policy mutation is disabled', async ({ page }) => {
+    await navigateTo(page, 'Personas');
+    await expect(page.getByRole('heading', { name: 'Personas', exact: true })).toBeVisible({ timeout: 10_000 });
+
+    // No "New persona" button in the list view.
+    await expect(page.getByTestId('new-persona-button')).toHaveCount(0);
+
+    // Drill into a persona; detail-view mutation controls are absent.
+    await page.locator('tr', { hasText: 'default' }).click();
+    await expect(page.getByRole('heading', { name: 'default', exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('compile-button')).toHaveCount(0);
+    await expect(page.getByTestId('delete-button')).toHaveCount(0);
+    await expect(page.getByTestId('constitution-editor')).toHaveCount(0);
+    await expect(page.getByTestId('memory-toggle')).toHaveCount(0);
+    await expect(page.getByTestId('broad-policy-toggle')).toHaveCount(0);
+  });
+});

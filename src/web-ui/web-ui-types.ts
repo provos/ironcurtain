@@ -68,11 +68,17 @@ export type MethodName =
   | 'workflows.messageLog'
   | 'workflows.readme'
   | 'personas.get'
-  | 'personas.compile'
   // Phase 1b: streamed long-running compile (fire-and-return) + its read methods.
   | 'personas.compileStream'
   | 'personas.getCompile'
-  | 'personas.listCompiles';
+  | 'personas.listCompiles'
+  // Phase 1c: full persona CRUD (all mutation methods; require the
+  // `--allow-policy-mutation` kill switch, else POLICY_MUTATION_FORBIDDEN).
+  | 'personas.create'
+  | 'personas.editConstitution'
+  | 'personas.setMemory'
+  | 'personas.delete'
+  | 'personas.setBroadPolicyOptIn';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -117,13 +123,19 @@ export type ErrorCode =
   | 'METHOD_NOT_FOUND'
   | 'LINT_FAILED'
   | 'INTERNAL_ERROR'
-  // Phase 1b persona-compile error codes. (PERSONA_EXISTS / BROAD_POLICY_REJECTED
-  // are Phase 1c and intentionally NOT added here.)
+  // Phase 1b persona-compile error codes.
   | 'COMPILE_IN_PROGRESS'
   | 'COMPILE_QUEUE_FULL'
   | 'CREDENTIALS_MISSING'
   | 'LIST_REQUIRES_MCP'
-  | 'POLICY_MUTATION_FORBIDDEN';
+  | 'POLICY_MUTATION_FORBIDDEN'
+  // Phase 1c persona-CRUD error codes.
+  // PERSONA_EXISTS: `personas.create` against an existing persona dir (after branding).
+  // BROAD_POLICY_REJECTED: the broad-policy validator rejected a compiled policy
+  //   (`'*'` domain/list or out-of-workspace path) without `allowBroadPolicy`;
+  //   surfaced terminally via the `persona.compile.failed` event.
+  | 'PERSONA_EXISTS'
+  | 'BROAD_POLICY_REJECTED';
 
 // ---------------------------------------------------------------------------
 // DTO Types
@@ -184,6 +196,14 @@ export interface DaemonStatusDto {
   readonly webUiListening: boolean;
   readonly activeSessions: number;
   readonly nextFireTime: string | null;
+  /**
+   * Whether the daemon was launched with `--allow-policy-mutation` (Phase 1c).
+   * Populated by `buildStatusDto` from `ctx.allowPolicyMutation`. The frontend
+   * uses this to HIDE all persona-mutation controls when the kill switch is
+   * off — when off, every mutation method returns POLICY_MUTATION_FORBIDDEN.
+   * Off by default, CLI-only, not config-persisted.
+   */
+  readonly allowPolicyMutation: boolean;
 }
 
 /** Job list entry with scheduling and last-run info. */
@@ -412,6 +432,16 @@ export interface PersonaDetailDto {
    * backward-compatible — existing callers ignore unknown fields.
    */
   readonly memory: boolean;
+  /**
+   * Whether this persona is authorized to compile a "broad" policy
+   * (persona.allowBroadPolicy ?? false). When false, the broad-policy
+   * validator rejects compiled policies containing a `'*'` domain/list or an
+   * out-of-workspace `paths.within`. Set ONLY via the gated
+   * `personas.setBroadPolicyOptIn` method — never inferred from the
+   * constitution. Added in Phase 1c. (Source: src/persona/types.ts
+   * PersonaDefinition.allowBroadPolicy.)
+   */
+  readonly allowBroadPolicy: boolean;
 }
 
 /**
@@ -441,16 +471,20 @@ export interface PersonaEditResultDto {
 }
 
 /**
- * Back-compat result shape for the BLOCKING `personas.compile` method.
- *
- * Kept verbatim (`{ success, ruleCount, errors? }`) so the existing blocking
- * RPC contract is unchanged. The streamed `personas.compileStream` path uses
- * the success-only {@link PersonaCompileResultDto} on its `done` event instead.
+ * Compile-time diff vs the persona's previous `compiled-policy.json`,
+ * carried on a successful compile result (Phase 1c). Surfaced by the
+ * `done` event/card so prompt-injected broadening is reviewable after the
+ * fact. `broadenedDomains` / `outOfWorkspacePaths` enumerate the specific
+ * `'*'`-domain and out-of-workspace `paths.within` values introduced (these
+ * are only ever non-empty for an `allowBroadPolicy` persona, since otherwise
+ * the broad-policy validator would have rejected the compile).
  */
-export interface PersonaBlockingCompileResultDto {
-  readonly success: boolean;
-  readonly ruleCount: number;
-  readonly errors?: readonly string[];
+export interface RuleDeltaDto {
+  readonly added: number;
+  readonly loosened: number;
+  readonly removed: number;
+  readonly broadenedDomains: readonly string[];
+  readonly outOfWorkspacePaths: readonly string[];
 }
 
 /**
@@ -458,11 +492,13 @@ export interface PersonaBlockingCompileResultDto {
  *
  * A terminal `done` record never represents failure — failures route through
  * the `persona.compile.failed` event and `PersonaCompileOperationDto.error`.
- * Phase 1b omits `ruleDelta` (RuleDeltaDto is a Phase 1c concern).
+ * Phase 1c adds the optional `ruleDelta` (absent when there was no previous
+ * compiled policy to diff against).
  */
 export interface PersonaCompileResultDto {
   readonly success: true;
   readonly ruleCount: number;
+  readonly ruleDelta?: RuleDeltaDto;
 }
 
 /**

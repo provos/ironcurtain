@@ -315,7 +315,14 @@ const CANNED_JOBS = [
   },
 ];
 
-const CANNED_PERSONAS = [
+interface MockPersonaListItem {
+  name: string;
+  description: string;
+  compiled: boolean;
+  memory?: boolean;
+}
+
+let CANNED_PERSONAS: MockPersonaListItem[] = [
   { name: 'default', description: 'General-purpose assistant with standard policy', compiled: true },
   { name: 'researcher', description: 'Read-only access focused on code analysis', compiled: true },
   { name: 'devops', description: 'Infrastructure and deployment operations', compiled: false },
@@ -329,13 +336,6 @@ const CANNED_PERSONAS = [
   // so the e2e suite can render the post-start failure affordance.
   { name: 'fail-compile', description: 'Persona whose compile fails after starting (test sentinel)', compiled: false },
 ];
-
-// Original compiled flags + policy detail, captured before any mutation so the
-// streamed-compile simulation (which flips compiled/hasPolicy on success) can be
-// reset between tests for isolation.
-const ORIGINAL_PERSONA_COMPILED: Record<string, boolean> = Object.fromEntries(
-  CANNED_PERSONAS.map((p) => [p.name, p.compiled]),
-);
 
 // ---------------------------------------------------------------------------
 // Persona streamed-compile state (Phase 1b)
@@ -359,6 +359,14 @@ type MockCompilationPhase =
   | 'repair-verify'
   | 'done';
 
+interface MockRuleDelta {
+  added: number;
+  loosened: number;
+  removed: number;
+  broadenedDomains: string[];
+  outOfWorkspacePaths: string[];
+}
+
 interface MockCompileOperation {
   operationId: string;
   name: string;
@@ -367,7 +375,7 @@ interface MockCompileOperation {
   queuePosition?: number;
   startedAt: string;
   endedAt?: string;
-  result?: { success: true; ruleCount: number };
+  result?: { success: true; ruleCount: number; ruleDelta?: MockRuleDelta };
   error?: { code: string; message: string };
   actor: string;
 }
@@ -403,22 +411,25 @@ function clearCompileState(): void {
   recentCompiles.clear();
   compileOpSeq = 0;
   allowPolicyMutation = true;
-  // Restore persona compiled flags + policy detail mutated by simulateCompile.
-  for (const p of CANNED_PERSONAS) {
-    p.compiled = ORIGINAL_PERSONA_COMPILED[p.name] ?? p.compiled;
-  }
-  for (const [name, detail] of Object.entries(CANNED_PERSONA_DETAILS)) {
-    const original = ORIGINAL_PERSONA_DETAILS[name];
-    if (original) {
-      const d = detail as { hasPolicy?: boolean; policyRuleCount?: number };
-      d.hasPolicy = original.hasPolicy;
-      if (original.policyRuleCount === undefined) delete d.policyRuleCount;
-      else d.policyRuleCount = original.policyRuleCount;
-    }
-  }
+  // Full restore of the persona list + details mutated by simulateCompile and
+  // the Phase 1c CRUD handlers (create/delete/edit/memory/broad-policy).
+  CANNED_PERSONAS = structuredClone(ORIGINAL_PERSONAS_LIST);
+  CANNED_PERSONA_DETAILS = structuredClone(ORIGINAL_PERSONA_DETAILS_FULL);
 }
 
-const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
+interface MockPersonaDetail {
+  name: string;
+  description: string;
+  createdAt: string;
+  constitution: string;
+  servers?: string[];
+  hasPolicy: boolean;
+  policyRuleCount?: number;
+  memory: boolean;
+  allowBroadPolicy: boolean;
+}
+
+let CANNED_PERSONA_DETAILS: Record<string, MockPersonaDetail> = {
   default: {
     name: 'default',
     description: 'General-purpose assistant with standard policy',
@@ -428,6 +439,8 @@ const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
     servers: ['filesystem', 'git'],
     hasPolicy: true,
     policyRuleCount: 12,
+    memory: true,
+    allowBroadPolicy: false,
   },
   researcher: {
     name: 'researcher',
@@ -438,6 +451,8 @@ const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
     servers: ['filesystem'],
     hasPolicy: true,
     policyRuleCount: 8,
+    memory: true,
+    allowBroadPolicy: false,
   },
   devops: {
     name: 'devops',
@@ -447,6 +462,8 @@ const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
       '# DevOps Persona\n\n## Principles\n\n- Allow Docker operations\n- Allow deployment scripts\n- Escalate infrastructure changes\n',
     servers: ['filesystem', 'git', 'github'],
     hasPolicy: false,
+    memory: true,
+    allowBroadPolicy: false,
   },
   'no-creds': {
     name: 'no-creds',
@@ -455,6 +472,8 @@ const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
     constitution: '# No-Creds Persona\n\n## Principles\n\n- Allow read operations\n',
     servers: ['filesystem'],
     hasPolicy: false,
+    memory: true,
+    allowBroadPolicy: false,
   },
   'slow-compile': {
     name: 'slow-compile',
@@ -463,6 +482,8 @@ const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
     constitution: '# Slow Compile Persona\n\n## Principles\n\n- Allow read operations\n',
     servers: ['filesystem'],
     hasPolicy: false,
+    memory: true,
+    allowBroadPolicy: false,
   },
   'fail-compile': {
     name: 'fail-compile',
@@ -471,17 +492,15 @@ const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
     constitution: '# Fail Compile Persona\n\n## Principles\n\n- Allow read operations\n',
     servers: ['filesystem'],
     hasPolicy: false,
+    memory: true,
+    allowBroadPolicy: false,
   },
 };
 
-// Snapshot original policy fields per persona so clearCompileState can restore
-// them after simulateCompile flips hasPolicy/policyRuleCount on success.
-const ORIGINAL_PERSONA_DETAILS: Record<string, { hasPolicy: boolean; policyRuleCount?: number }> = Object.fromEntries(
-  Object.entries(CANNED_PERSONA_DETAILS).map(([name, detail]) => {
-    const d = detail as { hasPolicy?: boolean; policyRuleCount?: number };
-    return [name, { hasPolicy: d.hasPolicy ?? false, policyRuleCount: d.policyRuleCount }];
-  }),
-);
+// Deep snapshots of the original persona list + details so resetState can
+// restore them after create/delete/edit mutate the in-memory copies.
+const ORIGINAL_PERSONAS_LIST: MockPersonaListItem[] = structuredClone(CANNED_PERSONAS);
+const ORIGINAL_PERSONA_DETAILS_FULL: Record<string, MockPersonaDetail> = structuredClone(CANNED_PERSONA_DETAILS);
 
 const CANNED_FILE_TREE = {
   entries: [
@@ -1036,7 +1055,7 @@ function buildMessageLogFixtures(workflowId: string): Array<Record<string, unkno
 const jobs = structuredClone(CANNED_JOBS);
 
 /** Reset all mutable state for test isolation. */
-function resetState(): void {
+function resetState(opts?: { allowPolicyMutation?: boolean }): void {
   sessions.clear();
   escalations.clear();
   nextLabel = 1;
@@ -1045,6 +1064,11 @@ function resetState(): void {
   jobs.push(...structuredClone(CANNED_JOBS));
   initWorkflows();
   clearCompileState();
+  // clearCompileState resets allowPolicyMutation to true (the default); honor a
+  // per-test override AFTER it so a flag-OFF e2e (controls hidden) is real.
+  if (opts?.allowPolicyMutation !== undefined) {
+    allowPolicyMutation = opts.allowPolicyMutation;
+  }
   if (replayController) {
     replayController.abort();
     replayController = null;
@@ -1112,6 +1136,10 @@ function buildStatusDto() {
     webUiListening: true,
     activeSessions: sessions.size,
     nextFireTime: jobs[0]?.nextRun ?? null,
+    // Phase 1c: drives whether the UI shows persona-mutation controls. Default
+    // true so the e2e happy paths work; a per-test POST /__reset override can
+    // flip it OFF to exercise the controls-hidden path.
+    allowPolicyMutation,
   };
 }
 
@@ -1259,7 +1287,20 @@ function simulateCompile(op: MockCompileOperation): void {
       const ruleCount = 10 + Math.floor(Math.random() * 10);
       live.phase = 'done';
       live.endedAt = new Date().toISOString();
-      live.result = { success: true, ruleCount };
+      const pd = CANNED_PERSONA_DETAILS[live.name];
+      // ruleDelta is present only when a previous compiled policy existed (i.e.
+      // this is a recompile); absent on a first compile.
+      const hadPriorPolicy = pd?.hasPolicy === true;
+      const ruleDelta: MockRuleDelta | undefined = hadPriorPolicy
+        ? {
+            added: 2,
+            loosened: 1,
+            removed: 0,
+            broadenedDomains: [],
+            outOfWorkspacePaths: [],
+          }
+        : undefined;
+      live.result = { success: true, ruleCount, ...(ruleDelta ? { ruleDelta } : {}) };
       // Critical-section analogue: record into recent, drop from active BEFORE
       // emitting done, so a getCompile/listCompiles issued immediately after the
       // event sees a real terminal record.
@@ -1268,7 +1309,6 @@ function simulateCompile(op: MockCompileOperation): void {
       // Flip the persona's compiled flag so the list badge updates on refresh.
       const persona = CANNED_PERSONAS.find((p) => p.name === live.name);
       if (persona) persona.compiled = true;
-      const pd = CANNED_PERSONA_DETAILS[live.name] as { hasPolicy?: boolean; policyRuleCount?: number } | undefined;
       if (pd) {
         pd.hasPolicy = true;
         pd.policyRuleCount = ruleCount;
@@ -1276,7 +1316,7 @@ function simulateCompile(op: MockCompileOperation): void {
       broadcast('persona.compile.done', {
         name: live.name,
         operationId: live.operationId,
-        result: { success: true, ruleCount },
+        result: { success: true, ruleCount, ...(ruleDelta ? { ruleDelta } : {}) },
       });
     }, 600),
   );
@@ -1447,13 +1487,6 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       return pDetail;
     }
 
-    case 'personas.compile': {
-      const pName = params.name as string;
-      if (!CANNED_PERSONA_DETAILS[pName]) return errorResult('PERSONA_NOT_FOUND', `Persona "${pName}" not found`);
-      // Simulate compilation success
-      return { success: true, ruleCount: 10 + Math.floor(Math.random() * 10) };
-    }
-
     case 'personas.compileStream': {
       const pName = params.name as string;
       if (typeof pName !== 'string' || pName.length === 0) {
@@ -1549,6 +1582,102 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         recent: [...recentCompiles.values()],
         queueDepth: 0,
       };
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1c persona CRUD. All gated on allowPolicyMutation; the gate fires
+    // BEFORE any other validation (mirrors requirePolicyMutation in the daemon).
+    // Each mutation broadcasts personas.changed.
+    // -----------------------------------------------------------------------
+
+    case 'personas.create': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const cName = params.name as string;
+      const cDesc = params.description as string;
+      if (typeof cName !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(cName) || cName.length > 63) {
+        return errorResult('INVALID_PARAMS', `Invalid persona name: ${cName}`);
+      }
+      if (typeof cDesc !== 'string' || cDesc.trim().length === 0) {
+        return errorResult('INVALID_PARAMS', 'description is required');
+      }
+      if (CANNED_PERSONA_DETAILS[cName]) {
+        return errorResult('PERSONA_EXISTS', `Persona "${cName}" already exists`);
+      }
+      const cServers = Array.isArray(params.servers) ? (params.servers as string[]) : undefined;
+      const cMemory = params.memoryEnabled === undefined ? true : params.memoryEnabled === true;
+      const cConstitution = typeof params.constitution === 'string' ? params.constitution : '';
+      const newDetail: MockPersonaDetail = {
+        name: cName,
+        description: cDesc.trim(),
+        createdAt: new Date().toISOString(),
+        constitution: cConstitution,
+        ...(cServers && cServers.length > 0 ? { servers: cServers } : {}),
+        hasPolicy: false,
+        memory: cMemory,
+        allowBroadPolicy: false,
+      };
+      CANNED_PERSONA_DETAILS[cName] = newDetail;
+      CANNED_PERSONAS.push({ name: cName, description: cDesc.trim(), compiled: false, memory: cMemory });
+      broadcast('personas.changed', {});
+      return newDetail;
+    }
+
+    case 'personas.editConstitution': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const eName = params.name as string;
+      const eConstitution = params.constitution as string;
+      const ed = CANNED_PERSONA_DETAILS[eName];
+      if (!ed) return errorResult('PERSONA_NOT_FOUND', `Persona "${eName}" not found`);
+      ed.constitution = typeof eConstitution === 'string' ? eConstitution : '';
+      broadcast('personas.changed', {});
+      // stale is true iff the persona had a compiled policy that no longer
+      // matches the (now-changed) constitution.
+      return { stale: ed.hasPolicy };
+    }
+
+    case 'personas.setMemory': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const mName = params.name as string;
+      const md = CANNED_PERSONA_DETAILS[mName];
+      if (!md) return errorResult('PERSONA_NOT_FOUND', `Persona "${mName}" not found`);
+      md.memory = params.enabled === true;
+      const listItem = CANNED_PERSONAS.find((p) => p.name === mName);
+      if (listItem) listItem.memory = md.memory;
+      broadcast('personas.changed', {});
+      return md;
+    }
+
+    case 'personas.setBroadPolicyOptIn': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const bName = params.name as string;
+      const bd = CANNED_PERSONA_DETAILS[bName];
+      if (!bd) return errorResult('PERSONA_NOT_FOUND', `Persona "${bName}" not found`);
+      bd.allowBroadPolicy = params.enabled === true;
+      broadcast('personas.changed', {});
+      return bd;
+    }
+
+    case 'personas.delete': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const dName = params.name as string;
+      if (params.confirmed !== true) {
+        return errorResult('INVALID_PARAMS', 'confirmed must be true');
+      }
+      if (!CANNED_PERSONA_DETAILS[dName]) {
+        return errorResult('PERSONA_NOT_FOUND', `Persona "${dName}" not found`);
+      }
+      // Soft (default) and hard (force) both remove the persona from the listed
+      // set in the mock; the real daemon distinguishes trash vs rmSync but the
+      // observable effect over the wire (gone from list) is the same.
+      delete CANNED_PERSONA_DETAILS[dName];
+      CANNED_PERSONAS = CANNED_PERSONAS.filter((p) => p.name !== dName);
+      broadcast('personas.changed', {});
+      return { deleted: true };
     }
 
     // Workflow methods
@@ -1863,6 +1992,19 @@ function errorResult(code: string, message: string): RpcErrorResult {
   return { __rpcError: true, code, message };
 }
 
+/**
+ * Kill-switch gate shared by all Phase 1c persona-mutation methods. Returns an
+ * RpcError when the mock's `allowPolicyMutation` flag is OFF (set via the
+ * POST /__reset override), else undefined. Mirrors requirePolicyMutation in the
+ * daemon dispatch: the gate fires BEFORE any other validation.
+ */
+function requireMutation(): RpcErrorResult | undefined {
+  if (!allowPolicyMutation) {
+    return errorResult('POLICY_MUTATION_FORBIDDEN', 'Policy mutation is not enabled on this daemon');
+  }
+  return undefined;
+}
+
 function isRpcError(value: unknown): value is RpcErrorResult {
   return typeof value === 'object' && value !== null && '__rpcError' in value;
 }
@@ -1966,9 +2108,23 @@ wss.on('connection', (ws) => {
 const RESET_PORT = parseInt(process.env.RESET_PORT ?? '7401', 10);
 const httpServer = createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/__reset') {
-    resetState();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
+    let body = '';
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      let opts: { allowPolicyMutation?: boolean } | undefined;
+      if (body.trim().length > 0) {
+        try {
+          opts = JSON.parse(body) as { allowPolicyMutation?: boolean };
+        } catch {
+          opts = undefined;
+        }
+      }
+      resetState(opts);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
   } else if (req.method === 'POST' && req.url === '/__workflow-event') {
     let body = '';
     req.on('data', (chunk: Buffer) => {

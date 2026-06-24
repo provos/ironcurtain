@@ -478,7 +478,10 @@ async function runDelete(nameStr: string): Promise<void> {
     return;
   }
 
-  deletePersona(name, 'cli');
+  // CLI keeps its current contract: a confirmed `persona delete` permanently
+  // removes the persona ("...and all its data?"). The soft-delete/trash path is
+  // the WS default; the CLI passes force:true to preserve behavior.
+  deletePersona(name, 'cli', { force: true });
   console.error(chalk.green(`Persona "${name}" deleted.`));
 }
 

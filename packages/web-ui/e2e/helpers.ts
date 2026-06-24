@@ -1,10 +1,15 @@
 import { expect, type Page, type APIRequestContext } from '@playwright/test';
 
 /**
- * Reset the mock server's mutable state so tests are isolated.
+ * Reset the mock server's mutable state so tests are isolated. Pass
+ * `allowPolicyMutation: false` to simulate a daemon launched WITHOUT
+ * `--allow-policy-mutation` (persona-mutation controls hidden).
  */
-export async function resetMockServer(request: APIRequestContext): Promise<void> {
-  await request.post('http://localhost:7401/__reset');
+export async function resetMockServer(
+  request: APIRequestContext,
+  opts?: { allowPolicyMutation?: boolean },
+): Promise<void> {
+  await request.post('http://localhost:7401/__reset', opts ? { data: opts } : undefined);
 }
 
 /**

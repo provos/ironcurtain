@@ -39,6 +39,7 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
 function createMockEffects(): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
+    refreshPersonas: vi.fn(),
     assignDisplayNumber: vi.fn(() => 1),
   };
 }

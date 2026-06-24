@@ -36,8 +36,11 @@ import {
   listPersonas,
   setPersonaConstitution,
   setPersonaMemory,
+  setPersonaBroadPolicyOptIn,
 } from '../src/persona/persona-service.js';
 import { createPersonaName } from '../src/persona/types.js';
+import { resolvePersona } from '../src/persona/resolve.js';
+import { scanPersonas } from '../src/mux/persona-scanner.js';
 
 const TEST_HOME = resolve(`/tmp/ironcurtain-persona-service-test-${process.pid}`);
 
@@ -241,11 +244,39 @@ describe('setPersonaMemory', () => {
 // ---------------------------------------------------------------------------
 
 describe('deletePersona', () => {
-  it('hard-removes the persona directory recursively', () => {
+  it('soft-deletes by default: moves the dir to .persona-trash (outside personas/)', () => {
     createPersona({ name: 'p', description: 'd', constitution: 'x' }, 'cli');
     expect(existsSync(personaDir('p'))).toBe(true);
     deletePersona(createPersonaName('p'), 'cli');
+    // Gone from personas/.
     expect(existsSync(personaDir('p'))).toBe(false);
+    // Present in the trash dir (outside personas/).
+    const trashDir = resolve(TEST_HOME, '.persona-trash');
+    expect(existsSync(trashDir)).toBe(true);
+    const tombs = readdirSync(trashDir);
+    expect(tombs.some((t) => t.startsWith('p-'))).toBe(true);
+  });
+
+  it('force:true hard-removes the persona directory recursively (no trash)', () => {
+    createPersona({ name: 'p', description: 'd', constitution: 'x' }, 'cli');
+    deletePersona(createPersonaName('p'), 'cli', { force: true });
+    expect(existsSync(personaDir('p'))).toBe(false);
+    const trashDir = resolve(TEST_HOME, '.persona-trash');
+    const tombs = existsSync(trashDir) ? readdirSync(trashDir) : [];
+    expect(tombs).toHaveLength(0);
+  });
+
+  it('a soft-deleted persona is unresolvable by scanPersonas and resolvePersona', () => {
+    createPersona({ name: 'p', description: 'd', constitution: 'x' }, 'cli');
+    writeCompiledPolicy('p', { rules: [] });
+    // Resolvable before delete.
+    expect(scanPersonas().map((x) => x.name)).toContain('p');
+    expect(() => resolvePersona('p')).not.toThrow();
+
+    deletePersona(createPersonaName('p'), 'cli'); // soft
+
+    expect(scanPersonas().map((x) => x.name)).not.toContain('p');
+    expect(() => resolvePersona('p')).toThrow();
   });
 
   it('throws PERSONA_NOT_FOUND for a missing persona', () => {
@@ -255,6 +286,32 @@ describe('deletePersona', () => {
     } catch (err) {
       expect((err as { code?: string }).code).toBe('PERSONA_NOT_FOUND');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setPersonaBroadPolicyOptIn
+// ---------------------------------------------------------------------------
+
+describe('setPersonaBroadPolicyOptIn', () => {
+  it('enabling writes allowBroadPolicy:true and reflects it in the detail DTO', () => {
+    createPersona({ name: 'p', description: 'd' }, 'cli');
+    expect(getPersonaDetail(createPersonaName('p')).allowBroadPolicy).toBe(false);
+    const detail = setPersonaBroadPolicyOptIn(createPersonaName('p'), true, 'cli');
+    expect(detail.allowBroadPolicy).toBe(true);
+    expect(readPersonaJson('p').allowBroadPolicy).toBe(true);
+  });
+
+  it('disabling drops the key (default-off)', () => {
+    createPersona({ name: 'p', description: 'd' }, 'cli');
+    setPersonaBroadPolicyOptIn(createPersonaName('p'), true, 'cli');
+    setPersonaBroadPolicyOptIn(createPersonaName('p'), false, 'cli');
+    expect('allowBroadPolicy' in readPersonaJson('p')).toBe(false);
+    expect(getPersonaDetail(createPersonaName('p')).allowBroadPolicy).toBe(false);
+  });
+
+  it('throws for a missing persona', () => {
+    expect(() => setPersonaBroadPolicyOptIn(createPersonaName('missing'), true, 'cli')).toThrow();
   });
 });
 

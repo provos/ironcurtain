@@ -16,7 +16,7 @@ import type {
   BudgetSummaryDto,
   PersonaListItem,
   PersonaDetailDto,
-  PersonaBlockingCompileResultDto,
+  PersonaEditResultDto,
   PersonaCompileOperationDto,
   PersonaCompileStreamAckDto,
   PersonaListCompilesDto,
@@ -149,6 +149,17 @@ export const appState = new AppState();
  */
 export const connectionGeneration = $state({ value: 0 });
 
+/**
+ * Monotonically increasing counter bumped on every `personas.changed`
+ * server-push event (persona create/edit/delete/memory/broad-policy mutation).
+ * The Personas view reads `.value` as a $effect dependency to refresh its
+ * locally-held persona list + selected detail, mirroring how `job.list_changed`
+ * drives `refreshJobs`. Kept as a standalone reactive object (rather than on
+ * appState) because the persona list lives in the route component, not the
+ * global store.
+ */
+export const personasChangedGeneration = $state({ value: 0 });
+
 // WebSocket client singleton
 let wsClient: WsClient | null = null;
 
@@ -202,6 +213,9 @@ function wireEventHandlers(client: WsClient): void {
       appState,
       {
         refreshJobs: () => refreshJobs(client),
+        refreshPersonas: () => {
+          personasChangedGeneration.value++;
+        },
         assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
       },
       event,
@@ -435,6 +449,75 @@ export async function listPersonas(): Promise<PersonaListItem[]> {
   return getWsClient().request<PersonaListItem[]>('personas.list');
 }
 
+// ── Persona CRUD mutation RPC actions (Phase 1c) ──────────────────────
+//
+// All five are gated server-side on the daemon's `--allow-policy-mutation`
+// flag: when off they reject with POLICY_MUTATION_FORBIDDEN. The UI hides
+// these controls when `appState.daemonStatus.allowPolicyMutation` is false,
+// so a forbidden rejection is a defense-in-depth path, not the normal one.
+// Errors (RpcError with a `.code`) bubble to the caller for inline/actionable
+// affordances. Each successful mutation also triggers a `personas.changed`
+// server-push event handled by the event handler.
+
+/**
+ * Create a new persona. `servers: undefined` (or omitted) means "all servers
+ * (incl. future)"; a non-empty array narrows to those servers explicitly.
+ * Errors: INVALID_PARAMS (bad slug / empty description), PERSONA_EXISTS,
+ * POLICY_MUTATION_FORBIDDEN.
+ */
+export async function createPersona(input: {
+  name: string;
+  description: string;
+  servers?: string[];
+  memoryEnabled?: boolean;
+  constitution?: string;
+}): Promise<PersonaDetailDto> {
+  const params: Record<string, unknown> = {
+    name: input.name,
+    description: input.description,
+  };
+  if (input.servers !== undefined) params.servers = input.servers;
+  if (input.memoryEnabled !== undefined) params.memoryEnabled = input.memoryEnabled;
+  if (input.constitution !== undefined) params.constitution = input.constitution;
+  return getWsClient().request<PersonaDetailDto>('personas.create', params);
+}
+
+/**
+ * Replace a persona's constitution. Returns `{ stale }` — `stale: true` means
+ * the previously compiled policy no longer matches the constitution and should
+ * be recompiled. Errors: PERSONA_NOT_FOUND, POLICY_MUTATION_FORBIDDEN.
+ */
+export async function editPersonaConstitution(name: string, constitution: string): Promise<PersonaEditResultDto> {
+  return getWsClient().request<PersonaEditResultDto>('personas.editConstitution', { name, constitution });
+}
+
+/** Toggle a persona's persistent-memory flag. Errors: PERSONA_NOT_FOUND, POLICY_MUTATION_FORBIDDEN. */
+export async function setPersonaMemory(name: string, enabled: boolean): Promise<PersonaDetailDto> {
+  return getWsClient().request<PersonaDetailDto>('personas.setMemory', { name, enabled });
+}
+
+/**
+ * Set a persona's broad-policy opt-in. This is the ONLY way to set
+ * `allowBroadPolicy`; it is never inferred from the constitution. When enabled,
+ * the compiler's broad-policy validator permits wildcard domains/lists and
+ * out-of-workspace paths. Errors: PERSONA_NOT_FOUND, POLICY_MUTATION_FORBIDDEN.
+ */
+export async function setPersonaBroadPolicyOptIn(name: string, enabled: boolean): Promise<PersonaDetailDto> {
+  return getWsClient().request<PersonaDetailDto>('personas.setBroadPolicyOptIn', { name, enabled });
+}
+
+/**
+ * Delete a persona. Soft by default (renamed into a trash dir, policy left
+ * inert); `force: true` hard-deletes and revokes the policy. `confirmed: true`
+ * is required by the backend schema. Errors: PERSONA_NOT_FOUND,
+ * POLICY_MUTATION_FORBIDDEN.
+ */
+export async function deletePersona(name: string, opts?: { force?: boolean }): Promise<{ deleted: true }> {
+  const params: Record<string, unknown> = { name, confirmed: true };
+  if (opts?.force) params.force = true;
+  return getWsClient().request<{ deleted: true }>('personas.delete', params);
+}
+
 // ── Workflow RPC actions ────────────────────────────────────────────
 
 export async function listWorkflowDefinitions(): Promise<WorkflowDefinitionDto[]> {
@@ -543,10 +626,6 @@ export async function getWorkflowMessageLog(
 
 export async function getPersonaDetail(name: string): Promise<PersonaDetailDto> {
   return getWsClient().request<PersonaDetailDto>('personas.get', { name });
-}
-
-export async function compilePersonaPolicy(name: string): Promise<PersonaBlockingCompileResultDto> {
-  return getWsClient().request<PersonaBlockingCompileResultDto>('personas.compile', { name });
 }
 
 /**
