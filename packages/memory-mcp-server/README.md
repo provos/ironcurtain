@@ -2,7 +2,7 @@
 
 A persistent memory server for LLM agents using the [Model Context Protocol](https://modelcontextprotocol.io/). Provides semantic search, optional LLM summarization, and automatic maintenance — all backed by a single SQLite file.
 
-> **0.2.0 — breaking schema change.** This release bumps the on-disk schema to version `4` (atomic-fact ingestion and parent-context retrieval add a `segments` table and a `segment_id` column). On startup, a database written by an **older** schema is **dropped and rebuilt** rather than migrated, discarding its contents; a database written by a **newer** schema fails closed (the server refuses to open it). Back up or re-ingest any 0.1.x database before upgrading.
+> **0.2.0 — breaking schema change.** This release bumps the on-disk schema to version `4` (atomic-fact ingestion and parent-context retrieval add a `segments` table and a `segment_id` column). On startup, a database written by an **older** schema is not migrated; the server first writes a sibling backup named like `default.db.backup-schema-v3-before-v4-2026-06-24T12-34-56-789Z.db`, then rebuilds the live database from scratch. If the backup cannot be written, startup fails closed and the original database is left untouched. A database written by a **newer** schema also fails closed (the server refuses to open it).
 
 ## Why Another Memory Server?
 

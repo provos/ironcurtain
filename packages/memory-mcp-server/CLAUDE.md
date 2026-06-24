@@ -26,7 +26,7 @@ src/
 ├── types.ts              Shared types (Memory, StoreResult, IngestResult, RecallResult, ExpandResult, ExpandMode, etc.)
 ├── prompts.ts            Exportable system prompts and tool descriptions
 ├── storage/
-│   ├── database.ts       SQLite schema (SCHEMA_VERSION 4): memories (+ segment_id FK), segments (off-index source chunks), vec_memories (768-dim), memories_fts (FTS5). Stale-DB drop-and-recreate.
+│   ├── database.ts       SQLite schema (SCHEMA_VERSION 4): memories (+ segment_id FK), segments (off-index source chunks), vec_memories (768-dim), memories_fts (FTS5). Stale-DB back-up-then-rebuild.
 │   ├── queries.ts        Data access: insert, search (vector + FTS), delete, stats; segment helpers (insertSegment, getSegmentsByIds, updateMemorySegmentIfRicher)
 │   ├── extraction.ts     LLM atomic-fact extraction (chunkBlob, extractFacts) + splitToPassages for expansion
 │   ├── constants.ts      Embedding dimensions, dedup thresholds
@@ -87,7 +87,7 @@ src/
 - **sqlite-vec** extension for vector nearest-neighbor search (768-dim, cosine distance)
 - **FTS5** for keyword search with BM25 ranking
 - **`segments` table** — source chunks `memory_ingest` decomposes facts from. OFF the retrieval index by construction: never embedded, never in `vec_memories`/`memories_fts`; fetched only by primary key during recall-time parent expansion ("index fine, return coarse"). Each ingested fact's `segment_id` is a FK to `segments`; `memory_store` rows keep `segment_id = NULL`. Segment helpers in `queries.ts`: `insertSegment` (one row per ingest chunk that produced ≥1 fact), `getSegmentsByIds` (batch primary-key fetch for expansion), `updateMemorySegmentIfRicher` (on an ingest merge, repoint the survivor to the parent with the higher `fact_count`).
-- **`SCHEMA_VERSION = '4'`** (`storage/database.ts`). The DB self-heals a stale on-disk schema on open via a NUMERIC version compare: an OLDER stamp is **dropped and recreated** (rebuild, not migrate — old data is deliberately discarded under the back-compat-free directive); a NEWER stamp **throws / fails closed** so an older binary never destroys a DB it can't understand; an unparseable stamp is treated as stale and rebuilt. This is a breaking 0.2.0 change (0.1.x DBs are wiped on first open).
+- **`SCHEMA_VERSION = '4'`** (`storage/database.ts`). The DB self-heals a stale on-disk schema on open via a NUMERIC version compare: an OLDER stamp is **backed up, then dropped and recreated** (rebuild, not migrate — the live DB starts fresh, but the prior contents are first copied to a sibling `…​.backup-schema-v<n>-before-v4-<timestamp>.db` via `VACUUM INTO`); if that backup cannot be written the open **fails closed** and the original is left untouched (no write access means the server couldn't persist new memory anyway). A NEWER stamp also **throws / fails closed** so an older binary never destroys a DB it can't understand; an unparseable stamp is treated as stale and rebuilt the same way. This is a breaking 0.2.0 change (0.1.x DBs are rebuilt — not migrated — on first open).
 - **Maintenance pipeline**: consolidation (batch LLM dedup), decay (vitality sampling), compaction (cluster + summarize)
 - Dedup at store: cosine distance < 0.05 merged immediately; distance < 0.3 deferred to consolidation with LLM judgment
 

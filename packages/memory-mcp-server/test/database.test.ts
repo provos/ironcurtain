@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { initDatabase, EMBEDDING_DIMENSIONS } from '../src/storage/database.js';
@@ -335,7 +335,7 @@ describe('database', () => {
       expect(schemaVersion(db)).toBe('4');
     });
 
-    it('drops-and-recreates a stale v3-shaped DB cleanly (no `no such column`, old data gone)', async () => {
+    it('backs up then drops-and-recreates a stale v3-shaped DB cleanly', async () => {
       const staleDir = mkdtempSync(join(tmpdir(), 'memory-stale-'));
       const stalePath = join(staleDir, 'stale.db');
 
@@ -378,9 +378,26 @@ describe('database', () => {
           reopened.prepare(`SELECT segment_id FROM memories WHERE namespace = ?`).all('test');
         expect(selectSegment).not.toThrow();
 
-        // The pre-change row was discarded by the rebuild.
+        // The live DB was rebuilt, so the pre-change row is no longer active.
         const oldRow = getMemoriesByIds(reopened, 'test', ['old-row']);
         expect(oldRow).toHaveLength(0);
+
+        const backups = readdirSync(staleDir).filter(
+          (name) => name.startsWith('stale.db.backup-schema-v3-before-v4-') && name.endsWith('.db'),
+        );
+        expect(backups).toHaveLength(1);
+
+        const backup = new Database(join(staleDir, backups[0]));
+        try {
+          expect(schemaVersion(backup)).toBe('3');
+          expect(columnNames(backup, 'memories')).not.toContain('segment_id');
+          const preserved = backup.prepare(`SELECT content FROM memories WHERE id = ?`).get('old-row') as
+            | { content: string }
+            | undefined;
+          expect(preserved?.content).toBe('stale pre-change row');
+        } finally {
+          backup.close();
+        }
 
         // The rebuilt DB round-trips store/recall (insert + read back).
         const id = generateId();

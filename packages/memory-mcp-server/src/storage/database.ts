@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export interface MemoryRow {
@@ -63,8 +63,8 @@ export function initDatabase(dbPath: string, embeddingModel: string): Database.D
   // Self-heal a stale on-disk schema BEFORE createSchema runs. A pre-`'4'` DB has an
   // old `memories` table without `segment_id`; `CREATE TABLE IF NOT EXISTS` would no-op
   // on it and the first `segment_id` access would throw `no such column`. Under the
-  // back-compat-free directive we drop-and-recreate (deliberately discarding old data).
-  dropStaleSchema(db);
+  // back-compat-free directive we back up, then drop-and-recreate.
+  dropStaleSchema(db, dbPath);
 
   createSchema(db);
   ensureSchemaMeta(db, embeddingModel);
@@ -77,24 +77,35 @@ export function initDatabase(dbPath: string, embeddingModel: string): Database.D
  * fresh DB) and reconcile it against the current SCHEMA_VERSION using a NUMERIC compare:
  *
  *   - absent stamp (fresh DB)      → no-op (createSchema builds from scratch)
- *   - on-disk  <  current          → drop-and-recreate (deliberately discard old data)
+ *   - absent stamp + legacy shape  → back up, then drop-and-recreate
+ *   - on-disk  <  current          → back up, then drop-and-recreate
  *   - on-disk  === current         → no-op (keep)
  *   - on-disk  >  current          → THROW (fail closed): an older binary must NOT
  *                                    destroy a newer DB it can't understand
- *   - present-but-unparseable      → drop (treat as stale; it is not a recognizable
- *                                    newer version)
+ *   - present-but-unparseable      → back up, then drop (treat as stale; it is not
+ *                                    a recognizable newer version)
  *
  * A pre-numeric string compare silently dropped a FUTURE schema opened by an older
  * binary (downgrade data loss); numeric compare + fail-closed prevents that.
  */
-function dropStaleSchema(db: Database.Database): void {
+function dropStaleSchema(db: Database.Database, dbPath: string): void {
   const hasSchemaMeta = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'`).get();
-  if (!hasSchemaMeta) return; // fresh DB — nothing to drop
+  if (!hasSchemaMeta) {
+    if (hasLegacyMemoriesShape(db)) {
+      rebuildSchema(db, dbPath, 'legacy-unversioned');
+    }
+    return;
+  }
 
   const stamp = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as
     | { value: string }
     | undefined;
-  if (!stamp) return; // fresh — no stamp to compare
+  if (!stamp) {
+    if (hasLegacyMemoriesShape(db)) {
+      rebuildSchema(db, dbPath, 'legacy-unversioned');
+    }
+    return;
+  }
 
   const current = Number(SCHEMA_VERSION);
   const onDisk = Number(stamp.value);
@@ -102,7 +113,7 @@ function dropStaleSchema(db: Database.Database): void {
   // A present-but-unparseable stamp is not a recognizable newer version: treat it as
   // stale and rebuild (matches the absent-`segment_id` self-heal intent).
   if (Number.isNaN(onDisk)) {
-    rebuildSchema(db);
+    rebuildSchema(db, dbPath, `schema-${stamp.value}`);
     return;
   }
 
@@ -117,15 +128,18 @@ function dropStaleSchema(db: Database.Database): void {
     );
   }
 
-  // on-disk < current: stale older DB — drop-and-recreate.
-  rebuildSchema(db);
+  // on-disk < current: stale older DB — back up, then drop-and-recreate.
+  rebuildSchema(db, dbPath, `schema-v${stamp.value}`);
 }
 
 /**
  * Drop the schema so `createSchema` rebuilds it from scratch. Drops the virtual tables
  * first (their shadow tables depend on nothing else), then the base tables.
  */
-function rebuildSchema(db: Database.Database): void {
+function rebuildSchema(db: Database.Database, dbPath: string, reason: string): void {
+  const backupPath = backupDatabaseBeforeRebuild(db, dbPath, reason);
+  console.warn(`[memory-server] Backed up incompatible memory database schema to '${backupPath}' before rebuilding.`);
+
   db.exec(`
     DROP TABLE IF EXISTS vec_memories;
     DROP TABLE IF EXISTS memories_fts;
@@ -133,6 +147,47 @@ function rebuildSchema(db: Database.Database): void {
     DROP TABLE IF EXISTS segments;
     DROP TABLE IF EXISTS schema_meta;
   `);
+}
+
+function hasLegacyMemoriesShape(db: Database.Database): boolean {
+  const hasMemories = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`).get();
+  if (!hasMemories) return false;
+
+  const columns = db.prepare(`PRAGMA table_info(memories)`).all() as Array<{ name: string }>;
+  return columns.length > 0 && !columns.some((column) => column.name === 'segment_id');
+}
+
+function backupDatabaseBeforeRebuild(db: Database.Database, dbPath: string, reason: string): string {
+  if (dbPath === ':memory:') {
+    throw new Error(
+      `Refusing to rebuild incompatible in-memory memory database schema because it cannot be backed up first.`,
+    );
+  }
+
+  const backupPath = nextSchemaBackupPath(dbPath, reason);
+  try {
+    db.prepare(`VACUUM main INTO ?`).run(backupPath);
+  } catch (cause) {
+    throw new Error(
+      `Refusing to rebuild incompatible memory database schema because backup creation failed at '${backupPath}'. ` +
+        `The original database was left untouched.`,
+      { cause },
+    );
+  }
+  return backupPath;
+}
+
+function nextSchemaBackupPath(dbPath: string, reason: string): string {
+  const sanitizedReason = reason.replace(/[^A-Za-z0-9._-]/g, '_');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const base = `${dbPath}.backup-${sanitizedReason}-before-v${SCHEMA_VERSION}-${timestamp}.db`;
+
+  if (!existsSync(base)) return base;
+
+  for (let suffix = 1; ; suffix++) {
+    const candidate = `${base}.${suffix}`;
+    if (!existsSync(candidate)) return candidate;
+  }
 }
 
 function createSchema(db: Database.Database): void {
