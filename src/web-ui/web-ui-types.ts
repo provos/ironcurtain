@@ -386,6 +386,12 @@ export interface PersonaDetailDto {
   readonly servers?: readonly string[];
   readonly hasPolicy: boolean;
   readonly policyRuleCount?: number;
+  /**
+   * Whether persistent memory is enabled for this persona
+   * (persona.memory?.enabled ?? true). Added in Phase 1a; additive and
+   * backward-compatible — existing callers ignore unknown fields.
+   */
+  readonly memory: boolean;
 }
 
 /** Response from `personas.compile`. */

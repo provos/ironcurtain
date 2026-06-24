@@ -7,7 +7,7 @@
  * and cli-help.ts for help formatting.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
@@ -20,10 +20,15 @@ import {
   getPersonaGeneratedDir,
   getPersonaConstitutionPath,
   getPersonaWorkspaceDir,
-  getPersonaDefinitionPath,
-  getPersonasDir,
   loadPersona,
 } from './resolve.js';
+import {
+  createPersona,
+  deletePersona,
+  listPersonas,
+  setPersonaConstitution,
+  setPersonaMemory,
+} from './persona-service.js';
 import { compilePersonaPolicy } from './compile-persona-policy.js';
 
 // ---------------------------------------------------------------------------
@@ -65,24 +70,6 @@ function loadPersonaOrExit(nameStr: string): PersonaDefinition {
     console.error(chalk.red(`Persona not found: ${nameStr}`));
     process.exit(1);
   }
-}
-
-/** Returns all persona names by reading the personas directory. */
-function listPersonaNames(): PersonaName[] {
-  const dir = getPersonasDir();
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => d.name)
-    .filter((name) => {
-      try {
-        createPersonaName(name);
-        return true;
-      } catch {
-        return false;
-      }
-    })
-    .map((name) => name as PersonaName);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,25 +227,11 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  // Create the persona directory structure
-  mkdirSync(personaDir, { recursive: true });
-  mkdirSync(getPersonaGeneratedDir(name), { recursive: true });
-  const workspaceDir = getPersonaWorkspaceDir(name);
-  mkdirSync(workspaceDir, { recursive: true });
-
-  // Save persona.json
-  const personaDef: PersonaDefinition = {
-    name,
-    description,
-    createdAt: new Date().toISOString(),
-    ...(servers ? { servers } : {}),
-    ...(!enableMemory ? { memory: { enabled: false } } : {}),
-  };
-  writeFileSync(getPersonaDefinitionPath(name), JSON.stringify(personaDef, null, 2) + '\n', 'utf-8');
-
-  // 4. Constitution authoring
+  // 4. Constitution authoring. The persona workspace path is only used as a
+  // string in the generator prompt; the actual directory tree is created by the
+  // service after all inputs are gathered.
   let constitution: string | undefined;
-  const constitutionPath = getPersonaConstitutionPath(name);
+  const workspaceDir = getPersonaWorkspaceDir(name);
   const noGenerate = createValues['no-generate'] as boolean | undefined;
 
   if (!noGenerate) {
@@ -287,16 +260,26 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     constitution = openEditorForMultiline(instructions);
   }
 
+  // Create the whole persona tree atomically (persona.json + constitution.md +
+  // generated/ + workspace/). The service owns all fs effects.
+  createPersona(
+    {
+      name,
+      description,
+      servers,
+      memoryEnabled: enableMemory,
+      constitution: constitution ?? '',
+    },
+    'cli',
+  );
+
   if (!constitution) {
     p.log.warn('No constitution provided. You can add one later with: ironcurtain persona edit ' + name);
-    writeFileSync(constitutionPath, '', 'utf-8');
     p.outro(`Persona "${name}" created (no constitution -- compilation skipped).`);
     return;
   }
 
-  // 6. Write constitution and compile
-  writeFileSync(constitutionPath, constitution + '\n', 'utf-8');
-
+  // 6. Compile.
   const compiled = await compileWithSpinner(name, p);
   if (!compiled) {
     p.log.warn(`Persona "${name}" was created. Fix the issue then run: ironcurtain persona compile ${name}`);
@@ -307,30 +290,16 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
 }
 
 function runList(): void {
-  const names = listPersonaNames();
+  const personas = listPersonas();
 
-  if (names.length === 0) {
+  if (personas.length === 0) {
     console.error('No personas configured. Use "ironcurtain persona create <name>" to create one.');
     return;
   }
 
-  for (const name of names) {
-    let description: string;
-    let status = 'not compiled';
-
-    try {
-      const persona = loadPersona(name);
-      description = persona.description;
-    } catch {
-      description = '(error reading persona.json)';
-    }
-
-    const compiledPath = join(getPersonaGeneratedDir(name), 'compiled-policy.json');
-    if (existsSync(compiledPath)) {
-      status = 'compiled';
-    }
-
-    const statusColor = status === 'compiled' ? chalk.green(status) : chalk.yellow(status);
+  for (const { name, description, compiled } of personas) {
+    const status = compiled ? 'compiled' : 'not compiled';
+    const statusColor = compiled ? chalk.green(status) : chalk.yellow(status);
     console.error(`  ${chalk.bold(name.padEnd(24))} ${description.slice(0, 50).padEnd(52)} ${statusColor}`);
   }
 }
@@ -407,13 +376,7 @@ async function runEdit(nameStr: string): Promise<void> {
       p.outro('No change.');
       return;
     }
-    // Destructure-omit `memory` so we can either re-attach it (off case)
-    // or drop it entirely (on case). Required when exactOptionalPropertyTypes
-    // is on; harmless when off.
-    const { memory: _omit, ...rest } = persona;
-    void _omit;
-    const updated: PersonaDefinition = !newEnabled ? { ...rest, memory: { enabled: false } } : rest;
-    writeFileSync(getPersonaDefinitionPath(name), JSON.stringify(updated, null, 2) + '\n', 'utf-8');
+    setPersonaMemory(name, newEnabled, 'cli');
     p.outro(`Memory ${newEnabled ? 'enabled' : 'disabled'} for persona "${name}".`);
     return;
   }
@@ -423,9 +386,9 @@ async function runEdit(nameStr: string): Promise<void> {
   if (editAction === 'customize') {
     constitutionChanged = await editViaCustomizer(persona, constitutionPath);
   } else if (editAction === 'editor') {
-    constitutionChanged = editViaEditor(constitutionPath);
+    constitutionChanged = editViaEditor(name, constitutionPath);
   } else {
-    constitutionChanged = await editViaGeneration(persona, constitutionPath, p);
+    constitutionChanged = await editViaGeneration(persona, p);
   }
 
   if (!constitutionChanged) {
@@ -442,24 +405,28 @@ async function editViaCustomizer(persona: PersonaDefinition, constitutionPath: s
   const { runPersonaConstitutionCustomizer } = await import('./persona-customizer.js');
   const refined = await runPersonaConstitutionCustomizer(currentConstitution, persona.description, persona.servers);
   if (refined) {
-    writeFileSync(constitutionPath, refined + '\n', 'utf-8');
+    setPersonaConstitution(persona.name, refined, 'cli');
     return true;
   }
   return false;
 }
 
 /** Opens $EDITOR on the constitution file and returns whether it changed. */
-function editViaEditor(constitutionPath: string): boolean {
+function editViaEditor(name: PersonaName, constitutionPath: string): boolean {
   console.error('Opening constitution in editor...');
-  return openEditor(constitutionPath);
+  const changed = openEditor(constitutionPath);
+  if (changed) {
+    // The editor wrote the file in place; persist it through the service so the
+    // write is atomic and stale-detection runs. Strip exactly one trailing
+    // newline (the service re-adds it) to keep the file content byte-identical.
+    const text = readFileSync(constitutionPath, 'utf-8');
+    setPersonaConstitution(name, text.endsWith('\n') ? text.slice(0, -1) : text, 'cli');
+  }
+  return changed;
 }
 
 /** Generates a fresh constitution from the persona description. */
-async function editViaGeneration(
-  persona: PersonaDefinition,
-  constitutionPath: string,
-  p: typeof import('@clack/prompts'),
-): Promise<boolean> {
+async function editViaGeneration(persona: PersonaDefinition, p: typeof import('@clack/prompts')): Promise<boolean> {
   const constitution = await generateAndReviewConstitution(
     persona.description,
     getPersonaWorkspaceDir(persona.name),
@@ -467,7 +434,7 @@ async function editViaGeneration(
     p,
   );
   if (!constitution) return false;
-  writeFileSync(constitutionPath, constitution + '\n', 'utf-8');
+  setPersonaConstitution(persona.name, constitution, 'cli');
   return true;
 }
 
@@ -511,7 +478,7 @@ async function runDelete(nameStr: string): Promise<void> {
     return;
   }
 
-  rmSync(personaDir, { recursive: true, force: true });
+  deletePersona(name, 'cli');
   console.error(chalk.green(`Persona "${name}" deleted.`));
 }
 

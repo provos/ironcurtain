@@ -7,8 +7,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
+import { atomicWriteTextSync } from '../util/atomic-write.js';
 import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
 import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
@@ -190,23 +191,6 @@ export async function withSpinner<T>(
 // ---------------------------------------------------------------------------
 // Atomic file primitives
 // ---------------------------------------------------------------------------
-
-/**
- * Atomically writes raw text using write-to-temp-then-rename.
- *
- * `renameSync` is atomic on POSIX filesystems, so a concurrent reader either
- * sees the complete old file or the complete new file — never a torn write.
- * Mirrors `atomicWriteJsonSync` in `escalation/escalation-watcher.ts` but takes
- * a raw string so it can write non-JSON artifacts (e.g. `constitution.md`).
- *
- * The parent directory is created if missing.
- */
-export function atomicWriteTextSync(filePath: string, text: string): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.tmp`;
-  writeFileSync(tmpPath, text);
-  renameSync(tmpPath, filePath);
-}
 
 /**
  * Atomically writes a JSON value (pretty-printed, trailing newline) using
