@@ -26,6 +26,7 @@
     buildSummaryPlaceholder,
     synthesizeSummaryFromPastRun,
     synthesizeSummaryFromId,
+    phaseLabel,
     type PastRunFilter,
   } from './workflows-helpers.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -536,7 +537,7 @@
                 <TableCell class="font-medium font-mono text-xs">{wf.name}</TableCell>
                 <TableCell>
                   <span class="inline-flex items-center gap-1.5">
-                    <Badge variant={phaseBadgeVariant(wf.phase)}>{wf.phase.replace('_', ' ')}</Badge>
+                    <Badge variant={phaseBadgeVariant(wf.phase)}>{phaseLabel(wf.phase)}</Badge>
                     {#if wf.phase === 'failed' && wf.error}
                       <Badge variant="destructive" class="cursor-help" title={wf.error}>!</Badge>
                     {/if}
@@ -619,7 +620,7 @@
                   <TableRow>
                     <TableCell>
                       <span class="inline-flex items-center gap-1.5">
-                        <Badge variant={phaseBadgeVariant(row.phase)}>{row.phase.replace('_', ' ')}</Badge>
+                        <Badge variant={phaseBadgeVariant(row.phase)}>{phaseLabel(row.phase)}</Badge>
                         {#if row.phase === 'failed' && row.error}
                           <Badge variant="destructive" class="cursor-help" title={row.error}>!</Badge>
                         {/if}
