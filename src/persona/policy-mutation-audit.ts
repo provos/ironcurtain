@@ -30,7 +30,7 @@
  * @see docs/designs/web-ui-policy-persona-management.md §7
  */
 
-import { closeSync, mkdirSync, openSync, renameSync, statSync, writeSync, existsSync } from 'node:fs';
+import { closeSync, fchmodSync, mkdirSync, openSync, renameSync, statSync, writeSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHmac, randomBytes } from 'node:crypto';
 import { getIronCurtainHome } from '../config/paths.js';
@@ -156,6 +156,10 @@ export class PolicyMutationAuditLog {
     this.rotateIfNeeded(path);
     const fd = openSync(path, 'a', 0o600);
     try {
+      // The mode arg to openSync only applies on file CREATION; enforce 0600 on
+      // an already-existing log too (best-effort — see the module's honest-scope
+      // note re: a full-local-user attacker). fchmod targets the open fd.
+      fchmodSync(fd, 0o600);
       writeSync(fd, JSON.stringify(record) + '\n');
     } finally {
       closeSync(fd);

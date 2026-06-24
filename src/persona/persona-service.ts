@@ -23,8 +23,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
-import { atomicWriteTextSync } from '../util/atomic-write.js';
+import { atomicWriteJsonSync, atomicWriteTextSync } from '../util/atomic-write.js';
 import { getIronCurtainHome } from '../config/paths.js';
 import {
   getPersonaDir,
