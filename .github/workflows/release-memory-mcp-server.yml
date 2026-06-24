@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'memory-mcp-server/v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and test only — skip npm publish and the GitHub release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -19,6 +25,20 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      - name: Resolve release tag and version
+        id: meta
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            pkg_version="$(node -p "require('./packages/memory-mcp-server/package.json').version")"
+            tag="memory-mcp-server/v${pkg_version}"
+          fi
+          version="${tag#memory-mcp-server/}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag (npm publish uses the version in package.json)"
 
       - name: Install Aikido safe-chain for supply chain protection
         run: npm install -g @aikidosec/safe-chain && safe-chain setup
@@ -41,14 +61,14 @@ jobs:
         run: npm test --workspace packages/memory-mcp-server
 
       - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
         run: npm publish --workspace packages/memory-mcp-server --provenance
 
       - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          version="${tag#memory-mcp-server/}"
-          gh release create "$tag" \
-            --title "memory-mcp-server $version" \
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --title "memory-mcp-server ${{ steps.meta.outputs.version }}" \
             --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
