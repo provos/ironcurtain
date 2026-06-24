@@ -146,6 +146,11 @@ describe('formatTokens', () => {
     expect(formatTokens(2_100_000)).toBe('2.1M');
   });
 
+  it('promotes the rounding boundary to "M" instead of emitting "1000k"', () => {
+    expect(formatTokens(999_499)).toBe('999k');
+    expect(formatTokens(999_999)).toBe('1.0M');
+  });
+
   it('guards against negative / non-finite input', () => {
     expect(formatTokens(-5)).toBe('0');
     expect(formatTokens(Number.NaN)).toBe('0');

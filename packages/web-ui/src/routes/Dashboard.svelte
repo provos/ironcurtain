@@ -208,7 +208,7 @@
             <div class="text-3xl font-bold font-mono tracking-tight {kpis.issues > 0 ? 'text-destructive' : ''}">
               {kpis.issues}
             </div>
-            <div class="text-[11px] text-muted-foreground mt-1">failed / aborted</div>
+            <div class="text-[11px] text-muted-foreground mt-1">problem runs</div>
           </div>
         </div>
 

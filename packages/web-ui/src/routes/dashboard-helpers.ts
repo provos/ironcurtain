@@ -130,7 +130,8 @@ export function sumWorkflowTokens(
 export function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0';
   if (n < 1000) return String(Math.round(n));
-  if (n < 1_000_000) {
+  // 999_500..999_999 would round to "1000k"; promote those to the "M" branch.
+  if (n < 999_500) {
     const k = n / 1000;
     return `${k < 10 ? k.toFixed(1) : Math.round(k)}k`;
   }
