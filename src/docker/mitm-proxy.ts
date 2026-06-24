@@ -714,6 +714,45 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
   });
 
+  // Fast-reject WebSocket upgrades on TLS-intercepted provider hosts.
+  //
+  // Codex CLI ≥ 0.142 talks to its inference endpoint over
+  // `wss://chatgpt.com/backend-api/codex/responses` (HTTP `GET` with
+  // `Upgrade: websocket`) and only falls back to the legacy `POST` + SSE
+  // path when the WS connection fails at the TRANSPORT level. Without this
+  // listener Node delivers the upgrade request to the `'request'` handler
+  // below, which forwards it via `https.request()`; the upstream's `101
+  // Switching Protocols` is then dropped on the floor (Node fires only
+  // `'close'` on a client request with no `'upgrade'` listener), and the
+  // agent's WS client sits on an open socket until its ~15s connect
+  // timeout, retrying ~7× (~112s) before falling back.
+  //
+  // We deliberately DESTROY the socket rather than replying with an HTTP
+  // 4xx/5xx: tungstenite surfaces a non-101 HTTP response as a fatal
+  // handshake error to the Codex turn (observed: `turn.failed` with the
+  // body text), whereas a connection-level failure (reset / EOF before
+  // handshake) is treated as a retryable transport error and triggers the
+  // POST/SSE fallback — the same path the timeout used to reach, just in
+  // milliseconds instead of ~15s per attempt.
+  //
+  // This is intentionally a fast-fail, NOT a bridge: bridging WS for
+  // provider hosts would let inference traffic bypass the SSE trajectory
+  // capture / token-stream extraction paths. A proper key-swapping WS
+  // bridge (with WS-frame reassembly for capture) is a follow-up; until
+  // then the agent's HTTP fallback is the supported transport.
+  innerServer.on('upgrade', (req: http.IncomingMessage, socket: Socket) => {
+    const meta = socketMetadata.get(req.socket as tls.TLSSocket);
+    const targetHost = meta?.host ?? 'unknown';
+    logger.info(
+      `[mitm-proxy] REJECTED ${req.headers.upgrade ?? 'upgrade'} ${targetHost}${req.url ?? ''} ` +
+        '(WebSocket not bridged for MITM provider hosts; agent should fall back to HTTP)',
+    );
+    socket.on('error', () => {
+      /* swallow — socket is being torn down */
+    });
+    socket.destroy();
+  });
+
   // Lazy-loaded registry handler to avoid circular imports.
   // Cached after first import so subsequent calls are synchronous.
   let registryHandlerModule: typeof import('./registry-proxy.js') | undefined;
