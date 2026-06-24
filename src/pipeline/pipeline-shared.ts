@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
@@ -188,13 +188,63 @@ export async function withSpinner<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Atomic file primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * Atomically writes raw text using write-to-temp-then-rename.
+ *
+ * `renameSync` is atomic on POSIX filesystems, so a concurrent reader either
+ * sees the complete old file or the complete new file — never a torn write.
+ * Mirrors `atomicWriteJsonSync` in `escalation/escalation-watcher.ts` but takes
+ * a raw string so it can write non-JSON artifacts (e.g. `constitution.md`).
+ *
+ * The parent directory is created if missing.
+ */
+export function atomicWriteTextSync(filePath: string, text: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, text);
+  renameSync(tmpPath, filePath);
+}
+
+/**
+ * Atomically writes a JSON value (pretty-printed, trailing newline) using
+ * write-to-temp-then-rename. The JSON-with-newline formatting matches the
+ * historical `writeArtifact` byte layout so existing on-disk artifacts and
+ * goldens compare identically.
+ */
+export function atomicWriteJsonSync(filePath: string, data: unknown): void {
+  atomicWriteTextSync(filePath, JSON.stringify(data, null, 2) + '\n');
+}
+
+/**
+ * Removes a file if it exists, swallowing ENOENT. Used to atomically clear a
+ * stale artifact (e.g. `dynamic-lists.json` when a recompile produces no list
+ * definitions) instead of leaving the previous run's file in place.
+ */
+export function removeArtifactIfExists(generatedDir: string, filename: string): void {
+  try {
+    unlinkSync(resolve(generatedDir, filename));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Artifact I/O
 // ---------------------------------------------------------------------------
 
-/** Writes a JSON artifact to the generated directory with consistent formatting. */
+/**
+ * Writes a JSON artifact to the generated directory with consistent formatting.
+ *
+ * The write is atomic (tmp + rename) so a concurrent reader of the generated
+ * directory — e.g. `loadPersonaPolicyArtifacts` during a policy hot-swap —
+ * never observes a partially-written file.
+ */
 export function writeArtifact(generatedDir: string, filename: string, data: unknown): void {
   mkdirSync(generatedDir, { recursive: true });
-  writeFileSync(resolve(generatedDir, filename), JSON.stringify(data, null, 2) + '\n');
+  atomicWriteJsonSync(resolve(generatedDir, filename), data);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,12 +329,33 @@ export function createPerServerModel(
  * Wraps a LanguageModel so that `doGenerate` and `doStream` acquire
  * the semaphore before delegating. This caps total concurrent LLM API
  * calls across all servers.
+ *
+ * When `signal` is provided it is merged into each call's `abortSignal`
+ * (the caller's per-call signal still wins if it fires first), so an aborted
+ * pipeline cancels in-flight LLM requests. A pre-acquisition check also
+ * short-circuits already-aborted calls before they consume a semaphore slot.
  */
-export function createThrottledModel(model: LanguageModelV3, semaphore: LimitFunction): LanguageModelV3 {
+export function createThrottledModel(
+  model: LanguageModelV3,
+  semaphore: LimitFunction,
+  signal?: AbortSignal,
+): LanguageModelV3 {
+  const withSignal = (options: LanguageModelV3CallOptions): LanguageModelV3CallOptions => {
+    if (!signal) return options;
+    if (!options.abortSignal) return { ...options, abortSignal: signal };
+    // Both present: combine so either firing aborts the call.
+    return { ...options, abortSignal: AbortSignal.any([signal, options.abortSignal]) };
+  };
   return {
     ...model,
-    doGenerate: (options: LanguageModelV3CallOptions) => semaphore(() => model.doGenerate(options)),
-    doStream: (options: LanguageModelV3CallOptions) => semaphore(() => model.doStream(options)),
+    doGenerate: (options: LanguageModelV3CallOptions) => {
+      signal?.throwIfAborted();
+      return semaphore(() => model.doGenerate(withSignal(options)));
+    },
+    doStream: (options: LanguageModelV3CallOptions) => {
+      signal?.throwIfAborted();
+      return semaphore(() => model.doStream(withSignal(options)));
+    },
   };
 }
 

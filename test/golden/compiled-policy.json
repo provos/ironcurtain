@@ -1,0 +1,45 @@
+{
+  "generatedAt": "2026-06-24T06:27:30.118Z",
+  "constitutionHash": "5303278f22bbac0be70df2fb5c7061cd1e162e54cadaa1f114cda8a760a8b2cf",
+  "inputHash": "0e9ce714fca0eec6065836dd6fc6a24ceba33f4bc505e418545c2a275e9ba0a1",
+  "rules": [
+    {
+      "name": "allow-trusted-news",
+      "description": "Allow fetching from trusted news domains.",
+      "principle": "Allow fetching news only from major trusted news sites.",
+      "if": {
+        "server": ["fetch"],
+        "tool": ["http_fetch"],
+        "domains": {
+          "roles": ["fetch-url"],
+          "allowed": ["@trusted-news-sites"]
+        }
+      },
+      "then": "allow",
+      "reason": "Trusted news domain."
+    },
+    {
+      "name": "allow-temp-reads",
+      "description": "Allow fetch operations whose URL role resolves under the temp directory.",
+      "principle": "Reads under the temp directory are permitted.",
+      "if": {
+        "server": ["fetch"],
+        "paths": {
+          "roles": ["read-path"],
+          "within": "/private/tmp"
+        }
+      },
+      "then": "allow",
+      "reason": "Within temp directory."
+    }
+  ],
+  "listDefinitions": [
+    {
+      "name": "trusted-news-sites",
+      "type": "domains",
+      "principle": "Allow fetching news only from major trusted news sites.",
+      "generationPrompt": "List the major trusted news site domains.",
+      "requiresMcp": false
+    }
+  ]
+}

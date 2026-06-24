@@ -32,6 +32,36 @@ export default tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'error',
     },
   },
+  // Layering boundary: live-runtime modules must not statically VALUE-import
+  // from src/pipeline (offline tooling). Type-only imports are allowed
+  // (allowTypeImports), and value imports must go through the sanctioned
+  // dynamic-import seam (compile-persona-policy.ts / compile-task-policy.ts,
+  // which are deliberately NOT in this files list). Scoped to the WS dispatch
+  // layer and the not-yet-existing persona-service modules so future phases
+  // inherit the guard without breaking the existing sanctioned importers.
+  {
+    files: [
+      'src/web-ui/**/*.ts',
+      'src/persona/persona-service.ts',
+      'src/persona/persona-compile-orchestrator.ts',
+      'src/persona/event-bus-progress-reporter.ts',
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/pipeline/**'],
+              allowTypeImports: true,
+              message:
+                'Live-runtime modules must not statically import VALUES from src/pipeline (offline tooling). Use `import type` for contracts, or reach pipeline code via the sanctioned dynamic-import seam (compile-persona-policy.ts / compile-task-policy.ts).',
+            },
+          ],
+        },
+      ],
+    },
+  },
   // Relaxed rules for test files — mocking patterns, deprecated API testing,
   // and vitest callbacks make strict unsafe-* rules too noisy.
   {

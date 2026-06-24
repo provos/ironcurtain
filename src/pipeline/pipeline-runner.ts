@@ -35,6 +35,7 @@ import {
   loadStoredToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
+  removeArtifactIfExists,
   createPipelineLlm,
   createPerServerModel,
   createThrottledModel,
@@ -141,6 +142,46 @@ export interface PipelineRunConfig {
    * When undefined, the pre-filter is skipped.
    */
   readonly prefilterText?: string;
+
+  /**
+   * Factory for per-server progress reporters. When provided, both the
+   * sequential and parallel paths use this instead of the built-in ora/spinner
+   * (sequential) or multi-line (parallel) reporters. Non-TTY callers (e.g. the
+   * daemon driving a compile over the WS surface) inject an event-bus reporter
+   * here. Absent => the built-in reporters are used (CLI behavior).
+   */
+  readonly reporterFactory?: (serverName: string) => ServerProgressReporter;
+
+  /**
+   * Cooperative cancellation. Threaded into every LLM call (`abortSignal`) and
+   * checked at each per-phase boundary so a long compile aborts promptly.
+   */
+  readonly signal?: AbortSignal;
+
+  /**
+   * Suppress narrative stderr output. The daemon path sets this so progress is
+   * routed through `onProgress`/`reporterFactory` instead of polluting stderr.
+   * When `quiet` is true, a `reporterFactory` MUST be supplied — there is no
+   * silent fallback to the ora/spinner reporter (it would write to stderr).
+   */
+  readonly quiet?: boolean;
+
+  /**
+   * Whether the list resolver may connect to live MCP servers to resolve
+   * data-backed (`requiresMcp: true`) lists. Defaults to true (CLI). The WS
+   * compile path sets this to false: there is no live MCP available, so any
+   * list definition that requires MCP fails fast with a typed error rather than
+   * silently resolving to empty.
+   */
+  readonly allowMcpLists?: boolean;
+
+  /**
+   * Optional validation hook invoked on the in-memory merged policy BEFORE any
+   * artifact is written. Throwing rejects the compile and leaves all prior
+   * artifacts intact (no partial write). Used by the WS surface to enforce
+   * additional invariants (e.g. server scoping) atomically.
+   */
+  readonly validateCompiled?: (policy: CompiledPolicyFile) => void;
 }
 
 /**
@@ -236,25 +277,24 @@ function computeScenariosHash(systemPrompt: string, handwrittenScenarios: TestSc
 function warnOnCompileAnnotationGaps(
   mcpServers: Record<string, MCPServerConfig> | undefined,
   storedAnnotationsFile: StoredToolAnnotationsFile,
+  log: NarrativeLogger = (msg) => {
+    console.error(msg);
+  },
 ): void {
   if (!mcpServers) return;
   const { missing } = findAnnotationServerDrift(storedAnnotationsFile, mcpServers);
   if (missing.length === 0) return;
 
-  console.error(
+  log(
     chalk.yellow(
       `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.map(safeForDisplay).join(', ')}.`,
     ),
   );
-  console.error(
-    chalk.yellow('  The compiled policy will have no rules for these servers and their tools will be denied.'),
-  );
+  log(chalk.yellow('  The compiled policy will have no rules for these servers and their tools will be denied.'));
   for (const name of missing) {
-    console.error(
-      chalk.yellow(`  Run \`ironcurtain annotate-tools --server ${safeForDisplay(name)}\` to annotate this server.`),
-    );
+    log(chalk.yellow(`  Run \`ironcurtain annotate-tools --server ${safeForDisplay(name)}\` to annotate this server.`));
   }
-  console.error('');
+  log('');
 }
 
 function extractPermittedDirectories(rules: CompiledRule[]): string[] {
@@ -332,10 +372,67 @@ function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+/**
+ * A narrative logger for non-progress output (summaries, warnings, gaps).
+ * In quiet mode the message is routed to `onProgress` (so the daemon can
+ * surface it) instead of stderr; otherwise it goes to stderr as before.
+ */
+type NarrativeLogger = (message: string) => void;
+
+function makeNarrativeLogger(config: PipelineRunConfig): NarrativeLogger {
+  if (config.quiet) {
+    const onProgress = config.onProgress;
+    return (msg: string) => {
+      onProgress?.(msg);
+    };
+  }
+  return (msg: string) => {
+    console.error(msg);
+  };
+}
+
+/**
+ * Resolves the reporter for a server. A caller-supplied `reporterFactory`
+ * always wins. When absent: quiet mode has NO fallback (the built-in reporters
+ * write to stderr), so it is a configuration error; non-quiet mode uses the
+ * built-in concrete reporter via `makeDefault`.
+ */
+function resolveReporter(
+  config: PipelineRunConfig,
+  serverName: string,
+  makeDefault: () => ServerProgressReporter,
+): ServerProgressReporter {
+  if (config.reporterFactory) return config.reporterFactory(serverName);
+  if (config.quiet) {
+    throw new Error(
+      `quiet:true requires a reporterFactory; no stderr-free reporter is available for server "${serverName}".`,
+    );
+  }
+  return makeDefault();
+}
+
 class RuleValidationError extends Error {
   constructor(public readonly errors: string[]) {
     super('Compiled rule validation failed');
     this.name = 'RuleValidationError';
+  }
+}
+
+/**
+ * Thrown when a list definition requires live MCP access (`requiresMcp: true`)
+ * but the run was configured with `allowMcpLists: false` (e.g. the WS compile
+ * path, which has no live MCP). Carries a discriminant `code` so callers can
+ * detect it without importing this module (`error.code === 'MCP_LISTS_DISALLOWED'`).
+ */
+export class McpListsDisallowedError extends Error {
+  readonly code = 'MCP_LISTS_DISALLOWED';
+  constructor(public readonly listNames: string[]) {
+    super(
+      `Dynamic list(s) require live MCP access but it is disabled (allowMcpLists: false): ` +
+        `${listNames.join(', ')}. Resolve these lists in an environment with MCP available, ` +
+        `or remove the MCP-backed list definitions.`,
+    );
+    this.name = 'McpListsDisallowedError';
   }
 }
 
@@ -511,14 +608,19 @@ export function validateServerScoping(serverName: string, rules: CompiledRule[])
  * generationPrompt values for the same named list, uses first-wins
  * (alphabetical server order) and logs a warning.
  */
-export function deduplicateListDefinitions(defs: ListDefinition[]): ListDefinition[] {
+export function deduplicateListDefinitions(
+  defs: ListDefinition[],
+  log: NarrativeLogger = (msg) => {
+    console.error(msg);
+  },
+): ListDefinition[] {
   const seen = new Map<string, ListDefinition>();
   for (const def of defs) {
     const existing = seen.get(def.name);
     if (!existing) {
       seen.set(def.name, def);
     } else if (existing.generationPrompt !== def.generationPrompt) {
-      console.error(
+      log(
         `  Warning: list "${def.name}" has divergent generation prompts ` +
           `across servers. Using first definition (alphabetical server order).`,
       );
@@ -536,12 +638,13 @@ export function mergeServerResults(
   results: ServerCompilationResult[],
   constitutionHash: string,
   skippedServers?: Array<{ serverName: string; reason: string }>,
+  log?: NarrativeLogger,
 ): CompiledPolicyFile {
   const sortedResults = [...results].sort((a, b) => a.serverName.localeCompare(b.serverName));
 
   const allRules: CompiledRule[] = sortedResults.flatMap((r) => r.rules);
   const allListDefs: ListDefinition[] = sortedResults.flatMap((r) => r.listDefinitions);
-  const uniqueListDefs = deduplicateListDefinitions(allListDefs);
+  const uniqueListDefs = deduplicateListDefinitions(allListDefs, log);
 
   const mergedInputHash = computeHash(...sortedResults.map((r) => r.inputHash));
 
@@ -613,6 +716,10 @@ export class PipelineRunner {
    * to select the appropriate compiler prompt.
    */
   private async runPerServer(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
+    const log = makeNarrativeLogger(config);
+
+    config.signal?.throwIfAborted();
+
     const storedAnnotationsFile =
       config.preloadedStoredAnnotations ??
       loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
@@ -621,7 +728,7 @@ export class PipelineRunner {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
 
-    warnOnCompileAnnotationGaps(config.mcpServers, storedAnnotationsFile);
+    warnOnCompileAnnotationGaps(config.mcpServers, storedAnnotationsFile, log);
 
     // Resolve conditional role specs to flat annotations for compiler prompts
     const toolAnnotationsFile = resolveStoredAnnotationsFile(storedAnnotationsFile);
@@ -636,11 +743,11 @@ export class PipelineRunner {
       storedAnnotationsFile,
     );
 
-    // Phase 2: Merge
-    const mergedPolicy = mergeServerResults(serverResults, constitutionHash, skippedServers);
-    writeArtifact(config.outputDir, 'compiled-policy.json', mergedPolicy);
+    config.signal?.throwIfAborted();
 
-    // Merge scenarios for the global artifact
+    // Phase 2: Merge (all three artifacts assembled in memory before any write)
+    const mergedPolicy = mergeServerResults(serverResults, constitutionHash, skippedServers, log);
+
     const allScenarios = serverResults.flatMap((r) => r.scenarios);
     const mergedScenariosFile: TestScenariosFile = {
       generatedAt: new Date().toISOString(),
@@ -648,12 +755,11 @@ export class PipelineRunner {
       inputHash: mergedPolicy.inputHash,
       scenarios: allScenarios,
     };
-    writeArtifact(config.outputDir, 'test-scenarios.json', mergedScenariosFile);
 
-    // Phase 3: Merge per-server resolved lists into global dynamic-lists.json
+    // Phase 3: Merge per-server resolved lists into the global dynamic-lists.json.
     // Each server resolved its own lists during compileServer(); merge them here.
     const listDefinitions = mergedPolicy.listDefinitions ?? [];
-
+    let mergedDynamicLists: DynamicListsFile | undefined;
     if (listDefinitions.length > 0) {
       const keptListNames = new Set(listDefinitions.map((d) => d.name));
       const mergedListEntries: Record<string, ResolvedList> = {};
@@ -668,12 +774,34 @@ export class PipelineRunner {
           }
         }
       }
-      const mergedDynamicLists: DynamicListsFile = {
+      mergedDynamicLists = {
         generatedAt: new Date().toISOString(),
         lists: mergedListEntries,
       };
-      writeArtifact(config.outputDir, 'dynamic-lists.json', mergedDynamicLists);
     }
+
+    // Optional caller validation runs on the in-memory policy BEFORE any artifact
+    // is written, so a rejection leaves the prior generation's files intact.
+    config.validateCompiled?.(mergedPolicy);
+
+    // Write order is the REVERSE of the runtime read order in
+    // loadPersonaPolicyArtifacts (compiled-policy first, then dynamic-lists):
+    //   1. dynamic-lists.json (or atomically REMOVE the stale file when there
+    //      are no list definitions — fixing the previous skip-leaves-stale bug)
+    //   2. test-scenarios.json
+    //   3. compiled-policy.json LAST
+    // Each write is per-file atomic (tmp + rename). The dependency ordering
+    // guarantees a concurrent reader that observes the NEW compiled-policy.json
+    // already sees the matching dynamic-lists.json; the reverse interleaving
+    // (new lists + old compiled) is fail-safe because an unknown @list-id
+    // expands to empty => deny.
+    if (mergedDynamicLists) {
+      writeArtifact(config.outputDir, 'dynamic-lists.json', mergedDynamicLists);
+    } else {
+      removeArtifactIfExists(config.outputDir, 'dynamic-lists.json');
+    }
+    writeArtifact(config.outputDir, 'test-scenarios.json', mergedScenariosFile);
+    writeArtifact(config.outputDir, 'compiled-policy.json', mergedPolicy);
 
     // Cross-server verification is intentionally omitted. Per-server rules compose
     // correctly by construction: every rule has server: [serverName] (enforced by
@@ -688,17 +816,17 @@ export class PipelineRunner {
     const totalScenarios = allScenarios.length;
     const serverCount = serverResults.length;
 
-    console.error('');
-    console.error(`  Servers compiled: ${serverCount}`);
-    console.error(`  Rules: ${totalRules}`);
-    console.error(`  Scenarios tested: ${totalScenarios}`);
-    console.error(`  Artifacts written to: ${chalk.dim(config.outputDir + '/')}`);
+    log('');
+    log(`  Servers compiled: ${serverCount}`);
+    log(`  Rules: ${totalRules}`);
+    log(`  Scenarios tested: ${totalScenarios}`);
+    log(`  Artifacts written to: ${chalk.dim(config.outputDir + '/')}`);
     if (config.llmLogPath) {
-      console.error(`  LLM interaction log: ${chalk.dim(config.llmLogPath)}`);
+      log(`  LLM interaction log: ${chalk.dim(config.llmLogPath)}`);
     }
 
-    console.error('');
-    console.error(chalk.green.bold('Policy compilation successful!'));
+    log('');
+    log(chalk.green.bold('Policy compilation successful!'));
 
     return mergedPolicy;
   }
@@ -717,6 +845,7 @@ export class PipelineRunner {
     results: ServerCompilationResult[];
     skippedServers: Array<{ serverName: string; reason: string }>;
   }> {
+    const log = makeNarrativeLogger(config);
     const serverEntries = Object.entries(toolAnnotationsFile.servers);
 
     // Apply server filter if provided
@@ -740,7 +869,7 @@ export class PipelineRunner {
       const prefilterText = config.prefilterText;
 
       if (prefilterText.trim() === '') {
-        console.error(chalk.yellow('Pre-filter input is empty. All servers skipped (default-deny applies).'));
+        log(chalk.yellow('Pre-filter input is empty. All servers skipped (default-deny applies).'));
         const allSkipped = filteredEntries.map(([name]) => ({
           serverName: name,
           reason: 'No input text provided — all servers skipped by default',
@@ -762,7 +891,7 @@ export class PipelineRunner {
       entriesToCompile = filteredEntries.filter(([name]) => {
         const decision = decisionMap.get(name);
         if (decision?.skip) {
-          console.error(`  ${chalk.dim(name)}: ${chalk.yellow('skipped')} — ${decision.reason}`);
+          log(`  ${chalk.dim(name)}: ${chalk.yellow('skipped')} — ${decision.reason}`);
           skippedServers.push({ serverName: name, reason: decision.reason });
           return false;
         }
@@ -771,12 +900,12 @@ export class PipelineRunner {
 
       const skippedCount = filteredEntries.length - entriesToCompile.length;
       if (skippedCount > 0) {
-        console.error(`  Pre-filter: ${skippedCount} server(s) skipped, ${entriesToCompile.length} proceeding`);
+        log(`  Pre-filter: ${skippedCount} server(s) skipped, ${entriesToCompile.length} proceeding`);
       }
     }
 
     if (entriesToCompile.length === 0) {
-      console.error(chalk.yellow('All servers skipped by pre-filter. Policy will use default-deny only.'));
+      log(chalk.yellow('All servers skipped by pre-filter. Policy will use default-deny only.'));
       return { results: [], skippedServers };
     }
 
@@ -829,9 +958,10 @@ export class PipelineRunner {
   private createServerModel(
     serverName: string,
     llmSemaphore: ReturnType<typeof pLimit>,
+    signal?: AbortSignal,
   ): { model: LanguageModel; logContext: LlmLogContext } {
     const { model, logContext } = createPerServerModel(this.baseLlm, this.logPath, serverName);
-    return { model: createThrottledModel(model, llmSemaphore), logContext };
+    return { model: createThrottledModel(model, llmSemaphore, signal), logContext };
   }
 
   private async compileServersSequential(
@@ -841,17 +971,19 @@ export class PipelineRunner {
     buildUnit: (name: string) => ServerCompilationUnit,
     llmSemaphore: ReturnType<typeof pLimit>,
   ): Promise<ServerCompilationResult[]> {
+    const log = makeNarrativeLogger(config);
     const results: ServerCompilationResult[] = [];
     const totalServers = filteredEntries.length;
     const failedServers: string[] = [];
 
     for (let i = 0; i < filteredEntries.length; i++) {
+      config.signal?.throwIfAborted();
       const [serverName] = filteredEntries[i];
-      console.error('');
-      console.error(chalk.bold(`[${i + 1}/${totalServers}] Compiling server: ${serverName}`));
+      log('');
+      log(chalk.bold(`[${i + 1}/${totalServers}] Compiling server: ${serverName}`));
 
-      const { model, logContext } = this.createServerModel(serverName, llmSemaphore);
-      const reporter = new SpinnerProgressReporter(serverName);
+      const { model, logContext } = this.createServerModel(serverName, llmSemaphore, config.signal);
+      const reporter = resolveReporter(config, serverName, () => new SpinnerProgressReporter(serverName));
 
       try {
         const result = await this.compileServer(
@@ -866,12 +998,12 @@ export class PipelineRunner {
       } catch (err) {
         const coerced = toError(err);
         reporter.fail('compiling', coerced);
-        console.error(`  ${chalk.red(`Server "${serverName}" failed:`)} ${coerced.message}`);
+        log(`  ${chalk.red(`Server "${serverName}" failed:`)} ${coerced.message}`);
         failedServers.push(serverName);
       }
     }
 
-    return this.handleCompilationResults(results, failedServers);
+    return this.handleCompilationResults(results, failedServers, log);
   }
 
   private async compileServersParallel(
@@ -882,17 +1014,27 @@ export class PipelineRunner {
     llmSemaphore: ReturnType<typeof pLimit>,
     serverLimit: ReturnType<typeof pLimit>,
   ): Promise<ServerCompilationResult[]> {
+    const log = makeNarrativeLogger(config);
+
     // Lazy import to avoid loading parallel-progress.ts when not needed
     const { ParallelProgressDisplay, ParallelProgressReporter } = await import('./parallel-progress.js');
 
     const serverNames = filteredEntries.map(([name]) => name);
-    const display = new ParallelProgressDisplay(serverNames);
+    // When a reporterFactory is injected the caller drives its own display; the
+    // built-in multi-line ParallelProgressDisplay would write to stderr, so it
+    // is only constructed for the built-in reporter path.
+    const display = config.reporterFactory ? undefined : new ParallelProgressDisplay(serverNames);
 
     const settled = await Promise.allSettled(
       filteredEntries.map(([serverName]) =>
         serverLimit(async () => {
-          const { model, logContext } = this.createServerModel(serverName, llmSemaphore);
-          const reporter = new ParallelProgressReporter(display, serverName);
+          config.signal?.throwIfAborted();
+          const { model, logContext } = this.createServerModel(serverName, llmSemaphore, config.signal);
+          const reporter = resolveReporter(config, serverName, () => {
+            // `display` is defined whenever reporterFactory is absent (built-in path).
+            if (!display) throw new Error('internal: built-in parallel display missing');
+            return new ParallelProgressReporter(display, serverName);
+          });
           try {
             return await this.compileServer(
               buildUnit(serverName),
@@ -910,7 +1052,7 @@ export class PipelineRunner {
       ),
     );
 
-    display.finish();
+    display?.finish();
 
     const results: ServerCompilationResult[] = [];
     const failedServers: string[] = [];
@@ -924,18 +1066,19 @@ export class PipelineRunner {
       }
     }
 
-    return this.handleCompilationResults(results, failedServers);
+    return this.handleCompilationResults(results, failedServers, log);
   }
 
   private handleCompilationResults(
     results: ServerCompilationResult[],
     failedServers: string[],
+    log: NarrativeLogger,
   ): ServerCompilationResult[] {
     if (failedServers.length > 0) {
-      console.error(
+      log(
         `\n${chalk.yellow(`Warning: ${failedServers.length} server(s) failed verification: ${failedServers.join(', ')}`)}`,
       );
-      console.error(chalk.yellow('Continuing with successfully compiled servers.'));
+      log(chalk.yellow('Continuing with successfully compiled servers.'));
     }
 
     if (results.length === 0) {
@@ -1021,6 +1164,7 @@ export class PipelineRunner {
     const compilerSystem = this.cacheStrategy.wrapSystemPrompt(compilerPrompt);
 
     // Step 1: Compile rules for this server
+    config.signal?.throwIfAborted();
     logContext.stepName = `compile-${unit.serverName}`;
     const compileResult = await this.compileServerPolicyRules(unit, compilerSystem, inputHash, model, reporter);
 
@@ -1030,6 +1174,7 @@ export class PipelineRunner {
     validateServerScoping(unit.serverName, rules);
 
     // Resolve dynamic lists for this server (before scenario generation so lists are available)
+    config.signal?.throwIfAborted();
     let dynamicLists: DynamicListsFile | undefined;
     if (listDefinitions.length > 0) {
       dynamicLists = await this.resolveServerLists(
@@ -1070,6 +1215,7 @@ export class PipelineRunner {
       : undefined;
 
     // Step 2: Generate test scenarios for this server
+    config.signal?.throwIfAborted();
     logContext.stepName = `scenarios-${unit.serverName}`;
     const permittedDirectories = extractPermittedDirectories(rules);
 
@@ -1097,6 +1243,7 @@ export class PipelineRunner {
     );
 
     // Step 3: Verify and repair
+    config.signal?.throwIfAborted();
     const state = await this.verifyAndRepairServer(
       unit,
       config,
@@ -1734,7 +1881,15 @@ export class PipelineRunner {
     logContext.stepName = `resolve-lists-${labelPrefix.trim()}`;
     const existingLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
 
-    const needsMcp = listDefinitions.some((d) => d.requiresMcp);
+    const mcpListNames = listDefinitions.filter((d) => d.requiresMcp).map((d) => d.name);
+    const needsMcp = mcpListNames.length > 0;
+
+    // The WS compile path disables live MCP. Fail fast with a typed error rather
+    // than silently resolving MCP-backed lists to empty (which would deny).
+    if (needsMcp && config.allowMcpLists === false) {
+      throw new McpListsDisallowedError(mcpListNames);
+    }
+
     let proxy: ProxyConnection | undefined;
     if (needsMcp && config.mcpServers) {
       proxy = await connectViaProxy(listDefinitions, config.mcpServers, config.toolAnnotationsDir);

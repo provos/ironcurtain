@@ -1,0 +1,12 @@
+{
+  "generatedAt": "2026-06-24T06:27:30.118Z",
+  "lists": {
+    "trusted-news-sites": {
+      "values": ["nytimes.com", "bbc.com", "reuters.com", "*.nytimes.com", "*.bbc.com", "*.reuters.com"],
+      "manualAdditions": [],
+      "manualRemovals": [],
+      "resolvedAt": "2026-06-24T06:27:30.114Z",
+      "inputHash": "5324d9556cbbed34af9713d74ade57c3f6863d21e63bd654136ded1b29dd5203"
+    }
+  }
+}
