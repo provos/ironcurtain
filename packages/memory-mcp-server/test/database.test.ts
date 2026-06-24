@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import * as sqliteVec from 'sqlite-vec';
 import { initDatabase, EMBEDDING_DIMENSIONS } from '../src/storage/database.js';
 import {
   insertMemory,
@@ -410,6 +411,112 @@ describe('database', () => {
         expect(back).toHaveLength(1);
         expect(back[0].content).toBe('fresh after rebuild');
         expect(back[0].segment_id).toBeNull();
+      } finally {
+        reopened.close();
+        rmSync(staleDir, { recursive: true, force: true });
+      }
+    });
+
+    it('backup faithfully preserves a realistic v3 DB (vec0 + FTS5 virtual tables), data intact', async () => {
+      const Database = (await import('better-sqlite3')).default;
+
+      const staleDir = mkdtempSync(join(tmpdir(), 'memory-stale-vtab-'));
+      const stalePath = join(staleDir, 'stale.db');
+
+      // A faithful pre-v4 database: the production schema minus `segment_id` and
+      // the `segments` table, but WITH the sqlite-vec and FTS5 virtual tables a
+      // real 0.1.x DB carries — the case `VACUUM INTO` actually has to copy.
+      const stale = new Database(stalePath);
+      stale.pragma('journal_mode = WAL');
+      sqliteVec.load(stale);
+      stale.exec(`
+        CREATE TABLE memories (
+          id TEXT PRIMARY KEY,
+          namespace TEXT NOT NULL DEFAULT 'default',
+          content TEXT NOT NULL,
+          tags TEXT,
+          importance REAL NOT NULL DEFAULT 0.5,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_accessed_at INTEGER NOT NULL,
+          access_count INTEGER NOT NULL DEFAULT 0,
+          is_compacted INTEGER NOT NULL DEFAULT 0,
+          source TEXT,
+          metadata TEXT,
+          consolidated INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE VIRTUAL TABLE vec_memories USING vec0(
+          memory_id TEXT PRIMARY KEY,
+          embedding float[${EMBEDDING_DIMENSIONS}]
+        );
+        CREATE VIRTUAL TABLE memories_fts USING fts5(
+          content, tags, content=memories, content_rowid=rowid, tokenize='porter unicode61'
+        );
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
+      `);
+
+      const embedding = randomEmbedding();
+      const embeddingBuf = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
+      const insert = stale.transaction(() => {
+        stale
+          .prepare(
+            `INSERT INTO memories (id, namespace, content, created_at, updated_at, last_accessed_at)
+             VALUES (?, 'test', ?, 1, 1, 1)`,
+          )
+          .run('vrow', 'parrots are remarkably clever birds');
+        const { rowid } = stale.prepare(`SELECT rowid FROM memories WHERE id = ?`).get('vrow') as { rowid: number };
+        stale.prepare(`INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)`).run('vrow', embeddingBuf);
+        stale
+          .prepare(`INSERT INTO memories_fts (rowid, content, tags) VALUES (?, ?, ?)`)
+          .run(rowid, 'parrots are remarkably clever birds', null);
+      });
+      insert();
+      stale.close();
+
+      const reopened = initDatabase(stalePath, TEST_MODEL);
+      try {
+        // The live DB was rebuilt to v4; the old data is no longer active.
+        expect(schemaVersion(reopened)).toBe('4');
+        expect(columnNames(reopened, 'memories')).toContain('segment_id');
+        expect(getMemoriesByIds(reopened, 'test', ['vrow'])).toHaveLength(0);
+
+        const backups = readdirSync(staleDir).filter(
+          (name) => name.startsWith('stale.db.backup-schema-v3-before-v4-') && name.endsWith('.db'),
+        );
+        expect(backups).toHaveLength(1);
+
+        // The backup must preserve the old schema AND the contents of all three
+        // tables — including the sqlite-vec and FTS5 virtual-table data.
+        const backup = new Database(join(staleDir, backups[0]), { readonly: true });
+        sqliteVec.load(backup);
+        try {
+          expect(schemaVersion(backup)).toBe('3');
+          expect(columnNames(backup, 'memories')).not.toContain('segment_id');
+
+          const row = backup.prepare(`SELECT content FROM memories WHERE id = ?`).get('vrow') as
+            | { content: string }
+            | undefined;
+          expect(row?.content).toBe('parrots are remarkably clever birds');
+
+          // sqlite-vec data survived: the stored embedding's nearest neighbour is
+          // itself at ~0 cosine distance, i.e. the vector bytes are intact.
+          expect((backup.prepare(`SELECT count(*) AS c FROM vec_memories`).get() as { c: number }).c).toBe(1);
+          const knn = backup
+            .prepare(
+              `SELECT memory_id, vec_distance_cosine(embedding, ?) AS distance
+               FROM vec_memories ORDER BY distance ASC LIMIT 1`,
+            )
+            .get(embeddingBuf) as { memory_id: string; distance: number };
+          expect(knn.memory_id).toBe('vrow');
+          expect(knn.distance).toBeCloseTo(0, 5);
+
+          // FTS5 index survived: a MATCH still finds the row.
+          const ftsHits = backup.prepare(`SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?`).all('parrots');
+          expect(ftsHits).toHaveLength(1);
+        } finally {
+          backup.close();
+        }
       } finally {
         reopened.close();
         rmSync(staleDir, { recursive: true, force: true });
