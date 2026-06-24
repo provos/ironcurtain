@@ -13,6 +13,7 @@
   } from '$lib/stores.svelte.js';
   import { RpcError } from '$lib/ws-client.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
+  import { phaseLabel } from './workflows-helpers.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Card, CardHeader, CardTitle, CardContent } from '$lib/components/ui/card/index.js';
@@ -239,7 +240,7 @@
   <div class="flex items-center gap-3">
     <Button variant="ghost" size="sm" onclick={onback}>&larr; Back</Button>
     <h2 class="text-xl font-semibold tracking-tight">{summary.name}</h2>
-    <Badge variant={phaseBadgeVariant(summary.phase)}>{summary.phase.replace('_', ' ')}</Badge>
+    <Badge variant={phaseBadgeVariant(summary.phase)}>{phaseLabel(summary.phase)}</Badge>
     {#if detail?.hasReadme}
       <Button
         variant="outline"

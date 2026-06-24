@@ -135,6 +135,11 @@ export function truncate(text: string, max = 80): string {
   return text.slice(0, max) + '…';
 }
 
+/** Human-readable phase label, e.g. `waiting_human` -> `waiting human`. */
+export function phaseLabel(phase: string): string {
+  return phase.replace('_', ' ');
+}
+
 /**
  * Phases that allow a Resume action from the Past-runs table.
  *
