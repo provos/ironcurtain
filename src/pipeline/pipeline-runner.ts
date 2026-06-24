@@ -197,10 +197,16 @@ export interface PipelineModels {
   readonly prefilterModel: LanguageModel;
 }
 
-/** Creates PipelineModels from user config. Delegates to shared createPipelineLlm. */
-export async function createPipelineModels(logDir?: string): Promise<PipelineModels> {
+/**
+ * Creates PipelineModels from user config. Delegates to shared createPipelineLlm.
+ *
+ * `logFileName` overrides the default `llm-interactions.jsonl` filename so a
+ * caller can scope the log to a single operation (e.g. the persona compile
+ * orchestrator passes `<operationId>.jsonl`).
+ */
+export async function createPipelineModels(logDir?: string, logFileName?: string): Promise<PipelineModels> {
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
-  const llm = await createPipelineLlm(effectiveLogDir, 'unknown');
+  const llm = await createPipelineLlm(effectiveLogDir, 'unknown', logFileName);
   const userConfig = loadUserConfig();
   const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig);
   const { model: prefilterModel } = createPerServerModel(haikuBaseLlm, llm.logPath, 'prefilter');

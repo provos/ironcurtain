@@ -60,6 +60,7 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
     jobs: [],
     workflows: new Map(),
     pendingGates: new Map(),
+    personaCompiles: new Map(),
     outputs,
     addOutput(label: number, line: OutputLine) {
       let existing = outputs.get(label) ?? [];
@@ -1020,6 +1021,139 @@ describe('handleEvent', () => {
       const verdict = state.workflows.get('wf-nc')?.latestVerdict;
       expect(verdict?.verdict).toBe('approved');
       expect(verdict?.confidence).toBeUndefined();
+    });
+  });
+
+  // ── Phase 1b: persona streamed-compile events (parseEvent -> applyEvent) ──
+
+  describe('persona compile events', () => {
+    it('persona.compile.started seeds a started record', () => {
+      const state = createMockState();
+      const ok = handleEvent(state, createMockEffects(), 'persona.compile.started', {
+        name: 'researcher',
+        operationId: 'op-1',
+        actor: 'web:conn-7',
+      });
+      expect(ok).toBe(true);
+      const rec = state.personaCompiles.get('op-1');
+      expect(rec).toBeTruthy();
+      expect(rec?.phase).toBe('started');
+      expect(rec?.name).toBe('researcher');
+      expect(rec?.actor).toBe('web:conn-7');
+      expect(rec?.startedAt).toBeTruthy();
+    });
+
+    it('persona.compile.progress moves to running and records serverProgress', () => {
+      const state = createMockState();
+      handleEvent(state, createMockEffects(), 'persona.compile.started', {
+        name: 'researcher',
+        operationId: 'op-1',
+        actor: 'web:conn-7',
+      });
+      const ok = handleEvent(state, createMockEffects(), 'persona.compile.progress', {
+        name: 'researcher',
+        operationId: 'op-1',
+        serverName: 'filesystem',
+        phase: 'scenarios',
+        detail: 'generating 12 scenarios',
+      });
+      expect(ok).toBe(true);
+      const rec = state.personaCompiles.get('op-1');
+      expect(rec?.phase).toBe('running');
+      expect(rec?.serverProgress).toEqual({
+        server: 'filesystem',
+        compilationPhase: 'scenarios',
+        detail: 'generating 12 scenarios',
+      });
+    });
+
+    it('persona.compile.progress synthesizes a record when the started event was missed', () => {
+      const state = createMockState();
+      const ok = handleEvent(state, createMockEffects(), 'persona.compile.progress', {
+        name: 'researcher',
+        operationId: 'op-orphan',
+        serverName: 'git',
+        phase: 'compiling',
+      });
+      expect(ok).toBe(true);
+      const rec = state.personaCompiles.get('op-orphan');
+      expect(rec?.phase).toBe('running');
+      expect(rec?.serverProgress?.server).toBe('git');
+      expect(rec?.serverProgress?.compilationPhase).toBe('compiling');
+      // No detail supplied -> omitted.
+      expect(rec?.serverProgress?.detail).toBeUndefined();
+    });
+
+    it('persona.compile.done writes a terminal record with the success result', () => {
+      const state = createMockState();
+      handleEvent(state, createMockEffects(), 'persona.compile.started', {
+        name: 'researcher',
+        operationId: 'op-1',
+        actor: 'web:conn-7',
+      });
+      const ok = handleEvent(state, createMockEffects(), 'persona.compile.done', {
+        name: 'researcher',
+        operationId: 'op-1',
+        result: { success: true, ruleCount: 17 },
+      });
+      expect(ok).toBe(true);
+      const rec = state.personaCompiles.get('op-1');
+      expect(rec?.phase).toBe('done');
+      expect(rec?.result).toEqual({ success: true, ruleCount: 17 });
+      expect(rec?.endedAt).toBeTruthy();
+    });
+
+    it('persona.compile.failed writes a terminal record with the typed error', () => {
+      const state = createMockState();
+      handleEvent(state, createMockEffects(), 'persona.compile.started', {
+        name: 'researcher',
+        operationId: 'op-1',
+        actor: 'web:conn-7',
+      });
+      const ok = handleEvent(state, createMockEffects(), 'persona.compile.failed', {
+        name: 'researcher',
+        operationId: 'op-1',
+        code: 'CREDENTIALS_MISSING',
+        error: 'ANTHROPIC_API_KEY not set',
+      });
+      expect(ok).toBe(true);
+      const rec = state.personaCompiles.get('op-1');
+      expect(rec?.phase).toBe('failed');
+      expect(rec?.error).toEqual({ code: 'CREDENTIALS_MISSING', message: 'ANTHROPIC_API_KEY not set' });
+      expect(rec?.endedAt).toBeTruthy();
+    });
+
+    it('full lifecycle started -> progress -> progress -> done settles to one done record', () => {
+      const state = createMockState();
+      const effects = createMockEffects();
+      handleEvent(state, effects, 'persona.compile.started', {
+        name: 'devops',
+        operationId: 'op-9',
+        actor: 'web:conn-1',
+      });
+      handleEvent(state, effects, 'persona.compile.progress', {
+        name: 'devops',
+        operationId: 'op-9',
+        serverName: 'filesystem',
+        phase: 'compiling',
+      });
+      handleEvent(state, effects, 'persona.compile.progress', {
+        name: 'devops',
+        operationId: 'op-9',
+        serverName: 'git',
+        phase: 'verifying',
+      });
+      handleEvent(state, effects, 'persona.compile.done', {
+        name: 'devops',
+        operationId: 'op-9',
+        result: { success: true, ruleCount: 24 },
+      });
+      expect(state.personaCompiles.size).toBe(1);
+      const rec = state.personaCompiles.get('op-9');
+      expect(rec?.phase).toBe('done');
+      expect(rec?.result?.ruleCount).toBe(24);
+      // The serverProgress from the last progress event is preserved on the done record.
+      expect(rec?.serverProgress?.server).toBe('git');
     });
   });
 

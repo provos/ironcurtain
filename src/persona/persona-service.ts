@@ -37,25 +37,13 @@ import type { PersonaName, PersonaDefinition } from './types.js';
 import { scanPersonas } from '../mux/persona-scanner.js';
 // Type-only imports — no runtime edge to pipeline / web-ui layers.
 import type { CompiledPolicyFile } from '../pipeline/types.js';
-import type { PersonaDetailDto } from '../web-ui/web-ui-types.js';
+import type { PersonaDetailDto, PersonaListDto, PersonaEditResultDto } from '../web-ui/web-ui-types.js';
 
-// ---------------------------------------------------------------------------
-// Local DTO types (1a-scoped). Promoted to web-ui-types.ts in later phases
-// when the WS dispatch consumes them directly.
-// ---------------------------------------------------------------------------
-
-/** Slim list-row returned by listPersonas(). */
-export interface PersonaListDto {
-  readonly name: string;
-  readonly description: string;
-  readonly compiled: boolean;
-}
-
-/** Return value of setPersonaConstitution(). */
-export interface PersonaEditResultDto {
-  /** True when the compiled policy no longer matches the new constitution. */
-  readonly stale: boolean;
-}
+// PersonaListDto / PersonaEditResultDto were promoted into web-ui-types.ts in
+// Phase 1b (the 1a follow-up) so backend and frontend build against a single
+// declaration. Re-export them so existing CLI/test importers of this module are
+// unaffected by the move.
+export type { PersonaListDto, PersonaEditResultDto } from '../web-ui/web-ui-types.js';
 
 // ---------------------------------------------------------------------------
 // Input types

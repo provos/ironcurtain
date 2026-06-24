@@ -8,6 +8,15 @@ import type { JobDefinition, RunRecord } from '../cron/types.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 import type { WorkflowId, HumanGateRequestDto } from '../workflow/types.js';
 import type { MessageLogEntry } from '../workflow/message-log.js';
+// TYPE-ONLY import of the 9-value pipeline phase union. The import-boundary
+// rule (test/pipeline-import-boundary.test.ts + ESLint no-restricted-imports)
+// forbids VALUE imports from pipeline/* on the live path; `import type` is the
+// sanctioned contract import and creates no runtime edge.
+import type { CompilationPhase } from '../pipeline/pipeline-shared.js';
+
+// Re-export the phase union so the frontend mirror and event consumers can name
+// it without reaching into the pipeline package directly.
+export type { CompilationPhase } from '../pipeline/pipeline-shared.js';
 
 // Re-export MessageLogEntry so frontends can import it from the wire-types
 // module without reaching into the workflow domain package directly.
@@ -59,7 +68,11 @@ export type MethodName =
   | 'workflows.messageLog'
   | 'workflows.readme'
   | 'personas.get'
-  | 'personas.compile';
+  | 'personas.compile'
+  // Phase 1b: streamed long-running compile (fire-and-return) + its read methods.
+  | 'personas.compileStream'
+  | 'personas.getCompile'
+  | 'personas.listCompiles';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -103,7 +116,14 @@ export type ErrorCode =
   | 'RATE_LIMITED'
   | 'METHOD_NOT_FOUND'
   | 'LINT_FAILED'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  // Phase 1b persona-compile error codes. (PERSONA_EXISTS / BROAD_POLICY_REJECTED
+  // are Phase 1c and intentionally NOT added here.)
+  | 'COMPILE_IN_PROGRESS'
+  | 'COMPILE_QUEUE_FULL'
+  | 'CREDENTIALS_MISSING'
+  | 'LIST_REQUIRES_MCP'
+  | 'POLICY_MUTATION_FORBIDDEN';
 
 // ---------------------------------------------------------------------------
 // DTO Types
@@ -394,11 +414,101 @@ export interface PersonaDetailDto {
   readonly memory: boolean;
 }
 
-/** Response from `personas.compile`. */
-export interface PersonaCompileResultDto {
+/**
+ * Slim list-row returned by `personas.list` (canonical scanner output).
+ *
+ * Promoted from a local definition in persona-service.ts (Phase 1a follow-up)
+ * so backend and frontend build against one declaration. `memory` is carried
+ * per row per the design (§5).
+ */
+export interface PersonaListDto {
+  readonly name: string;
+  readonly description: string;
+  readonly compiled: boolean;
+  /**
+   * Whether persistent memory is enabled for this persona
+   * (persona.memory?.enabled ?? true). NOTE: the Phase-1a service does not yet
+   * populate this; it is part of the locked contract and is filled in when the
+   * scanner is extended. Additive and backward-compatible.
+   */
+  readonly memory?: boolean;
+}
+
+/** Result of editing a persona's constitution (`personas.editConstitution`). */
+export interface PersonaEditResultDto {
+  /** True when the compiled policy no longer matches the new constitution. */
+  readonly stale: boolean;
+}
+
+/**
+ * Back-compat result shape for the BLOCKING `personas.compile` method.
+ *
+ * Kept verbatim (`{ success, ruleCount, errors? }`) so the existing blocking
+ * RPC contract is unchanged. The streamed `personas.compileStream` path uses
+ * the success-only {@link PersonaCompileResultDto} on its `done` event instead.
+ */
+export interface PersonaBlockingCompileResultDto {
   readonly success: boolean;
   readonly ruleCount: number;
   readonly errors?: readonly string[];
+}
+
+/**
+ * Success-only compile result carried by a `done` operation record / event.
+ *
+ * A terminal `done` record never represents failure — failures route through
+ * the `persona.compile.failed` event and `PersonaCompileOperationDto.error`.
+ * Phase 1b omits `ruleDelta` (RuleDeltaDto is a Phase 1c concern).
+ */
+export interface PersonaCompileResultDto {
+  readonly success: true;
+  readonly ruleCount: number;
+}
+
+/**
+ * Snapshot of a streamed persona-compile operation, returned by
+ * `personas.getCompile` and inside `personas.listCompiles`.
+ *
+ * Two distinct phase vocabularies:
+ *  - `phase` is the OPERATION lifecycle (started/running/done/failed).
+ *  - `serverProgress.compilationPhase` is the 9-value {@link CompilationPhase}
+ *    from the pipeline (type-only import) for the server currently compiling.
+ *
+ * The active operation record is the source of truth (events are best-effort /
+ * lossy), so a reconnecting client renders the live phase from a single
+ * `personas.listCompiles` call.
+ */
+export interface PersonaCompileOperationDto {
+  readonly operationId: string;
+  readonly name: string;
+  readonly phase: 'started' | 'running' | 'done' | 'failed';
+  readonly serverProgress?: {
+    readonly server: string;
+    readonly compilationPhase: CompilationPhase;
+    readonly detail?: string;
+  };
+  readonly queuePosition?: number;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly result?: PersonaCompileResultDto;
+  readonly error?: { readonly code: ErrorCode; readonly message: string };
+  readonly actor: string;
+}
+
+/** Response from `personas.listCompiles`. */
+export interface PersonaListCompilesDto {
+  readonly active: readonly PersonaCompileOperationDto[];
+  readonly recent: readonly PersonaCompileOperationDto[];
+  readonly queueDepth: number;
+}
+
+/** Response from `personas.compileStream` (fire-and-return; jobs.run shape). */
+export interface PersonaCompileStreamAckDto {
+  readonly accepted: true;
+  readonly name: string;
+  readonly operationId: string;
+  /** True when the operation was enqueued behind the global concurrency gate. */
+  readonly queued?: boolean;
 }
 
 // ---------------------------------------------------------------------------

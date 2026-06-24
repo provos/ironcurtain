@@ -1,6 +1,13 @@
 <script lang="ts">
-  import type { PersonaListItem, PersonaDetailDto, PersonaCompileResultDto } from '$lib/types.js';
-  import { listPersonas, getPersonaDetail, compilePersonaPolicy } from '$lib/stores.svelte.js';
+  import type { PersonaListItem, PersonaDetailDto, PersonaCompileOperationDto } from '$lib/types.js';
+  import {
+    listPersonas,
+    getPersonaDetail,
+    startPersonaCompile,
+    hydratePersonaCompiles,
+    appState,
+    connectionGeneration,
+  } from '$lib/stores.svelte.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Card, CardHeader, CardTitle, CardContent } from '$lib/components/ui/card/index.js';
@@ -16,12 +23,104 @@
   let detail = $state<PersonaDetailDto | null>(null);
   let detailLoading = $state(false);
   let detailError = $state('');
-  let compiling = $state(false);
-  let compileResult = $state<PersonaCompileResultDto | null>(null);
+
+  // The operationId of the compile this view started/owns for the selected
+  // persona. Drives the live indicator off appState.personaCompiles. Cleared
+  // when navigating away or selecting another persona.
+  let activeOperationId = $state<string | null>(null);
+  // Set true when a locally-owned operation disappears from a listCompiles
+  // hydration (e.g. the daemon restarted mid-compile) -- the card stays but
+  // offers a recompile affordance.
+  let interrupted = $state(false);
+  // Last RPC error from compileStream itself (synchronous rejection, e.g.
+  // POLICY_MUTATION_FORBIDDEN / COMPILE_IN_PROGRESS / CREDENTIALS_MISSING).
+  let startError = $state<{ code: string; message: string } | null>(null);
+  let starting = $state(false);
+  // Track which operationIds we've already reacted to terminally so the
+  // post-completion refresh fires exactly once per op.
+  let handledTerminal = $state<string | null>(null);
+
+  // The live record this view should display for the selected persona.
+  //
+  // Prefers the operation this view started (`activeOperationId`). Falls back to
+  // any in-flight (started/running) operation for the selected persona found in
+  // the hydrated map -- this is what lets a reconnect rehydrate an in-flight card
+  // even though the locally-owned operationId was lost on reload.
+  const activeCompile = $derived<PersonaCompileOperationDto | null>(resolveActiveCompile());
+
+  function resolveActiveCompile(): PersonaCompileOperationDto | null {
+    if (activeOperationId) {
+      return appState.personaCompiles.get(activeOperationId) ?? null;
+    }
+    if (!selectedName) return null;
+    let inflight: PersonaCompileOperationDto | null = null;
+    for (const op of appState.personaCompiles.values()) {
+      if (op.name !== selectedName) continue;
+      if (op.phase === 'started' || op.phase === 'running') {
+        // Prefer the most recently started in-flight op.
+        if (!inflight || op.startedAt > inflight.startedAt) inflight = op;
+      }
+    }
+    return inflight;
+  }
+
+  const compiling = $derived(starting || activeCompile?.phase === 'started' || activeCompile?.phase === 'running');
+
+  // Human-readable phase label for the live indicator.
+  const PHASE_LABELS: Record<string, string> = {
+    cached: 'Cached',
+    compiling: 'Compiling rules',
+    lists: 'Resolving lists',
+    scenarios: 'Generating scenarios',
+    'repair-scenarios': 'Repairing scenarios',
+    verifying: 'Verifying',
+    'repair-compile': 'Repairing compilation',
+    'repair-verify': 'Repairing verification',
+    done: 'Done',
+  };
+
+  function phaseLabel(op: PersonaCompileOperationDto): string {
+    const sp = op.serverProgress;
+    if (!sp) return op.phase === 'started' ? 'Starting...' : 'Working...';
+    const label = PHASE_LABELS[sp.compilationPhase] ?? sp.compilationPhase;
+    return `${sp.server}: ${label}${sp.detail ? ` -- ${sp.detail}` : ''}`;
+  }
 
   $effect(() => {
     loadPersonas();
   });
+
+  // Hydrate in-flight compile cards on connect / reconnect. Reading
+  // connectionGeneration.value makes this re-run after each (re)connection.
+  $effect(() => {
+    void connectionGeneration.value;
+    void hydrateCompiles();
+  });
+
+  // React when the owned operation reaches a terminal phase: refresh detail +
+  // list on success exactly once.
+  $effect(() => {
+    const op = activeCompile;
+    if (!op || !selectedName) return;
+    if (op.phase === 'done' && handledTerminal !== op.operationId) {
+      handledTerminal = op.operationId;
+      void refreshAfterCompile(selectedName);
+    } else if (op.phase === 'failed' && handledTerminal !== op.operationId) {
+      handledTerminal = op.operationId;
+    }
+  });
+
+  async function hydrateCompiles(): Promise<void> {
+    try {
+      const present = await hydratePersonaCompiles();
+      // A locally-owned op that the server no longer knows about is interrupted.
+      if (activeOperationId && !present.has(activeOperationId)) {
+        interrupted = true;
+      }
+    } catch {
+      // Best-effort -- events will repopulate live records.
+    }
+  }
 
   async function loadPersonas(): Promise<void> {
     loading = true;
@@ -39,7 +138,7 @@
     detailLoading = true;
     detailError = '';
     detail = null;
-    compileResult = null;
+    resetCompileState();
     try {
       detail = await getPersonaDetail(name);
     } catch (err) {
@@ -48,32 +147,63 @@
     detailLoading = false;
   }
 
+  function resetCompileState(): void {
+    activeOperationId = null;
+    interrupted = false;
+    startError = null;
+    starting = false;
+    handledTerminal = null;
+  }
+
   function deselectPersona(): void {
     selectedName = null;
     detail = null;
-    compileResult = null;
+    resetCompileState();
+  }
+
+  async function refreshAfterCompile(name: string): Promise<void> {
+    try {
+      detail = await getPersonaDetail(name);
+      personas = await listPersonas();
+    } catch {
+      // Best-effort refresh.
+    }
   }
 
   async function handleCompile(): Promise<void> {
     if (!selectedName) return;
-    compiling = true;
-    compileResult = null;
+    starting = true;
+    startError = null;
+    interrupted = false;
+    handledTerminal = null;
     try {
-      compileResult = await compilePersonaPolicy(selectedName);
-      // Refresh detail to update policy status
-      if (compileResult.success) {
-        detail = await getPersonaDetail(selectedName);
-        // Also refresh the list to update the compiled badge
-        personas = await listPersonas();
-      }
+      const ack = await startPersonaCompile(selectedName);
+      activeOperationId = ack.operationId;
     } catch (err) {
-      compileResult = {
-        success: false,
-        ruleCount: 0,
-        errors: [err instanceof Error ? err.message : String(err)],
+      const e = err as { code?: string; message?: string };
+      startError = {
+        code: typeof e.code === 'string' ? e.code : 'COMPILE_FAILED',
+        message: e.message ?? (err instanceof Error ? err.message : String(err)),
       };
     }
-    compiling = false;
+    starting = false;
+  }
+
+  function errorAffordance(code: string): string {
+    switch (code) {
+      case 'POLICY_MUTATION_FORBIDDEN':
+        return 'Policy compilation is disabled on this daemon. Start the daemon with policy mutation enabled to compile from the web UI.';
+      case 'COMPILE_IN_PROGRESS':
+        return 'A compile is already running for this persona. Wait for it to finish, then try again.';
+      case 'COMPILE_QUEUE_FULL':
+        return 'The compile queue is full. Please try again shortly.';
+      case 'CREDENTIALS_MISSING':
+        return 'Required model credentials are missing. Configure the provider API key on the daemon host, then retry.';
+      case 'LIST_REQUIRES_MCP':
+        return 'This policy needs live MCP servers to resolve dynamic lists, which are unavailable in this context.';
+      default:
+        return 'Compilation could not be started.';
+    }
   }
 </script>
 
@@ -129,28 +259,62 @@
         </Card>
       </div>
 
-      <!-- Compile button -->
+      <!-- Compile control + live indicator -->
       <Card>
         <CardContent>
-          <div class="flex items-center gap-3">
-            <Button variant="default" onclick={handleCompile} loading={compiling} disabled={compiling}>
+          <div class="flex items-center gap-3 flex-wrap">
+            <Button
+              variant="default"
+              onclick={handleCompile}
+              loading={compiling}
+              disabled={compiling}
+              data-testid="compile-button"
+            >
               {detail.hasPolicy ? 'Recompile Policy' : 'Compile Policy'}
             </Button>
-            {#if compileResult}
-              {#if compileResult.success}
-                <span class="text-sm text-success">
-                  Compiled successfully ({compileResult.ruleCount} rules)
-                </span>
-              {:else}
-                <span class="text-sm text-destructive">
-                  Compilation failed
-                  {#if compileResult.errors}
-                    : {compileResult.errors[0]}
-                  {/if}
-                </span>
-              {/if}
+
+            {#if compiling && activeCompile}
+              <span class="text-sm text-muted-foreground" data-testid="compile-progress">
+                {phaseLabel(activeCompile)}
+              </span>
+            {:else if compiling}
+              <span class="text-sm text-muted-foreground" data-testid="compile-progress"> Starting... </span>
+            {/if}
+
+            {#if activeCompile?.phase === 'done' && activeCompile.result}
+              <span class="text-sm text-success" data-testid="compile-success">
+                Compiled successfully ({activeCompile.result.ruleCount} rules)
+              </span>
             {/if}
           </div>
+
+          {#if interrupted}
+            <div data-testid="compile-interrupted" class="mt-3">
+              <Alert variant="destructive">
+                Compilation was interrupted (the daemon may have restarted). You can recompile.
+              </Alert>
+            </div>
+          {/if}
+
+          {#if startError}
+            <div data-testid="compile-error" class="mt-3">
+              <Alert variant="destructive">
+                <span class="block">
+                  <span class="font-mono text-xs" data-testid="compile-error-code">{startError.code}</span>
+                  <span class="block mt-1">{errorAffordance(startError.code)}</span>
+                </span>
+              </Alert>
+            </div>
+          {:else if activeCompile?.phase === 'failed' && activeCompile.error}
+            <div data-testid="compile-error" class="mt-3">
+              <Alert variant="destructive">
+                <span class="block">
+                  <span class="font-mono text-xs" data-testid="compile-error-code">{activeCompile.error.code}</span>
+                  <span class="block mt-1">{errorAffordance(activeCompile.error.code)}</span>
+                </span>
+              </Alert>
+            </div>
+          {/if}
         </CardContent>
       </Card>
 

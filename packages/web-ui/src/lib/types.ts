@@ -471,10 +471,132 @@ export interface PersonaDetailDto {
   readonly servers?: readonly string[];
   readonly hasPolicy: boolean;
   readonly policyRuleCount?: number;
+  /** Whether persistent memory is enabled (persona.memory?.enabled ?? true). */
+  readonly memory?: boolean;
 }
 
-export interface PersonaCompileResultDto {
+/** Slim list-row returned by `personas.list`. Mirrors backend PersonaListDto. */
+export interface PersonaListDto {
+  readonly name: string;
+  readonly description: string;
+  readonly compiled: boolean;
+  readonly memory?: boolean;
+}
+
+/** Result of editing a persona constitution. Mirrors backend PersonaEditResultDto. */
+export interface PersonaEditResultDto {
+  readonly stale: boolean;
+}
+
+/**
+ * Back-compat result shape for the BLOCKING `personas.compile` method.
+ * Mirrors backend PersonaBlockingCompileResultDto.
+ */
+export interface PersonaBlockingCompileResultDto {
   readonly success: boolean;
   readonly ruleCount: number;
   readonly errors?: readonly string[];
+}
+
+// ---------------------------------------------------------------------------
+// Persona streamed-compile types (Phase 1b). Mirror src/web-ui/web-ui-types.ts.
+// ---------------------------------------------------------------------------
+
+/**
+ * 9-value per-server compilation phase. Mirrors the pipeline's CompilationPhase
+ * union (type-only re-exported by the backend wire-types module).
+ */
+export type CompilationPhase =
+  | 'cached'
+  | 'compiling'
+  | 'lists'
+  | 'scenarios'
+  | 'repair-scenarios'
+  | 'verifying'
+  | 'repair-compile'
+  | 'repair-verify'
+  | 'done';
+
+/**
+ * Phase-1b error codes mirrored for the frontend. The frontend's RPC error
+ * `code` field is a plain string on the wire (ResponseFrame), so this alias is
+ * documentation/typing for the affordances; it is not exhaustively enforced.
+ */
+export type PersonaCompileErrorCode =
+  | 'COMPILE_IN_PROGRESS'
+  | 'COMPILE_QUEUE_FULL'
+  | 'CREDENTIALS_MISSING'
+  | 'LIST_REQUIRES_MCP'
+  | 'POLICY_MUTATION_FORBIDDEN'
+  | 'PERSONA_NOT_FOUND'
+  | 'INVALID_PARAMS';
+
+/** Success-only compile result carried by a `done` record/event. */
+export interface PersonaCompileResultDto {
+  readonly success: true;
+  readonly ruleCount: number;
+}
+
+/** Snapshot of a streamed compile operation (getCompile / listCompiles). */
+export interface PersonaCompileOperationDto {
+  readonly operationId: string;
+  readonly name: string;
+  readonly phase: 'started' | 'running' | 'done' | 'failed';
+  readonly serverProgress?: {
+    readonly server: string;
+    readonly compilationPhase: CompilationPhase;
+    readonly detail?: string;
+  };
+  readonly queuePosition?: number;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly result?: PersonaCompileResultDto;
+  readonly error?: { readonly code: string; readonly message: string };
+  readonly actor: string;
+}
+
+/** Response from `personas.listCompiles`. */
+export interface PersonaListCompilesDto {
+  readonly active: readonly PersonaCompileOperationDto[];
+  readonly recent: readonly PersonaCompileOperationDto[];
+  readonly queueDepth: number;
+}
+
+/** Response from `personas.compileStream`. */
+export interface PersonaCompileStreamAckDto {
+  readonly accepted: true;
+  readonly name: string;
+  readonly operationId: string;
+  readonly queued?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Persona streamed-compile event payloads (Phase 1b). Mirror WebEventMap.
+// ---------------------------------------------------------------------------
+
+export interface PersonaCompileStartedEvent {
+  readonly name: string;
+  readonly operationId: string;
+  readonly actor: string;
+}
+
+export interface PersonaCompileProgressEvent {
+  readonly name: string;
+  readonly operationId: string;
+  readonly serverName: string;
+  readonly phase: CompilationPhase;
+  readonly detail?: string;
+}
+
+export interface PersonaCompileDoneEvent {
+  readonly name: string;
+  readonly operationId: string;
+  readonly result: PersonaCompileResultDto;
+}
+
+export interface PersonaCompileFailedEvent {
+  readonly name: string;
+  readonly operationId: string;
+  readonly code: string;
+  readonly error: string;
 }

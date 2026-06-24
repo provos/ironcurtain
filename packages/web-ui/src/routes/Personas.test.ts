@@ -1,19 +1,44 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import type { PersonaListItem, PersonaDetailDto, PersonaCompileResultDto } from '$lib/types.js';
+import type {
+  PersonaListItem,
+  PersonaDetailDto,
+  PersonaCompileStreamAckDto,
+  PersonaCompileOperationDto,
+} from '$lib/types.js';
 
 // ---------------------------------------------------------------------------
-// Mock store functions -- must be declared before importing the component
+// Mock store -- declared before importing the component.
+//
+// The streamed-compile flow drives the live indicator off `appState.personaCompiles`.
+// We provide a minimal mutable `appState` plus a `connectionGeneration` object so the
+// component's reactive reads resolve. Component unit tests focus on list/detail
+// navigation and the *start* of a compile (the RPC call + synchronous error
+// affordances); the event-driven live progression is exercised end-to-end by the
+// Playwright suite against the mock WS server.
 // ---------------------------------------------------------------------------
 
 const mockListPersonas = vi.fn<() => Promise<PersonaListItem[]>>();
 const mockGetPersonaDetail = vi.fn<(name: string) => Promise<PersonaDetailDto>>();
-const mockCompilePersonaPolicy = vi.fn<(name: string) => Promise<PersonaCompileResultDto>>();
+const mockStartPersonaCompile = vi.fn<(name: string) => Promise<PersonaCompileStreamAckDto>>();
+const mockHydratePersonaCompiles = vi.fn<() => Promise<Set<string>>>();
+
+const appStateMock = {
+  personaCompiles: new Map<string, PersonaCompileOperationDto>(),
+};
+const connectionGenerationMock = { value: 0 };
 
 vi.mock('$lib/stores.svelte.js', () => ({
   listPersonas: (...args: unknown[]) => mockListPersonas(...(args as [])),
   getPersonaDetail: (...args: unknown[]) => mockGetPersonaDetail(...(args as [string])),
-  compilePersonaPolicy: (...args: unknown[]) => mockCompilePersonaPolicy(...(args as [string])),
+  startPersonaCompile: (...args: unknown[]) => mockStartPersonaCompile(...(args as [string])),
+  hydratePersonaCompiles: (...args: unknown[]) => mockHydratePersonaCompiles(...(args as [])),
+  get appState() {
+    return appStateMock;
+  },
+  get connectionGeneration() {
+    return connectionGenerationMock;
+  },
 }));
 
 // Import component after mocks are set up
@@ -52,6 +77,9 @@ describe('Personas', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockListPersonas.mockResolvedValue([]);
+    mockHydratePersonaCompiles.mockResolvedValue(new Set());
+    appStateMock.personaCompiles = new Map();
+    connectionGenerationMock.value = 0;
   });
 
   async function renderAndNavigateToDetail(
@@ -211,12 +239,10 @@ describe('Personas', () => {
       expect(screen.getByText('Constitution')).toBeTruthy();
     });
 
-    // Find the prose-markdown container
     const constitutionCard = screen.getByText('Constitution').closest('[class*="card"]');
     const markdownContainer = constitutionCard?.querySelector('.prose-markdown');
     expect(markdownContainer).toBeTruthy();
 
-    // Verify markdown was rendered into HTML
     expect(markdownContainer?.querySelector('h1')?.textContent).toBe('Research Rules');
     expect(markdownContainer?.querySelector('strong')?.textContent).toBe('cite');
   });
@@ -247,10 +273,10 @@ describe('Personas', () => {
     });
   });
 
-  // ── Compile policy ────────────────────────────────────────────────
+  // ── Compile (streamed): start ─────────────────────────────────────
 
-  it('compiles policy and shows success message', async () => {
-    mockCompilePersonaPolicy.mockResolvedValue({ success: true, ruleCount: 8 });
+  it('starts a streamed compile via startPersonaCompile when the button is clicked', async () => {
+    mockStartPersonaCompile.mockResolvedValue({ accepted: true, name: 'researcher', operationId: 'op-1' });
     await renderAndNavigateToDetail();
 
     await vi.waitFor(() => {
@@ -260,35 +286,15 @@ describe('Personas', () => {
     await fireEvent.click(screen.getByText('Compile Policy'));
 
     await vi.waitFor(() => {
-      expect(screen.getByText(/Compiled successfully/)).toBeTruthy();
-      expect(screen.getByText(/8 rules/)).toBeTruthy();
-    });
-
-    expect(mockCompilePersonaPolicy).toHaveBeenCalledWith('researcher');
-  });
-
-  it('shows compilation error when compile fails', async () => {
-    mockCompilePersonaPolicy.mockResolvedValue({
-      success: false,
-      ruleCount: 0,
-      errors: ['Invalid constitution format'],
-    });
-    await renderAndNavigateToDetail();
-
-    await vi.waitFor(() => {
-      expect(screen.getByText('Compile Policy')).toBeTruthy();
-    });
-
-    await fireEvent.click(screen.getByText('Compile Policy'));
-
-    await vi.waitFor(() => {
-      expect(screen.getByText(/Compilation failed/)).toBeTruthy();
-      expect(screen.getByText(/Invalid constitution format/)).toBeTruthy();
+      expect(mockStartPersonaCompile).toHaveBeenCalledWith('researcher');
     });
   });
 
-  it('shows compilation error when compile throws', async () => {
-    mockCompilePersonaPolicy.mockRejectedValue(new Error('Network error'));
+  it('renders a typed error affordance when compileStream is rejected (gated)', async () => {
+    mockStartPersonaCompile.mockRejectedValue({
+      code: 'POLICY_MUTATION_FORBIDDEN',
+      message: 'Policy mutation is disabled',
+    });
     await renderAndNavigateToDetail();
 
     await vi.waitFor(() => {
@@ -298,63 +304,41 @@ describe('Personas', () => {
     await fireEvent.click(screen.getByText('Compile Policy'));
 
     await vi.waitFor(() => {
-      expect(screen.getByText(/Compilation failed/)).toBeTruthy();
-      expect(screen.getByText(/Network error/)).toBeTruthy();
+      expect(screen.getByTestId('compile-error-code').textContent).toBe('POLICY_MUTATION_FORBIDDEN');
+      expect(screen.getByText(/Policy compilation is disabled/)).toBeTruthy();
     });
   });
 
-  it('refreshes detail and list after successful compilation', async () => {
-    mockCompilePersonaPolicy.mockResolvedValue({ success: true, ruleCount: 5 });
+  it('renders a credentials-missing affordance when compileStream reports CREDENTIALS_MISSING', async () => {
+    mockStartPersonaCompile.mockRejectedValue({
+      code: 'CREDENTIALS_MISSING',
+      message: 'No API key',
+    });
     await renderAndNavigateToDetail();
 
     await vi.waitFor(() => {
       expect(screen.getByText('Compile Policy')).toBeTruthy();
     });
 
-    mockGetPersonaDetail.mockClear();
-    mockListPersonas.mockClear();
-    mockGetPersonaDetail.mockResolvedValue(makeDetail({ hasPolicy: true, policyRuleCount: 5 }));
-    mockListPersonas.mockResolvedValue([makePersona({ compiled: true })]);
-
     await fireEvent.click(screen.getByText('Compile Policy'));
 
     await vi.waitFor(() => {
-      expect(mockGetPersonaDetail).toHaveBeenCalledWith('researcher');
-      expect(mockListPersonas).toHaveBeenCalled();
+      expect(screen.getByTestId('compile-error-code').textContent).toBe('CREDENTIALS_MISSING');
+      expect(screen.getByText(/credentials are missing/)).toBeTruthy();
     });
   });
 
-  it('does not refresh detail or list after failed compilation', async () => {
-    mockCompilePersonaPolicy.mockResolvedValue({
-      success: false,
-      ruleCount: 0,
-      errors: ['Syntax error'],
-    });
+  it('hydrates in-flight compiles on mount', async () => {
     await renderAndNavigateToDetail();
-
     await vi.waitFor(() => {
-      expect(screen.getByText('Compile Policy')).toBeTruthy();
+      expect(mockHydratePersonaCompiles).toHaveBeenCalled();
     });
-
-    mockGetPersonaDetail.mockClear();
-    mockListPersonas.mockClear();
-
-    await fireEvent.click(screen.getByText('Compile Policy'));
-
-    await vi.waitFor(() => {
-      expect(screen.getByText(/Compilation failed/)).toBeTruthy();
-    });
-
-    // After a failed compile, detail and list should NOT be refreshed
-    expect(mockGetPersonaDetail).not.toHaveBeenCalled();
-    expect(mockListPersonas).not.toHaveBeenCalled();
   });
 
   // ── Detail view: loading spinner ───────────────────────────────
 
   it('shows a loading spinner while fetching persona detail', async () => {
     mockListPersonas.mockResolvedValue([makePersona()]);
-    // Never resolves -- simulates indefinite loading
     mockGetPersonaDetail.mockReturnValue(new Promise(() => {}));
     render(Personas);
 
@@ -389,40 +373,9 @@ describe('Personas', () => {
     });
   });
 
-  // ── Detail view: back resets compile result ─────────────────────
-
-  it('resets compile result when navigating back and selecting the same persona again', async () => {
-    mockCompilePersonaPolicy.mockResolvedValue({ success: true, ruleCount: 8 });
-    await renderAndNavigateToDetail();
-    await vi.waitFor(() => {
-      expect(screen.getByText('Compile Policy')).toBeTruthy();
-    });
-    await fireEvent.click(screen.getByText('Compile Policy'));
-    await vi.waitFor(() => {
-      expect(screen.getByText(/Compiled successfully/)).toBeTruthy();
-    });
-
-    // Go back
-    await fireEvent.click(screen.getByText(/Back/));
-    await vi.waitFor(() => {
-      expect(screen.getByText('Personas')).toBeTruthy();
-    });
-
-    // Re-select same persona
-    mockGetPersonaDetail.mockResolvedValue(makeDetail());
-    await fireEvent.click(screen.getByText('researcher'));
-    await vi.waitFor(() => {
-      expect(screen.getByText('Compile Policy')).toBeTruthy();
-    });
-
-    // The compile result from the previous visit should not be shown
-    expect(screen.queryByText(/Compiled successfully/)).toBeNull();
-  });
-
   // ── List view: loading spinner ──────────────────────────────────
 
   it('shows a loading spinner while fetching the persona list', () => {
-    // Never resolves -- simulates indefinite loading
     mockListPersonas.mockReturnValue(new Promise(() => {}));
     render(Personas);
 

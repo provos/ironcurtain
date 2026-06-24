@@ -277,12 +277,21 @@ export interface PipelineLlm {
 /**
  * Creates a language model wrapped with pipeline logging middleware.
  * Both annotate.ts and compile.ts use this to set up their LLM instance.
+ *
+ * `logFileName` overrides the default `llm-interactions.jsonl` filename so a
+ * caller can scope the interaction log to a single operation (e.g. the persona
+ * compile orchestrator writes `<operationId>.jsonl`). It must be a bare
+ * filename, not a path.
  */
-export async function createPipelineLlm(generatedDir: string, initialStepName: string): Promise<PipelineLlm> {
+export async function createPipelineLlm(
+  generatedDir: string,
+  initialStepName: string,
+  logFileName = 'llm-interactions.jsonl',
+): Promise<PipelineLlm> {
   const userConfig = loadUserConfig();
   const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig);
   const logContext: LlmLogContext = { stepName: initialStepName };
-  const logPath = resolve(generatedDir, 'llm-interactions.jsonl');
+  const logPath = resolve(generatedDir, logFileName);
   const model = wrapLanguageModel({
     model: baseLlm,
     middleware: createLlmLoggingMiddleware(logPath, logContext),

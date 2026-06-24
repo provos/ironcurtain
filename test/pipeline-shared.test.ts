@@ -8,7 +8,7 @@
  *   - loadToolAnnotationsFile: reads + resolves stored tool annotations
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -17,8 +17,21 @@ import {
   loadExistingArtifact,
   writeArtifact,
   loadToolAnnotationsFile,
+  createPipelineLlm,
 } from '../src/pipeline/pipeline-shared.js';
 import type { StoredToolAnnotationsFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+
+// Mock the AI SDK providers so createPipelineLlm builds a model without
+// network access or a real API key (mirrors model-provider.test.ts).
+vi.mock('@ai-sdk/anthropic', () => ({
+  createAnthropic: vi.fn(() => (modelId: string) => ({ modelId, provider: 'anthropic' })),
+}));
+vi.mock('@ai-sdk/google', () => ({
+  createGoogleGenerativeAI: vi.fn(() => (modelId: string) => ({ modelId, provider: 'google' })),
+}));
+vi.mock('@ai-sdk/openai', () => ({
+  createOpenAI: vi.fn(() => (modelId: string) => ({ modelId, provider: 'openai' })),
+}));
 
 // ---------------------------------------------------------------------------
 // Temp directory management
@@ -373,5 +386,44 @@ describe('loadToolAnnotationsFile', () => {
     writeFileSync(resolve(dir, 'tool-annotations.json'), '{not valid json');
     const result = loadToolAnnotationsFile(dir);
     expect(result).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createPipelineLlm — log-path filename override
+//
+// Regression guard for the per-operationId LLM log path: the persona compile
+// orchestrator scopes each compile to generated/llm-interactions/<operationId>.jsonl.
+// The operationId must be interpolated into the FILENAME (not merely a presence
+// check), otherwise every compile of a persona co-mingles into one file.
+// ---------------------------------------------------------------------------
+
+describe('createPipelineLlm log path', () => {
+  const savedKey = process.env['ANTHROPIC_API_KEY'];
+
+  beforeEach(() => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-test';
+  });
+
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env['ANTHROPIC_API_KEY'];
+    else process.env['ANTHROPIC_API_KEY'] = savedKey;
+  });
+
+  it('defaults to llm-interactions.jsonl in the given dir', async () => {
+    const dir = tempDir('llm-default');
+    const llm = await createPipelineLlm(dir, 'unknown');
+    expect(llm.logPath).toBe(resolve(dir, 'llm-interactions.jsonl'));
+  });
+
+  it('interpolates an operationId-scoped filename into the log path', async () => {
+    const dir = tempDir('llm-scoped');
+    const operationId = 'op-1234-5678';
+    const llm = await createPipelineLlm(dir, 'unknown', `${operationId}.jsonl`);
+    expect(llm.logPath).toBe(resolve(dir, `${operationId}.jsonl`));
+    // The operationId VALUE must appear in the resolved on-disk path, not just
+    // be used as a presence check upstream.
+    expect(llm.logPath).toContain(operationId);
+    expect(llm.logPath.endsWith('.jsonl')).toBe(true);
   });
 });

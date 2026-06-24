@@ -17,6 +17,11 @@ import type {
   HumanGateRequestDto,
   LatestVerdictDto,
   LiveWorkflowPhase,
+  PersonaCompileOperationDto,
+  PersonaCompileStartedEvent,
+  PersonaCompileProgressEvent,
+  PersonaCompileDoneEvent,
+  PersonaCompileFailedEvent,
 } from './types.js';
 import { PHASE } from './types.js';
 
@@ -92,6 +97,8 @@ export interface AppStateLike {
   jobs: JobListDto[];
   workflows: Map<string, WorkflowSummaryDto>;
   pendingGates: Map<string, HumanGateRequestDto>;
+  /** Live + recently-terminal persona compile operations, keyed by operationId. */
+  personaCompiles: Map<string, PersonaCompileOperationDto>;
   addOutput(label: number, line: OutputLine): void;
   removeOutput(label: number): void;
   filterOutput(label: number, predicate: (line: OutputLine) => boolean): void;
@@ -166,7 +173,11 @@ export type WebEvent =
   | { event: 'workflow.completed'; payload: { workflowId: string } }
   | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
   | { event: 'workflow.gate_raised'; payload: { workflowId: string; gate: HumanGateRequestDto } }
-  | { event: 'workflow.gate_dismissed'; payload: { workflowId: string; gateId: string } };
+  | { event: 'workflow.gate_dismissed'; payload: { workflowId: string; gateId: string } }
+  | { event: 'persona.compile.started'; payload: PersonaCompileStartedEvent }
+  | { event: 'persona.compile.progress'; payload: PersonaCompileProgressEvent }
+  | { event: 'persona.compile.done'; payload: PersonaCompileDoneEvent }
+  | { event: 'persona.compile.failed'; payload: PersonaCompileFailedEvent };
 
 /**
  * Parse a raw event name + payload into a typed WebEvent.
@@ -237,6 +248,14 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
       };
     case 'workflow.gate_dismissed':
       return { event, payload: data as { workflowId: string; gateId: string } };
+    case 'persona.compile.started':
+      return { event, payload: data as unknown as PersonaCompileStartedEvent };
+    case 'persona.compile.progress':
+      return { event, payload: data as unknown as PersonaCompileProgressEvent };
+    case 'persona.compile.done':
+      return { event, payload: data as unknown as PersonaCompileDoneEvent };
+    case 'persona.compile.failed':
+      return { event, payload: data as unknown as PersonaCompileFailedEvent };
     default:
       return undefined;
   }
@@ -474,6 +493,81 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
           phase: PHASE.RUNNING,
         });
       }
+      return true;
+    }
+
+    // Persona streamed-compile events
+    case 'persona.compile.started': {
+      const { name, operationId, actor } = parsed.payload;
+      const record: PersonaCompileOperationDto = {
+        operationId,
+        name,
+        phase: 'started',
+        startedAt: new Date().toISOString(),
+        actor,
+      };
+      state.personaCompiles = new Map(state.personaCompiles).set(operationId, record);
+      return true;
+    }
+
+    case 'persona.compile.progress': {
+      const { name, operationId, serverName, phase: compilationPhase, detail } = parsed.payload;
+      const existing = state.personaCompiles.get(operationId);
+      // Tolerate a missing started event (lost during disconnect): synthesize a
+      // minimal running record so the progress is still reflected in the UI.
+      const base: PersonaCompileOperationDto = existing ?? {
+        operationId,
+        name,
+        phase: 'running',
+        startedAt: new Date().toISOString(),
+        actor: 'unknown',
+      };
+      const updated: PersonaCompileOperationDto = {
+        ...base,
+        phase: 'running',
+        serverProgress: { server: serverName, compilationPhase, ...(detail !== undefined ? { detail } : {}) },
+      };
+      state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
+      return true;
+    }
+
+    case 'persona.compile.done': {
+      const { name, operationId, result } = parsed.payload;
+      const existing = state.personaCompiles.get(operationId);
+      const base: PersonaCompileOperationDto = existing ?? {
+        operationId,
+        name,
+        phase: 'running',
+        startedAt: new Date().toISOString(),
+        actor: 'unknown',
+      };
+      const updated: PersonaCompileOperationDto = {
+        ...base,
+        phase: 'done',
+        endedAt: new Date().toISOString(),
+        result,
+      };
+      state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
+      return true;
+    }
+
+    case 'persona.compile.failed': {
+      const { name, operationId, code, error } = parsed.payload;
+      const existing = state.personaCompiles.get(operationId);
+      const base: PersonaCompileOperationDto = existing ?? {
+        operationId,
+        name,
+        phase: 'running',
+        startedAt: new Date().toISOString(),
+        actor: 'unknown',
+      };
+      const updated: PersonaCompileOperationDto = {
+        ...base,
+        phase: 'failed',
+        endedAt: new Date().toISOString(),
+        error: { code, message: error },
+      };
+      state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
       return true;
     }
 

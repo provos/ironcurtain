@@ -16,7 +16,10 @@ import type {
   BudgetSummaryDto,
   PersonaListItem,
   PersonaDetailDto,
-  PersonaCompileResultDto,
+  PersonaBlockingCompileResultDto,
+  PersonaCompileOperationDto,
+  PersonaCompileStreamAckDto,
+  PersonaListCompilesDto,
   ResumableWorkflowDto,
   WorkflowSummaryDto,
   WorkflowDetailDto,
@@ -75,6 +78,12 @@ class AppState {
   workflows: Map<string, WorkflowSummaryDto> = $state(new Map());
   selectedWorkflowId: string | null = $state(null);
   pendingGates: Map<string, HumanGateRequestDto> = $state(new Map());
+
+  // Persona streamed-compile state, keyed by operationId. Holds both live
+  // (started/running) and recently-terminal (done/failed) operations as they
+  // arrive via persona.compile.* events, hydrated on (re)connect via
+  // personas.listCompiles.
+  personaCompiles: Map<string, PersonaCompileOperationDto> = $state(new Map());
 
   get selectedSession(): SessionDto | null {
     if (this.selectedSessionLabel === null) return null;
@@ -212,12 +221,15 @@ let isInitialConnect = true;
 
 async function refreshAll(client: WsClient): Promise<void> {
   try {
-    const [status, sessions, jobs, escalations, workflowsList] = await Promise.all([
+    const [status, sessions, jobs, escalations, workflowsList, personaCompiles] = await Promise.all([
       client.request<DaemonStatusDto>('status'),
       client.request<SessionDto[]>('sessions.list'),
       client.request<JobListDto[]>('jobs.list'),
       client.request<EscalationDto[]>('escalations.list'),
       client.request<WorkflowSummaryDto[]>('workflows.list').catch(() => [] as WorkflowSummaryDto[]),
+      client
+        .request<PersonaListCompilesDto>('personas.listCompiles', {})
+        .catch(() => ({ active: [], recent: [], queueDepth: 0 }) as PersonaListCompilesDto),
     ]);
 
     appState.daemonStatus = status;
@@ -235,6 +247,12 @@ async function refreshAll(client: WsClient): Promise<void> {
       newWorkflows.set(wf.workflowId, wf);
     }
     appState.workflows = newWorkflows;
+
+    // Rehydrate persona compile operations (active wins over recent on id collision).
+    const newPersonaCompiles = new Map<string, PersonaCompileOperationDto>();
+    for (const op of personaCompiles.recent) newPersonaCompiles.set(op.operationId, op);
+    for (const op of personaCompiles.active) newPersonaCompiles.set(op.operationId, op);
+    appState.personaCompiles = newPersonaCompiles;
 
     // Repopulate pending gates for any workflow stuck at a human gate.
     // Events may have been lost during disconnect, leaving pendingGates empty.
@@ -527,8 +545,44 @@ export async function getPersonaDetail(name: string): Promise<PersonaDetailDto> 
   return getWsClient().request<PersonaDetailDto>('personas.get', { name });
 }
 
-export async function compilePersonaPolicy(name: string): Promise<PersonaCompileResultDto> {
-  return getWsClient().request<PersonaCompileResultDto>('personas.compile', { name });
+export async function compilePersonaPolicy(name: string): Promise<PersonaBlockingCompileResultDto> {
+  return getWsClient().request<PersonaBlockingCompileResultDto>('personas.compile', { name });
+}
+
+/**
+ * Fire-and-return a streamed persona compile. The ack carries the minted
+ * operationId; subsequent progress arrives via persona.compile.* events that
+ * land in `appState.personaCompiles`. RPC errors (e.g. POLICY_MUTATION_FORBIDDEN,
+ * COMPILE_IN_PROGRESS, CREDENTIALS_MISSING) bubble to the caller.
+ */
+export async function startPersonaCompile(name: string): Promise<PersonaCompileStreamAckDto> {
+  return getWsClient().request<PersonaCompileStreamAckDto>('personas.compileStream', { name });
+}
+
+/** Read a single compile operation snapshot (active live record, else recent LRU). */
+export async function getPersonaCompile(operationId: string): Promise<PersonaCompileOperationDto> {
+  return getWsClient().request<PersonaCompileOperationDto>('personas.getCompile', { operationId });
+}
+
+/** List in-flight + recently-terminal compile operations. */
+export async function listPersonaCompiles(): Promise<PersonaListCompilesDto> {
+  return getWsClient().request<PersonaListCompilesDto>('personas.listCompiles', {});
+}
+
+/**
+ * (Re)hydrate `appState.personaCompiles` from the daemon's authoritative
+ * active+recent records. Called on connect/reconnect and by the Personas view.
+ * Returns the operationIds present on the server so callers can detect a
+ * locally-tracked op that the server no longer knows about (interrupted).
+ */
+export async function hydratePersonaCompiles(): Promise<Set<string>> {
+  const { active, recent } = await listPersonaCompiles();
+  const next = new Map<string, PersonaCompileOperationDto>();
+  for (const op of recent) next.set(op.operationId, op);
+  // Active records win over a recent record with the same id.
+  for (const op of active) next.set(op.operationId, op);
+  appState.personaCompiles = next;
+  return new Set(next.keys());
 }
 
 export async function connectWithToken(token: string): Promise<void> {

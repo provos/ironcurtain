@@ -23,6 +23,8 @@ import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from
 import { dispatch, buildStatusDto, type WorkflowDispatchContext } from './json-rpc-dispatch.js';
 import type { WorkflowManager } from '../workflow/workflow-manager.js';
 import { wsDataToString } from './ws-utils.js';
+import { assignConnId } from './conn-registry.js';
+import { personaCompileOrchestrator } from '../persona/persona-compile-orchestrator.js';
 import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -162,6 +164,15 @@ export class WebUiServer {
     this.pingInterval = setInterval(() => {
       this.pingClients();
     }, 30_000);
+
+    // Phase 1b: scan persona dirs for stale .compile.lock files left by a prior
+    // daemon crash; emit synthetic persona.compile.failed so reconnecting UIs
+    // clear stuck cards.
+    try {
+      personaCompileOrchestrator.recoverStaleLocks(this.eventBus);
+    } catch (err) {
+      logger.warn(`[WebUI] Stale-lock recovery failed: ${String(err)}`);
+    }
 
     const addr = httpServer.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : this.options.port;
@@ -452,6 +463,9 @@ export class WebUiServer {
       this.clients.add(ws);
       this.aliveClients.add(ws);
       this.missedPings.delete(ws);
+      // Assign a per-connection id so persona-mutation dispatch can build an
+      // actor string (`${remoteAddr}#${connId}`) for audit attribution.
+      assignConnId(ws);
       this.cancelOrphanTimer();
       logger.info(`[WebUI] Client connected (${this.clients.size} active)`);
 

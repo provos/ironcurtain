@@ -37,7 +37,7 @@ export async function dispatch(
 
   if (method === 'status') return buildStatusDto(ctx);
 
-  if (method.startsWith('personas.')) return personaDispatch(method, params);
+  if (method.startsWith('personas.')) return personaDispatch(ctx, method, params, client);
 
   throw new MethodNotFoundError(method);
 }

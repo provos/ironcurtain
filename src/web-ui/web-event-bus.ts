@@ -8,7 +8,15 @@
  * broadcasts to all connected WebSocket clients.
  */
 
-import type { SessionDto, BudgetSummaryDto, DaemonStatusDto, EscalationDto } from './web-ui-types.js';
+import type {
+  SessionDto,
+  BudgetSummaryDto,
+  DaemonStatusDto,
+  EscalationDto,
+  CompilationPhase,
+  PersonaCompileResultDto,
+  ErrorCode,
+} from './web-ui-types.js';
 import type { HumanGateRequestDto } from '../workflow/types.js';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { RunRecord } from '../cron/types.js';
@@ -76,6 +84,22 @@ export interface WebEventMap {
 
   // Token stream events (targeted delivery via bridge, not broadcast)
   'session.token_stream': { label: number; events: readonly TokenStreamEvent[] };
+
+  // Persona streamed-compile events (Phase 1b). FOUR events; the snapshot in
+  // the orchestrator's operation record is the source of truth, these are
+  // best-effort/lossy. `personas.changed` is a Phase 1c CRUD concern and is
+  // intentionally NOT added here. `phase` here is the 9-value CompilationPhase
+  // (type-only import); the operation-level lifecycle lives on the snapshot DTO.
+  'persona.compile.started': { name: string; operationId: string; actor: string };
+  'persona.compile.progress': {
+    name: string;
+    operationId: string;
+    serverName: string;
+    phase: CompilationPhase;
+    detail?: string;
+  };
+  'persona.compile.done': { name: string; operationId: string; result: PersonaCompileResultDto };
+  'persona.compile.failed': { name: string; operationId: string; code: ErrorCode; error: string };
 }
 
 export type WebEventName = keyof WebEventMap;

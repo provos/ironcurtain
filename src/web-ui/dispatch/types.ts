@@ -40,6 +40,15 @@ export interface DispatchContext {
    * docs/designs/mitm-token-trajectory-capture.md §10.
    */
   readonly captureTracesDefault?: boolean;
+  /**
+   * Phase 1b authz gate (minimal form). When false (the DEFAULT), the
+   * policy-mutation surface does not exist: `personas.compileStream` returns
+   * `POLICY_MUTATION_FORBIDDEN`. Read methods (`getCompile`/`listCompiles`)
+   * stay ungated. The full 4-hop `--allow-policy-mutation` daemon flag, the
+   * broad-policy validator, audit, and the constitution-editing mutation
+   * methods are Phase 1c — only this single gate field lands in 1b.
+   */
+  readonly allowPolicyMutation?: boolean;
 }
 
 // ---------------------------------------------------------------------------
