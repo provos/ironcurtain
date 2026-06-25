@@ -189,6 +189,9 @@ test.describe('Persona mutation gating (flag OFF)', () => {
     await page.locator('tr', { hasText: 'default' }).click();
     await expect(page.getByRole('heading', { name: 'default', exact: true })).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId('compile-button')).toHaveCount(0);
+    // The whole compile card is dropped (not rendered as an empty box) when
+    // mutation is off, since every child requires a compile.
+    await expect(page.getByTestId('compile-card')).toHaveCount(0);
     await expect(page.getByTestId('delete-button')).toHaveCount(0);
     await expect(page.getByTestId('constitution-editor')).toHaveCount(0);
     await expect(page.getByTestId('memory-toggle')).toHaveCount(0);

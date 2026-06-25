@@ -492,7 +492,7 @@
       <!-- Settings: memory + broad-policy (gated) -->
       {#if mutationAllowed}
         <Card>
-          <CardContent>
+          <CardContent class="pt-4">
             <div class="flex flex-col gap-3">
               <label class="flex items-center gap-3 text-sm">
                 <input
@@ -524,11 +524,15 @@
         </Card>
       {/if}
 
-      <!-- Compile control + live indicator -->
-      <Card>
-        <CardContent>
-          <div class="flex items-center gap-3 flex-wrap">
-            {#if mutationAllowed}
+      <!-- Compile control + live indicator. Gated as a whole: every child (button,
+           progress, ruleDelta, errors) requires a compile, which can only be
+           initiated with policy mutation enabled — so when it's off, drop the card
+           rather than render an empty box. `pt-4` restores the top padding that
+           CardContent zeroes out for header-bearing cards (this card has no header). -->
+      {#if mutationAllowed}
+        <Card data-testid="compile-card">
+          <CardContent class="pt-4">
+            <div class="flex items-center gap-3 flex-wrap">
               <Button
                 variant="default"
                 onclick={handleCompile}
@@ -538,73 +542,73 @@
               >
                 {detail.hasPolicy ? 'Recompile Policy' : 'Compile Policy'}
               </Button>
-            {/if}
 
-            {#if compiling && activeCompile}
-              <span class="text-sm text-muted-foreground" data-testid="compile-progress">
-                {phaseLabel(activeCompile)}
-              </span>
-            {:else if compiling}
-              <span class="text-sm text-muted-foreground" data-testid="compile-progress"> Starting... </span>
-            {/if}
+              {#if compiling && activeCompile}
+                <span class="text-sm text-muted-foreground" data-testid="compile-progress">
+                  {phaseLabel(activeCompile)}
+                </span>
+              {:else if compiling}
+                <span class="text-sm text-muted-foreground" data-testid="compile-progress"> Starting... </span>
+              {/if}
 
-            {#if activeCompile?.phase === 'done' && activeCompile.result}
-              <span class="text-sm text-success" data-testid="compile-success">
-                Compiled successfully ({activeCompile.result.ruleCount} rules)
-              </span>
-            {/if}
-          </div>
+              {#if activeCompile?.phase === 'done' && activeCompile.result}
+                <span class="text-sm text-success" data-testid="compile-success">
+                  Compiled successfully ({activeCompile.result.ruleCount} rules)
+                </span>
+              {/if}
+            </div>
 
-          {#if ruleDelta}
-            <div class="mt-3 text-sm" data-testid="rule-delta">
-              <p class="text-xs text-muted-foreground mb-1">Policy changes vs previous compile</p>
-              <div class="flex flex-wrap gap-2">
-                <Badge variant="outline">+{ruleDelta.added} added</Badge>
-                <Badge variant={ruleDelta.loosened > 0 ? 'warning' : 'outline'}>{ruleDelta.loosened} loosened</Badge>
-                <Badge variant="outline">{ruleDelta.removed} removed</Badge>
+            {#if ruleDelta}
+              <div class="mt-3 text-sm" data-testid="rule-delta">
+                <p class="text-xs text-muted-foreground mb-1">Policy changes vs previous compile</p>
+                <div class="flex flex-wrap gap-2">
+                  <Badge variant="outline">+{ruleDelta.added} added</Badge>
+                  <Badge variant={ruleDelta.loosened > 0 ? 'warning' : 'outline'}>{ruleDelta.loosened} loosened</Badge>
+                  <Badge variant="outline">{ruleDelta.removed} removed</Badge>
+                </div>
+                {#if ruleDelta.broadenedDomains.length > 0}
+                  <p class="text-xs text-warning mt-2" data-testid="rule-delta-domains">
+                    Broadened domains: {ruleDelta.broadenedDomains.join(', ')}
+                  </p>
+                {/if}
+                {#if ruleDelta.outOfWorkspacePaths.length > 0}
+                  <p class="text-xs text-warning mt-1" data-testid="rule-delta-paths">
+                    Out-of-workspace paths: {ruleDelta.outOfWorkspacePaths.join(', ')}
+                  </p>
+                {/if}
               </div>
-              {#if ruleDelta.broadenedDomains.length > 0}
-                <p class="text-xs text-warning mt-2" data-testid="rule-delta-domains">
-                  Broadened domains: {ruleDelta.broadenedDomains.join(', ')}
-                </p>
-              {/if}
-              {#if ruleDelta.outOfWorkspacePaths.length > 0}
-                <p class="text-xs text-warning mt-1" data-testid="rule-delta-paths">
-                  Out-of-workspace paths: {ruleDelta.outOfWorkspacePaths.join(', ')}
-                </p>
-              {/if}
-            </div>
-          {/if}
+            {/if}
 
-          {#if interrupted}
-            <div data-testid="compile-interrupted" class="mt-3">
-              <Alert variant="destructive">
-                Compilation was interrupted (the daemon may have restarted). You can recompile.
-              </Alert>
-            </div>
-          {/if}
+            {#if interrupted}
+              <div data-testid="compile-interrupted" class="mt-3">
+                <Alert variant="destructive">
+                  Compilation was interrupted (the daemon may have restarted). You can recompile.
+                </Alert>
+              </div>
+            {/if}
 
-          {#if startError}
-            <div data-testid="compile-error" class="mt-3">
-              <Alert variant="destructive">
-                <span class="block">
-                  <span class="font-mono text-xs" data-testid="compile-error-code">{startError.code}</span>
-                  <span class="block mt-1">{errorAffordance(startError.code)}</span>
-                </span>
-              </Alert>
-            </div>
-          {:else if activeCompile?.phase === 'failed' && activeCompile.error}
-            <div data-testid="compile-error" class="mt-3">
-              <Alert variant="destructive">
-                <span class="block">
-                  <span class="font-mono text-xs" data-testid="compile-error-code">{activeCompile.error.code}</span>
-                  <span class="block mt-1">{errorAffordance(activeCompile.error.code)}</span>
-                </span>
-              </Alert>
-            </div>
-          {/if}
-        </CardContent>
-      </Card>
+            {#if startError}
+              <div data-testid="compile-error" class="mt-3">
+                <Alert variant="destructive">
+                  <span class="block">
+                    <span class="font-mono text-xs" data-testid="compile-error-code">{startError.code}</span>
+                    <span class="block mt-1">{errorAffordance(startError.code)}</span>
+                  </span>
+                </Alert>
+              </div>
+            {:else if activeCompile?.phase === 'failed' && activeCompile.error}
+              <div data-testid="compile-error" class="mt-3">
+                <Alert variant="destructive">
+                  <span class="block">
+                    <span class="font-mono text-xs" data-testid="compile-error-code">{activeCompile.error.code}</span>
+                    <span class="block mt-1">{errorAffordance(activeCompile.error.code)}</span>
+                  </span>
+                </Alert>
+              </div>
+            {/if}
+          </CardContent>
+        </Card>
+      {/if}
 
       <!-- Constitution: editable when mutation allowed, else read-only markdown -->
       <Card>
