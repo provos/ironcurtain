@@ -184,6 +184,8 @@ ironcurtain start --persona my-assistant "Check my calendar"
 
 In mux mode, `/new my-assistant` spawns a tab using that persona. Personas can also be assigned to cron jobs. See [DAEMON.md](DAEMON.md) for scheduled job configuration.
 
+Personas can also be managed from the [web UI](DAEMON.md#persona-policy-management) — browse, create, edit constitutions, and compile policies with live progress. Because a policy is a security boundary, the web UI's mutation controls are read-only unless the daemon is started with `--allow-policy-mutation` (off by default).
+
 ### Skills
 
 Drop SKILL.md packages under `~/.ironcurtain/skills/<name>/` to make purpose-specific guidance (helper scripts, deterministic checks, domain knowledge) available to every Docker agent session. The merged set is staged into a per-bundle host directory and bind-mounted **read-only** into the container at the path the active agent's native discovery walks — Claude Code is pointed at the staging dir via `--add-dir`, Goose scans `~/.config/goose/skills/<name>/SKILL.md`. The agent discovers them automatically and decides when to read them based on each skill's frontmatter description. The SKILL.md _format_ is the open standard adopted by Claude Code, Goose, and Codex; only the _discovery path_ differs per agent. Workflows can ship per-state skills inside the workflow package — see [WORKFLOWS.md](WORKFLOWS.md#skills).

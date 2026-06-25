@@ -1,6 +1,6 @@
 # Web UI Persona Policy Management (create / edit / compile / delete over WS)
 
-**Status:** Proposed (implementation-ready). Phase 0–1 fully spike-validated — including the previously-open runtime-containment question, now **resolved** by the containment-governance spike (§12, A9). Global (non-persona) policy compilation is explicitly deferred to Phase 2.
+**Status:** Implemented (v1 = Phases 0–1c landed; PR #347). Spike-validated — including the previously-open runtime-containment question, **resolved** by the containment-governance spike (§12, A9). Global (non-persona) policy compilation (Phase 2) and the WS customizer (Phase 3) remain deferred; `annotate-tools` over WS is a permanent non-goal. Remaining v1 open items are human decisions, not code: audit-chain secret durability (§14 Q3, defaulting per-daemon-lifetime) and `globalLimit`/queue-cap tuning (§14 Q4).
 
 **Authors:** feature-architect workflow (consolidated current-state map + 7 spikes + adversarial findings pass).
 

@@ -81,6 +81,7 @@ All commands are subcommands of `ironcurtain daemon`:
 | `--no-signal` | Skip Signal transport (cron-only mode) |
 | `--web-ui` | Enable the web UI (see [Web UI](#web-ui)) |
 | `--web-port <port>` | Web UI port (default: 7400) |
+| `--allow-policy-mutation` | Allow the web UI to create/edit/compile/delete personas (default: **off**; see [Persona policy management](#persona-policy-management)) |
 | `-f, --force` | Skip confirmation prompts |
 
 When a daemon is running, mutation commands (`run-job`, `remove-job`, `disable-job`, `enable-job`, `recompile-job`) are automatically forwarded to it via a Unix domain socket. If no daemon is running, they operate directly on the filesystem.
@@ -245,6 +246,30 @@ ironcurtain daemon --web-ui --web-port 8080
 | **Sessions** | Live session list with assistant message rendering (markdown). Supports persona-tagged sessions. |
 | **Escalations** | Pending escalations across all sessions. Approve or deny from the browser. |
 | **Jobs** | Job definitions, schedules, and run history. |
+| **Personas** | Browse personas and their constitutions / compiled policies. Read-only by default; create / edit / compile / delete controls appear only when the daemon is started with `--allow-policy-mutation` (see below). |
+
+### Persona policy management
+
+By default the Personas view is **read-only** — you can browse personas, their constitutions, and compiled-policy status, but the mutation controls are hidden. Because a persona's policy *is* its security boundary, editing it from the browser is a privilege-escalation surface, so it is gated behind an explicit, off-by-default kill switch:
+
+```bash
+ironcurtain daemon --web-ui --allow-policy-mutation
+```
+
+With the flag on, the Personas view gains:
+
+- **Create** a persona (name, description, optional server allowlist, memory opt-in, optional constitution).
+- **Edit constitution** in-browser; saving flags the compiled policy as **stale** until you recompile.
+- **Compile** (or recompile) with live per-phase progress streamed over the WebSocket, plus a rule-count diff (`ruleDelta`) on completion.
+- **Toggle persistent memory** and the **broad-policy opt-in** (the opt-in is required to compile a policy that grants broad wildcard egress — e.g. `*` / `*.com` — or out-of-workspace paths; without it such policies are rejected).
+- **Delete** (soft-delete by default; the persona dir is moved to `~/.ironcurtain/.persona-trash/`).
+
+Safeguards (all enforced server-side, regardless of the browser):
+
+- The flag is **CLI-only and not persisted** to `config.json`, so the mutation surface cannot be silently enabled by editing config — the operator must deliberately pass it at launch. When off, every mutation request is rejected with `POLICY_MUTATION_FORBIDDEN`.
+- Every mutation is recorded to a tamper-evident, hash-chained audit log at `~/.ironcurtain/audit/policy-mutation.jsonl`.
+- **Tool annotations are never editable from the web UI** — generating them (`ironcurtain annotate-tools`) is CLI-only; compilation only ever reads `tool-annotations.json`.
+- v1 targets a **single-operator localhost** daemon; the kill switch is the authorization gate (there is no separate admin credential). Do not expose the daemon beyond localhost.
 
 ### Authentication
 
