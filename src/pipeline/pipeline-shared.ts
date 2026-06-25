@@ -289,9 +289,16 @@ export async function createPipelineLlm(
   logFileName = 'llm-interactions.jsonl',
 ): Promise<PipelineLlm> {
   // Defensive: logFileName must be a bare filename (it is interpolated into a
-  // path under generatedDir). Reject empties and any path separator so a caller
-  // can never escape generatedDir (e.g. "../foo.jsonl") and clobber other files.
-  if (logFileName.length === 0 || logFileName.includes('/') || logFileName.includes('\\')) {
+  // path under generatedDir). Reject empties, the `.`/`..` traversal segments,
+  // and any path separator so a caller can never escape generatedDir
+  // (e.g. "../foo.jsonl" or a bare "..") and clobber other files.
+  if (
+    logFileName.length === 0 ||
+    logFileName === '.' ||
+    logFileName === '..' ||
+    logFileName.includes('/') ||
+    logFileName.includes('\\')
+  ) {
     throw new Error(`logFileName must be a bare filename, got: ${JSON.stringify(logFileName)}`);
   }
   const userConfig = loadUserConfig();

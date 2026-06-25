@@ -426,4 +426,11 @@ describe('createPipelineLlm log path', () => {
     expect(llm.logPath).toContain(operationId);
     expect(llm.logPath.endsWith('.jsonl')).toBe(true);
   });
+
+  it('rejects a logFileName that could escape the generated dir', async () => {
+    const dir = tempDir('llm-traversal');
+    for (const bad of ['', '.', '..', '../escape.jsonl', 'sub/dir.jsonl', 'a\\b.jsonl']) {
+      await expect(createPipelineLlm(dir, 'unknown', bad)).rejects.toThrow(/bare filename/);
+    }
+  });
 });

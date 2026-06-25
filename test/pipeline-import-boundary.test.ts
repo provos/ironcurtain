@@ -79,10 +79,12 @@ function listTsFiles(dir: string): string[] {
  * Matches statement-level STATIC imports/exports that pull a VALUE:
  *   import ... from '...'        (incl. default, namespace, named, side-effect)
  *   export ... from '...'        (re-exports)
- * but NOT `import type ... from` / `export type ... from` (type-only).
- * Inline `type` modifiers inside the braces (`import { type Foo }`) do not
- * exclude the statement — if any value binding is present it is a value edge,
- * and a fully-inline-type import is a rare, harmless over-count for this rule.
+ * but NOT `import type ... from` / `export type ... from` (the type-only prefix
+ * form, excluded by the negative lookahead), and NOT fully type-only named
+ * statements like `import { type Foo } from '...'` / `export { type Foo } from
+ * '...'` (stripped by stripTypeOnlyNamed before scanning). A MIXED statement
+ * with at least one value binding (`import { type Foo, Bar } from '...'`) is
+ * preserved — `Bar` is a real value edge.
  *
  * Dynamic `import('...')` is NOT matched: it has no `from` keyword and is an
  * expression, so it never matches these statement-anchored patterns.
@@ -93,6 +95,30 @@ const SIDE_EFFECT_IMPORT = /(?:^|;|\n)\s*import\s+['"]([^'"]+)['"]/g;
 /** Strips // line comments and block comments so commented-out imports are ignored. */
 function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+/**
+ * Removes fully type-only named import/export statements so STATIC_VALUE_IMPORT
+ * does not count them as value edges, e.g.
+ *   import { type A, type B } from './x.js';
+ *   export { type A } from './x.js';
+ * A MIXED statement (>= 1 value binding) is preserved, since its value edge is
+ * real. A specifier is type-only iff it is `type <name>` where the next token is
+ * not `as` (so a value import of a binding literally named `type`, written
+ * `{ type as alias }`, is correctly NOT treated as type-only).
+ */
+function stripTypeOnlyNamed(src: string): string {
+  return src.replace(
+    /(?:^|;|\n)\s*(?:import|export)\s*\{([^}]*)\}\s*from\s*['"][^'"]+['"]\s*;?/g,
+    (full: string, inner: string) => {
+      const specs = inner
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      if (specs.length === 0) return full; // `import {} from ...` — leave as-is
+      return specs.every((s) => /^type\s+(?!as\b)/.test(s)) ? '\n' : full;
+    },
+  );
 }
 
 /**
@@ -117,7 +143,7 @@ function buildGraph(): Graph {
   const graph: Graph = {};
   for (const file of listTsFiles(SRC)) {
     const key = relative(ROOT, file).split('\\').join('/');
-    const src = stripComments(readFileSync(file, 'utf-8'));
+    const src = stripTypeOnlyNamed(stripComments(readFileSync(file, 'utf-8')));
     const deps = new Set<string>();
     for (const re of [STATIC_VALUE_IMPORT, SIDE_EFFECT_IMPORT]) {
       re.lastIndex = 0;
