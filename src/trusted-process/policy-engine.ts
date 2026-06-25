@@ -43,6 +43,7 @@ import {
   extractDomainForRole,
 } from './domain-utils.js';
 import { getListMatcher } from './list-matcher.js';
+import * as logger from '../logger.js';
 
 /**
  * Extracts string values from arguments based on annotation roles.
@@ -246,7 +247,7 @@ function getEffectiveListValues(listName: string, lists: DynamicListsFile): stri
     // allowlist denies the affected rule, which is the safe degradation. The warn
     // (fired once per policy load, not per evaluation) preserves observability for
     // a genuine "forgot to compile lists" misconfiguration.
-    console.warn(
+    logger.warn(
       `[policy] Dynamic list "@${listName}" referenced in policy but not in dynamic-lists.json; ` +
         `treating as empty (deny). Run "ironcurtain compile-policy" to resolve lists.`,
     );

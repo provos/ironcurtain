@@ -1628,10 +1628,12 @@ describe('Dynamic list expansion', () => {
     // A missing @list resolves to the empty allowlist (=> deny) instead of
     // throwing, so policy load never crashes on a dangling reference.
     const engine = new PolicyEngine(policy, fetchAnnotations, [], undefined, undefined, dynamicLists);
+    // toolName MUST match the annotation ("fetch_url"); a wrong name would deny
+    // via the unknown-tool invariant and never exercise the missing-@list path.
     const result = engine.evaluate({
       requestId: 'test',
       serverName: 'fetch',
-      toolName: 'fetch',
+      toolName: 'fetch_url',
       arguments: { url: 'https://example.com' },
       timestamp: '',
     });
