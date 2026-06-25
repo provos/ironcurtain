@@ -1606,7 +1606,7 @@ describe('Dynamic list expansion', () => {
     expect(evil.decision).toBe('deny');
   });
 
-  it('throws when @list-name references missing list', () => {
+  it('denies (fail closed) when @list-name references a missing list', () => {
     const policy = makePolicy([
       {
         name: 'allow-listed',
@@ -1625,8 +1625,16 @@ describe('Dynamic list expansion', () => {
       lists: {},
     };
 
-    expect(() => {
-      new PolicyEngine(policy, fetchAnnotations, [], undefined, undefined, dynamicLists);
-    }).toThrow(/nonexistent/);
+    // A missing @list resolves to the empty allowlist (=> deny) instead of
+    // throwing, so policy load never crashes on a dangling reference.
+    const engine = new PolicyEngine(policy, fetchAnnotations, [], undefined, undefined, dynamicLists);
+    const result = engine.evaluate({
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://example.com' },
+      timestamp: '',
+    });
+    expect(result.decision).toBe('deny');
   });
 });

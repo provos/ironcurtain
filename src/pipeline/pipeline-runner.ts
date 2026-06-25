@@ -181,7 +181,7 @@ export interface PipelineRunConfig {
    * artifacts intact (no partial write). Used by the WS surface to enforce
    * additional invariants (e.g. server scoping) atomically.
    */
-  readonly validateCompiled?: (policy: CompiledPolicyFile) => void;
+  readonly validateCompiled?: (policy: CompiledPolicyFile, dynamicLists?: DynamicListsFile) => void;
 }
 
 /**
@@ -788,7 +788,7 @@ export class PipelineRunner {
 
     // Optional caller validation runs on the in-memory policy BEFORE any artifact
     // is written, so a rejection leaves the prior generation's files intact.
-    config.validateCompiled?.(mergedPolicy);
+    config.validateCompiled?.(mergedPolicy, mergedDynamicLists);
 
     // Write order is the REVERSE of the runtime read order in
     // loadPersonaPolicyArtifacts (compiled-policy first, then dynamic-lists):
@@ -800,7 +800,8 @@ export class PipelineRunner {
     // guarantees a concurrent reader that observes the NEW compiled-policy.json
     // already sees the matching dynamic-lists.json; the reverse interleaving
     // (new lists + old compiled) is fail-safe because an unknown @list-id
-    // expands to empty => deny.
+    // resolves to the empty allowlist => deny (PolicyEngine.getEffectiveListValues
+    // returns [] for a missing list rather than throwing).
     if (mergedDynamicLists) {
       writeArtifact(config.outputDir, 'dynamic-lists.json', mergedDynamicLists);
     } else {
@@ -1004,6 +1005,11 @@ export class PipelineRunner {
       } catch (err) {
         const coerced = toError(err);
         reporter.fail('compiling', coerced);
+        // A disabled-MCP-list error is a run-level configuration failure, not a
+        // per-server verification failure. Surface it past the failedServers
+        // aggregation so the orchestrator can map it to LIST_REQUIRES_MCP
+        // instead of the generic "all servers failed compilation" error.
+        if (err instanceof McpListsDisallowedError) throw err;
         log(`  ${chalk.red(`Server "${serverName}" failed:`)} ${coerced.message}`);
         failedServers.push(serverName);
       }
@@ -1067,6 +1073,10 @@ export class PipelineRunner {
       if (outcome.status === 'fulfilled') {
         results.push(outcome.value);
       } else {
+        // A disabled-MCP-list error is a run-level configuration failure, not a
+        // per-server verification failure. Surface it past the failedServers
+        // aggregation so the orchestrator can map it to LIST_REQUIRES_MCP.
+        if (outcome.reason instanceof McpListsDisallowedError) throw outcome.reason;
         const serverName = filteredEntries[i][0];
         failedServers.push(serverName);
       }

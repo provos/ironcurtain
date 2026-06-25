@@ -17,7 +17,7 @@ import {
   BroadPolicyRejectedError,
 } from '../src/persona/broad-policy-validator.js';
 import { computeRuleDelta } from '../src/persona/rule-delta.js';
-import type { CompiledPolicyFile, CompiledRule } from '../src/pipeline/types.js';
+import type { CompiledPolicyFile, CompiledRule, DynamicListsFile } from '../src/pipeline/types.js';
 
 const TEST_HOME = resolve(`/tmp/ironcurtain-broad-test-${process.pid}`);
 const WORKSPACE = resolve(TEST_HOME, 'workspace');
@@ -35,6 +35,23 @@ function rule(partial: Partial<CompiledRule> & { name: string }): CompiledRule {
 
 function policy(rules: CompiledRule[]): CompiledPolicyFile {
   return { generatedAt: '', constitutionHash: 'h', inputHash: 'i', rules };
+}
+
+/** Builds a DynamicListsFile from a map of list-name => resolved values. */
+function dynamicLists(
+  lists: Record<string, { values?: string[]; manualAdditions?: string[]; manualRemovals?: string[] }>,
+): DynamicListsFile {
+  const out: DynamicListsFile['lists'] = {};
+  for (const [name, l] of Object.entries(lists)) {
+    out[name] = {
+      values: l.values ?? [],
+      manualAdditions: l.manualAdditions ?? [],
+      manualRemovals: l.manualRemovals ?? [],
+      resolvedAt: '',
+      inputHash: 'i',
+    };
+  }
+  return { generatedAt: '', lists: out };
 }
 
 beforeEach(() => {
@@ -103,6 +120,43 @@ describe('findBroadPolicy', () => {
     const p = policy([rule({ name: 'r1', if: { paths: { roles: [], within: WORKSPACE } } })]);
     expect(findBroadPolicy(p, WORKSPACE).outOfWorkspacePaths).toEqual([]);
   });
+
+  it('resolves a @list domain reference to a broad wildcard and flags it (with via annotation)', () => {
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@news'] } } })]);
+    const lists = dynamicLists({ news: { values: ['nytimes.com', '*.com'] } });
+    const f = findBroadPolicy(p, WORKSPACE, lists);
+    expect(f.broadenedDomains).toEqual(['*.com (via @news)']);
+  });
+
+  it('resolves a @list hidden in a list allowance and flags broad members', () => {
+    const p = policy([rule({ name: 'r1', if: { lists: [{ roles: [], allowed: ['@sites'], matchType: 'domains' }] } })]);
+    const lists = dynamicLists({ sites: { values: ['example.com'], manualAdditions: ['*.gov'] } });
+    expect(findBroadPolicy(p, WORKSPACE, lists).broadenedDomains).toEqual(['*.gov (via @sites)']);
+  });
+
+  it('does not flag a @list resolving only to narrow values', () => {
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@news'] } } })]);
+    const lists = dynamicLists({ news: { values: ['nytimes.com', '*.github.com'] } });
+    expect(findBroadPolicy(p, WORKSPACE, lists).broadenedDomains).toEqual([]);
+  });
+
+  it('respects manualRemovals when resolving a @list (removed broad value is not flagged)', () => {
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@news'] } } })]);
+    const lists = dynamicLists({ news: { values: ['nytimes.com', '*.com'], manualRemovals: ['*.com'] } });
+    expect(findBroadPolicy(p, WORKSPACE, lists).broadenedDomains).toEqual([]);
+  });
+
+  it('ignores a @list reference with no resolved entry (missing list fails closed -> nothing to flag)', () => {
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@gone'] } } })]);
+    expect(findBroadPolicy(p, WORKSPACE, dynamicLists({})).broadenedDomains).toEqual([]);
+  });
+
+  it('does not resolve @list references when no dynamicLists are supplied', () => {
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@news'] } } })]);
+    // The literal '@news' symbol is not itself a broad pattern, so without
+    // resolution there is nothing to flag.
+    expect(findBroadPolicy(p, WORKSPACE).broadenedDomains).toEqual([]);
+  });
 });
 
 describe('makeBroadPolicyValidator', () => {
@@ -151,6 +205,27 @@ describe('makeBroadPolicyValidator', () => {
       rule({ name: 'r2', if: { paths: { roles: [], within: '/etc' } } }),
     ]);
     expect(() => validate(p)).not.toThrow();
+  });
+
+  it('rejects a @list that RESOLVES to a broad wildcard when not opted in', () => {
+    const validate = makeBroadPolicyValidator(WORKSPACE, false);
+    // The rule only stores the '@news' symbol; the broad value lives in the
+    // resolved dynamic-lists. Without the resolved lists this would slip through.
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@news'] } } })]);
+    const lists = dynamicLists({ news: { values: ['nytimes.com', '*.com'] } });
+    expect(() => validate(p, lists)).toThrowError(BroadPolicyRejectedError);
+    try {
+      validate(p, lists);
+    } catch (err) {
+      expect((err as BroadPolicyRejectedError).data?.broadenedDomains).toEqual(['*.com (via @news)']);
+    }
+  });
+
+  it('accepts a @list that resolves only to narrow values when not opted in', () => {
+    const validate = makeBroadPolicyValidator(WORKSPACE, false);
+    const p = policy([rule({ name: 'r1', if: { domains: { roles: [], allowed: ['@news'] } } })]);
+    const lists = dynamicLists({ news: { values: ['nytimes.com', '*.github.com'] } });
+    expect(() => validate(p, lists)).not.toThrow();
   });
 });
 

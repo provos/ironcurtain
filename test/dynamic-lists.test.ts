@@ -840,14 +840,25 @@ describe('Policy Engine List Expansion', () => {
     expect(result.decision).toBe('allow');
   });
 
-  it('throws when @list-name reference is missing from dynamic-lists.json', () => {
+  it('treats a missing @list-name reference as deny (fail closed), not a throw', () => {
     const policy = makePolicyFile([makeRuleWithDomainList('missing-list')]);
     const emptyLists = makeDynamicLists({});
     const annotations = makeToolAnnotationsFile([fetchAnnotation]);
 
-    expect(() => {
-      new PolicyEngine(policy, annotations, [], undefined, undefined, emptyLists);
-    }).toThrow(/Dynamic list "@missing-list"/);
+    // Construction no longer throws on a missing list (would otherwise crash
+    // policy load during the accepted concurrent-recompile interleaving).
+    const engine = new PolicyEngine(policy, annotations, [], undefined, undefined, emptyLists);
+
+    // The @missing-list rule's allowlist resolves to empty, so the fetch it
+    // would have allowed is now denied (default-deny).
+    const result = engine.evaluate({
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://example.com' },
+      timestamp: '',
+    });
+    expect(result.decision).toBe('deny');
   });
 
   it('applies manual additions during expansion', () => {

@@ -39,7 +39,7 @@
 import { resolveRealPath } from '../types/argument-roles.js';
 import type { ErrorCode } from '../web-ui/web-ui-types.js';
 // Type-only — no runtime edge to pipeline.
-import type { CompiledPolicyFile } from '../pipeline/types.js';
+import type { CompiledPolicyFile, DynamicListsFile } from '../pipeline/types.js';
 
 /** Thrown when a compiled policy is "broad" but the persona is not opted in. */
 export class BroadPolicyRejectedError extends Error {
@@ -89,32 +89,68 @@ export function isBroadDomainPattern(pattern: string): boolean {
 }
 
 /**
+ * Expands an `allowed` array (from `domains.allowed` or `lists[].allowed`) into
+ * the concrete values to test for breadth. A `@list` reference contributes its
+ * EFFECTIVE values (values + manualAdditions − manualRemovals), mirroring
+ * `PolicyEngine.getEffectiveListValues` — so a list that RESOLVES to a broad
+ * wildcard (e.g. a "major news sites" list containing `*.com`) is caught even
+ * though the rule only stores the `@list` symbol and the resolved values live
+ * separately in dynamic-lists.json. A missing list contributes nothing: the
+ * runtime fails closed (missing `@list` => empty => deny), so there is nothing
+ * broad to flag. `via` records the originating `@list` for a clear message.
+ */
+function expandAllowedForBreadth(
+  allowed: readonly string[],
+  dynamicLists: DynamicListsFile | undefined,
+): { value: string; via?: string }[] {
+  const out: { value: string; via?: string }[] = [];
+  for (const entry of allowed) {
+    if (!entry.startsWith('@')) {
+      out.push({ value: entry });
+      continue;
+    }
+    const list = dynamicLists?.lists[entry.slice(1)];
+    if (!list) continue;
+    const removals = new Set(list.manualRemovals);
+    for (const v of new Set([...list.values, ...list.manualAdditions])) {
+      if (!removals.has(v)) out.push({ value: v, via: entry });
+    }
+  }
+  return out;
+}
+
+/**
  * Inspects a compiled policy and returns the set of "broad" findings. Pure /
  * side-effect-free so it can also feed the ruleDelta computation. A path is
  * "out of workspace" iff its real-resolved form is neither the workspace dir nor
- * a descendant of it.
+ * a descendant of it. When `dynamicLists` is supplied, `@list` references in
+ * `domains.allowed` / `lists[].allowed` are resolved to their concrete values so
+ * a list that resolves to a broad wildcard is detected (the validator passes it;
+ * callers without the resolved lists — e.g. the rule-delta report — still get the
+ * literal-pattern findings).
  */
-export function findBroadPolicy(policy: CompiledPolicyFile, workspaceDir: string): BroadPolicyFindings {
+export function findBroadPolicy(
+  policy: CompiledPolicyFile,
+  workspaceDir: string,
+  dynamicLists?: DynamicListsFile,
+): BroadPolicyFindings {
   const broadenedDomains = new Set<string>();
   const outOfWorkspacePaths = new Set<string>();
 
   const workspaceReal = resolveRealPath(workspaceDir);
+  const flagBroad = (entries: readonly string[]): void => {
+    for (const { value, via } of expandAllowedForBreadth(entries, dynamicLists)) {
+      if (isBroadDomainPattern(value)) broadenedDomains.add(via ? `${value} (via ${via})` : value);
+    }
+  };
 
   for (const rule of policy.rules) {
     const cond = rule.if;
-    // Wildcard domains (record the actual broad pattern, not just '*').
-    if (cond.domains?.allowed) {
-      for (const d of cond.domains.allowed) {
-        if (isBroadDomainPattern(d)) broadenedDomains.add(d);
-      }
-    }
+    // Wildcard domains — incl. those reached through a resolved @list.
+    if (cond.domains?.allowed) flagBroad(cond.domains.allowed);
     // Wildcard list allowances.
     if (cond.lists) {
-      for (const list of cond.lists) {
-        for (const v of list.allowed) {
-          if (isBroadDomainPattern(v)) broadenedDomains.add(v);
-        }
-      }
+      for (const list of cond.lists) flagBroad(list.allowed);
     }
     // Out-of-workspace path containment.
     if (cond.paths?.within) {
@@ -140,10 +176,10 @@ export function findBroadPolicy(policy: CompiledPolicyFile, workspaceDir: string
 export function makeBroadPolicyValidator(
   workspaceDir: string,
   allowBroadPolicy: boolean,
-): (policy: CompiledPolicyFile) => void {
-  return (policy: CompiledPolicyFile): void => {
+): (policy: CompiledPolicyFile, dynamicLists?: DynamicListsFile) => void {
+  return (policy: CompiledPolicyFile, dynamicLists?: DynamicListsFile): void => {
     if (allowBroadPolicy) return;
-    const findings = findBroadPolicy(policy, workspaceDir);
+    const findings = findBroadPolicy(policy, workspaceDir, dynamicLists);
     if (findings.broadenedDomains.length === 0 && findings.outOfWorkspacePaths.length === 0) {
       return;
     }

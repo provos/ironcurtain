@@ -23,6 +23,7 @@
   import { Modal } from '$lib/components/ui/modal/index.js';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
   import { renderMarkdown } from '$lib/markdown.js';
+  import { compileClearsStale } from './persona-helpers.js';
 
   // Static set of MCP servers a new persona can be narrowed to. There is no
   // `servers.list` RPC; this mirrors the servers referenced by the canned
@@ -49,6 +50,11 @@
   let startError = $state<{ code: string; message: string } | null>(null);
   let starting = $state(false);
   let handledTerminal = $state<string | null>(null);
+  // Maps a compile operationId -> the saved constitution it was started against.
+  // On terminal success the stale flag is cleared ONLY if the persona's current
+  // saved constitution still matches what that compile covered, so a save made
+  // while an earlier compile was in flight is not silently marked compiled.
+  let compileConstitution = $state<Map<string, string>>(new Map());
 
   const activeCompile = $derived<PersonaCompileOperationDto | null>(resolveActiveCompile());
 
@@ -154,8 +160,15 @@
     if (!op || !selectedName) return;
     if (op.phase === 'done' && handledTerminal !== op.operationId) {
       handledTerminal = op.operationId;
-      // A successful compile means the constitution is no longer stale.
-      constitutionStale = false;
+      // Only clear staleness if this compile covered the persona's CURRENT saved
+      // constitution. If the user saved a newer constitution while the compile
+      // was running (snapshot differs), the new edit is uncompiled — keep the
+      // flag set. An unknown snapshot (e.g. a compile started outside this view)
+      // falls back to clearing, matching the prior behavior.
+      const covered = compileConstitution.get(op.operationId);
+      if (compileClearsStale(covered, detail?.constitution ?? '')) {
+        constitutionStale = false;
+      }
       void refreshAfterCompile(selectedName);
     } else if (op.phase === 'failed' && handledTerminal !== op.operationId) {
       handledTerminal = op.operationId;
@@ -221,6 +234,7 @@
     startError = null;
     starting = false;
     handledTerminal = null;
+    compileConstitution = new Map();
   }
 
   function resetDetailMutationState(): void {
@@ -256,6 +270,11 @@
     try {
       const ack = await startPersonaCompile(selectedName);
       activeOperationId = ack.operationId;
+      // Record the saved constitution this compile covers so the terminal effect
+      // can tell whether a later save outdated it before clearing staleness.
+      const next = new Map(compileConstitution);
+      next.set(ack.operationId, detail?.constitution ?? '');
+      compileConstitution = next;
     } catch (err) {
       startError = rpcError(err);
     }

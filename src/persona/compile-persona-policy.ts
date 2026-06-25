@@ -27,7 +27,7 @@ import {
   applyServerAllowlist,
 } from './resolve.js';
 import type { PersonaName } from './types.js';
-import type { CompiledPolicyFile } from '../pipeline/types.js';
+import type { CompiledPolicyFile, DynamicListsFile } from '../pipeline/types.js';
 import type { ServerProgressReporter } from '../pipeline/pipeline-shared.js';
 
 /**
@@ -45,7 +45,7 @@ export interface CompilePersonaOptions {
   readonly quiet?: boolean;
   /**
    * Operation id used to scope the per-op LLM interaction log to
-   * `generated/llm-interactions/<operationId>.jsonl` (append-only).
+   * `generated/llm-interactions/<operationId>.jsonl`.
    */
   readonly operationId?: string;
   /**
@@ -66,7 +66,7 @@ export interface CompilePersonaOptions {
    * enforce the broad-policy invariant (reject `'*'` domains/lists or
    * out-of-workspace `paths.within` unless the persona is opted in).
    */
-  readonly validateCompiled?: (policy: CompiledPolicyFile) => void;
+  readonly validateCompiled?: (policy: CompiledPolicyFile, dynamicLists?: DynamicListsFile) => void;
   /**
    * TEST-ONLY injection seam: pre-built PipelineModels (fake LLM). When absent,
    * `createPipelineModels` is called (real provider). Production callers never
@@ -94,11 +94,13 @@ export async function compilePersonaPolicy(
   const constitutionText = readFileSync(constitutionPath, 'utf-8');
   const annotationsDir = getUserGeneratedDir();
 
-  // Per-operation LLM log path (append-only, never truncated) when an
-  // operationId is supplied: `generated/llm-interactions/<operationId>.jsonl`.
-  // The operationId is interpolated into the FILENAME (not just used as a
-  // presence check) so concurrent/successive compiles of the same persona do
-  // not co-mingle into a single log file. Without an operationId, the pipeline
+  // Per-operation LLM log path when an operationId is supplied:
+  // `generated/llm-interactions/<operationId>.jsonl`. The pipeline truncates the
+  // file when it initializes the log (createLlmLoggingMiddleware -> initLogFile)
+  // and appends thereafter; because the operationId is interpolated into the
+  // FILENAME (not just used as a presence check), each compile writes to its own
+  // fresh file, so concurrent/successive compiles of the same persona never
+  // co-mingle or clobber one another. Without an operationId, the pipeline
   // default (`<outputDir>/llm-interactions.jsonl`) applies.
   const logDir = opts.operationId ? resolve(outputDir, 'llm-interactions') : outputDir;
   const logFileName = opts.operationId ? `${opts.operationId}.jsonl` : undefined;
