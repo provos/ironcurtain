@@ -270,6 +270,23 @@ function rethrowServiceError(err: unknown): never {
   throw err;
 }
 
+/**
+ * Runs a persona-service mutation under the WS actor, maps service errors to
+ * RpcError (via rethrowServiceError), emits `personas.changed`, and returns the
+ * mutation's result. Centralizes the per-handler try/catch + change-event
+ * boilerplate so a new mutation method cannot forget the notification.
+ */
+function mutateAndEmit<T>(ctx: WorkflowDispatchContext, mutate: (actor: string) => T, client?: WsWebSocket): T {
+  let result: T;
+  try {
+    result = mutate(describeActor(client));
+  } catch (err) {
+    rethrowServiceError(err);
+  }
+  ctx.eventBus.emit('personas.changed', {});
+  return result;
+}
+
 function createPersonaHandler(
   ctx: WorkflowDispatchContext,
   input: { name: string; description: string; servers?: string[]; memoryEnabled?: boolean; constitution?: string },
@@ -281,14 +298,7 @@ function createPersonaHandler(
   } catch {
     throw new RpcError('INVALID_PARAMS', `Invalid persona name: ${input.name}`);
   }
-  let detail: PersonaDetailDto;
-  try {
-    detail = createPersonaService(input, describeActor(client));
-  } catch (err) {
-    rethrowServiceError(err);
-  }
-  ctx.eventBus.emit('personas.changed', {});
-  return detail;
+  return mutateAndEmit(ctx, (actor) => createPersonaService(input, actor), client);
 }
 
 function editConstitutionHandler(
@@ -298,14 +308,7 @@ function editConstitutionHandler(
   client?: WsWebSocket,
 ): PersonaEditResultDto {
   const { name } = resolvePersonaOrThrow(nameRaw);
-  let result: PersonaEditResultDto;
-  try {
-    result = setPersonaConstitutionService(name, constitution, describeActor(client));
-  } catch (err) {
-    rethrowServiceError(err);
-  }
-  ctx.eventBus.emit('personas.changed', {});
-  return result;
+  return mutateAndEmit(ctx, (actor) => setPersonaConstitutionService(name, constitution, actor), client);
 }
 
 function setMemoryHandler(
@@ -315,12 +318,7 @@ function setMemoryHandler(
   client?: WsWebSocket,
 ): PersonaDetailDto {
   const { name } = resolvePersonaOrThrow(nameRaw);
-  try {
-    setPersonaMemoryService(name, enabled, describeActor(client));
-  } catch (err) {
-    rethrowServiceError(err);
-  }
-  ctx.eventBus.emit('personas.changed', {});
+  mutateAndEmit(ctx, (actor) => setPersonaMemoryService(name, enabled, actor), client);
   return getPersonaDetailService(name);
 }
 
@@ -331,12 +329,7 @@ function deletePersonaHandler(
   client?: WsWebSocket,
 ): { deleted: true } {
   const { name } = resolvePersonaOrThrow(nameRaw);
-  try {
-    deletePersonaService(name, describeActor(client), { force });
-  } catch (err) {
-    rethrowServiceError(err);
-  }
-  ctx.eventBus.emit('personas.changed', {});
+  mutateAndEmit(ctx, (actor) => deletePersonaService(name, actor, { force }), client);
   return { deleted: true };
 }
 
@@ -347,14 +340,7 @@ function setBroadPolicyOptInHandler(
   client?: WsWebSocket,
 ): PersonaDetailDto {
   const { name } = resolvePersonaOrThrow(nameRaw);
-  let detail: PersonaDetailDto;
-  try {
-    detail = setPersonaBroadPolicyOptInService(name, enabled, describeActor(client));
-  } catch (err) {
-    rethrowServiceError(err);
-  }
-  ctx.eventBus.emit('personas.changed', {});
-  return detail;
+  return mutateAndEmit(ctx, (actor) => setPersonaBroadPolicyOptInService(name, enabled, actor), client);
 }
 
 /** Builds the audit/actor string: `${remoteAddr}#${connId}` (WS) or 'cli'. */

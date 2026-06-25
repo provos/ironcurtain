@@ -283,6 +283,23 @@ export function handleEvent(state: AppStateLike, effects: EventSideEffects, even
  * Apply a typed WebEvent to the state. The switch on `parsed.event`
  * narrows `parsed.payload` automatically.
  */
+/**
+ * Returns the existing compile record, or a minimal synthesized "running"
+ * record that tolerates a `started` event lost during a disconnect.
+ */
+function compileBaseRecord(
+  existing: PersonaCompileOperationDto | undefined,
+  operationId: string,
+  name: string,
+): PersonaCompileOperationDto {
+  return existing ?? { operationId, name, phase: 'running', startedAt: new Date().toISOString(), actor: 'unknown' };
+}
+
+/** Immutably upserts a compile record (new Map so Svelte 5 detects the change). */
+function setCompileRecord(state: AppStateLike, operationId: string, record: PersonaCompileOperationDto): void {
+  state.personaCompiles = new Map(state.personaCompiles).set(operationId, record);
+}
+
 function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebEvent): boolean {
   switch (parsed.event) {
     case 'daemon.status':
@@ -507,75 +524,43 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     // Persona streamed-compile events
     case 'persona.compile.started': {
       const { name, operationId, actor } = parsed.payload;
-      const record: PersonaCompileOperationDto = {
+      setCompileRecord(state, operationId, {
         operationId,
         name,
         phase: 'started',
         startedAt: new Date().toISOString(),
         actor,
-      };
-      state.personaCompiles = new Map(state.personaCompiles).set(operationId, record);
+      });
       return true;
     }
 
     case 'persona.compile.progress': {
       const { name, operationId, serverName, phase: compilationPhase, detail } = parsed.payload;
-      const existing = state.personaCompiles.get(operationId);
-      // Tolerate a missing started event (lost during disconnect): synthesize a
-      // minimal running record so the progress is still reflected in the UI.
-      const base: PersonaCompileOperationDto = existing ?? {
-        operationId,
-        name,
-        phase: 'running',
-        startedAt: new Date().toISOString(),
-        actor: 'unknown',
-      };
-      const updated: PersonaCompileOperationDto = {
+      const base = compileBaseRecord(state.personaCompiles.get(operationId), operationId, name);
+      setCompileRecord(state, operationId, {
         ...base,
         phase: 'running',
         serverProgress: { server: serverName, compilationPhase, ...(detail !== undefined ? { detail } : {}) },
-      };
-      state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
+      });
       return true;
     }
 
     case 'persona.compile.done': {
       const { name, operationId, result } = parsed.payload;
-      const existing = state.personaCompiles.get(operationId);
-      const base: PersonaCompileOperationDto = existing ?? {
-        operationId,
-        name,
-        phase: 'running',
-        startedAt: new Date().toISOString(),
-        actor: 'unknown',
-      };
-      const updated: PersonaCompileOperationDto = {
-        ...base,
-        phase: 'done',
-        endedAt: new Date().toISOString(),
-        result,
-      };
-      state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
+      const base = compileBaseRecord(state.personaCompiles.get(operationId), operationId, name);
+      setCompileRecord(state, operationId, { ...base, phase: 'done', endedAt: new Date().toISOString(), result });
       return true;
     }
 
     case 'persona.compile.failed': {
       const { name, operationId, code, error } = parsed.payload;
-      const existing = state.personaCompiles.get(operationId);
-      const base: PersonaCompileOperationDto = existing ?? {
-        operationId,
-        name,
-        phase: 'running',
-        startedAt: new Date().toISOString(),
-        actor: 'unknown',
-      };
-      const updated: PersonaCompileOperationDto = {
+      const base = compileBaseRecord(state.personaCompiles.get(operationId), operationId, name);
+      setCompileRecord(state, operationId, {
         ...base,
         phase: 'failed',
         endedAt: new Date().toISOString(),
         error: { code, message: error },
-      };
-      state.personaCompiles = new Map(state.personaCompiles).set(operationId, updated);
+      });
       return true;
     }
 
