@@ -3,7 +3,7 @@
  * so that __dirname-relative path resolution works from compiled output.
  */
 
-import { cpSync, chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { cpSync, chmodSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,11 +58,14 @@ if (existsSync(readOnlyDir)) {
 // co-packaged files travel with the manifest.
 const srcWorkflows = resolve(__dirname, '..', 'src', 'workflow', 'workflows');
 const distWorkflows = resolve(__dirname, '..', 'dist', 'workflow', 'workflows');
+const shouldCopyWorkflowAsset = (src) => !src.endsWith('.pyc') && !src.split(/[\\/]/).includes('__pycache__');
 if (existsSync(srcWorkflows)) {
   mkdirSync(distWorkflows, { recursive: true });
   for (const entry of readdirSync(srcWorkflows, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    cpSync(resolve(srcWorkflows, entry.name), resolve(distWorkflows, entry.name), { recursive: true });
+    const dest = resolve(distWorkflows, entry.name);
+    rmSync(dest, { recursive: true, force: true });
+    cpSync(resolve(srcWorkflows, entry.name), dest, { recursive: true, filter: shouldCopyWorkflowAsset });
   }
 }
 

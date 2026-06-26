@@ -6,6 +6,50 @@ All notable changes to this project will be documented in this file.
 
 _No changes yet._
 
+## [0.12.0] - 2026-06-26
+
+### Features
+
+- **Codex CLI agent and token-trajectory capture** - added a Docker adapter for Codex CLI alongside faithful OpenAI/Codex token trajectory capture for SFT/RL training data. `--capture-traces` is wired through mux PTY sessions and daemon-launched workflows, with trajectory reassembly/tap support and documentation for downstream training pipelines (#273, #276, #280, #288).
+- **Evolve workflow** - new native workflow for iterative candidate evolution: deterministic container execution with packaged scripts, a structured deterministic result contract for verdict routing, single-round and multi-round execution, human-surface gates, final summaries, abort handling, a generic experiment harness, correctness stop conditions, resume idempotency, search-quality cognition promotion, multi-parent/selectable samplers, and synchronous N-way fan-out lanes (#292, #299, #300, #302, #303, #309, #313, #315, #323).
+- **Workflow runtime and gate improvements** - workflow agents can now use daemon-driven gates, shared containers can be snapshotted and resumed across resumable stops, workflow workspace artifacts auto-refresh on lifecycle events in the web UI, and workflow dependencies are installed at runtime instead of requiring per-workflow baked images (#304, #308, #316, #318).
+- **Web UI workflow and persona management** - added workflow statistics to the dashboard, hid test workflows from normal lists, added a workflow README modal, added copy-to-clipboard for workflow instructions, polished workflow pages, and introduced WebSocket-driven persona policy management (#283, #312, #340, #347).
+- **Apple container runtime backend and Rust fuzzing toolchain** - added an Apple `container` runtime backend plus Rust fuzzing support for agent/container workflows (#290).
+- **Cargo package proxying** - the MITM package proxy now supports Cargo/crates.io, extending the package-install mediation model beyond npm, PyPI, and apt (#348).
+- **Memory MCP server 0.2.0 integration** - upgraded the bundled memory server path with atomic-fact ingest, parent-context retrieval, new memory documentation, Docker build-context handling, and the separately tagged `memory-mcp-server/v0.2.0` release (#335, #337, #339).
+- **Vulnerability-discovery hardening** - discovery now better resists masked findings, lost runs, background-wait ambiguity, and hanging harness validation (#268, #281).
+
+### Behavior changes
+
+- **Workflow dependencies install at runtime** - workflows no longer bake a per-workflow Docker image just to include dependency files; the runtime installs them in the active workflow environment (#308).
+- **Leaf subcommands parse arguments strictly** - invalid trailing or misplaced arguments are rejected earlier for CLI leaf commands (#279).
+- **Builtin mode honors configured model provider** - preflight/model-provider handling now respects the configured provider when running outside Docker (#287).
+- **Discussions linked from issue templates** - the GitHub issue chooser now points users toward Discussions for support and exploratory topics.
+
+### Fixes
+
+- **Codex provider-host WSS fallback** - provider-host WebSocket upgrade attempts are fast-rejected so Codex falls back to HTTP instead of hanging through the MITM proxy (#341).
+- **Workflow teardown and gate CLI reliability** - Docker teardown is drained before CLI exit to avoid network leaks, and bad-flag errors preserve the gate CLI's JSON/exit-code contract (#311, #314).
+- **Workflow harness boundedness** - vulnerability-discovery harness validation and workflow harness execution now use hard-kill bounds to avoid indefinite hangs (#268).
+- **Trajectory capture robustness** - missing-terminal token streams are classified as mid-stream aborts, improving retry/recovery decisions (#289).
+- **Docker UID/GID remap** - benign Linux GID collisions are handled during agent UID/GID remapping (#333).
+- **Sandbox tool-error suggestions** - UTCP manual prefixes no longer leak into tool-error suggestions (#301).
+- **Memory DB schema safety** - incompatible memory databases are backed up before schema rebuild, and tests run serially to avoid model-download races (#337, #339).
+
+### Dependencies
+
+- Bump `@provos/memory-mcp-server` to `^0.2.0`.
+- Bump `undici` to `^8.5.0`.
+- Bump web UI dependencies including `vite`, `dompurify`, `hono`, `ws`, `qs`, `js-yaml`, `tar`, `form-data`, and related transitive security updates.
+- Bump `actions/checkout` from 6 to 7.
+
+### Internal
+
+- Broke a workflow runtime import cycle and added a `madge` pre-push cycle gate (#277).
+- Added detailed daemon WebSocket JSON-RPC and workflow human-gate documentation.
+- Marked evolve design slices as shipped and reconciled design documents with the implementation.
+- Promoted mux over raw PTY in user-facing docs.
+
 ## [0.11.0] - 2026-05-18
 
 ### Features
@@ -461,6 +505,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.12.0]: https://github.com/provos/ironcurtain/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/provos/ironcurtain/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/provos/ironcurtain/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/provos/ironcurtain/compare/v0.9.0...v0.9.1
