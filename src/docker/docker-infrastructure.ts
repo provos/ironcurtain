@@ -561,10 +561,10 @@ export async function prepareDockerInfrastructure(
   let packageValidation: { validator: import('./package-types.js').PackageValidator; auditLogPath: string } | undefined;
 
   if (pkgConfig.enabled) {
-    const { npmRegistry, pypiRegistry, debianRegistry } = await import('./registry-proxy.js');
+    const { npmRegistry, pypiRegistry, debianRegistry, cargoRegistry } = await import('./registry-proxy.js');
     const { createPackageValidator } = await import('./package-validator.js');
 
-    registries = [npmRegistry, pypiRegistry, debianRegistry];
+    registries = [npmRegistry, pypiRegistry, debianRegistry, cargoRegistry];
     const validator = createPackageValidator({
       allowedPackages: pkgConfig.allowedPackages,
       deniedPackages: pkgConfig.deniedPackages,

@@ -40,7 +40,7 @@ Lifecycle is driven through `DockerInfrastructure.beginCaptureSession()` / `endC
 
 - `proxy-tools.ts` - Hardcoded MCP tool definitions, annotations, and policy rules for domain management. Injected into the ToolCallCoordinator during construction for policy evaluation and audit logging.
 - `code-mode-proxy.ts` - MCP server exposing a single `execute_code` tool backed by the UTCP Code Mode sandbox. Docker agents send TypeScript via this tool, sharing the same V8 execution engine as builtin Code Mode sessions. Implements the `DockerProxy` interface. `DockerProxy.getPolicySwapTarget()` returns a narrow `PolicySwapTarget` handle (only `startControlServer`) that the workflow orchestrator uses to attach a control server to the live coordinator; single-session callers never use it.
-- `registry-proxy.ts` - URL parsing, metadata filtering, and tarball backstop for npm, PyPI, and Debian package registries. Built-in registry configs for each.
+- `registry-proxy.ts` - URL parsing, metadata filtering, and tarball backstop for npm, PyPI, Debian, and cargo (crates.io) package registries. Built-in registry configs for each.
 - `package-types.ts` - Shared types for the package installation proxy (`RegistryConfig`, `PackageIdentity`, `PackageValidator`, etc.).
 - `package-validator.ts` - Package validation against allowlist/denylist/age-gate rules. First-match semantics: denylist > allowlist > age gate > default allow.
 
@@ -85,4 +85,4 @@ The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `r
 
 Real credentials (API keys or OAuth tokens) never enter the container. The agent receives a fake sentinel key; the MITM proxy validates it and swaps for the real credential on the host side. OAuth is auto-detected from `~/.claude/.credentials.json` and preferred over API keys; override with `IRONCURTAIN_DOCKER_AUTH=apikey`. Endpoint filtering ensures only specific API paths are accessible (e.g., `POST /v1/messages`).
 
-Package installations are mediated by the registry proxy, which validates packages against allowlist/denylist rules and an age gate (quarantine period for new versions) before allowing downloads from npm, PyPI, or Debian repositories.
+Package installations are mediated by the registry proxy, which validates packages against allowlist/denylist rules and an age gate (quarantine period for new versions) before allowing downloads from npm, PyPI, Debian, or crates.io repositories.

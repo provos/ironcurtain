@@ -46,6 +46,27 @@ export const debianRegistry: RegistryConfig = {
   mirrorHosts: ['security.debian.org'],
 };
 
+// crates.io topology. The three hosts need different handling:
+//   - index.crates.io  : sparse index (version resolution) — metadata filter
+//   - static.crates.io : pure .crate tarball CDN — fail-closed backstop,
+//                        exactly like PyPI's files.pythonhosted.org
+//   - crates.io        : web API host (search/owners/readme) that also
+//                        issues the legacy download redirect — pass-through
+//                        for non-download paths, backstop for downloads
+const CARGO_INDEX_HOST = 'index.crates.io';
+const CARGO_STATIC_HOST = 'static.crates.io';
+const CARGO_API_HOST = 'crates.io';
+
+export const cargoRegistry: RegistryConfig = {
+  // Primary host is the sparse index — where cargo resolves versions.
+  host: CARGO_INDEX_HOST,
+  displayName: 'crates.io',
+  type: 'cargo',
+  // Both download hosts must be in the allowlist so their CONNECTs are
+  // MITM-terminated; handleRegistryRequest then routes each by host.
+  mirrorHosts: [CARGO_API_HOST, CARGO_STATIC_HOST],
+};
+
 // ── PyPI sidecar suffixes (PEP 658 metadata, PEP 714 provenance) ────
 
 const PYPI_SIDECAR_SUFFIXES = ['.metadata', '.provenance'];
@@ -266,6 +287,158 @@ export function parseDebianPackageUrl(path: string): PackageIdentity | undefined
   if (!filename || !filename.endsWith('.deb')) return undefined;
 
   return extractDebianPackageFromFilename(filename);
+}
+
+// ── Cargo / crates.io URL parsing ───────────────────────────────────
+
+/**
+ * Normalizes a crate name for index lookup and cache keying.
+ * crates.io treats names case-insensitively; the sparse index path
+ * is always lowercase.
+ */
+export function normalizeCargoName(name: string): string {
+  return name.toLowerCase();
+}
+
+/**
+ * Computes the sparse-index path for a crate name (without leading /).
+ *
+ * Per the Cargo registry protocol:
+ *   1 char  -> 1/{name}
+ *   2 chars -> 2/{name}
+ *   3 chars -> 3/{first}/{name}
+ *   4+      -> {first-two}/{next-two}/{name}
+ */
+export function cargoSparseIndexPath(name: string): string {
+  const lower = normalizeCargoName(name);
+  switch (lower.length) {
+    case 0:
+      return lower;
+    case 1:
+      return `1/${lower}`;
+    case 2:
+      return `2/${lower}`;
+    case 3:
+      return `3/${lower[0]}/${lower}`;
+    default:
+      return `${lower.slice(0, 2)}/${lower.slice(2, 4)}/${lower}`;
+  }
+}
+
+/** Valid crate name characters: ASCII alphanumerics, `-`, `_`. */
+const CARGO_NAME_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Parses a crates.io sparse-index URL path into a PackageIdentity.
+ * Returns undefined for /config.json and paths that don't conform to
+ * the sparse-index prefix layout.
+ */
+export function parseCargoSparseIndexUrl(path: string): PackageIdentity | undefined {
+  const cleanPath = path.split('?')[0].replace(/^\/+/, '');
+  if (cleanPath === 'config.json' || cleanPath === '') return undefined;
+
+  const segments = cleanPath.split('/');
+  const name = segments[segments.length - 1];
+  if (!name || !CARGO_NAME_RE.test(name)) return undefined;
+
+  // Verify the prefix matches the name (reject arbitrary paths).
+  if (cargoSparseIndexPath(name) !== cleanPath.toLowerCase()) return undefined;
+
+  return { registry: 'cargo', name: normalizeCargoName(name) };
+}
+
+/**
+ * Parses a crates.io download URL into a PackageIdentity.
+ *
+ * Patterns (across crates.io and static.crates.io):
+ *   /api/v1/crates/{name}/{version}/download
+ *   /crates/{name}/{version}/download
+ *   /crates/{name}/{name}-{version}.crate
+ */
+export function parseCargoDownloadUrl(path: string): PackageIdentity | undefined {
+  const cleanPath = path.split('?')[0];
+
+  // /api/v1/crates/{name}/{version}/download  or  /crates/{name}/{version}/download
+  const dlMatch = cleanPath.match(/^(?:\/api\/v1)?\/crates\/([A-Za-z0-9_-]+)\/([^/]+)\/download$/);
+  if (dlMatch) {
+    return { registry: 'cargo', name: normalizeCargoName(dlMatch[1]), version: dlMatch[2] };
+  }
+
+  // /crates/{name}/{name}-{version}.crate
+  const crateMatch = cleanPath.match(/^\/crates\/([A-Za-z0-9_-]+)\/([^/]+)\.crate$/);
+  if (crateMatch) {
+    const name = crateMatch[1];
+    const filename = crateMatch[2];
+    const prefix = `${name}-`;
+    // crates.io treats crate names case-insensitively; cargo emits the
+    // canonical case but compare case-insensitively so a mixed-case dir vs
+    // filename (e.g. /crates/Inflector/inflector-0.11.4.crate) still parses
+    // rather than being denied.
+    if (!filename.toLowerCase().startsWith(prefix.toLowerCase())) return undefined;
+    const version = filename.slice(prefix.length);
+    if (!version) return undefined;
+    return { registry: 'cargo', name: normalizeCargoName(name), version };
+  }
+
+  return undefined;
+}
+
+/** One line of the crates.io sparse index (newline-delimited JSON). */
+interface CargoIndexLine {
+  readonly name: string;
+  readonly vers: string;
+  readonly yanked?: boolean;
+  /** Publish timestamp (RFC 3339), backfilled across all versions. */
+  readonly pubtime?: string;
+  readonly [key: string]: unknown;
+}
+
+/**
+ * Filters a crates.io sparse-index file (newline-delimited JSON) to
+ * remove disallowed versions. Each line is a self-contained JSON object
+ * carrying its own `pubtime`, so no side-channel timestamp fetch is
+ * needed (unlike PyPI).
+ */
+export function filterCargoSparseIndex(
+  ndjson: string,
+  validator: PackageValidator,
+  packageName: string,
+): { filtered: string; denied: Array<{ version: string; reason: string }>; allowedVersions: Set<string> } {
+  const denied: Array<{ version: string; reason: string }> = [];
+  const allowedVersions = new Set<string>();
+  const kept: string[] = [];
+
+  for (const rawLine of ndjson.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    let entry: CargoIndexLine;
+    try {
+      entry = JSON.parse(line) as CargoIndexLine;
+    } catch {
+      // Unparseable line — drop it (fail-closed).
+      continue;
+    }
+    if (!entry.vers) continue;
+
+    const rawDate = entry.pubtime ? new Date(entry.pubtime) : undefined;
+    const publishedAt = rawDate && Number.isFinite(rawDate.getTime()) ? rawDate : undefined;
+
+    const decision = validator.validate(
+      { registry: 'cargo', name: packageName, version: entry.vers },
+      publishedAt !== undefined ? { publishedAt } : undefined,
+    );
+
+    if (decision.status === 'allow') {
+      allowedVersions.add(entry.vers);
+      kept.push(line);
+    } else {
+      denied.push({ version: entry.vers, reason: decision.reason });
+    }
+  }
+
+  // Trailing newline keeps cargo's NDJSON parser happy on an empty result.
+  return { filtered: kept.join('\n') + '\n', denied, allowedVersions };
 }
 
 // ── Request classification ──────────────────────────────────────────
@@ -500,6 +673,28 @@ export async function handleRegistryRequest(
     case 'debian':
       await handleDebianRequest(registry, path, clientReq, clientRes, host, port, options);
       break;
+    case 'cargo':
+      if (host === CARGO_STATIC_HOST) {
+        // Pure tarball CDN — fail closed on any unrecognized path, exactly
+        // like PyPI's files.pythonhosted.org. Every request must validate as
+        // a crate download or be denied (handleTarballDownload 403s on an
+        // unparseable URL); there are no legitimate non-download requests.
+        await handleTarballDownload(registry, path, clientRes, host, port, options, 'cargo');
+      } else if (host === CARGO_API_HOST) {
+        // Web API host: validate the download redirect; pass non-download
+        // endpoints (search, owners, readme) through unmodified.
+        if (parseCargoDownloadUrl(path)) {
+          await handleTarballDownload(registry, path, clientRes, host, port, options, 'cargo');
+        } else {
+          await forwardUpstream(clientReq, clientRes, host, port);
+        }
+      } else if (parseCargoSparseIndexUrl(path)) {
+        await handleCargoSparseIndex(registry, path, clientReq, clientRes, host, port, options);
+      } else {
+        // index.crates.io/config.json and anything unrecognized — pass through.
+        await forwardUpstream(clientReq, clientRes, host, port);
+      }
+      break;
     default: {
       const _exhaustive: never = registry.type;
       throw new Error(`Unknown registry type: ${String(_exhaustive)}`);
@@ -679,7 +874,7 @@ async function handleTarballDownload(
   options: RegistryHandlerOptions,
   registryType: RegistryType,
 ): Promise<void> {
-  const pkg = registryType === 'npm' ? parseNpmUrl(path) : parsePypiTarballUrl(path);
+  const pkg = parseTarballUrl(registryType, path);
   if (!pkg || !pkg.version) {
     // Can't parse -- fail-closed
     logger.info(`[registry-proxy] tarball backstop: can't parse URL, denying: ${path}`);
@@ -771,6 +966,94 @@ async function handleTarballDownload(
   }
 }
 
+/** Dispatches tarball-URL parsing by registry type. */
+function parseTarballUrl(registryType: RegistryType, path: string): PackageIdentity | undefined {
+  switch (registryType) {
+    case 'npm':
+      return parseNpmUrl(path);
+    case 'pypi':
+      return parsePypiTarballUrl(path);
+    case 'cargo':
+      return parseCargoDownloadUrl(path);
+    case 'debian':
+      return parseDebianPackageUrl(path);
+  }
+}
+
+async function handleCargoSparseIndex(
+  _registry: RegistryConfig,
+  path: string,
+  clientReq: http.IncomingMessage,
+  clientRes: http.ServerResponse,
+  host: string,
+  port: number,
+  options: RegistryHandlerOptions,
+): Promise<void> {
+  const pkg = parseCargoSparseIndexUrl(path);
+  if (!pkg) {
+    await forwardUpstream(clientReq, clientRes, host, port);
+    return;
+  }
+
+  try {
+    const ndjson = await fetchUpstreamText(host, port, path, 'text/plain');
+    if (ndjson === undefined) {
+      // Cargo treats 404/non-200 here as "crate not found" — preserve that.
+      clientRes.writeHead(404, { 'Content-Type': 'text/plain' });
+      clientRes.end('Not Found');
+      return;
+    }
+
+    const { filtered, denied, allowedVersions } = filterCargoSparseIndex(ndjson, options.validator, pkg.name);
+
+    setCachedVersions(options.cache, pkg, allowedVersions);
+
+    for (const d of denied) {
+      writeAuditEntry(options.auditLogPath, {
+        timestamp: new Date().toISOString(),
+        registry: pkg.registry,
+        packageName: pkg.name,
+        packageVersion: d.version,
+        decision: 'deny',
+        reason: d.reason,
+        source: 'metadata-filter',
+        requestPath: path,
+      });
+    }
+
+    if (allowedVersions.size > 0) {
+      writeAuditEntry(options.auditLogPath, {
+        timestamp: new Date().toISOString(),
+        registry: pkg.registry,
+        packageName: pkg.name,
+        packageVersion: `${allowedVersions.size} version(s)`,
+        decision: 'allow',
+        reason: 'Passed all validation checks',
+        source: 'metadata-filter',
+        requestPath: path,
+      });
+    }
+
+    if (denied.length > 0) {
+      logger.info(
+        `[registry-proxy] cargo ${pkg.name}: filtered ${denied.length} version(s), ${allowedVersions.size} allowed`,
+      );
+    }
+
+    clientRes.writeHead(200, {
+      'Content-Type': 'text/plain',
+      'Content-Length': Buffer.byteLength(filtered),
+    });
+    clientRes.end(filtered);
+  } catch (err) {
+    logger.info(
+      `[registry-proxy] cargo index error for ${pkg.name}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+    clientRes.end('Failed to process crate index');
+  }
+}
+
 async function handleDebianRequest(
   _registry: RegistryConfig,
   path: string,
@@ -844,6 +1127,24 @@ async function fetchAndValidateVersion(
     }
     const deniedEntry = denied.find((d) => d.version === pkg.version);
     return { status: 'deny', reason: deniedEntry?.reason ?? 'Version not found in package metadata' };
+  }
+
+  if (registry.type === 'cargo') {
+    // Sparse index carries pubtime per line — fetch it directly from
+    // index.crates.io regardless of which mirror the tarball request hit.
+    const indexPath = `/${cargoSparseIndexPath(pkg.name)}`;
+    const ndjson = await fetchUpstreamText(cargoRegistry.host, 443, indexPath, 'text/plain');
+    if (ndjson === undefined) {
+      return { status: 'deny', reason: 'Failed to fetch crate index from upstream' };
+    }
+    const { denied, allowedVersions } = filterCargoSparseIndex(ndjson, options.validator, pkg.name);
+    setCachedVersions(options.cache, pkg, allowedVersions);
+
+    if (pkg.version !== undefined && allowedVersions.has(pkg.version)) {
+      return { status: 'allow', reason: 'Version passed validation' };
+    }
+    const deniedEntry = denied.find((d) => d.version === pkg.version);
+    return { status: 'deny', reason: deniedEntry?.reason ?? 'Version not found in crate index' };
   }
 
   // PyPI: fetch JSON API for timestamps, validate ALL versions, populate cache

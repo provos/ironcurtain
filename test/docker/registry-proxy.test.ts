@@ -19,6 +19,11 @@ import {
   handleRegistryRequest,
   npmRegistry,
   debianRegistry,
+  cargoRegistry,
+  cargoSparseIndexPath,
+  parseCargoSparseIndexUrl,
+  parseCargoDownloadUrl,
+  filterCargoSparseIndex,
   type NpmPackument,
   type RegistryHandlerOptions,
 } from '../../src/docker/registry-proxy.js';
@@ -755,5 +760,254 @@ describe('handleRegistryRequest: debian', () => {
     });
     // Debian packages bypass quarantine via epoch publishedAt
     expect(validatedMetadata?.publishedAt).toEqual(new Date(0));
+  });
+});
+
+// ── Cargo sparse-index path computation ─────────────────────────────
+
+describe('cargoSparseIndexPath', () => {
+  it('handles 1-char crate names', () => {
+    expect(cargoSparseIndexPath('a')).toBe('1/a');
+  });
+
+  it('handles 2-char crate names', () => {
+    expect(cargoSparseIndexPath('io')).toBe('2/io');
+  });
+
+  it('handles 3-char crate names', () => {
+    expect(cargoSparseIndexPath('rmp')).toBe('3/r/rmp');
+  });
+
+  it('handles 4+ char crate names', () => {
+    expect(cargoSparseIndexPath('serde')).toBe('se/rd/serde');
+    expect(cargoSparseIndexPath('tokio')).toBe('to/ki/tokio');
+  });
+
+  it('lowercases the name', () => {
+    expect(cargoSparseIndexPath('Serde')).toBe('se/rd/serde');
+  });
+});
+
+// ── Cargo sparse-index URL parsing ──────────────────────────────────
+
+describe('parseCargoSparseIndexUrl', () => {
+  it('parses 4+ char crate path', () => {
+    expect(parseCargoSparseIndexUrl('/se/rd/serde')).toEqual({ registry: 'cargo', name: 'serde' });
+  });
+
+  it('parses 3-char crate path', () => {
+    expect(parseCargoSparseIndexUrl('/3/r/rmp')).toEqual({ registry: 'cargo', name: 'rmp' });
+  });
+
+  it('parses 2-char crate path', () => {
+    expect(parseCargoSparseIndexUrl('/2/io')).toEqual({ registry: 'cargo', name: 'io' });
+  });
+
+  it('parses 1-char crate path', () => {
+    expect(parseCargoSparseIndexUrl('/1/a')).toEqual({ registry: 'cargo', name: 'a' });
+  });
+
+  it('returns undefined for /config.json', () => {
+    expect(parseCargoSparseIndexUrl('/config.json')).toBeUndefined();
+  });
+
+  it('returns undefined for root', () => {
+    expect(parseCargoSparseIndexUrl('/')).toBeUndefined();
+  });
+
+  it('returns undefined when prefix does not match name', () => {
+    // Wrong prefix for "serde" — should be /se/rd/serde
+    expect(parseCargoSparseIndexUrl('/ab/cd/serde')).toBeUndefined();
+  });
+
+  it('returns undefined for invalid crate-name characters', () => {
+    expect(parseCargoSparseIndexUrl('/se/rd/ser.de')).toBeUndefined();
+  });
+
+  it('strips query string', () => {
+    expect(parseCargoSparseIndexUrl('/se/rd/serde?foo=bar')).toEqual({ registry: 'cargo', name: 'serde' });
+  });
+});
+
+// ── Cargo download URL parsing ──────────────────────────────────────
+
+describe('parseCargoDownloadUrl', () => {
+  it('parses static.crates.io /crates/{name}/{version}/download', () => {
+    expect(parseCargoDownloadUrl('/crates/serde/1.0.193/download')).toEqual({
+      registry: 'cargo',
+      name: 'serde',
+      version: '1.0.193',
+    });
+  });
+
+  it('parses crates.io API /api/v1/crates/{name}/{version}/download', () => {
+    expect(parseCargoDownloadUrl('/api/v1/crates/tokio/1.35.1/download')).toEqual({
+      registry: 'cargo',
+      name: 'tokio',
+      version: '1.35.1',
+    });
+  });
+
+  it('parses /crates/{name}/{name}-{version}.crate', () => {
+    expect(parseCargoDownloadUrl('/crates/serde/serde-1.0.193.crate')).toEqual({
+      registry: 'cargo',
+      name: 'serde',
+      version: '1.0.193',
+    });
+  });
+
+  it('handles pre-release versions', () => {
+    expect(parseCargoDownloadUrl('/crates/tokio/1.0.0-rc.1/download')).toEqual({
+      registry: 'cargo',
+      name: 'tokio',
+      version: '1.0.0-rc.1',
+    });
+  });
+
+  it('handles underscores in crate names', () => {
+    expect(parseCargoDownloadUrl('/crates/serde_json/1.0.108/download')).toEqual({
+      registry: 'cargo',
+      name: 'serde_json',
+      version: '1.0.108',
+    });
+  });
+
+  it('lowercases the crate name', () => {
+    expect(parseCargoDownloadUrl('/crates/Inflector/0.11.4/download')?.name).toBe('inflector');
+  });
+
+  it('returns undefined for non-download paths', () => {
+    expect(parseCargoDownloadUrl('/api/v1/crates/serde')).toBeUndefined();
+    expect(parseCargoDownloadUrl('/api/v1/crates/serde/owners')).toBeUndefined();
+    expect(parseCargoDownloadUrl('/')).toBeUndefined();
+  });
+
+  it('returns undefined when .crate filename does not match crate name', () => {
+    expect(parseCargoDownloadUrl('/crates/serde/tokio-1.0.0.crate')).toBeUndefined();
+  });
+
+  it('parses canonical mixed-case .crate filenames', () => {
+    expect(parseCargoDownloadUrl('/crates/Inflector/Inflector-0.11.4.crate')).toEqual({
+      registry: 'cargo',
+      name: 'inflector',
+      version: '0.11.4',
+    });
+  });
+
+  it('parses .crate when dir and filename case differ (case-insensitive prefix)', () => {
+    expect(parseCargoDownloadUrl('/crates/Inflector/inflector-0.11.4.crate')).toEqual({
+      registry: 'cargo',
+      name: 'inflector',
+      version: '0.11.4',
+    });
+  });
+});
+
+// ── Cargo sparse-index filtering ────────────────────────────────────
+
+describe('filterCargoSparseIndex', () => {
+  const oldDate = '2023-01-01T00:00:00Z';
+  const newDate = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(); // 1 day ago
+
+  const ndjson =
+    [
+      JSON.stringify({ name: 'serde', vers: '1.0.100', cksum: 'a', yanked: false, pubtime: oldDate }),
+      JSON.stringify({ name: 'serde', vers: '1.0.193', cksum: 'b', yanked: false, pubtime: oldDate }),
+      JSON.stringify({ name: 'serde', vers: '1.0.999', cksum: 'c', yanked: false, pubtime: newDate }),
+    ].join('\n') + '\n';
+
+  it('filters out versions newer than quarantine period', () => {
+    const validator = createPackageValidator({ quarantineDays: 7 });
+    const { filtered, denied, allowedVersions } = filterCargoSparseIndex(ndjson, validator, 'serde');
+
+    expect(filtered).toContain('"vers":"1.0.100"');
+    expect(filtered).toContain('"vers":"1.0.193"');
+    expect(filtered).not.toContain('"vers":"1.0.999"');
+    expect(denied).toHaveLength(1);
+    expect(denied[0].version).toBe('1.0.999');
+    expect(allowedVersions).toEqual(new Set(['1.0.100', '1.0.193']));
+  });
+
+  it('outputs valid newline-delimited JSON', () => {
+    const validator = createPackageValidator({ quarantineDays: 0 });
+    const { filtered } = filterCargoSparseIndex(ndjson, validator, 'serde');
+
+    const lines = filtered.split('\n').filter((l) => l.trim());
+    expect(lines).toHaveLength(3);
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+  });
+
+  it('treats missing pubtime as fail-closed under quarantine', () => {
+    const noTime = JSON.stringify({ name: 'serde', vers: '2.0.0', cksum: 'd', yanked: false }) + '\n';
+    const validator = createPackageValidator({ quarantineDays: 7 });
+    const { allowedVersions, denied } = filterCargoSparseIndex(noTime, validator, 'serde');
+
+    expect(allowedVersions.size).toBe(0);
+    expect(denied[0].reason).toContain('fail-closed');
+  });
+
+  it('drops unparseable lines (fail-closed)', () => {
+    const garbage = '{"name":"serde","vers":"1.0.0","pubtime":"' + oldDate + '"}\nnot json\n';
+    const validator = createPackageValidator({ quarantineDays: 0 });
+    const { allowedVersions } = filterCargoSparseIndex(garbage, validator, 'serde');
+
+    expect(allowedVersions).toEqual(new Set(['1.0.0']));
+  });
+
+  it('removes all versions for denylisted crates', () => {
+    const validator = createPackageValidator({ deniedPackages: ['serde'] });
+    const { allowedVersions, denied } = filterCargoSparseIndex(ndjson, validator, 'serde');
+
+    expect(allowedVersions.size).toBe(0);
+    expect(denied).toHaveLength(3);
+  });
+});
+
+// ── Cargo handleRegistryRequest ─────────────────────────────────────
+
+describe('handleRegistryRequest: cargo', () => {
+  it('blocks .crate download not in allowed cache (tarball backstop)', async () => {
+    const cache: AllowedVersionCache = new Map();
+    setCachedVersions(cache, { registry: 'cargo', name: 'serde' }, new Set(['1.0.100']));
+
+    const options: RegistryHandlerOptions = { validator: DENY_ALL_VALIDATOR, cache };
+    const req = fakeReq('/crates/serde/1.0.999/download');
+    const res = fakeRes();
+
+    await handleRegistryRequest(cargoRegistry, req, res, 'static.crates.io', 443, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('Forbidden');
+    expect(res.body).toContain('serde');
+  });
+
+  it('blocks API download path on crates.io', async () => {
+    const cache: AllowedVersionCache = new Map();
+    setCachedVersions(cache, { registry: 'cargo', name: 'tokio' }, new Set(['1.0.0']));
+
+    const options: RegistryHandlerOptions = { validator: DENY_ALL_VALIDATOR, cache };
+    const req = fakeReq('/api/v1/crates/tokio/1.35.1/download');
+    const res = fakeRes();
+
+    await handleRegistryRequest(cargoRegistry, req, res, 'crates.io', 443, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('tokio');
+  });
+
+  it('fails closed on an unrecognized path on static.crates.io (no pass-through)', async () => {
+    // static.crates.io is a pure tarball CDN — like files.pythonhosted.org it
+    // must never pass a request straight upstream. An unparseable path is
+    // denied rather than forwarded unvalidated.
+    const options: RegistryHandlerOptions = { validator: DENY_ALL_VALIDATOR, cache: new Map() };
+    const req = fakeReq('/some/unexpected/path');
+    const res = fakeRes();
+
+    await handleRegistryRequest(cargoRegistry, req, res, 'static.crates.io', 443, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('Forbidden');
   });
 });

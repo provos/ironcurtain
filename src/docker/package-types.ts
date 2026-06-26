@@ -10,7 +10,7 @@
  * Each type determines how package names and versions are extracted
  * from HTTP request paths, and how metadata responses are filtered.
  */
-export type RegistryType = 'npm' | 'pypi' | 'debian';
+export type RegistryType = 'npm' | 'pypi' | 'debian' | 'cargo';
 
 /**
  * Configuration for a package registry host.
