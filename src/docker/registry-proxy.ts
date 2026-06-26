@@ -46,15 +46,25 @@ export const debianRegistry: RegistryConfig = {
   mirrorHosts: ['security.debian.org'],
 };
 
+// crates.io topology. The three hosts need different handling:
+//   - index.crates.io  : sparse index (version resolution) — metadata filter
+//   - static.crates.io : pure .crate tarball CDN — fail-closed backstop,
+//                        exactly like PyPI's files.pythonhosted.org
+//   - crates.io        : web API host (search/owners/readme) that also
+//                        issues the legacy download redirect — pass-through
+//                        for non-download paths, backstop for downloads
+const CARGO_INDEX_HOST = 'index.crates.io';
+const CARGO_STATIC_HOST = 'static.crates.io';
+const CARGO_API_HOST = 'crates.io';
+
 export const cargoRegistry: RegistryConfig = {
   // Primary host is the sparse index — where cargo resolves versions.
-  host: 'index.crates.io',
+  host: CARGO_INDEX_HOST,
   displayName: 'crates.io',
   type: 'cargo',
-  // crates.io serves the API download redirect; static.crates.io serves
-  // the actual .crate tarballs (mirrors the PyPI files.pythonhosted.org
-  // pattern).
-  mirrorHosts: ['crates.io', 'static.crates.io'],
+  // Both download hosts must be in the allowlist so their CONNECTs are
+  // MITM-terminated; handleRegistryRequest then routes each by host.
+  mirrorHosts: [CARGO_API_HOST, CARGO_STATIC_HOST],
 };
 
 // ── PyPI sidecar suffixes (PEP 658 metadata, PEP 714 provenance) ────
@@ -360,7 +370,11 @@ export function parseCargoDownloadUrl(path: string): PackageIdentity | undefined
     const name = crateMatch[1];
     const filename = crateMatch[2];
     const prefix = `${name}-`;
-    if (!filename.startsWith(prefix)) return undefined;
+    // crates.io treats crate names case-insensitively; cargo emits the
+    // canonical case but compare case-insensitively so a mixed-case dir vs
+    // filename (e.g. /crates/Inflector/inflector-0.11.4.crate) still parses
+    // rather than being denied.
+    if (!filename.toLowerCase().startsWith(prefix.toLowerCase())) return undefined;
     const version = filename.slice(prefix.length);
     if (!version) return undefined;
     return { registry: 'cargo', name: normalizeCargoName(name), version };
@@ -660,10 +674,15 @@ export async function handleRegistryRequest(
       await handleDebianRequest(registry, path, clientReq, clientRes, host, port, options);
       break;
     case 'cargo':
-      if (registry.mirrorHosts?.includes(host)) {
-        // crates.io API + static.crates.io serve downloads. Anything we
-        // can't identify as a crate download (search, owners, readme)
-        // passes through.
+      if (host === CARGO_STATIC_HOST) {
+        // Pure tarball CDN — fail closed on any unrecognized path, exactly
+        // like PyPI's files.pythonhosted.org. Every request must validate as
+        // a crate download or be denied (handleTarballDownload 403s on an
+        // unparseable URL); there are no legitimate non-download requests.
+        await handleTarballDownload(registry, path, clientRes, host, port, options, 'cargo');
+      } else if (host === CARGO_API_HOST) {
+        // Web API host: validate the download redirect; pass non-download
+        // endpoints (search, owners, readme) through unmodified.
         if (parseCargoDownloadUrl(path)) {
           await handleTarballDownload(registry, path, clientRes, host, port, options, 'cargo');
         } else {

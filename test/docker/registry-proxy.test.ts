@@ -885,6 +885,22 @@ describe('parseCargoDownloadUrl', () => {
   it('returns undefined when .crate filename does not match crate name', () => {
     expect(parseCargoDownloadUrl('/crates/serde/tokio-1.0.0.crate')).toBeUndefined();
   });
+
+  it('parses canonical mixed-case .crate filenames', () => {
+    expect(parseCargoDownloadUrl('/crates/Inflector/Inflector-0.11.4.crate')).toEqual({
+      registry: 'cargo',
+      name: 'inflector',
+      version: '0.11.4',
+    });
+  });
+
+  it('parses .crate when dir and filename case differ (case-insensitive prefix)', () => {
+    expect(parseCargoDownloadUrl('/crates/Inflector/inflector-0.11.4.crate')).toEqual({
+      registry: 'cargo',
+      name: 'inflector',
+      version: '0.11.4',
+    });
+  });
 });
 
 // ── Cargo sparse-index filtering ────────────────────────────────────
@@ -979,5 +995,19 @@ describe('handleRegistryRequest: cargo', () => {
 
     expect(res.statusCode).toBe(403);
     expect(res.body).toContain('tokio');
+  });
+
+  it('fails closed on an unrecognized path on static.crates.io (no pass-through)', async () => {
+    // static.crates.io is a pure tarball CDN — like files.pythonhosted.org it
+    // must never pass a request straight upstream. An unparseable path is
+    // denied rather than forwarded unvalidated.
+    const options: RegistryHandlerOptions = { validator: DENY_ALL_VALIDATOR, cache: new Map() };
+    const req = fakeReq('/some/unexpected/path');
+    const res = fakeRes();
+
+    await handleRegistryRequest(cargoRegistry, req, res, 'static.crates.io', 443, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('Forbidden');
   });
 });
