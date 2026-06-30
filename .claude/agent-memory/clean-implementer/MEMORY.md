@@ -7,6 +7,9 @@
 - [Evolve N-way fan-out](evolve-fanout.md) — lane-template/orchestrator/bridge layering, barrier-owned stop_signals, per-lane slug collision fix, `ruff check`-only Python gate, best-effort token attribution.
 - [Evolve memory-fusion dogfood](evolve-memory-fusion-dogfood.md) — `IRONCURTAIN_MITM_ALLOW_ALL_HOSTS=1` lets HF model download through the proxy in-container (proven); dump-tap src/rootDir layering + MEMORY_FIXTURE_DUMP_MODULE abs-path; LoCoMo cat-5 has evidence (exclude by category not empty-gold); fixture builder via MemoryEngine directly.
 
+## Golden-QA de-saturation fixture
+- [Golden-QA fixture pipeline](golden-qa-fixture-pipeline.md) — `benchmark/golden/` stages; the `--n`/`--tier-mix` clobber gotcha; conversation-centroid clustering phase transition (caps ~16-18 multi-source → coarser just makes one blob); synthetic-union (M6) is the Tier-B scaler via fact-embedding k-means; pilot baseline numbers.
+
 ## memory-mcp-server package
 - [memory-mcp-server](memory-mcp-server.md) — MemoryEngine/EngineModules seam (config-free handlers, engine closure owns db+LLM), store/insert/merge internals (updateMemoryContent stamps updated_at=now & MAX importance), real-embedder+mocked-LLM test pattern (vi.mock llm/client.js + vi.hoisted), and the memory-ingest §5.4/§11 updated_at internal inconsistency (max(now,asOf)=now, not T_NEW).
 
