@@ -141,7 +141,7 @@
     "madge": "^8.0.0",
     "prettier": "^3.8.4",
     "tsx": "^4.22.4",
-    "typescript": "^5.7.0",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.0",
     "vitest": "^4.0.18"
   }
