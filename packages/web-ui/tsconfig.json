@@ -11,7 +11,7 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["svelte"],
+    "types": ["svelte", "vite/client"],
     "paths": {
       "$lib/*": ["./src/lib/*"]
     }

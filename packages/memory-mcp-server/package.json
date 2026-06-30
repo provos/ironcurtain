@@ -46,8 +46,8 @@
     "openai": "^6.44.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
     "vitest": "^4.0.18",
     "@types/better-sqlite3": "^7.6.13"
   }

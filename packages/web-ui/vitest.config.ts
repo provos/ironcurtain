@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
-  plugins: [svelte({ hot: false }), svelteTesting()],
+  plugins: [svelte(), svelteTesting()],
   resolve: {
     alias: {
       $lib: resolve(__dirname, 'src/lib'),
