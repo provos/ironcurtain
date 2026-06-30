@@ -415,8 +415,15 @@ describe('engine.ingest', () => {
 
     it('ingests good chunks and flags partial/degraded/failed_chunks when one chunk fails', async () => {
       // First chunk → facts; all subsequent chunks → null (hard LLM failure).
+      // The two facts must be semantically unrelated (not "fact A"/"fact B" one-char
+      // variants) so they stay well clear of EXACT_DEDUP_DISTANCE and are never merged
+      // at store time — this test asserts both are created, and must not balance on the
+      // dedup knife-edge (embedding output shifts across model/runtime versions).
       const responses: Array<string | null> = [
-        factsJson([{ fact: 'good chunk fact A' }, { fact: 'good chunk fact B' }]),
+        factsJson([
+          { fact: 'The Eiffel Tower is located in Paris' },
+          { fact: 'Honey never spoils if stored properly' },
+        ]),
       ];
       for (let i = 0; i < 49; i++) responses.push(null);
       setResponses(...responses);
