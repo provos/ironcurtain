@@ -26,7 +26,6 @@ import type {
   WorkflowResult,
   WorkflowCheckpoint,
   ContainerSnapshotRef,
-  WorkflowEvent,
   TransitionRecord,
   HumanGateRequest,
   HumanGateEvent,
@@ -1770,10 +1769,10 @@ export class WorkflowOrchestrator implements WorkflowController {
     // event format that onDone/onError handlers expect.
     servicePromise
       .then((output) => {
-        instance.actor.send({ type: `xstate.done.actor.${stateId}`, output } as unknown as WorkflowEvent);
+        instance.actor.send({ type: `xstate.done.actor.${stateId}`, output });
       })
       .catch((err: unknown) => {
-        instance.actor.send({ type: `xstate.error.actor.${stateId}`, error: err } as unknown as WorkflowEvent);
+        instance.actor.send({ type: `xstate.error.actor.${stateId}`, error: err });
       });
   }
 

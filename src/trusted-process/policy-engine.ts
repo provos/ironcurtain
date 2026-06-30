@@ -308,7 +308,7 @@ const DEFAULT_DENY_RESULT: EvaluationResult = Object.freeze({
   decision: 'deny',
   rule: 'default-deny',
   reason: 'No matching policy rule -- denied by default',
-}) as EvaluationResult;
+});
 
 /** Converts a matched compiled rule into an EvaluationResult. */
 function ruleToResult(rule: CompiledRule): EvaluationResult {

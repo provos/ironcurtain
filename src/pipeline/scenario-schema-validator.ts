@@ -24,7 +24,7 @@ interface JsonSchema {
 }
 
 function asJsonSchema(raw: Record<string, unknown>): JsonSchema {
-  return raw as JsonSchema;
+  return raw;
 }
 
 // ---------------------------------------------------------------------------

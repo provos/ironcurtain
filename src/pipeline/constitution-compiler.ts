@@ -875,7 +875,7 @@ function tryParsePatch(
 ): { ok: true; value: RulePatch } | { ok: false; error: string } {
   try {
     const parsed = parseJsonWithSchema(text, schema);
-    return { ok: true, value: parsed as RulePatch };
+    return { ok: true, value: parsed };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

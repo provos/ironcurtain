@@ -188,7 +188,9 @@ function formatDiffValue(key: string, value: unknown): string {
   if (key.includes('Tokens') || key === 'resourceBudget.maxTotalTokens') return formatTokens(value as number);
   if (key.includes('Seconds') || key === 'resourceBudget.maxSessionSeconds') return formatSeconds(value as number);
   if (key.includes('Cost')) return formatCost(value as number);
-  return String(value as string | number);
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  return JSON.stringify(value);
 }
 
 // ─── Model prompt ────────────────────────────────────────────

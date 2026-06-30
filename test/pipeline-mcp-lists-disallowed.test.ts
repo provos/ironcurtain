@@ -20,7 +20,6 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { MockLanguageModelV3 } from 'ai/test';
-import type { LanguageModel } from 'ai';
 import type { LanguageModelV3CallOptions } from '@ai-sdk/provider';
 
 import { PipelineRunner, type PipelineRunConfig, type PipelineModels } from '../src/pipeline/pipeline-runner.js';
@@ -223,7 +222,7 @@ function makePerServerFakeModels(logPath: string): PipelineModels {
     baseLlm,
     cacheStrategy: identityCacheStrategy,
     logPath,
-    prefilterModel: baseLlm as unknown as LanguageModel,
+    prefilterModel: baseLlm,
   };
 }
 

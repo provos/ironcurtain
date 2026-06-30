@@ -141,10 +141,10 @@ function createMockSpawn(): MockSpawn {
     child.stdout = stdout;
     child.stderr = stderr;
     child.killed = false;
-    child.kill = (() => {
+    child.kill = () => {
       child.killed = true;
       return true;
-    }) as ChildProcess['kill'];
+    };
 
     handles.push({
       child,
@@ -867,11 +867,11 @@ describe('DockerManager', () => {
       // is what lets the SIGKILL path fire.
       const recordingSpawn: SpawnFn = (cmd, args, options) => {
         const child = createMockSpawn().spawn(cmd, args, options) as ChildProcess & { killed: boolean };
-        child.kill = ((signal?: NodeJS.Signals | number) => {
+        child.kill = (signal?: NodeJS.Signals | number) => {
           signals.push(typeof signal === 'string' ? signal : 'SIGTERM');
           child.killed = true;
           return true;
-        }) as ChildProcess['kill'];
+        };
         return child;
       };
 
@@ -906,11 +906,11 @@ describe('DockerManager', () => {
       const signals: NodeJS.Signals[] = [];
       const recordingSpawn: SpawnFn = (cmd, args, options) => {
         const child = inner.spawn(cmd, args, options) as ChildProcess & { killed: boolean };
-        child.kill = ((signal?: NodeJS.Signals | number) => {
+        child.kill = (signal?: NodeJS.Signals | number) => {
           signals.push(typeof signal === 'string' ? signal : 'SIGTERM');
           child.killed = true;
           return true;
-        }) as ChildProcess['kill'];
+        };
         return child;
       };
 
@@ -965,9 +965,9 @@ describe('DockerManager', () => {
       const inner = createMockSpawn();
       const throwingKillSpawn: SpawnFn = (cmd, args, options) => {
         const child = inner.spawn(cmd, args, options) as ChildProcess & { killed: boolean };
-        child.kill = (() => {
+        child.kill = () => {
           throw new Error('unexpected kill() failure');
-        }) as ChildProcess['kill'];
+        };
         return child;
       };
 

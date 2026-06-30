@@ -924,7 +924,7 @@ export function parseSignalEnvelope(data: string): SignalEnvelope | null {
     if (typeof parsed !== 'object' || parsed === null) return null;
     const record = parsed as Record<string, unknown>;
     // json-rpc mode wraps the envelope; fall back to the raw object
-    return (record.envelope ?? parsed) as SignalEnvelope;
+    return record.envelope ?? parsed;
   } catch {
     return null;
   }

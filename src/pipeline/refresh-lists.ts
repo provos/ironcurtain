@@ -69,7 +69,7 @@ function parseRefreshArgs(args: string[]): RefreshListsOptions | null {
     refreshListsSpec.name,
   );
 
-  if (checkHelp(values as { help?: boolean }, refreshListsSpec)) return null;
+  if (checkHelp(values, refreshListsSpec)) return null;
 
   return {
     listName: values.list as string | undefined,

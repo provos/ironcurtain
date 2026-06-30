@@ -60,7 +60,7 @@ export function extractJson(text: string): string {
  */
 export function parseJsonWithSchema<T extends z.ZodType>(text: string, schema: T): z.infer<T> {
   const json: unknown = JSON.parse(extractJson(text));
-  return schema.parse(json) as z.infer<T>;
+  return schema.parse(json);
 }
 
 interface GenerateObjectWithRepairOptions<T extends z.ZodType> {

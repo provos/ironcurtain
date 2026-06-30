@@ -76,7 +76,7 @@ export async function main(args?: string[]): Promise<void> {
     startSpec.name,
   );
 
-  if (checkHelp(values as { help?: boolean }, startSpec)) return;
+  if (checkHelp(values, startSpec)) return;
 
   // Handle --list-agents: print registered agents and exit
   if (values['list-agents']) {

@@ -352,7 +352,7 @@ describe('createWorkflowSessionFactory precedence', () => {
     vi.doMock('../../src/session/index.js', () => ({
       createSession: async (opts: SessionOptions) => {
         capturedOptions = opts;
-        capturedConfig = opts.config as unknown as { agentModelId: string };
+        capturedConfig = opts.config;
         return new MockSession({ responses: ['ok'] });
       },
     }));

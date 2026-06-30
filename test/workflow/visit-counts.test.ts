@@ -196,7 +196,7 @@ describe('visitCounts prompt selection', () => {
         implement: {
           ...(loopDefinition.states.implement as AgentStateDefinition),
           freshSession: undefined,
-        } as WorkflowDefinition['states'][string],
+        },
       },
     };
 
@@ -292,7 +292,7 @@ describe('visitCounts prompt selection', () => {
         implement: {
           ...(loopDefinition.states.implement as AgentStateDefinition),
           freshSession: undefined,
-        } as WorkflowDefinition['states'][string],
+        },
       },
     };
 

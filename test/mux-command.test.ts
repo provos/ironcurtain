@@ -300,7 +300,7 @@ describe('ironcurtain mux preflight integration', () => {
     const resolveSessionMode = vi.fn().mockResolvedValue({
       mode: { kind: 'builtin' },
       reason: 'preferredMode = builtin',
-    } as PreflightResult);
+    });
     const createMuxApp = vi.fn(() => makeFakeMuxApp());
 
     await expect(

@@ -136,7 +136,7 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
     muxSpec.name,
   );
 
-  if (checkHelp(values as { help?: boolean }, muxSpec)) return;
+  if (checkHelp(values, muxSpec)) return;
 
   const requestedAgentRaw = values.agent as string | undefined;
   const model = values.model as string | undefined;

@@ -546,10 +546,10 @@ function fakeRes(): http.ServerResponse & { body: string; statusCode: number } {
   const res = new PassThrough() as unknown as http.ServerResponse & { body: string; statusCode: number };
   res.body = '';
   res.statusCode = 0;
-  res.writeHead = ((code: number) => {
+  res.writeHead = (code: number) => {
     res.statusCode = code;
     return res;
-  }) as unknown as typeof res.writeHead;
+  };
   res.end = ((data?: string) => {
     if (data) res.body = data;
     return res;

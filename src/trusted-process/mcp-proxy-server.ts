@@ -651,7 +651,7 @@ async function main(): Promise<void> {
         serverName,
         name: tool.name,
         description: tool.description,
-        inputSchema: tool.inputSchema as Record<string, unknown>,
+        inputSchema: tool.inputSchema,
       });
     }
   }
@@ -684,7 +684,7 @@ async function main(): Promise<void> {
         serverName: 'proxy',
         name: toolDef.name,
         description: toolDef.description,
-        inputSchema: toolDef.inputSchema as Record<string, unknown>,
+        inputSchema: toolDef.inputSchema,
       });
     }
 

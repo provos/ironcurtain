@@ -305,7 +305,7 @@ describe('createObserveTui pushEvents', () => {
   beforeEach(() => {
     // Mock stdout to capture writes without actually writing to terminal
     writeImpl = process.stdout.write;
-    process.stdout.write = (() => true) as typeof process.stdout.write;
+    process.stdout.write = () => true;
     // Mock stdout dimensions
     Object.defineProperty(process.stdout, 'columns', { value: 120, configurable: true });
     Object.defineProperty(process.stdout, 'rows', { value: 40, configurable: true });
@@ -422,10 +422,10 @@ describe('destroy() cleanup', () => {
   beforeEach(() => {
     captured = [];
     writeImpl = process.stdout.write;
-    process.stdout.write = ((chunk: string | Uint8Array) => {
+    process.stdout.write = (chunk: string | Uint8Array) => {
       captured.push(String(chunk));
       return true;
-    }) as typeof process.stdout.write;
+    };
     Object.defineProperty(process.stdout, 'columns', { value: 120, configurable: true });
     Object.defineProperty(process.stdout, 'rows', { value: 40, configurable: true });
   });
