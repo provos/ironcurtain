@@ -32,6 +32,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { guardStdioStreamErrors } from '../utils/stdio-guard.js';
 import { UdsServerTransport } from './uds-server-transport.js';
 import { TcpServerTransport } from './tcp-server-transport.js';
 import { resolveContainerSpawnCommand } from './container-command.js';
@@ -824,6 +825,7 @@ async function main(): Promise<void> {
   } else if (transportConfig.kind === 'uds') {
     transport = new UdsServerTransport(transportConfig.socketPath);
   } else {
+    guardStdioStreamErrors();
     transport = new StdioServerTransport();
   }
   await server.connect(transport);

@@ -20,6 +20,7 @@ import { JSDOM } from 'jsdom';
 import TurndownService from 'turndown';
 import { VERSION } from '../version.js';
 import { createSearchProvider, formatSearchResults } from './search-providers.js';
+import { guardStdioStreamErrors } from '../utils/stdio-guard.js';
 
 const USER_AGENT = `IronCurtain/${VERSION} (AI Agent Runtime)`;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -424,5 +425,6 @@ async function handleWebSearch(
   }
 }
 
+guardStdioStreamErrors();
 const transport = new StdioServerTransport();
 await server.connect(transport);
