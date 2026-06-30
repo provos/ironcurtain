@@ -178,8 +178,8 @@ function makeCell(overrides: Partial<TranslatedCell> = {}): TranslatedCell {
   return {
     char: ' ',
     width: 1,
-    fg: 'default' as TermkitColor,
-    bg: 'default' as TermkitColor,
+    fg: 'default',
+    bg: 'default',
     bold: false,
     italic: false,
     underline: false,

@@ -283,9 +283,9 @@ describe('parseProxyEnvConfig', () => {
 
   it('calls process.exit(1) when MCP_SERVERS_CONFIG is missing', () => {
     process.env.GENERATED_DIR = '/tmp/gen';
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit');
-    }) as never);
+    });
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     expect(() => parseProxyEnvConfig()).toThrow('process.exit');
@@ -299,9 +299,9 @@ describe('parseProxyEnvConfig', () => {
 
   it('calls process.exit(1) when GENERATED_DIR is missing', () => {
     process.env.MCP_SERVERS_CONFIG = JSON.stringify({ fs: { command: 'node', args: [] } });
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit');
-    }) as never);
+    });
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     expect(() => parseProxyEnvConfig()).toThrow('process.exit');
@@ -317,9 +317,9 @@ describe('parseProxyEnvConfig', () => {
     process.env.MCP_SERVERS_CONFIG = JSON.stringify({ fs: { command: 'node', args: [] } });
     process.env.GENERATED_DIR = '/tmp/gen';
     process.env.SERVER_FILTER = 'nonexistent';
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit');
-    }) as never);
+    });
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     expect(() => parseProxyEnvConfig()).toThrow('process.exit');

@@ -1,5 +1,9 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
+// ErrorCode is a numeric enum; widen to a plain number so the comparison against
+// McpError.code (typed `number`) doesn't trip no-unsafe-enum-comparison.
+const INVALID_PARAMS_CODE: number = ErrorCode.InvalidParams;
+
 /**
  * Extracts a meaningful error message from an MCP server error.
  *
@@ -16,7 +20,7 @@ export function extractMcpErrorMessage(err: unknown): string {
   }
 
   // Schema validation errors wrap the real error in `data`
-  if (err.code === (ErrorCode.InvalidParams as number) && err.data != null) {
+  if (err.code === INVALID_PARAMS_CODE && err.data != null) {
     const extracted = extractFromData(err.data);
     if (extracted) return extracted;
   }

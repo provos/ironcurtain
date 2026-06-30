@@ -498,7 +498,7 @@ describe('Proxy MCP Server Integration', { timeout: 30_000 }, () => {
           GENERATED_DIR: generatedDir,
           ALLOWED_DIRECTORY: tempDir,
           PROTECTED_PATHS: '[]',
-        } as Record<string, string>,
+        },
         stderr: 'pipe',
       });
 

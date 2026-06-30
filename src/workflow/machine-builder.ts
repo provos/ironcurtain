@@ -658,7 +658,7 @@ export function buildWorkflowMachine(
       let workflowEvent: WorkflowEvent;
 
       if (doneEvent.type.startsWith('xstate.done.actor.')) {
-        const result = extractInvokeResult(doneEvent as { output?: unknown });
+        const result = extractInvokeResult(doneEvent);
         if (result) {
           // Special case: isStalled needs access to outputHash and stateId
           // which are not part of AgentOutput/WorkflowEvent.
@@ -705,7 +705,7 @@ export function buildWorkflowMachine(
     let matchSource: Readonly<Record<string, unknown>> | undefined;
 
     if (doneEvent.type.startsWith('xstate.done.actor.')) {
-      const result = extractInvokeResult(doneEvent as { output?: unknown });
+      const result = extractInvokeResult(doneEvent);
       if (result) {
         matchSource = result.output as unknown as Readonly<Record<string, unknown>>;
       } else {
@@ -739,7 +739,7 @@ export function buildWorkflowMachine(
     types: {
       context: {} as WorkflowContext,
       events: {} as WorkflowEvent,
-      input: {} as { context?: WorkflowContext } | undefined,
+      input: {},
     },
     actors: {
       agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(() => {
@@ -848,7 +848,7 @@ export function buildWorkflowMachine(
         if (err instanceof Error) {
           message = err.message;
         } else if (typeof err === 'object' && err !== null && 'message' in err) {
-          message = String((err as { message: unknown }).message);
+          message = String(err.message);
         } else if (typeof err === 'string') {
           message = err;
         } else {

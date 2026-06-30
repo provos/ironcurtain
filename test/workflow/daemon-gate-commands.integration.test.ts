@@ -34,7 +34,6 @@ import { WorkflowManager } from '../../src/workflow/workflow-manager.js';
 import { SessionManager } from '../../src/session/session-manager.js';
 import { getWebUiStatePath } from '../../src/config/paths.js';
 import type { ControlRequestHandler } from '../../src/daemon/control-socket.js';
-import type { RunRecord } from '../../src/cron/types.js';
 import { runDaemonGateCommand } from '../../src/workflow/daemon-gate-commands.js';
 import { createArtifactAwareSession, approvedResponse } from './test-helpers.js';
 import type { Session, SessionOptions } from '../../src/session/types.js';
@@ -61,7 +60,7 @@ function makeMockHandler(): ControlRequestHandler {
     disableJob: vi.fn().mockResolvedValue(undefined),
     recompileJob: vi.fn().mockResolvedValue(undefined),
     reloadJob: vi.fn().mockResolvedValue(undefined),
-    runJobNow: vi.fn().mockResolvedValue({} as RunRecord),
+    runJobNow: vi.fn().mockResolvedValue({}),
     listJobs: vi.fn().mockReturnValue([]),
   };
 }
@@ -154,10 +153,10 @@ beforeEach(() => {
   // overload that `mockRestore` re-derives.
   stdoutChunks.length = 0;
   const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: unknown): boolean => {
+  process.stdout.write = (chunk: unknown): boolean => {
     stdoutChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
     return true;
-  }) as typeof process.stdout.write;
+  };
   restoreStdout = () => {
     process.stdout.write = original;
   };

@@ -192,7 +192,7 @@ describe('DaemonClient', () => {
       const client = makeClient();
       await client.connect();
 
-      const result = await client.call('workflows.resolveGate' as never);
+      const result = await client.call('workflows.resolveGate');
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.code).toBe('WORKFLOW_NOT_AT_GATE');

@@ -661,7 +661,7 @@ function parseConfigJson(raw: string, configPath: string): unknown {
  */
 function warnUnknownFields(parsed: unknown, configPath: string): void {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return;
-  const keys = Object.keys(parsed as Record<string, unknown>);
+  const keys = Object.keys(parsed);
   for (const key of keys) {
     if (!KNOWN_FIELDS.has(key)) {
       process.stderr.write(`Warning: unknown field "${key}" in ${configPath}\n`);
@@ -899,7 +899,7 @@ export function saveUserConfig(changes: UserConfig): void {
     mkdirSync(dirname(configPath), { recursive: true });
   }
 
-  const merged = deepMergeConfig(existing, changes as Record<string, unknown>);
+  const merged = deepMergeConfig(existing, changes);
 
   // Validate the merged result (only known fields)
   const result = userConfigSchema.safeParse(merged);

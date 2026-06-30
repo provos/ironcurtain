@@ -16,15 +16,15 @@ async function captureOutput(fn: () => Promise<void>): Promise<string> {
   const writes: string[] = [];
   const origWrite = process.stdout.write;
   const origErrWrite = process.stderr.write;
-  process.stdout.write = ((chunk: string) => {
+  process.stdout.write = (chunk: string) => {
     writes.push(chunk);
     return true;
-  }) as typeof process.stdout.write;
+  };
   // printHelp() uses console.error which writes to stderr
-  process.stderr.write = ((chunk: string) => {
+  process.stderr.write = (chunk: string) => {
     writes.push(chunk);
     return true;
-  }) as typeof process.stderr.write;
+  };
   const origConsoleError = console.error;
   console.error = ((...args: unknown[]) => {
     writes.push(args.map(String).join(' '));

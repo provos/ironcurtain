@@ -145,7 +145,7 @@ describe('redactObject', () => {
         inner: 'card 4111111111111111',
       },
     });
-    expect((result.outer as { inner: string }).inner).not.toContain('4111111111111111');
+    expect(result.outer.inner).not.toContain('4111111111111111');
   });
 
   it('redacts arrays of strings', () => {
@@ -182,7 +182,7 @@ describe('redactObject', () => {
       },
     };
     const result = redactObject(input);
-    const items = (result.level1 as { level2: Array<{ text: string }> }).level2;
+    const items = result.level1.level2;
     expect(items[0].text).not.toContain(key);
     expect(items[1].text).toBe('no secrets');
   });

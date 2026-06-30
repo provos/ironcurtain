@@ -227,7 +227,7 @@ function createMockHandler(overrides?: Partial<ControlRequestHandler>): ControlR
       },
     ]),
     ...overrides,
-  } as ControlRequestHandler;
+  };
 }
 
 function createMockContext(overrides?: Partial<DispatchContext>): DispatchContext {

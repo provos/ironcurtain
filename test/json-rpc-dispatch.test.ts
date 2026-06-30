@@ -19,7 +19,6 @@ import { SessionManager, type PendingEscalationData } from '../src/session/sessi
 import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
 import type { Session, SessionInfo, BudgetStatus } from '../src/session/types.js';
 import type { Transport } from '../src/session/transport.js';
-import type { RunRecord } from '../src/cron/types.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -101,7 +100,7 @@ function makeMockHandler(): ControlRequestHandler {
       escalationsEncountered: 0,
       escalationsApproved: 0,
       discardedChanges: null,
-    } as RunRecord),
+    }),
     listJobs: vi.fn().mockReturnValue([]),
   };
 }

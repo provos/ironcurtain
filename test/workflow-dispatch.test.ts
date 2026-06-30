@@ -205,7 +205,7 @@ function createContext(opts: {
   baseDir?: string;
 }): WorkflowDispatchContext {
   const controller: WorkflowController = {
-    start: vi.fn().mockResolvedValue('mock-id' as WorkflowId),
+    start: vi.fn().mockResolvedValue('mock-id'),
     resume: vi.fn().mockResolvedValue(undefined),
     listResumable: vi.fn().mockReturnValue([]),
     getStatus: vi.fn().mockReturnValue(undefined),
@@ -1747,7 +1747,7 @@ describe('workflows.messageLog', () => {
       makeLoad({
         checkpoint: makeCheckpoint(),
         definition: makeDefinition(),
-      }) as PastRunLoadResult;
+      });
   }
 
   it('returns an empty page with hasMore=false when the log file is missing', async () => {

@@ -98,10 +98,10 @@ function createMockSpawn(): MockSpawn {
     child.stdout = stdout;
     child.stderr = stderr;
     child.killed = false;
-    child.kill = (() => {
+    child.kill = () => {
       child.killed = true;
       return true;
-    }) as ChildProcess['kill'];
+    };
     const { code, stderrChunk } = nextExit;
     setImmediate(() => {
       if (stderrChunk) stderr.write(stderrChunk);

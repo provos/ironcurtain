@@ -344,7 +344,7 @@ function reportRpcError(mode: OutputMode, result: Extract<RpcResult<unknown>, { 
 
 function extractDiagnostics(data: unknown): unknown[] | undefined {
   if (data !== null && typeof data === 'object' && 'diagnostics' in data) {
-    const diagnostics: unknown = (data as { diagnostics: unknown }).diagnostics;
+    const diagnostics: unknown = data.diagnostics;
     if (Array.isArray(diagnostics)) return diagnostics as unknown[];
   }
   return undefined;

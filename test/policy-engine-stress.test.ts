@@ -1456,8 +1456,8 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        arguments: { path: 42 as any },
+
+        arguments: { path: 42 },
       }),
     );
     expect(result.decision).toBeDefined();
@@ -1468,8 +1468,8 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        arguments: { path: null as any },
+
+        arguments: { path: null },
       }),
     );
     expect(result.decision).toBeDefined();
@@ -1491,8 +1491,8 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        arguments: { path: undefined as any },
+
+        arguments: { path: undefined },
       }),
     );
     expect(result.decision).toBeDefined();

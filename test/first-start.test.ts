@@ -45,9 +45,9 @@ describe('first-start wizard', () => {
     vi.clearAllMocks();
     mocks.isCancel.mockReturnValue(false);
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit');
-    }) as never);
+    });
   });
 
   afterEach(() => {

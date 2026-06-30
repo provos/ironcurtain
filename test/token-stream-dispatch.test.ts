@@ -14,7 +14,6 @@ import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
 import type { Session, SessionInfo, BudgetStatus } from '../src/session/types.js';
 import type { Transport } from '../src/session/transport.js';
 import type { WebSocket as WsWebSocket } from 'ws';
-import type { RunRecord } from '../src/cron/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -78,7 +77,7 @@ function makeMockHandler(): ControlRequestHandler {
     disableJob: vi.fn().mockResolvedValue(undefined),
     recompileJob: vi.fn().mockResolvedValue(undefined),
     reloadJob: vi.fn().mockResolvedValue(undefined),
-    runJobNow: vi.fn().mockResolvedValue({} as RunRecord),
+    runJobNow: vi.fn().mockResolvedValue({}),
     listJobs: vi.fn().mockReturnValue([]),
   };
 }

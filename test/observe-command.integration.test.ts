@@ -103,10 +103,10 @@ function okHandler(req: ParsedRequest, ws: WebSocket): void {
 function captureStderr(): { text(): string; restore(): void } {
   const chunks: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((chunk: unknown): boolean => {
+  process.stderr.write = (chunk: unknown): boolean => {
     chunks.push(typeof chunk === 'string' ? chunk : String(chunk));
     return true;
-  }) as typeof process.stderr.write;
+  };
   return {
     text: () => chunks.join(''),
     restore: () => {

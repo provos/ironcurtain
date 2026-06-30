@@ -22,7 +22,6 @@ import { WebUiServer, type WebUiServerOptions } from '../../src/web-ui/web-ui-se
 import { WorkflowManager } from '../../src/workflow/workflow-manager.js';
 import { SessionManager } from '../../src/session/session-manager.js';
 import type { ControlRequestHandler } from '../../src/daemon/control-socket.js';
-import type { RunRecord } from '../../src/cron/types.js';
 import { createDaemonClient, type DaemonClient, type DaemonEvent } from '../../src/daemon-client/daemon-client.js';
 import { createArtifactAwareSession, approvedResponse } from './test-helpers.js';
 import type { Session, SessionOptions } from '../../src/session/types.js';
@@ -49,7 +48,7 @@ function makeMockHandler(): ControlRequestHandler {
     disableJob: vi.fn().mockResolvedValue(undefined),
     recompileJob: vi.fn().mockResolvedValue(undefined),
     reloadJob: vi.fn().mockResolvedValue(undefined),
-    runJobNow: vi.fn().mockResolvedValue({} as RunRecord),
+    runJobNow: vi.fn().mockResolvedValue({}),
     listJobs: vi.fn().mockReturnValue([]),
   };
 }

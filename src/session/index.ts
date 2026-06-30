@@ -639,7 +639,7 @@ export function buildSessionConfig(
     mkdirSync(dirname(dbPath), { recursive: true });
     sessionConfig.mcpServers[MEMORY_SERVER_NAME] = buildMemoryServerConfig({
       dbPath,
-      namespace: (opts.persona ?? opts.jobId) as string,
+      namespace: opts.persona ?? opts.jobId,
       llmBaseUrl: memoryConfig.llmBaseUrl,
       llmApiKey: memoryConfig.llmApiKey,
       anthropicApiKey: config.userConfig.anthropicApiKey,

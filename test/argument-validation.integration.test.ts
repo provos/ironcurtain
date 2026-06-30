@@ -78,7 +78,7 @@ describe('argument name validation -- real filesystem server', () => {
       serverName: 'filesystem',
       name: tool.name,
       description: tool.description,
-      inputSchema: tool.inputSchema as Record<string, unknown>,
+      inputSchema: tool.inputSchema,
     }));
 
     auditLog = new AuditLog(RAW_AUDIT_PATH);

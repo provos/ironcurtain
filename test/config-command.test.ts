@@ -213,9 +213,9 @@ describe('config-command', () => {
   it('non-TTY exits with error', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit');
-    }) as never);
+    });
     const stderrSpy = vi.spyOn(console, 'error').mockReturnValue();
 
     await expect(runConfigCommand()).rejects.toThrow('process.exit');

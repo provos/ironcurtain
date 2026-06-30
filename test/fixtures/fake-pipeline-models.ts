@@ -18,7 +18,6 @@
  */
 
 import { MockLanguageModelV3 } from 'ai/test';
-import type { LanguageModel } from 'ai';
 import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
 import type { PromptCacheStrategy } from '../../src/session/prompt-cache.js';
 import type { PipelineModels } from '../../src/pipeline/pipeline-runner.js';
@@ -112,6 +111,6 @@ export function createFakePipelineModels(responses: CannedResponses, logPath: st
     // Never called in the golden run (prefilterText undefined). Provided for type
     // completeness; cast through unknown because MockLanguageModelV3 is a V3 model
     // and the prefilter field is typed as the wrapped `LanguageModel`.
-    prefilterModel: baseLlm as unknown as LanguageModel,
+    prefilterModel: baseLlm,
   };
 }

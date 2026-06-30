@@ -170,7 +170,7 @@ describe('loadUserConfig', () => {
   });
 
   it('warns about unknown fields to stderr', () => {
-    writeConfigFile({ unknownField: 'value' } as Record<string, unknown>);
+    writeConfigFile({ unknownField: 'value' });
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     loadUserConfig();
@@ -180,7 +180,7 @@ describe('loadUserConfig', () => {
   });
 
   it('does not throw on unknown fields', () => {
-    writeConfigFile({ extraField: true, anotherExtra: 42 } as Record<string, unknown>);
+    writeConfigFile({ extraField: true, anotherExtra: 42 });
 
     // Should not throw, just warn
     expect(() => loadUserConfig()).not.toThrow();
@@ -410,7 +410,7 @@ describe('loadUserConfig', () => {
     writeConfigFile({
       agentModelId: 'claude-opus-4-6',
       customField: 'keep-me',
-    } as Record<string, unknown>);
+    });
 
     loadUserConfig();
 

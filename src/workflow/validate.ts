@@ -928,7 +928,7 @@ export function validateDefinition(raw: unknown): WorkflowDefinition {
 
   let parsed: WorkflowDefinition;
   try {
-    parsed = workflowDefinitionSchema.parse(raw) as WorkflowDefinition;
+    parsed = workflowDefinitionSchema.parse(raw);
   } catch (err) {
     if (err instanceof z.ZodError) {
       const issues = err.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`);

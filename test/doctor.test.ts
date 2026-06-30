@@ -68,24 +68,24 @@ async function captureOutput(fn: () => Promise<void>): Promise<{ output: string;
   const origStdout = process.stdout.write;
   const origStderr = process.stderr.write;
   const origConsoleError = console.error;
-  process.stdout.write = ((chunk: string) => {
+  process.stdout.write = (chunk: string) => {
     writes.push(typeof chunk === 'string' ? chunk : String(chunk));
     return true;
-  }) as typeof process.stdout.write;
-  process.stderr.write = ((chunk: string) => {
+  };
+  process.stderr.write = (chunk: string) => {
     writes.push(typeof chunk === 'string' ? chunk : String(chunk));
     return true;
-  }) as typeof process.stderr.write;
+  };
   console.error = ((...args: unknown[]) => {
     writes.push(args.map(String).join(' ') + '\n');
   }) as typeof console.error;
 
   const origExit = process.exit;
   let exitCode: number | undefined;
-  process.exit = ((code?: number) => {
+  process.exit = (code?: number) => {
     exitCode = code;
     throw new Error(`__exit_${code ?? 0}`);
-  }) as typeof process.exit;
+  };
 
   try {
     await fn();

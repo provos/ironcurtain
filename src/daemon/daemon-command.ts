@@ -110,7 +110,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     daemonSpec.name,
   );
 
-  if (checkHelp(values as { help?: boolean }, daemonSpec)) {
+  if (checkHelp(values, daemonSpec)) {
     return;
   }
 

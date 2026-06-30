@@ -407,7 +407,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
           ...makeStubInfrastructure(input.workflowId, input.bundleId),
           docker,
           containerId: `container-${input.bundleId}`,
-        } as DockerInfrastructure;
+        };
       });
       const destroyInfra = vi.fn(async () => {});
 
@@ -453,7 +453,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
           ...makeStubInfrastructure(input.workflowId, input.bundleId),
           docker,
           containerId: `resume-container-${input.bundleId}`,
-        } as DockerInfrastructure;
+        };
       });
       const resumeSessionFactory = vi.fn(async () => {
         return new Promise<never>(() => {
@@ -540,7 +540,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
             ...makeStubInfrastructure(input.workflowId, input.bundleId),
             docker,
             containerId: `${prefix}-${input.bundleId}`,
-          } as DockerInfrastructure;
+          };
         });
       const destroyInfra = vi.fn(async () => {});
 

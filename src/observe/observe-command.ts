@@ -136,7 +136,7 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
     observeSpec.name,
   );
 
-  if (checkHelp(values as { help?: boolean }, observeSpec)) return;
+  if (checkHelp(values, observeSpec)) return;
 
   const allMode = values.all as boolean | undefined;
   const labelArg = positionals[0];

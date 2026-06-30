@@ -16,7 +16,7 @@ function setupFakeStdin() {
     if (event === 'data') {
       const raw = args[0];
       const str = raw instanceof Buffer ? raw.toString('utf-8') : (raw as string);
-      emitted.push({ event: event as string, data: str });
+      emitted.push({ event: event, data: str });
     }
     return fakeEmitter.emit(event, ...args);
   } as typeof process.stdin.emit;

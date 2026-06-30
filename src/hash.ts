@@ -19,7 +19,7 @@ export function stableStringify(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     return '[' + value.map(stableStringify).join(',') + ']';
   }
-  const keys = Object.keys(value as Record<string, unknown>).sort();
+  const keys = Object.keys(value).sort();
   const pairs = keys.map(
     (k) => JSON.stringify(k) + ':' + (stableStringify((value as Record<string, unknown>)[k]) ?? ''),
   );

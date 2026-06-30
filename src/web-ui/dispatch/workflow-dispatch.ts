@@ -1159,7 +1159,7 @@ export function extractLastState(machineState: unknown): string {
   if (typeof machineState === 'string') return machineState;
   if (machineState && typeof machineState === 'object') {
     // Nested XState value: { parentState: "childState" }
-    const keys = Object.keys(machineState as Record<string, unknown>);
+    const keys = Object.keys(machineState);
     if (keys.length > 0) return keys[0];
   }
   return 'unknown';
