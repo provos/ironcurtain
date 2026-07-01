@@ -300,6 +300,14 @@ function isDaemonNotRunning(err: unknown): boolean {
  * Returns the connected client on success, or `undefined` on timeout. Arg-array
  * spawn — no shell string concatenation (CLAUDE.md Safe Coding).
  *
+ * `process.execArgv` is prepended so a loader-based invocation survives into the
+ * detached child. Under the documented dev entry `tsx src/cli.ts ...`,
+ * `execPath` is `node` and `argv[1]` is `cli.ts` — which bare `node` cannot
+ * execute — so without the loader flags (`--import tsx/esm`, `--loader`, etc.)
+ * the spawned daemon would exit silently and `--ensure-daemon` would just time
+ * out with `DAEMON_START_TIMEOUT`. For the installed binary `execArgv` is empty,
+ * so this is a no-op on the production path.
+ *
  * Polling on connect (rather than discovery) is what makes readiness real: a
  * stale `web-ui.json` left by a crashed daemon would make `discoverDaemon()`
  * return immediately, but its socket will not accept a connection.
@@ -308,7 +316,7 @@ async function ensureDaemonRunning(): Promise<DaemonClient | undefined> {
   const cliEntry = process.argv[1];
   if (!cliEntry) return undefined;
 
-  const child = spawn(process.execPath, [cliEntry, 'daemon', '--web-ui'], {
+  const child = spawn(process.execPath, [...process.execArgv, cliEntry, 'daemon', '--web-ui'], {
     detached: true,
     stdio: 'ignore',
   });
@@ -325,6 +333,29 @@ async function ensureDaemonRunning(): Promise<DaemonClient | undefined> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Opens a daemon client (honoring `--ensure-daemon`), runs `fn` with it, and
+ * guarantees the socket is closed. Collapses the open/guard/try-finally-close
+ * scaffold that every gate subcommand would otherwise repeat, so a handler can
+ * no longer forget the `if (!client)` guard or the `.catch()` on close.
+ *
+ * Returns {@link EXIT_ERROR} when no daemon can be reached — {@link openClient}
+ * has already reported the specific error on the right channel by then.
+ */
+async function withDaemonClient(
+  mode: OutputMode,
+  ensureDaemon: boolean,
+  fn: (client: DaemonClient) => Promise<number>,
+): Promise<number> {
+  const client = await openClient(mode, ensureDaemon);
+  if (!client) return EXIT_ERROR;
+  try {
+    return await fn(client);
+  } finally {
+    await client.close().catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,10 +429,7 @@ async function runRun(args: string[]): Promise<number> {
     }
   }
 
-  const client = await openClient(mode, values['ensure-daemon'] === true);
-  if (!client) return EXIT_ERROR;
-
-  try {
+  return withDaemonClient(mode, values['ensure-daemon'] === true, async (client) => {
     const params: Record<string, unknown> = { definitionPath, taskDescription };
     if (workspacePath !== undefined) params.workspacePath = workspacePath;
 
@@ -412,9 +440,7 @@ async function runRun(args: string[]): Promise<number> {
     emitJson(mode, { ok: true, workflowId, phase: 'running' });
     emitText(`Started workflow ${workflowId} (use: ironcurtain workflow await ${workflowId})`);
     return EXIT_OK;
-  } finally {
-    await client.close().catch(() => {});
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -435,16 +461,11 @@ async function runStatus(args: string[]): Promise<number> {
     return EXIT_USAGE;
   }
 
-  const client = await openClient(mode, values['ensure-daemon'] === true);
-  if (!client) return EXIT_ERROR;
-
-  try {
+  return withDaemonClient(mode, values['ensure-daemon'] === true, async (client) => {
     const result = await client.call<WorkflowDetailDto>('workflows.get', { workflowId });
     if (!result.ok) return reportRpcError(mode, result);
     return emitStatus(mode, result.payload);
-  } finally {
-    await client.close().catch(() => {});
-  }
+  });
 }
 
 /** Emits a status projection and returns the phase-derived exit code. */
@@ -487,14 +508,9 @@ async function runAwait(args: string[]): Promise<number> {
     return EXIT_USAGE;
   }
 
-  const client = await openClient(mode, values['ensure-daemon'] === true);
-  if (!client) return EXIT_ERROR;
-
-  try {
-    return await awaitDecisionPoint(client, mode, workflowId, timeoutSec * 1000);
-  } finally {
-    await client.close().catch(() => {});
-  }
+  return withDaemonClient(mode, values['ensure-daemon'] === true, (client) =>
+    awaitDecisionPoint(client, mode, workflowId, timeoutSec * 1000),
+  );
 }
 
 /**
@@ -652,10 +668,7 @@ async function runGate(args: string[]): Promise<number> {
     return fail(mode, 'INVALID_PARAMS', { message: `Feedback is required for ${event} events` }, EXIT_USAGE);
   }
 
-  const client = await openClient(mode, values['ensure-daemon'] === true);
-  if (!client) return EXIT_ERROR;
-
-  try {
+  return withDaemonClient(mode, values['ensure-daemon'] === true, async (client) => {
     const params: Record<string, unknown> = { workflowId, event };
     if (prompt !== undefined) params.prompt = prompt;
 
@@ -665,9 +678,7 @@ async function runGate(args: string[]): Promise<number> {
     emitJson(mode, { ok: true, workflowId, event });
     emitText(`Resolved gate for ${workflowId} with ${event}`);
     return EXIT_OK;
-  } finally {
-    await client.close().catch(() => {});
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -694,10 +705,7 @@ async function runShow(args: string[]): Promise<number> {
     return EXIT_USAGE;
   }
 
-  const client = await openClient(mode, values['ensure-daemon'] === true);
-  if (!client) return EXIT_ERROR;
-
-  try {
+  return withDaemonClient(mode, values['ensure-daemon'] === true, async (client) => {
     const result = await client.call<ArtifactContent>('workflows.artifacts', { workflowId, artifactName });
     if (!result.ok) return reportRpcError(mode, result);
 
@@ -707,9 +715,7 @@ async function runShow(args: string[]): Promise<number> {
       emitText(file.content);
     }
     return EXIT_OK;
-  } finally {
-    await client.close().catch(() => {});
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
