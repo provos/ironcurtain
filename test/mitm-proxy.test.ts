@@ -959,7 +959,7 @@ describe('MitmProxy', () => {
     // One-shot override: the single upstream forward this test triggers is
     // intercepted (no network); all other https.request calls fall back to the
     // call-through default installed by vi.mock above.
-    vi.mocked(https.request).mockImplementationOnce(((...args: unknown[]): http.ClientRequest => {
+    vi.mocked(https.request).mockImplementationOnce((...args: unknown[]): http.ClientRequest => {
       const opts = (args[0] ?? {}) as { hostname?: unknown; port?: unknown };
       captured.hostname = opts.hostname;
       captured.port = opts.port;
@@ -969,7 +969,7 @@ describe('MitmProxy', () => {
       // forwardToUpstream resolves with a 502 and the client request ends.
       setImmediate(() => fake.emit('error', new Error('mock upstream')));
       return fake;
-    }) as unknown as typeof https.request);
+    });
 
     const debianRegistry: RegistryConfig = { host: 'deb.debian.org', displayName: 'Debian', type: 'debian' };
     proxy = createMitmProxy({

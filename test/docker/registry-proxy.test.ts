@@ -1054,12 +1054,12 @@ describe('handleRegistryRequest: debian plain-HTTP path (URL rewrite from absolu
    * that any audit entry was written before forwarding, with zero network I/O.
    */
   function mockUpstreamOnce(): void {
-    vi.mocked(https.request).mockImplementationOnce(((): http.ClientRequest => {
+    vi.mocked(https.request).mockImplementationOnce((): http.ClientRequest => {
       const fake = new PassThrough() as unknown as http.ClientRequest;
       (fake as unknown as { setTimeout: () => void }).setTimeout = () => {};
       setImmediate(() => fake.emit('error', new Error('mock upstream (no network in tests)')));
       return fake;
-    }) as unknown as typeof https.request);
+    });
   }
 
   /** Reads a JSONL audit log and returns parsed entries. */
