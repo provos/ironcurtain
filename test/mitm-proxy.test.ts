@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import * as http from 'node:http';
 import * as tls from 'node:tls';
 import * as crypto from 'node:crypto';
@@ -18,7 +18,17 @@ import {
   type ProviderConfig,
 } from '../src/docker/provider-config.js';
 import type { RegistryConfig } from '../src/docker/package-types.js';
+import { DENY_ALL_VALIDATOR, createPackageValidator } from '../src/docker/package-validator.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
+
+// Mock node:https so a single test can observe the upstream target of a
+// registry forward. The default wraps the real implementation (call-through),
+// so every other TLS test in this file behaves exactly as before; only the
+// Debian-upstream-port test installs a one-shot override via mockImplementationOnce.
+vi.mock('node:https', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:https')>();
+  return { ...actual, request: vi.fn(actual.request) };
+});
 
 // --- Test helpers ---
 
@@ -877,75 +887,120 @@ describe('MitmProxy', () => {
     }
   });
 
-  it('forwards plain HTTP proxy requests to Debian registry hosts', async () => {
-    const upstream = http.createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(JSON.stringify({ ok: true, path: req.url, method: req.method }));
+  it('routes plain HTTP proxy requests to Debian registry hosts through registry validation', async () => {
+    const debianRegistry: RegistryConfig = {
+      host: 'deb.debian.org',
+      displayName: 'Debian',
+      type: 'debian',
+    };
+
+    // Include a non-Debian registry to verify it is NOT routed through the Debian handler
+    const npmRegistry: RegistryConfig = {
+      host: 'registry.npmjs.org',
+      displayName: 'npm',
+      type: 'npm',
+    };
+
+    // DENY_ALL_VALIDATOR: every .deb request is denied. This proves the registry
+    // validation handler is invoked (not forwardPlainHttpPassthrough) — a raw
+    // passthrough would never produce a 403 with a package name in the body.
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [],
+      registries: [debianRegistry, npmRegistry],
+      packageValidation: { validator: DENY_ALL_VALIDATOR },
     });
-    const upstreamPort = await new Promise<number>((resolve) => {
-      upstream.listen(0, '127.0.0.1', () => {
-        const addr = upstream.address() as import('node:net').AddressInfo;
-        resolve(addr.port);
-      });
-    });
+    await proxy.start();
 
-    try {
-      const debianRegistry: RegistryConfig = {
-        host: 'deb.debian.org',
-        displayName: 'Debian',
-        type: 'debian',
-      };
-
-      // Include a non-Debian registry to verify it does NOT get plain HTTP forwarding
-      const npmRegistry: RegistryConfig = {
-        host: 'registry.npmjs.org',
-        displayName: 'npm',
-        type: 'npm',
-      };
-
-      proxy = createMitmProxy({
-        socketPath,
-        ca,
-        providers: [],
-        registries: [debianRegistry, npmRegistry],
-        dnsLookup: localhostDnsLookup,
-      });
-      await proxy.start();
-
-      const fetchStatus = async (url: string): Promise<{ statusCode: number; body: string }> =>
-        new Promise((resolve, reject) => {
-          const req = http.request({ socketPath, method: 'GET', path: url }, (res) => {
-            let data = '';
-            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-            res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
-          });
-          req.on('error', reject);
-          req.end();
+    const fetchStatus = async (url: string): Promise<{ statusCode: number; body: string }> =>
+      new Promise((resolve, reject) => {
+        const req = http.request({ socketPath, method: 'GET', path: url }, (res) => {
+          let data = '';
+          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+          res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
         });
-
-      // Debian registry host should be forwarded
-      const debian = await fetchStatus(`http://deb.debian.org:${upstreamPort}/debian/dists/bookworm/InRelease`);
-      expect(debian.statusCode).toBe(200);
-      const parsed = JSON.parse(debian.body);
-      expect(parsed.ok).toBe(true);
-      expect(parsed.path).toBe('/debian/dists/bookworm/InRelease');
-
-      // Non-Debian registry (npm) should NOT be forwarded via plain HTTP
-      const npm = await fetchStatus(`http://registry.npmjs.org:${upstreamPort}/express`);
-      expect(npm.statusCode).toBe(403);
-
-      // Unknown host should still get 403
-      const unknown = await fetchStatus(`http://evil.example.com:${upstreamPort}/malware`);
-      expect(unknown.statusCode).toBe(403);
-
-      // Out-of-range port (>65535) is rejected by URL parser, returns 405 (not a proxy request)
-      const badPort = await fetchStatus('http://deb.debian.org:99999/debian/dists/bookworm/InRelease');
-      expect(badPort.statusCode).toBe(405);
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        upstream.close((err) => (err ? reject(err) : resolve()));
+        req.on('error', reject);
+        req.end();
       });
-    }
+
+    // Debian .deb request is blocked by the registry validator (DENY_ALL_VALIDATOR),
+    // and the body contains the package name — proving the registry handler ran.
+    const deniedDeb = await fetchStatus(
+      'http://deb.debian.org/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb',
+    );
+    expect(deniedDeb.statusCode).toBe(403);
+    expect(deniedDeb.body).toContain('libssl3');
+
+    // Non-Debian registry (npm) is NOT routed through the Debian handler —
+    // plain HTTP to an npm host is still blocked at the allowlist level.
+    const npm = await fetchStatus('http://registry.npmjs.org/express');
+    expect(npm.statusCode).toBe(403);
+
+    // Unknown host: still blocked at the allowlist level.
+    const unknown = await fetchStatus('http://evil.example.com/malware');
+    expect(unknown.statusCode).toBe(403);
+
+    // Out-of-range port (>65535) is rejected by the URL parser before routing.
+    const badPort = await fetchStatus('http://deb.debian.org:99999/debian/dists/bookworm/InRelease');
+    expect(badPort.statusCode).toBe(405);
+  });
+
+  it('forwards an allowed Debian .deb upstream over HTTPS:443, not the client plain-HTTP port', async () => {
+    // Regression guard for #329: the registry proxy re-originates TLS to the
+    // mirror (forwardToUpstream → https.request), so the plain-HTTP apt path
+    // (client :80) must forward upstream on :443. Passing the client's :80 here
+    // would point https.request at a non-TLS port and 502 every allowed package
+    // and metadata fetch — silently breaking apt. Spy on https.request to assert
+    // the upstream target without hitting the network.
+    const https = await import('node:https');
+    const { PassThrough } = await import('node:stream');
+    const captured: { hostname?: unknown; port?: unknown } = {};
+    // One-shot override: the single upstream forward this test triggers is
+    // intercepted (no network); all other https.request calls fall back to the
+    // call-through default installed by vi.mock above.
+    vi.mocked(https.request).mockImplementationOnce(((...args: unknown[]): http.ClientRequest => {
+      const opts = (args[0] ?? {}) as { hostname?: unknown; port?: unknown };
+      captured.hostname = opts.hostname;
+      captured.port = opts.port;
+      const fake = new PassThrough() as unknown as http.ClientRequest;
+      (fake as unknown as { setTimeout: () => void }).setTimeout = () => {};
+      // Complete deterministically without a real socket: emit 'error' so
+      // forwardToUpstream resolves with a 502 and the client request ends.
+      setImmediate(() => fake.emit('error', new Error('mock upstream')));
+      return fake;
+    }) as unknown as typeof https.request);
+
+    const debianRegistry: RegistryConfig = { host: 'deb.debian.org', displayName: 'Debian', type: 'debian' };
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [],
+      registries: [debianRegistry],
+      // quarantineDays: 0 + no denylist ⇒ the .deb is allowed and forwarded upstream.
+      packageValidation: { validator: createPackageValidator({ quarantineDays: 0 }) },
+    });
+    await proxy.start();
+
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath,
+          method: 'GET',
+          path: 'http://deb.debian.org/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb',
+        },
+        (res) => {
+          res.on('data', () => {});
+          res.on('end', () => resolve());
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    // The upstream fetch must target the mirror over HTTPS, not the client's :80.
+    expect(captured.hostname).toBe('deb.debian.org');
+    expect(captured.port).toBe(443);
   });
 
   it('performs TLS handshake with CA-signed cert for allowed host', async () => {

@@ -350,6 +350,16 @@ export function resolveSseProvider(hostname: string): SseProvider {
 /** Maximum characters for tool_result content before truncation. */
 const MAX_TOOL_RESULT_CONTENT_LEN = 500;
 
+/**
+ * Upstream port for registry forwarding. The registry proxy always re-originates
+ * TLS to the real mirror (`forwardToUpstream` uses `https.request`), so registry
+ * traffic reaches upstream over HTTPS regardless of the client-side transport.
+ * apt speaks plain HTTP on :80, but the upstream fetch must still target :443 —
+ * forwarding the client's :80 here would point `https.request` at a non-TLS port
+ * and 502 every allowed package and metadata request.
+ */
+const REGISTRY_UPSTREAM_HTTPS_PORT = 443;
+
 /** Truncate tool result content to MAX_TOOL_RESULT_CONTENT_LEN, appending ellipsis if needed. */
 function truncateToolResult(text: string): string {
   return text.length > MAX_TOOL_RESULT_CONTENT_LEN ? text.slice(0, MAX_TOOL_RESULT_CONTENT_LEN) + '\u2026' : text;
@@ -1405,15 +1415,33 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   }
 
   outerServer.on('request', (req, res) => {
-    // Handle plain HTTP proxy requests for passthrough and Debian registry domains.
-    // HTTP proxy clients send absolute URLs: "GET http://host:port/path".
-    // Only Debian registries are included here because apt uses plain HTTP
-    // by default. npm/PyPI use HTTPS CONNECT and go through the registry-proxy
-    // validation path instead.
+    // Handle plain HTTP proxy requests. HTTP proxy clients send absolute URLs:
+    // "GET http://host:port/path HTTP/1.1". We parse the absolute URL into
+    // hostname, port, and origin-form path before dispatching.
+    //
+    // Debian (apt) uses plain HTTP, so Debian registry hosts are intercepted
+    // here and routed through the same registry-validation / audit-log path
+    // as HTTPS CONNECT traffic. The absolute URL is rewritten to origin-form
+    // (req.url = parsed.path) before dispatching because handleRegistryRequest
+    // and its helpers read clientReq.url as a path.
+    //
+    // Passthrough hosts and wildcard-eligible hosts are forwarded without
+    // content inspection (no package validation, no credential swap).
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    const isDebianRegistry = parsed ? registriesByHost.get(parsed.hostname)?.type === 'debian' : false;
+    const debianRegistry = parsed ? registriesByHost.get(parsed.hostname) : undefined;
     const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
-    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry || isWildcardEligible)) {
+
+    // Debian registry: route through package validation and audit logging.
+    // Rewrite absolute URL to origin-form path so registry handlers can read it.
+    // Forward to the HTTPS upstream port (not the client's plain-HTTP :80) — see
+    // REGISTRY_UPSTREAM_HTTPS_PORT: the registry proxy always re-originates TLS.
+    if (parsed && debianRegistry?.type === 'debian') {
+      req.url = parsed.path;
+      dispatchRegistryRequest(debianRegistry, req, res, parsed.hostname, REGISTRY_UPSTREAM_HTTPS_PORT);
+      return;
+    }
+
+    if (parsed && (passthroughHosts.has(parsed.hostname) || isWildcardEligible)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }

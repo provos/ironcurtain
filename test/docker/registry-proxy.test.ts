@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
+import * as https from 'node:https';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
 import {
   parseNpmUrl,
@@ -29,6 +33,15 @@ import {
 } from '../../src/docker/registry-proxy.js';
 import { createPackageValidator, DENY_ALL_VALIDATOR } from '../../src/docker/package-validator.js';
 import type { AllowedVersionCache, PackageIdentity } from '../../src/docker/package-types.js';
+
+// Mock node:https so the Debian allow/metadata tests can exercise the
+// forwardUpstream path without a real network call. The default wraps the real
+// implementation (call-through), so every other test behaves as before; the
+// affected tests install a one-shot override via mockImplementationOnce.
+vi.mock('node:https', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:https')>();
+  return { ...actual, request: vi.fn(actual.request) };
+});
 
 // ── npm URL parsing ─────────────────────────────────────────────────
 
@@ -1009,5 +1022,164 @@ describe('handleRegistryRequest: cargo', () => {
 
     expect(res.statusCode).toBe(403);
     expect(res.body).toContain('Forbidden');
+  });
+});
+
+// ── Debian plain-HTTP proxy path (URL rewrite from absolute to origin-form) ──
+//
+// When apt uses plain HTTP, the MITM proxy's outerServer.on('request') handler
+// receives absolute-form URLs like "http://deb.debian.org/debian/pool/.../foo.deb".
+// The fix in mitm-proxy.ts rewrites req.url to the origin-form path before
+// calling dispatchRegistryRequest. These tests exercise handleRegistryRequest
+// directly with origin-form paths (simulating the post-rewrite state) to verify
+// that the registry handler applies denylist/allowlist + writes audit entries.
+// This is the highest-fidelity layer the unit-test harness supports without
+// spinning up a real HTTP server.
+
+describe('handleRegistryRequest: debian plain-HTTP path (URL rewrite from absolute to origin-form)', () => {
+  // Temp directory for audit log files; cleaned up after each test.
+  let auditDir = '';
+
+  afterEach(async () => {
+    if (auditDir) {
+      await fs.rm(auditDir, { recursive: true, force: true }).catch(() => undefined);
+      auditDir = '';
+    }
+  });
+
+  /**
+   * Installs a one-shot https.request override so the next forwardUpstream call
+   * completes without a real network connection. The fake emits 'error', which
+   * forwardToUpstream turns into a 502 — enough to prove "not denied (403)" and
+   * that any audit entry was written before forwarding, with zero network I/O.
+   */
+  function mockUpstreamOnce(): void {
+    vi.mocked(https.request).mockImplementationOnce(((): http.ClientRequest => {
+      const fake = new PassThrough() as unknown as http.ClientRequest;
+      (fake as unknown as { setTimeout: () => void }).setTimeout = () => {};
+      setImmediate(() => fake.emit('error', new Error('mock upstream (no network in tests)')));
+      return fake;
+    }) as unknown as typeof https.request);
+  }
+
+  /** Reads a JSONL audit log and returns parsed entries. */
+  async function readAuditEntries(auditLogPath: string): Promise<Record<string, unknown>[]> {
+    const content = await fs.readFile(auditLogPath, 'utf-8').catch(() => '');
+    return content
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  /** Waits for at least one audit entry to appear in the log file. */
+  async function waitForAuditEntry(auditLogPath: string, timeoutMs = 500): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const content = await fs.readFile(auditLogPath, 'utf-8').catch(() => '');
+      if (content.trim()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  it('returns 403 and writes a deny audit entry for a denylisted .deb', async () => {
+    auditDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ironcurtain-test-'));
+    const auditLogPath = path.join(auditDir, 'pkg-audit.jsonl');
+
+    const options: RegistryHandlerOptions = {
+      validator: createPackageValidator({ deniedPackages: ['libssl3'] }),
+      cache: new Map(),
+      auditLogPath,
+    };
+    // Origin-form path — as mitm-proxy.ts produces after rewriting the absolute URL.
+    const req = fakeReq('/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb');
+    const res = fakeRes();
+
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 80, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('Forbidden');
+    expect(res.body).toContain('libssl3');
+
+    await waitForAuditEntry(auditLogPath);
+    const entries = await readAuditEntries(auditLogPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].decision).toBe('deny');
+    expect(entries[0].packageName).toBe('libssl3');
+    expect(entries[0].packageVersion).toBe('3.0.11-1~deb12u2');
+    expect(entries[0].registry).toBe('debian');
+    expect(entries[0].source).toBe('deb-backstop');
+  });
+
+  it('writes an allow audit entry for a permitted .deb (passes validation, not 403)', async () => {
+    auditDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ironcurtain-test-'));
+    const auditLogPath = path.join(auditDir, 'pkg-audit.jsonl');
+
+    // Allow-all validator: quarantine-days=0, no denylist. The validator returns
+    // 'allow', writeAuditEntry runs before forwardUpstream. The mocked upstream
+    // fails fast (502), but the audit entry is already committed.
+    const options: RegistryHandlerOptions = {
+      validator: createPackageValidator({ quarantineDays: 0 }),
+      cache: new Map(),
+      auditLogPath,
+    };
+    const req = fakeReq('/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb');
+    const res = fakeRes();
+
+    mockUpstreamOnce();
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 443, options);
+
+    // Not denied — the mocked upstream yields 502, but never 403 (policy deny).
+    expect(res.statusCode).not.toBe(403);
+
+    await waitForAuditEntry(auditLogPath);
+    const entries = await readAuditEntries(auditLogPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].decision).toBe('allow');
+    expect(entries[0].packageName).toBe('libssl3');
+    expect(entries[0].registry).toBe('debian');
+    expect(entries[0].source).toBe('deb-backstop');
+  });
+
+  it('passes metadata requests (InRelease) without validation and without an audit entry', async () => {
+    auditDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ironcurtain-test-'));
+    const auditLogPath = path.join(auditDir, 'pkg-audit.jsonl');
+
+    // DENY_ALL_VALIDATOR: if validation were applied, metadata would be denied.
+    // Metadata (.../InRelease, Packages.gz, etc.) must pass through untouched.
+    const options: RegistryHandlerOptions = {
+      validator: DENY_ALL_VALIDATOR,
+      cache: new Map(),
+      auditLogPath,
+    };
+    // Origin-form path for a Release metadata file — not a .deb, so no validation.
+    const req = fakeReq('/debian/dists/bookworm/InRelease');
+    const res = fakeRes();
+
+    mockUpstreamOnce();
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 443, options);
+
+    // Metadata is never denied by the registry handler regardless of validator.
+    expect(res.statusCode).not.toBe(403);
+
+    // No audit entry should be written for metadata requests.
+    // Wait briefly to confirm no entry appears.
+    await new Promise((r) => setTimeout(r, 50));
+    const entries = await readAuditEntries(auditLogPath);
+    expect(entries).toHaveLength(0);
+  });
+
+  it('passes Packages.gz metadata without validation', async () => {
+    const options: RegistryHandlerOptions = {
+      validator: DENY_ALL_VALIDATOR,
+      cache: new Map(),
+    };
+    const req = fakeReq('/debian/dists/bookworm/main/binary-arm64/Packages.gz');
+    const res = fakeRes();
+
+    mockUpstreamOnce();
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 443, options);
+
+    // Metadata requests are forwarded upstream (not denied), so statusCode is not 403.
+    expect(res.statusCode).not.toBe(403);
   });
 });
