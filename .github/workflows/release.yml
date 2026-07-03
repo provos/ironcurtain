@@ -17,7 +17,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          # Node 24 has an isolated-vm 7.0.0 prebuild; Node 22 does not (it would
+          # source-compile via node-gyp on the publish critical path). The Node
+          # version only affects build/test speed here — the published npm
+          # artifact is IronCurtain's own JS and does not bundle isolated-vm
+          # (consumers install it themselves) — so pin a prebuilt line.
+          node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
 

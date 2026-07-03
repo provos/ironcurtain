@@ -172,9 +172,7 @@ function runSandboxViabilityCheck(): Promise<PreflightCheckResult> {
       if (signal) {
         message = `V8 sandbox crashed with signal ${signal}.`;
         if (signal === 'SIGSEGV' || signal === 'SIGILL') {
-          hint =
-            'This is often caused by an incompatible Node.js version (e.g., Node 25). ' +
-            'Please use Node.js 22, 23, or 24.';
+          hint = 'This is often caused by an unsupported Node.js version. Please use Node.js 22, 24, or 26.';
         }
       } else if (stderr.includes('NODE_MODULE_VERSION')) {
         message = 'Native module ABI mismatch detected.';

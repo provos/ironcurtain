@@ -50,7 +50,7 @@ export interface CheckResult {
 
 /** Minimum and maximum supported Node.js major versions. */
 const NODE_MIN_MAJOR = 22;
-const NODE_MAX_MAJOR = 24;
+const NODE_MAX_MAJOR = 26;
 
 export function checkNodeVersion(versionString: string = process.versions.node): CheckResult {
   const match = /^(\d+)\./.exec(versionString);
@@ -68,7 +68,9 @@ export function checkNodeVersion(versionString: string = process.versions.node):
       name: 'Node.js',
       status: 'fail',
       message: `${versionString} (unsupported)`,
-      hint: `IronCurtain requires Node.js ${NODE_MIN_MAJOR}.x – ${NODE_MAX_MAJOR}.x.`,
+      hint:
+        `IronCurtain requires Node.js ${NODE_MIN_MAJOR}.x – ${NODE_MAX_MAJOR}.x. ` +
+        'Node 22 source-compiles the V8 sandbox (isolated-vm); 24 and 26 use prebuilt binaries.',
     };
   }
   return {

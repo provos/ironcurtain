@@ -29,7 +29,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.0.0 <26"
+    "node": ">=22.0.0 <27"
   },
   "bin": {
     "ironcurtain": "dist/cli.js"
@@ -112,7 +112,8 @@
     "terminal-kit": "^3.1.2"
   },
   "overrides": {
-    "minimatch": "^10.2.1"
+    "minimatch": "^10.2.1",
+    "isolated-vm": "7.0.0"
   },
   "lint-staged": {
     "!(packages/**)/*.ts": [

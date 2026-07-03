@@ -22,16 +22,36 @@ jobs:
   ci:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        # Node 24 (abi137) and Node 26 (abi147) both have isolated-vm 7.0.0
+        # prebuilt binaries → fast install on every PR and every master push.
         os: [ubuntu-latest, macos-latest]
-        node-version: [22, 24]
+        node-version: [24, 26]
+        # Node 22 has NO isolated-vm 7.0.0 prebuild → it source-compiles via
+        # node-gyp during `npm ci` (~tens of seconds on CI). Run it on master
+        # pushes only, and ubuntu-only, to keep that cost off every PR and off
+        # the ~10x-pricier macOS runners. `push` here fires only on master (see
+        # trigger above), so github.event_name == 'push' means "a master push".
+        include: ${{ github.event_name == 'push' && fromJSON('[{"os":"ubuntu-latest","node-version":22}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      - run: npm ci
+      # --foreground-scripts surfaces the node-gyp compile output in the logs so
+      # the Node-22 isolated-vm source build is visible; the step's duration in
+      # the Actions UI is then the measurement. (No node_modules/prebuild cache
+      # here on purpose — npm ci stays deterministic; if the Node-22 job ever
+      # gets painful, a prebuild cache is a possible future optimization.)
+      - run: npm ci --foreground-scripts
+      - name: Report Node ABI and isolated-vm build source
+        run: |
+          node -e "console.log('ABI', process.versions.modules)"
+          test -f node_modules/isolated-vm/build/Release/isolated_vm.node \
+            && echo "isolated-vm: SOURCE-COMPILED (build/Release/isolated_vm.node present)" \
+            || echo "isolated-vm: PREBUILD (no build/Release/isolated_vm.node)"
       - run: npm run build --workspace=packages/memory-mcp-server
       - run: npm run format:check
       - run: npm run lint
