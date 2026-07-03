@@ -267,6 +267,101 @@ export type SessionModeKind = (typeof SESSION_MODES)[number];
 export const CONTAINER_RUNTIMES = ['auto', 'docker', 'apple-container'] as const;
 export type ContainerRuntimeSetting = (typeof CONTAINER_RUNTIMES)[number];
 
+// --- OpenRouter provider-profile registry (see docs/designs/openrouter-integration.md §6) ---
+
+/** OpenRouter host (single host serving all three agent wire formats). */
+export const OPENROUTER_HOST = 'openrouter.ai';
+/** Claude Code `ANTHROPIC_BASE_URL` when routing through OpenRouter. */
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
+/** Codex/Goose `base_url` when routing through OpenRouter. */
+export const OPENROUTER_API_V1 = 'https://openrouter.ai/api/v1';
+/** Default GLM slug used when no per-agent / glob mapping resolves (D2). */
+export const DEFAULT_GLM_SLUG = 'z-ai/glm-5.2';
+
+/** The implicit, always-present profile name. Reserved: users may not define it. */
+export const NATIVE_PROFILE_NAME = 'native';
+
+/**
+ * Out-of-box glob→slug mapping applied when an openrouter profile omits
+ * `modelMap`. Maps the canonical Anthropic tiers to GLM (D3 quickstart). An
+ * explicit `modelMap: []` is preserved and disables glob mapping (per-agent
+ * only mode).
+ */
+export const DEFAULT_MODEL_MAP: readonly { readonly match: string; readonly model: string }[] = [
+  { match: '*opus*', model: DEFAULT_GLM_SLUG },
+  { match: '*sonnet*', model: DEFAULT_GLM_SLUG },
+  { match: '*haiku*', model: DEFAULT_GLM_SLUG },
+];
+
+/** A single ordered glob→slug mapping rule. First match wins. */
+const modelMapRuleSchema = z.object({
+  /** Glob matched (case-insensitively) against the REQUESTED model id. `*` = any run of chars. */
+  match: z.string().min(1),
+  /** OpenRouter slug to route to, e.g. "z-ai/glm-5.2". */
+  model: z.string().min(1),
+});
+
+/** Provider-preference passthrough for cache pinning (OpenRouter `provider` body field). */
+const providerPreferenceSchema = z
+  .object({
+    /** Ordered provider slugs to try, e.g. ["z-ai"]. */
+    order: z.array(z.string().min(1)).optional(),
+    /** Restrict routing to exactly these provider slugs. */
+    only: z.array(z.string().min(1)).optional(),
+    /** Allow OpenRouter to fall back to other providers. Default true. */
+    allowFallbacks: z.boolean().optional(),
+  })
+  .optional();
+
+/** An openrouter-type profile: EXACTLY v2's `openrouter` section fields, sans `enabled`. */
+const openrouterProfileSchema = z.object({
+  type: z.literal('openrouter'),
+  /** OpenRouter API key (sk-or-v1-...). Env OPENROUTER_API_KEY takes precedence. Sensitive. */
+  apiKey: z.string().min(1).optional(),
+  /** Ordered glob→slug rules; first match wins. */
+  modelMap: z.array(modelMapRuleSchema).optional(),
+  /** Per-agent model override. WINS over modelMap for that agent (D1 precedence). */
+  perAgent: z
+    .object({
+      'claude-code': z.string().min(1).optional(),
+      goose: z.string().min(1).optional(),
+      codex: z.string().min(1).optional(),
+    })
+    .optional(),
+  /** Provider-preference passthrough (cache pinning). */
+  providerPreference: providerPreferenceSchema,
+  /** Inject a stable top-level session_id for GLM cache affinity. Default true. */
+  sessionAffinity: z.boolean().optional(),
+});
+
+/** A native-type profile: today's canonical Anthropic/OpenAI/ChatGPT routing. No fields. */
+const nativeProfileSchema = z.object({ type: z.literal('native') });
+
+/** v1 profile union. New provider types extend this discriminator (§16). */
+const providerProfileSchema = z.discriminatedUnion('type', [nativeProfileSchema, openrouterProfileSchema]);
+
+const modelProvidersSchema = z
+  .object({
+    /**
+     * Name of the profile used when no per-session choice is made. Must name
+     * an existing profile or "native". Absent => "native".
+     */
+    default: z.string().min(1).optional(),
+    /** User-named profiles. A profile named "native" is REJECTED (reserved). */
+    profiles: z
+      .record(z.string().min(1), providerProfileSchema)
+      .refine((p) => !(NATIVE_PROFILE_NAME in p), {
+        message: `"${NATIVE_PROFILE_NAME}" is a reserved profile name and cannot be redefined.`,
+      })
+      .optional(),
+  })
+  // `default`, when present, must resolve to an existing profile or the reserved native name.
+  .refine((mp) => mp.default === undefined || mp.default === NATIVE_PROFILE_NAME || !!mp.profiles?.[mp.default], {
+    message: 'modelProviders.default must name a configured profile or "native".',
+    path: ['default'],
+  })
+  .optional();
+
 export const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
@@ -288,6 +383,7 @@ export const userConfigSchema = z.object({
   autoApprove: autoApproveSchema,
   auditRedaction: auditRedactionSchema,
   webSearch: webSearchSchema,
+  modelProviders: modelProvidersSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
   signal: signalSchema,
   memory: memorySchema,
@@ -380,6 +476,40 @@ export interface ResolvedWebSearchConfig {
   readonly serpapi: { readonly apiKey: string } | null;
 }
 
+/**
+ * Resolved openrouter profile = v2's ResolvedOpenRouterConfig fields, minus
+ * `enabled` (enablement is now "the active profile's type is openrouter").
+ * See docs/designs/openrouter-integration.md §6.
+ */
+export interface ResolvedOpenRouterProfile {
+  readonly type: 'openrouter';
+  /** '' when unset (neither OPENROUTER_API_KEY env nor profile.apiKey). */
+  readonly apiKey: string;
+  readonly modelMap: readonly { readonly match: string; readonly model: string }[];
+  readonly perAgent: Readonly<Record<DockerAgent, string | undefined>>;
+  readonly providerPreference:
+    | { readonly order?: readonly string[]; readonly only?: readonly string[]; readonly allowFallbacks?: boolean }
+    | undefined;
+  readonly sessionAffinity: boolean;
+}
+
+/** Resolved native profile: today's canonical routing. No fields. */
+export interface ResolvedNativeProfile {
+  readonly type: 'native';
+}
+
+/** The resolved active profile the whole OpenRouter feature reads (§7–§11). */
+export type ResolvedProviderProfile = ResolvedNativeProfile | ResolvedOpenRouterProfile;
+
+/**
+ * Resolved provider-profile registry. `profiles` ALWAYS includes the implicit
+ * `native` profile; `default` is a resolved name ('native' when unset).
+ */
+export interface ResolvedModelProvidersConfig {
+  readonly default: string;
+  readonly profiles: Readonly<Record<string, ResolvedProviderProfile>>;
+}
+
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
@@ -398,6 +528,12 @@ export interface ResolvedUserConfig {
   readonly auditRedaction: ResolvedAuditRedactionConfig;
   readonly memory: ResolvedMemoryConfig;
   readonly webSearch: ResolvedWebSearchConfig;
+  /**
+   * OpenRouter provider-profile registry. The `profiles` record always
+   * includes the implicit `native` profile; `default` is 'native' when unset.
+   * See docs/designs/openrouter-integration.md §6.
+   */
+  readonly modelProviders: ResolvedModelProvidersConfig;
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** Signal transport config. Null when Signal is not set up. */
   readonly signal: import('../signal/signal-config.js').ResolvedSignalConfig | null;
@@ -436,6 +572,7 @@ const SENSITIVE_FIELDS = new Set([
   'openaiApiKey',
   'serverCredentials',
   'webSearch',
+  'modelProviders', // Each openrouter profile may carry an sk-or-v1- API key
   'signal', // Contains phone numbers and identity key fingerprints
 ]);
 
@@ -741,6 +878,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       tavily: config.webSearch?.tavily ?? null,
       serpapi: config.webSearch?.serpapi ?? null,
     },
+    modelProviders: resolveModelProviders(config.modelProviders),
     serverCredentials: config.serverCredentials ?? {},
     signal: resolveSignalFromUserConfig(config),
     gooseProvider: config.gooseProvider ?? 'anthropic',
@@ -776,6 +914,68 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     // resolver applies the `?? false` default (§10).
     ...(config.capture?.enabled !== undefined ? { capture: { enabled: config.capture.enabled } } : {}),
   };
+}
+
+/** A single validated openrouter profile as parsed from config. */
+type OpenrouterProfileInput = Extract<z.infer<typeof providerProfileSchema>, { type: 'openrouter' }>;
+
+/**
+ * Resolves one openrouter profile's fields to a ResolvedOpenRouterProfile.
+ * `apiKey` is resolved to `profile.apiKey ?? ''` here; the OPENROUTER_API_KEY
+ * env override is layered on for EVERY openrouter profile in applyEnvOverrides().
+ * An explicit `modelMap: []` is preserved (uses `??`, not `||`).
+ */
+function resolveOpenrouterProfile(profile: OpenrouterProfileInput): ResolvedOpenRouterProfile {
+  const perAgentInput = profile.perAgent ?? {};
+  const perAgent = Object.fromEntries(DOCKER_AGENTS.map((agent) => [agent, perAgentInput[agent]])) as Record<
+    DockerAgent,
+    string | undefined
+  >;
+  return {
+    type: 'openrouter',
+    apiKey: profile.apiKey ?? '',
+    modelMap: profile.modelMap ?? DEFAULT_MODEL_MAP,
+    perAgent,
+    providerPreference: profile.providerPreference,
+    sessionAffinity: profile.sessionAffinity ?? true,
+  };
+}
+
+/**
+ * Resolves the `modelProviders` registry. The implicit `native` profile is
+ * always injected; `default` resolves to 'native' when unset. A configured
+ * `default` naming a missing profile has already been rejected by the schema
+ * `.refine` at load time, so the resolved `default` always names a present key.
+ */
+function resolveModelProviders(config: UserConfig['modelProviders']): ResolvedModelProvidersConfig {
+  const profiles: Record<string, ResolvedProviderProfile> = { [NATIVE_PROFILE_NAME]: { type: 'native' } };
+  for (const [name, profile] of Object.entries(config?.profiles ?? {})) {
+    profiles[name] = profile.type === 'openrouter' ? resolveOpenrouterProfile(profile) : { type: 'native' };
+  }
+  return {
+    default: config?.default ?? NATIVE_PROFILE_NAME,
+    profiles,
+  };
+}
+
+/**
+ * Resolves the active provider profile for a session from an optional
+ * per-session `providerProfileName`. Resolution order (§6): explicit name →
+ * `modelProviders.default` (already 'native' when unset) → the resolved
+ * profile. Throws a clear error listing the available profiles when the name
+ * is not a key of the resolved `profiles` record (guards `--provider-profile`
+ * typos and stale scripts). Pure — testable without infra.
+ */
+export function resolveActiveProfile(
+  modelProviders: ResolvedModelProvidersConfig,
+  providerProfileName?: string,
+): ResolvedProviderProfile {
+  const activeName = providerProfileName ?? modelProviders.default;
+  if (!Object.prototype.hasOwnProperty.call(modelProviders.profiles, activeName)) {
+    const available = Object.keys(modelProviders.profiles).join(', ');
+    throw new Error(`Unknown provider profile "${activeName}". Available: ${available}.`);
+  }
+  return modelProviders.profiles[activeName];
 }
 
 /**
@@ -819,7 +1019,23 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
     anthropicBaseUrl: validateBaseUrlEnv('ANTHROPIC_BASE_URL') ?? config.anthropicBaseUrl,
     openaiBaseUrl: validateBaseUrlEnv('OPENAI_BASE_URL') ?? config.openaiBaseUrl,
     googleBaseUrl: validateBaseUrlEnv('GOOGLE_API_BASE_URL') ?? config.googleBaseUrl,
+    modelProviders: applyOpenrouterKeyEnv(config.modelProviders),
   };
+}
+
+/**
+ * Layers the OPENROUTER_API_KEY env var over EVERY openrouter profile's
+ * resolved apiKey (env fills/overrides). Resolution: `env || profile.apiKey`.
+ * When the env var is unset, the config-resolved key is left unchanged.
+ */
+function applyOpenrouterKeyEnv(config: ResolvedModelProvidersConfig): ResolvedModelProvidersConfig {
+  const envKey = process.env.OPENROUTER_API_KEY;
+  if (!envKey) return config;
+  const profiles: Record<string, ResolvedProviderProfile> = {};
+  for (const [name, profile] of Object.entries(config.profiles)) {
+    profiles[name] = profile.type === 'openrouter' ? { ...profile, apiKey: envKey } : profile;
+  }
+  return { default: config.default, profiles };
 }
 
 /**

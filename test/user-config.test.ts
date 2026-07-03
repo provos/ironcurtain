@@ -7,8 +7,12 @@ import {
   saveUserConfig,
   userConfigSchema,
   validateModelId,
+  resolveActiveProfile,
   USER_CONFIG_DEFAULTS,
+  DEFAULT_MODEL_MAP,
+  DEFAULT_GLM_SLUG,
 } from '../src/config/user-config.js';
+import type { ResolvedOpenRouterProfile } from '../src/config/user-config.js';
 
 /** Env var names that need save/restore between tests. */
 const ENV_VARS_TO_ISOLATE = [
@@ -19,6 +23,7 @@ const ENV_VARS_TO_ISOLATE = [
   'GOOGLE_API_BASE_URL',
   'GOOGLE_GENERATIVE_AI_API_KEY',
   'OPENAI_API_KEY',
+  'OPENROUTER_API_KEY',
 ] as const;
 
 describe('loadUserConfig', () => {
@@ -860,5 +865,267 @@ describe('validateModelId', () => {
   it('returns error message for invalid model IDs', () => {
     expect(validateModelId('unknown:model')).toBeDefined();
     expect(validateModelId('')).toBeDefined();
+  });
+});
+
+// --- G1: modelProviders provider-profile registry (openrouter-integration §6/§12.1) ---
+
+/** The §6 two-profile example config. */
+const TWO_PROFILE_EXAMPLE = {
+  modelProviders: {
+    default: 'glm-5.2',
+    profiles: {
+      'glm-5.2': {
+        type: 'openrouter',
+        apiKey: 'sk-or-v1-REDACTED',
+        modelMap: [
+          { match: '*opus*', model: 'z-ai/glm-5.2' },
+          { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+          { match: '*haiku*', model: 'z-ai/glm-5.2' },
+        ],
+        perAgent: { goose: 'z-ai/glm-5.2', codex: 'z-ai/glm-5.2' },
+        providerPreference: { order: ['z-ai'], allowFallbacks: false },
+        sessionAffinity: true,
+      },
+      kimi: {
+        type: 'openrouter',
+        modelMap: [{ match: '*', model: 'moonshot/kimi-k3' }],
+      },
+    },
+  },
+} as const;
+
+describe('modelProviders schema (userConfigSchema.safeParse)', () => {
+  it('accepts the §6 two-profile example', () => {
+    const result = userConfigSchema.safeParse(TWO_PROFILE_EXAMPLE);
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a modelMap entry with an empty match', () => {
+    const result = userConfigSchema.safeParse({
+      modelProviders: {
+        profiles: { p: { type: 'openrouter', modelMap: [{ match: '', model: 'z-ai/glm-5.2' }] } },
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a user-defined profile named "native" (reserved)', () => {
+    const result = userConfigSchema.safeParse({
+      modelProviders: { profiles: { native: { type: 'openrouter' } } },
+    });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error)).toContain('reserved');
+  });
+
+  it('rejects default naming a non-existent profile', () => {
+    const result = userConfigSchema.safeParse({
+      modelProviders: { default: 'ghost', profiles: { real: { type: 'openrouter' } } },
+    });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error)).toContain('must name a configured profile');
+  });
+
+  it('accepts default "native"', () => {
+    const result = userConfigSchema.safeParse({ modelProviders: { default: 'native' } });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts default naming a configured profile', () => {
+    const result = userConfigSchema.safeParse({
+      modelProviders: { default: 'glm-5.2', profiles: { 'glm-5.2': { type: 'openrouter' } } },
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('modelProviders resolution (loadUserConfig)', () => {
+  let testHome: string;
+  const savedEnv: Record<string, string | undefined> = {};
+  const ENV_KEYS = ['IRONCURTAIN_HOME', 'OPENROUTER_API_KEY'] as const;
+
+  beforeEach(() => {
+    testHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-modelproviders-'));
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    process.env.IRONCURTAIN_HOME = testHome;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] !== undefined) process.env[key] = savedEnv[key];
+      else delete process.env[key];
+    }
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  function writeConfigFile(config: Record<string, unknown>): void {
+    mkdirSync(testHome, { recursive: true });
+    writeFileSync(resolve(testHome, 'config.json'), JSON.stringify(config, null, 2));
+  }
+
+  it('always includes the implicit native profile, even when modelProviders is absent', () => {
+    const config = loadUserConfig();
+    expect(config.modelProviders.profiles.native).toEqual({ type: 'native' });
+  });
+
+  it('default resolves to "native" when unset', () => {
+    const config = loadUserConfig();
+    expect(config.modelProviders.default).toBe('native');
+  });
+
+  it('resolves default from config when set', () => {
+    writeConfigFile({ modelProviders: { default: 'glm-5.2', profiles: { 'glm-5.2': { type: 'openrouter' } } } });
+    const config = loadUserConfig();
+    expect(config.modelProviders.default).toBe('glm-5.2');
+  });
+
+  it('applies DEFAULT_MODEL_MAP to an openrouter profile with no modelMap', () => {
+    writeConfigFile({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x' } } } });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.modelMap).toEqual(DEFAULT_MODEL_MAP);
+  });
+
+  it('preserves an explicit empty modelMap (D1 per-agent-only mode)', () => {
+    writeConfigFile({
+      modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x', modelMap: [] } } },
+    });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.modelMap).toEqual([]);
+  });
+
+  it('defaults sessionAffinity to true when absent', () => {
+    writeConfigFile({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x' } } } });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.sessionAffinity).toBe(true);
+  });
+
+  it('honors an explicit sessionAffinity=false', () => {
+    writeConfigFile({
+      modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x', sessionAffinity: false } } },
+    });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.sessionAffinity).toBe(false);
+  });
+
+  it('resolves apiKey to "" when neither env nor config sets it', () => {
+    writeConfigFile({ modelProviders: { profiles: { p: { type: 'openrouter' } } } });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.apiKey).toBe('');
+  });
+
+  it('OPENROUTER_API_KEY env beats every profile config apiKey', () => {
+    writeConfigFile({
+      modelProviders: {
+        profiles: {
+          a: { type: 'openrouter', apiKey: 'sk-or-v1-config-a' },
+          b: { type: 'openrouter' },
+        },
+      },
+    });
+    process.env.OPENROUTER_API_KEY = 'sk-or-v1-from-env';
+    const config = loadUserConfig();
+    const a = config.modelProviders.profiles.a as ResolvedOpenRouterProfile;
+    const b = config.modelProviders.profiles.b as ResolvedOpenRouterProfile;
+    expect(a.apiKey).toBe('sk-or-v1-from-env');
+    expect(b.apiKey).toBe('sk-or-v1-from-env');
+  });
+
+  it('uses the profile config apiKey when OPENROUTER_API_KEY is unset', () => {
+    writeConfigFile({ modelProviders: { profiles: { a: { type: 'openrouter', apiKey: 'sk-or-v1-config-a' } } } });
+    const config = loadUserConfig();
+    const a = config.modelProviders.profiles.a as ResolvedOpenRouterProfile;
+    expect(a.apiKey).toBe('sk-or-v1-config-a');
+  });
+
+  it('resolves perAgent overrides, leaving unset agents undefined', () => {
+    writeConfigFile({
+      modelProviders: {
+        profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x', perAgent: { goose: 'z-ai/glm-5.2' } } },
+      },
+    });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.perAgent.goose).toBe('z-ai/glm-5.2');
+    expect(p.perAgent['claude-code']).toBeUndefined();
+    expect(p.perAgent.codex).toBeUndefined();
+  });
+
+  it('does not back-fill modelProviders into the config file (computeMissingDefaults skips it)', () => {
+    // Trigger auto-creation, then confirm no modelProviders key is written.
+    loadUserConfig();
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.modelProviders).toBeUndefined();
+  });
+
+  it('persists an explicitly-set profile apiKey via saveUserConfig', () => {
+    loadUserConfig();
+    saveUserConfig({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-persist' } } } });
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.modelProviders.profiles.p.apiKey).toBe('sk-or-v1-persist');
+  });
+});
+
+describe('resolveActiveProfile (pure resolver)', () => {
+  const modelProviders = {
+    default: 'glm-5.2',
+    profiles: {
+      native: { type: 'native' as const },
+      'glm-5.2': {
+        type: 'openrouter' as const,
+        apiKey: 'sk-or-v1-x',
+        modelMap: DEFAULT_MODEL_MAP,
+        perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
+        providerPreference: undefined,
+        sessionAffinity: true,
+      },
+      kimi: {
+        type: 'openrouter' as const,
+        apiKey: '',
+        modelMap: [{ match: '*', model: 'moonshot/kimi-k3' }],
+        perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
+        providerPreference: undefined,
+        sessionAffinity: true,
+      },
+    },
+  };
+
+  it('returns the explicitly named profile', () => {
+    const profile = resolveActiveProfile(modelProviders, 'kimi');
+    expect(profile).toBe(modelProviders.profiles.kimi);
+  });
+
+  it('falls back to modelProviders.default when no name is given', () => {
+    const profile = resolveActiveProfile(modelProviders, undefined);
+    expect(profile).toBe(modelProviders.profiles['glm-5.2']);
+  });
+
+  it('falls back to native when default is native and no name is given', () => {
+    const nativeOnly = { default: 'native', profiles: { native: { type: 'native' as const } } };
+    expect(resolveActiveProfile(nativeOnly, undefined)).toEqual({ type: 'native' });
+  });
+
+  it('resolves an explicit "native" name', () => {
+    expect(resolveActiveProfile(modelProviders, 'native')).toEqual({ type: 'native' });
+  });
+
+  it('throws a clear error listing available profiles for an unknown name', () => {
+    expect(() => resolveActiveProfile(modelProviders, 'does-not-exist')).toThrow(
+      'Unknown provider profile "does-not-exist". Available: native, glm-5.2, kimi.',
+    );
+  });
+
+  it('DEFAULT_GLM_SLUG is the default map target', () => {
+    // Guards against DEFAULT_MODEL_MAP drifting away from the GLM slug.
+    for (const rule of DEFAULT_MODEL_MAP) {
+      expect(rule.model).toBe(DEFAULT_GLM_SLUG);
+    }
   });
 });
