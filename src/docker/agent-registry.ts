@@ -53,7 +53,7 @@ export async function registerBuiltinAdapters(userConfig?: ResolvedUserConfig): 
 
   if (!registry.has('codex' as AgentId)) {
     const { createCodexAdapter } = await import('./adapters/codex.js');
-    const codexAdapter = createCodexAdapter();
+    const codexAdapter = createCodexAdapter(userConfig);
     registry.set(codexAdapter.id, codexAdapter);
   }
 }

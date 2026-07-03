@@ -28,7 +28,7 @@ describe('Claude Code Adapter', () => {
   });
 
   it('generates MCP config with socat bridge', () => {
-    const files = claudeCodeAdapter.generateMcpConfig('/run/ironcurtain/proxy.sock');
+    const files = claudeCodeAdapter.generateMcpConfig('/run/ironcurtain/proxy.sock', {} as IronCurtainConfig);
 
     expect(files).toHaveLength(1);
     expect(files[0].path).toBe('claude-mcp-config.json');
@@ -142,7 +142,7 @@ describe('Claude Code Adapter', () => {
   });
 
   it('returns providers including anthropic', () => {
-    const providers = claudeCodeAdapter.getProviders();
+    const providers = claudeCodeAdapter.getProviders({} as IronCurtainConfig);
     expect(providers).toHaveLength(2);
     expect(providers[0].host).toBe('api.anthropic.com');
     expect(providers[0].displayName).toBe('Anthropic');

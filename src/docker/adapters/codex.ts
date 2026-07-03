@@ -17,8 +17,11 @@ import type {
 import type { DockerAuthKind, IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import type { AuthMethod } from '../oauth-credentials.js';
+import type { ResolvedOpenRouterProfile, ResolvedUserConfig } from '../../config/user-config.js';
+import { DEFAULT_GLM_SLUG, OPENROUTER_API_V1, OPENROUTER_HOST } from '../../config/user-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
+import { makeOpenRouterProviderForProfile } from '../openrouter.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
 import { parseModelId } from '../../config/model-provider.js';
 import {
@@ -76,7 +79,65 @@ exec codex --ask-for-approval never --sandbox danger-full-access "\${MODEL_ARGS[
 `;
 }
 
-export function createCodexAdapter(): AgentAdapter {
+/**
+ * Codex slug under an openrouter-type profile (D2). Codex has NO native model
+ * field in IronCurtain config, so it must never passthrough an unmapped OpenAI
+ * id — the `modelMap` does NOT participate. The slug is exactly
+ * `perAgent.codex ?? DEFAULT_GLM_SLUG`.
+ */
+function codexSlugFor(profile: ResolvedOpenRouterProfile): string {
+  return profile.perAgent.codex ?? DEFAULT_GLM_SLUG;
+}
+
+/**
+ * Builds the Codex `config.toml` string. Under an openrouter-type profile the
+ * two root keys (`model`, `model_provider`) are PREPENDED before the first
+ * `[table]` (TOML is order-sensitive — root keys must precede any table header,
+ * §4.6/B1), and the `[model_providers.openrouter]` table is APPENDED.
+ */
+function buildCodexToml(connectTarget: string, profile: ResolvedOpenRouterProfile | undefined): string {
+  const rootKeys = ['cli_auth_credentials_store = "file"', 'project_doc_fallback_filenames = ["CLAUDE.md"]'];
+  const openrouterRootKeys = profile
+    ? [`model = ${tomlString(codexSlugFor(profile))}`, 'model_provider = "openrouter"']
+    : [];
+  const openrouterProviderTable = profile
+    ? [
+        '',
+        '[model_providers.openrouter]',
+        `base_url = ${tomlString(OPENROUTER_API_V1)}`,
+        'env_key = "OPENROUTER_API_KEY"',
+        'wire_api = "responses"',
+      ]
+    : [];
+
+  return [
+    ...openrouterRootKeys,
+    ...rootKeys,
+    '',
+    '[projects."/workspace"]',
+    'trust_level = "trusted"',
+    ...openrouterProviderTable,
+    '',
+    '[mcp_servers.ironcurtain]',
+    'command = "socat"',
+    `args = ["STDIO", ${tomlString(connectTarget)}]`,
+    'startup_timeout_sec = 20',
+    'tool_timeout_sec = 600',
+    'default_tools_approval_mode = "auto"',
+    '',
+  ].join('\n');
+}
+
+/**
+ * @param userConfig - Resolved user config, accepted for factory-signature
+ *   symmetry with the other adapters (m3). Codex reads no non-profile field
+ *   from it today; the ACTIVE PROFILE is read from the per-session stamped
+ *   `config.activeProviderProfile` at method-call time, never captured here
+ *   (§9 F1 — a factory-captured profile would leak across the process-global
+ *   registry's cached instance).
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- userConfig kept for factory-signature symmetry (m3)
+export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapter {
   return {
     id: 'codex' as AgentId,
     displayName: 'Codex CLI',
@@ -88,25 +149,13 @@ export function createCodexAdapter(): AgentAdapter {
       return CODEX_IMAGE;
     },
 
-    generateMcpConfig(socketPath: string): AgentConfigFile[] {
+    generateMcpConfig(socketPath: string, config: IronCurtainConfig): AgentConfigFile[] {
       const isTcp = socketPath.includes(':');
       const connectTarget = isTcp ? `TCP:${socketPath}` : `UNIX-CONNECT:${socketPath}`;
 
-      const toml = [
-        'cli_auth_credentials_store = "file"',
-        'project_doc_fallback_filenames = ["CLAUDE.md"]',
-        '',
-        '[projects."/workspace"]',
-        'trust_level = "trusted"',
-        '',
-        '[mcp_servers.ironcurtain]',
-        'command = "socat"',
-        `args = ["STDIO", ${tomlString(connectTarget)}]`,
-        'startup_timeout_sec = 20',
-        'tool_timeout_sec = 600',
-        'default_tools_approval_mode = "auto"',
-        '',
-      ].join('\n');
+      const profile = config.activeProviderProfile;
+      const openrouterProfile = profile?.type === 'openrouter' ? profile : undefined;
+      const toml = buildCodexToml(connectTarget, openrouterProfile);
 
       return [{ path: 'codex-config.toml', content: toml }];
     },
@@ -144,11 +193,37 @@ export function createCodexAdapter(): AgentAdapter {
     },
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- authKind kept for adapter interface symmetry
-    getProviders(_authKind?: DockerAuthKind): readonly ProviderConfig[] {
+    getProviders(config: IronCurtainConfig, _authKind?: DockerAuthKind): readonly ProviderConfig[] {
+      const profile = config.activeProviderProfile;
+      if (profile?.type === 'openrouter') {
+        // Codex speaks the Responses wire format; the bearer OpenRouter provider
+        // replaces the ChatGPT OAuth providers entirely.
+        return [makeOpenRouterProviderForProfile('responses', profile, 'codex')];
+      }
       return [codexChatGptProvider, codexAuthProvider];
     },
 
-    buildEnv(_config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
+    buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
+      const profile = config.activeProviderProfile;
+      if (profile?.type === 'openrouter') {
+        // OpenRouter mode: Codex reads OPENROUTER_API_KEY (referenced by the
+        // generated config.toml's env_key). Drop the Codex OAuth token env
+        // entirely — the ChatGPT auth flow is not used here.
+        const fakeKey = fakeKeys.get(OPENROUTER_HOST);
+        if (!fakeKey) {
+          throw new Error(
+            `No fake key generated for ${OPENROUTER_HOST} — cannot configure Codex OpenRouter authentication`,
+          );
+        }
+        return {
+          CODEX_HOME: '/home/codespace/.codex',
+          OPENROUTER_API_KEY: fakeKey,
+          CODEX_CA_CERTIFICATE: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
+          SSL_CERT_FILE: '/etc/ssl/certs/ca-certificates.crt',
+          RUST_LOG: 'error',
+        };
+      }
+
       const fakeToken = fakeKeys.get('chatgpt.com');
       if (!fakeToken) {
         throw new Error('No fake token generated for chatgpt.com — cannot configure Codex authentication');
@@ -227,7 +302,14 @@ export function createCodexAdapter(): AgentAdapter {
       return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-codex.sh,pty,setsid,ctty,stderr,rawer'];
     },
 
-    detectCredential(): AuthMethod {
+    detectCredential(config: IronCurtainConfig): AuthMethod {
+      const profile = config.activeProviderProfile;
+      if (profile?.type === 'openrouter') {
+        // OpenRouter mode: credential presence is the profile's apiKey being
+        // non-empty (no `codex login` needed). Empty => 'none' (feeds m5).
+        if (profile.apiKey !== '') return { kind: 'apikey', key: profile.apiKey };
+        return { kind: 'none' };
+      }
       const credentials = loadCodexOAuthCredentials();
       if (!credentials) return { kind: 'none' };
       return {

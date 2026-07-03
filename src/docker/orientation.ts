@@ -74,7 +74,7 @@ export function prepareSession(
 
   // proxyAddress is either a TCP host:port (macOS) or defaults to the UDS path (Linux)
   const address = proxyAddress ?? '/run/ironcurtain/proxy.sock';
-  writeConfigFiles(orientationDir, adapter.generateMcpConfig(address));
+  writeConfigFiles(orientationDir, adapter.generateMcpConfig(address, config));
   writeConfigFiles(orientationDir, adapter.generateOrientationFiles(context));
 
   const systemPrompt = adapter.buildSystemPrompt(context);

@@ -47,6 +47,10 @@ fi
 # Auth mode determines how Claude Code gets its API credentials:
 # - OAuth mode (CLAUDE_CODE_OAUTH_TOKEN set): Claude Code reads the token from
 #   this env var directly -- no apiKeyHelper needed.
+# - OpenRouter mode (ANTHROPIC_AUTH_TOKEN set, CLAUDE_CODE_OAUTH_TOKEN not):
+#   Claude Code reads the bearer token from ANTHROPIC_AUTH_TOKEN directly, so
+#   no apiKeyHelper is written (an apiKeyHelper echoing an empty
+#   IRONCURTAIN_API_KEY would compete with the bearer token).
 # - API key mode: apiKeyHelper echoes the fake key so Claude Code skips the
 #   custom API key approval dialog entirely.
 # Always written (even on resume) because auth mode is runtime-specific.
@@ -54,6 +58,24 @@ mkdir -p "$HOME/.claude"
 
 if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
   # OAuth mode: Claude Code reads the token from env var directly.
+  cat > "$HOME/.claude/settings.json" <<EOSETTINGS
+{
+  "permissions": {
+    "allow": [],
+    "deny": [],
+    "additionalDirectories": [],
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "skipWebFetchPreflight": true,
+  "env": {
+    "HTTPS_PROXY": "${HTTPS_PROXY}"
+  }
+}
+EOSETTINGS
+elif [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+  # OpenRouter mode: Claude Code reads the bearer token from ANTHROPIC_AUTH_TOKEN
+  # directly -- no apiKeyHelper (which would echo an empty IRONCURTAIN_API_KEY).
   cat > "$HOME/.claude/settings.json" <<EOSETTINGS
 {
   "permissions": {

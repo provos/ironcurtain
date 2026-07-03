@@ -219,8 +219,12 @@ export interface AgentAdapter {
    * the agent how to connect to IronCurtain's proxy.
    *
    * @param socketPath - container-side UDS path (e.g., /run/ironcurtain/proxy.sock)
+   * @param config - per-session config. Codex reads `config.activeProviderProfile`
+   *   to decide whether to emit the OpenRouter TOML root keys + provider table
+   *   (§9.2). The profile MUST come from the per-session stamped `config`, never
+   *   from a factory-captured value (§9 F1).
    */
-  generateMcpConfig(socketPath: string): AgentConfigFile[];
+  generateMcpConfig(socketPath: string, config: IronCurtainConfig): AgentConfigFile[];
 
   /**
    * Generates orientation documents that teach the agent about
@@ -265,10 +269,14 @@ export interface AgentAdapter {
    * The MITM proxy uses these to build the host allowlist,
    * generate fake API keys, swap keys in requests, and filter endpoints.
    *
+   * @param config - per-session config. Adapters read `config.activeProviderProfile`
+   *   to decide whether to return the OpenRouter provider or the native providers.
+   *   The profile MUST come from the per-session stamped `config`, never from a
+   *   factory-captured value (§9 F1).
    * @param authKind - When 'oauth', returns providers configured for bearer
    *   token injection instead of header-based API key injection.
    */
-  getProviders(authKind?: DockerAuthKind): readonly ProviderConfig[];
+  getProviders(config: IronCurtainConfig, authKind?: DockerAuthKind): readonly ProviderConfig[];
 
   /**
    * Constructs environment variables for the container.
@@ -318,10 +326,18 @@ export interface AgentAdapter {
 
   /**
    * Detects available credentials for this agent.
-   * When not implemented, prepareDockerInfrastructure() falls back to
-   * detectAuthMethod() (Anthropic OAuth + API key detection).
+   *
+   * When not implemented — OR when it returns `undefined` —
+   * prepareDockerInfrastructure() falls back to detectAuthMethod()
+   * (Anthropic OAuth + API key detection). Returning `undefined` lets an
+   * adapter handle only a subset of cases (e.g. Claude Code returns an
+   * api-key AuthMethod for an OpenRouter-only profile via B2a, but returns
+   * `undefined` for a native profile to preserve today's OAuth+API-key
+   * detection path). Returning `{ kind: 'none' }` is a DEFINITIVE "no
+   * credentials" that makes infra prep throw — distinct from the
+   * fall-through `undefined`.
    */
-  detectCredential?(config: IronCurtainConfig): AuthMethod;
+  detectCredential?(config: IronCurtainConfig): AuthMethod | undefined;
 
   /**
    * Error message to show when no credentials are detected.
