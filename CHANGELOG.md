@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Behavior changes
 
-- **Node.js 26 support** — bumped the V8 sandbox dependency `isolated-vm` to 7.0.0 (via an npm `override`, since it is transitive through `@utcp/code-mode`) so Code Mode initializes on Node 26; `isolated-vm` 6.x has no Node 26 prebuild and fails to compile against Node 26's V8. The supported range is now Node 22–26 (`engines` `>=22.0.0 <27`): Node 24 and 26 install prebuilt native binaries, while Node 22 compiles `isolated-vm` from source at install (no prebuilt binary ships for it, so a C/C++ toolchain is required). CI runs Node 24 and 26 on every PR and adds a Node 22 source-compile job on pushes to master (#356).
+- **Node.js 26 support** — bumped the V8 sandbox dependency `isolated-vm` to 7.0.0 (via an npm `override`, since it is transitive through `@utcp/code-mode`) so Code Mode initializes on Node 26; `isolated-vm` 6.x has no Node 26 prebuild and fails to compile against Node 26's V8. Supported lines are now the even-numbered major lines **22, 24, and 26**: Node 24 and 26 install prebuilt native binaries, while Node 22 compiles `isolated-vm` from source at install (no prebuilt binary ships for it, so a C/C++ toolchain is required). Odd non-LTS lines (23, 25) run within `engines` (`>=22.0.0 <27`) but are untested — `ironcurtain doctor` reports them as a warning, not an `ok`. CI runs Node 24 and 26 on every PR and adds a Node 22 source-compile job on pushes to master (#356, #358).
 
 ## [0.12.0] - 2026-06-26
 
