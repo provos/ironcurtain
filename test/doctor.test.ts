@@ -162,17 +162,21 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
 // ---------------------------------------------------------------------------
 
 describe('checkNodeVersion', () => {
-  it('passes for supported major versions', () => {
+  it('passes for supported (even LTS) major versions', () => {
     expect(checkNodeVersion('22.13.0').status).toBe('ok');
-    expect(checkNodeVersion('23.5.0').status).toBe('ok');
     expect(checkNodeVersion('24.0.0').status).toBe('ok');
     expect(checkNodeVersion('26.0.0').status).toBe('ok');
+  });
+
+  it('warns for in-range non-LTS (odd) major versions', () => {
+    expect(checkNodeVersion('23.5.0').status).toBe('warn');
+    expect(checkNodeVersion('25.0.0').status).toBe('warn');
   });
 
   it('fails for too-old major version', () => {
     const result = checkNodeVersion('20.10.0');
     expect(result.status).toBe('fail');
-    expect(result.hint).toMatch(/22\.x/);
+    expect(result.hint).toMatch(/22, 24, or 26/);
   });
 
   it('fails for too-new major version', () => {
