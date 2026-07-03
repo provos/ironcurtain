@@ -94,6 +94,8 @@ export interface PtyBridgeOptions {
   readonly resumeSessionId?: string;
   /** Optional persona name (passed as --persona to the child). */
   readonly persona?: string;
+  /** Optional provider-profile name (passed as --provider-profile to the child). */
+  readonly providerProfileName?: string;
   /** Optional model ID override (passed as --model to the child). */
   readonly model?: string;
   /** When true, pass `--capture-traces` to the child `ironcurtain start --pty`. */
@@ -102,6 +104,38 @@ export interface PtyBridgeOptions {
   readonly muxId?: string;
   /** Mux process PID to propagate to child sessions via env var. */
   readonly muxPid?: number;
+}
+
+/**
+ * Builds the child `ironcurtain start --pty` argv from the bridge options.
+ *
+ * Pure and exported so the argv construction is unit-testable (F6) without
+ * spawning a process. Order: prefix args (tsx loader/script path) → the
+ * `start --pty --agent <agent>` base → the optional per-session selection
+ * flags (`--resume`, `--workspace`, `--persona`, `--provider-profile`,
+ * `--model`, `--capture-traces`). Each flag is appended only when set.
+ */
+export function buildSpawnArgs(options: PtyBridgeOptions): string[] {
+  const spawnArgs = [...(options.prefixArgs ?? []), 'start', '--pty', '--agent', options.agent];
+  if (options.resumeSessionId) {
+    spawnArgs.push('--resume', options.resumeSessionId);
+  }
+  if (options.workspacePath) {
+    spawnArgs.push('--workspace', options.workspacePath);
+  }
+  if (options.persona) {
+    spawnArgs.push('--persona', options.persona);
+  }
+  if (options.providerProfileName) {
+    spawnArgs.push('--provider-profile', options.providerProfileName);
+  }
+  if (options.model) {
+    spawnArgs.push('--model', options.model);
+  }
+  if (options.captureTraces) {
+    spawnArgs.push('--capture-traces');
+  }
+  return spawnArgs;
 }
 
 /** Session discovery timeout (ms). */
@@ -122,22 +156,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
     allowProposedApi: true,
   });
 
-  const spawnArgs = [...(options.prefixArgs ?? []), 'start', '--pty', '--agent', options.agent];
-  if (options.resumeSessionId) {
-    spawnArgs.push('--resume', options.resumeSessionId);
-  }
-  if (options.workspacePath) {
-    spawnArgs.push('--workspace', options.workspacePath);
-  }
-  if (options.persona) {
-    spawnArgs.push('--persona', options.persona);
-  }
-  if (options.model) {
-    spawnArgs.push('--model', options.model);
-  }
-  if (options.captureTraces) {
-    spawnArgs.push('--capture-traces');
-  }
+  const spawnArgs = buildSpawnArgs(options);
   // Create a copy of process.env so we don't mutate the shared object
   const childEnv: Record<string, string> = { ...(process.env as Record<string, string>) };
   if (options.muxId) {

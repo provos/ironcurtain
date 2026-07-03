@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createMuxInputHandler } from '../src/mux/mux-input-handler.js';
 import { createPersonaName } from '../src/persona/types.js';
 import type { PersonaSnapshot } from '../src/mux/persona-scanner.js';
+import type { ProviderProfileSnapshot } from '../src/mux/provider-profile-snapshot.js';
 
 describe('MuxInputHandler', () => {
   describe('initialMode option', () => {
@@ -689,6 +690,112 @@ describe('MuxInputHandler', () => {
       const action = handler.handleKey('ENTER');
       expect(action).toEqual({ kind: 'picker-spawn', workspacePath: '/tmp/test' });
       expect(action).not.toHaveProperty('persona');
+    });
+  });
+
+  describe('provider picker mode (G13)', () => {
+    // Two configured profiles + native, glm-5.2 marked default — the snapshot
+    // shape mux-command builds from `modelProviders`.
+    const profiles: ProviderProfileSnapshot[] = [
+      { name: 'native', type: 'native', primaryModelLabel: 'Anthropic / OpenAI / ChatGPT', isDefault: false },
+      { name: 'glm-5.2', type: 'openrouter', primaryModelLabel: 'z-ai/glm-5.2 (OpenRouter)', isDefault: true },
+      { name: 'kimi', type: 'openrouter', primaryModelLabel: 'moonshot/kimi-k3 (OpenRouter)', isDefault: false },
+    ];
+
+    /** Native-only snapshot (no selectable profiles). */
+    const nativeOnly: ProviderProfileSnapshot[] = [
+      { name: 'native', type: 'native', primaryModelLabel: 'Anthropic / OpenAI / ChatGPT', isDefault: true },
+    ];
+
+    it('quick-spawn (menu option 1) opens the provider picker when profiles are configured', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], profiles);
+      const action = handler.handleKey('1');
+      expect(action).toEqual({ kind: 'redraw-picker' });
+      expect(handler.mode).toBe('provider-picker');
+      // The picker lists native + both profiles, and pre-selects the default.
+      expect(handler.providerPickerState?.profiles.map((p) => p.name)).toEqual(['native', 'glm-5.2', 'kimi']);
+      expect(handler.providerPickerState?.profiles[handler.providerPickerState.selectedIndex].name).toBe('glm-5.2');
+    });
+
+    it('selecting kimi emits picker-spawn carrying providerProfileName: kimi', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], profiles);
+      handler.handleKey('1'); // quick-spawn → provider picker
+      // Move from the default (glm-5.2, index 1) down to kimi (index 2).
+      handler.handleKey('DOWN');
+      expect(handler.providerPickerState?.selectedIndex).toBe(2);
+
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'picker-spawn', providerProfileName: 'kimi' });
+      expect(handler.mode).toBe('command');
+      expect(handler.providerPickerState).toBeNull();
+    });
+
+    it('selecting the default (Enter without navigation) uses the default profile', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], profiles);
+      handler.handleKey('1');
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'picker-spawn', providerProfileName: 'glm-5.2' });
+    });
+
+    it('carries the pending workspace/persona through the provider step', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], profiles);
+      // Menu option 2 → browse; type a workspace path.
+      handler.handleKey('2');
+      const ps = handler.pickerState!;
+      while (ps.cursorPos > 0) handler.handleKey('BACKSPACE');
+      for (const c of '/tmp/ws') handler.handleKey(c);
+      // Submitting the path now opens the provider picker (not picker-spawn yet).
+      const submit = handler.handleKey('ENTER');
+      expect(submit).toEqual({ kind: 'redraw-picker' });
+      expect(handler.mode).toBe('provider-picker');
+      expect(handler.providerPickerState?.pending).toEqual({ workspacePath: '/tmp/ws' });
+
+      // Selecting a profile combines the pending workspace with the choice.
+      handler.handleKey('DOWN'); // → kimi
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'picker-spawn', workspacePath: '/tmp/ws', providerProfileName: 'kimi' });
+    });
+
+    it('SKIPS the provider step entirely when only native is configured (zero friction)', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], nativeOnly);
+      const action = handler.handleKey('1');
+      // No provider-picker transition; emits picker-spawn directly with no profile.
+      expect(action).toEqual({ kind: 'picker-spawn' });
+      expect(handler.mode).toBe('command');
+      expect(action).not.toHaveProperty('providerProfileName');
+    });
+
+    it('SKIPS the provider step when no profile snapshot is supplied (native default)', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode(); // no personas, no profiles
+      const action = handler.handleKey('1');
+      expect(action).toEqual({ kind: 'picker-spawn' });
+      expect(handler.mode).toBe('command');
+    });
+
+    it('ESC in the provider picker cancels the whole /new flow', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], profiles);
+      handler.handleKey('1');
+      expect(handler.mode).toBe('provider-picker');
+      const action = handler.handleKey('ESCAPE');
+      expect(action).toEqual({ kind: 'picker-cancel' });
+      expect(handler.mode).toBe('command');
+      expect(handler.providerPickerState).toBeNull();
+    });
+
+    it('exitProviderPickerMode returns to command mode with no side effects', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode([], profiles);
+      handler.handleKey('1');
+      handler.exitProviderPickerMode();
+      expect(handler.mode).toBe('command');
+      expect(handler.providerPickerState).toBeNull();
     });
   });
 

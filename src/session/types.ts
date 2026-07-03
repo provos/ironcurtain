@@ -122,6 +122,13 @@ export interface SessionMetadata {
   readonly createdAt: string;
   readonly persona?: string;
   readonly workspacePath?: string;
+  /**
+   * Resolved provider-profile name (`'native'` or a configured profile).
+   * Stored as the resolved name — not "no intent" — so a resumed session
+   * keeps its original profile even if `modelProviders.default` later
+   * changes on disk. See docs/designs/openrouter-integration.md §9.7 F3.
+   */
+  readonly providerProfileName?: string;
   readonly policyDir?: string;
   readonly disableAutoApprove?: boolean;
   /**
@@ -419,6 +426,14 @@ export interface SessionOptions {
    * Must be validated via validateWorkspacePath() before passing here.
    */
   workspacePath?: string;
+
+  /**
+   * Per-session provider-profile selection (OpenRouter integration §9.7).
+   * Resolved once at infra prep to the active profile that routes the Docker
+   * agent. Unset falls through to `modelProviders.default` (→ `native`).
+   * Docker Agent Mode only; silently inert for builtin/Code Mode sessions.
+   */
+  providerProfileName?: string;
 
   /**
    * When set, loads compiled-policy.json (and optionally

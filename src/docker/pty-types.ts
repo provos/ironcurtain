@@ -35,6 +35,13 @@ export interface SessionSnapshot {
   readonly lastActivity: string;
   /** Host-side workspace path. */
   readonly workspacePath: string;
+  /**
+   * Resolved provider-profile name active for this session (`'native'` or a
+   * configured profile). Restored on resume so a later `modelProviders.default`
+   * change does not re-route the resumed session. Absent on snapshots written
+   * before this field existed. See docs/designs/openrouter-integration.md §9.7 F3.
+   */
+  readonly providerProfileName?: string;
   /** Agent adapter ID (e.g., 'claude-code', 'goose'). */
   readonly agent: string;
   /** Human-readable session label. */

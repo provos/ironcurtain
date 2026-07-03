@@ -40,6 +40,11 @@ const startSpec: CommandSpec = {
       description: 'Legacy raw PTY/debug mode; use ironcurtain mux for normal interactive Docker sessions',
     },
     { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
+    {
+      flag: 'provider-profile',
+      description: 'Route the Docker agent through a named provider profile (OpenRouter)',
+      placeholder: '<name>',
+    },
     { flag: 'capture-traces', description: 'Capture LLM API traces for this run (overrides config; Docker mode only)' },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
@@ -51,6 +56,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
     'ironcurtain start --agent codex "task"         # Docker: Codex CLI',
     'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
+    'ironcurtain start --provider-profile glm-5.2 "task" # Route via an OpenRouter profile',
     'ironcurtain start --pty                        # Legacy raw PTY/debug; prefer ironcurtain mux',
     'ironcurtain start --list-agents                # List available agents',
   ],
@@ -68,6 +74,7 @@ export async function main(args?: string[]): Promise<void> {
         persona: { type: 'string', short: 'p' },
         pty: { type: 'boolean' },
         model: { type: 'string', short: 'm' },
+        'provider-profile': { type: 'string' },
         'capture-traces': { type: 'boolean' },
         'list-agents': { type: 'boolean' },
       },
@@ -100,6 +107,7 @@ export async function main(args?: string[]): Promise<void> {
   const agentName = values.agent as string | undefined;
   const rawWorkspace = values.workspace as string | undefined;
   const personaName = values.persona as string | undefined;
+  const providerProfileName = values['provider-profile'] as string | undefined;
   const modelOverride = values.model as string | undefined;
   const modelMisuse = modelFlagMisusedAsAgent(modelOverride);
   if (modelMisuse) {
@@ -122,6 +130,11 @@ export async function main(args?: string[]): Promise<void> {
   }
   if (resumeSessionId && personaName) {
     process.stderr.write(chalk.yellow('Note: --persona is ignored when resuming; original persona is restored.\n'));
+  }
+  if (resumeSessionId && providerProfileName) {
+    process.stderr.write(
+      chalk.yellow('Note: --provider-profile is ignored when resuming; original profile is restored.\n'),
+    );
   }
 
   // Validate --workspace before anything else that uses config
@@ -146,6 +159,18 @@ export async function main(args?: string[]): Promise<void> {
   }
 
   const mode = preflight.mode;
+
+  // F4: --provider-profile only affects Docker Agent Mode; the builtin
+  // (Code Mode) agent never reaches profile resolution. Warn on a harmless
+  // no-op rather than silently ignoring the flag. Skip on resume (already
+  // warned above that the flag is ignored).
+  if (providerProfileName && !resumeSessionId && mode.kind !== 'docker') {
+    process.stderr.write(
+      chalk.yellow(
+        'Note: --provider-profile applies only to Docker Agent Mode; ignored for the builtin (Code Mode) agent.\n',
+      ),
+    );
+  }
 
   // Check constitution and annotation freshness once here, before any proxy processes are spawned.
   const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy({
@@ -194,6 +219,7 @@ export async function main(args?: string[]): Promise<void> {
       workspacePath,
       resumeSessionId,
       persona: resumeSessionId ? undefined : personaName,
+      providerProfileName: resumeSessionId ? undefined : providerProfileName,
       captureTracesOverride,
     });
     process.exit(0);
@@ -221,6 +247,7 @@ export async function main(args?: string[]): Promise<void> {
       // workspacePath is already undefined when resuming (validation skipped above)
       workspacePath,
       persona: resumeSessionId ? undefined : personaName,
+      providerProfileName: resumeSessionId ? undefined : providerProfileName,
       captureTracesOverride,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),

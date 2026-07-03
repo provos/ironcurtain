@@ -17,6 +17,8 @@ import { PASTE_START, PASTE_END } from './paste-interceptor.js';
 import type { InputMode, MuxAction } from './types.js';
 import type { SessionSnapshot } from './session-scanner.js';
 import type { PersonaSnapshot } from './persona-scanner.js';
+import type { ProviderProfileSnapshot } from './provider-profile-snapshot.js';
+import { hasSelectableProfiles } from './provider-profile-snapshot.js';
 
 export type PickerPhase = 'menu' | 'browse';
 
@@ -47,6 +49,23 @@ export interface PersonaPickerState {
   personas: PersonaSnapshot[];
   selectedIndex: number;
   scrollOffset: number;
+}
+
+/**
+ * The workspace/persona selection carried into the provider-picker step, to be
+ * combined with the chosen profile when the final `picker-spawn` is emitted.
+ */
+export interface PendingSpawnSelection {
+  workspacePath?: string;
+  persona?: string;
+}
+
+export interface ProviderPickerState {
+  profiles: ProviderProfileSnapshot[];
+  selectedIndex: number;
+  scrollOffset: number;
+  /** The workspace/persona chosen before this step. */
+  pending: PendingSpawnSelection;
 }
 
 export interface EscalationPickerState {
@@ -83,8 +102,15 @@ export interface MuxInputHandler {
   /** Current persona picker state (null when not in persona picker mode). */
   readonly personaPickerState: PersonaPickerState | null;
 
-  /** Enter picker mode (called by /new command handler). */
-  enterPickerMode(personas?: PersonaSnapshot[]): void;
+  /** Current provider picker state (null when not in provider picker mode). */
+  readonly providerPickerState: ProviderPickerState | null;
+
+  /**
+   * Enter picker mode (called by /new command handler). The optional
+   * `profiles` snapshot drives the post-selection provider-picker step; when
+   * only `native` is configured the step is skipped entirely.
+   */
+  enterPickerMode(personas?: PersonaSnapshot[], profiles?: ProviderProfileSnapshot[]): void;
 
   /** Enter resume picker mode with the given sessions. */
   enterResumePickerMode(sessions: SessionSnapshot[]): void;
@@ -103,6 +129,9 @@ export interface MuxInputHandler {
 
   /** Exit persona picker mode and return to command mode. */
   exitPersonaPickerMode(): void;
+
+  /** Exit provider picker mode and return to command mode (no side effects). */
+  exitProviderPickerMode(): void;
 
   /** Current escalation picker state (null when not in escalation picker mode). */
   readonly escalationPickerState: EscalationPickerState | null;
@@ -244,14 +273,17 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   let _pickerState: PickerState | null = null;
   let _resumePickerState: ResumePickerState | null = null;
   let _personaPickerState: PersonaPickerState | null = null;
+  let _providerPickerState: ProviderPickerState | null = null;
   let _escalationPickerState: EscalationPickerState | null = null;
   let _escalationDismissed = false;
   let _escalationDismissedAtNumber = 0;
 
   let _cachedPersonas: PersonaSnapshot[] = [];
+  let _cachedProfiles: ProviderProfileSnapshot[] = [];
 
-  function enterPickerMode(personas?: PersonaSnapshot[]): void {
+  function enterPickerMode(personas?: PersonaSnapshot[], profiles?: ProviderProfileSnapshot[]): void {
     _cachedPersonas = personas ?? [];
+    _cachedProfiles = profiles ?? [];
     _mode = 'picker';
     _pickerState = {
       phase: 'menu',
@@ -336,6 +368,92 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   function exitPersonaPickerMode(): void {
     _mode = 'command';
     _personaPickerState = null;
+  }
+
+  function enterProviderPickerMode(pending: PendingSpawnSelection): void {
+    _mode = 'provider-picker';
+    // Default selection to the marked `isDefault` entry so Enter without
+    // navigation spawns with the user's configured default profile.
+    const defaultIndex = Math.max(
+      0,
+      _cachedProfiles.findIndex((p) => p.isDefault),
+    );
+    _providerPickerState = { profiles: _cachedProfiles, selectedIndex: defaultIndex, scrollOffset: 0, pending };
+  }
+
+  function exitProviderPickerMode(): void {
+    _mode = 'command';
+    _providerPickerState = null;
+  }
+
+  /**
+   * Completes a workspace/persona selection. When selectable profiles are
+   * configured, interposes the provider-picker step (carrying the pending
+   * selection); otherwise emits the terminal `picker-spawn` immediately for a
+   * zero-friction native default (§9.7 (3)).
+   */
+  function finishSelection(pending: PendingSpawnSelection): MuxAction {
+    _pickerState = null;
+    if (hasSelectableProfiles(_cachedProfiles)) {
+      enterProviderPickerMode(pending);
+      return { kind: 'redraw-picker' };
+    }
+    _mode = 'command';
+    return spawnActionFor(pending, undefined);
+  }
+
+  /** Builds a `picker-spawn` action, omitting undefined fields. */
+  function spawnActionFor(pending: PendingSpawnSelection, providerProfileName: string | undefined): MuxAction {
+    return {
+      kind: 'picker-spawn',
+      ...(pending.workspacePath !== undefined ? { workspacePath: pending.workspacePath } : {}),
+      ...(pending.persona !== undefined ? { persona: pending.persona } : {}),
+      ...(providerProfileName !== undefined ? { providerProfileName } : {}),
+    };
+  }
+
+  function handleProviderPickerKey(key: string): MuxAction {
+    const pps = _providerPickerState;
+    if (!pps || pps.profiles.length === 0) {
+      // Defensive: the mode is only entered with a non-empty snapshot.
+      if (key === ESCAPE || key === CTRL_C || key === ENTER) {
+        exitProviderPickerMode();
+        return { kind: 'picker-cancel' };
+      }
+      return { kind: 'none' };
+    }
+
+    if (key === ESCAPE || key === CTRL_C) {
+      // Cancel the whole /new flow (the workspace/persona choice is discarded).
+      exitProviderPickerMode();
+      return { kind: 'picker-cancel' };
+    }
+
+    if (key === ENTER) {
+      const selected = pps.profiles[pps.selectedIndex];
+      const pending = pps.pending;
+      exitProviderPickerMode();
+      return spawnActionFor(pending, selected.name);
+    }
+
+    if (key === UP) {
+      if (pps.selectedIndex > 0) {
+        pps.selectedIndex--;
+        if (pps.selectedIndex < pps.scrollOffset) {
+          pps.scrollOffset = pps.selectedIndex;
+        }
+      }
+      return { kind: 'redraw-picker' };
+    }
+
+    if (key === DOWN) {
+      if (pps.selectedIndex < pps.profiles.length - 1) {
+        pps.selectedIndex++;
+      }
+      return { kind: 'redraw-picker' };
+    }
+
+    return { kind: 'none' };
   }
 
   function handlePersonaPickerKey(key: string): MuxAction {
@@ -444,9 +562,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
 
   function executeMenuSelection(selection: number): MuxAction {
     if (selection === 0) {
-      _mode = 'command';
-      _pickerState = null;
-      return { kind: 'picker-spawn' };
+      // Quick-spawn: no workspace, no persona. May still route through the
+      // provider-picker step when profiles are configured.
+      return finishSelection({});
     }
     if (selection === 1) {
       initBrowsePhase();
@@ -577,11 +695,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === ENTER && !ps.inList) {
       if (ps.inputPath.trim()) {
         const workspacePath = ps.inputPath.replace(/\/+$/, '');
-        _mode = 'command';
-        _pickerState = null;
-        return ps.persona
-          ? { kind: 'picker-spawn', workspacePath, persona: ps.persona }
-          : { kind: 'picker-spawn', workspacePath };
+        return finishSelection(ps.persona ? { workspacePath, persona: ps.persona } : { workspacePath });
       }
       return { kind: 'redraw-picker' };
     }
@@ -877,12 +991,16 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     get personaPickerState() {
       return _personaPickerState;
     },
+    get providerPickerState() {
+      return _providerPickerState;
+    },
 
     enterPickerMode,
     enterResumePickerMode,
     exitResumePickerMode,
     enterPersonaPickerMode,
     exitPersonaPickerMode,
+    exitProviderPickerMode,
     enterBrowseWithError,
     exitPickerMode,
     enterEscalationPickerMode,
@@ -911,6 +1029,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       }
       if (_mode === 'persona-picker') {
         return handlePersonaPickerKey(key);
+      }
+      if (_mode === 'provider-picker') {
+        return handleProviderPickerKey(key);
       }
       if (_mode === 'escalation-picker') {
         return handleEscalationPickerKey(key);

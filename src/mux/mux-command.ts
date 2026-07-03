@@ -24,6 +24,7 @@ import {
 import type { PreflightOptions, PreflightResult } from '../session/preflight.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import { createMuxApp, type MuxApp, type MuxAppOptions } from './mux-app.js';
+import { buildProviderProfileSnapshots } from './provider-profile-snapshot.js';
 
 const muxSpec: CommandSpec = {
   name: 'ironcurtain mux',
@@ -195,6 +196,10 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
   const registryDir = getPtyRegistryDir();
   mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 
+  // Config-load seam (F5): derive the provider-profile snapshot so the /new
+  // picker can offer a profile step. Empty (native-only) → the step is skipped.
+  const providerProfiles = buildProviderProfileSnapshots(config.userConfig.modelProviders);
+
   const app = createApp({
     agent: resolvedAgent,
     model,
@@ -203,6 +208,7 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
     protectedPaths: config.protectedPaths,
     muxId,
     muxPid: process.pid,
+    providerProfiles,
   });
 
   await app.start();

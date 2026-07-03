@@ -55,6 +55,9 @@ function createTestConfig(
       anthropicBaseUrl: '',
       openaiBaseUrl: '',
       googleBaseUrl: '',
+      // Native-default registry: no OpenRouter routing, so preflight falls
+      // through to agent-native credential detection (G13 §9.7).
+      modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
       escalationTimeoutSeconds: 300,
       resourceBudget: {
         maxTotalTokens: 1_000_000,

@@ -23,6 +23,7 @@ import {
   PROVIDER_ENV_VARS,
   type ProviderId,
 } from '../config/model-provider.js';
+import { resolveActiveProfile } from '../config/user-config.js';
 // The Docker availability probe lives in `docker/docker-probe.js` (a
 // dependency-free leaf) so runtime modules can use it without importing this
 // file. Import callers reference `docker-probe.js` directly.
@@ -73,6 +74,18 @@ async function detectCredentialState(
   config: IronCurtainConfig,
   sources: CredentialSources,
 ): Promise<CredentialState> {
+  // OpenRouter integration (§9.7): when the resolved active profile is
+  // openrouter-type, the container authenticates with the profile's OpenRouter
+  // key — not the agent-native credential. The interactive banner would
+  // otherwise report "no credentials" for an OpenRouter-only user. Preflight
+  // has no threaded per-session flag, so it resolves the config default (the
+  // same `name ?? default` expression infra prep uses). Native profiles fall
+  // through to the agent-native detection unchanged.
+  const activeProfile = resolveActiveProfile(config.userConfig.modelProviders);
+  if (activeProfile.type === 'openrouter') {
+    return { credKind: activeProfile.apiKey ? 'apikey' : null, anthropicOAuthOnly: false };
+  }
+
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
     const key = resolveApiKeyForProvider(provider, config.userConfig);

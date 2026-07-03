@@ -132,6 +132,7 @@ function applyResumeMetadata(options: SessionOptions): SessionOptions {
     // caller-provided values (important for non-CLI callers like the daemon).
     ...(metadata.persona !== undefined ? { persona: metadata.persona } : {}),
     ...(metadata.workspacePath !== undefined ? { workspacePath: metadata.workspacePath } : {}),
+    ...(metadata.providerProfileName !== undefined ? { providerProfileName: metadata.providerProfileName } : {}),
     ...(metadata.policyDir !== undefined ? { policyDir: metadata.policyDir } : {}),
     ...(metadata.disableAutoApprove !== undefined ? { disableAutoApprove: metadata.disableAutoApprove } : {}),
     // Caller-supplied `agentConversationId` wins over the persisted
@@ -303,6 +304,9 @@ async function createDockerSession(
           capturesDir: getSessionCapturesDir(sessionId),
           recordedAgentName: agentId,
         },
+        undefined, // scriptsDir
+        undefined, // options (CreateDockerInfrastructureOptions)
+        options.providerProfileName,
       );
       // Standalone sessions use their bundle for the session's entire
       // lifetime; pin the token-stream routing ID to this session's ID.
@@ -449,6 +453,7 @@ export function buildSessionConfig(
     SessionOptions,
     | 'resumeSessionId'
     | 'workspacePath'
+    | 'providerProfileName'
     | 'policyDir'
     | 'disableAutoApprove'
     | 'persona'
@@ -661,10 +666,17 @@ export function buildSessionConfig(
   // Persist session settings so --resume can restore them.
   // Only write on initial creation (not when resuming).
   if (!resumeSessionId) {
+    // Persist the RESOLVED active-profile name (not the raw flag) so a
+    // resumed Docker session keeps its original profile even if
+    // `modelProviders.default` later changes. Docker mode only: builtin
+    // sessions never route through a provider profile (§9.7 F3/F4).
+    const resolvedProfileName =
+      opts.mode?.kind === 'docker' ? (opts.providerProfileName ?? config.userConfig.modelProviders.default) : undefined;
     const metadata = {
       createdAt: new Date().toISOString(),
       ...(opts.persona ? { persona: opts.persona } : {}),
       ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+      ...(resolvedProfileName ? { providerProfileName: resolvedProfileName } : {}),
       // Only store policyDir when no persona is set (persona derives its own)
       ...(!opts.persona && policyDir ? { policyDir } : {}),
       ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
