@@ -99,6 +99,12 @@ function generateCA(certPath: string, keyPath: string): CertificateAuthority {
 
 /** Generates a random serial number as a hex string. */
 export function randomSerialNumber(): string {
-  const bytes = forge.random.getBytesSync(16);
-  return forge.util.bytesToHex(bytes);
+  const hex = forge.util.bytesToHex(forge.random.getBytesSync(16));
+  // node-forge encodes the serial's bytes verbatim with no sign pad; a leading
+  // byte >= 0x80 becomes a NEGATIVE DER INTEGER, which strict OpenSSL (Node 22 /
+  // OpenSSL 3.0.x) rejects at cert-load with "asn1 …::illegal padding". Clear the
+  // high bit for a positive serial, and avoid a 0x00 leading byte (redundant pad).
+  let first = parseInt(hex.slice(0, 2), 16) & 0x7f;
+  if (first === 0) first = 0x01;
+  return first.toString(16).padStart(2, '0') + hex.slice(2);
 }

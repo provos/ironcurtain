@@ -125,7 +125,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client.close();
-  httpServer.close();
+  // Force-close any lingering connections (e.g. the never-responding /slow
+  // request) so the server socket actually releases and doesn't keep the event
+  // loop alive past teardown.
+  httpServer.closeAllConnections();
+  await new Promise<void>((resolve) => httpServer.close(() => resolve()));
 });
 
 /** Extracts the text content from an MCP tool call result. */

@@ -23,13 +23,12 @@ class MockSignalApi {
   private server: http.Server;
   private wss: WebSocketServer;
   readonly sentMessages: SentMessage[] = [];
-  readonly port: number;
+  // Assigned by start() after the OS picks an ephemeral port (bind to 0).
+  port = 0;
   private identities: Array<{ number: string; fingerprint: string }> = [];
   private identityEndpointDown = false;
 
-  constructor(port: number) {
-    this.port = port;
-
+  constructor() {
     this.server = http.createServer((req, res) => {
       this.handleRequest(req, res);
     });
@@ -80,8 +79,14 @@ class MockSignalApi {
   }
 
   async start(): Promise<void> {
-    return new Promise((resolve) => {
-      this.server.listen(this.port, '127.0.0.1', () => resolve());
+    return new Promise((resolve, reject) => {
+      this.server.on('error', reject);
+      // Bind an ephemeral port (0) so parallel/retried runs never collide.
+      this.server.listen(0, '127.0.0.1', () => {
+        const addr = this.server.address();
+        this.port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
     });
   }
 
@@ -465,11 +470,11 @@ describe('SignalBotDaemon', () => {
   let mockApi: MockSignalApi;
   let port: number;
 
-  // Use a random port to avoid conflicts
+  // Bind an ephemeral port to avoid conflicts; read it back after start().
   beforeEach(async () => {
-    port = 18100 + Math.floor(Math.random() * 900);
-    mockApi = new MockSignalApi(port);
+    mockApi = new MockSignalApi();
     await mockApi.start();
+    port = mockApi.port;
     // Set default identity for the configured recipient
     mockApi.setIdentities([{ number: '+15559876543', fingerprint: 'test-identity-key-abc123' }]);
   });
@@ -1408,6 +1413,10 @@ describe('SignalBotDaemon', () => {
     // Deny and verify correct routing
     mockApi.simulateIncomingMessage('+15559876543', 'deny');
     await waitForMessage(mockApi, (m) => m.includes('Clone blocked'));
+    // The "denied" confirmation is emitted on a separate async chain
+    // (resolveSessionEscalation().then()) from the session's "Clone blocked"
+    // response, so wait for it explicitly before asserting on it.
+    await waitForMessage(mockApi, (m) => m.includes('denied') && m.includes('[#2]'));
 
     messages = mockApi.messageTexts;
     // Deny confirmation should reference #2

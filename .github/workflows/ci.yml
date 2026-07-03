@@ -45,7 +45,21 @@ jobs:
       # the Actions UI is then the measurement. (No node_modules/prebuild cache
       # here on purpose — npm ci stays deterministic; if the Node-22 job ever
       # gets painful, a prebuild cache is a possible future optimization.)
-      - run: npm ci --foreground-scripts
+      #
+      # Retried: some deps run postinstall scripts that download native binaries
+      # from a CDN (e.g. onnxruntime-node via @huggingface/transformers), which
+      # intermittently ETIMEDOUT/ENETUNREACH on runners and fails `npm ci`. Retry
+      # the whole install a couple times before giving up.
+      - name: Install dependencies (retry on transient network failure)
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci --foreground-scripts; then exit 0; fi
+            echo "::warning::npm ci attempt $attempt failed; cleaning and retrying in 15s"
+            rm -rf node_modules
+            sleep 15
+          done
+          echo "::error::npm ci failed after 3 attempts"
+          exit 1
       - name: Report Node ABI and isolated-vm build source
         run: |
           node -e "console.log('ABI', process.versions.modules)"

@@ -30,6 +30,20 @@ vi.mock('../src/escalation/listener-lock.js', async (importOriginal) => {
   };
 });
 
+// The watcher polls on a 300ms interval, so a fixed sleep can lose the race under
+// a GC/scheduler stall. Poll the live `pendingCount` getter until it reaches the
+// expected value or a generous timeout elapses.
+async function waitForPendingCount(
+  manager: { readonly pendingCount: number },
+  expected: number,
+  timeoutMs = 5000,
+): Promise<void> {
+  const start = Date.now();
+  while (manager.pendingCount < expected && Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 describe('MuxEscalationManager', () => {
   let tempDir: string;
 
@@ -149,7 +163,7 @@ describe('MuxEscalationManager', () => {
     });
 
     // Wait for the watcher to poll (default 300ms)
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForPendingCount(manager, 1);
 
     expect(manager.pendingCount).toBe(1);
     manager.stop();
@@ -187,7 +201,7 @@ describe('MuxEscalationManager', () => {
     });
 
     // Wait for the watcher to poll (default 300ms)
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForPendingCount(manager, 1);
 
     // Should only have 1 pending escalation, not 2
     expect(manager.pendingCount).toBe(1);
