@@ -91,6 +91,7 @@ function createMockEffects(): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
     refreshPersonas: vi.fn(),
+    refreshConfig: vi.fn(),
     assignDisplayNumber: vi.fn(() => ++displayNumberCounter),
   };
 }
@@ -394,6 +395,14 @@ describe('handleEvent', () => {
     const handled = handleEvent(state, effects, 'personas.changed', {});
     expect(handled).toBe(true);
     expect(effects.refreshPersonas).toHaveBeenCalledOnce();
+  });
+
+  it('calls refreshConfig for config.changed', () => {
+    const state = createMockState();
+    const effects = createMockEffects();
+    const handled = handleEvent(state, effects, 'config.changed', {});
+    expect(handled).toBe(true);
+    expect(effects.refreshConfig).toHaveBeenCalledOnce();
   });
 
   it('returns false for unknown events', () => {

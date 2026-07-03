@@ -106,6 +106,11 @@ export interface WebEventMap {
   // setBroadPolicyOptIn) so connected clients refresh the persona list,
   // mirroring `job.list_changed`. Carries no payload.
   'personas.changed': Record<string, never>;
+
+  // Config change notification. Emitted by `config.setModelProviders` after a
+  // successful write so connected clients refresh their Settings view,
+  // mirroring `personas.changed`. Carries no payload.
+  'config.changed': Record<string, never>;
 }
 
 export type WebEventName = keyof WebEventMap;

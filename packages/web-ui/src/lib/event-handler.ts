@@ -112,6 +112,11 @@ export interface EventSideEffects {
    * `personas.changed` event, mirroring `refreshJobs` for `job.list_changed`.
    */
   refreshPersonas(): void;
+  /**
+   * Refresh the model-provider config view. Invoked on every `config.changed`
+   * event (a `config.setModelProviders` write), mirroring `refreshPersonas`.
+   */
+  refreshConfig(): void;
   assignDisplayNumber(escalationId: string): number;
 }
 
@@ -183,7 +188,8 @@ export type WebEvent =
   | { event: 'persona.compile.progress'; payload: PersonaCompileProgressEvent }
   | { event: 'persona.compile.done'; payload: PersonaCompileDoneEvent }
   | { event: 'persona.compile.failed'; payload: PersonaCompileFailedEvent }
-  | { event: 'personas.changed'; payload: Record<string, never> };
+  | { event: 'personas.changed'; payload: Record<string, never> }
+  | { event: 'config.changed'; payload: Record<string, never> };
 
 /**
  * Parse a raw event name + payload into a typed WebEvent.
@@ -263,6 +269,8 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'persona.compile.failed':
       return { event, payload: data as unknown as PersonaCompileFailedEvent };
     case 'personas.changed':
+      return { event, payload: {} as Record<string, never> };
+    case 'config.changed':
       return { event, payload: {} as Record<string, never> };
     default:
       return undefined;
@@ -568,6 +576,12 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     // mirroring how `job.list_changed` triggers `refreshJobs`.
     case 'personas.changed':
       effects.refreshPersonas();
+      return true;
+
+    // Config change notification: refresh the model-provider config view,
+    // mirroring how `personas.changed` triggers `refreshPersonas`.
+    case 'config.changed':
+      effects.refreshConfig();
       return true;
 
     default:

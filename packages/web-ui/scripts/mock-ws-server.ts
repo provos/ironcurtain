@@ -502,6 +502,170 @@ let CANNED_PERSONA_DETAILS: Record<string, MockPersonaDetail> = {
 const ORIGINAL_PERSONAS_LIST: MockPersonaListItem[] = structuredClone(CANNED_PERSONAS);
 const ORIGINAL_PERSONA_DETAILS_FULL: Record<string, MockPersonaDetail> = structuredClone(CANNED_PERSONA_DETAILS);
 
+// ---------------------------------------------------------------------------
+// Model-provider profiles (config.getModelProviders / config.setModelProviders).
+//
+// Mirrors the daemon's config-dispatch contract (§12.6): the get response masks
+// every openrouter profile's apiKey and includes the implicit `native` profile;
+// the set path applies M5 (per-profile mask-unchanged/clear/set), F7 (drop a
+// verbatim {type:'native'}, reject any other native value), and F10 (re-point a
+// dropped default to 'native'). State holds the REAL keys; the wire always masks.
+// ---------------------------------------------------------------------------
+
+const NATIVE_NAME = 'native';
+const DOCKER_AGENTS = ['claude-code', 'goose', 'codex'] as const;
+
+interface MockOpenrouterProfile {
+  type: 'openrouter';
+  apiKey?: string;
+  modelMap?: { match: string; model: string }[];
+  perAgent?: Record<string, string>;
+  providerPreference?: { order?: string[]; only?: string[]; allowFallbacks?: boolean };
+  sessionAffinity?: boolean;
+}
+type MockStoredProfile = { type: 'native' } | MockOpenrouterProfile;
+
+interface MockModelProviders {
+  default: string;
+  profiles: Record<string, MockStoredProfile>;
+}
+
+const DEFAULT_MODEL_MAP = [
+  { match: '*opus*', model: 'z-ai/glm-5.2' },
+  { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+  { match: '*haiku*', model: 'z-ai/glm-5.2' },
+];
+
+/** The stored config (REAL keys). The wire representation masks apiKey. */
+let modelProviders: MockModelProviders = {
+  default: 'glm-5.2',
+  profiles: {
+    'glm-5.2': {
+      type: 'openrouter',
+      apiKey: 'sk-or-v1-glmMOCKkey000000000000000000end',
+      modelMap: [
+        { match: '*opus*', model: 'z-ai/glm-5.2' },
+        { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+      ],
+      perAgent: { goose: 'z-ai/glm-5.2', codex: 'z-ai/glm-5.2' },
+      providerPreference: { order: ['z-ai'], allowFallbacks: false },
+      sessionAffinity: true,
+    },
+    kimi: {
+      type: 'openrouter',
+      modelMap: [{ match: '*', model: 'moonshot/kimi-k3' }],
+    },
+  },
+};
+
+const ORIGINAL_MODEL_PROVIDERS: MockModelProviders = structuredClone(modelProviders);
+
+/** Mirrors maskApiKey in config-command.ts / config-dispatch.ts (`sk-...xyz` / 'none'). */
+function maskApiKey(key: string | undefined): string {
+  if (!key) return 'none';
+  if (key.length <= 6) return '***';
+  return key.slice(0, 3) + '...' + key.slice(-3);
+}
+
+/** The resolved (defaults-applied) view of one stored openrouter profile. */
+function resolveOpenrouter(p: MockOpenrouterProfile) {
+  const perAgent: Record<string, string | undefined> = {};
+  for (const agent of DOCKER_AGENTS) perAgent[agent] = p.perAgent?.[agent];
+  return {
+    type: 'openrouter' as const,
+    apiKey: maskApiKey(p.apiKey),
+    modelMap: (p.modelMap ?? DEFAULT_MODEL_MAP).map((r) => ({ match: r.match, model: r.model })),
+    perAgent,
+    providerPreference: p.providerPreference,
+    sessionAffinity: p.sessionAffinity ?? true,
+  };
+}
+
+/** Builds the masked GetModelProvidersDto (native always present, key-less). */
+function buildModelProvidersDto() {
+  const profiles: Record<string, unknown> = { [NATIVE_NAME]: { type: 'native' } };
+  for (const [name, prof] of Object.entries(modelProviders.profiles)) {
+    if (name === NATIVE_NAME) continue;
+    profiles[name] = prof.type === 'openrouter' ? resolveOpenrouter(prof) : { type: 'native' };
+  }
+  return { default: modelProviders.default, profiles };
+}
+
+/**
+ * Applies a config.setModelProviders request to `modelProviders`. Returns an
+ * RpcError sentinel on a contract violation (reserved-native, bad default),
+ * else undefined. Mirrors config-dispatch.ts exactly.
+ */
+function applySetModelProviders(params: Record<string, unknown>): RpcErrorResult | undefined {
+  const inProfiles = (params.profiles ?? {}) as Record<string, Record<string, unknown>>;
+  if (typeof inProfiles !== 'object') return errorResult('INVALID_PARAMS', 'profiles is required');
+
+  const priorNames = Object.keys(modelProviders.profiles);
+  const next: Record<string, MockStoredProfile> = {};
+
+  for (const [name, dto] of Object.entries(inProfiles)) {
+    if (name === NATIVE_NAME) {
+      // F7: accept-and-drop a verbatim { type: 'native' }; reject anything else.
+      if (dto.type === 'native' && Object.keys(dto).length === 1) continue;
+      return errorResult('INVALID_PARAMS', `"${NATIVE_NAME}" is a reserved profile name and cannot be redefined.`);
+    }
+    if (dto.type === 'native') {
+      next[name] = { type: 'native' };
+      continue;
+    }
+    if (dto.type !== 'openrouter') return errorResult('INVALID_PARAMS', `Invalid profile "${name}"`);
+
+    const current = modelProviders.profiles[name];
+    const currentKey = current?.type === 'openrouter' ? current.apiKey : undefined;
+    const resolvedKey = resolveKey(dto.apiKey, currentKey);
+
+    const built: MockOpenrouterProfile = { type: 'openrouter' };
+    if (resolvedKey) built.apiKey = resolvedKey;
+    if (Array.isArray(dto.modelMap)) {
+      built.modelMap = (dto.modelMap as { match: string; model: string }[]).map((r) => ({
+        match: r.match,
+        model: r.model,
+      }));
+    }
+    const perAgent: Record<string, string> = {};
+    if (dto.perAgent && typeof dto.perAgent === 'object') {
+      for (const agent of DOCKER_AGENTS) {
+        const slug = (dto.perAgent as Record<string, unknown>)[agent];
+        if (typeof slug === 'string' && slug.length > 0) perAgent[agent] = slug;
+      }
+    }
+    if (Object.keys(perAgent).length > 0) built.perAgent = perAgent;
+    if (dto.providerPreference && typeof dto.providerPreference === 'object') {
+      built.providerPreference = dto.providerPreference as MockOpenrouterProfile['providerPreference'];
+    }
+    if (typeof dto.sessionAffinity === 'boolean') built.sessionAffinity = dto.sessionAffinity;
+    next[name] = built;
+  }
+
+  // F10: re-point a `default` that names a DROPPED profile; reject a genuinely
+  // bad default (one that never existed).
+  const requested = typeof params.default === 'string' ? params.default : undefined;
+  let resolvedDefault: string | undefined = requested;
+  if (requested !== undefined && requested !== NATIVE_NAME && !(requested in next)) {
+    resolvedDefault = priorNames.includes(requested) ? NATIVE_NAME : requested;
+  }
+  if (resolvedDefault !== undefined && resolvedDefault !== NATIVE_NAME && !(resolvedDefault in next)) {
+    return errorResult('INVALID_PARAMS', 'modelProviders.default must name a configured profile or "native".');
+  }
+
+  modelProviders = { default: resolvedDefault ?? NATIVE_NAME, profiles: next };
+  return undefined;
+}
+
+/** M5: absent/null/mask-equal → keep; '' → clear (undefined); other → set. */
+function resolveKey(wire: unknown, currentKey: string | undefined): string | undefined {
+  if (wire === undefined || wire === null) return currentKey;
+  if (typeof wire !== 'string') return currentKey;
+  if (wire === maskApiKey(currentKey)) return currentKey;
+  if (wire === '') return undefined;
+  return wire;
+}
+
 const CANNED_FILE_TREE = {
   entries: [
     { name: '.workflow', type: 'directory' as const },
@@ -1064,6 +1228,8 @@ function resetState(opts?: { allowPolicyMutation?: boolean }): void {
   jobs.push(...structuredClone(CANNED_JOBS));
   initWorkflows();
   clearCompileState();
+  // Restore the model-provider registry so a set-mutating e2e starts fresh.
+  modelProviders = structuredClone(ORIGINAL_MODEL_PROVIDERS);
   // clearCompileState resets allowPolicyMutation to true (the default); honor a
   // per-test override AFTER it so a flag-OFF e2e (controls hidden) is real.
   if (opts?.allowPolicyMutation !== undefined) {
@@ -1678,6 +1844,24 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       CANNED_PERSONAS = CANNED_PERSONAS.filter((p) => p.name !== dName);
       broadcast('personas.changed', {});
       return { deleted: true };
+    }
+
+    // -----------------------------------------------------------------------
+    // Config (modelProviders). Read is ungated; the write is gated on
+    // allowPolicyMutation and applies the M5/F7/F10 contract, then broadcasts
+    // config.changed (mirrors config-dispatch.ts).
+    // -----------------------------------------------------------------------
+
+    case 'config.getModelProviders':
+      return buildModelProvidersDto();
+
+    case 'config.setModelProviders': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const applied = applySetModelProviders(params);
+      if (applied) return applied;
+      broadcast('config.changed', {});
+      return buildModelProvidersDto();
     }
 
     // Workflow methods

@@ -40,6 +40,7 @@ function createMockEffects(): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
     refreshPersonas: vi.fn(),
+    refreshConfig: vi.fn(),
     assignDisplayNumber: vi.fn(() => 1),
   };
 }

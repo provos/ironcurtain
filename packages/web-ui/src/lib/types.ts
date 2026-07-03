@@ -503,6 +503,57 @@ export interface PersonaEditResultDto {
 }
 
 // ---------------------------------------------------------------------------
+// Config (modelProviders) types — mirror src/web-ui/web-ui-types.ts.
+// ---------------------------------------------------------------------------
+
+/** One glob→slug rule for a modelMap. */
+export interface ModelMapRuleDto {
+  readonly match: string;
+  readonly model: string;
+}
+
+/** Provider-preference passthrough (cache pinning). */
+export interface ProviderPreferenceDto {
+  readonly order?: readonly string[];
+  readonly only?: readonly string[];
+  readonly allowFallbacks?: boolean;
+}
+
+/** The native profile DTO — no fields beyond the discriminator. */
+export interface NativeProfileDto {
+  readonly type: 'native';
+}
+
+/**
+ * The openrouter profile DTO. On the GET response `apiKey` is MASKED
+ * (`sk-...xyz` / 'none'). On a SET request `apiKey` follows the M5
+ * mask-unchanged contract: absent/null/mask-equal → keep, '' → clear, other → set.
+ */
+export interface OpenrouterProfileDto {
+  readonly type: 'openrouter';
+  readonly apiKey?: string | null;
+  readonly modelMap?: readonly ModelMapRuleDto[];
+  readonly perAgent?: Readonly<Record<string, string | undefined>>;
+  readonly providerPreference?: ProviderPreferenceDto;
+  readonly sessionAffinity?: boolean;
+}
+
+/** A single profile DTO (discriminated on `type`). */
+export type ProfileDto = NativeProfileDto | OpenrouterProfileDto;
+
+/** Response from `config.getModelProviders`. */
+export interface GetModelProvidersDto {
+  readonly default: string;
+  readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+/** Request for `config.setModelProviders` (whole profiles record). */
+export interface SetModelProvidersDto {
+  readonly default?: string;
+  readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+// ---------------------------------------------------------------------------
 // Persona streamed-compile types (Phase 1b). Mirror src/web-ui/web-ui-types.ts.
 // ---------------------------------------------------------------------------
 
