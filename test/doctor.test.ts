@@ -166,6 +166,7 @@ describe('checkNodeVersion', () => {
     expect(checkNodeVersion('22.13.0').status).toBe('ok');
     expect(checkNodeVersion('23.5.0').status).toBe('ok');
     expect(checkNodeVersion('24.0.0').status).toBe('ok');
+    expect(checkNodeVersion('26.0.0').status).toBe('ok');
   });
 
   it('fails for too-old major version', () => {
@@ -175,7 +176,7 @@ describe('checkNodeVersion', () => {
   });
 
   it('fails for too-new major version', () => {
-    const result = checkNodeVersion('25.0.0');
+    const result = checkNodeVersion('27.0.0');
     expect(result.status).toBe('fail');
   });
 
