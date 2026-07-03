@@ -103,6 +103,7 @@ export class SignalBotDaemon {
   private baseUrl: string = '';
   private closed = false;
   private reconnectAttempts = 0;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
   private static readonly MAX_RECONNECT_DELAY_MS = 30_000;
   private static readonly BASE_RECONNECT_DELAY_MS = 1_000;
 
@@ -195,6 +196,10 @@ export class SignalBotDaemon {
   async shutdown(): Promise<void> {
     logger.info('[Signal Daemon] Shutting down...');
     this.closed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     await this.sendSignalMessage('IronCurtain bot is shutting down. Goodbye.').catch(() => {});
 
     // Wait for any in-flight session operations (e.g., /new) to complete
@@ -292,13 +297,15 @@ export class SignalBotDaemon {
       SignalBotDaemon.MAX_RECONNECT_DELAY_MS,
     );
 
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
       if (!this.closed) {
         this.connectWebSocket().catch(() => {
           // Retry will be scheduled by the close handler
         });
       }
     }, delay);
+    // Don't let a pending reconnect timer keep the event loop alive after shutdown.
+    this.reconnectTimer.unref();
   }
 
   // --- Message routing ---

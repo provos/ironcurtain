@@ -151,7 +151,8 @@ interface SentMessage {
 class MockSignalApi {
   private server: http.Server;
   readonly sentMessages: SentMessage[] = [];
-  readonly port: number;
+  // Assigned by start() after the OS picks an ephemeral port (bind to 0).
+  port = 0;
   private identities: Array<{
     number: string;
     fingerprint: string;
@@ -163,8 +164,7 @@ class MockSignalApi {
   private registerShouldFail = false;
   private verifyShouldFail = false;
 
-  constructor(port: number) {
-    this.port = port;
+  constructor() {
     this.server = http.createServer((req, res) => {
       this.handleRequest(req, res);
     });
@@ -193,8 +193,14 @@ class MockSignalApi {
   }
 
   async start(): Promise<void> {
-    return new Promise((resolve) => {
-      this.server.listen(this.port, '127.0.0.1', () => resolve());
+    return new Promise((resolve, reject) => {
+      this.server.on('error', reject);
+      // Bind an ephemeral port (0) so parallel/retried runs never collide.
+      this.server.listen(0, '127.0.0.1', () => {
+        const addr = this.server.address();
+        this.port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
     });
   }
 
@@ -300,12 +306,11 @@ describe('validatePhoneNumber', () => {
 describe('registerNewNumber', () => {
   let api: MockSignalApi;
   let baseUrl: string;
-  const PORT = 19201;
 
   beforeAll(async () => {
-    api = new MockSignalApi(PORT);
+    api = new MockSignalApi();
     await api.start();
-    baseUrl = `http://127.0.0.1:${PORT}`;
+    baseUrl = `http://127.0.0.1:${api.port}`;
   });
 
   afterAll(async () => {
@@ -352,12 +357,11 @@ describe('registerNewNumber', () => {
 describe('verifyRecipientIdentity', () => {
   let api: MockSignalApi;
   let baseUrl: string;
-  const PORT = 19203;
 
   beforeAll(async () => {
-    api = new MockSignalApi(PORT);
+    api = new MockSignalApi();
     await api.start();
-    baseUrl = `http://127.0.0.1:${PORT}`;
+    baseUrl = `http://127.0.0.1:${api.port}`;
   });
 
   afterAll(async () => {
@@ -422,11 +426,12 @@ describe('verifyRecipientIdentity', () => {
 
 describe('runSignalSetup', () => {
   let api: MockSignalApi;
-  const PORT = 19204;
+  let port: number;
 
   beforeAll(async () => {
-    api = new MockSignalApi(PORT);
+    api = new MockSignalApi();
     await api.start();
+    port = api.port;
   });
 
   afterAll(async () => {
@@ -441,7 +446,7 @@ describe('runSignalSetup', () => {
     api.setRegisterShouldFail(false);
     api.setVerifyShouldFail(false);
 
-    sharedContainerManager.ensureRunning.mockResolvedValue(`http://127.0.0.1:${PORT}`);
+    sharedContainerManager.ensureRunning.mockResolvedValue(`http://127.0.0.1:${port}`);
     sharedContainerManager.isRunning.mockResolvedValue(true);
     sharedContainerManager.pullImage.mockResolvedValue(undefined);
     sharedContainerManager.waitForHealthy.mockResolvedValue(undefined);
@@ -481,7 +486,7 @@ describe('runSignalSetup', () => {
       recipientIdentityKey: '05oldkey1234567890abcdef',
       container: {
         image: 'bbernhard/signal-cli-rest-api:latest',
-        port: PORT,
+        port,
         dataDir: '/tmp/test-signal-data',
         containerName: 'ironcurtain-signal-test',
       },
@@ -516,11 +521,12 @@ describe('runSignalSetup', () => {
 
 describe('runReTrust', () => {
   let api: MockSignalApi;
-  const PORT = 19205;
+  let port: number;
 
   beforeAll(async () => {
-    api = new MockSignalApi(PORT);
+    api = new MockSignalApi();
     await api.start();
+    port = api.port;
   });
 
   afterAll(async () => {
@@ -540,14 +546,14 @@ describe('runReTrust', () => {
       recipientIdentityKey: '05oldkey1234567890abcdef',
       container: {
         image: 'bbernhard/signal-cli-rest-api:latest',
-        port: PORT,
+        port,
         dataDir: '/tmp/test-signal-data',
         containerName: 'ironcurtain-signal-test',
       },
     });
 
     sharedContainerManager.isRunning.mockResolvedValue(true);
-    sharedContainerManager.ensureRunning.mockResolvedValue(`http://127.0.0.1:${PORT}`);
+    sharedContainerManager.ensureRunning.mockResolvedValue(`http://127.0.0.1:${port}`);
   });
 
   it('re-verifies identity and saves new key', async () => {

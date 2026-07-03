@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import forge from 'node-forge';
-import { loadOrCreateCA } from '../src/docker/ca.js';
+import { loadOrCreateCA, randomSerialNumber } from '../src/docker/ca.js';
 
 describe('loadOrCreateCA', () => {
   let tempDir: string;
@@ -108,5 +108,27 @@ describe('loadOrCreateCA', () => {
     // Verify the leaf cert was signed by the CA
     const verified = caCert.verify(leafCert);
     expect(verified).toBe(true);
+  });
+});
+
+describe('randomSerialNumber', () => {
+  // node-forge encodes the serial's bytes verbatim as a DER INTEGER with no sign
+  // padding, so a leading byte >= 0x80 becomes a NEGATIVE integer that strict
+  // OpenSSL (Node 22 / OpenSSL 3.0.x) rejects at cert-load with "illegal padding".
+  // The leading byte must always encode a positive, minimally-encoded integer:
+  // >= 0x01 (non-zero, no redundant sign pad) and < 0x80 (positive).
+  it('always produces a positive, minimally-encoded leading byte', () => {
+    for (let i = 0; i < 500; i++) {
+      const serial = randomSerialNumber();
+      const first = parseInt(serial.slice(0, 2), 16);
+      expect(first).toBeGreaterThanOrEqual(0x01);
+      expect(first).toBeLessThan(0x80);
+    }
+  });
+
+  it('returns 32 hex chars (16 bytes) of even length', () => {
+    const serial = randomSerialNumber();
+    expect(serial).toHaveLength(32);
+    expect(serial).toMatch(/^[0-9a-f]+$/);
   });
 });
