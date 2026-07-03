@@ -162,7 +162,7 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
 // ---------------------------------------------------------------------------
 
 describe('checkNodeVersion', () => {
-  it('passes for supported (even LTS) major versions', () => {
+  it('passes for supported (even-numbered) major versions', () => {
     expect(checkNodeVersion('22.13.0').status).toBe('ok');
     expect(checkNodeVersion('24.0.0').status).toBe('ok');
     expect(checkNodeVersion('26.0.0').status).toBe('ok');

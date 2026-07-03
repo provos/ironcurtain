@@ -48,16 +48,16 @@ export interface CheckResult {
   readonly hint?: string;
 }
 
-/** Outer bounds of Node.js major versions IronCurtain runs on. */
-const NODE_MIN_MAJOR = 22;
-const NODE_MAX_MAJOR = 26;
 /**
- * Fully supported (tested) major lines: the even LTS releases. 24 and 26 ship
- * prebuilt `isolated-vm` binaries; 22 source-compiles the V8 sandbox at install.
- * In-range odd lines (23, 25) are non-LTS, ship no prebuilt binary, and are not
- * validated — they get a `warn`, not an `ok`.
+ * Fully supported (tested) major lines: the even-numbered Node.js releases.
+ * 24 and 26 ship prebuilt `isolated-vm` binaries; 22 source-compiles the V8
+ * sandbox at install. In-range odd lines (23, 25) are non-LTS, ship no prebuilt
+ * binary, and are not validated — they get a `warn`, not an `ok`.
  */
 const SUPPORTED_MAJORS = [22, 24, 26];
+/** Outer bounds — derived from SUPPORTED_MAJORS so they can't drift from it. */
+const NODE_MIN_MAJOR = Math.min(...SUPPORTED_MAJORS);
+const NODE_MAX_MAJOR = Math.max(...SUPPORTED_MAJORS);
 
 export function checkNodeVersion(versionString: string = process.versions.node): CheckResult {
   const match = /^(\d+)\./.exec(versionString);
