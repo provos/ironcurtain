@@ -54,9 +54,11 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             if npm ci --foreground-scripts; then exit 0; fi
-            echo "::warning::npm ci attempt $attempt failed; cleaning and retrying in 15s"
-            rm -rf node_modules
-            sleep 15
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm ci attempt $attempt failed; cleaning and retrying in 15s"
+              rm -rf node_modules
+              sleep 15
+            fi
           done
           echo "::error::npm ci failed after 3 attempts"
           exit 1

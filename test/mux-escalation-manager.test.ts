@@ -39,7 +39,12 @@ async function waitForPendingCount(
   timeoutMs = 5000,
 ): Promise<void> {
   const start = Date.now();
-  while (manager.pendingCount < expected && Date.now() - start < timeoutMs) {
+  while (manager.pendingCount < expected) {
+    if (Date.now() - start >= timeoutMs) {
+      throw new Error(
+        `Timed out after ${timeoutMs}ms waiting for pendingCount to reach ${expected} (last seen: ${manager.pendingCount})`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 25));
   }
 }
