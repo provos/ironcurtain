@@ -2,6 +2,50 @@
 
 IronCurtain supports redirecting LLM API traffic to a custom upstream — an OpenAI-compatible gateway like [LiteLLM](https://docs.litellm.ai/) fronting [OpenRouter](https://openrouter.ai/), a regional Anthropic endpoint, or a corporate proxy. The same configuration works in both Code Mode and Docker Agent Mode.
 
+## First-class OpenRouter
+
+For OpenRouter specifically there is a dedicated, no-external-proxy path: **named provider profiles**. A profile is a _model preset_ — "run this session on GLM", "on Kimi" — that routes a Docker agent (Claude Code, Codex, Goose) straight through `openrouter.ai` with a bound model map and key, **no LiteLLM sidecar**. See [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) for the full design.
+
+Profiles live in the `modelProviders` section of `~/.ironcurtain/config.json` (see [CONFIG.md](CONFIG.md#model-providers-first-class-openrouter)). An implicit `native` profile — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present and is the fallback.
+
+There are three selection surfaces:
+
+- **Global default** — `modelProviders.default`. Applies to every Docker Agent Mode session that makes no per-session choice (interactive `mux`/`start`, daemon/cron jobs, signal-bot, web-UI-spawned sessions, and workflow orchestrator bundles).
+- **`ironcurtain start --provider-profile <name>`** — per-session override for batch and PTY runs.
+- **mux `/new` profile picker** — pick a preset when spawning an interactive session; it is rendered as `<name> → <slug> (OpenRouter)` (or `native → Anthropic / OpenAI / ChatGPT`).
+
+**Caching is preserved.** When a mapped slug is `z-ai/*` and no `providerPreference` is set, the MITM injects a default soft pin `provider: { order: ["z-ai"] }` (D3) plus a stable top-level `session_id` for cache affinity (session affinity is on by default) — so GLM-through-Claude-Code gets implicit prompt caching out of the box, unlike the LiteLLM base-URL path where caching silently drops. **Cost bills accurately** for Claude Code: the authoritative OpenRouter `usage.cost` is preferred over the CLI's self-report (Goose/Codex fall back to the static estimate in v0).
+
+The generic base-URL mechanism below (`anthropicBaseUrl` etc. + LiteLLM) **remains the escape hatch** for any other gateway (Bedrock, a regional endpoint, or a non-OpenRouter provider). When an OpenRouter profile is active it takes precedence over `anthropicBaseUrl` for that session; the base-URL override only applies to sessions on the `native` profile.
+
+### Quickstart: GLM-5.2 via OpenRouter
+
+Fresh install → working, cached GLM in four steps:
+
+1. Get an OpenRouter API key (`sk-or-v1-...`) from [openrouter.ai](https://openrouter.ai/).
+2. Run `ironcurtain config` → **Model Providers** → **Add profile...** → choose type `openrouter`, name it (e.g. `glm-5.2`), and paste the key.
+3. **Set default** to that profile (or pick it later at the mux `/new` picker, or pass `--provider-profile glm-5.2`).
+4. Done. Because `DEFAULT_MODEL_MAP` maps `*opus*` / `*sonnet*` / `*haiku*` → `z-ai/glm-5.2` and D3 injects the soft z-ai pin, a session on this profile routes Claude Code to cached GLM-5.2 with no further config.
+
+Per-session instead of default:
+
+```bash
+ironcurtain start --provider-profile glm-5.2 "your task"
+```
+
+The equivalent minimal `config.json` — no `modelMap` / `providerPreference` needed; the defaults supply GLM mapping + soft z-ai pin + session affinity:
+
+```json
+{
+  "modelProviders": {
+    "default": "glm-5.2",
+    "profiles": { "glm-5.2": { "type": "openrouter", "apiKey": "sk-or-v1-..." } }
+  }
+}
+```
+
+**Errors pass through unchanged (m10).** OpenRouter's HTTP errors — 401 (auth) and 429 (rate/quota) — reach the agent verbatim. Claude Code's quota-reset parsing is tuned to Anthropic/LiteLLM phrasing and may not recognize OpenRouter's 429 wording, so a workflow's quota-exhausted short-circuit degrades to a **generic error** rather than a timed pause. Accepted for v0.
+
 ## Configuration
 
 Set either an environment variable or the corresponding field in `~/.ironcurtain/config.json`. Env vars take precedence.
@@ -23,6 +67,8 @@ In **Code Mode**, the AI SDK connects directly to the override — no MITM invol
 In **Docker Agent Mode**, the agent's client still talks to the canonical host (`api.anthropic.com`, etc.) over a trusted TLS channel; the MITM decrypts, swaps the fake sentinel key for the real host-side key, then forwards to the override instead of the canonical host. The agent itself sees nothing unusual.
 
 ## Recipe: LiteLLM + OpenRouter
+
+> For OpenRouter, prefer the first-class **provider profiles** above — no sidecar, caching preserved, accurate cost. This recipe remains the escape hatch for other gateways (Bedrock, a regional Anthropic endpoint, a corporate proxy) or for routing Code Mode, which the OpenRouter profiles do not cover.
 
 LiteLLM accepts Anthropic-style `/v1/messages` requests and translates them to any backend. With OpenRouter you get hundreds of models under one key.
 
@@ -123,6 +169,7 @@ Z.ai's docs show `ANTHROPIC_AUTH_TOKEN` (bearer), but their endpoint also accept
 
 ## See also
 
+- [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) — first-class OpenRouter provider-profile design
 - [CONFIG.md](CONFIG.md) — full `~/.ironcurtain/config.json` reference
 - [RUNNING_MODES.md](RUNNING_MODES.md) — Code Mode vs Docker Agent Mode
 - [LiteLLM proxy docs](https://docs.litellm.ai/docs/proxy/configs)

@@ -77,6 +77,61 @@ Configure a web search provider so the agent can search the web via the `web_sea
 - **Tavily**: https://tavily.com/
 - **SerpAPI**: https://serpapi.com/
 
+## Model Providers (first-class OpenRouter)
+
+Route Docker agents (Claude Code, Codex, Goose) through named **provider profiles** — model presets that map an agent to an OpenRouter model with a bound key, no LiteLLM sidecar. See [MODEL_ROUTING.md](MODEL_ROUTING.md#first-class-openrouter) for the quickstart and [docs/designs/openrouter-integration.md](docs/designs/openrouter-integration.md) for the design. Edit via `ironcurtain config` → **Model Providers**, or the web UI Settings view.
+
+An implicit profile named `native` — today's canonical Anthropic / OpenAI / ChatGPT routing — is always present, cannot be redefined or deleted, and is the fallback when no default is set.
+
+| Field                                               | Type    | Default                              | Description                                                                                                  |
+| --------------------------------------------------- | ------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `modelProviders.default`                            | string  | `native`                             | Profile used when no per-session choice is made. Must name a configured profile or `native`.                 |
+| `modelProviders.profiles`                           | object  | `{}`                                 | User-named profiles, keyed by name. A profile named `native` is rejected (reserved).                         |
+| `modelProviders.profiles.<name>.type`               | string  | —                                    | Discriminator: `openrouter` or `native`.                                                                     |
+| `modelProviders.profiles.<name>.apiKey`             | string  | —                                    | OpenRouter key (`sk-or-v1-...`). `OPENROUTER_API_KEY` env takes precedence. Sensitive; masked in the editor. |
+| `modelProviders.profiles.<name>.modelMap`           | array   | `*opus/sonnet/haiku* → z-ai/glm-5.2` | Ordered glob→slug rules (first match wins), matched case-insensitively against the requested model.          |
+| `modelProviders.profiles.<name>.perAgent`           | object  | —                                    | Per-agent model override (`claude-code`, `goose`, `codex`). Wins over `modelMap` for that agent.             |
+| `modelProviders.profiles.<name>.providerPreference` | object  | soft z-ai pin                        | Cache pinning passthrough (`order` / `only` / `allowFallbacks`). Replaces the D3 default when set.           |
+| `modelProviders.profiles.<name>.sessionAffinity`    | boolean | `true`                               | Inject a stable top-level `session_id` for GLM cache affinity.                                               |
+
+**Defaults (per openrouter profile).** When `modelMap` is omitted it defaults to `DEFAULT_MODEL_MAP`: `*opus*`, `*sonnet*`, and `*haiku*` → `z-ai/glm-5.2`. `sessionAffinity` defaults to `true`. When the mapped slug is `z-ai/*` and `providerPreference` is unset, the MITM injects a soft pin `provider: { order: ["z-ai"] }` for cache affinity. An openrouter profile with just `{ "type": "openrouter", "apiKey": "sk-or-v1-..." }` therefore routes Claude Code to cached GLM-5.2 with no further config.
+
+**`OPENROUTER_API_KEY` env.** When set, it fills `apiKey` for **every** openrouter profile and takes precedence over any per-profile config `apiKey` (share one key across profiles). A profile's config `apiKey` is used only when the env var is unset.
+
+**`modelMap: []` (per-agent-only mode).** An explicit empty array is preserved (resolution uses `??`, not `||`): the glob never matches, so routing relies on `perAgent` only.
+
+**Reach of `default`.** The global default applies to **all** Docker Agent Mode sessions — interactive (`ironcurtain mux` PTY and batch `ironcurtain start`), daemon/cron jobs, signal-bot sessions, web-UI-spawned sessions, **and workflow orchestrator bundles** (one profile per shared-container run). A **per-session override** exists only where a surface exposes it: `ironcurtain start --provider-profile <name>` and the mux `/new` profile picker. Code Mode (builtin agent) is unaffected — profiles apply only to Docker Agent Mode.
+
+**Hard load error on a dangling default.** A hand-edited `default` naming a profile that does not exist is a **hard error at config load** (`modelProviders.default must name a configured profile or "native".`) — it does not silently fall back to `native`. The `ironcurtain config` editor and web UI re-point `default` to `native` in the same write when you delete the profile it named, so they never persist a dangling default.
+
+```json
+{
+  "modelProviders": {
+    "default": "glm-5.2",
+    "profiles": {
+      "glm-5.2": {
+        "type": "openrouter",
+        "apiKey": "sk-or-v1-...",
+        "modelMap": [
+          { "match": "*opus*", "model": "z-ai/glm-5.2" },
+          { "match": "*sonnet*", "model": "z-ai/glm-5.2" },
+          { "match": "*haiku*", "model": "z-ai/glm-5.2" }
+        ],
+        "perAgent": { "goose": "z-ai/glm-5.2", "codex": "z-ai/glm-5.2" },
+        "providerPreference": { "order": ["z-ai"], "allowFallbacks": false },
+        "sessionAffinity": true
+      },
+      "kimi": {
+        "type": "openrouter",
+        "modelMap": [{ "match": "*", "model": "moonshot/kimi-k3" }]
+      }
+    }
+  }
+}
+```
+
+Here `glm-5.2` is the default; `kimi` shares the env `OPENROUTER_API_KEY` (no per-profile `apiKey`) and uses a strict wildcard map. `native` need not be listed.
+
 ## Server Credentials
 
 Per-server environment variables injected securely at runtime. The proxy strips `SERVER_CREDENTIALS` from the environment before spawning child processes, so credentials never leak to MCP servers that don't need them.
@@ -96,18 +151,19 @@ Keys must match server names in `mcp-servers.json`. A warning is emitted for unm
 
 API keys can be set via environment variables (preferred) or in the config file. Environment variables take precedence.
 
-| Env Var                        | Config Field       | Description                                                                     |
-| ------------------------------ | ------------------ | ------------------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`            | `anthropicApiKey`  | Anthropic API key                                                               |
-| `ANTHROPIC_BASE_URL`           | `anthropicBaseUrl` | Override the Anthropic upstream endpoint (typically paired with a LiteLLM key)  |
-| `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`     | Google AI API key                                                               |
-| `OPENAI_API_KEY`               | `openaiApiKey`     | OpenAI API key                                                                  |
+| Env Var                        | Config Field                            | Description                                                                                                     |
+| ------------------------------ | --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`            | `anthropicApiKey`                       | Anthropic API key                                                                                               |
+| `ANTHROPIC_BASE_URL`           | `anthropicBaseUrl`                      | Override the Anthropic upstream endpoint (typically paired with a LiteLLM key)                                  |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey`                          | Google AI API key                                                                                               |
+| `OPENAI_API_KEY`               | `openaiApiKey`                          | OpenAI API key                                                                                                  |
+| `OPENROUTER_API_KEY`           | `modelProviders.profiles.<name>.apiKey` | OpenRouter key; fills every openrouter profile (see [Model Providers](#model-providers-first-class-openrouter)) |
 
 In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
 
 ### Routing through a non-Anthropic gateway
 
-IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth. To use OpenRouter or another non-Anthropic provider, run [LiteLLM](https://docs.litellm.ai/) as a local sidecar that translates Anthropic-format requests to your target provider, then point IronCurtain at it:
+For OpenRouter, prefer the first-class [Model Providers](#model-providers-first-class-openrouter) section above — no sidecar, prompt caching preserved, accurate cost. For any other gateway, IronCurtain talks to Anthropic via the official SDK with `x-api-key` auth; run [LiteLLM](https://docs.litellm.ai/) as a local sidecar that translates Anthropic-format requests to your target provider, then point IronCurtain at it:
 
 ```bash
 export ANTHROPIC_API_KEY="<your-litellm-virtual-key>"
