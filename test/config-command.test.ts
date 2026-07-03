@@ -35,13 +35,14 @@ vi.mock('@clack/prompts', () => ({
 import {
   runConfigCommand,
   computeDiff,
+  repointDefaultAfterDelete,
   formatTokens,
   formatSeconds,
   formatCost,
   maskApiKey,
 } from '../src/config/config-command.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
-import { USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
+import { USER_CONFIG_DEFAULTS, loadUserConfig } from '../src/config/user-config.js';
 
 describe('config-command', () => {
   let env: ConfigTestEnv;
@@ -210,6 +211,134 @@ describe('config-command', () => {
     expect(ws.brave).toEqual({ apiKey: 'test-brave-key-123' });
   });
 
+  it('Model Providers section appears in main menu', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+    });
+
+    // Script: enter Model Providers -> Back -> Save (no changes)
+    mocks.select
+      .mockResolvedValueOnce('modelProviders') // main menu: Model Providers
+      .mockResolvedValueOnce('back') // Model Providers: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
+
+    await runConfigCommand();
+
+    const firstCall = mocks.select.mock.calls[0][0] as { options: { value: string }[] };
+    expect(firstCall.options.some((o) => o.value === 'modelProviders')).toBe(true);
+    expect(mocks.outro).toHaveBeenCalledWith('No changes to save.');
+  });
+
+  it('adding an openrouter profile writes the whole modelProviders block', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+    });
+
+    // Script: Model Providers -> Add profile -> (name) -> (key) -> Back -> Save -> confirm
+    mocks.select
+      .mockResolvedValueOnce('modelProviders') // main menu
+      .mockResolvedValueOnce('add') // Model Providers: Add profile
+      .mockResolvedValueOnce('back') // Model Providers: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
+    mocks.text
+      .mockResolvedValueOnce('glm-5.2') // profile name
+      .mockResolvedValueOnce('sk-or-v1-testkey-abcdef'); // api key
+    mocks.confirm.mockResolvedValueOnce(true); // confirm save
+
+    await runConfigCommand();
+
+    const onDisk = readConfig(env.testHome);
+    const mp = onDisk.modelProviders as {
+      default?: string;
+      profiles: Record<string, { type: string; apiKey?: string }>;
+    };
+    expect(mp.profiles['glm-5.2']).toEqual({ type: 'openrouter', apiKey: 'sk-or-v1-testkey-abcdef' });
+    // native is implicit and must NOT be persisted.
+    expect(mp.profiles.native).toBeUndefined();
+    // A subsequent load must not throw (schema + refines pass).
+    expect(() => loadUserConfig()).not.toThrow();
+  });
+
+  it('setting the default profile persists modelProviders.default', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+      modelProviders: {
+        default: 'native',
+        profiles: { glm: { type: 'openrouter', apiKey: 'sk-or-v1-storedkey-abcdefgh' } },
+      },
+    });
+
+    // Script: Model Providers -> Set default -> glm -> Back -> Save -> confirm
+    mocks.select
+      .mockResolvedValueOnce('modelProviders') // main menu
+      .mockResolvedValueOnce('default') // Model Providers: Set default
+      .mockResolvedValueOnce('glm') // default selector: glm
+      .mockResolvedValueOnce('back') // Model Providers: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
+    mocks.confirm.mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    const onDisk = readConfig(env.testHome);
+    const mp = onDisk.modelProviders as { default?: string };
+    expect(mp.default).toBe('glm');
+    expect(() => loadUserConfig()).not.toThrow();
+  });
+
+  it('deleting the default-pointed profile re-points default to native (F10)', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+      modelProviders: {
+        default: 'glm', // default points at the profile we delete
+        profiles: { glm: { type: 'openrouter', apiKey: 'sk-or-v1-storedkey-abcdefgh' } },
+      },
+    });
+
+    // Script: Model Providers -> edit glm -> delete -> confirm delete -> Back -> Save -> confirm save
+    mocks.select
+      .mockResolvedValueOnce('modelProviders') // main menu
+      .mockResolvedValueOnce('profile:glm') // Model Providers: edit glm
+      .mockResolvedValueOnce('delete') // Profile: Delete
+      .mockResolvedValueOnce('back') // Model Providers: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
+    mocks.confirm
+      .mockResolvedValueOnce(true) // confirm delete
+      .mockResolvedValueOnce(true); // confirm save
+
+    await runConfigCommand();
+
+    const onDisk = readConfig(env.testHome);
+    const mp = onDisk.modelProviders as {
+      default?: string;
+      profiles: Record<string, unknown>;
+    };
+    // The dangling default must have been re-pointed to native, never left as 'glm'.
+    expect(mp.default).toBe('native');
+    expect(mp.profiles.glm).toBeUndefined();
+    // The persisted config must load without the HARD refine error.
+    expect(() => loadUserConfig()).not.toThrow();
+  });
+
   it('non-TTY exits with error', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
@@ -255,6 +384,23 @@ describe('computeDiff', () => {
       brave: null,
       tavily: null,
       serpapi: null,
+    },
+    modelProviders: {
+      default: 'native',
+      profiles: {
+        native: { type: 'native' },
+        glm: {
+          type: 'openrouter',
+          apiKey: 'sk-or-v1-storedkey-abcdefghijklmnop',
+          modelMap: [
+            { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+            { match: '*opus*', model: 'z-ai/glm-5.2' },
+          ],
+          perAgent: { 'claude-code': undefined, goose: 'z-ai/glm-5.2', codex: undefined },
+          providerPreference: { order: ['z-ai'] },
+          sessionAffinity: true,
+        },
+      },
     },
     serverCredentials: {},
   };
@@ -313,6 +459,108 @@ describe('computeDiff', () => {
     const apiKeyDiff = diffs.find(([p]) => p === 'webSearch.brave.apiKey');
     expect(apiKeyDiff).toBeDefined();
     expect(apiKeyDiff![1].to).toBe('abc...nop');
+  });
+
+  it('shows modelProviders profile changes with masked key', () => {
+    const diffs = computeDiff(resolved, {
+      modelProviders: {
+        default: 'native',
+        profiles: {
+          glm: {
+            type: 'openrouter',
+            apiKey: 'sk-or-v1-newkey-qrstuvwxyz012345',
+            modelMap: [
+              { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+              { match: '*opus*', model: 'z-ai/glm-5.2' },
+            ],
+            perAgent: { goose: 'z-ai/glm-5.2' },
+            providerPreference: { order: ['z-ai'] },
+            sessionAffinity: true,
+          },
+        },
+      },
+    });
+    const keyDiff = diffs.find(([p]) => p === 'modelProviders.profiles.glm.apiKey');
+    expect(keyDiff).toBeDefined();
+    // Only the key changed; the mask hides the raw value.
+    expect(keyDiff![1].from).toBe('sk-...nop');
+    expect(keyDiff![1].to).toBe('sk-...345');
+    // No other profile fields changed, so only the apiKey diff is present.
+    expect(diffs.filter(([p]) => p.startsWith('modelProviders.profiles.glm'))).toHaveLength(1);
+  });
+
+  it('produces an EMPTY diff for a no-op modelProviders edit (m14)', () => {
+    // Same object CONTENT as resolved, different object reference (read-modify-write
+    // round-trip). The dedicated deep-equality branch must yield no diff.
+    const pending: UserConfig = {
+      modelProviders: {
+        default: 'native',
+        profiles: {
+          glm: {
+            type: 'openrouter',
+            apiKey: 'sk-or-v1-storedkey-abcdefghijklmnop',
+            modelMap: [
+              { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+              { match: '*opus*', model: 'z-ai/glm-5.2' },
+            ],
+            perAgent: { goose: 'z-ai/glm-5.2' },
+            providerPreference: { order: ['z-ai'] },
+            sessionAffinity: true,
+          },
+        },
+      },
+    };
+    expect(computeDiff(resolved, pending)).toEqual([]);
+  });
+
+  it('diffs the default selector change', () => {
+    const diffs = computeDiff(resolved, {
+      modelProviders: {
+        default: 'glm',
+        profiles: {
+          glm: {
+            type: 'openrouter',
+            apiKey: 'sk-or-v1-storedkey-abcdefghijklmnop',
+            modelMap: [
+              { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+              { match: '*opus*', model: 'z-ai/glm-5.2' },
+            ],
+            perAgent: { goose: 'z-ai/glm-5.2' },
+            providerPreference: { order: ['z-ai'] },
+            sessionAffinity: true,
+          },
+        },
+      },
+    });
+    expect(diffs).toContainEqual(['modelProviders.default', { from: 'native', to: 'glm' }]);
+  });
+
+  it('diffs a removed profile', () => {
+    // Whole-record write that omits `glm` → the profile is dropped.
+    const diffs = computeDiff(resolved, {
+      modelProviders: { default: 'native', profiles: {} },
+    });
+    expect(diffs).toContainEqual(['modelProviders.profiles.glm', { from: 'configured', to: 'removed' }]);
+  });
+});
+
+describe('repointDefaultAfterDelete (F10)', () => {
+  it('keeps the default when it still names a remaining profile', () => {
+    expect(repointDefaultAfterDelete('glm', ['glm', 'kimi'])).toBe('glm');
+  });
+
+  it('re-points a dangling default to native', () => {
+    // `glm` was just deleted → not in the remaining names → re-point.
+    expect(repointDefaultAfterDelete('glm', ['kimi'])).toBe('native');
+  });
+
+  it('re-points to native when no profiles remain', () => {
+    expect(repointDefaultAfterDelete('glm', [])).toBe('native');
+  });
+
+  it('leaves native untouched', () => {
+    expect(repointDefaultAfterDelete('native', [])).toBe('native');
+    expect(repointDefaultAfterDelete('native', ['glm'])).toBe('native');
   });
 });
 
