@@ -1202,6 +1202,11 @@ describe('SignalBotDaemon', () => {
     // Step 6: Deny and verify it resolves on session #2
     mockApi.simulateIncomingMessage('+15559876543', 'deny');
     await waitForMessage(mockApi, (m) => m.includes('Clone operation was blocked'));
+    // The "Escalation denied." confirmation is emitted on a separate async chain
+    // (resolveSessionEscalation().then() in signal-bot-daemon.ts) and can lag the
+    // session's "blocked" response, so await it explicitly before asserting on it —
+    // otherwise `denyMsg` is intermittently undefined (macOS-runner-timing flake).
+    await waitForMessage(mockApi, (m) => m.includes('denied'));
 
     messages = mockApi.messageTexts;
     // The deny confirmation should reference session #2
