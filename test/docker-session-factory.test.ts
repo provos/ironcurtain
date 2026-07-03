@@ -128,6 +128,7 @@ function createTestConfig(): IronCurtainConfig {
       auditRedaction: { enabled: true },
       memory: { enabled: false, llmBaseUrl: undefined, llmApiKey: undefined },
       dockerResources: { memoryMb: null, cpus: null },
+      modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
     },
   } as unknown as IronCurtainConfig;
 }

@@ -36,6 +36,7 @@ import {
   type ConversationStateConfig,
 } from './agent-adapter.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
+import { OPENROUTER_HOST, resolveActiveProfile } from '../config/user-config.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
@@ -387,7 +388,28 @@ export async function prepareDockerInfrastructure(
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
+  providerProfileName?: string,
 ): Promise<PreContainerInfrastructure> {
+  // Resolve and STAMP the active provider profile as the FIRST step (§9.7 F1),
+  // before any container-runtime probe, adapter registration, or auth
+  // detection. This ordering is load-bearing: Claude Code's
+  // detectCredential(config) reads config.activeProviderProfile to return an
+  // API-key AuthMethod for an OpenRouter-only user, so the stamp must already
+  // be present when auth detection runs below. An unknown providerProfileName
+  // throws a clear error listing the available profiles before any expensive
+  // work or container launch. Safe to mutate: callers always pass a
+  // session-specific config copy (the same invariant the config.dockerAuth
+  // stamp below relies on).
+  const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
+  config.activeProviderProfile = activeProfile;
+  if (activeProfile.type === 'openrouter' && activeProfile.apiKey === '') {
+    const activeName = providerProfileName ?? config.userConfig.modelProviders.default;
+    throw new Error(
+      `Provider profile "${activeName}" is OpenRouter but no API key is configured. ` +
+        "Set OPENROUTER_API_KEY or the profile's apiKey in ~/.ironcurtain/config.json.",
+    );
+  }
+
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
   // coordinator) can take it from either `config.auditLogPath` or
@@ -430,9 +452,14 @@ export async function prepareDockerInfrastructure(
   const useTcp = topology !== 'uds';
 
   // Detect authentication method. Adapters with detectCredential() handle
-  // their own credential detection (e.g., Goose checks provider-specific keys).
-  // Adapters without it fall back to detectAuthMethod() (Anthropic OAuth + API key).
-  const authMethod = adapter.detectCredential ? adapter.detectCredential(config) : await detectAuthMethod(config);
+  // their own credential detection (e.g., Goose checks provider-specific keys;
+  // Claude Code returns an api-key AuthMethod for an OpenRouter-only profile).
+  // A `detectCredential` that returns `undefined` DEFERS to detectAuthMethod()
+  // (Anthropic OAuth + API key) — this is how Claude Code preserves today's
+  // detection for a native profile (B2a). Adapters without the method also
+  // fall back.
+  const detected = adapter.detectCredential?.(config);
+  const authMethod = detected ?? (await detectAuthMethod(config));
   if (authMethod.kind === 'none') {
     throw new Error(
       adapter.credentialHelpText ??
@@ -528,7 +555,7 @@ export async function prepareDockerInfrastructure(
           },
         )
       : undefined;
-  const providers = adapter.getProviders(authKind);
+  const providers = adapter.getProviders(config, authKind);
 
   const resolvedProviders = applyUpstreamOverrides(providers, parseUpstreamBaseUrl, {
     'api.anthropic.com': config.userConfig.anthropicBaseUrl,
@@ -840,6 +867,7 @@ export async function createDockerInfrastructure(
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
   options?: CreateDockerInfrastructureOptions,
+  providerProfileName?: string,
 ): Promise<DockerInfrastructure> {
   const core = await prepareDockerInfrastructure(
     config,
@@ -853,6 +881,7 @@ export async function createDockerInfrastructure(
     resolvedSkills,
     captureInput,
     scriptsDir,
+    providerProfileName,
   );
 
   let containerResources: ContainerResources | undefined;
@@ -1468,6 +1497,15 @@ export function resolveRealKey(host: string, config: IronCurtainConfig, oauthAcc
     case 'generativelanguage.googleapis.com':
       key = config.userConfig.googleApiKey;
       break;
+    case OPENROUTER_HOST: {
+      // OpenRouter uses a static bearer key from the stamped active profile
+      // (§7.5). The same host serves all three agents, so this single case
+      // covers them. `isManagedOAuthHost` never matches openrouter.ai, so no
+      // OAuth token is involved here.
+      const profile = config.activeProviderProfile;
+      key = profile?.type === 'openrouter' ? profile.apiKey : '';
+      break;
+    }
     default:
       logger.warn(`No API key mapping for unknown provider host: ${host}`);
       return '';

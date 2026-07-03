@@ -8,17 +8,22 @@ import {
   prepareConversationStateDir,
   createSessionContainers,
   destroyDockerInfrastructure,
+  prepareDockerInfrastructure,
   resolveRealKey,
   canRefreshOAuth,
   computeWorkflowDependencyHash,
   buildWorkflowExecCommand,
   ensureImage,
 } from '../src/docker/docker-infrastructure.js';
-import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
+import type { AgentAdapter, AgentId, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { ContainerRuntime } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
+import type { ResolvedProviderProfile } from '../src/config/user-config.js';
+import { resolveActiveProfile } from '../src/config/user-config.js';
+import { generateFakeKey } from '../src/docker/fake-keys.js';
+import { makeOpenRouterProvider, makeOpenRouterRewriter } from '../src/docker/openrouter.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
@@ -213,6 +218,174 @@ describe('resolveRealKey', () => {
   it('falls back to the configured API key for Anthropic hosts when no OAuth token', () => {
     const config = configWithKeys({ anthropicApiKey: 'sk-ant-api03-configured' });
     expect(resolveRealKey('api.anthropic.com', config, undefined)).toBe('sk-ant-api03-configured');
+  });
+
+  // --- OpenRouter (G4 / §7.5) ---
+
+  /** Config stamped with an openrouter-type active profile carrying `apiKey`. */
+  function configWithOpenrouterProfile(apiKey: string): IronCurtainConfig {
+    return {
+      userConfig: {},
+      activeProviderProfile: {
+        type: 'openrouter',
+        apiKey,
+        modelMap: [],
+        perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
+        providerPreference: undefined,
+        sessionAffinity: true,
+      },
+    } as unknown as IronCurtainConfig;
+  }
+
+  it('returns the stamped active profile apiKey for openrouter.ai', () => {
+    const config = configWithOpenrouterProfile('sk-or-v1-realkey');
+    expect(resolveRealKey('openrouter.ai', config, undefined)).toBe('sk-or-v1-realkey');
+  });
+
+  it('never returns an OAuth token for openrouter.ai (static bearer key only)', () => {
+    // openrouter.ai is in neither ANTHROPIC_HOSTS nor CODEX_CHATGPT_HOSTS, so
+    // even a provided OAuth token is ignored — the profile key wins. This is
+    // the observable proof that no OAuth token manager is attached (§7.5).
+    const config = configWithOpenrouterProfile('sk-or-v1-realkey');
+    expect(resolveRealKey('openrouter.ai', config, 'oauth-access-token')).toBe('sk-or-v1-realkey');
+  });
+
+  it('returns empty string for openrouter.ai when the active profile is native', () => {
+    const config = { userConfig: {}, activeProviderProfile: { type: 'native' } } as unknown as IronCurtainConfig;
+    expect(resolveRealKey('openrouter.ai', config, undefined)).toBe('');
+  });
+
+  it('returns empty string for openrouter.ai when no active profile is stamped', () => {
+    const config = configWithKeys({});
+    expect(resolveRealKey('openrouter.ai', config, undefined)).toBe('');
+  });
+});
+
+describe('OpenRouter ProviderKeyMapping assembly (G4 / §7.5, §9.5)', () => {
+  /** Minimal openrouter-type resolved profile with the given key. */
+  function openrouterProfile(apiKey: string): ResolvedProviderProfile {
+    return {
+      type: 'openrouter',
+      apiKey,
+      modelMap: [],
+      perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
+      providerPreference: undefined,
+      sessionAffinity: true,
+    };
+  }
+
+  /** Config carrying only the fields the assembly logic reads. */
+  function stampedConfig(profile: ResolvedProviderProfile): IronCurtainConfig {
+    return { userConfig: {}, activeProviderProfile: profile } as unknown as IronCurtainConfig;
+  }
+
+  it('assembles a fake/real ProviderKeyMapping for openrouter.ai with distinct keys', () => {
+    // Mirrors the per-provider loop in prepareDockerInfrastructure: the
+    // openrouterProvider's fakeKeyPrefix seeds a structurally-valid fake key,
+    // and resolveRealKey supplies the real key off the stamped profile.
+    const rewriter = makeOpenRouterRewriter({
+      modelMap: [],
+      perAgentDefault: undefined,
+      providerPreference: undefined,
+      sessionAffinity: true,
+    });
+    const provider = makeOpenRouterProvider('messages', rewriter);
+    expect(provider.host).toBe('openrouter.ai');
+    expect(provider.fakeKeyPrefix).toBe('sk-or-v1-ironcurtain-');
+
+    const fakeKey = generateFakeKey(provider.fakeKeyPrefix);
+    expect(fakeKey.startsWith('sk-or-v1-ironcurtain-')).toBe(true);
+
+    const config = stampedConfig(openrouterProfile('sk-or-v1-realkey'));
+    const realKey = resolveRealKey(provider.host, config, undefined);
+    expect(realKey).toBe('sk-or-v1-realkey');
+    expect(fakeKey).not.toBe(realKey);
+  });
+
+  it('leaves openrouter.ai unmanaged by OAuth (no token manager) — real key ignores an OAuth token', () => {
+    // isManagedOAuthHost is ANTHROPIC_HOSTS ∪ (codex ∧ CODEX_CHATGPT_HOSTS);
+    // openrouter.ai matches neither, so no token manager is ever attached and
+    // resolveRealKey never substitutes an OAuth token for the profile key.
+    const config = stampedConfig(openrouterProfile('sk-or-v1-realkey'));
+    expect(resolveRealKey('openrouter.ai', config, 'oauth-access-token')).toBe('sk-or-v1-realkey');
+  });
+
+  it('resolves the active profile from a providerProfileName (G1 resolver, used by infra prep)', () => {
+    const modelProviders = {
+      default: 'native',
+      profiles: {
+        native: { type: 'native' as const },
+        glm: openrouterProfile('sk-or-v1-realkey'),
+        kimi: openrouterProfile(''),
+      },
+    };
+    expect(resolveActiveProfile(modelProviders, 'glm')).toEqual(openrouterProfile('sk-or-v1-realkey'));
+    expect(resolveActiveProfile(modelProviders, undefined)).toEqual({ type: 'native' });
+  });
+
+  it('throws listing available profiles for an unknown providerProfileName (before container launch)', () => {
+    const modelProviders = {
+      default: 'native',
+      profiles: {
+        native: { type: 'native' as const },
+        glm: openrouterProfile('sk-or-v1-realkey'),
+        kimi: openrouterProfile(''),
+      },
+    };
+    expect(() => resolveActiveProfile(modelProviders, 'does-not-exist')).toThrow(
+      'Unknown provider profile "does-not-exist". Available: native, glm, kimi.',
+    );
+  });
+
+  it('fails fast before container launch when an openrouter profile has an empty resolved apiKey (§9.5)', async () => {
+    // The bundle-level belt-and-suspenders guard in prepareDockerInfrastructure
+    // resolves + stamps the active profile FIRST, then throws when the active
+    // profile is openrouter-type with an empty apiKey — before any container is
+    // launched. Reaching the guard in-process requires only that the container-
+    // runtime probe is short-circuited (env override) and the requested agent
+    // registers; the guard runs before any Docker/CA/proxy work.
+    const prev = process.env.IRONCURTAIN_CONTAINER_RUNTIME;
+    process.env.IRONCURTAIN_CONTAINER_RUNTIME = 'docker';
+    try {
+      const config = {
+        // Minimal userConfig: only the fields the pre-guard path reads. The
+        // adapter factories read agentModelId/gooseProvider/gooseModel (all
+        // optional); resolveRuntimeKind is short-circuited by the env override.
+        userConfig: {
+          modelProviders: {
+            default: 'glm',
+            profiles: {
+              native: { type: 'native' },
+              glm: openrouterProfile(''),
+            },
+          },
+        },
+        auditLogPath: join(tmpdir(), 'audit.jsonl'),
+      } as unknown as IronCurtainConfig;
+
+      await expect(
+        prepareDockerInfrastructure(
+          config,
+          { kind: 'docker', agent: 'claude-code' as AgentId },
+          mkdtempSync(join(tmpdir(), 'or-bundle-')),
+          mkdtempSync(join(tmpdir(), 'or-ws-')),
+          mkdtempSync(join(tmpdir(), 'or-esc-')),
+          'or-fail-fast' as BundleId,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'glm',
+        ),
+      ).rejects.toThrow(
+        'Provider profile "glm" is OpenRouter but no API key is configured. ' +
+          "Set OPENROUTER_API_KEY or the profile's apiKey in ~/.ironcurtain/config.json.",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.IRONCURTAIN_CONTAINER_RUNTIME;
+      else process.env.IRONCURTAIN_CONTAINER_RUNTIME = prev;
+    }
   });
 });
 
