@@ -13,12 +13,19 @@
  * G13; the D6 cost-accumulation test is G6. Neither is covered here.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { parse as parseToml } from 'smol-toml';
+import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createClaudeCodeAdapter } from '../../src/docker/adapters/claude-code.js';
 import { createCodexAdapter } from '../../src/docker/adapters/codex.js';
 import { createGooseAdapter } from '../../src/docker/adapters/goose.js';
 import { generateFakeKey } from '../../src/docker/fake-keys.js';
+import { DockerAgentSession, type DockerAgentSessionDeps } from '../../src/docker/docker-agent-session.js';
+import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
+import { getTokenStreamBus, resetTokenStreamBus } from '../../src/docker/token-stream-bus.js';
+import type { TokenStreamEvent } from '../../src/docker/token-stream-types.js';
 import {
   DEFAULT_GLM_SLUG,
   DEFAULT_MODEL_MAP,
@@ -33,6 +40,15 @@ import type {
   ResolvedProviderProfile,
 } from '../../src/config/user-config.js';
 import type { IronCurtainConfig } from '../../src/config/types.js';
+import type { AgentConversationId, BundleId, SessionId } from '../../src/session/types.js';
+import type { DockerExecResult } from '../../src/docker/types.js';
+import {
+  createMockCA,
+  createMockDocker,
+  createMockMitmProxy,
+  createMockProxy,
+  scriptedExec,
+} from '../helpers/docker-mocks.js';
 
 // ─── Fixtures ────────────────────────────────────────────────
 
@@ -492,5 +508,174 @@ describe('OpenRouter — active-profile resolution + cross-session isolation', (
     );
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(env.IRONCURTAIN_API_KEY).toBe('sk-ant-fake');
+  });
+});
+
+// ─── D6 cost accumulation (§10, §12.3 named test) ────────────
+
+describe('OpenRouter — D6 authoritative-cost accumulation', () => {
+  const TEST_SESSION_ID = 'd6-cost-session' as SessionId;
+
+  /** A Claude Code result envelope carrying the CLI's self-reported cost. */
+  function claudeResult(totalCostUsd: number | undefined): string {
+    const envelope: Record<string, unknown> = {
+      type: 'result',
+      subtype: 'success',
+      result: 'done',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    };
+    // Omit the field entirely for the "no CLI cost" case so extractResponse
+    // leaves `costUsd` undefined (it only sets it when total_cost_usd is a number).
+    if (totalCostUsd !== undefined) envelope.total_cost_usd = totalCostUsd;
+    return JSON.stringify(envelope);
+  }
+
+  /** A terminal `message_end` bus event carrying an authoritative OpenRouter cost. */
+  function messageEndWithCost(costUsd: number): TokenStreamEvent {
+    return {
+      kind: 'message_end',
+      stopReason: 'end_turn',
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd,
+      timestamp: Date.now(),
+    };
+  }
+
+  let tempDir: string;
+  let session: DockerAgentSession | undefined;
+
+  function buildDeps(
+    profile: ResolvedProviderProfile,
+    exec: (container: string, cmd: readonly string[]) => Promise<DockerExecResult>,
+  ): DockerAgentSessionDeps {
+    const sessionDir = join(tempDir, 'session');
+    const sandboxDir = join(tempDir, 'sandbox');
+    const escalationDir = join(tempDir, 'escalations');
+    mkdirSync(sessionDir, { recursive: true });
+    mkdirSync(sandboxDir, { recursive: true });
+    mkdirSync(escalationDir, { recursive: true });
+
+    const config = {
+      mcpServers: {},
+      activeProviderProfile: profile,
+      userConfig: {
+        anthropicApiKey: 'sk-test',
+        resourceBudget: {
+          maxTotalTokens: null,
+          maxSteps: null,
+          maxSessionSeconds: null,
+          maxEstimatedCostUsd: null,
+        },
+        escalationTimeoutSeconds: 120,
+        auditRedaction: { enabled: true },
+      },
+    } as unknown as IronCurtainConfig;
+
+    const infra: DockerInfrastructure = {
+      bundleId: 'd6-bundle' as BundleId,
+      bundleDir: sessionDir,
+      workspaceDir: sandboxDir,
+      escalationDir,
+      auditLogPath: join(tempDir, 'audit.jsonl'),
+      proxy: createMockProxy(join(sessionDir, 'proxy.sock')),
+      mitmProxy: createMockMitmProxy(),
+      docker: createMockDocker({ exec }),
+      adapter: createClaudeCodeAdapter(),
+      ca: createMockCA(tempDir),
+      fakeKeys: openrouterFakeKeys(),
+      orientationDir: join(sessionDir, 'orientation'),
+      systemPrompt: 'You are a test agent.',
+      image: 'ironcurtain-claude-code:latest',
+      useTcp: false,
+      socketsDir: join(sessionDir, 'sockets'),
+      mitmAddr: { socketPath: '/tmp/test-mitm.sock' },
+      authKind: 'apikey',
+      containerId: 'container-d6',
+      containerName: 'ironcurtain-d6',
+      beginCaptureSession: () => {},
+      endCaptureSession: async () => {},
+    } as unknown as DockerInfrastructure;
+
+    return {
+      config,
+      sessionId: TEST_SESSION_ID,
+      agentConversationId: '00000000-1111-2222-3333-4444d6cost00' as AgentConversationId,
+      infra,
+      ownsInfra: true,
+    };
+  }
+
+  async function startSession(deps: DockerAgentSessionDeps): Promise<DockerAgentSession> {
+    const s = new DockerAgentSession(deps);
+    await s.initialize();
+    return s;
+  }
+
+  beforeEach(() => {
+    // No live TokenStreamBridge is constructed in these tests, so resetting the
+    // module-scoped singleton between tests is safe (see resetTokenStreamBus).
+    resetTokenStreamBus();
+    tempDir = mkdtempSync(join(tmpdir(), 'd6-cost-test-'));
+    session = undefined;
+  });
+
+  afterEach(async () => {
+    try {
+      await session?.close();
+    } catch {
+      /* ignore */
+    }
+    if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('prefers summed authoritative usage.cost over CLI costUsd when an OpenRouter profile is active', async () => {
+    const { exec } = scriptedExec([{ exitCode: 0, stdout: claudeResult(0.5), stderr: '' }]);
+    session = await startSession(buildDeps(openrouterProfile(), exec));
+
+    // Two authoritative usage events (as the MITM would publish during the turn)
+    // sum to 0.020; the CLI self-reports a (wrong-for-GLM) 0.5.
+    const bus = getTokenStreamBus();
+    bus.push(TEST_SESSION_ID, messageEndWithCost(0.012));
+    bus.push(TEST_SESSION_ID, messageEndWithCost(0.008));
+
+    await session.sendMessageDetailed('do the thing');
+
+    expect(session.getBudgetStatus().estimatedCostUsd).toBeCloseTo(0.02, 6);
+  });
+
+  it('falls back to CLI costUsd when the active profile is native', async () => {
+    const { exec } = scriptedExec([{ exitCode: 0, stdout: claudeResult(0.5), stderr: '' }]);
+    session = await startSession(buildDeps({ type: 'native' }, exec));
+
+    // Even if authoritative events arrive, a native profile must ignore them.
+    getTokenStreamBus().push(TEST_SESSION_ID, messageEndWithCost(0.012));
+
+    await session.sendMessageDetailed('do the thing');
+
+    expect(session.getBudgetStatus().estimatedCostUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it('falls back to CLI costUsd when the observed authoritative sum is 0', async () => {
+    const { exec } = scriptedExec([{ exitCode: 0, stdout: claudeResult(0.5), stderr: '' }]);
+    session = await startSession(buildDeps(openrouterProfile(), exec));
+
+    // No authoritative events pushed → sum stays 0 → CLI self-report wins.
+    await session.sendMessageDetailed('do the thing');
+
+    expect(session.getBudgetStatus().estimatedCostUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it('retains the prior cost (static-estimate slot) when there is no CLI cost and no authoritative sum', async () => {
+    // No total_cost_usd in the envelope and no bus events: neither the
+    // authoritative sum nor the CLI self-report is available, so the cumulative
+    // cost stays at its initial 0 (the Docker session has no token counts to
+    // compute a fresh static estimate).
+    const { exec } = scriptedExec([{ exitCode: 0, stdout: claudeResult(undefined), stderr: '' }]);
+    session = await startSession(buildDeps(openrouterProfile(), exec));
+
+    await session.sendMessageDetailed('do the thing');
+
+    expect(session.getBudgetStatus().estimatedCostUsd).toBe(0);
   });
 });

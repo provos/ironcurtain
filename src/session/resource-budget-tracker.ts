@@ -134,6 +134,15 @@ const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: M
   { match: 'gemini-2.0-flash', pricing: { inputPerMillion: 0.1, outputPerMillion: 0.4, cacheReadPerMillion: 0.01 } },
   // Gemini 1.5 Pro ($1.25/$5/$0.125)
   { match: 'gemini-1.5-pro', pricing: { inputPerMillion: 1.25, outputPerMillion: 5, cacheReadPerMillion: 0.125 } },
+
+  // --- OpenRouter / Z.ai (GLM) ---
+  // GLM 5.2 ($0.60/$2.20/$0.11) — the specific slug MUST precede the broad
+  // 'z-ai/' guard, since 'z-ai/glm-5.2' contains both substrings and the
+  // table is first-match-wins.
+  { match: 'glm-5.2', pricing: { inputPerMillion: 0.6, outputPerMillion: 2.2, cacheReadPerMillion: 0.11 } },
+  // Any other z-ai/ slug falls back to GLM-5.2-family pricing rather than the
+  // generic Sonnet-priced FALLBACK (a saner default for OpenRouter GLM models).
+  { match: 'z-ai/', pricing: { inputPerMillion: 0.6, outputPerMillion: 2.2, cacheReadPerMillion: 0.11 } },
 ];
 
 const FALLBACK_PRICING: ModelPricing = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 };
