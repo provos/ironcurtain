@@ -37,6 +37,27 @@ function arr(value: unknown): Array<Record<string, unknown>> | undefined {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : undefined;
 }
 
+/** OpenRouter-only usage fields surfaced on the `message_end` event (§10.2). */
+interface OpenRouterUsageFields {
+  readonly costUsd?: number;
+  readonly cachedTokens?: number;
+}
+
+/**
+ * Extracts OpenRouter's authoritative `usage.cost` (USD) and
+ * `usage.prompt_tokens_details.cached_tokens` from a terminal usage object,
+ * when present. Native Anthropic usage objects lack these keys, so both fields
+ * come back undefined and the event carries no extra data (§10.2).
+ */
+function extractOpenRouterUsage(usage: Record<string, unknown> | undefined): OpenRouterUsageFields {
+  if (!usage) return {};
+  const details = obj(usage['prompt_tokens_details']);
+  return {
+    ...(typeof usage['cost'] === 'number' ? { costUsd: usage['cost'] } : {}),
+    ...(typeof details?.['cached_tokens'] === 'number' ? { cachedTokens: details['cached_tokens'] } : {}),
+  };
+}
+
 /**
  * A passthrough Transform stream that intercepts SSE data flowing
  * through the MITM proxy without modifying the forwarded bytes.
@@ -228,7 +249,14 @@ export class SseExtractorTransform extends Transform {
     if (type === 'message_delta') {
       const delta = obj(root['delta']);
       const usage = obj(root['usage']);
-      this.emitSafe(this.makeMessageEnd(str(delta?.['stop_reason']), 0, num(usage?.['output_tokens'])));
+      this.emitSafe(
+        this.makeMessageEnd(
+          str(delta?.['stop_reason']),
+          0,
+          num(usage?.['output_tokens']),
+          extractOpenRouterUsage(usage),
+        ),
+      );
       return;
     }
 
@@ -315,8 +343,21 @@ export class SseExtractorTransform extends Transform {
     this.emitSafe({ kind: 'raw', eventType: 'openai_delta', data, timestamp: now });
   }
 
-  private makeMessageEnd(stopReason: string, inputTokens: number, outputTokens: number): TokenStreamEvent {
-    return { kind: 'message_end', stopReason, inputTokens, outputTokens, timestamp: Date.now() };
+  private makeMessageEnd(
+    stopReason: string,
+    inputTokens: number,
+    outputTokens: number,
+    usage?: OpenRouterUsageFields,
+  ): TokenStreamEvent {
+    return {
+      kind: 'message_end',
+      stopReason,
+      inputTokens,
+      outputTokens,
+      ...(usage?.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
+      ...(usage?.cachedTokens !== undefined ? { cachedTokens: usage.cachedTokens } : {}),
+      timestamp: Date.now(),
+    };
   }
 
   /** Invoke the callback, swallowing any listener errors. */

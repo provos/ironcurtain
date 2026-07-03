@@ -38,6 +38,7 @@ import { getTokenStreamBus } from './token-stream-bus.js';
 import type { SseProvider } from './token-stream-types.js';
 import { SseExtractorTransform } from './sse-extractor.js';
 import * as logger from '../logger.js';
+import { OPENROUTER_HOST } from '../config/user-config.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 
@@ -333,16 +334,22 @@ function bufferRequestBody(req: http.IncomingMessage, maxBytes: number): Promise
 }
 
 /**
- * Maps a target hostname to the SSE provider for token stream parsing.
- * Only Anthropic and OpenAI hosts are recognized; everything else
- * falls back to 'unknown'.
+ * Maps a target hostname (and, for OpenRouter, request path) to the SSE
+ * provider for token stream parsing. Anthropic and OpenAI hosts classify by
+ * host alone; `openrouter.ai` serves three wire formats depending on path, so
+ * `/api/v1/messages` (the Anthropic skin) is 'anthropic' and every other path
+ * is 'openai'. Everything else falls back to 'unknown'.
  */
-export function resolveSseProvider(hostname: string): SseProvider {
+export function resolveSseProvider(hostname: string, path?: string): SseProvider {
   if (hostname === 'api.anthropic.com' || hostname === 'platform.claude.com') {
     return 'anthropic';
   }
   if (hostname === 'api.openai.com') {
     return 'openai';
+  }
+  if (hostname === OPENROUTER_HOST) {
+    const p = (path ?? '').split('?')[0];
+    return p.endsWith('/messages') ? 'anthropic' : 'openai';
   }
   return 'unknown';
 }
@@ -368,7 +375,14 @@ function truncateToolResult(text: string): string {
 /** Returns true for LLM messages endpoints that carry multi-turn request bodies. */
 function isLlmMessagesEndpoint(path: string): boolean {
   const p = path.split('?')[0];
-  return p === '/v1/messages' || p === '/v1/chat/completions';
+  return (
+    p === '/v1/messages' ||
+    p === '/v1/chat/completions' ||
+    // OpenRouter paths (one host, three wire formats — §11.3).
+    p === '/api/v1/messages' ||
+    p === '/api/v1/chat/completions' ||
+    p === '/api/v1/responses'
+  );
 }
 
 /**
@@ -1019,7 +1033,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
           if (sidAtAttach && contentType.includes('text/event-stream')) {
             const tokenBus = getTokenStreamBus();
-            const sseProvider = resolveSseProvider(targetHost);
+            const sseProvider = resolveSseProvider(targetHost, path);
             const extractor = new SseExtractorTransform(sseProvider, (event) => {
               tokenBus.push(sidAtAttach, event);
             });
@@ -1256,7 +1270,15 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           const reqPath = path as string;
           try {
             const parsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
-            const result = rewriter(parsed, { method: reqMethod, path: reqPath, agentKind });
+            // Reuse the pre-rewrite tokenSessionId snapshot as the stable
+            // per-conversation cacheKey so a concurrent setTokenSessionId flip
+            // cannot split this request's session_id injection (§7.2).
+            const result = rewriter(parsed, {
+              method: reqMethod,
+              path: reqPath,
+              agentKind,
+              cacheKey: sidForToolResults,
+            });
             if (result) {
               finalBody = Buffer.from(JSON.stringify(result.modified));
               logger.info(`[mitm-proxy] POST ${targetHost}${path} - stripped tools: ${result.stripped.join(', ')}`);

@@ -150,7 +150,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       ...(inputs.workflowRunId !== undefined ? { workflowRunId: inputs.workflowRunId } : {}),
       ...(inputs.bundleId !== undefined ? { bundleId: inputs.bundleId } : {}),
       ...(inputs.recordedAgentName !== undefined ? { recordedAgentName: inputs.recordedAgentName } : {}),
-      provider: providerForHost(inputs.host),
+      provider: providerForHost(inputs.host, inputs.path),
       method: inputs.method,
       host: inputs.host,
       path: inputs.path,
@@ -234,7 +234,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       const contentType = String(args.headers['content-type'] ?? '').toLowerCase();
       const isSse = contentType.includes('text/event-stream');
       const reassembler: Reassembler | undefined =
-        isSse || contentType === '' ? createReassembler(inputs.host) : undefined;
+        isSse || contentType === '' ? createReassembler(inputs.host, inputs.path) : undefined;
       const streaming = reassembler !== undefined || isSse;
       // The caller is responsible for wiring a decompressor in front of
       // this tap (see `createResponseCaptureInlet`). The bytes reaching
