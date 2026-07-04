@@ -20,13 +20,26 @@ import type { EndpointPattern, ProviderConfig, RequestBodyRewriter, RewriteResul
 const REGEX_METACHARS = /[.+?^${}()|[\]\\]/g;
 
 /**
+ * Memoized compiled globs. `resolveMappedModel` runs on every rewritten request
+ * (and in env-hint paths), so compiling the same handful of `modelMap` patterns
+ * on each lookup is wasted work. Patterns originate from config (finite, small),
+ * so the cache is effectively bounded.
+ */
+const GLOB_REGEX_CACHE = new Map<string, RegExp>();
+
+/**
  * Compiles a `modelMap` glob to a RegExp anchored full-string,
  * case-insensitive. `*` becomes `.*`; every other regex metacharacter is
  * escaped so a literal `.` in e.g. `gpt-4.1` is not treated as a wildcard.
+ * Results are memoized since this runs on every rewritten request.
  */
 export function globToRegExp(glob: string): RegExp {
+  const cached = GLOB_REGEX_CACHE.get(glob);
+  if (cached) return cached;
   const escaped = glob.replace(REGEX_METACHARS, '\\$&').replace(/\*/g, '.*');
-  return new RegExp(`^${escaped}$`, 'i');
+  const compiled = new RegExp(`^${escaped}$`, 'i');
+  GLOB_REGEX_CACHE.set(glob, compiled);
+  return compiled;
 }
 
 /**

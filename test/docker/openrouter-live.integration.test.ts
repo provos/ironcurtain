@@ -17,8 +17,10 @@
  *
  * Two turns share the same long-ish stable system prompt + a stable prefix; the
  * SECOND turn (identical prefix, same `session_id`, one extra user message) must
- * report `usage.prompt_tokens_details.cached_tokens > 0` — the cache oracle
- * (§4.4, §12.5, R6). `max_tokens` is kept tiny (32) to minimize spend.
+ * report cache-read tokens > 0 — the cache oracle (§4.4, §12.5, R6). On the
+ * Anthropic skin this is the Anthropic-native `usage.cache_read_input_tokens`
+ * field (with the OpenAI-shape `prompt_tokens_details.cached_tokens` accepted as a
+ * fallback). `max_tokens` is kept tiny (32) to minimize spend.
  *
  * Run:
  *   OPENROUTER_API_KEY=sk-or-v1-... LLM_INTEGRATION_TEST=true \

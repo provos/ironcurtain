@@ -148,10 +148,15 @@ export async function main(args?: string[]): Promise<void> {
     }
   }
 
-  // Pre-flight: resolve session mode (auto-detect or validate explicit --agent)
+  // Pre-flight: resolve session mode (auto-detect or validate explicit --agent).
+  // Thread the per-session --provider-profile so credential detection reflects
+  // the profile the session will actually route through (OpenRouter-only users
+  // on a native-default config must not be spuriously blocked). Ignored on
+  // resume (the original profile is restored from metadata later).
   const preflight = await resolveSessionMode({
     config,
     requestedAgent: agentName ? (agentName as AgentId) : undefined,
+    providerProfileName: resumeSessionId ? undefined : providerProfileName,
   });
 
   if (!agentName) {

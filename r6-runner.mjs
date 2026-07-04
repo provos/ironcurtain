@@ -1,5 +1,6 @@
-// Temporary R6 live-test runner (not committed): loads OPENROUTER_API_KEY from .env
-// and runs the real §12.5 vitest test with LLM_INTEGRATION_TEST=true. Never prints the key.
+// R6 live-test runner (committed; wired into package.json as `openrouter-live-check`):
+// loads OPENROUTER_API_KEY from .env and runs the real §12.5 vitest test with
+// LLM_INTEGRATION_TEST=true. Never prints the key.
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
