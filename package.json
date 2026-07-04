@@ -64,7 +64,7 @@
     "setup": "tsx src/cli.ts setup",
     "prepublishOnly": "npm run build",
     "test": "bash scripts/test.sh",
-    "openrouter-live-check": "node r6-runner.mjs",
+    "openrouter-live-check": "node scripts/openrouter-live-check.mjs",
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",
