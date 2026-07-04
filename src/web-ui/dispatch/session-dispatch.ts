@@ -8,7 +8,14 @@
 import { z } from 'zod';
 import type { WebSocket as WsWebSocket } from 'ws';
 
-import { type DispatchContext, validateParams, toSessionDto, toBudgetDto, labelSchema } from './types.js';
+import {
+  type DispatchContext,
+  validateParams,
+  toSessionDto,
+  toBudgetDto,
+  zeroedBudgetDto,
+  labelSchema,
+} from './types.js';
 import {
   type SessionDto,
   type SessionDetailDto,
@@ -17,6 +24,7 @@ import {
   MethodNotFoundError,
 } from '../web-ui-types.js';
 import { tokenStreamDispatch } from './token-stream-dispatch.js';
+import { ptyDispatch } from './pty-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
 import { createStandaloneSession } from '../../session/index.js';
@@ -59,6 +67,14 @@ export async function sessionDispatch(
     return tokenStreamDispatch(ctx, method, params, client);
   }
 
+  // Delegate PTY terminal methods to dedicated dispatch module
+  if (method.startsWith('sessions.pty')) {
+    if (!client) {
+      throw new RpcError('INTERNAL_ERROR', 'PTY methods require a WebSocket client');
+    }
+    return ptyDispatch(ctx, method, params, client);
+  }
+
   switch (method) {
     case 'sessions.list':
       return listSessions(ctx);
@@ -68,10 +84,20 @@ export async function sessionDispatch(
     }
     case 'sessions.create': {
       const { persona, captureTraces } = validateParams(sessionCreateSchema, params);
+      // Docker mode streams a live terminal (web-pty); code mode keeps the
+      // turn-based chatbox session. The daemon's SessionMode is process-global.
+      if (ctx.mode.kind === 'docker') {
+        return createPtySession(ctx, persona, captureTraces);
+      }
       return createWebSession(ctx, persona, captureTraces);
     }
     case 'sessions.end': {
       const { label } = validateParams(labelSchema, params);
+      // Route PTY labels to their manager (they are not in SessionManager).
+      if (ctx.ptySessionManager?.has(label)) {
+        ctx.ptySessionManager.end(label);
+        return;
+      }
       const endManaged = ctx.sessionManager.get(label);
       const endSessionId = endManaged?.session.getInfo().id;
       await ctx.sessionManager.end(label);
@@ -86,18 +112,25 @@ export async function sessionDispatch(
     }
     case 'sessions.budget': {
       const { label } = validateParams(labelSchema, params);
+      // PTY sessions have no turn/budget accounting; return a zeroed budget
+      // rather than throwing, so a stale/racing client degrades cleanly (§11 D2).
+      if (ctx.ptySessionManager?.has(label)) return zeroedBudgetDto();
       const managed = ctx.sessionManager.get(label);
       if (!managed) throw new SessionNotFoundError(label);
       return toBudgetDto(managed);
     }
     case 'sessions.history': {
       const { label } = validateParams(labelSchema, params);
+      // PTY sessions carry no turn history (§11 D2).
+      if (ctx.ptySessionManager?.has(label)) return [];
       const managed = ctx.sessionManager.get(label);
       if (!managed) throw new SessionNotFoundError(label);
       return managed.session.getHistory();
     }
     case 'sessions.diagnostics': {
       const { label } = validateParams(labelSchema, params);
+      // PTY sessions carry no diagnostic log (§11 D2).
+      if (ctx.ptySessionManager?.has(label)) return [];
       const managed = ctx.sessionManager.get(label);
       if (!managed) throw new SessionNotFoundError(label);
       return managed.session.getDiagnosticLog();
@@ -117,10 +150,18 @@ function cleanupSessionQueue(ctx: DispatchContext, label: number): void {
 }
 
 function listSessions(ctx: DispatchContext): SessionDto[] {
-  return ctx.sessionManager.all().map((m) => toSessionDto(m));
+  const managed = ctx.sessionManager.all().map((m) => toSessionDto(m));
+  const pty = ctx.ptySessionManager?.listDtos() ?? [];
+  return [...managed, ...pty];
 }
 
 function getSession(ctx: DispatchContext, label: number): SessionDetailDto {
+  // PTY sessions have no turn history/diagnostics; return the DTO with empty
+  // logs rather than throwing, since selecting one drives this call.
+  const ptyDto = ctx.ptySessionManager?.getDto(label);
+  if (ptyDto) {
+    return { ...ptyDto, history: [], diagnosticLog: [] };
+  }
   const managed = ctx.sessionManager.get(label);
   if (!managed) throw new SessionNotFoundError(label);
   return {
@@ -128,6 +169,29 @@ function getSession(ctx: DispatchContext, label: number): SessionDetailDto {
     history: managed.session.getHistory(),
     diagnosticLog: managed.session.getDiagnosticLog(),
   };
+}
+
+/**
+ * Creates a Docker-agent PTY session (docker mode). Enforces the SAME
+ * concurrency cap as the turn-based path, counting PTY sessions (§11 D4) —
+ * each is a full container, so an unbounded spawn is a real resource concern.
+ */
+async function createPtySession(
+  ctx: DispatchContext,
+  persona?: string,
+  captureTracesOverride?: boolean,
+): Promise<{ label: number }> {
+  const manager = ctx.ptySessionManager;
+  if (!manager) {
+    throw new RpcError('INTERNAL_ERROR', 'PTY session manager not available');
+  }
+  if (manager.size >= ctx.maxConcurrentWebSessions) {
+    throw new RpcError('RATE_LIMITED', `PTY session limit reached (max ${ctx.maxConcurrentWebSessions})`);
+  }
+  return manager.create({
+    ...(persona ? { persona } : {}),
+    ...(captureTracesOverride !== undefined ? { captureTraces: captureTracesOverride } : {}),
+  });
 }
 
 async function createWebSession(

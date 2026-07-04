@@ -49,6 +49,13 @@ export type MethodName =
   | 'sessions.unsubscribeTokenStream'
   | 'sessions.subscribeAllTokenStreams'
   | 'sessions.unsubscribeAllTokenStreams'
+  // Docker-agent PTY terminal streaming (web-pty session kind). Attach/detach
+  // manage per-client subscription to a session's terminal stream; input/resize
+  // forward keystrokes and the browser xterm's size to the child PTY.
+  | 'sessions.ptyAttach'
+  | 'sessions.ptyDetach'
+  | 'sessions.ptyInput'
+  | 'sessions.ptyResize'
   | 'escalations.list'
   | 'escalations.resolve'
   | 'personas.list'
@@ -159,6 +166,13 @@ export interface SessionDto {
   readonly messageInFlight: boolean;
   readonly budget: BudgetSummaryDto;
   readonly persona?: string;
+  /**
+   * ISO 8601 timestamp of the most recent browser attach. Populated only for
+   * `web-pty` sessions (see `toPtySessionDto`) so the operator can spot an
+   * abandoned-but-alive terminal in the session list; absent for all other
+   * kinds. Additive/optional — existing consumers ignore it.
+   */
+  readonly lastAttachedAt?: string;
 }
 
 export interface BudgetSummaryDto {

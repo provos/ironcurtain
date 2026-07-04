@@ -43,11 +43,16 @@ export interface PendingEscalationData {
  *   Does NOT accept follow-up messages.
  * - 'web': interactive session created via the web UI.
  *   Always targeted by explicit label (no currentLabel focus).
+ * - 'web-pty': live Docker-agent PTY session streamed to the web UI as a
+ *   terminal. Never registered in SessionManager (it has no Session/Transport);
+ *   the label is only borrowed via reserveLabel(). Produced solely by
+ *   `toPtySessionDto` for the sessions list — see PtySessionManager.
  */
 export type SessionSource =
   | { readonly kind: 'signal' }
   | { readonly kind: 'cron'; readonly jobId: JobId; readonly jobName: string }
-  | { readonly kind: 'web'; readonly persona?: string };
+  | { readonly kind: 'web'; readonly persona?: string }
+  | { readonly kind: 'web-pty'; readonly persona?: string };
 
 /**
  * Unified managed session entry. Used for both Signal-initiated
