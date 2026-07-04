@@ -12,6 +12,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { WebSocket as WsWebSocket } from 'ws';
 
 import {
@@ -21,9 +24,12 @@ import {
 } from '../../src/web-ui/pty-session-manager.js';
 import type { PtyBridge, PtyBridgeOptions } from '../../src/pty/pty-bridge.js';
 import type { PtySessionRegistration } from '../../src/docker/pty-types.js';
+import type { EscalationRequest } from '../../src/session/types.js';
+import type { EscalationDto } from '../../src/web-ui/web-ui-types.js';
 import { SessionManager } from '../../src/session/session-manager.js';
 import { WebEventBus } from '../../src/web-ui/web-event-bus.js';
 import { sessionDispatch } from '../../src/web-ui/dispatch/session-dispatch.js';
+import { escalationDispatch } from '../../src/web-ui/dispatch/escalation-dispatch.js';
 import type { DispatchContext } from '../../src/web-ui/dispatch/types.js';
 import type { ControlRequestHandler } from '../../src/daemon/control-socket.js';
 
@@ -446,6 +452,195 @@ describe('PtySessionManager', () => {
       expect(dtos[0].turnCount).toBe(0);
       expect(dtos[0].budget.tokenTrackingAvailable).toBe(false);
       expect(dtos[0].status).toBe('ready');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Escalation bridging (Phase 4): a real EscalationWatcher over a temp dir.
+  // The watcher's immediate first poll (§7.2) means writing the request BEFORE
+  // discovery surfaces it synchronously -- no timer advance needed.
+  // -------------------------------------------------------------------------
+  describe('escalation bridging (Phase 4)', () => {
+    const tempDirs: string[] = [];
+
+    function makeEscalationDir(): string {
+      const dir = mkdtempSync(join(tmpdir(), 'pty-esc-'));
+      tempDirs.push(dir);
+      return dir;
+    }
+
+    function writeRequest(dir: string, id: string, overrides: Partial<EscalationRequest> = {}): void {
+      const request: EscalationRequest = {
+        escalationId: id,
+        toolName: 'write_file',
+        serverName: 'filesystem',
+        arguments: { path: '/etc/hosts' },
+        reason: 'Protected path',
+        ...overrides,
+      };
+      writeFileSync(join(dir, `request-${id}.json`), JSON.stringify(request));
+    }
+
+    function discover(bridge: StubBridge, escalationDir: string): void {
+      bridge.emitDiscovered({ sessionId: 's', escalationDir, label: 'l', startedAt: '', pid: 4242 });
+    }
+
+    afterEach(() => {
+      for (const dir of tempDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('re-emits a discovered escalation as escalation.created with a web-pty source', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create({ persona: 'assistant' });
+      const escDir = makeEscalationDir();
+
+      writeRequest(escDir, 'esc-pty-1');
+      discover(h.lastBridge(), escDir);
+
+      const created = h.events.filter((e) => e.event === 'escalation.created');
+      expect(created).toHaveLength(1);
+      const dto = created[0].payload as EscalationDto;
+      expect(dto.sessionSource.kind).toBe('web-pty');
+      expect(dto.sessionLabel).toBe(label);
+      expect(dto.escalationId).toBe('esc-pty-1');
+      expect(dto.toolName).toBe('write_file');
+      expect(dto.serverName).toBe('filesystem');
+
+      expect(h.manager.hasEscalation('esc-pty-1')).toBe(true);
+      const pending = h.manager.listPendingEscalationDtos();
+      expect(pending).toHaveLength(1);
+      expect(pending[0].escalationId).toBe('esc-pty-1');
+    });
+
+    it('resolveEscalation writes response-*.json, drops the entry, and emits escalation.resolved', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+      const escDir = makeEscalationDir();
+      writeRequest(escDir, 'esc-pty-2');
+      discover(h.lastBridge(), escDir);
+
+      const accepted = h.manager.resolveEscalation('esc-pty-2', 'approved');
+      expect(accepted).toBe(true);
+
+      const responsePath = join(escDir, 'response-esc-pty-2.json');
+      expect(existsSync(responsePath)).toBe(true);
+      expect(JSON.parse(readFileSync(responsePath, 'utf-8')).decision).toBe('approved');
+
+      const resolved = h.events.filter((e) => e.event === 'escalation.resolved');
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0].payload).toEqual({ escalationId: 'esc-pty-2', decision: 'approved' });
+
+      expect(h.manager.hasEscalation('esc-pty-2')).toBe(false);
+      expect(h.manager.listPendingEscalationDtos()).toHaveLength(0);
+    });
+
+    it('forwards the whitelist selection through to the response file', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+      const escDir = makeEscalationDir();
+      writeRequest(escDir, 'esc-pty-wl');
+      discover(h.lastBridge(), escDir);
+
+      h.manager.resolveEscalation('esc-pty-wl', 'approved', { whitelistSelection: 2 });
+
+      const response = JSON.parse(readFileSync(join(escDir, 'response-esc-pty-wl.json'), 'utf-8'));
+      expect(response).toEqual({ decision: 'approved', whitelistSelection: 2 });
+    });
+
+    it('drops the entry and emits escalation.expired when the watcher observes expiry', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+      const escDir = makeEscalationDir();
+      writeRequest(escDir, 'esc-pty-3');
+      discover(h.lastBridge(), escDir);
+      expect(h.manager.hasEscalation('esc-pty-3')).toBe(true);
+
+      // Proxy-side cleanup (both files gone) -> the next poll detects expiry.
+      rmSync(join(escDir, 'request-esc-pty-3.json'));
+      vi.advanceTimersByTime(400);
+
+      const expired = h.events.filter((e) => e.event === 'escalation.expired');
+      expect(expired).toHaveLength(1);
+      expect(expired[0].payload).toEqual({ escalationId: 'esc-pty-3', sessionLabel: 1 });
+      expect(h.manager.hasEscalation('esc-pty-3')).toBe(false);
+    });
+
+    it('stops the escalation watcher on end() (no leaked polling)', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
+      const escDir = makeEscalationDir();
+      discover(h.lastBridge(), escDir);
+
+      h.manager.end(label);
+      h.events.length = 0;
+
+      // A request written after end() must NOT surface: the watcher is stopped
+      // and its interval cleared, so advancing timers polls nothing.
+      writeRequest(escDir, 'esc-after-end');
+      vi.advanceTimersByTime(1000);
+      expect(h.events.filter((e) => e.event === 'escalation.created')).toHaveLength(0);
+    });
+
+    it('stops the escalation watcher on close()', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+      const escDir = makeEscalationDir();
+      discover(h.lastBridge(), escDir);
+
+      await h.manager.close();
+      h.events.length = 0;
+
+      writeRequest(escDir, 'esc-after-close');
+      vi.advanceTimersByTime(1000);
+      expect(h.events.filter((e) => e.event === 'escalation.created')).toHaveLength(0);
+    });
+
+    // The escalation-dispatch composition (Deliverable 3): resolve routes to the
+    // PTY manager when it owns the id; list unions PTY pendings.
+    function makeDispatchCtx(h: Harness): DispatchContext {
+      return {
+        handler: makeHandler(),
+        sessionManager: new SessionManager(),
+        mode: { kind: 'docker', agent: 'claude-code' },
+        eventBus: h.eventBus,
+        maxConcurrentWebSessions: 4,
+        sessionQueues: new Map(),
+        ptySessionManager: h.manager,
+      };
+    }
+
+    it('escalations.resolve routes to the PTY manager and writes the response', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+      const escDir = makeEscalationDir();
+      writeRequest(escDir, 'esc-dispatch-1');
+      discover(h.lastBridge(), escDir);
+
+      await escalationDispatch(makeDispatchCtx(h), 'escalations.resolve', {
+        escalationId: 'esc-dispatch-1',
+        decision: 'denied',
+      });
+
+      expect(existsSync(join(escDir, 'response-esc-dispatch-1.json'))).toBe(true);
+      expect(h.manager.hasEscalation('esc-dispatch-1')).toBe(false);
+      const resolved = h.events.filter((e) => e.event === 'escalation.resolved');
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0].payload).toEqual({ escalationId: 'esc-dispatch-1', decision: 'denied' });
+    });
+
+    it('escalations.list unions PTY pending escalations', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+      const escDir = makeEscalationDir();
+      writeRequest(escDir, 'esc-list-1');
+      discover(h.lastBridge(), escDir);
+
+      const list = (await escalationDispatch(makeDispatchCtx(h), 'escalations.list', {})) as EscalationDto[];
+      expect(list).toHaveLength(1);
+      expect(list[0].escalationId).toBe('esc-list-1');
+      expect(list[0].sessionSource.kind).toBe('web-pty');
     });
   });
 });

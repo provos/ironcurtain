@@ -33,10 +33,20 @@ export async function escalationDispatch(
       return listEscalations(ctx);
     case 'escalations.resolve': {
       const validated = validateParams(escalationResolveSchema, params);
+      const options =
+        validated.whitelistSelection != null ? { whitelistSelection: validated.whitelistSelection } : undefined;
+
+      // PTY sessions own their escalations outside SessionManager; route to the
+      // PTY manager (writes the response file + emits escalation.resolved).
+      if (ctx.ptySessionManager?.hasEscalation(validated.escalationId)) {
+        ctx.ptySessionManager.resolveEscalation(validated.escalationId, validated.decision, options);
+        return;
+      }
+
       const result = await ctx.sessionManager.resolveSessionEscalation(
         validated.escalationId,
         validated.decision,
-        validated.whitelistSelection != null ? { whitelistSelection: validated.whitelistSelection } : undefined,
+        options,
       );
       if (!result.resolved) {
         throw new RpcError(
@@ -56,7 +66,7 @@ export async function escalationDispatch(
 // ---------------------------------------------------------------------------
 
 function listEscalations(ctx: DispatchContext): EscalationDto[] {
-  return ctx.sessionManager.withPendingEscalation().flatMap((m) => {
+  const turnBased = ctx.sessionManager.withPendingEscalation().flatMap((m) => {
     const esc = m.pendingEscalation;
     if (!esc) return [];
     return [
@@ -66,4 +76,6 @@ function listEscalations(ctx: DispatchContext): EscalationDto[] {
       },
     ];
   });
+  const pty = ctx.ptySessionManager?.listPendingEscalationDtos() ?? [];
+  return [...turnBased, ...pty];
 }

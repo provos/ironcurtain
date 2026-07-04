@@ -15,19 +15,24 @@
  * docker mode, reaped on explicit `sessions.end`, on child exit, on an idle-TTL
  * backstop ({@link PTY_IDLE_TTL_MS}), or on daemon shutdown (`close()`).
  *
- * Escalation bridging (an EscalationWatcher on the discovered `escalationDir`)
- * is Phase 4. The seam is present: {@link PtyWebSession.escalationDir} is
- * captured from `bridge.onSessionDiscovered`, but no watcher is started here.
+ * Escalation bridging (Phase 4): once `bridge.onSessionDiscovered` yields an
+ * `escalationDir`, an {@link EscalationWatcher} (the same file-watch primitive
+ * mux uses) is started for the session. Detected requests are re-emitted as
+ * `escalation.created` DTOs (`sessionSource: { kind: 'web-pty' }`) onto the
+ * {@link WebEventBus}, so the existing structured Escalations UI works on top
+ * of the terminal. `resolveEscalation` writes the response file and emits
+ * `escalation.resolved` so the UI clears the card.
  */
 
 import type { WebSocket as WsWebSocket } from 'ws';
 
 import type { SessionManager } from '../session/session-manager.js';
-import type { SessionMode } from '../session/types.js';
+import type { SessionMode, EscalationRequest } from '../session/types.js';
 import type { WebEventBus } from './web-event-bus.js';
 import { createPtyBridge, type PtyBridge, type PtyBridgeOptions } from '../pty/pty-bridge.js';
 import { resolveIroncurtainBin } from '../pty/resolve-ironcurtain-bin.js';
-import { RpcError, SessionNotFoundError } from './web-ui-types.js';
+import { createEscalationWatcher, type EscalationWatcher } from '../escalation/escalation-watcher.js';
+import { RpcError, SessionNotFoundError, type EscalationDto } from './web-ui-types.js';
 // Runtime edge is one-directional (this module -> dispatch/types.ts); the
 // back-reference from types.ts to PtyWebSession/PtySessionManager is type-only.
 import { toPtySessionDto } from './dispatch/types.js';
@@ -71,6 +76,27 @@ function encodeBytes(text: string): string {
 }
 function decodeBytes(b64: string): string {
   return Buffer.from(b64, 'base64').toString('utf8');
+}
+
+/**
+ * Builds the `EscalationDto` the web UI consumes from a raw `EscalationRequest`,
+ * tagged as a PTY session. Mirrors `WebSessionTransport.createEscalationHandler`'s
+ * DTO shape exactly (the frontend Escalations UI is shared), differing only in
+ * the `sessionSource` discriminant.
+ */
+function buildPtyEscalationDto(request: EscalationRequest, label: number): EscalationDto {
+  return {
+    escalationId: request.escalationId,
+    sessionLabel: label,
+    sessionSource: { kind: 'web-pty' },
+    toolName: request.toolName,
+    serverName: request.serverName,
+    arguments: request.arguments,
+    reason: request.reason,
+    context: request.context,
+    whitelistCandidates: request.whitelistCandidates,
+    receivedAt: new Date().toISOString(),
+  };
 }
 
 /** Targeted per-client event delivery. Implemented by WebUiServer. */
@@ -117,12 +143,16 @@ export interface PtySessionManagerOptions {
 // ---------------------------------------------------------------------------
 
 export class PtyWebSession {
-  /** Discovered escalation dir (Phase 4 seam; no watcher started in v1). */
+  /** Discovered escalation dir; the {@link escalationWatcher} polls it. */
   escalationDir: string | undefined;
+  /** Watcher over {@link escalationDir}; set by the manager once discovered. */
+  escalationWatcher: EscalationWatcher | null = null;
   /** ISO timestamp of the most recent browser attach (surfaced in the DTO). */
   lastAttachedAt: string | null = null;
   readonly createdAt: string = new Date().toISOString();
 
+  /** Escalation DTOs currently pending for this session, keyed by id. */
+  private readonly pendingEscalations = new Map<string, EscalationDto>();
   private readonly subscribers = new Set<WsWebSocket>();
   /** Clients skipped due to backpressure; resynced with a fresh snapshot on drain. */
   private readonly desynced = new Set<WsWebSocket>();
@@ -181,12 +211,51 @@ export class PtyWebSession {
     }
   }
 
+  // --- Escalation state (Phase 4) ---
+
+  /** Records a newly detected escalation's DTO. */
+  addPendingEscalation(dto: EscalationDto): void {
+    this.pendingEscalations.set(dto.escalationId, dto);
+  }
+
+  /** Drops a pending escalation (resolved or expired). */
+  removePendingEscalation(escalationId: string): void {
+    this.pendingEscalations.delete(escalationId);
+  }
+
+  hasEscalation(escalationId: string): boolean {
+    return this.pendingEscalations.has(escalationId);
+  }
+
+  listEscalationDtos(): EscalationDto[] {
+    return [...this.pendingEscalations.values()];
+  }
+
+  /**
+   * Resolves a pending escalation by writing the response file via the watcher,
+   * then drops it from the pending map. Returns whether the response was
+   * accepted (false if the request had already expired). Emitting
+   * `escalation.resolved` is the manager's responsibility.
+   */
+  resolveEscalation(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    options?: { whitelistSelection?: number },
+  ): boolean {
+    const accepted = this.escalationWatcher?.resolve(escalationId, decision, options) ?? false;
+    this.pendingEscalations.delete(escalationId);
+    return accepted;
+  }
+
   /** Clears timers + buffered state; leaves subscriber routing to the manager. */
   dispose(): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    this.escalationWatcher?.stop();
+    this.escalationWatcher = null;
+    this.pendingEscalations.clear();
     this.subscribers.clear();
     this.desynced.clear();
     this.buffer = '';
@@ -327,9 +396,12 @@ export class PtySessionManager {
     const session = new PtyWebSession(label, bridge, this.sender, options.persona);
     bridge.onData((chunk) => session.pushChunk(chunk));
     bridge.onExit(() => this.handleExit(label));
-    // Phase 4 seam: capture the escalation dir for a future EscalationWatcher.
+    // Phase 4: capture the escalation dir and start bridging its escalations
+    // to the structured Escalations UI over the WebEventBus.
     bridge.onSessionDiscovered((reg) => {
-      if (reg) session.escalationDir = reg.escalationDir;
+      if (!reg) return;
+      session.escalationDir = reg.escalationDir;
+      this.startEscalationWatcher(session, reg.escalationDir);
     });
 
     this.sessions.set(label, session);
@@ -413,6 +485,68 @@ export class PtySessionManager {
   getDto(label: number): ReturnType<typeof toPtySessionDto> | undefined {
     const session = this.sessions.get(label);
     return session ? toPtySessionDto(session) : undefined;
+  }
+
+  // -------------------------------------------------------------------------
+  // Escalation bridging (Phase 4)
+  // -------------------------------------------------------------------------
+
+  /** Whether any live PTY session has this escalation pending. */
+  hasEscalation(escalationId: string): boolean {
+    return this.findEscalationOwner(escalationId) !== undefined;
+  }
+
+  /**
+   * Resolves a PTY escalation: writes the response file, drops the pending
+   * entry, and emits `escalation.resolved` so the UI clears the card (§11 D3).
+   * Returns whether the response was accepted (false if it had already expired).
+   */
+  resolveEscalation(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    options?: { whitelistSelection?: number },
+  ): boolean {
+    const session = this.findEscalationOwner(escalationId);
+    if (!session) {
+      throw new RpcError('ESCALATION_NOT_FOUND', `No pending PTY escalation: ${escalationId}`);
+    }
+    const accepted = session.resolveEscalation(escalationId, decision, options);
+    this.eventBus.emit('escalation.resolved', { escalationId, decision });
+    return accepted;
+  }
+
+  /** All escalations pending across live PTY sessions, for the list union. */
+  listPendingEscalationDtos(): EscalationDto[] {
+    return [...this.sessions.values()].flatMap((session) => session.listEscalationDtos());
+  }
+
+  private findEscalationOwner(escalationId: string): PtyWebSession | undefined {
+    for (const session of this.sessions.values()) {
+      if (session.hasEscalation(escalationId)) return session;
+    }
+    return undefined;
+  }
+
+  /**
+   * Starts an {@link EscalationWatcher} over a discovered escalation dir (idempotent
+   * per session). Detected requests are re-emitted as `escalation.created` DTOs and
+   * expiries as `escalation.expired`, mirroring the turn-based transport.
+   */
+  private startEscalationWatcher(session: PtyWebSession, escalationDir: string): void {
+    if (session.escalationWatcher) return;
+    const watcher = createEscalationWatcher(escalationDir, {
+      onEscalation: (request) => {
+        const dto = buildPtyEscalationDto(request, session.label);
+        session.addPendingEscalation(dto);
+        this.eventBus.emit('escalation.created', dto);
+      },
+      onEscalationExpired: (escalationId) => {
+        session.removePendingEscalation(escalationId);
+        this.eventBus.emit('escalation.expired', { escalationId, sessionLabel: session.label });
+      },
+    });
+    session.escalationWatcher = watcher;
+    watcher.start();
   }
 
   // -------------------------------------------------------------------------
