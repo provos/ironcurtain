@@ -979,6 +979,39 @@ export function resolveActiveProfile(
 }
 
 /**
+ * Masks an API key for display / the wire (`sk-...xyz`, `***` for short keys,
+ * `none` when absent). The mask FORMAT is a load-bearing contract: the web-ui
+ * dispatch compares an incoming wire value against `maskApiKey(currentKey)` to
+ * implement the "leave-masked-to-keep" round-trip, and the frontend depends on
+ * the same shape. Defined here (a dependency-light leaf) so both the interactive
+ * CLI editor and the daemon WS dispatch share ONE definition without either
+ * pulling in the other's imports (e.g. `@clack/prompts`).
+ */
+export function maskApiKey(key: string | undefined | null): string {
+  if (!key) return 'none';
+  if (key.length <= 6) return '***';
+  return key.slice(0, 3) + '...' + key.slice(-3);
+}
+
+/**
+ * Deep-clones a provider preference into a fresh mutable object, copying the
+ * `order`/`only` arrays so callers can't alias the source. Shared by the config
+ * editor and the web-ui dispatch, which convert between the resolved, DTO, and
+ * input shapes with an identical field copy.
+ */
+export function cloneProviderPreference(pref: {
+  readonly order?: readonly string[];
+  readonly only?: readonly string[];
+  readonly allowFallbacks?: boolean;
+}): { order?: string[]; only?: string[]; allowFallbacks?: boolean } {
+  return {
+    order: pref.order ? [...pref.order] : undefined,
+    only: pref.only ? [...pref.only] : undefined,
+    allowFallbacks: pref.allowFallbacks,
+  };
+}
+
+/**
  * Resolves Signal config inline to avoid circular imports.
  * signal-config.ts re-exports a richer version; this is the minimal
  * resolution needed by mergeWithDefaults().

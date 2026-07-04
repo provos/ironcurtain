@@ -20,6 +20,8 @@ import { type GetModelProvidersDto, type ProfileDto, RpcError, MethodNotFoundErr
 import {
   loadUserConfig,
   saveUserConfig,
+  maskApiKey,
+  cloneProviderPreference,
   DOCKER_AGENTS,
   NATIVE_PROFILE_NAME,
   type UserConfig,
@@ -27,22 +29,12 @@ import {
   type ResolvedOpenRouterProfile,
 } from '../../config/user-config.js';
 
-// ---------------------------------------------------------------------------
-// API-key masking
-// ---------------------------------------------------------------------------
-
-/**
- * Masks an API key for the wire (`sk-...xyz` / 'none'). Mirrors `maskApiKey` in
- * `config-command.ts:89` exactly. Duplicated (not imported) because that module
- * pulls in `@clack/prompts` at its top level — an interactive-CLI dependency we
- * must not drag into the daemon's WS dispatch path. The mask FORMAT (not the
- * import) is the DTO contract (§12.6).
- */
-function maskApiKey(key: string | undefined | null): string {
-  if (!key) return 'none';
-  if (key.length <= 6) return '***';
-  return key.slice(0, 3) + '...' + key.slice(-3);
-}
+// The mask FORMAT that `maskApiKey` produces is the DTO contract (§12.6): the
+// `resolveApiKey` round-trip below compares an incoming wire value against
+// `maskApiKey(currentKey)`, and the frontend renders the same shape. It is
+// shared from the `user-config.ts` leaf so the CLI editor and this daemon
+// dispatch cannot drift — without dragging the editor's `@clack/prompts` import
+// onto the WS path.
 
 // ---------------------------------------------------------------------------
 // Param schemas
@@ -146,13 +138,7 @@ function toOpenrouterDto(profile: ResolvedOpenRouterProfile): ProfileDto {
     apiKey: maskApiKey(profile.apiKey),
     modelMap: profile.modelMap.map((r) => ({ match: r.match, model: r.model })),
     perAgent,
-    providerPreference: profile.providerPreference
-      ? {
-          order: profile.providerPreference.order ? [...profile.providerPreference.order] : undefined,
-          only: profile.providerPreference.only ? [...profile.providerPreference.only] : undefined,
-          allowFallbacks: profile.providerPreference.allowFallbacks,
-        }
-      : undefined,
+    providerPreference: profile.providerPreference ? cloneProviderPreference(profile.providerPreference) : undefined,
     sessionAffinity: profile.sessionAffinity,
   };
 }
@@ -245,12 +231,7 @@ function buildOpenrouterInput(
   const perAgent = buildPerAgent(dto.perAgent);
   if (perAgent) out.perAgent = perAgent;
   if (dto.providerPreference) {
-    const pp = dto.providerPreference;
-    out.providerPreference = {
-      order: pp.order ? [...pp.order] : undefined,
-      only: pp.only ? [...pp.only] : undefined,
-      allowFallbacks: pp.allowFallbacks,
-    };
+    out.providerPreference = cloneProviderPreference(dto.providerPreference);
   }
   if (dto.sessionAffinity !== undefined) out.sessionAffinity = dto.sessionAffinity;
   return out;

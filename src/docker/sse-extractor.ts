@@ -354,8 +354,9 @@ export class SseExtractorTransform extends Transform {
       stopReason,
       inputTokens,
       outputTokens,
-      ...(usage?.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
-      ...(usage?.cachedTokens !== undefined ? { cachedTokens: usage.cachedTokens } : {}),
+      // `usage` (from extractOpenRouterUsage) already contains ONLY the defined
+      // OpenRouter fields, so spreading it omits absent keys without re-guarding.
+      ...(usage ?? {}),
       timestamp: Date.now(),
     };
   }

@@ -21,7 +21,7 @@ import type { ResolvedOpenRouterProfile, ResolvedUserConfig } from '../../config
 import { DEFAULT_GLM_SLUG, OPENROUTER_API_V1, OPENROUTER_HOST } from '../../config/user-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
-import { makeOpenRouterProviderForProfile } from '../openrouter.js';
+import { makeOpenRouterProviderForProfile, openRouterCredential } from '../openrouter.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
 import { parseModelId } from '../../config/model-provider.js';
 import {
@@ -303,13 +303,11 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     detectCredential(config: IronCurtainConfig): AuthMethod {
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'openrouter') {
-        // OpenRouter mode: credential presence is the profile's apiKey being
-        // non-empty (no `codex login` needed). Empty => 'none' (feeds m5).
-        if (profile.apiKey !== '') return { kind: 'apikey', key: profile.apiKey };
-        return { kind: 'none' };
-      }
+      // OpenRouter mode: credential presence is the profile's non-empty apiKey
+      // (no `codex login` needed); empty ⇒ 'none' (feeds m5). Native ⇒ undefined,
+      // so fall through to Codex ChatGPT OAuth detection.
+      const openRouter = openRouterCredential(config);
+      if (openRouter) return openRouter;
       const credentials = loadCodexOAuthCredentials();
       if (!credentials) return { kind: 'none' };
       return {

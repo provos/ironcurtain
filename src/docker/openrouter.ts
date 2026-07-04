@@ -13,6 +13,8 @@
 import { OPENROUTER_HOST } from '../config/user-config.js';
 import type { DockerAgent, ResolvedOpenRouterProfile } from '../config/user-config.js';
 import type { EndpointPattern, ProviderConfig, RequestBodyRewriter, RewriteResult } from './provider-config.js';
+import type { AuthMethod } from './oauth-credentials.js';
+import type { IronCurtainConfig } from '../config/types.js';
 
 // --- 7.1 Glob resolution ---
 
@@ -169,12 +171,10 @@ export function makeOpenRouterRewriter(cfg: OpenRouterRewriterConfig): RequestBo
  *
  * Keeping this in `openrouter.ts` (rather than duplicating the field pick in
  * each adapter) is the single place that maps the profile shape to the
- * rewriter's contract, per §9.6.
+ * rewriter's contract, per §9.6. Internal to the module — the only caller is
+ * {@link makeOpenRouterProviderForProfile} below.
  */
-export function rewriterConfigFromProfile(
-  profile: ResolvedOpenRouterProfile,
-  agentId: DockerAgent,
-): OpenRouterRewriterConfig {
+function rewriterConfigFromProfile(profile: ResolvedOpenRouterProfile, agentId: DockerAgent): OpenRouterRewriterConfig {
   return {
     modelMap: profile.modelMap,
     perAgentDefault: profile.perAgent[agentId],
@@ -213,6 +213,24 @@ const COMPLETION_PATH: Readonly<Record<OpenRouterEndpointKind, string>> = {
   responses: '/api/v1/responses',
 };
 
+/** OpenRouter wire format served at a given request path. */
+export type OpenRouterWireFormat = 'anthropic' | 'responses' | 'chat';
+
+/**
+ * Classifies an OpenRouter request path into its wire format (§11.2/§11.3):
+ * one host serves three formats — the Anthropic skin (`.../messages`), the
+ * OpenAI Responses API (`.../responses`), and OpenAI Chat Completions (anything
+ * else). Query strings are ignored. Shared by the token-stream classifier
+ * (`resolveSseProvider`) and the capture classifiers (`providerForHost` /
+ * `createReassembler`) so the path-suffix rules live in exactly one place.
+ */
+export function openRouterWireForPath(path?: string): OpenRouterWireFormat {
+  const p = (path ?? '').split('?')[0];
+  if (p.endsWith('/messages')) return 'anthropic';
+  if (p.endsWith('/responses')) return 'responses';
+  return 'chat';
+}
+
 /** Allowlisted endpoints per kind (completion path + metadata + count_tokens for messages, D5). */
 function allowedEndpointsFor(kind: OpenRouterEndpointKind): EndpointPattern[] {
   const endpoints: EndpointPattern[] = [{ method: 'POST', path: COMPLETION_PATH[kind] }];
@@ -244,4 +262,22 @@ export function makeOpenRouterProvider(kind: OpenRouterEndpointKind, rewriter: R
     requestRewriter: rewriter,
     rewriteEndpoints: [completionPath],
   };
+}
+
+// --- 7.5 Credential resolution ---
+
+/**
+ * The OpenRouter credential for a session whose active profile routes through
+ * OpenRouter: an api-key {@link AuthMethod} when the profile carries a non-empty
+ * key, or `{ kind: 'none' }` when the key is empty (which feeds infra prep's
+ * clear no-credentials error, m5). Returns `undefined` for a native or unset
+ * profile so each adapter's `detectCredential` DEFERS to its own agent-native
+ * detection, preserving today's behavior byte-for-byte. Centralizes the
+ * empty-key contract that would otherwise be re-branched identically in every
+ * adapter (§9.6).
+ */
+export function openRouterCredential(config: IronCurtainConfig): AuthMethod | undefined {
+  const profile = config.activeProviderProfile;
+  if (profile?.type !== 'openrouter') return undefined;
+  return profile.apiKey !== '' ? { kind: 'apikey', key: profile.apiKey } : { kind: 'none' };
 }

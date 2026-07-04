@@ -26,7 +26,7 @@ import type { ResolvedUserConfig, GooseProvider } from '../../config/user-config
 import { DEFAULT_GLM_SLUG, OPENROUTER_HOST } from '../../config/user-config.js';
 import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
-import { makeOpenRouterProviderForProfile, resolveMappedModel } from '../openrouter.js';
+import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
 import { resolveApiKeyForProvider } from '../../config/model-provider.js';
 import {
   buildResizePtyScript,
@@ -381,13 +381,11 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     detectCredential(config: IronCurtainConfig): AuthMethod {
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'openrouter') {
-        // OpenRouter mode: credential presence is the profile's apiKey being
-        // non-empty. Empty => 'none' (feeds m5).
-        if (profile.apiKey !== '') return { kind: 'apikey', key: profile.apiKey };
-        return { kind: 'none' };
-      }
+      // OpenRouter mode: credential presence is the profile's non-empty apiKey;
+      // empty ⇒ 'none' (feeds m5). Native ⇒ undefined, so fall through to the
+      // goose provider's API-key detection.
+      const openRouter = openRouterCredential(config);
+      if (openRouter) return openRouter;
       const key = resolveApiKeyForProvider(gooseProvider, config.userConfig);
       if (key) return { kind: 'apikey', key };
       return { kind: 'none' };

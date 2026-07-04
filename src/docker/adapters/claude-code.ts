@@ -27,7 +27,7 @@ import type { AuthMethod } from '../oauth-credentials.js';
 import type { ResolvedUserConfig } from '../../config/user-config.js';
 import { OPENROUTER_BASE_URL, OPENROUTER_HOST } from '../../config/user-config.js';
 import { parseModelId } from '../../config/model-provider.js';
-import { makeOpenRouterProviderForProfile, resolveMappedModel } from '../openrouter.js';
+import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
 import {
   anthropicProvider,
   claudePlatformProvider,
@@ -260,19 +260,13 @@ exit $STATUS
     },
 
     detectCredential(config: IronCurtainConfig): AuthMethod | undefined {
-      // B2a: an OpenRouter-only user has no Anthropic OAuth/API key, so the
-      // generic detectAuthMethod() would throw. When the active profile routes
-      // through OpenRouter with a non-empty key, report an api-key AuthMethod so
-      // auth detection succeeds and authKind resolves to 'apikey' (B2b). An
-      // openrouter profile with an EMPTY key returns { kind: 'none' } so infra
-      // prep throws the clear no-credentials error (feeds m5). For a native
-      // profile, return `undefined` to DEFER to detectAuthMethod() — preserving
+      // B2a/B2b: an OpenRouter-only user has no Anthropic OAuth/API key, so the
+      // generic detectAuthMethod() would throw. openRouterCredential reports an
+      // api-key AuthMethod for a keyed OpenRouter profile (authKind ⇒ 'apikey'),
+      // { kind: 'none' } for an empty-key profile (feeds m5), and `undefined`
+      // for a native profile — DEFERRING to detectAuthMethod() and preserving
       // today's OAuth+API-key detection byte-for-byte.
-      const profile = config.activeProviderProfile;
-      if (profile?.type === 'openrouter') {
-        return profile.apiKey !== '' ? { kind: 'apikey', key: profile.apiKey } : { kind: 'none' };
-      }
-      return undefined;
+      return openRouterCredential(config);
     },
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {

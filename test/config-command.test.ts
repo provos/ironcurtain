@@ -39,10 +39,9 @@ import {
   formatTokens,
   formatSeconds,
   formatCost,
-  maskApiKey,
 } from '../src/config/config-command.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
-import { USER_CONFIG_DEFAULTS, loadUserConfig } from '../src/config/user-config.js';
+import { USER_CONFIG_DEFAULTS, loadUserConfig, maskApiKey } from '../src/config/user-config.js';
 
 describe('config-command', () => {
   let env: ConfigTestEnv;

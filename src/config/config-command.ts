@@ -25,6 +25,8 @@ import {
   CONTAINER_RUNTIMES,
   NATIVE_PROFILE_NAME,
   DEFAULT_GLM_SLUG,
+  maskApiKey,
+  cloneProviderPreference,
   type UserConfig,
   type ResolvedUserConfig,
   type ResolvedProviderProfile,
@@ -86,12 +88,6 @@ export function formatCost(n: number | null): string {
   return `$${n.toFixed(2)}`;
 }
 
-export function maskApiKey(key: string | undefined | null): string {
-  if (!key) return 'none';
-  if (key.length <= 6) return '***';
-  return key.slice(0, 3) + '...' + key.slice(-3);
-}
-
 function formatModelShort(id: string): string {
   const known = KNOWN_MODELS.find((m) => m.value === id);
   return known ? known.label : id;
@@ -139,11 +135,7 @@ function resolvedProfileToInput(profile: ResolvedProviderProfile): PendingProfil
   }
   if (Object.keys(perAgent).length > 0) input.perAgent = perAgent;
   if (profile.providerPreference) {
-    input.providerPreference = {
-      order: profile.providerPreference.order ? [...profile.providerPreference.order] : undefined,
-      only: profile.providerPreference.only ? [...profile.providerPreference.only] : undefined,
-      allowFallbacks: profile.providerPreference.allowFallbacks,
-    };
+    input.providerPreference = cloneProviderPreference(profile.providerPreference);
   }
   input.sessionAffinity = profile.sessionAffinity;
   return input;

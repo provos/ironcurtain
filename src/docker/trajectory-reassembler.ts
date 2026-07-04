@@ -18,6 +18,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import type { CaptureProvider, Reassembler, ReassemblyResult } from './trajectory-types.js';
 import { OPENROUTER_HOST } from '../config/user-config.js';
+import { openRouterWireForPath } from './openrouter.js';
 
 /** Errors thrown by the reassemblers when the stream is unrecoverable. */
 export class ReassemblyError extends Error {
@@ -1010,8 +1011,7 @@ export function providerForHost(host: string, path?: string): CaptureProvider {
   // Chat Completions paths are 'openai' (Chat Completions is raw-capture-only —
   // see createReassembler).
   if (normalized === OPENROUTER_HOST) {
-    const p = (path ?? '').split('?')[0];
-    return p.endsWith('/messages') ? 'anthropic' : 'openai';
+    return openRouterWireForPath(path) === 'anthropic' ? 'anthropic' : 'openai';
   }
   return 'unknown';
 }
@@ -1035,9 +1035,9 @@ export function createReassembler(host: string, path?: string): Reassembler | un
   // as Anthropic; `/api/v1/responses` reuses the Responses reassembler;
   // `/api/v1/chat/completions` has no reassembler (raw-bytes capture, v0).
   if (h === OPENROUTER_HOST) {
-    const p = (path ?? '').split('?')[0];
-    if (p.endsWith('/messages')) return new AnthropicReassembler();
-    if (p.endsWith('/responses')) return new ResponsesReassembler();
+    const wire = openRouterWireForPath(path);
+    if (wire === 'anthropic') return new AnthropicReassembler();
+    if (wire === 'responses') return new ResponsesReassembler();
     return undefined;
   }
   return undefined;

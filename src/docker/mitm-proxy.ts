@@ -39,6 +39,7 @@ import type { SseProvider } from './token-stream-types.js';
 import { SseExtractorTransform } from './sse-extractor.js';
 import * as logger from '../logger.js';
 import { OPENROUTER_HOST } from '../config/user-config.js';
+import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 
@@ -348,8 +349,7 @@ export function resolveSseProvider(hostname: string, path?: string): SseProvider
     return 'openai';
   }
   if (hostname === OPENROUTER_HOST) {
-    const p = (path ?? '').split('?')[0];
-    return p.endsWith('/messages') ? 'anthropic' : 'openai';
+    return openRouterWireForPath(path) === 'anthropic' ? 'anthropic' : 'openai';
   }
   return 'unknown';
 }
