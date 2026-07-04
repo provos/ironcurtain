@@ -998,6 +998,36 @@ describe('modelProviders resolution (loadUserConfig)', () => {
     expect(p.modelMap).toEqual([]);
   });
 
+  it('sets usesDefaultMap true when the profile OMITS modelMap (default-tracking)', () => {
+    writeConfigFile({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x' } } } });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.usesDefaultMap).toBe(true);
+    expect(p.modelMap).toEqual(DEFAULT_MODEL_MAP);
+  });
+
+  it('sets usesDefaultMap false for an explicit empty modelMap (per-agent-only, not default)', () => {
+    writeConfigFile({
+      modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x', modelMap: [] } } },
+    });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.usesDefaultMap).toBe(false);
+  });
+
+  it('sets usesDefaultMap false for an explicit non-empty modelMap', () => {
+    writeConfigFile({
+      modelProviders: {
+        profiles: {
+          p: { type: 'openrouter', apiKey: 'sk-or-v1-x', modelMap: [{ match: '*', model: 'z-ai/glm-5.2' }] },
+        },
+      },
+    });
+    const config = loadUserConfig();
+    const p = config.modelProviders.profiles.p as ResolvedOpenRouterProfile;
+    expect(p.usesDefaultMap).toBe(false);
+  });
+
   it('defaults sessionAffinity to true when absent', () => {
     writeConfigFile({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-x' } } } });
     const config = loadUserConfig();
@@ -1109,6 +1139,7 @@ describe('resolveActiveProfile (pure resolver)', () => {
         type: 'openrouter' as const,
         apiKey: 'sk-or-v1-x',
         modelMap: DEFAULT_MODEL_MAP,
+        usesDefaultMap: false,
         perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
         providerPreference: undefined,
         sessionAffinity: true,
@@ -1117,6 +1148,7 @@ describe('resolveActiveProfile (pure resolver)', () => {
         type: 'openrouter' as const,
         apiKey: '',
         modelMap: [{ match: '*', model: 'moonshot/kimi-k3' }],
+        usesDefaultMap: false,
         perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
         providerPreference: undefined,
         sessionAffinity: true,

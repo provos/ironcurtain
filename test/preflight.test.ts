@@ -104,6 +104,7 @@ function withOpenRouterProfile(
     type: 'openrouter',
     apiKey,
     modelMap: [{ match: '*', model: 'z-ai/glm-5.2' }],
+    usesDefaultMap: false,
     perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
     providerPreference: undefined,
     sessionAffinity: true,
@@ -551,20 +552,40 @@ describe('resolveSessionMode', () => {
       await expect(promise).rejects.toThrow(PreflightError);
     });
 
-    it('degrades to the default profile for an unknown name (infra prep remains the authority)', async () => {
-      // Unknown --provider-profile: preflight must NOT throw its own "unknown
-      // profile" error — it falls back to the default (native, valid key here)
-      // so the authoritative listing error surfaces later at infra prep.
-      const config = withOpenRouterProfile(createTestConfig(), 'glm', 'sk-or-v1-live');
+    it('surfaces the authoritative unknown-profile error for an unknown name, before credential detection', async () => {
+      // The bug scenario: an OpenRouter-only user (native default, NO agent
+      // creds) typos `--provider-profile`. Preflight must surface the
+      // authoritative available-profiles listing from resolveActiveProfile —
+      // NOT mask it behind a generic "no credentials" error by degrading to
+      // the (credential-less) default.
+      const config = withOpenRouterProfile(createTestConfig({ anthropicApiKey: '' }), 'glm', 'sk-or-v1-live');
 
-      const result = await resolveSessionMode({
+      const promise = resolveSessionMode({
         config,
         providerProfileName: 'does-not-exist',
         isDockerAvailable: dockerAvailable,
         credentialSources: noOAuthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'apikey' });
+      await expect(promise).rejects.toThrow('Unknown provider profile "does-not-exist". Available: native, glm.');
+      // The confusing generic credential error must NOT be what the user sees.
+      await expect(promise).rejects.not.toThrow(/preferredMode is "docker"/);
+    });
+
+    it('surfaces the unknown-profile error identically even when the default profile HAS creds', async () => {
+      // Same typo, but the native default now carries a valid API key. The
+      // error must be identical: the name is resolved before credential
+      // detection, so whether the default has creds is irrelevant.
+      const config = withOpenRouterProfile(createTestConfig(), 'glm', 'sk-or-v1-live');
+
+      await expect(
+        resolveSessionMode({
+          config,
+          providerProfileName: 'does-not-exist',
+          isDockerAvailable: dockerAvailable,
+          credentialSources: noOAuthSources,
+        }),
+      ).rejects.toThrow('Unknown provider profile "does-not-exist". Available: native, glm.');
     });
   });
 });

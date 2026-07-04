@@ -72,6 +72,23 @@ export function toEditable(dto: OpenrouterProfileDto): EditableProfile {
   };
 }
 
+/**
+ * True when saving `name` would clobber a different existing profile.
+ *
+ * A rename or add is a collision when the (trimmed) target name is not the one
+ * being edited (`original`) yet already appears in `existingNames`. Keeping the
+ * same name (`name === original`) is always allowed — that's a plain edit-in-place.
+ * Callers pass the trimmed name; `existingNames` should exclude the reserved
+ * `native` (that clash is rejected separately).
+ */
+export function isDuplicateProfileName(
+  name: string,
+  original: string | null,
+  existingNames: readonly string[],
+): boolean {
+  return name !== original && existingNames.includes(name);
+}
+
 /** Parses a comma-separated list into trimmed, non-empty tokens. */
 export function parseList(value: string): string[] {
   return value

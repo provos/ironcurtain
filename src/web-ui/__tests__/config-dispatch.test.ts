@@ -126,17 +126,42 @@ describe('config.getModelProviders', () => {
     expect(kimi.apiKey).toBe('none');
   });
 
-  it('surfaces resolved defaults (modelMap/perAgent/sessionAffinity) for a minimal profile', async () => {
+  it('surfaces resolved defaults (perAgent/sessionAffinity) and OMITS modelMap for a minimal profile', async () => {
     writeConfig({
       modelProviders: { profiles: { glm: { type: 'openrouter', apiKey: SK_GLM } } },
     });
     const dto = await get(makeCtx(false));
     const glm = dto.profiles.glm;
     if (glm.type !== 'openrouter') throw new Error('unreachable');
-    // DEFAULT_MODEL_MAP is applied at resolution.
-    expect(glm.modelMap && glm.modelMap.length).toBeGreaterThan(0);
+    // A default-tracking profile OMITS modelMap so the "track defaults" intent
+    // survives a set-back round-trip (rather than materializing DEFAULT_MODEL_MAP).
+    expect(glm.modelMap).toBeUndefined();
     expect(glm.sessionAffinity).toBe(true);
     expect(glm.perAgent).toBeDefined();
+  });
+
+  it('includes modelMap for a profile with an explicit non-empty map', async () => {
+    writeConfig({
+      modelProviders: {
+        profiles: {
+          glm: { type: 'openrouter', apiKey: SK_GLM, modelMap: [{ match: '*', model: 'z-ai/glm-5.2' }] },
+        },
+      },
+    });
+    const dto = await get(makeCtx(false));
+    const glm = dto.profiles.glm;
+    if (glm.type !== 'openrouter') throw new Error('unreachable');
+    expect(glm.modelMap).toEqual([{ match: '*', model: 'z-ai/glm-5.2' }]);
+  });
+
+  it('includes an explicit empty modelMap (per-agent-only mode, distinct from default-tracking)', async () => {
+    writeConfig({
+      modelProviders: { profiles: { glm: { type: 'openrouter', apiKey: SK_GLM, modelMap: [] } } },
+    });
+    const dto = await get(makeCtx(false));
+    const glm = dto.profiles.glm;
+    if (glm.type !== 'openrouter') throw new Error('unreachable');
+    expect(glm.modelMap).toEqual([]);
   });
 });
 
@@ -249,6 +274,41 @@ describe('config.setModelProviders — M5 per-profile apiKey', () => {
     // glm key preserved (mask-equal).
     const glm = onDisk.profiles.glm as { apiKey?: string };
     expect(glm.apiKey).toBe(SK_GLM);
+  });
+});
+
+describe('config.setModelProviders — default-map preservation (round-trip)', () => {
+  it('a default-tracking profile stays default-tracking after a GET/SET round-trip', async () => {
+    // On-disk profile OMITS modelMap => it tracks DEFAULT_MODEL_MAP.
+    writeConfig({
+      modelProviders: { profiles: { glm: { type: 'openrouter', apiKey: SK_GLM } } },
+    });
+    const ctx = makeCtx(true);
+
+    // GET returns the profile with modelMap OMITTED...
+    const gotten = await get(ctx);
+    const gotGlm = gotten.profiles.glm;
+    if (gotGlm.type !== 'openrouter') throw new Error('unreachable');
+    expect(gotGlm.modelMap).toBeUndefined();
+
+    // ...and setting it back verbatim must NOT materialize DEFAULT_MODEL_MAP.
+    await set(ctx, { default: gotten.default, profiles: gotten.profiles });
+
+    const onDisk = readConfig().modelProviders as { profiles: Record<string, { modelMap?: unknown }> };
+    expect(onDisk.profiles.glm.modelMap).toBeUndefined();
+  });
+
+  it('an explicit empty modelMap is preserved (not dropped) across a round-trip', async () => {
+    writeConfig({
+      modelProviders: { profiles: { glm: { type: 'openrouter', apiKey: SK_GLM, modelMap: [] } } },
+    });
+    const ctx = makeCtx(true);
+
+    const gotten = await get(ctx);
+    await set(ctx, { default: gotten.default, profiles: gotten.profiles });
+
+    const onDisk = readConfig().modelProviders as { profiles: Record<string, { modelMap?: unknown }> };
+    expect(onDisk.profiles.glm.modelMap).toEqual([]);
   });
 });
 

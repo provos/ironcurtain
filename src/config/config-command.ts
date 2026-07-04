@@ -127,7 +127,9 @@ function resolvedProfileToInput(profile: ResolvedProviderProfile): PendingProfil
   if (profile.type === 'native') return { type: 'native' };
   const input: PendingOpenrouterProfile = { type: 'openrouter' };
   if (profile.apiKey) input.apiKey = profile.apiKey;
-  input.modelMap = profile.modelMap.map((r) => ({ match: r.match, model: r.model }));
+  // A default-tracking profile OMITS `modelMap` so an edit round-trip re-persists
+  // the omission rather than pinning today's materialized DEFAULT_MODEL_MAP.
+  if (!profile.usesDefaultMap) input.modelMap = profile.modelMap.map((r) => ({ match: r.match, model: r.model }));
   const perAgent: Record<string, string> = {};
   for (const agent of DOCKER_AGENTS) {
     const slug = profile.perAgent[agent];

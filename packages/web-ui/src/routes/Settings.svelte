@@ -24,6 +24,7 @@
     blankOpenrouterProfile,
     toEditable,
     editableToDto,
+    isDuplicateProfileName,
   } from './settings-helpers.js';
 
   // Whether the daemon permits config mutation. When false every mutation control
@@ -167,6 +168,12 @@
     }
     if (name === NATIVE_NAME) {
       saveError = { code: 'INVALID_PARAMS', message: '"native" is a reserved profile name.' };
+      return;
+    }
+    // Renaming onto (or adding with) an existing profile's name would silently
+    // overwrite that profile's config — reject instead of clobbering it.
+    if (isDuplicateProfileName(name, editing.original, openrouterNames)) {
+      saveError = { code: 'INVALID_PARAMS', message: `A profile named "${name}" already exists.` };
       return;
     }
     saving = true;

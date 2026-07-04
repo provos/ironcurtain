@@ -486,6 +486,13 @@ export interface ResolvedOpenRouterProfile {
   /** '' when unset (neither OPENROUTER_API_KEY env nor profile.apiKey). */
   readonly apiKey: string;
   readonly modelMap: readonly { readonly match: string; readonly model: string }[];
+  /**
+   * True iff the on-disk profile OMITTED `modelMap` (so `modelMap` above holds
+   * the materialized `DEFAULT_MODEL_MAP`). Serializers use this to re-persist an
+   * omitted map — preserving "track the defaults" intent across edit round-trips.
+   * An explicit `modelMap: []` (per-agent-only mode) is `false`, not default.
+   */
+  readonly usesDefaultMap: boolean;
   readonly perAgent: Readonly<Record<DockerAgent, string | undefined>>;
   readonly providerPreference:
     | { readonly order?: readonly string[]; readonly only?: readonly string[]; readonly allowFallbacks?: boolean }
@@ -935,6 +942,9 @@ function resolveOpenrouterProfile(profile: OpenrouterProfileInput): ResolvedOpen
     type: 'openrouter',
     apiKey: profile.apiKey ?? '',
     modelMap: profile.modelMap ?? DEFAULT_MODEL_MAP,
+    // An explicit `modelMap: []` is per-agent-only mode, distinct from omission:
+    // `[] !== undefined`, so only a truly-omitted map tracks the defaults.
+    usesDefaultMap: profile.modelMap === undefined,
     perAgent,
     providerPreference: profile.providerPreference,
     sessionAffinity: profile.sessionAffinity ?? true,

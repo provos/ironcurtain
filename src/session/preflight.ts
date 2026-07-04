@@ -58,9 +58,10 @@ export interface PreflightOptions {
    * credential banner/block matches the routing the session will actually use.
    * Undefined resolves the config default — the unchanged behavior for mux,
    * daemon, cron, and resumes (which restore the original profile later). An
-   * unknown name is NOT authoritative here: infra prep produces the listing
-   * error, so preflight degrades to the default profile rather than throwing a
-   * second, less-helpful error.
+   * unknown name propagates `resolveActiveProfile`'s authoritative
+   * available-profiles error early (before credential detection), so a
+   * `--provider-profile` typo surfaces as "unknown profile" rather than being
+   * masked by a generic "no credentials" error when the default lacks creds.
    */
   providerProfileName?: string;
   /** Dependency injection for tests. Defaults to real Docker check. */
@@ -81,26 +82,6 @@ function authKindLabel(kind: DockerAuthKind): string {
   return kind === 'oauth' ? 'OAuth' : 'API key';
 }
 
-/**
- * Resolves the profile whose credentials preflight should check. Honors the
- * per-session `--provider-profile` override so an OpenRouter-only user who
- * selects an OpenRouter profile on a native-default config is not spuriously
- * blocked (the exact `name ?? default` expression infra prep uses). An unknown
- * name is left to infra prep — which throws with the full available-profiles
- * listing — so here we degrade to the default profile rather than throw a
- * second, less-helpful "unknown profile" error before that listing is reached.
- */
-function resolveActiveProfileForPreflight(
-  config: IronCurtainConfig,
-  providerProfileName: string | undefined,
-): ReturnType<typeof resolveActiveProfile> {
-  try {
-    return resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
-  } catch {
-    return resolveActiveProfile(config.userConfig.modelProviders);
-  }
-}
-
 async function detectCredentialState(
   agentId: AgentId,
   config: IronCurtainConfig,
@@ -112,8 +93,12 @@ async function detectCredentialState(
   // key — not the agent-native credential. The interactive banner would
   // otherwise report "no credentials" for an OpenRouter-only user. The
   // per-session `--provider-profile` override is honored here (native profiles
-  // fall through to the agent-native detection unchanged).
-  const activeProfile = resolveActiveProfileForPreflight(config, providerProfileName);
+  // fall through to the agent-native detection unchanged). An unknown name
+  // makes `resolveActiveProfile` throw its authoritative available-profiles
+  // listing — we let that propagate so the typo surfaces here, before
+  // credential detection, identically whether or not the default has creds
+  // (rather than masking it behind a generic "no credentials" error).
+  const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
   if (activeProfile.type === 'openrouter') {
     return { credKind: activeProfile.apiKey ? 'apikey' : null, anthropicOAuthOnly: false };
   }

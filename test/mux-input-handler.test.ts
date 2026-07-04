@@ -797,6 +797,39 @@ describe('MuxInputHandler', () => {
       expect(handler.mode).toBe('command');
       expect(handler.providerPickerState).toBeNull();
     });
+
+    it('backing out of persona selection (ESC) preserves configured provider profiles', () => {
+      const personas: PersonaSnapshot[] = [
+        {
+          name: createPersonaName('researcher'),
+          description: 'Research assistant',
+          compiled: true,
+          workspacePath: '/home/user/research',
+        },
+      ];
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      // Enter the /new picker with BOTH personas and provider profiles.
+      handler.enterPickerMode(personas, profiles);
+
+      // Drill into persona selection (menu option 3), then back out with ESC.
+      handler.handleKey('3');
+      expect(handler.mode).toBe('persona-picker');
+      handler.handleKey('ESCAPE');
+      expect(handler.mode).toBe('picker');
+      expect(handler.pickerState?.phase).toBe('menu');
+      // Persona menu item survives the round-trip (cache not wiped).
+      expect(handler.pickerState?.menuItemCount).toBe(3);
+
+      // Quick-spawn (option 1) now runs finishSelection. With the profile cache
+      // preserved, the provider-picker step MUST be interposed rather than
+      // skipped to a default-provider spawn.
+      const action = handler.handleKey('1');
+      expect(action).toEqual({ kind: 'redraw-picker' });
+      expect(handler.mode).toBe('provider-picker');
+      expect(handler.providerPickerState?.profiles.map((p) => p.name)).toEqual(['native', 'glm-5.2', 'kimi']);
+      // The default profile is still pre-selected.
+      expect(handler.providerPickerState?.profiles[handler.providerPickerState.selectedIndex].name).toBe('glm-5.2');
+    });
   });
 
   describe('escalation picker mode', () => {

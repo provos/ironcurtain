@@ -27,6 +27,7 @@ function openrouterProfile(overrides: Partial<ResolvedOpenRouterProfile> = {}): 
     type: 'openrouter',
     apiKey: 'sk-or-v1-test',
     modelMap: DEFAULT_MODEL_MAP,
+    usesDefaultMap: true,
     providerPreference: undefined,
     sessionAffinity: true,
     ...rest,

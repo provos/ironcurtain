@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import type { OpenrouterProfileDto } from '$lib/types.js';
-import { toEditable, editableToDto, parseList, blankOpenrouterProfile } from './settings-helpers.js';
+import {
+  toEditable,
+  editableToDto,
+  parseList,
+  blankOpenrouterProfile,
+  isDuplicateProfileName,
+} from './settings-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Full-field get→edit→set round-trip (M4) + M5 masked-key preservation.
@@ -118,5 +124,32 @@ describe('parseList', () => {
   it('splits, trims, and drops empties', () => {
     expect(parseList('z-ai,  deepinfra , ,')).toEqual(['z-ai', 'deepinfra']);
     expect(parseList('')).toEqual([]);
+  });
+});
+
+describe('isDuplicateProfileName', () => {
+  const existing = ['kimi', 'glm'];
+
+  it('flags an add whose name collides with an existing profile', () => {
+    // Add flow: original is null, name already taken → would clobber `glm`.
+    expect(isDuplicateProfileName('glm', null, existing)).toBe(true);
+  });
+
+  it('flags a rename onto another existing profile', () => {
+    // Editing `kimi`, renaming it to `glm` → would clobber `glm`.
+    expect(isDuplicateProfileName('glm', 'kimi', existing)).toBe(true);
+  });
+
+  it('allows an edit that keeps the same name', () => {
+    // Editing `glm` in place (name unchanged) must not be rejected.
+    expect(isDuplicateProfileName('glm', 'glm', existing)).toBe(false);
+  });
+
+  it('allows a brand-new unique name', () => {
+    expect(isDuplicateProfileName('deepseek', null, existing)).toBe(false);
+  });
+
+  it('allows a rename to an unused name', () => {
+    expect(isDuplicateProfileName('deepseek', 'kimi', existing)).toBe(false);
   });
 });

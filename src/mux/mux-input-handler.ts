@@ -468,9 +468,11 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     }
 
     if (key === ESCAPE || key === CTRL_C) {
-      // Return to the picker menu (not command mode)
+      // Return to the picker menu (not command mode). Preserve the cached
+      // provider profiles so the post-selection provider-picker step is not
+      // wrongly skipped after backing out of persona selection.
       _personaPickerState = null;
-      enterPickerMode(_cachedPersonas);
+      enterPickerMode(_cachedPersonas, _cachedProfiles);
       return { kind: 'redraw-picker' };
     }
 

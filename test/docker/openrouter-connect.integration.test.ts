@@ -90,6 +90,7 @@ const OPENROUTER_PROFILE: ResolvedOpenRouterProfile = {
     { match: '*sonnet*', model: DEFAULT_GLM_SLUG },
     { match: '*haiku*', model: DEFAULT_GLM_SLUG },
   ],
+  usesDefaultMap: false,
   perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
   providerPreference: undefined,
   sessionAffinity: true,

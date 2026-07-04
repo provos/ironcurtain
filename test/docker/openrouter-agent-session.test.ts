@@ -75,6 +75,7 @@ function openrouterProfile(overrides: Partial<ResolvedOpenRouterProfile> = {}): 
     type: 'openrouter',
     apiKey: REAL_OPENROUTER_KEY,
     modelMap: DEFAULT_MODEL_MAP,
+    usesDefaultMap: true,
     providerPreference: undefined,
     sessionAffinity: true,
     ...rest,

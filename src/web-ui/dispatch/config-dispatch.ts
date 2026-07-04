@@ -136,7 +136,10 @@ function toOpenrouterDto(profile: ResolvedOpenRouterProfile): ProfileDto {
   return {
     type: 'openrouter',
     apiKey: maskApiKey(profile.apiKey),
-    modelMap: profile.modelMap.map((r) => ({ match: r.match, model: r.model })),
+    // A default-tracking profile OMITS `modelMap` so a set-back round-trip
+    // re-persists the omission (not today's materialized DEFAULT_MODEL_MAP).
+    // An explicit map (including `[]`) is serialized verbatim.
+    modelMap: profile.usesDefaultMap ? undefined : profile.modelMap.map((r) => ({ match: r.match, model: r.model })),
     perAgent,
     providerPreference: profile.providerPreference ? cloneProviderPreference(profile.providerPreference) : undefined,
     sessionAffinity: profile.sessionAffinity,
