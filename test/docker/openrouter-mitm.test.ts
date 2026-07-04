@@ -245,6 +245,51 @@ describe('OpenRouter through the real MITM (G3 / §12.2)', () => {
     expect(messageEnd?.cachedTokens).toBe(900);
   });
 
+  // 6b. usage cost / cached_tokens on the Chat Completions wire (Goose).
+  it('surfaces usage.cost and cached_tokens on the token-stream bus (Chat Completions skin)', async () => {
+    const sid = 'cost-conv-chat' as SessionId;
+    const events: TokenStreamEvent[] = [];
+    getTokenStreamBus().subscribe(sid, (_s, e) => events.push(e));
+
+    const sse = readFixture('openrouter-chat-stream.sse');
+    await startProxy({
+      kind: 'chat',
+      initialTokenSessionId: sid,
+      upstreamResponder: () => ({ status: 200, contentType: 'text/event-stream', body: sse }),
+    });
+    await post('/api/v1/chat/completions', { model: 'claude-sonnet-4-6', messages: [] });
+
+    const messageEnd = events.find(
+      (e): e is Extract<TokenStreamEvent, { kind: 'message_end' }> =>
+        e.kind === 'message_end' && e.costUsd !== undefined,
+    );
+    expect(messageEnd, 'chat wire must surface a message_end carrying authoritative cost').toBeDefined();
+    expect(messageEnd?.costUsd).toBe(0.0123);
+    expect(messageEnd?.cachedTokens).toBe(900);
+  });
+
+  // 6c. usage cost / cached_tokens on the Responses wire (Codex).
+  it('surfaces usage.cost and cached_tokens on the token-stream bus (Responses skin)', async () => {
+    const sid = 'cost-conv-responses' as SessionId;
+    const events: TokenStreamEvent[] = [];
+    getTokenStreamBus().subscribe(sid, (_s, e) => events.push(e));
+
+    const sse = readFixture('openrouter-responses-stream.sse');
+    await startProxy({
+      kind: 'responses',
+      initialTokenSessionId: sid,
+      upstreamResponder: () => ({ status: 200, contentType: 'text/event-stream', body: sse }),
+    });
+    await post('/api/v1/responses', { model: 'claude-sonnet-4-6', input: [] });
+
+    const messageEnd = events.find(
+      (e): e is Extract<TokenStreamEvent, { kind: 'message_end' }> => e.kind === 'message_end',
+    );
+    expect(messageEnd, 'responses wire must surface a message_end carrying authoritative cost').toBeDefined();
+    expect(messageEnd?.costUsd).toBe(0.0123);
+    expect(messageEnd?.cachedTokens).toBe(900);
+  });
+
   // 7. keep-alive comment tolerance.
   it('tolerates interleaved keep-alive comment lines without erroring the stream', async () => {
     const sid = 'keepalive-conv' as SessionId;

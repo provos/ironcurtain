@@ -301,6 +301,52 @@ describe('config.setModelProviders — F10 delete-repoints-default', () => {
     // The next load does not throw (no dangling default).
     expect(() => loadUserConfig({ readOnly: true })).not.toThrow();
   });
+
+  it('re-points to native when the request DROPS the current default and OMITS default entirely', async () => {
+    writeConfig({
+      modelProviders: {
+        default: 'glm',
+        profiles: {
+          glm: { type: 'openrouter', apiKey: SK_GLM },
+          kimi: { type: 'openrouter', apiKey: SK_KIMI },
+        },
+      },
+    });
+    const ctx = makeCtx(true);
+
+    // A raw client deletes glm (the current default) WITHOUT resending `default`.
+    // The shallow merge would preserve the stale `default: 'glm'` and dangle it;
+    // the backend must auto-repoint to native rather than reject the write.
+    const result = await set(ctx, { profiles: { kimi: { type: 'openrouter', apiKey: 'sk-...end' } } });
+
+    const onDisk = readConfig().modelProviders as { default?: string; profiles: Record<string, unknown> };
+    expect(onDisk.default).toBe('native');
+    expect(onDisk.profiles.glm).toBeUndefined();
+    expect(result.default).toBe('native');
+    expect(() => loadUserConfig({ readOnly: true })).not.toThrow();
+  });
+
+  it('leaves the stored default untouched when default is omitted and its profile survives', async () => {
+    writeConfig({
+      modelProviders: {
+        default: 'glm',
+        profiles: {
+          glm: { type: 'openrouter', apiKey: SK_GLM },
+          kimi: { type: 'openrouter', apiKey: SK_KIMI },
+        },
+      },
+    });
+    const ctx = makeCtx(true);
+
+    // Omit `default`; glm (the stored default) is still present, so preservation
+    // is correct — the fix must not gratuitously rewrite the default.
+    const result = await set(ctx, {
+      profiles: { glm: { type: 'openrouter', apiKey: 'sk-...glm' }, kimi: { type: 'openrouter', apiKey: 'sk-...end' } },
+    });
+
+    expect(result.default).toBe('glm');
+    expect((readConfig().modelProviders as { default?: string }).default).toBe('glm');
+  });
 });
 
 describe('config.setModelProviders — validation passthrough', () => {

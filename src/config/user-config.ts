@@ -1126,6 +1126,46 @@ function deepMergeConfig(existing: Record<string, unknown>, changes: Record<stri
 }
 
 /**
+ * Prevents the `OPENROUTER_API_KEY` env value from being persisted to disk.
+ *
+ * `applyOpenrouterKeyEnv` layers the env key onto EVERY openrouter profile's
+ * resolved `apiKey` at load time, so the editor and web-UI dispatch — which read
+ * resolved config — would otherwise bake that env secret into config.json on any
+ * `modelProviders` edit (silently, since the masked apiKey diff shows no change).
+ * That defeats the point of the env var and contradicts the editor's "API keys
+ * are excluded (use env vars)" design.
+ *
+ * At the single write chokepoint, any openrouter `apiKey` in the outgoing config
+ * that equals the env value is replaced with the profile's ON-DISK key (so a
+ * genuine file-origin key survives) or omitted entirely (env-only profiles). A
+ * user-typed key that differs from the env value is untouched. No-op when the
+ * env var is unset.
+ */
+function stripEnvOpenrouterKeys(
+  merged: Record<string, unknown>,
+  existing: Record<string, unknown>,
+): Record<string, unknown> {
+  const envKey = process.env.OPENROUTER_API_KEY;
+  if (!envKey) return merged;
+  const mp = merged['modelProviders'];
+  if (!isPlainObject(mp) || !isPlainObject(mp['profiles'])) return merged;
+
+  const existingMp = existing['modelProviders'];
+  const existingProfiles: Record<string, unknown> =
+    isPlainObject(existingMp) && isPlainObject(existingMp['profiles']) ? existingMp['profiles'] : {};
+
+  for (const [name, profile] of Object.entries(mp['profiles'])) {
+    if (!isPlainObject(profile) || profile['type'] !== 'openrouter' || profile['apiKey'] !== envKey) continue;
+    const fileProfile = existingProfiles[name];
+    const fileKey =
+      isPlainObject(fileProfile) && typeof fileProfile['apiKey'] === 'string' ? fileProfile['apiKey'] : undefined;
+    if (fileKey && fileKey !== envKey) profile['apiKey'] = fileKey;
+    else delete profile['apiKey'];
+  }
+  return merged;
+}
+
+/**
  * Saves user config changes to ~/.ironcurtain/config.json.
  *
  * Reads the existing file (if any), deep-merges the changes (one level deep
@@ -1148,7 +1188,7 @@ export function saveUserConfig(changes: UserConfig): void {
     mkdirSync(dirname(configPath), { recursive: true });
   }
 
-  const merged = deepMergeConfig(existing, changes);
+  const merged = stripEnvOpenrouterKeys(deepMergeConfig(existing, changes), existing);
 
   // Validate the merged result (only known fields)
   const result = userConfigSchema.safeParse(merged);

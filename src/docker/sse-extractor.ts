@@ -37,6 +37,12 @@ function arr(value: unknown): Array<Record<string, unknown>> | undefined {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : undefined;
 }
 
+/** First argument that is a number, else undefined (to distinguish absent from 0). */
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) if (typeof value === 'number') return value;
+  return undefined;
+}
+
 /** OpenRouter-only usage fields surfaced on the `message_end` event (§10.2). */
 interface OpenRouterUsageFields {
   readonly costUsd?: number;
@@ -44,17 +50,28 @@ interface OpenRouterUsageFields {
 }
 
 /**
- * Extracts OpenRouter's authoritative `usage.cost` (USD) and
- * `usage.prompt_tokens_details.cached_tokens` from a terminal usage object,
- * when present. Native Anthropic usage objects lack these keys, so both fields
- * come back undefined and the event carries no extra data (§10.2).
+ * Extracts OpenRouter's authoritative `usage.cost` (USD) and cache-read token
+ * count from a terminal usage object. OpenRouter reports cache reads under a
+ * DIFFERENT key per wire format (§10.2), so all three are accepted:
+ *   - Anthropic skin (`/api/v1/messages`):        `cache_read_input_tokens`
+ *   - Chat Completions (`/api/v1/chat/completions`): `prompt_tokens_details.cached_tokens`
+ *   - Responses (`/api/v1/responses`):             `input_tokens_details.cached_tokens`
+ * `cost` is a top-level field of the usage object on every skin. Native
+ * (non-OpenRouter) usage objects carry none of these, so both fields come back
+ * undefined and the event carries no extra data.
  */
 function extractOpenRouterUsage(usage: Record<string, unknown> | undefined): OpenRouterUsageFields {
   if (!usage) return {};
-  const details = obj(usage['prompt_tokens_details']);
+  const promptDetails = obj(usage['prompt_tokens_details']);
+  const inputDetails = obj(usage['input_tokens_details']);
+  const cachedTokens = firstNumber(
+    usage['cache_read_input_tokens'],
+    promptDetails?.['cached_tokens'],
+    inputDetails?.['cached_tokens'],
+  );
   return {
     ...(typeof usage['cost'] === 'number' ? { costUsd: usage['cost'] } : {}),
-    ...(typeof details?.['cached_tokens'] === 'number' ? { cachedTokens: details['cached_tokens'] } : {}),
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
   };
 }
 
@@ -292,6 +309,18 @@ export class SseExtractorTransform extends Transform {
     const root = obj(parsed);
     if (!root) return;
 
+    // OpenRouter Responses wire (Codex): the terminal `response.completed` /
+    // `response.done` event carries authoritative usage under `response.usage`.
+    // The rest of this parser understands only the chat-completions `choices`
+    // shape, so without this branch the Responses cost/cache is dropped (§10.2).
+    const rootType = str(root['type']);
+    if (rootType === 'response.completed' || rootType === 'response.done') {
+      const response = obj(root['response']);
+      const status = str(response?.['status']) || 'stop';
+      this.emitSafe(this.makeMessageEnd(status, 0, 0, extractOpenRouterUsage(obj(response?.['usage']))));
+      return;
+    }
+
     const now = Date.now();
     const choices = arr(root['choices']);
     if (!choices || choices.length === 0) {
@@ -309,7 +338,7 @@ export class SseExtractorTransform extends Transform {
     if (!delta) {
       const finishReason = str(choice['finish_reason']) || undefined;
       if (finishReason) {
-        this.emitSafe(this.makeMessageEnd(finishReason, 0, 0));
+        this.emitSafe(this.makeMessageEnd(finishReason, 0, 0, extractOpenRouterUsage(obj(root['usage']))));
       }
       return;
     }
@@ -333,9 +362,10 @@ export class SseExtractorTransform extends Transform {
     }
 
     // Empty delta with finish_reason (common OpenAI pattern for stream end).
+    // OpenRouter rides authoritative usage on this final chunk (§10.2).
     const finishReason = str(choice['finish_reason']) || undefined;
     if (finishReason) {
-      this.emitSafe(this.makeMessageEnd(finishReason, 0, 0));
+      this.emitSafe(this.makeMessageEnd(finishReason, 0, 0, extractOpenRouterUsage(obj(root['usage']))));
       return;
     }
 

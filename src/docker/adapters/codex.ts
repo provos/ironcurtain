@@ -21,7 +21,7 @@ import type { ResolvedOpenRouterProfile, ResolvedUserConfig } from '../../config
 import { DEFAULT_GLM_SLUG, OPENROUTER_API_V1, OPENROUTER_HOST } from '../../config/user-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
-import { makeOpenRouterProviderForProfile, openRouterCredential } from '../openrouter.js';
+import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
 import { parseModelId } from '../../config/model-provider.js';
 import {
@@ -81,12 +81,17 @@ exec codex --ask-for-approval never --sandbox danger-full-access "\${MODEL_ARGS[
 
 /**
  * Codex slug under an openrouter-type profile (D2). Codex has NO native model
- * field in IronCurtain config, so it must never passthrough an unmapped OpenAI
- * id — the `modelMap` does NOT participate. The slug is exactly
- * `perAgent.codex ?? DEFAULT_GLM_SLUG`.
+ * field in IronCurtain config, so the slug is `perAgent.codex`, else the
+ * `DEFAULT_GLM_SLUG` run through the profile's `modelMap` — never an unmapped
+ * passthrough (a non-matching map falls back to `DEFAULT_GLM_SLUG`).
+ *
+ * Applying the map here is what keeps `config.toml`'s `model` consistent with
+ * the model the MITM rewriter actually serves: the rewriter (D1) re-globs
+ * whatever Codex sends, so without the same map the container would budget its
+ * context window for one model while being routed to another.
  */
 function codexSlugFor(profile: ResolvedOpenRouterProfile): string {
-  return profile.perAgent.codex ?? DEFAULT_GLM_SLUG;
+  return profile.perAgent.codex ?? resolveMappedModel(DEFAULT_GLM_SLUG, profile.modelMap) ?? DEFAULT_GLM_SLUG;
 }
 
 /**

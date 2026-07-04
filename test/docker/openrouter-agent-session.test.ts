@@ -219,10 +219,24 @@ describe('OpenRouter — Codex adapter', () => {
     expect(mcp.ironcurtain.command).toBe('socat');
   });
 
-  it('D2: generateMcpConfig model falls back to DEFAULT_GLM_SLUG when no perAgent.codex (modelMap ignored)', () => {
-    // modelMap has a wildcard that WOULD match an OpenAI id, but Codex ignores
-    // the map entirely — the slug must be DEFAULT_GLM_SLUG, never a passthrough.
+  it('D2: generateMcpConfig maps DEFAULT_GLM_SLUG through modelMap so config.toml matches the served model', () => {
+    // A wildcard map remaps everything (including the GLM default). Codex's
+    // config.toml model must reflect what the MITM rewriter actually serves
+    // (D1 re-globs whatever Codex sends), not the pre-map default — otherwise
+    // the container budgets its context window for a model it isn't routed to.
     const config = configWithProfile(openrouterProfile({ modelMap: [{ match: '*', model: 'openai/gpt-5' }] }));
+    const parsed = parseToml(adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', config)[0].content) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed.model).toBe('openai/gpt-5');
+    expect(parsed.model_provider).toBe('openrouter');
+  });
+
+  it('D2: generateMcpConfig falls back to DEFAULT_GLM_SLUG when the modelMap matches nothing (never a passthrough)', () => {
+    // The default *sonnet*/*opus*/*haiku* map does not match the GLM default slug,
+    // so codexSlugFor stays DEFAULT_GLM_SLUG — never an unmapped external id.
+    const config = configWithProfile(openrouterProfile({ modelMap: [{ match: '*sonnet*', model: 'z-ai/glm-5.2' }] }));
     const parsed = parseToml(adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', config)[0].content) as Record<
       string,
       unknown

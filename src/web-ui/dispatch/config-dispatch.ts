@@ -163,9 +163,11 @@ type SetInput = z.infer<typeof setModelProvidersSchema>;
  * Emits `config.changed`, then returns the fresh masked get DTO.
  */
 function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetModelProvidersDto {
-  // Snapshot the currently-resolved profiles so M5 can compare against the
-  // stored key and preserve it when the wire value equals its mask.
-  const currentProfiles = loadUserConfig({ readOnly: true }).modelProviders.profiles;
+  // Snapshot the currently-resolved registry so M5 can compare against the
+  // stored key (preserve when the wire value equals its mask) and F10 can see
+  // the stored default when the write omits one.
+  const current = loadUserConfig({ readOnly: true }).modelProviders;
+  const currentProfiles = current.profiles;
 
   const profiles: Record<string, NonNullable<NonNullable<UserConfig['modelProviders']>['profiles']>[string]> = {};
   for (const [name, dto] of Object.entries(input.profiles)) {
@@ -191,7 +193,21 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
   // it falls through to the Zod `.refine` in saveUserConfig and is rejected
   // (validation-passthrough: the request itself set a bad default).
   const priorNames = Object.keys(currentProfiles);
-  const resolvedDefault = repointDefault(input.default, profiles, priorNames);
+  let resolvedDefault = repointDefault(input.default, profiles, priorNames);
+  if (input.default === undefined) {
+    // The client omitted `default`; the shallow config merge would preserve the
+    // stored default. If THIS write deletes the profile that default names, that
+    // preserved default would dangle and saveUserConfig's schema `.refine` would
+    // reject the whole write with a confusing INVALID_PARAMS. Auto-repoint to
+    // native for that case — the same F10 outcome as sending it explicitly.
+    if (
+      current.default !== NATIVE_PROFILE_NAME &&
+      !(current.default in profiles) &&
+      priorNames.includes(current.default)
+    ) {
+      resolvedDefault = NATIVE_PROFILE_NAME;
+    }
+  }
 
   const modelProviders: NonNullable<UserConfig['modelProviders']> = { profiles };
   if (resolvedDefault !== undefined) modelProviders.default = resolvedDefault;

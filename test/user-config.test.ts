@@ -1071,6 +1071,33 @@ describe('modelProviders resolution (loadUserConfig)', () => {
     const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
     expect(written.modelProviders.profiles.p.apiKey).toBe('sk-or-v1-persist');
   });
+
+  it('never persists the OPENROUTER_API_KEY env value (env-only profile → apiKey omitted)', () => {
+    // Simulates the editor/web-UI persisting a resolved profile whose apiKey was
+    // injected only from the env var (applyOpenrouterKeyEnv) — it must not land on disk.
+    process.env.OPENROUTER_API_KEY = 'sk-or-v1-from-env';
+    saveUserConfig({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-from-env' } } } });
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.modelProviders.profiles.p.apiKey).toBeUndefined();
+    // Round-trips: the env var still supplies the key at load time.
+    expect((loadUserConfig().modelProviders.profiles.p as ResolvedOpenRouterProfile).apiKey).toBe('sk-or-v1-from-env');
+  });
+
+  it('restores a distinct file-origin apiKey when scrubbing the env value', () => {
+    writeConfigFile({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-file' } } } });
+    process.env.OPENROUTER_API_KEY = 'sk-or-v1-from-env';
+    // A save that carries the env-injected key (as the resolved editor value would).
+    saveUserConfig({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-from-env' } } } });
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.modelProviders.profiles.p.apiKey).toBe('sk-or-v1-file');
+  });
+
+  it('persists a user-typed key that differs from the env value', () => {
+    process.env.OPENROUTER_API_KEY = 'sk-or-v1-from-env';
+    saveUserConfig({ modelProviders: { profiles: { p: { type: 'openrouter', apiKey: 'sk-or-v1-typed' } } } });
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.modelProviders.profiles.p.apiKey).toBe('sk-or-v1-typed');
+  });
 });
 
 describe('resolveActiveProfile (pure resolver)', () => {
