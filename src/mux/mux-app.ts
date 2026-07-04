@@ -8,6 +8,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment */
 
 import { createPtyBridge } from '../pty/pty-bridge.js';
+import { resolveIroncurtainBin } from '../pty/resolve-ironcurtain-bin.js';
 import { createMuxInputHandler, SCROLL_LINES, type MuxInputHandler } from './mux-input-handler.js';
 import { createMuxEscalationManager, type MuxEscalationManager } from './mux-escalation-manager.js';
 import { createMuxRenderer, type MuxRenderer } from './mux-renderer.js';
@@ -92,18 +93,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     } else if (activeTabIndex >= tabs.length) {
       activeTabIndex = tabs.length - 1;
     }
-  }
-
-  function resolveIroncurtainBin(): { bin: string; prefixArgs: string[] } {
-    const script = process.argv[1];
-    // If the entry point is a .ts file, we're running via tsx/ts-node --
-    // spawn the child through the same runtime. process.execArgv contains
-    // the loader flags (e.g. --import tsx/loader) that make .ts imports work.
-    if (script && script.endsWith('.ts')) {
-      return { bin: process.argv[0], prefixArgs: [...process.execArgv, script] };
-    }
-    // If running a compiled JS file or via an installed bin, use it directly
-    return { bin: script || 'ironcurtain', prefixArgs: [] };
   }
 
   async function spawnSession(opts?: {
