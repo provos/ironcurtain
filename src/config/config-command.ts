@@ -1139,10 +1139,13 @@ async function promptSlug(message: string, opts: { current: string; allowNone: b
   const typed = await p.text({
     message,
     placeholder: current || DEFAULT_GLM_SLUG,
-    validate: allowNone ? () => undefined : (val) => (!val ? 'Target slug is required' : undefined),
+    validate: allowNone ? () => undefined : (val) => (!val || !val.trim() ? 'Target slug is required' : undefined),
   });
   if (isCancelled(typed)) return undefined;
-  return typed as string;
+  // Trim: a free-typed slug is persisted as-is, and " " would pass the schema's
+  // min(1) yet break routing (and defeat "blank to clear" for per-agent). The web
+  // path already trims (editableToDto / validateSlugs); keep the CLI consistent.
+  return (typed as string).trim();
 }
 
 async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingOpenrouterProfile | undefined> {
