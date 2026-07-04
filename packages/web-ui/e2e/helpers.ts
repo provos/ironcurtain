@@ -3,11 +3,14 @@ import { expect, type Page, type APIRequestContext } from '@playwright/test';
 /**
  * Reset the mock server's mutable state so tests are isolated. Pass
  * `allowPolicyMutation: false` to simulate a daemon launched WITHOUT
- * `--allow-policy-mutation` (persona-mutation controls hidden).
+ * `--allow-policy-mutation` (persona-mutation controls hidden). Pass
+ * `mode: 'docker'` to flip the single mock instance into Docker Agent Mode so
+ * `sessions.create` yields a `web-pty` terminal session; a bare reset (no
+ * `mode`) always restores the default chatbox mode.
  */
 export async function resetMockServer(
   request: APIRequestContext,
-  opts?: { allowPolicyMutation?: boolean },
+  opts?: { allowPolicyMutation?: boolean; mode?: 'default' | 'docker' },
 ): Promise<void> {
   await request.post('http://localhost:7401/__reset', opts ? { data: opts } : undefined);
 }

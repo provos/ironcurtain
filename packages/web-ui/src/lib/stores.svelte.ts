@@ -174,19 +174,74 @@ export const personasChangedGeneration = $state({ value: 0 });
 export const configChangedGeneration = $state({ value: 0 });
 
 /**
- * Per-label terminal sink registry. The Sessions route installs a sink for the
- * `web-pty` session it is showing (the bound `TerminalConsole`); the pure
- * event handler routes incoming `session.pty_*` events to it via `getPtySink`.
- * Not reactive — sinks are imperative handles, never rendered.
+ * Per-label terminal sink registry. A `web-pty` session's frames
+ * (`session.pty_replay` / `session.pty_output`) can arrive BEFORE its
+ * `TerminalConsole` has created its xterm terminal — a fast daemon sends the
+ * one-shot replay the instant it receives `ptyAttach`, which can beat the
+ * component's mount effect. So each sink BUFFERS frames until the route connects
+ * the mounted terminal's live handle, then drains them in order — a replay
+ * snapshot is never dropped (which would blank a reconnect to an idle session).
+ * The pure event handler routes `session.pty_*` events here via `getPtySink`.
+ * Not reactive — imperative handles, never rendered.
  */
-const ptySinks = new Map<number, PtySink>();
+class BufferingPtySink implements PtySink {
+  private live: PtySink | null = null;
+  private buffered: Array<{ reset: boolean; b64: string }> = [];
 
-export function registerPtySink(label: number, sink: PtySink): void {
-  ptySinks.set(label, sink);
+  write(dataB64: string): void {
+    if (this.live) this.live.write(dataB64);
+    else this.buffered.push({ reset: false, b64: dataB64 });
+  }
+
+  reset(snapshotB64: string): void {
+    if (this.live) this.live.reset(snapshotB64);
+    // A fresh snapshot is the source of truth: it supersedes buffered deltas.
+    else this.buffered = [{ reset: true, b64: snapshotB64 }];
+  }
+
+  /** Connect the mounted terminal and flush any buffered frames, in order. */
+  connect(handle: PtySink): void {
+    this.live = handle;
+    for (const frame of this.buffered) {
+      if (frame.reset) handle.reset(frame.b64);
+      else handle.write(frame.b64);
+    }
+    this.buffered = [];
+  }
+
+  disconnect(): void {
+    this.live = null;
+  }
+}
+
+const ptySinks = new Map<number, BufferingPtySink>();
+
+/** Registers a buffering sink for a label. Idempotent — never clobbers a live sink. */
+export function registerPtySink(label: number): void {
+  if (!ptySinks.has(label)) ptySinks.set(label, new BufferingPtySink());
 }
 
 export function unregisterPtySink(label: number): void {
   ptySinks.delete(label);
+}
+
+/**
+ * Connects a mounted terminal's live handle for `label`, draining buffered
+ * frames. Order-independent with `registerPtySink` (creates the sink if the
+ * terminal mounted before the route registered it).
+ */
+export function connectPtyTerminal(label: number, handle: PtySink): void {
+  let sink = ptySinks.get(label);
+  if (!sink) {
+    sink = new BufferingPtySink();
+    ptySinks.set(label, sink);
+  }
+  sink.connect(handle);
+}
+
+/** Disconnects the live handle (the terminal unmounted); later frames re-buffer. */
+export function disconnectPtyTerminal(label: number): void {
+  ptySinks.get(label)?.disconnect();
 }
 
 // WebSocket client singleton

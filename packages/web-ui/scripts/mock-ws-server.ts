@@ -89,9 +89,23 @@ const startTime = Date.now();
 // return a `web-pty` session and enables the sessions.pty* handlers; anything
 // else (default) keeps the turn-based `web` chatbox so the existing e2e suite
 // is unaffected.
+//
+// The mode is also switchable at runtime via `POST /__reset { mode }` so the
+// single Playwright mock instance can serve BOTH the chatbox specs (default)
+// and the PTY spec (docker) without a second server. A bare reset (no `mode`)
+// always restores the env-derived initial mode, so a PTY spec that flips to
+// docker never contaminates a later chatbox spec's default-mode reset.
 // ---------------------------------------------------------------------------
 
-const PTY_MODE = process.env.MOCK_SESSION_MODE === 'docker';
+type SessionMode = 'default' | 'docker';
+
+const INITIAL_SESSION_MODE: SessionMode = process.env.MOCK_SESSION_MODE === 'docker' ? 'docker' : 'default';
+
+let sessionMode: SessionMode = INITIAL_SESSION_MODE;
+
+function isPtyMode(): boolean {
+  return sessionMode === 'docker';
+}
 
 /** base64 of the UTF-8 bytes of a terminal string (matches the daemon framing). */
 function b64(text: string): string {
@@ -1338,7 +1352,11 @@ function buildMessageLogFixtures(workflowId: string): Array<Record<string, unkno
 const jobs = structuredClone(CANNED_JOBS);
 
 /** Reset all mutable state for test isolation. */
-function resetState(opts?: { allowPolicyMutation?: boolean }): void {
+function resetState(opts?: { allowPolicyMutation?: boolean; mode?: SessionMode }): void {
+  // Restore the session mode: an explicit `mode` flips it (a PTY spec asks for
+  // 'docker'), otherwise fall back to the env-derived initial mode so a bare
+  // reset from a chatbox spec always lands back in 'default'.
+  sessionMode = opts?.mode ?? INITIAL_SESSION_MODE;
   stopAllPtyFrames();
   sessions.clear();
   escalations.clear();
@@ -1661,7 +1679,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         stepCount: 0,
         estimatedCostUsd: 0,
         // In docker mode the daemon returns a terminal (web-pty) session.
-        ...(PTY_MODE ? { isPty: true } : {}),
+        ...(isPtyMode() ? { isPty: true } : {}),
       };
       sessions.set(label, session);
       broadcast('session.created', buildSessionDto(session));
@@ -1679,7 +1697,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       const attachSession = sessions.get(label);
       if (!attachSession) return errorResult('SESSION_NOT_FOUND', `Session #${label} not found`);
       attachSession.lastAttachedAt = new Date().toISOString();
-      // One-shot full-screen replay to just the attaching client.
+      // One-shot full-screen replay to just the attaching client, emitted inline
+      // the instant we receive ptyAttach (a fast daemon serializes+sends the same
+      // way). This can beat the client's terminal-mount effect, so TerminalConsole
+      // buffers a replay that arrives before its xterm Terminal exists and flushes
+      // it on open — the snapshot is never dropped. The e2e exercises exactly this.
       emit(ws, 'session.pty_replay', { label, snapshot: b64(PTY_BANNER) });
       broadcast('session.updated', buildSessionDto(attachSession));
       startPtyFrames(label);
@@ -2514,10 +2536,10 @@ const httpServer = createServer((req, res) => {
       body += chunk.toString();
     });
     req.on('end', () => {
-      let opts: { allowPolicyMutation?: boolean } | undefined;
+      let opts: { allowPolicyMutation?: boolean; mode?: SessionMode } | undefined;
       if (body.trim().length > 0) {
         try {
-          opts = JSON.parse(body) as { allowPolicyMutation?: boolean };
+          opts = JSON.parse(body) as { allowPolicyMutation?: boolean; mode?: SessionMode };
         } catch {
           opts = undefined;
         }
@@ -2574,7 +2596,7 @@ if (replayConfig && replayPlan) {
     Terminal 1: cd packages/web-ui && npm run mock-server
     Terminal 2: cd packages/web-ui && npm run dev
 
-  Session mode: ${PTY_MODE ? 'docker (web-pty terminals)' : 'code (turn-based chatbox)'}
+  Session mode: ${isPtyMode() ? 'docker (web-pty terminals)' : 'code (turn-based chatbox)'}
     Set MOCK_SESSION_MODE=docker to demo the xterm terminal view.
 `);
 }

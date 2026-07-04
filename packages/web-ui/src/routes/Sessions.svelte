@@ -13,6 +13,8 @@
     sendPtyResize,
     registerPtySink,
     unregisterPtySink,
+    connectPtyTerminal,
+    disconnectPtyTerminal,
   } from '../lib/stores.svelte.js';
   import type { ConversationTurn } from '../lib/types.js';
 
@@ -123,22 +125,20 @@
     appState.selectedSession?.source.kind === 'web-pty' ? appState.selectedSession.label : null,
   );
 
-  // PTY attach lifecycle. Install this component's sink BEFORE attaching (the
-  // daemon sends a one-shot pty_replay on attach), then focus the terminal.
-  // Detach + unregister on switch/unmount.
+  // PTY attach lifecycle. Register the buffering sink BEFORE attaching (the
+  // daemon sends a one-shot pty_replay on attach, which can beat the terminal's
+  // mount): the sink buffers frames until the mounted TerminalConsole connects
+  // its live handle via `onready`, so a replay is never dropped. Detach +
+  // unregister on switch/unmount.
   $effect(() => {
     const label = selectedPtyLabel;
     if (label === null) return;
 
-    registerPtySink(label, {
-      write: (dataB64) => terminalRef?.write(dataB64),
-      reset: (snapshotB64) => terminalRef?.reset(snapshotB64),
-    });
-    attachPty(label)
-      .then(() => terminalRef?.focus())
-      .catch((err) => console.error('Failed to attach PTY:', err));
+    registerPtySink(label);
+    attachPty(label).catch((err) => console.error('Failed to attach PTY:', err));
 
     return () => {
+      disconnectPtyTerminal(label);
       unregisterPtySink(label);
       detachPty(label).catch(() => {});
     };
@@ -190,6 +190,10 @@
         {#key ptySession.label}
           <TerminalConsole
             bind:this={terminalRef}
+            onready={(handle) => {
+              connectPtyTerminal(ptySession.label, handle);
+              terminalRef?.focus();
+            }}
             oninput={(dataB64) => sendPtyInput(ptySession.label, dataB64)}
             onresize={(cols, rows) => sendPtyResize(ptySession.label, cols, rows)}
           />
