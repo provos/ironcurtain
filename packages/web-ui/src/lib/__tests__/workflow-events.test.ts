@@ -42,6 +42,7 @@ function createMockEffects(): EventSideEffects {
     refreshPersonas: vi.fn(),
     refreshConfig: vi.fn(),
     assignDisplayNumber: vi.fn(() => 1),
+    getPtySink: vi.fn(() => undefined),
   };
 }
 

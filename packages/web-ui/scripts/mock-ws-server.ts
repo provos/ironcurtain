@@ -52,6 +52,10 @@ interface MockSession {
   totalTokens: number;
   stepCount: number;
   estimatedCostUsd: number;
+  /** True for a docker-mode `web-pty` (terminal) session. */
+  isPty?: boolean;
+  /** ISO timestamp of the most recent ptyAttach (web-pty only). */
+  lastAttachedAt?: string;
 }
 
 interface MockWhitelistCandidate {
@@ -76,6 +80,68 @@ interface MockEscalation {
 const PORT = parseInt(process.env.PORT ?? '7400', 10);
 const MOCK_TOKEN = 'mock-dev-token';
 const startTime = Date.now();
+
+// ---------------------------------------------------------------------------
+// PTY (Docker Agent Mode) simulation
+//
+// A docker-mode daemon serves live xterm terminals instead of the chatbox. The
+// mock picks its mode from MOCK_SESSION_MODE: `docker` makes sessions.create
+// return a `web-pty` session and enables the sessions.pty* handlers; anything
+// else (default) keeps the turn-based `web` chatbox so the existing e2e suite
+// is unaffected.
+// ---------------------------------------------------------------------------
+
+const PTY_MODE = process.env.MOCK_SESSION_MODE === 'docker';
+
+/** base64 of the UTF-8 bytes of a terminal string (matches the daemon framing). */
+function b64(text: string): string {
+  return Buffer.from(text, 'utf-8').toString('base64');
+}
+
+// A full-screen ANSI snapshot sent on attach (mirrors a serialize() replay).
+const PTY_BANNER =
+  '\x1b[2J\x1b[H' +
+  '\x1b[1;36m┌─ IronCurtain PTY (mock) ─────────────────────────────┐\x1b[0m\r\n' +
+  '\x1b[1;36m│\x1b[0m  Claude Code in a --network=none container (fake)   \x1b[1;36m│\x1b[0m\r\n' +
+  '\x1b[1;36m└──────────────────────────────────────────────────────┘\x1b[0m\r\n' +
+  '\r\n' +
+  'Type to send keystrokes. Type "escalate" to trigger an escalation.\r\n' +
+  '\r\n\x1b[32m$\x1b[0m ';
+
+const PTY_SPINNER = ['|', '/', '-', '\\'];
+
+// Per-label fake-TUI frame timers. A single interval per attached label repaints
+// a bottom status line; cleared on detach / end / reset.
+const ptyTimers = new Map<number, ReturnType<typeof setInterval>>();
+
+function buildPtyFrame(tick: number): string {
+  const spin = PTY_SPINNER[tick % PTY_SPINNER.length];
+  // Save cursor, jump to the bottom row, clear it, paint a status line, restore.
+  return `\x1b7\x1b[999;1H\x1b[2K\x1b[33m[mock] agent working ${spin}  frame ${tick}\x1b[0m\x1b8`;
+}
+
+function startPtyFrames(label: number): void {
+  if (ptyTimers.has(label)) return;
+  let tick = 0;
+  const timer = setInterval(() => {
+    tick++;
+    broadcast('session.pty_output', { label, data: b64(buildPtyFrame(tick)) });
+  }, 1000);
+  ptyTimers.set(label, timer);
+}
+
+function stopPtyFrames(label: number): void {
+  const timer = ptyTimers.get(label);
+  if (timer) {
+    clearInterval(timer);
+    ptyTimers.delete(label);
+  }
+}
+
+function stopAllPtyFrames(): void {
+  for (const timer of ptyTimers.values()) clearInterval(timer);
+  ptyTimers.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Replay mode CLI parsing
@@ -1273,6 +1339,7 @@ const jobs = structuredClone(CANNED_JOBS);
 
 /** Reset all mutable state for test isolation. */
 function resetState(opts?: { allowPolicyMutation?: boolean }): void {
+  stopAllPtyFrames();
   sessions.clear();
   escalations.clear();
   nextLabel = 1;
@@ -1333,7 +1400,34 @@ function buildBudgetDto(session: MockSession) {
   };
 }
 
+function buildZeroBudgetDto() {
+  return {
+    totalTokens: 0,
+    stepCount: 0,
+    elapsedSeconds: 0,
+    estimatedCostUsd: 0,
+    tokenTrackingAvailable: false,
+    limits: { maxTotalTokens: null, maxSteps: null, maxSessionSeconds: null, maxEstimatedCostUsd: null },
+  };
+}
+
 function buildSessionDto(session: MockSession) {
+  // A web-pty (terminal) session has zeroed budget, turnCount 0, no token
+  // tracking, and an optional lastAttachedAt — mirrors toPtySessionDto.
+  if (session.isPty) {
+    return {
+      label: session.label,
+      source: { kind: 'web-pty' as const, ...(session.persona ? { persona: session.persona } : {}) },
+      status: session.status,
+      turnCount: 0,
+      createdAt: session.createdAt,
+      hasPendingEscalation: [...escalations.values()].some((e) => e.sessionLabel === session.label),
+      messageInFlight: false,
+      budget: buildZeroBudgetDto(),
+      ...(session.persona ? { persona: session.persona } : {}),
+      ...(session.lastAttachedAt ? { lastAttachedAt: session.lastAttachedAt } : {}),
+    };
+  }
   return {
     label: session.label,
     source: { kind: 'web' as const },
@@ -1363,9 +1457,11 @@ function buildStatusDto() {
 }
 
 function buildEscalationDto(esc: MockEscalation) {
+  const session = sessions.get(esc.sessionLabel);
+  const kind = session?.isPty ? ('web-pty' as const) : ('web' as const);
   return {
     ...esc,
-    sessionSource: { kind: 'web' as const },
+    sessionSource: { kind },
   };
 }
 
@@ -1564,10 +1660,71 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         totalTokens: 0,
         stepCount: 0,
         estimatedCostUsd: 0,
+        // In docker mode the daemon returns a terminal (web-pty) session.
+        ...(PTY_MODE ? { isPty: true } : {}),
       };
       sessions.set(label, session);
       broadcast('session.created', buildSessionDto(session));
       return { label };
+    }
+
+    // -----------------------------------------------------------------------
+    // PTY terminal streaming (docker mode). attach replays a snapshot + starts
+    // a fake-TUI frame timer; input echoes back (and routes "escalate" to the
+    // overlay); resize is a noop ack; detach stops the frames.
+    // -----------------------------------------------------------------------
+
+    case 'sessions.ptyAttach': {
+      const label = params.label as number;
+      const attachSession = sessions.get(label);
+      if (!attachSession) return errorResult('SESSION_NOT_FOUND', `Session #${label} not found`);
+      attachSession.lastAttachedAt = new Date().toISOString();
+      // One-shot full-screen replay to just the attaching client.
+      emit(ws, 'session.pty_replay', { label, snapshot: b64(PTY_BANNER) });
+      broadcast('session.updated', buildSessionDto(attachSession));
+      startPtyFrames(label);
+      return { attached: true };
+    }
+
+    case 'sessions.ptyDetach': {
+      const label = params.label as number;
+      stopPtyFrames(label);
+      return { detached: true };
+    }
+
+    case 'sessions.ptyInput': {
+      const label = params.label as number;
+      const dataB64 = params.data as string;
+      const inputSession = sessions.get(label);
+      if (!inputSession) return errorResult('SESSION_NOT_FOUND', `Session #${label} not found`);
+      const text = Buffer.from(dataB64, 'base64').toString('utf-8');
+      // Route "escalate" to a structured escalation so the overlay is demoable.
+      if (text.toLowerCase().includes('escalate')) {
+        const escalationId = `esc-${Date.now()}`;
+        const esc: MockEscalation = {
+          escalationId,
+          sessionLabel: label,
+          toolName: 'filesystem__write_file',
+          serverName: 'filesystem',
+          arguments: { path: '/etc/hosts', content: 'malicious content' },
+          reason: 'Write to protected system path',
+          whitelistCandidates: [
+            { description: 'Allow filesystem.write_file within /etc/' },
+            { description: 'Allow filesystem.write_file for this exact path: /etc/hosts' },
+          ],
+          receivedAt: new Date().toISOString(),
+        };
+        escalations.set(escalationId, esc);
+        broadcast('escalation.created', buildEscalationDto(esc));
+      }
+      // Echo the keystrokes back so typed characters appear at the cursor.
+      broadcast('session.pty_output', { label, data: dataB64 });
+      return { accepted: true };
+    }
+
+    case 'sessions.ptyResize': {
+      // Last-writer-wins; the mock has no real PTY to resize.
+      return { resized: true };
     }
 
     case 'sessions.get': {
@@ -1593,6 +1750,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     case 'sessions.end': {
       const label = params.label as number;
+      stopPtyFrames(label);
       sessions.delete(label);
       // Clean up any escalations belonging to this session
       for (const [id, esc] of escalations) {
@@ -2415,5 +2573,8 @@ if (replayConfig && replayPlan) {
   Two-terminal workflow:
     Terminal 1: cd packages/web-ui && npm run mock-server
     Terminal 2: cd packages/web-ui && npm run dev
+
+  Session mode: ${PTY_MODE ? 'docker (web-pty terminals)' : 'code (turn-based chatbox)'}
+    Set MOCK_SESSION_MODE=docker to demo the xterm terminal view.
 `);
 }

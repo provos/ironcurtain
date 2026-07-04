@@ -33,6 +33,7 @@ import type {
   GetModelProvidersDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
+  PtySink,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
@@ -172,6 +173,22 @@ export const personasChangedGeneration = $state({ value: 0 });
  */
 export const configChangedGeneration = $state({ value: 0 });
 
+/**
+ * Per-label terminal sink registry. The Sessions route installs a sink for the
+ * `web-pty` session it is showing (the bound `TerminalConsole`); the pure
+ * event handler routes incoming `session.pty_*` events to it via `getPtySink`.
+ * Not reactive — sinks are imperative handles, never rendered.
+ */
+const ptySinks = new Map<number, PtySink>();
+
+export function registerPtySink(label: number, sink: PtySink): void {
+  ptySinks.set(label, sink);
+}
+
+export function unregisterPtySink(label: number): void {
+  ptySinks.delete(label);
+}
+
 // WebSocket client singleton
 let wsClient: WsClient | null = null;
 
@@ -232,6 +249,7 @@ function wireEventHandlers(client: WsClient): void {
           configChangedGeneration.value++;
         },
         assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
+        getPtySink: (label: number) => ptySinks.get(label),
       },
       event,
       payload,
@@ -434,6 +452,29 @@ export async function loadSessionHistory(label: number): Promise<ConversationTur
 
 export async function loadSessionBudget(label: number): Promise<BudgetSummaryDto> {
   return getWsClient().request<BudgetSummaryDto>('sessions.budget', { label });
+}
+
+// ── PTY terminal RPC actions (web-pty sessions) ──────────────────────
+//
+// Attach/detach manage this client's subscription to a session's terminal
+// stream; input/resize forward keystrokes and the browser xterm's size to the
+// child PTY. `data` is base64 of the UTF-8 bytes of the keystroke string.
+// Ending a PTY session reuses `endSession` (`sessions.end`).
+
+export async function attachPty(label: number): Promise<void> {
+  await getWsClient().request('sessions.ptyAttach', { label });
+}
+
+export async function detachPty(label: number): Promise<void> {
+  await getWsClient().request('sessions.ptyDetach', { label });
+}
+
+export async function sendPtyInput(label: number, dataB64: string): Promise<void> {
+  await getWsClient().request('sessions.ptyInput', { label, data: dataB64 });
+}
+
+export async function sendPtyResize(label: number, cols: number, rows: number): Promise<void> {
+  await getWsClient().request('sessions.ptyResize', { label, cols, rows });
 }
 
 // ── Job RPC actions ──────────────────────────────────────────────────

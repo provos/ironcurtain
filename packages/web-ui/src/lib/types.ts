@@ -4,9 +4,16 @@
  */
 
 export interface SessionSource {
-  readonly kind: 'signal' | 'cron' | 'web';
+  /**
+   * `web-pty` is a live Docker-agent PTY session streamed to the web UI as an
+   * xterm terminal (never registered in the daemon's SessionManager). It is
+   * rendered with `TerminalConsole` instead of the turn-based chatbox.
+   */
+  readonly kind: 'signal' | 'cron' | 'web' | 'web-pty';
   readonly jobId?: string;
   readonly jobName?: string;
+  /** Persona name for `web` / `web-pty` sessions. */
+  readonly persona?: string;
 }
 
 export interface BudgetSummaryDto {
@@ -33,6 +40,12 @@ export interface SessionDto {
   readonly messageInFlight: boolean;
   readonly budget: BudgetSummaryDto;
   readonly persona?: string;
+  /**
+   * ISO 8601 timestamp of the most recent browser attach. Populated only for
+   * `web-pty` sessions so the operator can spot an abandoned-but-alive terminal;
+   * absent for all other kinds.
+   */
+  readonly lastAttachedAt?: string;
 }
 
 export interface ConversationTurn {
@@ -139,6 +152,42 @@ export interface EventFrame {
   readonly event: string;
   readonly payload: unknown;
   readonly seq: number;
+}
+
+// ---------------------------------------------------------------------------
+// PTY terminal streaming (web-pty session kind)
+//
+// Client -> server RPC methods: `sessions.ptyAttach`, `sessions.ptyDetach`,
+// `sessions.ptyInput` ({ label, data }), `sessions.ptyResize`
+// ({ label, cols, rows }). Server -> client events below. Every `data` /
+// `snapshot` field is base64 of the UTF-8 bytes of a terminal string.
+// ---------------------------------------------------------------------------
+
+/** Incremental terminal delta pushed to subscribed clients. */
+export interface PtyOutputEvent {
+  readonly label: number;
+  /** base64 of UTF-8 bytes. */
+  readonly data: string;
+}
+
+/** One-shot full-screen snapshot sent to a single client on attach/resync. */
+export interface PtyReplayEvent {
+  readonly label: number;
+  /** base64 of UTF-8 bytes. */
+  readonly snapshot: string;
+}
+
+/**
+ * Imperative terminal sink the Sessions route installs (keyed by label) so the
+ * pure event handler can route incoming `session.pty_*` events to the bound
+ * `TerminalConsole` without importing Svelte or the DOM. Both payloads are the
+ * raw base64 strings off the wire; the component decodes at the xterm boundary.
+ */
+export interface PtySink {
+  /** Apply an incremental delta (`PtyOutputEvent.data`). */
+  write(dataB64: string): void;
+  /** Clear and repaint from a full snapshot (`PtyReplayEvent.snapshot`). */
+  reset(snapshotB64: string): void;
 }
 
 /** Available persona for session creation. */
