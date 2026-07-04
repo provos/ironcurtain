@@ -109,7 +109,7 @@ export function toPtySessionDto(session: PtyWebSession): SessionDto {
     status: session.alive ? 'ready' : 'closed',
     turnCount: 0,
     createdAt: session.createdAt,
-    hasPendingEscalation: false,
+    hasPendingEscalation: session.listEscalationDtos().length > 0,
     messageInFlight: false,
     budget: zeroedBudgetDto(),
     ...(persona ? { persona } : {}),

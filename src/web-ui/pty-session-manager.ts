@@ -359,9 +359,6 @@ export class PtySessionManager {
   get size(): number {
     return this.sessions.size;
   }
-  get count(): number {
-    return this.sessions.size;
-  }
 
   has(label: number): boolean {
     return this.sessions.has(label);
