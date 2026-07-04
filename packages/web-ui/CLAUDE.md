@@ -79,16 +79,16 @@ src/
 
 Each component lives in its own directory with an `index.ts` barrel export. All components use the `cn()` utility for class merging and accept a `class` prop for overrides.
 
-| Component | Path | Usage |
-|-----------|------|-------|
-| **Button** | `button/` | Variants: default, destructive, outline, ghost, secondary, success. Sizes: default, sm, lg, icon. `loading` prop shows spinner. |
-| **Badge** | `badge/` | Variants: default, secondary, destructive, outline, success, warning. For status indicators. |
-| **Card** | `card/` | Card, CardHeader, CardTitle, CardContent. Wraps content in bordered rounded container. |
-| **Table** | `table/` | Table, TableHeader, TableBody, TableRow, TableHead, TableCell. `clickable` and `muted` props on rows. |
-| **Input** | `input/` | Styled input with consistent focus ring. Supports `bind:value`. |
-| **Alert** | `alert/` | Variants: default, destructive. `dismissible` + `ondismiss` for closeable alerts. |
+| Component        | Path             | Usage                                                                                                                               |
+| ---------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **Button**       | `button/`        | Variants: default, destructive, outline, ghost, secondary, success. Sizes: default, sm, lg, icon. `loading` prop shows spinner.     |
+| **Badge**        | `badge/`         | Variants: default, secondary, destructive, outline, success, warning. For status indicators.                                        |
+| **Card**         | `card/`          | Card, CardHeader, CardTitle, CardContent. Wraps content in bordered rounded container.                                              |
+| **Table**        | `table/`         | Table, TableHeader, TableBody, TableRow, TableHead, TableCell. `clickable` and `muted` props on rows.                               |
+| **Input**        | `input/`         | Styled input with consistent focus ring. Supports `bind:value`.                                                                     |
+| **Alert**        | `alert/`         | Variants: default, destructive. `dismissible` + `ondismiss` for closeable alerts.                                                   |
 | **DropdownMenu** | `dropdown-menu/` | DropdownMenu (container with backdrop) + DropdownMenuItem. `align` prop: bottom-left/right, top-left/right. Uses `trigger` snippet. |
-| **Spinner** | `spinner/` | Animated loading spinner. Sizes: xs, sm, md. |
+| **Spinner**      | `spinner/`       | Animated loading spinner. Sizes: xs, sm, md.                                                                                        |
 
 ### Adding a New Component
 
@@ -147,33 +147,37 @@ cd packages/web-ui && npm run mock-server
 cd packages/web-ui && npm run dev
 ```
 
-Open `http://localhost:5173?token=mock-token-for-dev` in your browser. The mock server simulates the full JSON-RPC protocol with canned data:
+Open `http://localhost:5173?token=mock-dev-token` in your browser. The mock server simulates the full JSON-RPC protocol with canned data:
 
 - **Chat**: Messages produce realistic event sequences (thinking → tool calls → markdown response)
 - **Escalations**: Send a message containing the word "escalate" to trigger an escalation
 - **Jobs**: Three canned jobs with working enable/disable/remove actions
 - **Personas**: Three canned personas in the session creation picker
 - **Dashboard**: Live status updates every 10 seconds
+- **PTY terminal (Docker Agent Mode)**: start the mock with `MOCK_SESSION_MODE=docker npm run mock-server` so `sessions.create` returns a `web-pty` session that renders a live xterm terminal (canned replay banner + fake-TUI frames; type "escalate" to raise an escalation over the terminal)
 
 ## Testing
 
 ### Unit tests
 
 ```bash
-npm test -w packages/web-ui       # Run all 36 tests
+npm test -w packages/web-ui       # Run the vitest unit suite
 npm run test:watch -w packages/web-ui  # Watch mode during development
 ```
 
 Tests cover:
-- **`event-handler.test.ts`** -- All WebSocket event types, state mutations, edge cases (18 tests)
-- **`output-grouping.test.ts`** -- Collapsible group logic, summary formatting (11 tests)
-- **`ws-client.test.ts`** -- Request correlation, event dispatch, reconnect, timeouts (7 tests)
+
+- **`event-handler.test.ts`** -- All WebSocket event types, state mutations, edge cases
+- **`output-grouping.test.ts`** -- Collapsible group logic, summary formatting
+- **`ws-client.test.ts`** -- Request correlation, event dispatch, reconnect, timeouts
+- **`stores-pty.test.ts`** -- PTY store actions + the buffering sink registry (frames that arrive before the terminal connects are held and drained in order; see "PTY terminal streaming" below)
 
 Root `npm test` also runs the web-ui tests after the main test suite.
 
 ### Architecture for testability
 
 Event handling and output grouping logic are extracted into pure, non-Svelte modules:
+
 - `src/lib/event-handler.ts` -- `handleEvent(state, effects, event, payload)` with `AppStateLike` interface
 - `src/lib/output-grouping.ts` -- `groupOutputLines(lines)` with `OutputEntry` types
 
@@ -183,13 +187,15 @@ These can be tested without any Svelte, DOM, or WebSocket dependency.
 
 ```bash
 npx playwright install chromium   # One-time: install browser
-npm run e2e                       # Run all 31 tests (auto-starts mock server + Vite)
+npm run e2e                       # Auto-starts mock server + Vite, runs all specs
 npm run e2e:headed                # Run with visible browser for debugging
 ```
 
 Playwright auto-starts both the mock WS server (port 7400) and Vite dev server (port 5173) via the `webServer` config in `playwright.config.ts`. Tests reset mock state via `POST http://localhost:7401/__reset` in `beforeEach`.
 
-Tests cover: Dashboard stats, session lifecycle (create/send/end), escalation approve/deny, job actions, theme switching, error states.
+Tests cover: Dashboard stats, session lifecycle (create/send/end), escalation approve/deny, job actions, theme switching, error states, and the PTY terminal (`pty-terminal.spec.ts`).
+
+**Docker Agent Mode in E2E** — the chatbox specs run the mock in its default (code) mode; `pty-terminal.spec.ts` flips the _single_ running mock into Docker Agent Mode per-test with `resetMockServer(request, { mode: 'docker' })` (→ `POST /__reset { mode: 'docker' }`). A bare `/__reset` (no `mode`) always restores the env-derived initial mode, so a PTY spec never contaminates a later chatbox spec. Read xterm output in assertions via `getByTestId('pty-terminal').locator('.xterm-rows')`.
 
 ## Keeping the Mock WS Server in Sync
 
@@ -202,9 +208,20 @@ The mock server (`scripts/mock-ws-server.ts`) must stay in sync with the real da
 
 The mock server is the source of truth for E2E tests — if it diverges from the real protocol, tests pass but don't validate real behavior.
 
+## PTY terminal streaming (Docker Agent Mode)
+
+A `web-pty` session (`source.kind === 'web-pty'`) renders a live xterm.js terminal instead of the turn-based chatbox. The session mode is process-global on the daemon (docker → terminal, code → chatbox), so a session either is or isn't a PTY for its whole life.
+
+**Protocol.** Methods (client → daemon): `sessions.ptyAttach` / `ptyDetach` / `ptyInput { data }` / `ptyResize { cols, rows }`. Events (daemon → client): `session.pty_replay { label, snapshot }` (one-shot full-screen snapshot on attach) and `session.pty_output { label, data }` (incremental deltas). `data`/`snapshot` are base64 of the UTF-8 bytes of the terminal stream — the component decodes to a `Uint8Array` and lets xterm own UTF-8 (never `atob`-to-string, which corrupts multibyte codepoints split across chunks). Codec: `src/lib/pty-codec.ts`.
+
+**Component (`features/terminal-console.svelte`).** Presentational: no store import (route wiring only). Creates the xterm terminal in **`onMount`, not `$effect`** — the route passes inline callback props whose identity changes on every parent re-render, and a reactive `$effect` re-runs on that churn, disposing and recreating the terminal and **dropping the one-shot replay** (the bug the E2E caught: reconnect to an idle session blanked). On mount it hands the route a live `{ write, reset }` handle via `onready`. Input is keyboard-only (mux parity: no `onBinary`/app-mouse forwarding; wheel = local scrollback; Ctrl+C stays SIGINT).
+
+**Buffering sink (`stores.svelte.ts`).** The one-shot replay can arrive _before_ the terminal has mounted (a fast daemon sends it the instant it receives `ptyAttach`). The per-label `BufferingPtySink` holds frames until the terminal connects, then drains them in order — a snapshot is never dropped. API: `registerPtySink(label)` (route, before attach) / `connectPtyTerminal(label, handle)` (from the component's `onready`) / `disconnectPtyTerminal` / `unregisterPtySink`; these two are order-independent (either creates the sink). `getPtySink(label)` returns the sink so the pure `event-handler.ts` can route `pty_output`/`pty_replay` to `.write` / `.reset`.
+
 ## WebSocket Client
 
 `ws-client.ts` implements a JSON-RPC client with:
+
 - Request/response correlation via `id` field
 - Server-push events via `event` field
 - Auto-reconnect with exponential backoff (1s base, 30s max)
