@@ -17,6 +17,7 @@ import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { scanResumableSessions } from './session-scanner.js';
 import { scanPersonas } from './persona-scanner.js';
+import type { ProviderProfileSnapshot } from './provider-profile-snapshot.js';
 import ora from 'ora';
 import chalk from 'chalk';
 import * as logger from '../logger.js';
@@ -43,6 +44,12 @@ export interface MuxAppOptions {
   readonly muxId?: string;
   /** PID of this mux process (for orphan detection by other mux instances). */
   readonly muxPid?: number;
+  /**
+   * Provider-profile snapshot for the `/new` picker. When it contains a
+   * selectable (non-`native`) profile, `/new` shows a profile-picker step;
+   * otherwise the step is skipped. Empty/absent → native-only, no step.
+   */
+  readonly providerProfiles?: readonly ProviderProfileSnapshot[];
 }
 
 /**
@@ -52,6 +59,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   const agent = options.agent ?? 'claude-code';
   const autoSpawn = options.autoSpawn ?? true;
   const protectedPaths = options.protectedPaths ?? [];
+  const providerProfiles = options.providerProfiles ?? [];
 
   const tabs: MuxTab[] = [];
   let activeTabIndex = 0;
@@ -103,6 +111,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     resumeSessionId?: string;
     agentOverride?: string;
     persona?: string;
+    providerProfileName?: string;
   }): Promise<MuxTab> {
     const { columns } = process.stdout;
     const ptyRows = renderer.layout.ptyViewportRows;
@@ -119,6 +128,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       workspacePath: opts?.workspacePath,
       resumeSessionId: opts?.resumeSessionId,
       persona: opts?.persona,
+      providerProfileName: opts?.providerProfileName,
       model: options.model,
       captureTraces: options.captureTraces,
       muxId: options.muxId,
@@ -298,11 +308,16 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
             break;
           }
         }
-        const tab = await spawnSession({ workspacePath: validatedPath, persona: action.persona });
+        const tab = await spawnSession({
+          workspacePath: validatedPath,
+          persona: action.persona,
+          providerProfileName: action.providerProfileName,
+        });
         activeTabIndex = tabs.length - 1;
         const personaPrefix = action.persona ? `persona "${action.persona}" ` : '';
+        const profileSuffix = action.providerProfileName ? ` [${action.providerProfileName}]` : '';
         const suffix = validatedPath ? ` in ${validatedPath}` : '';
-        showMessage(`Spawned ${personaPrefix}session #${tab.number}${suffix}`);
+        showMessage(`Spawned ${personaPrefix}session #${tab.number}${suffix}${profileSuffix}`);
         inputHandler.exitPickerMode();
         renderer.fullRedraw();
         break;
@@ -441,7 +456,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           break;
         }
         const personas = scanPersonas();
-        inputHandler.enterPickerMode(personas);
+        inputHandler.enterPickerMode(personas, [...providerProfiles]);
         renderer.fullRedraw();
         break;
       }
@@ -630,6 +645,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         getPickerState: () => inputHandler.pickerState,
         getResumePickerState: () => inputHandler.resumePickerState,
         getPersonaPickerState: () => inputHandler.personaPickerState,
+        getProviderPickerState: () => inputHandler.providerPickerState,
         getEscalationPickerState: () => inputHandler.escalationPickerState,
         getScrollOffset: () => {
           const active = getActiveTab();
@@ -700,6 +716,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
               inputHandler.exitResumePickerMode();
             } else if (mode === 'persona-picker') {
               inputHandler.exitPersonaPickerMode();
+            } else if (mode === 'provider-picker') {
+              inputHandler.exitProviderPickerMode();
             }
 
             inputHandler.enterEscalationPickerMode(highestPending, previousMode);

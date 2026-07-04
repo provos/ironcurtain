@@ -1,0 +1,13 @@
+: OPENROUTER PROCESSING
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"Hello "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"from GLM"}
+
+: OPENROUTER PROCESSING
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_x","status":"completed","usage":{"input_tokens":1024,"output_tokens":128,"input_tokens_details":{"cached_tokens":900},"cost":0.0123,"cost_details":{"cache_discount":0.0041}}}}
+

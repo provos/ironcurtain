@@ -651,7 +651,7 @@ describe('Claude Code adapter OAuth support', () => {
   it('returns OAuth providers when authKind is oauth', async () => {
     const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
     const claudeCodeAdapter = createAdapter();
-    const providers = claudeCodeAdapter.getProviders('oauth');
+    const providers = claudeCodeAdapter.getProviders({} as IronCurtainConfig, 'oauth');
     expect(providers).toHaveLength(2);
     expect(providers[0].displayName).toBe('Anthropic (OAuth)');
     expect(providers[0].keyInjection).toEqual({ type: 'bearer' });
@@ -662,7 +662,7 @@ describe('Claude Code adapter OAuth support', () => {
   it('returns API key providers when authKind is apikey', async () => {
     const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
     const claudeCodeAdapter = createAdapter();
-    const providers = claudeCodeAdapter.getProviders('apikey');
+    const providers = claudeCodeAdapter.getProviders({} as IronCurtainConfig, 'apikey');
     expect(providers).toHaveLength(2);
     expect(providers[0].displayName).toBe('Anthropic');
     expect(providers[0].keyInjection).toEqual({ type: 'header', headerName: 'x-api-key' });
@@ -671,7 +671,7 @@ describe('Claude Code adapter OAuth support', () => {
   it('returns API key providers when authKind is undefined', async () => {
     const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
     const claudeCodeAdapter = createAdapter();
-    const providers = claudeCodeAdapter.getProviders();
+    const providers = claudeCodeAdapter.getProviders({} as IronCurtainConfig);
     expect(providers).toHaveLength(2);
     expect(providers[0].displayName).toBe('Anthropic');
   });

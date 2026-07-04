@@ -23,7 +23,7 @@ describe('CodexAdapter', () => {
   });
 
   it('generates Codex TOML config with MCP stdio bridge and CLAUDE.md fallback', () => {
-    const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock');
+    const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', {} as IronCurtainConfig);
 
     expect(files).toHaveLength(1);
     expect(files[0].path).toBe('codex-config.toml');
@@ -35,7 +35,7 @@ describe('CodexAdapter', () => {
   });
 
   it('generates TCP MCP config for macOS bridge mode', () => {
-    const files = adapter.generateMcpConfig('host.docker.internal:12345');
+    const files = adapter.generateMcpConfig('host.docker.internal:12345', {} as IronCurtainConfig);
     expect(files[0].content).toContain('"TCP:host.docker.internal:12345"');
   });
 
@@ -82,7 +82,7 @@ describe('CodexAdapter', () => {
   });
 
   it('returns Codex ChatGPT OAuth providers', () => {
-    const providers = adapter.getProviders('oauth');
+    const providers = adapter.getProviders({} as IronCurtainConfig, 'oauth');
     expect(providers.map((p) => p.host)).toEqual(['chatgpt.com', 'auth.openai.com']);
     expect(providers.every((p) => p.keyInjection.type === 'bearer')).toBe(true);
     expect(providers[1].fakeKeyPrefix).toBe(providers[0].fakeKeyPrefix);

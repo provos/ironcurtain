@@ -17,6 +17,8 @@
 
 import { StringDecoder } from 'node:string_decoder';
 import type { CaptureProvider, Reassembler, ReassemblyResult } from './trajectory-types.js';
+import { OPENROUTER_HOST } from '../config/user-config.js';
+import { openRouterWireForPath } from './openrouter.js';
 
 /** Errors thrown by the reassemblers when the stream is unrecoverable. */
 export class ReassemblyError extends Error {
@@ -999,11 +1001,18 @@ function splitJsonArrayElements(arrayRaw: string): string[] {
  * do NOT broaden this to map all `*.openai.com` to `'openai'` (that would
  * route a non-completion host to a reassembler).
  */
-export function providerForHost(host: string): CaptureProvider {
+export function providerForHost(host: string, path?: string): CaptureProvider {
   const normalized = host.toLowerCase();
   if (normalized === 'api.anthropic.com') return 'anthropic';
   if (normalized === 'api.openai.com') return 'openai';
   if (normalized === 'chatgpt.com') return 'openai';
+  // OpenRouter serves three wire formats on one host, disambiguated by path
+  // (§11.2). The Anthropic skin is 'anthropic'; the OpenAI-shape Responses and
+  // Chat Completions paths are 'openai' (Chat Completions is raw-capture-only —
+  // see createReassembler).
+  if (normalized === OPENROUTER_HOST) {
+    return openRouterWireForPath(path) === 'anthropic' ? 'anthropic' : 'openai';
+  }
   return 'unknown';
 }
 
@@ -1018,9 +1027,18 @@ export function providerForHost(host: string): CaptureProvider {
  * `openaiProvider` does not capture it. Unclassifiable hosts yield
  * `undefined`; the caller falls back to capturing raw bytes verbatim.
  */
-export function createReassembler(host: string): Reassembler | undefined {
+export function createReassembler(host: string, path?: string): Reassembler | undefined {
   const h = host.toLowerCase();
   if (h === 'api.anthropic.com') return new AnthropicReassembler();
   if (h === 'chatgpt.com' || h === 'api.openai.com') return new ResponsesReassembler();
+  // OpenRouter, disambiguated by path (§11.2): the Anthropic skin reassembles
+  // as Anthropic; `/api/v1/responses` reuses the Responses reassembler;
+  // `/api/v1/chat/completions` has no reassembler (raw-bytes capture, v0).
+  if (h === OPENROUTER_HOST) {
+    const wire = openRouterWireForPath(path);
+    if (wire === 'anthropic') return new AnthropicReassembler();
+    if (wire === 'responses') return new ResponsesReassembler();
+    return undefined;
+  }
   return undefined;
 }

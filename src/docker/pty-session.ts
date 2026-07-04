@@ -47,6 +47,13 @@ export interface PtySessionOptions {
   /** Persona name. Used to build CLAUDE.md and system prompt augmentation. */
   readonly persona?: string;
   /**
+   * Per-session provider-profile selection (OpenRouter integration §9.7).
+   * Resolved to the active profile in infra prep. On resume, the persisted
+   * snapshot name wins over this field (a conflicting flag is warn-ignored
+   * upstream in src/index.ts).
+   */
+  readonly providerProfileName?: string;
+  /**
    * Trajectory-capture override: CLI flag wins over `userConfig.capture.enabled`.
    * `true` forces capture on for this run, `undefined` falls through to config.
    * See docs/designs/mitm-token-trajectory-capture.md §10.
@@ -214,6 +221,11 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const effectiveSessionId = options.resumeSessionId ?? sessionId;
   const sessionDir = getSessionDir(effectiveSessionId);
 
+  // On resume, restore the profile the same way workspacePath is restored:
+  // the persisted snapshot name wins over any passed flag (which is
+  // warn-ignored upstream). Fresh sessions use the passed flag.
+  const providerProfileName = isResume ? resumeSnapshot.providerProfileName : options.providerProfileName;
+
   // Delegate to shared buildSessionConfig() so PTY sessions get the same
   // config patching as standard Docker sessions (persona, memory MCP server
   // injection, server allowlist, policy dir, etc.).
@@ -221,7 +233,14 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     resumeSessionId: options.resumeSessionId,
     workspacePath: isResume ? resumeSnapshot.workspacePath : options.workspacePath,
     persona: options.persona,
+    providerProfileName,
+    mode: options.mode,
   });
+
+  // Resolve the active-profile name to persist in the snapshot for resume.
+  // Docker mode always: PTY sessions are Docker-only. Mirrors the batch
+  // path's metadata write (§9.7 F3).
+  const resolvedProviderProfileName = providerProfileName ?? options.config.userConfig.modelProviders.default;
 
   // Layer PTY-specific fields on top of the shared config.
   const sessionConfig = { ...dirConfig.config, isPtySession: true };
@@ -315,6 +334,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         capturesDir: getSessionCapturesDir(effectiveSessionId),
         recordedAgentName: options.mode.agent,
       },
+      undefined, // scriptsDir
+      providerProfileName,
     );
     // PTY sessions are standalone: pin the MITM proxy's token-stream
     // routing ID to this session's ID for the session's lifetime.
@@ -764,6 +785,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
           exitCode: ptyExitCode,
           lastActivity: new Date().toISOString(),
           workspacePath: sandboxDir,
+          providerProfileName: resolvedProviderProfileName,
           agent: adapterIdForSnapshot,
           label: `${adapterDisplayNameForSnapshot ?? adapterIdForSnapshot} (interactive)`,
           resumable: canResume,

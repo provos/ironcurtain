@@ -25,7 +25,13 @@ import {
   type MuxTab,
 } from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
-import type { PickerState, ResumePickerState, PersonaPickerState, EscalationPickerState } from './mux-input-handler.js';
+import type {
+  PickerState,
+  ResumePickerState,
+  PersonaPickerState,
+  ProviderPickerState,
+  EscalationPickerState,
+} from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
 import { formatRelativeTime, getWorkspaceLabel } from './session-scanner.js';
 
@@ -147,6 +153,7 @@ export interface MuxRendererDeps {
   getPickerState: () => PickerState | null;
   getResumePickerState: () => ResumePickerState | null;
   getPersonaPickerState: () => PersonaPickerState | null;
+  getProviderPickerState: () => ProviderPickerState | null;
   getEscalationPickerState: () => EscalationPickerState | null;
   /** Returns the active tab's scroll offset (null = live/bottom). */
   getScrollOffset: () => number | null;
@@ -794,6 +801,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       drawResumePickerOverlay();
     } else if (mode === 'persona-picker') {
       drawPersonaPickerOverlay();
+    } else if (mode === 'provider-picker') {
+      drawProviderPickerOverlay();
     } else if (mode === 'escalation-picker') {
       drawEscalationPickerOverlay();
     }
@@ -1134,6 +1143,75 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           term.dim(desc);
           if (!p.compiled) {
             term.yellow(status);
+          }
+        }
+      }
+      term.eraseLineAfter();
+      currentY++;
+    }
+
+    // Hint bar
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.bgWhite.black(' Enter ');
+    term.styleReset();
+    term.dim(' spawn  ');
+    term.bgWhite.black(' Esc ');
+    term.styleReset();
+    term.dim(' cancel');
+    term.styleReset();
+    term.eraseLineAfter();
+  }
+
+  function drawProviderPickerOverlay(): void {
+    const pps = deps.getProviderPickerState();
+    if (!pps) return;
+
+    const startY = _layout.pickerY;
+    const totalRows = _layout.pickerRows;
+    if (totalRows < 3) return;
+
+    let currentY = startY;
+
+    // Title
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.cyan('/new');
+    term.dim(' — select a provider profile');
+    term.eraseLineAfter();
+    currentY++;
+
+    // Profile list
+    const listRows = Math.max(0, totalRows - 2); // title + hint bar
+
+    let scrollOffset = pps.scrollOffset;
+    if (pps.selectedIndex < scrollOffset) {
+      scrollOffset = pps.selectedIndex;
+    } else if (pps.selectedIndex >= scrollOffset + listRows) {
+      scrollOffset = pps.selectedIndex - listRows + 1;
+    }
+
+    for (let i = 0; i < listRows; i++) {
+      clearLine(currentY);
+      const idx = scrollOffset + i;
+      if (idx < pps.profiles.length) {
+        const p = pps.profiles[idx];
+        const isSelected = idx === pps.selectedIndex;
+        const defaultMark = p.isDefault ? ' (default)' : '';
+        const label = truncate(p.primaryModelLabel, Math.max(10, _cols - p.name.length - defaultMark.length - 12));
+        const line = `${p.name}  ${label}${defaultMark}`;
+
+        moveTo(2, currentY);
+        if (isSelected) {
+          term.bgCyan.black('> ' + truncate(line, Math.max(1, _cols - 6)));
+          term.styleReset();
+        } else {
+          term('  ');
+          term.cyan(p.name);
+          term('  ');
+          term.dim(label);
+          if (p.isDefault) {
+            term.dim(defaultMark);
           }
         }
       }

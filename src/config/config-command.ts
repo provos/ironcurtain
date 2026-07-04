@@ -23,8 +23,13 @@ import {
   DOCKER_AGENTS,
   SESSION_MODES,
   CONTAINER_RUNTIMES,
+  NATIVE_PROFILE_NAME,
+  DEFAULT_GLM_SLUG,
+  maskApiKey,
+  cloneProviderPreference,
   type UserConfig,
   type ResolvedUserConfig,
+  type ResolvedProviderProfile,
   type WebSearchProvider,
   type GooseProvider,
   type DockerAgent,
@@ -83,15 +88,100 @@ export function formatCost(n: number | null): string {
   return `$${n.toFixed(2)}`;
 }
 
-export function maskApiKey(key: string | undefined | null): string {
-  if (!key) return 'none';
-  if (key.length <= 6) return '***';
-  return key.slice(0, 3) + '...' + key.slice(-3);
-}
-
 function formatModelShort(id: string): string {
   const known = KNOWN_MODELS.find((m) => m.value === id);
   return known ? known.label : id;
+}
+
+// ─── Model provider profiles ─────────────────────────────────
+
+/** The pending (input-shape) `modelProviders` section written into `pending`. */
+type PendingModelProviders = NonNullable<UserConfig['modelProviders']>;
+/** A single pending profile: the discriminated-union input for one profile. */
+type PendingProfile = NonNullable<PendingModelProviders['profiles']>[string];
+/** The openrouter variant of a pending profile. */
+type PendingOpenrouterProfile = Extract<PendingProfile, { type: 'openrouter' }>;
+
+/**
+ * The current editor view of the `profiles` record, in input shape (openrouter
+ * profiles carry the fields the editor mutates). A pending `profiles` record,
+ * when present, is already the whole record (read-modify-write) and replaces the
+ * resolved view; otherwise the resolved profiles are converted to input shape.
+ * The implicit `native` profile is intentionally excluded — it is never
+ * persisted and is always shown separately as read-only.
+ */
+function currentProfiles(resolved: ResolvedUserConfig, pending: UserConfig): Record<string, PendingProfile> {
+  if (pending.modelProviders?.profiles) {
+    return { ...pending.modelProviders.profiles };
+  }
+  const view: Record<string, PendingProfile> = {};
+  for (const [name, profile] of Object.entries(resolved.modelProviders.profiles)) {
+    if (name === NATIVE_PROFILE_NAME) continue;
+    view[name] = resolvedProfileToInput(profile);
+  }
+  return view;
+}
+
+/** Converts a resolved profile back to its input shape (drops resolution-only defaults where empty). */
+function resolvedProfileToInput(profile: ResolvedProviderProfile): PendingProfile {
+  if (profile.type === 'native') return { type: 'native' };
+  const input: PendingOpenrouterProfile = { type: 'openrouter' };
+  if (profile.apiKey) input.apiKey = profile.apiKey;
+  // A default-tracking profile OMITS `modelMap` so an edit round-trip re-persists
+  // the omission rather than pinning today's materialized DEFAULT_MODEL_MAP.
+  if (!profile.usesDefaultMap) input.modelMap = profile.modelMap.map((r) => ({ match: r.match, model: r.model }));
+  const perAgent: Record<string, string> = {};
+  for (const agent of DOCKER_AGENTS) {
+    const slug = profile.perAgent[agent];
+    if (slug) perAgent[agent] = slug;
+  }
+  if (Object.keys(perAgent).length > 0) input.perAgent = perAgent;
+  if (profile.providerPreference) {
+    input.providerPreference = cloneProviderPreference(profile.providerPreference);
+  }
+  input.sessionAffinity = profile.sessionAffinity;
+  return input;
+}
+
+/** The current default profile name (pending override wins over the resolved value). */
+function currentDefault(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  return pending.modelProviders?.default ?? resolved.modelProviders.default;
+}
+
+/**
+ * F10 — re-point a dangling `default` to `native`. Returns `NATIVE_PROFILE_NAME`
+ * when the current default no longer names a profile in `remainingNames` (and is
+ * not itself `native`), otherwise returns the current default unchanged. Pure so
+ * the delete-repoints-default invariant is unit-testable without the interactive
+ * flow. Persisting a `default` that names a missing profile would make the next
+ * `loadUserConfig` a HARD error (the Zod `.refine`), so callers must apply this
+ * in the same pending write that deletes a profile.
+ */
+export function repointDefaultAfterDelete(currentDefaultName: string, remainingNames: readonly string[]): string {
+  if (currentDefaultName === NATIVE_PROFILE_NAME) return currentDefaultName;
+  return remainingNames.includes(currentDefaultName) ? currentDefaultName : NATIVE_PROFILE_NAME;
+}
+
+/** Compact one-line summary of an openrouter profile for list/hint rendering. */
+function summarizeOpenrouterProfile(profile: PendingOpenrouterProfile): string {
+  const parts: string[] = [];
+  const map = profile.modelMap;
+  if (map && map.length === 0) {
+    parts.push('per-agent only');
+  } else if (map && map.length > 0) {
+    parts.push(map.length === 1 ? `-> ${map[0].model}` : `${map.length} map rules`);
+  } else {
+    parts.push('default map');
+  }
+  parts.push(`key: ${maskApiKey(profile.apiKey)}`);
+  return parts.join(', ');
+}
+
+/** Compact rendering of a modelMap for diffs: `*sonnet*->z-ai/glm-5.2; *opus*->…`. */
+function formatModelMap(map: readonly { match: string; model: string }[] | undefined): string {
+  if (!map) return 'default';
+  if (map.length === 0) return 'per-agent only (empty map)';
+  return map.map((r) => `${r.match}->${r.model}`).join('; ');
 }
 
 // ─── Diff ────────────────────────────────────────────────────
@@ -178,7 +268,85 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     }
   }
 
+  diffModelProviders(resolved, pending, diffs);
+
   return diffs;
+}
+
+/**
+ * Dedicated `modelProviders` diff branch (not the generic nestedSections loop,
+ * which compares by reference and would spuriously diff freshly-materialized
+ * profile objects — m14). Deep-compares each profile field via JSON.stringify so
+ * a no-op read-modify-write yields an EMPTY diff; masks every `apiKey`; renders
+ * modelMap rows compactly.
+ */
+function diffModelProviders(resolved: ResolvedUserConfig, pending: UserConfig, diffs: [string, DiffEntry][]): void {
+  const pendingMp = pending.modelProviders;
+  if (!pendingMp) return;
+
+  // default selector
+  const resolvedDefault = resolved.modelProviders.default;
+  if (pendingMp.default !== undefined && pendingMp.default !== resolvedDefault) {
+    diffs.push(['modelProviders.default', { from: resolvedDefault, to: pendingMp.default }]);
+  }
+
+  if (!pendingMp.profiles) return;
+  const resolvedProfiles = resolved.modelProviders.profiles;
+  const pendingProfiles = pendingMp.profiles;
+
+  // Added / changed profiles.
+  for (const [name, pendingProfile] of Object.entries(pendingProfiles)) {
+    if (name === NATIVE_PROFILE_NAME) continue;
+    const before = name in resolvedProfiles ? resolvedProfileToInput(resolvedProfiles[name]) : undefined;
+    diffOneProfile(name, before, pendingProfile, diffs);
+  }
+
+  // Removed profiles (present in resolved, absent in the whole-record pending write).
+  for (const name of Object.keys(resolvedProfiles)) {
+    if (name === NATIVE_PROFILE_NAME) continue;
+    if (!(name in pendingProfiles)) {
+      diffs.push([`modelProviders.profiles.${name}`, { from: 'configured', to: 'removed' }]);
+    }
+  }
+}
+
+/** Field-by-field diff of one profile, masking apiKey and rendering modelMap compactly. */
+function diffOneProfile(
+  name: string,
+  before: PendingProfile | undefined,
+  after: PendingProfile,
+  diffs: [string, DiffEntry][],
+): void {
+  const prefix = `modelProviders.profiles.${name}`;
+
+  if (!before) {
+    diffs.push([prefix, { from: 'none', to: `added (${after.type})` }]);
+    return;
+  }
+  if (before.type !== after.type) {
+    diffs.push([`${prefix}.type`, { from: before.type, to: after.type }]);
+    return;
+  }
+  if (before.type === 'native' || after.type === 'native') return;
+
+  if (before.apiKey !== after.apiKey) {
+    diffs.push([`${prefix}.apiKey`, { from: maskApiKey(before.apiKey), to: maskApiKey(after.apiKey) }]);
+  }
+  if (JSON.stringify(before.modelMap) !== JSON.stringify(after.modelMap)) {
+    diffs.push([`${prefix}.modelMap`, { from: formatModelMap(before.modelMap), to: formatModelMap(after.modelMap) }]);
+  }
+  if (JSON.stringify(before.perAgent) !== JSON.stringify(after.perAgent)) {
+    diffs.push([`${prefix}.perAgent`, { from: before.perAgent ?? {}, to: after.perAgent ?? {} }]);
+  }
+  if (JSON.stringify(before.providerPreference) !== JSON.stringify(after.providerPreference)) {
+    diffs.push([
+      `${prefix}.providerPreference`,
+      { from: before.providerPreference ?? 'default', to: after.providerPreference ?? 'default' },
+    ]);
+  }
+  if (before.sessionAffinity !== after.sessionAffinity) {
+    diffs.push([`${prefix}.sessionAffinity`, { from: before.sessionAffinity, to: after.sessionAffinity }]);
+  }
 }
 
 function formatDiffValue(key: string, value: unknown): string {
@@ -679,6 +847,368 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
   }
 }
 
+// ─── Model Providers ─────────────────────────────────────────
+
+/** Returns a shallow copy of `obj` without the given key (avoids `delete obj[dynamicKey]`). */
+function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
+  const copy = { ...obj };
+  // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- key is intentionally dynamic here
+  delete copy[key];
+  return copy;
+}
+
+/**
+ * Writes the whole `profiles` record + `default` into pending (read-modify-write,
+ * required by the shallow `deepMergeConfig`). Callers always pass the complete
+ * view so no unmentioned profile is dropped unintentionally.
+ */
+function commitModelProviders(
+  pending: UserConfig,
+  profiles: Record<string, PendingProfile>,
+  defaultName: string,
+): void {
+  pending.modelProviders = { default: defaultName, profiles };
+}
+
+async function handleModelProviders(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const profiles = currentProfiles(resolved, pending);
+    const defaultName = currentDefault(resolved, pending);
+
+    const options: { value: string; label: string; hint?: string }[] = [
+      {
+        value: `profile:${NATIVE_PROFILE_NAME}`,
+        label: NATIVE_PROFILE_NAME,
+        hint: defaultName === NATIVE_PROFILE_NAME ? 'native routing (default, not editable)' : 'native routing',
+      },
+    ];
+    for (const [name, profile] of Object.entries(profiles)) {
+      const summary = profile.type === 'openrouter' ? summarizeOpenrouterProfile(profile) : 'native';
+      options.push({
+        value: `profile:${name}`,
+        label: name,
+        hint: `${profile.type}, ${summary}${name === defaultName ? ' (default)' : ''}`,
+      });
+    }
+    options.push({ value: 'add', label: 'Add profile...' });
+    options.push({ value: 'default', label: 'Set default', hint: defaultName });
+    options.push({ value: 'back', label: 'Back' });
+
+    const action = await p.select({ message: 'Model Providers', options });
+    if (isCancelled(action) || action === 'back') return;
+
+    if (action === 'add') {
+      await addProfile(resolved, pending);
+    } else if (action === 'default') {
+      await setDefaultProfile(resolved, pending);
+    } else if (typeof action === 'string' && action.startsWith('profile:')) {
+      const name = action.slice('profile:'.length);
+      if (name === NATIVE_PROFILE_NAME) {
+        p.note('The native profile uses today’s canonical routing and cannot be edited or deleted.', 'native');
+        continue;
+      }
+      await editProfile(resolved, pending, name);
+    }
+  }
+}
+
+async function addProfile(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  const profiles = currentProfiles(resolved, pending);
+  const name = await p.text({
+    message: 'Profile name:',
+    placeholder: 'e.g. glm-5.2',
+    validate: (val) => {
+      if (!val || val.trim() === '') return 'Name is required';
+      if (val === NATIVE_PROFILE_NAME) return `"${NATIVE_PROFILE_NAME}" is a reserved profile name.`;
+      if (val in profiles) return `Profile "${val}" already exists.`;
+      return undefined;
+    },
+  });
+  if (isCancelled(name)) return;
+
+  // v1 supports only the 'openrouter' type; native is implicit and never user-defined.
+  p.note(
+    'OpenRouter routes Docker agents through openrouter.ai with a bound model map + key.\n' +
+      'Paste an sk-or-v1-... key; defaults map *sonnet*/*opus*/*haiku* -> ' +
+      `${DEFAULT_GLM_SLUG} with a soft z-ai cache pin.`,
+    'openrouter',
+  );
+
+  const apiKey = await p.text({
+    message: 'OpenRouter API key (sk-or-v1-...):',
+    placeholder: 'set via OPENROUTER_API_KEY env, or leave blank',
+    validate: () => undefined,
+  });
+  if (isCancelled(apiKey)) return;
+
+  const profile: PendingOpenrouterProfile = { type: 'openrouter' };
+  if (apiKey) profile.apiKey = apiKey as string;
+  profiles[name as string] = profile;
+  commitModelProviders(pending, profiles, currentDefault(resolved, pending));
+}
+
+async function setDefaultProfile(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  const profiles = currentProfiles(resolved, pending);
+  const currentName = currentDefault(resolved, pending);
+
+  const options = [
+    {
+      value: NATIVE_PROFILE_NAME,
+      label: NATIVE_PROFILE_NAME,
+      hint: currentName === NATIVE_PROFILE_NAME ? '(current)' : undefined,
+    },
+    ...Object.keys(profiles).map((name) => ({
+      value: name,
+      label: name,
+      hint: name === currentName ? '(current)' : undefined,
+    })),
+  ];
+
+  const selected = await p.select({
+    message: 'Default profile (applies when no per-session choice is made):',
+    options,
+  });
+  if (isCancelled(selected)) return;
+  const name = selected as string;
+  if (name !== currentName) {
+    commitModelProviders(pending, profiles, name);
+  }
+}
+
+async function editProfile(resolved: ResolvedUserConfig, pending: UserConfig, name: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const profiles = currentProfiles(resolved, pending);
+    if (!(name in profiles)) return;
+    const profile = profiles[name];
+    if (profile.type !== 'openrouter') return;
+
+    const field = await p.select({
+      message: `Profile: ${name}`,
+      options: [
+        { value: 'apiKey', label: 'API key', hint: maskApiKey(profile.apiKey) },
+        { value: 'modelMap', label: 'Model map (glob -> slug)', hint: formatModelMap(profile.modelMap) },
+        { value: 'perAgent', label: 'Per-agent model overrides', hint: perAgentSummary(profile) },
+        {
+          value: 'providerPreference',
+          label: 'Provider preference (cache pinning)',
+          hint: providerPreferenceSummary(profile.providerPreference),
+        },
+        {
+          value: 'sessionAffinity',
+          label: 'Session affinity (GLM cache)',
+          hint: (profile.sessionAffinity ?? true) ? 'on' : 'off',
+        },
+        { value: 'delete', label: 'Delete profile' },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'delete') {
+      const confirmed = await p.confirm({ message: `Delete profile "${name}"?`, initialValue: false });
+      if (isCancelled(confirmed) || !confirmed) continue;
+      const remaining = omitKey(profiles, name);
+      // F10: never persist a `default` that names the just-deleted profile.
+      const nextDefault = repointDefaultAfterDelete(currentDefault(resolved, pending), Object.keys(remaining));
+      commitModelProviders(pending, remaining, nextDefault);
+      return;
+    }
+
+    const updated = await editProfileField(field as string, profile);
+    if (updated) {
+      profiles[name] = updated;
+      commitModelProviders(pending, profiles, currentDefault(resolved, pending));
+    }
+  }
+}
+
+/** Edits one field of an openrouter profile, returning the updated profile or undefined (no change). */
+async function editProfileField(
+  field: string,
+  profile: PendingOpenrouterProfile,
+): Promise<PendingOpenrouterProfile | undefined> {
+  if (field === 'apiKey') {
+    const apiKey = await p.text({
+      message: 'OpenRouter API key (sk-or-v1-...):',
+      placeholder: profile.apiKey ? '(keep current)' : 'leave blank to use OPENROUTER_API_KEY env',
+      validate: () => undefined,
+    });
+    if (isCancelled(apiKey)) return undefined;
+    const next: PendingOpenrouterProfile = { ...profile };
+    if (apiKey) next.apiKey = apiKey as string;
+    else delete next.apiKey;
+    return next;
+  }
+  if (field === 'modelMap') return editModelMap(profile);
+  if (field === 'perAgent') return editPerAgent(profile);
+  if (field === 'providerPreference') return editProviderPreference(profile);
+  if (field === 'sessionAffinity') {
+    const enabled = await p.confirm({
+      message: 'Inject a stable session_id for GLM cache affinity?',
+      initialValue: profile.sessionAffinity ?? true,
+    });
+    if (isCancelled(enabled)) return undefined;
+    return { ...profile, sessionAffinity: enabled as boolean };
+  }
+  return undefined;
+}
+
+async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingOpenrouterProfile | undefined> {
+  const rows = [...(profile.modelMap ?? [])];
+  p.note(
+    'Ordered glob -> slug rules; first match wins (matched against the requested model id).\n' +
+      'An EMPTY map means "per-agent-only mode": no glob mapping, rely on per-agent overrides.\n' +
+      'Leaving the map unset uses the built-in defaults (*sonnet*/*opus*/*haiku* -> ' +
+      `${DEFAULT_GLM_SLUG}).`,
+    'Model map',
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const options: { value: string; label: string; hint?: string }[] = rows.map((row, i) => ({
+      value: `row:${i}`,
+      label: `${row.match} -> ${row.model}`,
+      hint: 'select to remove',
+    }));
+    options.push({ value: 'add', label: 'Add rule...' });
+    options.push({ value: 'done', label: 'Done', hint: rows.length === 0 ? 'empty = per-agent-only mode' : undefined });
+
+    const action = await p.select({ message: `Model map (${rows.length} rule(s))`, options });
+    if (isCancelled(action) || action === 'done') break;
+
+    if (action === 'add') {
+      const match = await p.text({
+        message: 'Glob to match (e.g. *sonnet*):',
+        validate: (val) => (!val ? 'Match glob is required' : undefined),
+      });
+      if (isCancelled(match)) continue;
+      const model = await p.text({
+        message: 'Target OpenRouter slug (e.g. z-ai/glm-5.2):',
+        placeholder: DEFAULT_GLM_SLUG,
+        validate: (val) => (!val ? 'Target slug is required' : undefined),
+      });
+      if (isCancelled(model)) continue;
+      rows.push({ match: match as string, model: model as string });
+    } else if (typeof action === 'string' && action.startsWith('row:')) {
+      const index = Number(action.slice('row:'.length));
+      rows.splice(index, 1);
+    }
+  }
+
+  return { ...profile, modelMap: rows };
+}
+
+async function editPerAgent(profile: PendingOpenrouterProfile): Promise<PendingOpenrouterProfile | undefined> {
+  let perAgent: Record<string, string> = { ...(profile.perAgent ?? {}) };
+
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const options = DOCKER_AGENTS.map((agent) => ({
+      value: agent,
+      label: DOCKER_AGENT_LABELS[agent],
+      hint: perAgent[agent] ?? 'none (use model map)',
+    }));
+
+    const selected = await p.select({
+      message: 'Per-agent model overrides (wins over the model map)',
+      options: [...options, { value: 'back', label: 'Back', hint: '' }],
+    });
+    if (isCancelled(selected) || selected === 'back') break;
+
+    const agent = selected as DockerAgent;
+    const slug = await p.text({
+      message: `${DOCKER_AGENT_LABELS[agent]} model slug (blank to clear):`,
+      placeholder: perAgent[agent] ?? DEFAULT_GLM_SLUG,
+      validate: () => undefined,
+    });
+    if (isCancelled(slug)) continue;
+    if (slug) perAgent[agent] = slug as string;
+    else perAgent = omitKey(perAgent, agent);
+  }
+
+  const next: PendingOpenrouterProfile = { ...profile };
+  if (Object.keys(perAgent).length > 0) next.perAgent = perAgent;
+  else delete next.perAgent;
+  return next;
+}
+
+async function editProviderPreference(
+  profile: PendingOpenrouterProfile,
+): Promise<PendingOpenrouterProfile | undefined> {
+  const pref: NonNullable<PendingOpenrouterProfile['providerPreference']> = { ...(profile.providerPreference ?? {}) };
+
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const field = await p.select({
+      message: 'Provider preference (leave unset for the default soft z-ai pin on z-ai/* slugs)',
+      options: [
+        { value: 'order', label: 'order (soft pin)', hint: pref.order?.join(', ') ?? 'none' },
+        { value: 'only', label: 'only (strict pin)', hint: pref.only?.join(', ') ?? 'none' },
+        {
+          value: 'allowFallbacks',
+          label: 'allowFallbacks',
+          hint: pref.allowFallbacks === undefined ? 'default (true)' : pref.allowFallbacks ? 'true' : 'false',
+        },
+        { value: 'clear', label: 'Clear (revert to default pin)' },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') break;
+
+    if (field === 'clear') {
+      return { ...profile, providerPreference: undefined };
+    }
+    if (field === 'order' || field === 'only') {
+      const input = await p.text({
+        message: `${field} — comma-separated provider slugs (e.g. z-ai), blank to clear:`,
+        placeholder: pref[field]?.join(', ') ?? 'z-ai',
+        validate: () => undefined,
+      });
+      if (isCancelled(input)) continue;
+      const list = (input as string)
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const next = list.length > 0 ? list : undefined;
+      if (field === 'order') pref.order = next;
+      else pref.only = next;
+    } else if (field === 'allowFallbacks') {
+      const enabled = await p.confirm({
+        message: 'Allow OpenRouter to fall back to other providers?',
+        initialValue: pref.allowFallbacks ?? true,
+      });
+      if (isCancelled(enabled)) continue;
+      pref.allowFallbacks = enabled as boolean;
+    }
+  }
+
+  const cleaned: NonNullable<PendingOpenrouterProfile['providerPreference']> = {};
+  if (pref.order !== undefined) cleaned.order = pref.order;
+  if (pref.only !== undefined) cleaned.only = pref.only;
+  if (pref.allowFallbacks !== undefined) cleaned.allowFallbacks = pref.allowFallbacks;
+  const hasAny = Object.keys(cleaned).length > 0;
+  return { ...profile, providerPreference: hasAny ? cleaned : undefined };
+}
+
+function perAgentSummary(profile: PendingOpenrouterProfile): string {
+  const perAgent = profile.perAgent;
+  if (!perAgent) return 'none';
+  const entries = Object.entries(perAgent).filter(([, v]) => v);
+  if (entries.length === 0) return 'none';
+  return entries.map(([agent, slug]) => `${agent}=${slug}`).join(', ');
+}
+
+function providerPreferenceSummary(pref: PendingOpenrouterProfile['providerPreference'] | undefined): string {
+  if (!pref) return 'default (soft z-ai pin)';
+  const parts: string[] = [];
+  if (pref.only) parts.push(`only: ${pref.only.join(', ')}`);
+  if (pref.order) parts.push(`order: ${pref.order.join(', ')}`);
+  if (pref.allowFallbacks !== undefined) parts.push(`fallbacks: ${pref.allowFallbacks ? 'on' : 'off'}`);
+  return parts.length > 0 ? parts.join(', ') : 'default';
+}
+
 // ─── Server Credentials ──────────────────────────────────────
 
 /** Loads server names from mcp-servers.json for the credential editor. */
@@ -1109,6 +1639,14 @@ function webSearchHint(resolved: ResolvedUserConfig, pending: UserConfig): strin
   return provider ? WEB_SEARCH_PROVIDER_LABELS[provider] : 'not configured';
 }
 
+function modelProvidersHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const profiles = currentProfiles(resolved, pending);
+  const count = Object.keys(profiles).length;
+  const defaultName = currentDefault(resolved, pending);
+  if (count === 0) return `default: ${defaultName}`;
+  return `${count} profile${count > 1 ? 's' : ''}, default: ${defaultName}`;
+}
+
 function serverCredentialsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const creds = { ...resolved.serverCredentials, ...pending.serverCredentials };
   const configured = Object.entries(creds).filter(([, v]) => Object.keys(v).length > 0);
@@ -1180,6 +1718,7 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'resources', label: `Resource Limits (${resourceHint(resolved, pending)})` },
         { value: 'compact', label: `Auto-Compact (${autoCompactHint(resolved, pending)})` },
         { value: 'websearch', label: `Web Search (${webSearchHint(resolved, pending)})` },
+        { value: 'modelProviders', label: `Model Providers (${modelProvidersHint(resolved, pending)})` },
         { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
         { value: 'memory', label: `Memory (${memoryHint(resolved, pending)})` },
         { value: 'snapshots', label: `Container Snapshots (${snapshotHint(resolved, pending)})` },
@@ -1209,6 +1748,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'websearch':
         await handleWebSearch(resolved, pending);
+        break;
+      case 'modelProviders':
+        await handleModelProviders(resolved, pending);
         break;
       case 'credentials':
         await handleServerCredentials(resolved, pending);

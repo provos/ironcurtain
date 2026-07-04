@@ -121,6 +121,14 @@ export interface IronCurtainConfig {
    */
   dockerAuth?: { readonly kind: DockerAuthKind };
   /**
+   * The resolved provider profile active for this session. Stamped as the
+   * FIRST step of prepareDockerInfrastructure() (before auth detection), from
+   * the resolved modelProviders registry + the per-session providerProfileName.
+   * When absent or `type: 'native'`, OpenRouter routing is not installed
+   * (byte-identical to today). See docs/designs/openrouter-integration.md §9.
+   */
+  activeProviderProfile?: import('./user-config.js').ResolvedProviderProfile;
+  /**
    * Whether this is a PTY session. When true, the proxy requires
    * trusted input source ("mux-trusted-input") for auto-approval.
    * Set by PTY session orchestration code.

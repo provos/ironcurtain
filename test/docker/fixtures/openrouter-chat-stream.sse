@@ -1,0 +1,12 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello "},"finish_reason":null}]}
+
+data: {"id":"gen-x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"from GLM"},"finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1024,"completion_tokens":128,"prompt_tokens_details":{"cached_tokens":900},"cost":0.0123,"cost_details":{"cache_discount":0.0041}}}
+
+data: [DONE]
+

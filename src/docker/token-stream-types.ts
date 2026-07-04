@@ -40,6 +40,21 @@ export type TokenStreamEvent =
       readonly stopReason: string;
       readonly inputTokens: number;
       readonly outputTokens: number;
+      /**
+       * Authoritative USD cost from an OpenRouter `usage.cost` field, when the
+       * upstream reports one (Anthropic-skin path, §10.2). Undefined for native
+       * providers and any stream without a cost field. Optional so existing
+       * consumers are unaffected.
+       */
+      readonly costUsd?: number;
+      /**
+       * Cached input tokens from OpenRouter usage, normalized across the three
+       * wire formats by `extractOpenRouterUsage`: `cache_read_input_tokens`
+       * (Anthropic skin), `prompt_tokens_details.cached_tokens` (Chat
+       * Completions), and `input_tokens_details.cached_tokens` (Responses).
+       * Undefined when the stream reports none (§10.2).
+       */
+      readonly cachedTokens?: number;
       readonly timestamp: number;
     }
   | {

@@ -23,6 +23,7 @@ import {
   PROVIDER_ENV_VARS,
   type ProviderId,
 } from '../config/model-provider.js';
+import { resolveActiveProfile } from '../config/user-config.js';
 // The Docker availability probe lives in `docker/docker-probe.js` (a
 // dependency-free leaf) so runtime modules can use it without importing this
 // file. Import callers reference `docker-probe.js` directly.
@@ -50,6 +51,19 @@ export interface PreflightOptions {
   config: IronCurtainConfig;
   /** The --agent flag value. undefined = use preferredMode from config. */
   requestedAgent?: AgentId;
+  /**
+   * The per-session `--provider-profile` selection (fresh Docker sessions only).
+   * When it names an OpenRouter profile, preflight authenticates against that
+   * profile's OpenRouter key instead of the agent-native credential, so the
+   * credential banner/block matches the routing the session will actually use.
+   * Undefined resolves the config default — the unchanged behavior for mux,
+   * daemon, cron, and resumes (which restore the original profile later). An
+   * unknown name propagates `resolveActiveProfile`'s authoritative
+   * available-profiles error early (before credential detection), so a
+   * `--provider-profile` typo surfaces as "unknown profile" rather than being
+   * masked by a generic "no credentials" error when the default lacks creds.
+   */
+  providerProfileName?: string;
   /** Dependency injection for tests. Defaults to real Docker check. */
   isDockerAvailable?: () => Promise<DockerAvailability>;
   /** Dependency injection for tests. Defaults to real credential detection. */
@@ -72,7 +86,23 @@ async function detectCredentialState(
   agentId: AgentId,
   config: IronCurtainConfig,
   sources: CredentialSources,
+  providerProfileName: string | undefined,
 ): Promise<CredentialState> {
+  // OpenRouter integration (§9.7): when the resolved active profile is
+  // openrouter-type, the container authenticates with the profile's OpenRouter
+  // key — not the agent-native credential. The interactive banner would
+  // otherwise report "no credentials" for an OpenRouter-only user. The
+  // per-session `--provider-profile` override is honored here (native profiles
+  // fall through to the agent-native detection unchanged). An unknown name
+  // makes `resolveActiveProfile` throw its authoritative available-profiles
+  // listing — we let that propagate so the typo surfaces here, before
+  // credential detection, identically whether or not the default has creds
+  // (rather than masking it behind a generic "no credentials" error).
+  const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
+  if (activeProfile.type === 'openrouter') {
+    return { credKind: activeProfile.apiKey ? 'apikey' : null, anthropicOAuthOnly: false };
+  }
+
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
     const key = resolveApiKeyForProvider(provider, config.userConfig);
@@ -119,11 +149,12 @@ async function probeDockerAndCredentials(
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<DockerAvailability>,
   credentialSources: CredentialSources | undefined,
+  providerProfileName: string | undefined,
 ): Promise<{ dockerStatus: DockerAvailability; credState: CredentialState }> {
   const phase1Sources = credentialSources ?? readOnlyCredentialSources;
   const [dockerStatus, credState] = await Promise.all([
     isDockerAvailable(),
-    detectCredentialState(agent, config, phase1Sources),
+    detectCredentialState(agent, config, phase1Sources, providerProfileName),
   ]);
 
   if (!credentialSources && dockerStatus.available && credState.credKind === 'oauth') {
@@ -285,6 +316,7 @@ async function resolveDockerAgent(
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<DockerAvailability>,
   credentialSources: CredentialSources | undefined,
+  providerProfileName: string | undefined,
   messages: DockerAgentMessages,
 ): Promise<PreflightResult> {
   const { dockerStatus, credState } = await probeDockerAndCredentials(
@@ -292,6 +324,7 @@ async function resolveDockerAgent(
     config,
     isDockerAvailable,
     credentialSources,
+    providerProfileName,
   );
 
   if (!dockerStatus.available) {
@@ -321,10 +354,10 @@ export async function resolveSessionMode(options: PreflightOptions): Promise<Pre
   const isDockerAvailable = options.isDockerAvailable ?? (await resolveDefaultAvailabilityProbe(config));
 
   if (requestedAgent !== undefined) {
-    return resolveExplicit(requestedAgent, config, isDockerAvailable, credentialSources);
+    return resolveExplicit(requestedAgent, config, isDockerAvailable, credentialSources, options.providerProfileName);
   }
 
-  return resolveDefaultMode(config, isDockerAvailable, credentialSources);
+  return resolveDefaultMode(config, isDockerAvailable, credentialSources, options.providerProfileName);
 }
 
 /**
@@ -347,7 +380,8 @@ async function resolveExplicit(
   agent: AgentId,
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<DockerAvailability>,
-  credentialSources?: CredentialSources,
+  credentialSources: CredentialSources | undefined,
+  providerProfileName: string | undefined,
 ): Promise<PreflightResult> {
   if (agent === 'builtin') {
     return {
@@ -356,7 +390,7 @@ async function resolveExplicit(
     };
   }
 
-  return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, {
+  return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, providerProfileName, {
     dockerUnavailable: (detailedMessage) =>
       `--agent ${agent} requires Docker, but it is not available:\n\n${detailedMessage}\n\n` +
       'Please fix your Docker installation or use the builtin agent.',
@@ -368,7 +402,8 @@ async function resolveExplicit(
 async function resolveDefaultMode(
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<DockerAvailability>,
-  credentialSources?: CredentialSources,
+  credentialSources: CredentialSources | undefined,
+  providerProfileName: string | undefined,
 ): Promise<PreflightResult> {
   const { preferredMode, preferredDockerAgent } = config.userConfig;
 
@@ -385,7 +420,7 @@ async function resolveDefaultMode(
 
   const agent = preferredDockerAgent as AgentId;
 
-  return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, {
+  return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, providerProfileName, {
     dockerUnavailable: dockerUnavailableMessage,
     credentialsMissing: (oauthOnly) => credentialErrorMessageForPreferredMode(agent, config, oauthOnly),
     successReason: (authKind) => `${preferredDockerAgent} (${authKindLabel(authKind)})`,

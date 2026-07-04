@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolveSessionMode, PreflightError } from '../src/session/preflight.js';
 import { checkDockerAvailable, type DockerAvailability, type ProbeExecFileFn } from '../src/docker/docker-probe.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
+import type { ResolvedProviderProfile } from '../src/config/user-config.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 import type { CredentialSources } from '../src/docker/oauth-credentials.js';
 
@@ -55,6 +56,9 @@ function createTestConfig(
       anthropicBaseUrl: '',
       openaiBaseUrl: '',
       googleBaseUrl: '',
+      // Native-default registry: no OpenRouter routing, so preflight falls
+      // through to agent-native credential detection (G13 §9.7).
+      modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
       escalationTimeoutSeconds: 300,
       resourceBudget: {
         maxTotalTokens: 1_000_000,
@@ -81,6 +85,38 @@ function createTestConfig(
       preferredMode: overrides.preferredMode ?? 'docker',
       packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
       dockerResources: { memoryMb: 8192, cpus: 4 },
+    },
+  };
+}
+
+/**
+ * Registers an OpenRouter profile in the resolved `modelProviders` registry
+ * without moving `default` (unless `makeDefault`). Mirrors how `--provider-profile`
+ * selects a non-default OpenRouter profile at session start.
+ */
+function withOpenRouterProfile(
+  config: IronCurtainConfig,
+  name: string,
+  apiKey: string,
+  makeDefault = false,
+): IronCurtainConfig {
+  const openrouterProfile: ResolvedProviderProfile = {
+    type: 'openrouter',
+    apiKey,
+    modelMap: [{ match: '*', model: 'z-ai/glm-5.2' }],
+    usesDefaultMap: false,
+    perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
+    providerPreference: undefined,
+    sessionAffinity: true,
+  };
+  return {
+    ...config,
+    userConfig: {
+      ...config.userConfig,
+      modelProviders: {
+        default: makeDefault ? name : config.userConfig.modelProviders.default,
+        profiles: { ...config.userConfig.modelProviders.profiles, [name]: openrouterProfile },
+      },
     },
   };
 }
@@ -467,6 +503,89 @@ describe('resolveSessionMode', () => {
         // error is attributed to the flag the user typed.
         await expect(promise).rejects.toThrow(/--agent claude-code requires Docker/);
       });
+    });
+  });
+
+  // §9.7 / G13: the per-session --provider-profile override must be honored by
+  // preflight credential detection, so an OpenRouter-only user (no agent-native
+  // creds, native default) is authenticated against the profile's OpenRouter
+  // key rather than spuriously blocked. Regression guard for the Copilot finding
+  // on PR #361 (preflight resolved only modelProviders.default).
+  describe('--provider-profile credential resolution', () => {
+    it('honors an OpenRouter --provider-profile override on a native-default config with no agent creds', async () => {
+      // default=native, no Anthropic key, no OAuth — the pre-fix behavior blocked here.
+      const config = withOpenRouterProfile(createTestConfig({ anthropicApiKey: '' }), 'glm', 'sk-or-v1-live');
+
+      const result = await resolveSessionMode({
+        config,
+        providerProfileName: 'glm',
+        isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
+      });
+
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'apikey' });
+    });
+
+    it('still blocks (default profile) when the override is absent — fix is scoped to the flag', async () => {
+      const config = withOpenRouterProfile(createTestConfig({ anthropicApiKey: '' }), 'glm', 'sk-or-v1-live');
+
+      const promise = resolveSessionMode({
+        config,
+        isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
+      });
+
+      await expect(promise).rejects.toThrow(PreflightError);
+      await expect(promise).rejects.toThrow(/preferredMode is "docker"/);
+    });
+
+    it('blocks when the selected OpenRouter profile has no key (missing creds, not native fallthrough)', async () => {
+      const config = withOpenRouterProfile(createTestConfig({ anthropicApiKey: '' }), 'glm-nokey', '');
+
+      const promise = resolveSessionMode({
+        config,
+        providerProfileName: 'glm-nokey',
+        isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
+      });
+
+      await expect(promise).rejects.toThrow(PreflightError);
+    });
+
+    it('surfaces the authoritative unknown-profile error for an unknown name, before credential detection', async () => {
+      // The bug scenario: an OpenRouter-only user (native default, NO agent
+      // creds) typos `--provider-profile`. Preflight must surface the
+      // authoritative available-profiles listing from resolveActiveProfile —
+      // NOT mask it behind a generic "no credentials" error by degrading to
+      // the (credential-less) default.
+      const config = withOpenRouterProfile(createTestConfig({ anthropicApiKey: '' }), 'glm', 'sk-or-v1-live');
+
+      const promise = resolveSessionMode({
+        config,
+        providerProfileName: 'does-not-exist',
+        isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
+      });
+
+      await expect(promise).rejects.toThrow('Unknown provider profile "does-not-exist". Available: native, glm.');
+      // The confusing generic credential error must NOT be what the user sees.
+      await expect(promise).rejects.not.toThrow(/preferredMode is "docker"/);
+    });
+
+    it('surfaces the unknown-profile error identically even when the default profile HAS creds', async () => {
+      // Same typo, but the native default now carries a valid API key. The
+      // error must be identical: the name is resolved before credential
+      // detection, so whether the default has creds is irrelevant.
+      const config = withOpenRouterProfile(createTestConfig(), 'glm', 'sk-or-v1-live');
+
+      await expect(
+        resolveSessionMode({
+          config,
+          providerProfileName: 'does-not-exist',
+          isDockerAvailable: dockerAvailable,
+          credentialSources: noOAuthSources,
+        }),
+      ).rejects.toThrow('Unknown provider profile "does-not-exist". Available: native, glm.');
     });
   });
 });

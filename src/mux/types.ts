@@ -5,11 +5,24 @@
 import type { PtyBridge } from './pty-bridge.js';
 
 /** Input mode for the mux. */
-export type InputMode = 'pty' | 'command' | 'picker' | 'resume-picker' | 'persona-picker' | 'escalation-picker';
+export type InputMode =
+  | 'pty'
+  | 'command'
+  | 'picker'
+  | 'resume-picker'
+  | 'persona-picker'
+  | 'provider-picker'
+  | 'escalation-picker';
 
 /** Whether the mode is any picker variant. */
 export function isPickerMode(mode: InputMode): boolean {
-  return mode === 'picker' || mode === 'resume-picker' || mode === 'persona-picker' || mode === 'escalation-picker';
+  return (
+    mode === 'picker' ||
+    mode === 'resume-picker' ||
+    mode === 'persona-picker' ||
+    mode === 'provider-picker' ||
+    mode === 'escalation-picker'
+  );
 }
 
 /**
@@ -18,7 +31,7 @@ export function isPickerMode(mode: InputMode): boolean {
  * on top of the full PTY viewport.
  */
 export function isBottomPanelPicker(mode: InputMode): boolean {
-  return mode === 'picker' || mode === 'resume-picker' || mode === 'persona-picker';
+  return mode === 'picker' || mode === 'resume-picker' || mode === 'persona-picker' || mode === 'provider-picker';
 }
 
 /** A single tab in the mux. */
@@ -49,7 +62,12 @@ export type MuxAction =
   | { readonly kind: 'trusted-input'; readonly text: string }
   | { readonly kind: 'redraw-input' }
   | { readonly kind: 'enter-picker-mode' }
-  | { readonly kind: 'picker-spawn'; readonly workspacePath?: string; readonly persona?: string }
+  | {
+      readonly kind: 'picker-spawn';
+      readonly workspacePath?: string;
+      readonly persona?: string;
+      readonly providerProfileName?: string;
+    }
   | { readonly kind: 'picker-cancel' }
   | { readonly kind: 'redraw-picker' }
   | { readonly kind: 'resume-spawn'; readonly sessionId: string; readonly agent: string }

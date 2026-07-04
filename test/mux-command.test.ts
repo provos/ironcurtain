@@ -64,6 +64,8 @@ const mockConfig: IronCurtainConfig = {
     autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
     auditRedaction: { enabled: true },
     serverCredentials: {},
+    // Native-only registry: the /new profile-picker step is skipped (G13 §9.7).
+    modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
     gooseProvider: 'anthropic',
     gooseModel: 'claude-sonnet-4-20250514',
     preferredDockerAgent: 'claude-code',

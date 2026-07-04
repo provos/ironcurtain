@@ -78,7 +78,11 @@ export type MethodName =
   | 'personas.editConstitution'
   | 'personas.setMemory'
   | 'personas.delete'
-  | 'personas.setBroadPolicyOptIn';
+  | 'personas.setBroadPolicyOptIn'
+  // Config (modelProviders registry). Read is ungated; the mutation is gated
+  // on the daemon's `--allow-policy-mutation` kill switch (POLICY_MUTATION_FORBIDDEN).
+  | 'config.getModelProviders'
+  | 'config.setModelProviders';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -545,6 +549,79 @@ export interface PersonaCompileStreamAckDto {
   readonly operationId: string;
   /** True when the operation was enqueued behind the global concurrency gate. */
   readonly queued?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Config (modelProviders) DTO Types
+// ---------------------------------------------------------------------------
+//
+// Wire contract for `config.getModelProviders` / `config.setModelProviders`,
+// scoped to the `modelProviders` registry only (see
+// docs/designs/openrouter-integration.md §12.6). The DTO carries the SAME
+// per-profile fields as the resolved config, with every openrouter profile's
+// `apiKey` MASKED (`sk-...xyz` / 'none'). The `native` profile is included in
+// the get response (`{ type: 'native' }`) but is always implicit — the set
+// path silently drops a verbatim `{ type: 'native' }` echo (F7).
+
+/** One glob→slug rule (mirrors the resolved config's modelMap entry). */
+export interface ModelMapRuleDto {
+  readonly match: string;
+  readonly model: string;
+}
+
+/** Provider-preference passthrough (cache pinning) — mirrors the resolved shape. */
+export interface ProviderPreferenceDto {
+  readonly order?: readonly string[];
+  readonly only?: readonly string[];
+  readonly allowFallbacks?: boolean;
+}
+
+/** The native profile DTO — no fields beyond the discriminator. */
+export interface NativeProfileDto {
+  readonly type: 'native';
+}
+
+/**
+ * The openrouter profile DTO. On the GET response `apiKey` is MASKED. On a SET
+ * request `apiKey` follows the M5 mask-unchanged contract per profile:
+ *   - absent / null / equal-to-the-returned-mask → keep the stored key
+ *   - '' (empty string) → clear the stored key
+ *   - any other string → set it
+ */
+export interface OpenrouterProfileDto {
+  readonly type: 'openrouter';
+  /** Masked on read; M5-interpreted on write. May be absent/null on write. */
+  readonly apiKey?: string | null;
+  readonly modelMap?: readonly ModelMapRuleDto[];
+  readonly perAgent?: Readonly<Record<string, string | undefined>>;
+  readonly providerPreference?: ProviderPreferenceDto;
+  readonly sessionAffinity?: boolean;
+}
+
+/** A single profile DTO (discriminated on `type`). */
+export type ProfileDto = NativeProfileDto | OpenrouterProfileDto;
+
+/**
+ * Response from `config.getModelProviders`. `default` is the resolved default
+ * name ('native' when unset); `profiles` always includes the implicit `native`
+ * entry and every openrouter profile with its `apiKey` masked.
+ */
+export interface GetModelProvidersDto {
+  readonly default: string;
+  readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+/**
+ * Request for `config.setModelProviders`. Carries the WHOLE profiles record
+ * (the shallow `deepMergeConfig` replaces `profiles` wholesale, so a partial
+ * write would drop unmentioned profiles). `default` is optional; when it names
+ * the profile being dropped in the same write, the backend re-points it to
+ * 'native' (F10). A verbatim `{ type: 'native' }` under `profiles.native` is
+ * accepted-and-dropped (F7); any other value under `native` is rejected.
+ */
+export interface SetModelProvidersDto {
+  readonly default?: string;
+  readonly profiles: Readonly<Record<string, ProfileDto>>;
 }
 
 // ---------------------------------------------------------------------------

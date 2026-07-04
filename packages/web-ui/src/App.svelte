@@ -24,6 +24,7 @@
   import Jobs from './routes/Jobs.svelte';
   import Workflows from './routes/Workflows.svelte';
   import Personas from './routes/Personas.svelte';
+  import Settings from './routes/Settings.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -42,6 +43,7 @@
   import Check from 'phosphor-svelte/lib/Check';
   import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
   import UserCircle from 'phosphor-svelte/lib/UserCircle';
+  import GearSix from 'phosphor-svelte/lib/GearSix';
   import List from 'phosphor-svelte/lib/List';
   import X from 'phosphor-svelte/lib/X';
 
@@ -168,6 +170,7 @@
     { id: 'jobs', label: 'Jobs', icon: Clock },
     { id: 'workflows', label: 'Workflows', icon: TreeStructure },
     { id: 'personas', label: 'Personas', icon: UserCircle },
+    { id: 'settings', label: 'Settings', icon: GearSix },
   ] as const;
 </script>
 
@@ -398,6 +401,8 @@
         <Workflows />
       {:else if appState.currentView === 'personas'}
         <Personas />
+      {:else if appState.currentView === 'settings'}
+        <Settings />
       {/if}
     </main>
 

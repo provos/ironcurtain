@@ -31,7 +31,7 @@ export async function connectWithToken(page: Page): Promise<void> {
  */
 export async function navigateTo(
   page: Page,
-  view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs' | 'Workflows' | 'Personas',
+  view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs' | 'Workflows' | 'Personas' | 'Settings',
 ): Promise<void> {
   await page.getByTestId('sidebar-nav').getByRole('button', { name: view }).click();
 }

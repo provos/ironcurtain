@@ -52,6 +52,7 @@ import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/esca
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import * as logger from '../logger.js';
 import { DEFAULT_EXEC_TIMEOUT_MS } from './docker-manager.js';
+import { getTokenStreamBus } from './token-stream-bus.js';
 
 export interface DockerAgentSessionDeps {
   readonly config: IronCurtainConfig;
@@ -144,6 +145,21 @@ export class DockerAgentSession implements Session {
   private cumulativeActiveMs = 0;
   private cumulativeCostUsd = 0;
 
+  /**
+   * Cumulative authoritative USD cost, summed from OpenRouter `usage.cost`
+   * values surfaced on the token-stream bus (`message_end` events) for this
+   * session id (§10, D6). This is ground truth for the Anthropic-skin path:
+   * Claude Code's own `total_cost_usd` self-report is wrong when routed to a
+   * non-Anthropic model. Preferred over the CLI self-report only when the
+   * active profile is openrouter-type AND this sum is > 0 (see
+   * `resolveCostUsd`). Populated by the token-stream subscription installed in
+   * `initialize()`.
+   */
+  private authoritativeCostUsd = 0;
+
+  /** Unsubscribe handle for the token-stream cost subscription. */
+  private unsubscribeCostStream: (() => void) | null = null;
+
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onEscalationExpired?: () => void;
   private readonly onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
@@ -218,6 +234,20 @@ export class DockerAgentSession implements Session {
     // an entry the proxy just wrote.
     this.auditTailer = new AuditLogTailer(this.infra.auditLogPath, (event) => this.emitDiagnostic(event));
     this.auditTailer.start();
+
+    // Authoritative-cost tap (§10, D6): sum OpenRouter `usage.cost` values
+    // surfaced on `message_end` events for this session id. The MITM proxy
+    // publishes on the module-scoped singleton bus keyed by its token-session
+    // id, which equals this session id in single-session mode (see
+    // docker-infrastructure.ts `routingId`). The subscription is unconditional
+    // and cheap — accumulation is a no-op for native providers (no `costUsd`
+    // field); whether the sum is *preferred* over the CLI self-report is gated
+    // in `resolveCostUsd`.
+    this.unsubscribeCostStream = getTokenStreamBus().subscribe(this.sessionId, (_sessionId, event) => {
+      if (event.kind === 'message_end' && typeof event.costUsd === 'number') {
+        this.authoritativeCostUsd += event.costUsd;
+      }
+    });
 
     // Trajectory capture is driven HERE only in standalone (owns-infra)
     // mode: the session owns the bundle and runs exactly one Claude session
@@ -306,9 +336,7 @@ export class DockerAgentSession implements Session {
 
       const response = this.infra.adapter.extractResponse(exitCode, stdout, stderr);
 
-      if (response.costUsd !== undefined) {
-        this.cumulativeCostUsd = response.costUsd;
-      }
+      this.cumulativeCostUsd = this.resolveCostUsd(response.costUsd);
 
       const turn: ConversationTurn = {
         turnNumber: this.turns.length + 1,
@@ -449,6 +477,8 @@ export class DockerAgentSession implements Session {
 
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
+    this.unsubscribeCostStream?.();
+    this.unsubscribeCostStream = null;
 
     // Trajectory capture: end the capture session BEFORE infrastructure
     // teardown so the `session-end` manifest entry is durable. The
@@ -479,6 +509,34 @@ export class DockerAgentSession implements Session {
   }
 
   // --- Private helpers ---
+
+  /**
+   * Resolve the cumulative session cost, applying the D6 fallback order
+   * (§10): authoritative summed `usage.cost` → CLI self-reported `costUsd`
+   * → static estimate.
+   *
+   * The authoritative sum (from OpenRouter `usage.cost` on the token-stream
+   * bus) is ground truth and is preferred ONLY when the active profile is
+   * openrouter-type AND the sum is > 0 — Claude Code's `total_cost_usd` is
+   * wrong when routed to a non-Anthropic model. For native profiles, or when
+   * no authoritative cost was observed, the CLI self-report is used. When
+   * neither is available, the prior cumulative value is retained (the Docker
+   * session has no per-turn token counts to compute a fresh static estimate).
+   *
+   * Both the authoritative sum and the CLI `costUsd` are cumulative session
+   * totals, so this returns the value to *assign* (not add) to
+   * `cumulativeCostUsd`.
+   */
+  private resolveCostUsd(cliCostUsd: number | undefined): number {
+    const isOpenRouter = this.config.activeProviderProfile?.type === 'openrouter';
+    if (isOpenRouter && this.authoritativeCostUsd > 0) {
+      return this.authoritativeCostUsd;
+    }
+    if (cliCostUsd !== undefined) {
+      return cliCostUsd;
+    }
+    return this.cumulativeCostUsd;
+  }
 
   private emitDiagnostic(event: DiagnosticEvent): void {
     this.diagnosticLog.push(event);

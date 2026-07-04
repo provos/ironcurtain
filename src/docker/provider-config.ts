@@ -39,7 +39,17 @@ export interface RewriteResult {
  */
 export type RequestBodyRewriter = (
   body: Record<string, unknown>,
-  context: { method: string; path: string; agentKind?: AgentKind },
+  context: {
+    method: string;
+    path: string;
+    agentKind?: AgentKind;
+    /**
+     * Stable per-conversation id used for OpenRouter `session_id` injection
+     * (GLM cache affinity, D4). Set from the proxy's `tokenSessionId` snapshot.
+     * All existing rewriters ignore it (backward-compatible).
+     */
+    cacheKey?: string;
+  },
 ) => RewriteResult | null;
 
 /**

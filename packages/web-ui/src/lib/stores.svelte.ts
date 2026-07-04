@@ -30,12 +30,14 @@ import type {
   FileContentResponseDto,
   ArtifactContentDto,
   MessageLogResponseDto,
+  GetModelProvidersDto,
+  SetModelProvidersDto,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
-export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas';
+export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas' | 'settings';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -160,6 +162,15 @@ export const connectionGeneration = $state({ value: 0 });
  */
 export const personasChangedGeneration = $state({ value: 0 });
 
+/**
+ * Monotonically increasing counter bumped on every `config.changed` server-push
+ * event (a `config.setModelProviders` write). The Settings view reads `.value`
+ * as a $effect dependency to refresh its locally-held provider-profile view,
+ * mirroring `personasChangedGeneration`. Kept off appState because the config
+ * view state lives in the route component, not the global store.
+ */
+export const configChangedGeneration = $state({ value: 0 });
+
 // WebSocket client singleton
 let wsClient: WsClient | null = null;
 
@@ -215,6 +226,9 @@ function wireEventHandlers(client: WsClient): void {
         refreshJobs: () => refreshJobs(client),
         refreshPersonas: () => {
           personasChangedGeneration.value++;
+        },
+        refreshConfig: () => {
+          configChangedGeneration.value++;
         },
         assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
       },
@@ -662,6 +676,36 @@ export async function hydratePersonaCompiles(): Promise<Set<string>> {
   for (const op of active) next.set(op.operationId, op);
   appState.personaCompiles = next;
   return new Set(next.keys());
+}
+
+// ── Config (modelProviders) RPC actions ────────────────────────────────
+//
+// `config.getModelProviders` is ungated (read); `config.setModelProviders` is
+// gated server-side on the daemon's `--allow-policy-mutation` flag (rejects with
+// POLICY_MUTATION_FORBIDDEN when off). The Settings view hides mutation controls
+// when `appState.daemonStatus.allowPolicyMutation` is false. A successful write
+// broadcasts a `config.changed` server-push event (bumps configChangedGeneration).
+
+/**
+ * Read the model-provider registry. Every openrouter profile's `apiKey` is
+ * masked (`sk-...xyz` / 'none'); the implicit `native` profile is included.
+ */
+export async function getModelProviders(): Promise<GetModelProvidersDto> {
+  return getWsClient().request<GetModelProvidersDto>('config.getModelProviders', {});
+}
+
+/**
+ * Write the WHOLE model-provider registry. Sends the complete `profiles` record
+ * (the backend replaces it wholesale). Per the M5 contract, leaving a profile's
+ * masked `apiKey` untouched preserves the stored key; '' clears it; a new string
+ * sets it. Returns the fresh masked registry. Errors (POLICY_MUTATION_FORBIDDEN,
+ * INVALID_PARAMS) bubble to the caller.
+ */
+export async function setModelProviders(input: SetModelProvidersDto): Promise<GetModelProvidersDto> {
+  return getWsClient().request<GetModelProvidersDto>('config.setModelProviders', {
+    ...(input.default !== undefined ? { default: input.default } : {}),
+    profiles: input.profiles,
+  });
 }
 
 export async function connectWithToken(token: string): Promise<void> {

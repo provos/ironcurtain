@@ -87,7 +87,7 @@ describe('GooseAdapter.generateMcpConfig', () => {
   const adapter = createGooseAdapter();
 
   it('generates YAML config with UNIX-CONNECT for UDS path', () => {
-    const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock');
+    const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', {} as IronCurtainConfig);
 
     expect(files).toHaveLength(1);
     expect(files[0].path).toBe('goose-config.yaml');
@@ -100,7 +100,7 @@ describe('GooseAdapter.generateMcpConfig', () => {
   });
 
   it('generates YAML config with TCP for host:port address', () => {
-    const files = adapter.generateMcpConfig('host.docker.internal:12345');
+    const files = adapter.generateMcpConfig('host.docker.internal:12345', {} as IronCurtainConfig);
 
     expect(files).toHaveLength(1);
     expect(files[0].content).toContain('TCP:host.docker.internal:12345');
@@ -108,7 +108,7 @@ describe('GooseAdapter.generateMcpConfig', () => {
   });
 
   it('produces valid YAML structure with telemetry disabled', () => {
-    const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock');
+    const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', {} as IronCurtainConfig);
     const content = files[0].content;
 
     // Verify the YAML contains the required keys
@@ -259,21 +259,21 @@ describe('GooseAdapter.buildSystemPrompt', () => {
 describe('GooseAdapter.getProviders', () => {
   it('returns anthropicProvider when gooseProvider is anthropic', () => {
     const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'anthropic' }));
-    const providers = adapter.getProviders();
+    const providers = adapter.getProviders({} as IronCurtainConfig);
     expect(providers).toHaveLength(1);
     expect(providers[0].host).toBe('api.anthropic.com');
   });
 
   it('returns openaiProvider when gooseProvider is openai', () => {
     const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'openai' }));
-    const providers = adapter.getProviders();
+    const providers = adapter.getProviders({} as IronCurtainConfig);
     expect(providers).toHaveLength(1);
     expect(providers[0].host).toBe('api.openai.com');
   });
 
   it('returns googleProvider when gooseProvider is google', () => {
     const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'google' }));
-    const providers = adapter.getProviders();
+    const providers = adapter.getProviders({} as IronCurtainConfig);
     expect(providers).toHaveLength(1);
     expect(providers[0].host).toBe('generativelanguage.googleapis.com');
   });
@@ -281,15 +281,15 @@ describe('GooseAdapter.getProviders', () => {
   it('returns exactly one provider', () => {
     for (const provider of ['anthropic', 'openai', 'google'] as const) {
       const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: provider }));
-      const providers = adapter.getProviders();
+      const providers = adapter.getProviders({} as IronCurtainConfig);
       expect(providers).toHaveLength(1);
     }
   });
 
   it('ignores authKind parameter', () => {
     const adapter = createGooseAdapter(makeUserConfig({ gooseProvider: 'openai' }));
-    const providersApiKey = adapter.getProviders('apikey');
-    const providersOAuth = adapter.getProviders('oauth');
+    const providersApiKey = adapter.getProviders({} as IronCurtainConfig, 'apikey');
+    const providersOAuth = adapter.getProviders({} as IronCurtainConfig, 'oauth');
     expect(providersApiKey).toEqual(providersOAuth);
   });
 });

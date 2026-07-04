@@ -226,6 +226,52 @@ describe('ResourceBudgetTracker', () => {
       const snapshot = tracker.getSnapshot();
       expect(snapshot.estimatedCostUsd).toBeCloseTo(3.0, 1);
     });
+
+    it('resolves GLM pricing for the z-ai/glm-5.2 slug (not the generic fallback)', () => {
+      // The OpenRouter GLM slug must hit the `glm-5.2` matcher ($0.60/$2.20/$0.11),
+      // NOT the generic Sonnet-priced FALLBACK ($3/$15/$0.30). Using a full
+      // 'z-ai/glm-5.2' id also guards ordering: the specific `glm-5.2` entry
+      // precedes the broad `z-ai/` guard, so both resolve to GLM pricing.
+      const tracker = createTracker({ maxEstimatedCostUsd: 100, maxTotalTokens: null, maxSteps: null }, 'z-ai/glm-5.2');
+
+      // GLM: input=$0.60/M, output=$2.20/M
+      // 1M input + 100K output = $0.60 + $0.22 = $0.82
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          totalTokens: 1_100_000,
+          inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      );
+
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.estimatedCostUsd).toBeCloseTo(0.82, 2);
+      // Guard against a silent fall-through to FALLBACK ($3.60 for these tokens).
+      expect(snapshot.estimatedCostUsd).toBeLessThan(1.0);
+    });
+
+    it('resolves GLM pricing for a broader z-ai/ slug via the guard entry', () => {
+      // A z-ai slug that is NOT glm-5.2 still lands on GLM-family pricing via
+      // the broad `z-ai/` guard, not the generic FALLBACK.
+      const tracker = createTracker(
+        { maxEstimatedCostUsd: 100, maxTotalTokens: null, maxSteps: null },
+        'z-ai/glm-5.2-air',
+      );
+
+      // GLM: input=$0.60/M → 1M input = $0.60
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 0,
+          totalTokens: 1_000_000,
+          inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      );
+
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.estimatedCostUsd).toBeCloseTo(0.6, 2);
+    });
   });
 
   describe('null dimensions', () => {

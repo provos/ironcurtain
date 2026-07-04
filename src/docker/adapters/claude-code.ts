@@ -23,8 +23,11 @@ import type {
 } from '../agent-adapter.js';
 import type { DockerAuthKind, IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
+import type { AuthMethod } from '../oauth-credentials.js';
 import type { ResolvedUserConfig } from '../../config/user-config.js';
+import { OPENROUTER_BASE_URL, OPENROUTER_HOST } from '../../config/user-config.js';
 import { parseModelId } from '../../config/model-provider.js';
+import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
 import {
   anthropicProvider,
   claudePlatformProvider,
@@ -241,11 +244,29 @@ exit $STATUS
       return `${codeModePrompt}\n${dockerPrompt}`;
     },
 
-    getProviders(authKind?: DockerAuthKind): readonly ProviderConfig[] {
+    getProviders(config: IronCurtainConfig, authKind?: DockerAuthKind): readonly ProviderConfig[] {
+      const profile = config.activeProviderProfile;
+      if (profile?.type === 'openrouter') {
+        // OpenRouter routing: the single bearer-auth provider replaces both
+        // the Anthropic API and telemetry providers (and the OAuth pair). No
+        // api.anthropic.com host is allowlisted (decision B); Claude Code's
+        // telemetry calls are simply blocked at CONNECT.
+        return [makeOpenRouterProviderForProfile('messages', profile, 'claude-code')];
+      }
       if (authKind === 'oauth') {
         return [anthropicOAuthProvider, claudePlatformOAuthProvider];
       }
       return [anthropicProvider, claudePlatformProvider];
+    },
+
+    detectCredential(config: IronCurtainConfig): AuthMethod | undefined {
+      // B2a/B2b: an OpenRouter-only user has no Anthropic OAuth/API key, so the
+      // generic detectAuthMethod() would throw. openRouterCredential reports an
+      // api-key AuthMethod for a keyed OpenRouter profile (authKind ⇒ 'apikey'),
+      // { kind: 'none' } for an empty-key profile (feeds m5), and `undefined`
+      // for a native profile — DEFERRING to detectAuthMethod() and preserving
+      // today's OAuth+API-key detection byte-for-byte.
+      return openRouterCredential(config);
     },
 
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
@@ -257,6 +278,40 @@ exit $STATUS
 
       if (modelId) {
         env.IRONCURTAIN_MODEL = modelId;
+      }
+
+      const profile = config.activeProviderProfile;
+      if (profile?.type === 'openrouter') {
+        // B2c: OpenRouter mode auth-var exclusivity. Claude Code sends its
+        // credential as `Authorization: Bearer` ONLY when it comes from
+        // ANTHROPIC_AUTH_TOKEN (not ANTHROPIC_API_KEY, which is sent as
+        // x-api-key). We therefore inject the sentinel via ANTHROPIC_AUTH_TOKEN
+        // and set NEITHER CLAUDE_CODE_OAUTH_TOKEN NOR IRONCURTAIN_API_KEY — even
+        // when host OAuth creds exist (OpenRouter overrides OAuth detection).
+        const fakeKey = fakeKeys.get(OPENROUTER_HOST);
+        if (!fakeKey) {
+          throw new Error(
+            `No fake key generated for ${OPENROUTER_HOST} — cannot configure Claude Code OpenRouter authentication`,
+          );
+        }
+        env.ANTHROPIC_BASE_URL = OPENROUTER_BASE_URL;
+        env.ANTHROPIC_AUTH_TOKEN = fakeKey;
+        // Suppress Anthropic-only pre-release beta fields (e.g. context_management)
+        // that non-Anthropic upstreams reject (§4.3 belt; the MITM strips too).
+        env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1';
+        // m2: per-tier model hints for the agent's own context budgeting /
+        // [1m] handling. The MITM does the authoritative remap; these are hints
+        // only. Each resolves as perAgent['claude-code'] ?? glob-map(probe) ??
+        // omit (the DEFAULT_MODEL_MAP *sonnet*/*opus*/*haiku* globs match these
+        // probe strings).
+        const perAgent = profile.perAgent['claude-code'];
+        const sonnet = perAgent ?? resolveMappedModel('claude-sonnet', profile.modelMap);
+        const opus = perAgent ?? resolveMappedModel('claude-opus', profile.modelMap);
+        const haiku = perAgent ?? resolveMappedModel('claude-haiku', profile.modelMap);
+        if (sonnet !== undefined) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
+        if (opus !== undefined) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
+        if (haiku !== undefined) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haiku;
+        return env;
       }
 
       const fakeKey = fakeKeys.get('api.anthropic.com');
