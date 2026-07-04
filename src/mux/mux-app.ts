@@ -7,7 +7,7 @@
 
 /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment */
 
-import { createPtyBridge } from './pty-bridge.js';
+import { createPtyBridge } from '../pty/pty-bridge.js';
 import { createMuxInputHandler, SCROLL_LINES, type MuxInputHandler } from './mux-input-handler.js';
 import { createMuxEscalationManager, type MuxEscalationManager } from './mux-escalation-manager.js';
 import { createMuxRenderer, type MuxRenderer } from './mux-renderer.js';

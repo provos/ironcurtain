@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildSpawnArgs, type PtyBridgeOptions } from '../src/mux/pty-bridge.js';
+import { buildSpawnArgs, type PtyBridgeOptions } from '../src/pty/pty-bridge.js';
 
 /** Minimal always-required options; per-test flags are layered on top. */
 function baseOptions(overrides: Partial<PtyBridgeOptions> = {}): PtyBridgeOptions {
