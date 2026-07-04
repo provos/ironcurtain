@@ -89,6 +89,8 @@ Config lives in `~/.ironcurtain/config.json`, validated by a Zod schema (`src/co
 
 Every OpenRouter completion response carries `usage` with: `prompt_tokens`, `completion_tokens`, `prompt_tokens_details.cached_tokens`, `cache_write_tokens`, `cost` (authoritative USD), `cost_details.cache_discount`. Present in both the final SSE `message_delta`/usage event (Anthropic skin) and the terminal chunk (chat/responses).
 
+> **Live-verified correction (2026-07-03):** on the **Anthropic skin** (`/api/v1/messages`), cache reads are reported via the **Anthropic-native `cache_read_input_tokens`** field (observed: `cache_read_input_tokens: 192` on a session-pinned GLM-5.2 turn 2), not `prompt_tokens_details.cached_tokens`. Consumers of skin responses must read `cache_read_input_tokens` first and treat the OpenAI-shape field as a fallback. `usage.cost` is present as documented (`cost_details` carries `upstream_inference_*` breakdowns).
+
 ### 4.5 Claude Code model-override env vars (behind `ANTHROPIC_BASE_URL`)
 
 `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` (the Haiku one also drives background calls). Behind a gateway Claude Code budgets 200K context unless the model name carries a `[1m]` suffix; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` tunes compaction.
