@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   select: vi.fn(),
   confirm: vi.fn(),
   text: vi.fn(),
+  autocomplete: vi.fn(),
   intro: vi.fn(),
   outro: vi.fn(),
   note: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock('@clack/prompts', () => ({
   select: (...args: unknown[]) => mocks.select(...args),
   confirm: (...args: unknown[]) => mocks.confirm(...args),
   text: (...args: unknown[]) => mocks.text(...args),
+  autocomplete: (...args: unknown[]) => mocks.autocomplete(...args),
   intro: (...args: unknown[]) => mocks.intro(...args),
   outro: (...args: unknown[]) => mocks.outro(...args),
   note: (...args: unknown[]) => mocks.note(...args),
@@ -30,6 +32,17 @@ vi.mock('@clack/prompts', () => ({
   isCancel: (...args: unknown[]) => mocks.isCancel(...args),
   log: mocks.log,
 }));
+
+// Stub the network fetch in the catalog leaf so interactive-flow tests never hit
+// openrouter.ai. A plain (non-vi.fn) function is immune to clear/restoreAllMocks.
+// `catalogEnforces` stays REAL so slugPromptMode's truth table exercises production logic.
+vi.mock('../src/config/openrouter-catalog.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config/openrouter-catalog.js')>();
+  return {
+    ...actual,
+    listOpenrouterModels: () => Promise.resolve({ models: [], source: 'bundled' as const, fetchedAt: 0 }),
+  };
+});
 
 // Now import the module under test
 import {
@@ -39,7 +52,10 @@ import {
   formatTokens,
   formatSeconds,
   formatCost,
+  buildSlugOptions,
+  slugPromptMode,
 } from '../src/config/config-command.js';
+import type { ModelCatalogResult, ModelCatalogSource } from '../src/config/openrouter-catalog.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
 import { USER_CONFIG_DEFAULTS, loadUserConfig, maskApiKey } from '../src/config/user-config.js';
 
@@ -601,5 +617,80 @@ describe('formatters', () => {
     expect(formatCost(null)).toBe('disabled');
     expect(formatCost(5)).toBe('$5.00');
     expect(formatCost(0.5)).toBe('$0.50');
+  });
+});
+
+describe('buildSlugOptions', () => {
+  const models = ['anthropic/claude-opus-4', 'z-ai/glm-5.2', 'openai/gpt-4o'];
+  const cat = (source: ModelCatalogSource, slugs: string[] = models): ModelCatalogResult => ({
+    models: slugs,
+    source,
+    fetchedAt: source === 'bundled' ? 0 : 1,
+  });
+
+  it('prepends the (none) sentinel FIRST when allowNone is true', () => {
+    const opts = buildSlugOptions(cat('live'), '', { allowNone: true });
+    expect(opts[0]).toEqual({ value: '', label: '(none — use model map)' });
+    // the catalog slugs follow, in catalog order
+    expect(opts.slice(1).map((o) => o.value)).toEqual(models);
+  });
+
+  it('omits the (none) sentinel when allowNone is false (map-row model is required)', () => {
+    const opts = buildSlugOptions(cat('live'), '', { allowNone: false });
+    expect(opts.some((o) => o.value === '')).toBe(false);
+    expect(opts.map((o) => o.value)).toEqual(models);
+  });
+
+  it('appends a grandfather option when current is non-empty and absent from the catalog', () => {
+    const opts = buildSlugOptions(cat('live'), 'legacy/delisted-model', { allowNone: false });
+    expect(opts[opts.length - 1]).toEqual({
+      value: 'legacy/delisted-model',
+      label: 'legacy/delisted-model  (current, unverified)',
+    });
+    expect(opts).toHaveLength(models.length + 1);
+  });
+
+  it('does NOT add a grandfather option when current is already in the catalog', () => {
+    const opts = buildSlugOptions(cat('live'), 'z-ai/glm-5.2', { allowNone: false });
+    expect(opts).toHaveLength(models.length);
+    expect(opts.filter((o) => o.value === 'z-ai/glm-5.2')).toHaveLength(1);
+  });
+
+  it('does NOT add a grandfather option when current is empty', () => {
+    const opts = buildSlugOptions(cat('live'), '', { allowNone: false });
+    expect(opts).toHaveLength(models.length);
+  });
+
+  it('places (none) first AND the grandfather last (perAgent editing a delisted slug)', () => {
+    const opts = buildSlugOptions(cat('cache'), 'legacy/delisted', { allowNone: true });
+    expect(opts[0].value).toBe('');
+    expect(opts[opts.length - 1]).toEqual({
+      value: 'legacy/delisted',
+      label: 'legacy/delisted  (current, unverified)',
+    });
+    expect(opts).toHaveLength(models.length + 2); // (none) + catalog + grandfather
+  });
+
+  it('never injects a __refresh__ sentinel (CHANGE 2)', () => {
+    const variants = [
+      buildSlugOptions(cat('live'), 'legacy/x', { allowNone: true }),
+      buildSlugOptions(cat('live'), '', { allowNone: false }),
+      buildSlugOptions(cat('cache'), 'z-ai/glm-5.2', { allowNone: true }),
+    ];
+    for (const opts of variants) {
+      expect(opts.some((o) => o.value === '__refresh__')).toBe(false);
+      expect(opts.some((o) => o.label.includes('Refresh'))).toBe(false);
+    }
+  });
+});
+
+describe('slugPromptMode', () => {
+  it('is autocomplete for authoritative sources (live/cache hard-block)', () => {
+    expect(slugPromptMode('live')).toBe('autocomplete');
+    expect(slugPromptMode('cache')).toBe('autocomplete');
+  });
+
+  it('is freetext for the bundled floor (warn-only)', () => {
+    expect(slugPromptMode('bundled')).toBe('freetext');
   });
 });

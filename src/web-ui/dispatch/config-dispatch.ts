@@ -16,7 +16,13 @@ import { z } from 'zod';
 
 import { validateParams } from './types.js';
 import type { WorkflowDispatchContext } from './workflow-dispatch.js';
-import { type GetModelProvidersDto, type ProfileDto, RpcError, MethodNotFoundError } from '../web-ui-types.js';
+import {
+  type GetModelProvidersDto,
+  type OpenrouterModelsDto,
+  type ProfileDto,
+  RpcError,
+  MethodNotFoundError,
+} from '../web-ui-types.js';
 import {
   loadUserConfig,
   saveUserConfig,
@@ -28,6 +34,7 @@ import {
   type ResolvedModelProvidersConfig,
   type ResolvedOpenRouterProfile,
 } from '../../config/user-config.js';
+import { listOpenrouterModels } from '../../config/openrouter-catalog.js';
 
 // The mask FORMAT that `maskApiKey` produces is the DTO contract (§12.6): the
 // `resolveApiKey` round-trip below compares an incoming wire value against
@@ -80,11 +87,12 @@ const setModelProvidersSchema = z.object({
 
 const getModelProvidersSchema = z.object({});
 
+const listOpenrouterModelsSchema = z.object({ forceRefresh: z.boolean().optional() });
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/require-await
 export async function configDispatch(
   ctx: WorkflowDispatchContext,
   method: string,
@@ -100,6 +108,13 @@ export async function configDispatch(
       requirePolicyMutation(ctx);
       const input = validateParams(setModelProvidersSchema, params);
       return setModelProviders(ctx, input);
+    }
+
+    // Ungated read of the PUBLIC OpenRouter catalog (mirrors getModelProviders).
+    case 'config.listOpenrouterModels': {
+      const input = validateParams(listOpenrouterModelsSchema, params);
+      const result = await listOpenrouterModels({ forceRefresh: input.forceRefresh });
+      return { models: result.models, source: result.source } satisfies OpenrouterModelsDto;
     }
 
     default:

@@ -148,3 +148,124 @@ export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
   dto.sessionAffinity = p.sessionAffinity;
   return dto;
 }
+
+// ---------------------------------------------------------------------------
+// Slug validation (OpenRouter model autocomplete).
+//
+// A pure, DOM-free guardrail run in `saveEdit` before persisting. The block-vs
+// -warn decision keys ONLY on the catalog `source` (mirrors the backend's
+// `catalogEnforces`): authoritative lists (`live`/`cache`) hard-block unknown
+// slugs; the offline `bundled` floor is warn-only. Grandfathering exempts any
+// slug that was already persisted for this profile, so routine edits (e.g. an
+// API-key rotation) never trap an untouched — possibly since-delisted — slug.
+// ---------------------------------------------------------------------------
+
+export type ModelCatalogSource = 'live' | 'cache' | 'bundled';
+
+/** The loaded catalog the editor validates against. */
+export interface KnownModels {
+  readonly slugs: ReadonlySet<string>;
+  readonly source: ModelCatalogSource;
+}
+
+/** One unrecognized slug, located back to the field that produced it. */
+export interface SlugIssue {
+  readonly field: 'model' | 'peragent';
+  /** modelMap row index (only for `field: 'model'`). */
+  readonly index?: number;
+  /** per-agent key (only for `field: 'peragent'`). */
+  readonly agent?: DockerAgent;
+  readonly slug: string;
+}
+
+/** Split of unrecognized slugs into hard-blocks and non-blocking warnings. */
+export interface SlugValidation {
+  readonly blocked: SlugIssue[];
+  readonly warnings: SlugIssue[];
+}
+
+/**
+ * The single source of truth for the block-vs-warn decision. Mirrors the
+ * backend catalog's `catalogEnforces`: authoritative sources enforce (block);
+ * the known-incomplete `bundled` fallback only warns.
+ */
+export function sourceEnforces(source: ModelCatalogSource): boolean {
+  return source !== 'bundled';
+}
+
+/**
+ * The set of slugs already persisted for a profile (all `modelMap[].model` and
+ * all `perAgent` values, trimmed). Membership in this set exempts a current slug
+ * from blocking — the robust, per-profile way to grandfather values the user did
+ * not introduce this session (no per-row identity tracking needed).
+ */
+export function persistedSlugSet(dto: OpenrouterProfileDto | undefined): ReadonlySet<string> {
+  const slugs = new Set<string>();
+  if (!dto) return slugs;
+  for (const row of dto.modelMap ?? []) {
+    const slug = row.model.trim();
+    if (slug.length > 0) slugs.add(slug);
+  }
+  for (const agent of DOCKER_AGENTS) {
+    const slug = (dto.perAgent?.[agent] ?? '').trim();
+    if (slug.length > 0) slugs.add(slug);
+  }
+  return slugs;
+}
+
+/**
+ * Validates the editable profile's slug-target fields against a known catalog.
+ *
+ * Each `modelMap[].model` (only for rows that would actually persist — see
+ * `editableToDto`) and each `perAgent` slug is trimmed, then: empty → ignored;
+ * in `known.slugs` or `grandfathered` → clean; otherwise blocked (authoritative
+ * source) or warned (bundled). modelMap is skipped entirely when the profile
+ * tracks the default map, since those rows are omitted on save.
+ */
+export function validateSlugs(
+  p: EditableProfile,
+  known: KnownModels,
+  grandfathered: ReadonlySet<string>,
+): SlugValidation {
+  const blocked: SlugIssue[] = [];
+  const warnings: SlugIssue[] = [];
+  const enforce = sourceEnforces(known.source);
+
+  const classify = (raw: string, locate: (slug: string) => SlugIssue): void => {
+    const slug = raw.trim();
+    if (slug.length === 0) return;
+    if (known.slugs.has(slug) || grandfathered.has(slug)) return;
+    (enforce ? blocked : warnings).push(locate(slug));
+  };
+
+  if (!p.usesDefaultMap) {
+    p.modelMap.forEach((row, index) => {
+      // A row with no `match` is filtered out by editableToDto, so it never
+      // persists — validating its model would false-block a discarded row.
+      if (row.match.trim().length === 0) return;
+      classify(row.model, (slug) => ({ field: 'model', index, slug }));
+    });
+  }
+  for (const agent of DOCKER_AGENTS) {
+    classify(p.perAgent[agent], (slug) => ({ field: 'peragent', agent, slug }));
+  }
+  return { blocked, warnings };
+}
+
+/** Human-readable location for a slug issue, e.g. "Model map row 2: `foo/bar`". */
+function describeIssue(issue: SlugIssue): string {
+  const where = issue.field === 'model' ? `Model map row ${(issue.index ?? 0) + 1}` : `${issue.agent} override`;
+  return `${where}: \`${issue.slug}\``;
+}
+
+/** Save-blocking message naming each unknown slug and where it lives. */
+export function blockMessage(blocked: SlugIssue[]): string {
+  return blocked.map((issue) => `${describeIssue(issue)} is not a known OpenRouter model`).join('; ');
+}
+
+/** Non-blocking note for slugs unverifiable against the offline `bundled` floor. */
+export function warningMessage(warnings: SlugIssue[]): string {
+  if (warnings.length === 0) return '';
+  const list = warnings.map(describeIssue).join('; ');
+  return `Saved. The following could not be verified against the offline model list — ${list}.`;
+}

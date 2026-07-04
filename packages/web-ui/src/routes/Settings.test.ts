@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import type { GetModelProvidersDto, SetModelProvidersDto } from '$lib/types.js';
+import type { GetModelProvidersDto, SetModelProvidersDto, OpenrouterModelsDto } from '$lib/types.js';
 
 // ---------------------------------------------------------------------------
 // Mock the store — declared before importing the component (mirrors
@@ -11,6 +11,18 @@ import type { GetModelProvidersDto, SetModelProvidersDto } from '$lib/types.js';
 
 const mockGet = vi.fn<() => Promise<GetModelProvidersDto>>();
 const mockSet = vi.fn<(input: SetModelProvidersDto) => Promise<GetModelProvidersDto>>();
+const mockList = vi.fn<() => Promise<OpenrouterModelsDto>>();
+
+// A realistic catalog covering every fixture slug (incl. z-ai/glm-5.2) plus a
+// few glm variants for the filter/keyboard test. Used as the SAFE default so the
+// pre-existing save tests never hard-block on an in-flight/known slug.
+const CATALOG_SLUGS = [
+  'anthropic/claude-3.7-sonnet',
+  'moonshotai/kimi-k2',
+  'openai/gpt-5',
+  'z-ai/glm-4.6',
+  'z-ai/glm-5.2',
+];
 
 const appStateMock: { daemonStatus: { allowPolicyMutation: boolean } | null } = {
   daemonStatus: { allowPolicyMutation: true },
@@ -21,6 +33,7 @@ const configChangedGenerationMock = { value: 0 };
 vi.mock('$lib/stores.svelte.js', () => ({
   getModelProviders: (...args: unknown[]) => mockGet(...(args as [])),
   setModelProviders: (...args: unknown[]) => mockSet(...(args as [SetModelProvidersDto])),
+  listOpenrouterModels: (...args: unknown[]) => mockList(...(args as [])),
   get appState() {
     return appStateMock;
   },
@@ -58,11 +71,15 @@ describe('Settings', () => {
   beforeEach(() => {
     mockGet.mockReset();
     mockSet.mockReset();
+    mockList.mockReset();
     appStateMock.daemonStatus = { allowPolicyMutation: true };
     connectionGenerationMock.value = 0;
     configChangedGenerationMock.value = 0;
     mockGet.mockResolvedValue(makeRegistry());
     mockSet.mockImplementation((input) => Promise.resolve(makeRegistry({ default: input.default ?? 'native' })));
+    // SAFE default: bundled (warn-only) AND a list covering every fixture slug —
+    // so opening/saving existing profiles never spuriously hard-blocks.
+    mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'bundled' });
   });
 
   it('renders the profile list with native first and non-deletable', async () => {
@@ -242,5 +259,133 @@ describe('Settings', () => {
     // No RPC issued; an inline error is shown.
     expect(mockSet).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(screen.getByTestId('editor-error')).toBeTruthy());
+  });
+
+  // ── Model autocomplete + save-time slug validation (Unit B) ───────────────
+
+  it('opens the model dropdown on focus, filters as you type, and commits with the keyboard', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-glm')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+
+    const model0 = screen.getByTestId('map-model-0') as HTMLInputElement;
+    await fireEvent.focus(model0);
+    // Popover (portaled to <body>) opens with options.
+    await vi.waitFor(() => expect(screen.getByTestId('model-combobox-listbox')).toBeTruthy());
+
+    // Typing filters to glm slugs (case-insensitive substring).
+    await fireEvent.input(model0, { target: { value: 'glm' } });
+    await vi.waitFor(() => {
+      const opts = screen.getAllByTestId(/^model-combobox-option-/);
+      expect(opts.length).toBeGreaterThan(0);
+      for (const o of opts) expect(o.textContent).toContain('glm');
+    });
+
+    // ArrowDown highlights the first option; Enter commits it into map-model-0.
+    await fireEvent.keyDown(model0, { key: 'ArrowDown' });
+    await fireEvent.keyDown(model0, { key: 'Enter' });
+    expect(model0.value).toContain('glm');
+    expect(CATALOG_SLUGS).toContain(model0.value);
+    // Popover closed after commit.
+    expect(screen.queryByTestId('model-combobox-listbox')).toBeNull();
+  });
+
+  it('hard-blocks an unknown slug under an authoritative (live) source', async () => {
+    // Live catalog that EXCLUDES the garbage slug the user types.
+    mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'live' });
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('add-profile-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('add-profile-button'));
+    await fireEvent.input(screen.getByTestId('profile-name'), { target: { value: 'kimi' } });
+
+    // Wait for the live list to load: the "Partial list (offline)" badge (shown
+    // only for the bundled default) disappears once source flips to live.
+    await vi.waitFor(() => expect(screen.queryAllByTestId('model-combobox-source').length).toBe(0));
+
+    await fireEvent.input(screen.getByTestId('peragent-goose'), { target: { value: 'garbage/model' } });
+    await fireEvent.click(screen.getByTestId('save-profile-button'));
+
+    // Save aborted: no RPC, error names the slug, and the field is marked invalid.
+    expect(mockSet).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(screen.getByTestId('editor-error')).toBeTruthy());
+    expect(screen.getByTestId('editor-error').textContent).toContain('garbage/model');
+    expect(screen.getByTestId('peragent-goose').getAttribute('aria-invalid')).toBe('true');
+  });
+
+  it('warn-degrades (saves) an unknown slug under the bundled fallback', async () => {
+    // Default mock is bundled; the garbage slug is unknown but only warns.
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('add-profile-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('add-profile-button'));
+    await fireEvent.input(screen.getByTestId('profile-name'), { target: { value: 'kimi' } });
+    await fireEvent.input(screen.getByTestId('peragent-goose'), { target: { value: 'garbage/model' } });
+    await fireEvent.click(screen.getByTestId('save-profile-button'));
+
+    // Persisted despite the unknown slug; a non-blocking warning note is shown.
+    await vi.waitFor(() => expect(mockSet).toHaveBeenCalledOnce());
+    const kimi = mockSet.mock.calls[0][0].profiles.kimi;
+    if (kimi.type !== 'openrouter') throw new Error('unreachable');
+    expect(kimi.perAgent).toEqual({ goose: 'garbage/model' });
+    await vi.waitFor(() => expect(screen.getByTestId('slug-warning')).toBeTruthy());
+    expect(screen.getByTestId('slug-warning').textContent).toContain('garbage/model');
+  });
+
+  it('saves a bundled-legit slug typed by hand with no warning', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('add-profile-button')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('add-profile-button'));
+    await fireEvent.input(screen.getByTestId('profile-name'), { target: { value: 'kimi' } });
+    await fireEvent.input(screen.getByTestId('peragent-goose'), { target: { value: 'z-ai/glm-4.6' } });
+    await fireEvent.click(screen.getByTestId('save-profile-button'));
+
+    await vi.waitFor(() => expect(mockSet).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId('slug-warning')).toBeNull();
+  });
+
+  it('grandfathers an untouched persisted slug even under a live source (key-rotation)', async () => {
+    // glm's persisted slug z-ai/glm-5.2 is NOT in this live list, but it was
+    // already saved — editing only the API key must not trap it.
+    mockList.mockResolvedValue({ models: ['anthropic/claude-3.7-sonnet'], source: 'live' });
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-glm')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+    await vi.waitFor(() => expect(screen.queryAllByTestId('model-combobox-source').length).toBe(0));
+    // Rotate the key only; leave the (now-delisted) slug untouched.
+    await fireEvent.input(screen.getByTestId('profile-apikey'), { target: { value: 'sk-or-v1-ROTATED' } });
+    await fireEvent.click(screen.getByTestId('save-profile-button'));
+
+    await vi.waitFor(() => expect(mockSet).toHaveBeenCalledOnce());
+    const glm = mockSet.mock.calls[0][0].profiles.glm;
+    if (glm.type !== 'openrouter') throw new Error('unreachable');
+    expect(glm.apiKey).toBe('sk-or-v1-ROTATED');
+    expect(glm.modelMap).toEqual([{ match: '*sonnet*', model: 'z-ai/glm-5.2' }]);
+  });
+
+  it('shows the "Partial list (offline)" badge for bundled and hides it for live', async () => {
+    // Bundled (default) → badge present on the editor's slug fields.
+    const { unmount } = render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-glm')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+    await vi.waitFor(() => expect(screen.getAllByTestId('model-combobox-source').length).toBeGreaterThan(0));
+    unmount();
+
+    // Live → no bundled badge.
+    mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'live' });
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-glm')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+    await vi.waitFor(() => expect(screen.queryAllByTestId('model-combobox-source').length).toBe(0));
+  });
+
+  it('the Refresh button forces a catalog re-fetch with forceRefresh=true', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-glm')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-glm'));
+    // Let the on-open load settle (the Refresh button re-enables once modelsLoading clears).
+    await vi.waitFor(() => expect((screen.getByTestId('model-refresh') as HTMLButtonElement).disabled).toBe(false));
+    mockList.mockClear();
+    await fireEvent.click(screen.getByTestId('model-refresh'));
+    // Re-fetches even though the catalog already loaded this session, and with force=true.
+    await vi.waitFor(() => expect(mockList).toHaveBeenCalledWith(true));
   });
 });

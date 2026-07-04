@@ -82,7 +82,10 @@ export type MethodName =
   // Config (modelProviders registry). Read is ungated; the mutation is gated
   // on the daemon's `--allow-policy-mutation` kill switch (POLICY_MUTATION_FORBIDDEN).
   | 'config.getModelProviders'
-  | 'config.setModelProviders';
+  | 'config.setModelProviders'
+  // OpenRouter model-slug catalog for autocomplete/validation. Ungated read of
+  // PUBLIC data (mirrors `config.getModelProviders`); no secret, no mutation.
+  | 'config.listOpenrouterModels';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -622,6 +625,17 @@ export interface GetModelProvidersDto {
 export interface SetModelProvidersDto {
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+/**
+ * Response from `config.listOpenrouterModels`. `source` drives client-side
+ * validation strictness: `live`/`cache` are authoritative (hard-block unknown
+ * slugs), `bundled` is the known-incomplete offline floor (warn-only). See
+ * `catalogEnforces` in `src/config/openrouter-catalog.ts`.
+ */
+export interface OpenrouterModelsDto {
+  readonly models: readonly string[];
+  readonly source: 'live' | 'cache' | 'bundled';
 }
 
 // ---------------------------------------------------------------------------

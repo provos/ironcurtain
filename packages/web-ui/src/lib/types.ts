@@ -553,6 +553,16 @@ export interface SetModelProvidersDto {
   readonly profiles: Readonly<Record<string, ProfileDto>>;
 }
 
+/**
+ * Response from `config.listOpenrouterModels`. `source` drives validation
+ * strictness: `live`/`cache` hard-block unknown slugs; `bundled` (the offline
+ * floor) is warn-only.
+ */
+export interface OpenrouterModelsDto {
+  readonly models: readonly string[];
+  readonly source: 'live' | 'cache' | 'bundled';
+}
+
 // ---------------------------------------------------------------------------
 // Persona streamed-compile types (Phase 1b). Mirror src/web-ui/web-ui-types.ts.
 // ---------------------------------------------------------------------------

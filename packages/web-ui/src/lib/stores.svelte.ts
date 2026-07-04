@@ -32,6 +32,7 @@ import type {
   MessageLogResponseDto,
   GetModelProvidersDto,
   SetModelProvidersDto,
+  OpenrouterModelsDto,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
@@ -706,6 +707,19 @@ export async function setModelProviders(input: SetModelProvidersDto): Promise<Ge
     ...(input.default !== undefined ? { default: input.default } : {}),
     profiles: input.profiles,
   });
+}
+
+/**
+ * Fetch the OpenRouter model-slug catalog for autocomplete/validation. `source`
+ * tells the caller whether the list is authoritative (`live`/`cache` → hard-block
+ * unknown slugs) or the offline floor (`bundled` → warn-only). Ungated read.
+ * Pass `forceRefresh` to bypass the daemon's 6h cache (the editor's Refresh button).
+ */
+export async function listOpenrouterModels(forceRefresh = false): Promise<OpenrouterModelsDto> {
+  return getWsClient().request<OpenrouterModelsDto>(
+    'config.listOpenrouterModels',
+    forceRefresh ? { forceRefresh: true } : {},
+  );
 }
 
 export async function connectWithToken(token: string): Promise<void> {

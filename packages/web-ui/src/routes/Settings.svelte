@@ -3,6 +3,7 @@
   import {
     getModelProviders,
     setModelProviders,
+    listOpenrouterModels,
     appState,
     connectionGeneration,
     configChangedGeneration,
@@ -15,16 +16,23 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { Modal } from '$lib/components/ui/modal/index.js';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
+  import ModelCombobox from '$lib/components/features/model-combobox.svelte';
   import Plus from 'phosphor-svelte/lib/Plus';
   import Trash from 'phosphor-svelte/lib/Trash';
+  import ArrowsClockwise from 'phosphor-svelte/lib/ArrowsClockwise';
   import {
     NATIVE_NAME,
     DOCKER_AGENTS,
+    type DockerAgent,
     type EditableProfile,
     blankOpenrouterProfile,
     toEditable,
     editableToDto,
     isDuplicateProfileName,
+    validateSlugs,
+    blockMessage,
+    warningMessage,
+    persistedSlugSet,
   } from './settings-helpers.js';
 
   // Whether the daemon permits config mutation. When false every mutation control
@@ -44,6 +52,21 @@
   let editing = $state<{ name: string; original: string | null; profile: EditableProfile } | null>(null);
   let saving = $state(false);
   let saveError = $state<{ code: string; message: string } | null>(null);
+
+  // OpenRouter model catalog for slug autocomplete + save-time validation.
+  // `modelsSource` defaults to 'bundled' (warn-only) until loadModels() resolves,
+  // so an in-flight save can never spuriously hard-block.
+  let models = $state<string[]>([]);
+  let modelsSource = $state<'live' | 'cache' | 'bundled'>('bundled');
+  let modelsLoading = $state(false);
+  let modelsError = $state(false);
+  let modelsLoaded = $state(false);
+
+  // Fields the last blocked save flagged (drives each combobox's `invalid` ring).
+  let invalidModelRows = $state<ReadonlySet<number>>(new Set());
+  let invalidAgents = $state<ReadonlySet<DockerAgent>>(new Set());
+  // Non-blocking note surfaced after a warn-degrade save (modal already closed).
+  let savedWarning = $state('');
 
   // Delete confirmation.
   let deleteTarget = $state<string | null>(null);
@@ -117,22 +140,61 @@
     return `${mapPart} · key: ${p.apiKey ?? 'none'}`;
   }
 
+  // Fetch the OpenRouter catalog lazily when the editor opens. Best-effort: a
+  // failure degrades to the bundled (warn-only) mode, never throws. Loads once
+  // per page session (the daemon caches with a 6h TTL); a prior failure retries,
+  // and the editor's Refresh button forces a re-fetch (`opts.force`).
+  async function loadModels(opts?: { force?: boolean }): Promise<void> {
+    const force = opts?.force ?? false;
+    if (modelsLoading) return;
+    if (modelsLoaded && !modelsError && !force) return;
+    modelsLoading = true;
+    modelsError = false;
+    try {
+      const dto = await listOpenrouterModels(force);
+      models = [...dto.models];
+      modelsSource = dto.source;
+      modelsLoaded = true;
+    } catch {
+      modelsError = true;
+    }
+    modelsLoading = false;
+  }
+
+  // Clears per-edit UX state (blocked-field marks + the last warn note) so a
+  // freshly opened editor starts clean.
+  function resetEditFeedback(): void {
+    saveError = null;
+    invalidModelRows = new Set();
+    invalidAgents = new Set();
+    savedWarning = '';
+  }
+
   // ── Add / edit dialog ────────────────────────────────────────────────────
   function openAdd(): void {
     editing = { name: '', original: null, profile: blankOpenrouterProfile() };
-    saveError = null;
+    resetEditFeedback();
+    void loadModels();
   }
 
   function openEdit(name: string): void {
     const p = registry?.profiles[name];
     if (!p || p.type !== 'openrouter') return;
     editing = { name, original: name, profile: toEditable(p) };
-    saveError = null;
+    resetEditFeedback();
+    void loadModels();
   }
 
   function closeEdit(): void {
     editing = null;
     saveError = null;
+  }
+
+  /** The originally-persisted openrouter DTO for `original` (undefined for add). */
+  function registryProfileDto(original: string | null): OpenrouterProfileDto | undefined {
+    if (!original) return undefined;
+    const p = registry?.profiles[original];
+    return p && p.type === 'openrouter' ? p : undefined;
   }
 
   function addMapRow(): void {
@@ -186,6 +248,29 @@
       saveError = { code: 'INVALID_PARAMS', message: `A profile named "${name}" already exists.` };
       return;
     }
+
+    // Client-side slug guardrail (a UX aid, not a security boundary — the backend
+    // persists whatever it is given). Grandfather slugs already persisted for this
+    // profile so a routine edit never traps an untouched, possibly-delisted slug.
+    const grandfathered = persistedSlugSet(registryProfileDto(editing.original));
+    const validation = validateSlugs(editing.profile, { slugs: new Set(models), source: modelsSource }, grandfathered);
+    if (validation.blocked.length > 0) {
+      saveError = { code: 'INVALID_PARAMS', message: blockMessage(validation.blocked) };
+      const rows = new Set<number>();
+      const agents = new Set<DockerAgent>();
+      for (const issue of validation.blocked) {
+        if (issue.field === 'model' && issue.index !== undefined) rows.add(issue.index);
+        else if (issue.field === 'peragent' && issue.agent) agents.add(issue.agent);
+      }
+      invalidModelRows = rows;
+      invalidAgents = agents;
+      return;
+    }
+    // Under the bundled fallback, unknown slugs only warn — surface after saving.
+    const pendingWarning = warningMessage(validation.warnings);
+    invalidModelRows = new Set();
+    invalidAgents = new Set();
+
     saving = true;
     saveError = null;
     try {
@@ -195,6 +280,7 @@
       const nextDefault = defaultName;
       applyRegistry(await setModelProviders({ default: nextDefault, profiles }));
       editing = null;
+      savedWarning = pendingWarning;
     } catch (err) {
       saveError = rpcError(err);
     }
@@ -288,6 +374,14 @@
           <span class="font-mono text-xs" data-testid="settings-error-code">{saveError.code}</span>
           <span class="block mt-1">{errorAffordance(saveError.code)}</span>
         </span>
+      </Alert>
+    </div>
+  {/if}
+
+  {#if savedWarning}
+    <div data-testid="slug-warning">
+      <Alert variant="default" dismissible ondismiss={() => (savedWarning = '')}>
+        <span class="block text-sm">{savedWarning}</span>
       </Alert>
     </div>
   {/if}
@@ -403,7 +497,19 @@
       </div>
 
       <div>
-        <p class="text-xs text-muted-foreground mb-1">Model map</p>
+        <div class="flex items-center justify-between mb-1">
+          <p class="text-xs text-muted-foreground">Model map</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            onclick={() => loadModels({ force: true })}
+            disabled={modelsLoading}
+            data-testid="model-refresh"
+          >
+            <ArrowsClockwise size={13} class="mr-1" />
+            {modelsLoading ? 'Refreshing…' : 'Refresh models'}
+          </Button>
+        </div>
         <label class="flex items-start gap-2 text-sm mb-2">
           <input
             type="checkbox"
@@ -424,18 +530,27 @@
         {#if !editing.profile.usesDefaultMap}
           <p class="text-[11px] text-muted-foreground mb-1">Custom rules (glob → slug, first match wins)</p>
           {#each editing.profile.modelMap as _row, i (i)}
-            <div class="flex items-center gap-2 mb-2">
-              <Input
-                bind:value={editing.profile.modelMap[i].match}
-                placeholder="*sonnet*"
-                data-testid={`map-match-${i}`}
-              />
+            <div class="flex items-start gap-2 mb-2">
+              <div class="flex-1">
+                <Input
+                  bind:value={editing.profile.modelMap[i].match}
+                  placeholder="*sonnet*"
+                  data-testid={`map-match-${i}`}
+                />
+              </div>
               <span class="text-muted-foreground">→</span>
-              <Input
-                bind:value={editing.profile.modelMap[i].model}
-                placeholder="z-ai/glm-5.2"
-                data-testid={`map-model-${i}`}
-              />
+              <div class="flex-1">
+                <ModelCombobox
+                  bind:value={editing.profile.modelMap[i].model}
+                  {models}
+                  source={modelsSource}
+                  loading={modelsLoading}
+                  error={modelsError}
+                  invalid={invalidModelRows.has(i)}
+                  placeholder="z-ai/glm-5.2"
+                  testid={`map-model-${i}`}
+                />
+              </div>
               <Button variant="ghost" size="sm" onclick={() => removeMapRow(i)} data-testid={`map-remove-${i}`}>
                 <Trash size={14} />
               </Button>
@@ -454,13 +569,20 @@
         <p class="text-xs text-muted-foreground mb-1">Per-agent model override (wins over the map)</p>
         <div class="space-y-2">
           {#each DOCKER_AGENTS as agent (agent)}
-            <div class="flex items-center gap-2">
-              <span class="text-xs font-mono w-24 shrink-0">{agent}</span>
-              <Input
-                bind:value={editing.profile.perAgent[agent]}
-                placeholder="(unset)"
-                data-testid={`peragent-${agent}`}
-              />
+            <div class="flex items-start gap-2">
+              <span class="text-xs font-mono w-24 shrink-0 mt-2.5">{agent}</span>
+              <div class="flex-1">
+                <ModelCombobox
+                  bind:value={editing.profile.perAgent[agent]}
+                  {models}
+                  source={modelsSource}
+                  loading={modelsLoading}
+                  error={modelsError}
+                  invalid={invalidAgents.has(agent)}
+                  placeholder="(unset)"
+                  testid={`peragent-${agent}`}
+                />
+              </div>
             </div>
           {/each}
         </div>
@@ -505,7 +627,9 @@
         <div data-testid="editor-error">
           <Alert variant="destructive">
             <span class="font-mono text-xs">{saveError.code}</span>
-            <span class="block mt-1">{errorAffordance(saveError.code)}</span>
+            <span class="block mt-1">
+              {saveError.code === 'INVALID_PARAMS' ? saveError.message : errorAffordance(saveError.code)}
+            </span>
           </Alert>
         </div>
       {/if}

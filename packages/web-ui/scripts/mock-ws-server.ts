@@ -560,6 +560,52 @@ let modelProviders: MockModelProviders = {
 
 const ORIGINAL_MODEL_PROVIDERS: MockModelProviders = structuredClone(modelProviders);
 
+// ---------------------------------------------------------------------------
+// OpenRouter model catalog (config.listOpenrouterModels).
+//
+// A realistic slug set for offline autocomplete/validation dev + demo. It MUST
+// include every slug referenced by the canned profiles above (z-ai/glm-5.2,
+// moonshot/kimi-k3) plus every DEFAULT_MODEL_MAP target, so opening/saving the
+// seeded profiles never hard-blocks.
+//
+// The reported `source` defaults to 'live' so the HARD-BLOCK path is demoable
+// offline (type a garbage slug -> see it blocked). Set the env var
+// MOCK_OPENROUTER_SOURCE=bundled to reach the warn-degrade path (unknown slugs
+// allowed), or =cache/=live for the authoritative path — all without a real daemon.
+// ---------------------------------------------------------------------------
+
+const MOCK_SLUGS: readonly string[] = [
+  'anthropic/claude-3.5-haiku',
+  'anthropic/claude-3.5-sonnet',
+  'anthropic/claude-3.7-sonnet',
+  'anthropic/claude-opus-4.1',
+  'anthropic/claude-sonnet-4.5',
+  'deepseek/deepseek-chat',
+  'deepseek/deepseek-r1',
+  'deepseek/deepseek-v3',
+  'google/gemini-2.0-flash',
+  'google/gemini-2.5-flash',
+  'google/gemini-2.5-pro',
+  'moonshot/kimi-k3',
+  'moonshotai/kimi-k2',
+  'openai/gpt-4.1',
+  'openai/gpt-4o',
+  'openai/gpt-4o-mini',
+  'openai/gpt-5',
+  'openai/o3',
+  'openai/o4-mini',
+  'x-ai/grok-4',
+  'z-ai/glm-4.5',
+  'z-ai/glm-4.6',
+  'z-ai/glm-5.2',
+];
+
+function resolveMockOpenrouterSource(): 'live' | 'cache' | 'bundled' {
+  const v = process.env.MOCK_OPENROUTER_SOURCE;
+  if (v === 'bundled' || v === 'cache' || v === 'live') return v;
+  return 'live';
+}
+
 /** Mirrors maskApiKey in config-command.ts / config-dispatch.ts (`sk-...xyz` / 'none'). */
 function maskApiKey(key: string | undefined): string {
   if (!key) return 'none';
@@ -1870,6 +1916,12 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       broadcast('config.changed', {});
       return buildModelProvidersDto();
     }
+
+    // Ungated read of the OpenRouter catalog. Source is env-toggled (see
+    // MOCK_OPENROUTER_SOURCE near MOCK_SLUGS) so both validation modes are
+    // reachable offline; defaults to 'live' (hard-block path).
+    case 'config.listOpenrouterModels':
+      return { models: MOCK_SLUGS, source: resolveMockOpenrouterSource() };
 
     // Workflow methods
     case 'workflows.listDefinitions':

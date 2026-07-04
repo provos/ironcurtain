@@ -6,6 +6,13 @@ import {
   parseList,
   blankOpenrouterProfile,
   isDuplicateProfileName,
+  sourceEnforces,
+  persistedSlugSet,
+  validateSlugs,
+  blockMessage,
+  warningMessage,
+  type EditableProfile,
+  type KnownModels,
 } from './settings-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -135,6 +142,141 @@ describe('parseList', () => {
   it('splits, trims, and drops empties', () => {
     expect(parseList('z-ai,  deepinfra , ,')).toEqual(['z-ai', 'deepinfra']);
     expect(parseList('')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slug validation (OpenRouter model autocomplete).
+// ---------------------------------------------------------------------------
+
+describe('sourceEnforces', () => {
+  it('blocks on authoritative sources and warns on the bundled floor', () => {
+    expect(sourceEnforces('live')).toBe(true);
+    expect(sourceEnforces('cache')).toBe(true);
+    expect(sourceEnforces('bundled')).toBe(false);
+  });
+});
+
+describe('persistedSlugSet', () => {
+  it('returns an empty set for a brand-new (undefined) profile', () => {
+    expect(persistedSlugSet(undefined).size).toBe(0);
+  });
+
+  it('collects every persisted modelMap + perAgent slug, trimmed and de-duped', () => {
+    const dto: OpenrouterProfileDto = {
+      type: 'openrouter',
+      modelMap: [
+        { match: '*sonnet*', model: 'z-ai/glm-5.2' },
+        { match: '*opus*', model: 'z-ai/glm-5.2' },
+      ],
+      perAgent: { 'claude-code': 'openai/gpt-x', goose: undefined, codex: '  moonshot/kimi-k3  ' },
+    };
+    expect(persistedSlugSet(dto)).toEqual(new Set(['z-ai/glm-5.2', 'openai/gpt-x', 'moonshot/kimi-k3']));
+  });
+});
+
+/** A minimal editable profile with a custom map (usesDefaultMap = false). */
+function editableWith(over: Partial<EditableProfile> = {}): EditableProfile {
+  return {
+    apiKey: 'sk-x',
+    modelMap: [],
+    perAgent: { 'claude-code': '', goose: '', codex: '' },
+    providerOrder: '',
+    providerOnly: '',
+    allowFallbacks: true,
+    sessionAffinity: true,
+    usesDefaultMap: false,
+    ...over,
+  };
+}
+
+const KNOWN = 'z-ai/glm-5.2';
+const known = (source: KnownModels['source']): KnownModels => ({ slugs: new Set([KNOWN]), source });
+const NONE: ReadonlySet<string> = new Set();
+
+describe('validateSlugs', () => {
+  it('blocks an unknown modelMap slug under an authoritative (live) source', () => {
+    const p = editableWith({ modelMap: [{ match: '*', model: 'foo/bar' }] });
+    const v = validateSlugs(p, known('live'), NONE);
+    expect(v.blocked).toEqual([{ field: 'model', index: 0, slug: 'foo/bar' }]);
+    expect(v.warnings).toEqual([]);
+  });
+
+  it('only warns on an unknown slug under the bundled fallback', () => {
+    const p = editableWith({ modelMap: [{ match: '*', model: 'foo/bar' }] });
+    const v = validateSlugs(p, known('bundled'), NONE);
+    expect(v.blocked).toEqual([]);
+    expect(v.warnings).toEqual([{ field: 'model', index: 0, slug: 'foo/bar' }]);
+  });
+
+  it('treats a known slug as clean', () => {
+    const p = editableWith({ modelMap: [{ match: '*', model: KNOWN }] });
+    expect(validateSlugs(p, known('live'), NONE)).toEqual({ blocked: [], warnings: [] });
+  });
+
+  it('ignores empty slugs (never validated)', () => {
+    const p = editableWith({
+      modelMap: [{ match: '*', model: '   ' }],
+      perAgent: { 'claude-code': '', goose: '', codex: '' },
+    });
+    expect(validateSlugs(p, known('live'), NONE)).toEqual({ blocked: [], warnings: [] });
+  });
+
+  it('grandfathers a persisted slug under an authoritative source (key-rotation case)', () => {
+    // The persisted slug is absent from the (delisted) live catalog, but was
+    // already saved — editing only the API key must never trap it.
+    const p = editableWith({ modelMap: [{ match: '*sonnet*', model: 'z-ai/legacy-glm' }] });
+    const grandfathered = new Set(['z-ai/legacy-glm']);
+    const v = validateSlugs(p, known('live'), grandfathered);
+    expect(v.blocked).toEqual([]);
+    expect(v.warnings).toEqual([]);
+  });
+
+  it('trims before the membership check (a trailing-space known slug is clean)', () => {
+    const p = editableWith({ modelMap: [{ match: '*', model: `${KNOWN}  ` }] });
+    expect(validateSlugs(p, known('live'), NONE)).toEqual({ blocked: [], warnings: [] });
+  });
+
+  it('validates per-agent slugs and locates them by agent', () => {
+    const p = editableWith({ perAgent: { 'claude-code': '', goose: 'bad/one', codex: KNOWN } });
+    const v = validateSlugs(p, known('live'), NONE);
+    expect(v.blocked).toEqual([{ field: 'peragent', agent: 'goose', slug: 'bad/one' }]);
+  });
+
+  it('skips modelMap entirely when the profile tracks the default map', () => {
+    // Stale rows can linger behind the "use default map" toggle; they are omitted
+    // on save, so they must not block.
+    const p = editableWith({ usesDefaultMap: true, modelMap: [{ match: '*', model: 'foo/bar' }] });
+    expect(validateSlugs(p, known('live'), NONE)).toEqual({ blocked: [], warnings: [] });
+  });
+
+  it('skips a modelMap row with no match (editableToDto would discard it)', () => {
+    const p = editableWith({ modelMap: [{ match: '', model: 'foo/bar' }] });
+    expect(validateSlugs(p, known('live'), NONE)).toEqual({ blocked: [], warnings: [] });
+  });
+});
+
+describe('blockMessage', () => {
+  it('names each bad slug and where it lives', () => {
+    const msg = blockMessage([
+      { field: 'model', index: 1, slug: 'foo/bar' },
+      { field: 'peragent', agent: 'codex', slug: 'x/y' },
+    ]);
+    expect(msg).toContain('Model map row 2: `foo/bar`');
+    expect(msg).toContain('codex override: `x/y`');
+    expect(msg).toContain('is not a known OpenRouter model');
+  });
+});
+
+describe('warningMessage', () => {
+  it('is empty when there are no warnings', () => {
+    expect(warningMessage([])).toBe('');
+  });
+
+  it('lists the unverified slugs', () => {
+    const msg = warningMessage([{ field: 'peragent', agent: 'goose', slug: 'a/b' }]);
+    expect(msg).toContain('goose override: `a/b`');
+    expect(msg.toLowerCase()).toContain('offline');
   });
 });
 

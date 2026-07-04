@@ -37,6 +37,12 @@ import {
   type ContainerRuntimeSetting,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
+import {
+  listOpenrouterModels,
+  catalogEnforces,
+  type ModelCatalogResult,
+  type ModelCatalogSource,
+} from './openrouter-catalog.js';
 import type { MCPServerConfig } from './types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1055,6 +1061,90 @@ async function editProfileField(
   return undefined;
 }
 
+// ─── Slug autocomplete (OpenRouter model catalog) ────────────
+
+/** One selectable slug in a model-slug autocomplete. */
+export type SlugOption = { value: string; label: string };
+
+/**
+ * Builds the option list for a model-slug autocomplete from the resolved catalog.
+ *
+ * - Every catalog slug becomes a `{ value, label }` option.
+ * - `allowNone` prepends a `(none)` sentinel (value `''`) FIRST — the only way a
+ *   selection-only prompt can clear a per-agent override.
+ * - A non-empty `current` absent from the catalog is appended as a grandfather
+ *   option, so editing a legacy/delisted slug never traps the user.
+ *
+ * There is intentionally NO refresh sentinel: `ironcurtain config` is short-lived
+ * and fetches the catalog once, so re-running it IS the refresh path.
+ */
+export function buildSlugOptions(
+  catalog: ModelCatalogResult,
+  current: string,
+  opts: { allowNone: boolean },
+): SlugOption[] {
+  const options: SlugOption[] = catalog.models.map((slug) => ({ value: slug, label: slug }));
+  if (opts.allowNone) {
+    options.unshift({ value: '', label: '(none — use model map)' });
+  }
+  if (current !== '' && !catalog.models.includes(current)) {
+    options.push({ value: current, label: `${current}  (current, unverified)` });
+  }
+  return options;
+}
+
+/** Autocomplete (hard-block) for an authoritative catalog; free text for the bundled floor. */
+export function slugPromptMode(source: ModelCatalogSource): 'autocomplete' | 'freetext' {
+  return catalogEnforces(source) ? 'autocomplete' : 'freetext';
+}
+
+/**
+ * Prompts for one OpenRouter model slug. Fetches the catalog lazily (module-cached)
+ * so apiKey / provider-preference-only edits never pay the network cost.
+ *
+ * Authoritative catalog (`live`/`cache`): a selection-only `autocomplete` whose
+ * options ARE the allowlist — a structural hard-block — with `validate` as
+ * belt-and-suspenders. For an UNSET field the `(none)` sentinel is first, so a
+ * no-op Enter keeps it unset — clack auto-preselects the first option and collapses
+ * a falsy `initialValue` to undefined; a non-empty `current` is passed as
+ * `initialValue` so editing an existing slug starts on it.
+ *
+ * Bundled floor (offline): the list is known-incomplete, so free-text entry with a
+ * one-line warning — the value is accepted as-is.
+ *
+ * Returns the chosen slug (`''` clears when `allowNone`), or `undefined` on cancel.
+ */
+async function promptSlug(message: string, opts: { current: string; allowNone: boolean }): Promise<string | undefined> {
+  const { current, allowNone } = opts;
+  const catalog = await listOpenrouterModels();
+
+  if (slugPromptMode(catalog.source) === 'autocomplete') {
+    // Allowlist = catalog slugs, plus `current` (grandfather a legacy/delisted slug)
+    // and '' ONLY when the field is clearable (per-agent). A required field
+    // (map-row model, allowNone:false) never admits an empty submit.
+    const allowlist = new Set<string>([...catalog.models, ...(current ? [current] : []), ...(allowNone ? [''] : [])]);
+    const picked = await p.autocomplete<string>({
+      message,
+      options: buildSlugOptions(catalog, current, { allowNone }),
+      initialValue: current || '',
+      initialUserInput: current || undefined,
+      maxItems: 8,
+      validate: (v) => (typeof v === 'string' && !allowlist.has(v) ? `Unknown model: ${v}` : undefined),
+    });
+    if (isCancelled(picked)) return undefined;
+    return picked as string;
+  }
+
+  p.note("Model catalog unavailable — slug can't be verified; entered value accepted as-is.");
+  const typed = await p.text({
+    message,
+    placeholder: current || DEFAULT_GLM_SLUG,
+    validate: allowNone ? () => undefined : (val) => (!val ? 'Target slug is required' : undefined),
+  });
+  if (isCancelled(typed)) return undefined;
+  return typed as string;
+}
+
 async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingOpenrouterProfile | undefined> {
   const rows = [...(profile.modelMap ?? [])];
   p.note(
@@ -1084,13 +1174,12 @@ async function editModelMap(profile: PendingOpenrouterProfile): Promise<PendingO
         validate: (val) => (!val ? 'Match glob is required' : undefined),
       });
       if (isCancelled(match)) continue;
-      const model = await p.text({
-        message: 'Target OpenRouter slug (e.g. z-ai/glm-5.2):',
-        placeholder: DEFAULT_GLM_SLUG,
-        validate: (val) => (!val ? 'Target slug is required' : undefined),
+      const model = await promptSlug('Target OpenRouter slug (e.g. z-ai/glm-5.2):', {
+        current: '',
+        allowNone: false,
       });
-      if (isCancelled(model)) continue;
-      rows.push({ match: match as string, model: model as string });
+      if (model === undefined) continue;
+      rows.push({ match: match as string, model });
     } else if (typeof action === 'string' && action.startsWith('row:')) {
       const index = Number(action.slice('row:'.length));
       rows.splice(index, 1);
@@ -1118,13 +1207,12 @@ async function editPerAgent(profile: PendingOpenrouterProfile): Promise<PendingO
     if (isCancelled(selected) || selected === 'back') break;
 
     const agent = selected as DockerAgent;
-    const slug = await p.text({
-      message: `${DOCKER_AGENT_LABELS[agent]} model slug (blank to clear):`,
-      placeholder: perAgent[agent] ?? DEFAULT_GLM_SLUG,
-      validate: () => undefined,
+    const slug = await promptSlug(`${DOCKER_AGENT_LABELS[agent]} model slug (blank to clear):`, {
+      current: perAgent[agent] ?? '',
+      allowNone: true,
     });
-    if (isCancelled(slug)) continue;
-    if (slug) perAgent[agent] = slug as string;
+    if (slug === undefined) continue;
+    if (slug) perAgent[agent] = slug;
     else perAgent = omitKey(perAgent, agent);
   }
 
