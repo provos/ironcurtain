@@ -597,8 +597,15 @@ function buildModelProvidersDto() {
  * else undefined. Mirrors config-dispatch.ts exactly.
  */
 function applySetModelProviders(params: Record<string, unknown>): RpcErrorResult | undefined {
-  const inProfiles = (params.profiles ?? {}) as Record<string, Record<string, unknown>>;
-  if (typeof inProfiles !== 'object') return errorResult('INVALID_PARAMS', 'profiles is required');
+  // Mirror the daemon's `z.record(...)` contract: `profiles` is required and
+  // must be a plain object. `typeof x === 'object'` alone would let arrays (and
+  // formerly null) through — `profiles: []` would be read as numeric profile
+  // names and silently accepted, masking frontend/server contract bugs in e2e.
+  const rawProfiles = params.profiles;
+  if (typeof rawProfiles !== 'object' || rawProfiles === null || Array.isArray(rawProfiles)) {
+    return errorResult('INVALID_PARAMS', 'profiles is required');
+  }
+  const inProfiles = rawProfiles as Record<string, Record<string, unknown>>;
 
   const priorNames = Object.keys(modelProviders.profiles);
   const next: Record<string, MockStoredProfile> = {};

@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 const envText = readFileSync(new URL('./.env', import.meta.url), 'utf-8');
 const match = envText.match(/^OPENROUTER_API_KEY=["']?([^"'\r\n]+)["']?\s*$/m);
 if (!match) {
-  console.error('OPENROUTER_API_KEY not found in .env');
+  process.stderr.write('OPENROUTER_API_KEY not found in .env\n');
   process.exit(2);
 }
 

@@ -48,8 +48,11 @@ export type TokenStreamEvent =
        */
       readonly costUsd?: number;
       /**
-       * Cached input tokens from OpenRouter `usage.prompt_tokens_details.cached_tokens`,
-       * when present (§10.2). Undefined otherwise.
+       * Cached input tokens from OpenRouter usage, normalized across the three
+       * wire formats by `extractOpenRouterUsage`: `cache_read_input_tokens`
+       * (Anthropic skin), `prompt_tokens_details.cached_tokens` (Chat
+       * Completions), and `input_tokens_details.cached_tokens` (Responses).
+       * Undefined when the stream reports none (§10.2).
        */
       readonly cachedTokens?: number;
       readonly timestamp: number;
