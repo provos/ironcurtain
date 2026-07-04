@@ -115,6 +115,43 @@ describe('Settings', () => {
     expect((screen.getByTestId('provider-order') as HTMLInputElement).value).toBe('z-ai');
     expect((screen.getByTestId('provider-allow-fallbacks') as HTMLInputElement).checked).toBe(false);
     expect((screen.getByTestId('session-affinity') as HTMLInputElement).checked).toBe(true);
+    // glm carries an explicit map, so the "use default map" toggle is OFF and the
+    // custom-rules editor is shown.
+    expect((screen.getByTestId('map-use-default') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('presents a default-tracking profile as "use default map", not an empty/per-agent map', async () => {
+    // A profile that OMITS modelMap tracks IronCurtain's built-in defaults. The
+    // editor must say so — never render a bare, empty rules list that reads as
+    // "nothing configured" or the misleading "per-agent only" note.
+    mockGet.mockResolvedValue({
+      default: 'glm',
+      profiles: {
+        native: { type: 'native' },
+        tracked: {
+          type: 'openrouter',
+          apiKey: MASK,
+          // modelMap omitted → default-tracking
+          perAgent: { 'claude-code': undefined, goose: undefined, codex: undefined },
+          sessionAffinity: true,
+        },
+      },
+    });
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('edit-profile-tracked')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('edit-profile-tracked'));
+
+    // Toggle ON; the rules editor and its "per-agent only" note are hidden.
+    const useDefault = screen.getByTestId('map-use-default') as HTMLInputElement;
+    expect(useDefault.checked).toBe(true);
+    expect(screen.queryByTestId('map-add')).toBeNull();
+    expect(screen.queryByTestId('map-match-0')).toBeNull();
+
+    // Unchecking enters custom mode and seeds an editable row (not silently empty).
+    await fireEvent.click(useDefault);
+    expect((screen.getByTestId('map-use-default') as HTMLInputElement).checked).toBe(false);
+    await vi.waitFor(() => expect(screen.getByTestId('map-add')).toBeTruthy());
+    expect(screen.getByTestId('map-match-0')).toBeTruthy();
   });
 
   it('save sends the whole record with the masked key preserved for an unedited profile', async () => {

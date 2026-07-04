@@ -112,6 +112,17 @@ describe('settings-helpers round-trip', () => {
     expect(back.modelMap).toEqual([]);
   });
 
+  it('omits modelMap whenever usesDefaultMap is set, even if stale rows linger (checkbox decoupling)', () => {
+    // The "use default map" checkbox hides but preserves any prior custom rows;
+    // usesDefaultMap must win so re-checking it re-tracks the default (not the
+    // hidden rows). This is the case the old zero-rows-AND-default guard missed.
+    const editable = toEditable(fullMaskedDto());
+    editable.usesDefaultMap = true;
+    editable.modelMap = [{ match: '*opus*', model: 'z-ai/glm-5.2' }];
+    const back = editableToDto(editable);
+    expect(back.modelMap).toBeUndefined();
+  });
+
   it('omits providerPreference when both lists are empty', () => {
     const editable = blankOpenrouterProfile();
     editable.apiKey = 'sk-or-v1-x';

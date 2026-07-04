@@ -145,6 +145,16 @@
     editing.profile.modelMap = editing.profile.modelMap.filter((_, i) => i !== index);
   }
 
+  // Fires after the "use default map" checkbox flips `usesDefaultMap`. Leaving
+  // the default (unchecked) enters custom mode; seed a blank row so the editor is
+  // immediately usable instead of silently meaning "per-agent only".
+  function onToggleDefaultMap(): void {
+    if (!editing) return;
+    if (!editing.profile.usesDefaultMap && editing.profile.modelMap.length === 0) {
+      editing.profile.modelMap = [{ match: '', model: '' }];
+    }
+  }
+
   /** Builds the whole profiles record for the write, replacing/adding the edited profile. */
   function buildProfilesForSave(edit: NonNullable<typeof editing>): Record<string, ProfileDto> {
     const out: Record<string, ProfileDto> = {};
@@ -393,29 +403,51 @@
       </div>
 
       <div>
-        <p class="text-xs text-muted-foreground mb-1">Model map (glob → slug, first match wins)</p>
-        {#each editing.profile.modelMap as _row, i (i)}
-          <div class="flex items-center gap-2 mb-2">
-            <Input
-              bind:value={editing.profile.modelMap[i].match}
-              placeholder="*sonnet*"
-              data-testid={`map-match-${i}`}
-            />
-            <span class="text-muted-foreground">→</span>
-            <Input
-              bind:value={editing.profile.modelMap[i].model}
-              placeholder="z-ai/glm-5.2"
-              data-testid={`map-model-${i}`}
-            />
-            <Button variant="ghost" size="sm" onclick={() => removeMapRow(i)} data-testid={`map-remove-${i}`}>
-              <Trash size={14} />
-            </Button>
-          </div>
-        {/each}
-        <Button variant="outline" size="sm" onclick={addMapRow} data-testid="map-add">
-          <Plus size={14} class="mr-1" /> Add rule
-        </Button>
-        <p class="text-[11px] text-muted-foreground mt-1">An empty map means “per-agent only” (glob never matches).</p>
+        <p class="text-xs text-muted-foreground mb-1">Model map</p>
+        <label class="flex items-start gap-2 text-sm mb-2">
+          <input
+            type="checkbox"
+            class="mt-1"
+            bind:checked={editing.profile.usesDefaultMap}
+            onchange={onToggleDefaultMap}
+            data-testid="map-use-default"
+          />
+          <span>
+            Use IronCurtain’s default model map
+            <span class="block text-[11px] text-muted-foreground">
+              Every Claude model (Sonnet / Opus / Haiku) routes to the default GLM model, and stays in sync if the
+              built-in defaults change. Uncheck to define your own glob rules.
+            </span>
+          </span>
+        </label>
+
+        {#if !editing.profile.usesDefaultMap}
+          <p class="text-[11px] text-muted-foreground mb-1">Custom rules (glob → slug, first match wins)</p>
+          {#each editing.profile.modelMap as _row, i (i)}
+            <div class="flex items-center gap-2 mb-2">
+              <Input
+                bind:value={editing.profile.modelMap[i].match}
+                placeholder="*sonnet*"
+                data-testid={`map-match-${i}`}
+              />
+              <span class="text-muted-foreground">→</span>
+              <Input
+                bind:value={editing.profile.modelMap[i].model}
+                placeholder="z-ai/glm-5.2"
+                data-testid={`map-model-${i}`}
+              />
+              <Button variant="ghost" size="sm" onclick={() => removeMapRow(i)} data-testid={`map-remove-${i}`}>
+                <Trash size={14} />
+              </Button>
+            </div>
+          {/each}
+          <Button variant="outline" size="sm" onclick={addMapRow} data-testid="map-add">
+            <Plus size={14} class="mr-1" /> Add rule
+          </Button>
+          <p class="text-[11px] text-muted-foreground mt-1">
+            No rules means “per-agent only” — the glob map never matches, so only the per-agent overrides below apply.
+          </p>
+        {/if}
       </div>
 
       <div>

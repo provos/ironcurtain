@@ -102,9 +102,10 @@ export function parseList(value: string): string[] {
  *
  * The apiKey is passed through verbatim: an untouched masked value is sent back
  * (backend M5 mask-equality → keep), an empty string clears, any other value
- * sets. An explicitly-cleared model map (rows removed AND not usesDefaultMap)
- * is sent as `[]` (per-agent-only mode); omitting the field entirely restores
- * the default map. Provider preference is omitted when both lists are empty.
+ * sets. Model map keys off `usesDefaultMap`: when set, the field is OMITTED so
+ * the built-in default map applies (and stays in sync); otherwise the explicit
+ * rows are sent, and zero valid rows becomes `[]` ("per-agent only" — the glob
+ * never matches). Provider preference is omitted when both lists are empty.
  */
 export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
   const dto: {
@@ -119,13 +120,11 @@ export function editableToDto(p: EditableProfile): OpenrouterProfileDto {
   // apiKey: '' is meaningful (clear); pass through untouched (mask/new/clear).
   dto.apiKey = p.apiKey;
 
-  // Model map: keep valid rows. If the user cleared to zero rows but the profile
-  // previously used the default map, omit the field (restore the default);
-  // otherwise send the explicit (possibly empty) array.
-  const rows = p.modelMap.filter((r) => r.match.trim().length > 0 && r.model.trim().length > 0);
-  if (rows.length === 0 && p.usesDefaultMap) {
-    // omit modelMap → default map applies
-  } else {
+  // Model map: when the profile tracks the built-in default map, omit the field
+  // so the default applies (and stays in sync). Otherwise send the explicit rows;
+  // zero valid rows becomes `[]`, i.e. "per-agent only" (the glob never matches).
+  if (!p.usesDefaultMap) {
+    const rows = p.modelMap.filter((r) => r.match.trim().length > 0 && r.model.trim().length > 0);
     dto.modelMap = rows.map((r) => ({ match: r.match.trim(), model: r.model.trim() }));
   }
 
