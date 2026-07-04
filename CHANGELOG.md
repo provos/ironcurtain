@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **First-class OpenRouter provider profiles** — named profiles in `config.json` `modelProviders` route Docker agents (Claude Code, Codex, Goose) through openrouter.ai with a bound model map and per-profile key, with no LiteLLM sidecar (the implicit `native` profile remains the fallback). GLM prompt caching is preserved via a MITM soft `z-ai` provider pin plus stable session affinity, and billing uses the authoritative `usage.cost` reported by OpenRouter rather than the CLI self-report. A profile is selectable across three surfaces — the global `modelProviders.default`, `ironcurtain start --provider-profile <name>`, and the mux `/new` picker — and is configurable via `ironcurtain config` → Model Providers and the web UI Settings view (#361).
+
 ### Behavior changes
 
 - **Node.js 26 support** — bumped the V8 sandbox dependency `isolated-vm` to 7.0.0 (via an npm `override`, since it is transitive through `@utcp/code-mode`) so Code Mode initializes on Node 26; `isolated-vm` 6.x has no Node 26 prebuild and fails to compile against Node 26's V8. Supported lines are now the even-numbered major lines **22, 24, and 26**: Node 24 and 26 install prebuilt native binaries, while Node 22 compiles `isolated-vm` from source at install (no prebuilt binary ships for it, so a C/C++ toolchain is required). Odd non-LTS lines (23, 25) run within `engines` (`>=22.0.0 <27`) but are untested — `ironcurtain doctor` reports them as a warning, not an `ok`. CI runs Node 24 and 26 on every PR and adds a Node 22 source-compile job on pushes to master (#356, #358).

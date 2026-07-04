@@ -96,7 +96,7 @@ An implicit profile named `native` — today's canonical Anthropic / OpenAI / Ch
 
 **Defaults (per openrouter profile).** When `modelMap` is omitted it defaults to `DEFAULT_MODEL_MAP`: `*opus*`, `*sonnet*`, and `*haiku*` → `z-ai/glm-5.2`. `sessionAffinity` defaults to `true`. When the mapped slug is `z-ai/*` and `providerPreference` is unset, the MITM injects a soft pin `provider: { order: ["z-ai"] }` for cache affinity. An openrouter profile with just `{ "type": "openrouter", "apiKey": "sk-or-v1-..." }` therefore routes Claude Code to cached GLM-5.2 with no further config.
 
-**`OPENROUTER_API_KEY` env.** When set, it fills `apiKey` for **every** openrouter profile and takes precedence over any per-profile config `apiKey` (share one key across profiles). A profile's config `apiKey` is used only when the env var is unset.
+**`OPENROUTER_API_KEY` env.** When set, it fills `apiKey` for **every** openrouter profile and takes precedence over any per-profile config `apiKey` (share one key across profiles). A profile's config `apiKey` is used only when the env var is unset. The env value is applied at resolve time and is **never persisted** to `config.json` — editing `modelProviders` via `ironcurtain config` or the web UI strips it from the write, so the env secret is never baked into the file.
 
 **`modelMap: []` (per-agent-only mode).** An explicit empty array is preserved (resolution uses `??`, not `||`): the glob never matches, so routing relies on `perAgent` only.
 
