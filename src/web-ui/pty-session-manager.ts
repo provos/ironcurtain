@@ -391,6 +391,19 @@ export class PtySessionManager {
     });
 
     const session = new PtyWebSession(label, bridge, this.sender, options.persona);
+
+    // Register + announce the session BEFORE wiring the bridge handlers. A child
+    // that already exited by now makes `bridge.onExit` fire its callback
+    // synchronously; if the session were not yet in the map, `handleExit` would
+    // no-op and leak the entry (armed idle timer, `session.created` with no
+    // matching `session.ended`). Registering first makes that a clean
+    // created -> ended. A freshly created session has no subscribers yet, so the
+    // idle backstop guards against a browser that crashes between create and
+    // attach; the first attach cancels it.
+    this.sessions.set(label, session);
+    this.startIdleTimer(label);
+    this.eventBus.emit('session.created', toPtySessionDto(session));
+
     bridge.onData((chunk) => session.pushChunk(chunk));
     bridge.onExit(() => this.handleExit(label));
     // Phase 4: capture the escalation dir and start bridging its escalations
@@ -400,13 +413,6 @@ export class PtySessionManager {
       session.escalationDir = reg.escalationDir;
       this.startEscalationWatcher(session, reg.escalationDir);
     });
-
-    this.sessions.set(label, session);
-    // A freshly created session has no subscribers yet; arm the idle backstop so
-    // a browser that crashes between create and attach doesn't leak a container.
-    // The first attach cancels it.
-    this.startIdleTimer(label);
-    this.eventBus.emit('session.created', toPtySessionDto(session));
     return { label };
   }
 

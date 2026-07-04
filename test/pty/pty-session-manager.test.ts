@@ -183,6 +183,27 @@ describe('PtySessionManager', () => {
       expect(dto.source.persona).toBe('assistant');
     });
 
+    it('reaps a child that already exited during create (created -> ended, no leak)', async () => {
+      // A fast-failing child (missing binary / immediate crash) can exit before
+      // create() finishes wiring handlers; the bridge then fires onExit
+      // synchronously. The session must be registered BEFORE the handlers so the
+      // synchronous exit is reaped (created -> ended) rather than leaked.
+      const bridge = new StubBridge();
+      bridge.alive = false;
+      bridge.exitCode = 1;
+      const h = makeHarness({ createBridge: async () => bridge as unknown as PtyBridge });
+
+      await h.manager.create();
+
+      expect(h.manager.size).toBe(0); // not leaked
+      const createdIdx = h.events.findIndex((e) => e.event === 'session.created');
+      const endedIdx = h.events.findIndex((e) => e.event === 'session.ended');
+      expect(createdIdx).toBeGreaterThanOrEqual(0);
+      expect(endedIdx).toBeGreaterThan(createdIdx); // created before ended
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(1);
+      expect((h.events[endedIdx].payload as { reason: string }).reason).toBe('pty_exited');
+    });
+
     it('passes the docker-mode agent + webui owner id to the bridge factory', async () => {
       const seen: PtyBridgeOptions[] = [];
       const h = makeHarness({
