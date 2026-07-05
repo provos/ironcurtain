@@ -206,4 +206,21 @@ describe('PTY sink registry seam', () => {
     expect(handle2.writes).toEqual(['YnVmZg==']);
     unregisterPtySink(45);
   });
+
+  it('caps the pre-connect buffer so a terminal that never connects cannot grow it without bound', () => {
+    getWsClient();
+    registerPtySink(46);
+    const big = 'x'.repeat(200_000); // ~200KB per frame
+    const total = 15; // ~3MB total, over the 2MB cap
+    for (let i = 0; i < total; i++) {
+      capturedOnEvent?.('session.pty_output', { label: 46, data: `${i}:${big}` });
+    }
+    const handle = makeSink();
+    connectPtyTerminal(46, handle);
+    // Oldest frames were dropped to stay under the cap; the newest is retained.
+    expect(handle.writes.length).toBeGreaterThan(0);
+    expect(handle.writes.length).toBeLessThan(total);
+    expect(handle.writes[handle.writes.length - 1].startsWith(`${total - 1}:`)).toBe(true);
+    unregisterPtySink(46);
+  });
 });

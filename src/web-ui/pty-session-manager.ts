@@ -507,7 +507,16 @@ export class PtySessionManager {
     const session = this.requireSession(label);
     if (!session.bridge.alive) return;
     if (session.escalationDir) {
-      writeTrustedUserContext(session.escalationDir, text);
+      try {
+        writeTrustedUserContext(session.escalationDir, text);
+      } catch (err) {
+        // A failed trusted-context write (I/O error, bad dir perms) must not
+        // swallow the message: fall through and inject it UNTRUSTED (approvable
+        // actions then escalate to a human) rather than aborting the RPC.
+        logger.warn(
+          `[WebUI] PTY session #${label}: trusted user-context write failed (${err instanceof Error ? err.message : String(err)}); message sent untrusted`,
+        );
+      }
     } else {
       logger.warn(`[WebUI] PTY session #${label}: escalation dir not ready; message sent untrusted`);
     }

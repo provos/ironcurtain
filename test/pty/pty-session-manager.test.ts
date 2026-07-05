@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { WebSocket as WsWebSocket } from 'ws';
@@ -301,6 +301,23 @@ describe('PtySessionManager', () => {
     it('throws SessionNotFoundError for an unknown label', () => {
       const h = makeHarness();
       expect(() => h.manager.sendPrompt(999, 'x')).toThrow();
+    });
+
+    it('degrades to untrusted injection when the trusted-context write throws', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
+      const bridge = h.lastBridge();
+      const dir = makeDir();
+      // Make the atomic write's rename target a directory so
+      // writeTrustedUserContext throws (EISDIR/ENOTDIR) — the message must
+      // still be injected (untrusted), not swallowed by a failed RPC.
+      mkdirSync(join(dir, 'user-context.json'));
+      bridge.emitDiscovered({ sessionId: 's', escalationDir: dir, label: 'l', startedAt: '', pid: 1 });
+
+      expect(() => h.manager.sendPrompt(label, 'hi')).not.toThrow();
+      expect(bridge.write).toHaveBeenCalledWith('hi');
+      vi.advanceTimersByTime(60);
+      expect(bridge.write).toHaveBeenCalledWith('\r');
     });
   });
 

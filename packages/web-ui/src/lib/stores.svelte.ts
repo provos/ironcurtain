@@ -185,19 +185,45 @@ export const configChangedGeneration = $state({ value: 0 });
  * The pure event handler routes `session.pty_*` events here via `getPtySink`.
  * Not reactive — imperative handles, never rendered.
  */
+/**
+ * Cap on the pre-connect buffer (base64 chars ~= bytes). Bounds memory if a
+ * terminal never connects (render error) or mounts late during heavy output;
+ * the common case (mount within a frame or two) never trips it, and a snapshot
+ * `reset()` supersedes the buffer entirely.
+ */
+const PTY_SINK_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+
 class BufferingPtySink implements PtySink {
   private live: PtySink | null = null;
   private buffered: Array<{ reset: boolean; b64: string }> = [];
+  private bufferedBytes = 0;
 
   write(dataB64: string): void {
-    if (this.live) this.live.write(dataB64);
-    else this.buffered.push({ reset: false, b64: dataB64 });
+    if (this.live) {
+      this.live.write(dataB64);
+      return;
+    }
+    this.buffered.push({ reset: false, b64: dataB64 });
+    this.bufferedBytes += dataB64.length;
+    this.capBuffer();
   }
 
   reset(snapshotB64: string): void {
-    if (this.live) this.live.reset(snapshotB64);
+    if (this.live) {
+      this.live.reset(snapshotB64);
+      return;
+    }
     // A fresh snapshot is the source of truth: it supersedes buffered deltas.
-    else this.buffered = [{ reset: true, b64: snapshotB64 }];
+    this.buffered = [{ reset: true, b64: snapshotB64 }];
+    this.bufferedBytes = snapshotB64.length;
+  }
+
+  /** Drops the oldest buffered frames once over the cap (always keeps >=1). */
+  private capBuffer(): void {
+    while (this.bufferedBytes > PTY_SINK_MAX_BUFFERED_BYTES && this.buffered.length > 1) {
+      const dropped = this.buffered.shift();
+      if (dropped) this.bufferedBytes -= dropped.b64.length;
+    }
   }
 
   /** Connect the mounted terminal and flush any buffered frames, in order. */
@@ -208,6 +234,7 @@ class BufferingPtySink implements PtySink {
       else handle.write(frame.b64);
     }
     this.buffered = [];
+    this.bufferedBytes = 0;
   }
 
   disconnect(): void {
