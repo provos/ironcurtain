@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const TEST_HOME = resolve(`/tmp/ironcurtain-policydir-test-${process.pid}`);
@@ -17,7 +17,15 @@ beforeEach(() => {
   process.env['IRONCURTAIN_HOME'] = TEST_HOME;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Some paths below initialize session logging before validation fails.
+  // Tear it down explicitly so this file cannot leak process-level state into
+  // the next Vitest file scheduled on the same worker.
+  const logger = await import('../src/logger.js');
+  logger.teardown();
+  vi.doUnmock('ai');
+  vi.doUnmock('@ai-sdk/anthropic');
+  vi.resetModules();
   delete process.env['IRONCURTAIN_HOME'];
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
@@ -93,24 +101,20 @@ describe('policyDir containment validation', () => {
   });
 
   it('accepts policyDir under IronCurtain home', async () => {
-    // This test verifies that a valid policyDir passes the validation
-    // (it will fail later during session init, but the policyDir check passes)
-    const { createSession } = await import('../src/session/index.js');
+    // Keep this as a config-building assertion instead of calling the full
+    // createSession() happy path. The full path starts MCP proxy subprocesses;
+    // this test only owns policyDir containment validation.
+    const { buildSessionConfig } = await import('../src/session/index.js');
+    const { createSessionId } = await import('../src/session/types.js');
     const config = (await import('../src/config/index.js')).loadConfig();
 
     const validPolicyDir = resolve(TEST_HOME, 'jobs/test-job/generated');
+    const sessionId = createSessionId();
 
-    // The session will fail for other reasons (no MCP servers, etc),
-    // but NOT because of policyDir validation.
-    try {
-      await createSession({
-        config,
-        policyDir: validPolicyDir,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      // Should NOT contain the policyDir validation error
-      expect(message).not.toContain('policyDir must be under');
-    }
+    const sessionConfig = buildSessionConfig(config, sessionId, sessionId, {
+      policyDir: validPolicyDir,
+    });
+
+    expect(sessionConfig.config.generatedDir).toBe(realpathSync(validPolicyDir));
   });
 });
