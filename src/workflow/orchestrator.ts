@@ -1292,8 +1292,10 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   private async dockerForSnapshotCleanup(instance: WorkflowInstance): Promise<ContainerRuntime | undefined> {
-    if (instance.bundlesByScope.size > 0) {
-      return [...instance.bundlesByScope.values()][0].docker;
+    for (const infra of instance.bundlesByScope.values()) {
+      if (infra.docker.supportsImageSnapshots) {
+        return infra.docker;
+      }
     }
     if (!commandExists('docker')) return undefined;
     const { createDockerManager } = await import('../docker/docker-manager.js');

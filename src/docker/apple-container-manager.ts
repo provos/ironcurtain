@@ -423,9 +423,8 @@ export function createAppleContainerManager(
     },
 
     // Workflow snapshot/image management (commit, removeImage, listImages,
-    // inspectImage) is Docker-only. The orchestrator's snapshot paths call
-    // createDockerManager() directly, so these are never reached on the
-    // apple-container backend; reject loudly rather than degrade silently.
+    // inspectImage) is runtime-capability gated. Reject loudly if these methods
+    // are reached on the apple-container backend instead of degrading silently.
     commit: (): Promise<string> => unsupported('image commit (workflow snapshots)'),
     removeImage: (): Promise<boolean> => unsupported('image removal'),
     listImages: (): Promise<readonly DockerImageInfo[]> => unsupported('image listing'),

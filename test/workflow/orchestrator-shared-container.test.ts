@@ -519,6 +519,34 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     expect(docker.commit).not.toHaveBeenCalled();
   });
 
+  it('uses a snapshot-capable runtime for snapshot cleanup', async () => {
+    const unsupportedRuntime = {
+      ...createMockDocker(),
+      supportsImageSnapshots: false,
+      removeImage: vi.fn(async () => {
+        throw new Error('unsupported runtime should not clean snapshots');
+      }),
+    };
+    const snapshotRuntime = {
+      ...createMockDocker(),
+      removeImage: vi.fn(async () => true),
+    };
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    type CleanupHarness = {
+      dockerForSnapshotCleanup(instance: unknown): Promise<unknown>;
+    };
+    const instance = {
+      bundlesByScope: new Map([
+        ['apple', { docker: unsupportedRuntime }],
+        ['docker', { docker: snapshotRuntime }],
+      ]),
+    };
+
+    const cleanupRuntime = await (orchestrator as unknown as CleanupHarness).dockerForSnapshotCleanup(instance);
+
+    expect(cleanupRuntime).toBe(snapshotRuntime);
+  });
+
   it('supersedes (removes) the previous snapshot digest on a resume-then-stop', async () => {
     const snapshotDef: WorkflowDefinition = {
       name: 'docker-snapshot-supersede',
