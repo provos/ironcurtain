@@ -147,7 +147,7 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
 
   // Reuse the availability result from the Environment section so each
   // runtime is probed at most once per doctor run. checkPreferredMode
-  // upgrades the earlier warn to a fail when preferredMode is "docker",
+  // upgrades the earlier warn to a fail when preferredMode is "container",
   // because in that configuration runtime unavailability means sessions
   // refuse to start.
   const preferredModeResult = checkPreferredMode(config, runtime.availability, runtime.label);

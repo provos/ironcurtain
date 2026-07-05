@@ -392,7 +392,7 @@
       {#if appState.currentView === 'dashboard'}
         <Dashboard />
       {:else if appState.currentView === 'sessions'}
-        <Sessions onOpenEscalation={() => (escalationModalOpen = true)} />
+        <Sessions />
       {:else if appState.currentView === 'escalations'}
         <Escalations />
       {:else if appState.currentView === 'jobs'}

@@ -447,6 +447,14 @@ describe('json-rpc-dispatch', () => {
       expect(dto.webUiListening).toBe(true);
       expect(dto.uptimeSeconds).toBe(300);
       expect(dto.nextFireTime).toBe('2026-03-05T10:00:00.000Z');
+      expect(dto.sessionMode).toBe('builtin');
+    });
+
+    it('buildStatusDto maps internal docker mode to public container mode', () => {
+      const ctx = makeCtx({ mode: { kind: 'docker', agent: 'claude-code', authKind: 'apikey' } });
+      const dto = buildStatusDto(ctx);
+
+      expect(dto.sessionMode).toBe('container');
     });
 
     it('buildStatusDto handles null nextFireTime', () => {

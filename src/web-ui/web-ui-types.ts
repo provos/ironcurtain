@@ -227,13 +227,13 @@ export interface DaemonStatusDto {
    */
   readonly allowPolicyMutation: boolean;
   /**
-   * The daemon's process-global session mode. `docker` → new sessions are
+   * The daemon's process-global session mode. `container` → new sessions are
    * `web-pty` live terminals that accept launch options (workspace / provider
-   * profile / model) and mediate trusted input; `builtin` → the turn-based
-   * chatbox. Populated by `buildStatusDto` from `ctx.mode.kind` so the UI can
-   * pick the correct create flow before a session exists.
+   * profile / model) and mediate trusted input; `builtin` → legacy
+   * daemon-managed sessions. Populated by `buildStatusDto`, which maps the
+   * internal Docker-agent discriminator to the public runtime-neutral label.
    */
-  readonly sessionMode: 'builtin' | 'docker';
+  readonly sessionMode: 'builtin' | 'container';
 }
 
 /** Job list entry with scheduling and last-run info. */

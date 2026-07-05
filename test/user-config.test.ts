@@ -828,14 +828,28 @@ describe('preferredMode field', () => {
     writeFileSync(resolve(testHome, 'config.json'), JSON.stringify(config, null, 2));
   }
 
-  it('defaults to "docker" when not set', () => {
+  it('defaults to "container" when not set', () => {
     const config = loadUserConfig();
-    expect(config.preferredMode).toBe('docker');
+    expect(config.preferredMode).toBe('container');
   });
 
-  it('accepts "docker"', () => {
+  it('accepts "container"', () => {
+    writeConfigFile({ preferredMode: 'container' });
+    expect(loadUserConfig().preferredMode).toBe('container');
+  });
+
+  it('accepts legacy "docker" and normalizes it to "container"', () => {
     writeConfigFile({ preferredMode: 'docker' });
-    expect(loadUserConfig().preferredMode).toBe('docker');
+    expect(loadUserConfig().preferredMode).toBe('container');
+  });
+
+  it('normalizes legacy "docker" to "container" when saving changes', () => {
+    writeConfigFile({ preferredMode: 'docker' });
+
+    saveUserConfig({ agentModelId: 'anthropic:claude-opus-4-6' });
+
+    const onDisk = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    expect(onDisk.preferredMode).toBe('container');
   });
 
   it('accepts "builtin"', () => {

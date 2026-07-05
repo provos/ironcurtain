@@ -1,11 +1,9 @@
 <script lang="ts">
-  import { untrack, tick } from 'svelte';
+  import { tick } from 'svelte';
   import {
     appState,
     createSession,
-    sendSessionMessage,
     endSession,
-    loadSessionHistory,
     listPersonas,
     attachPty,
     detachPty,
@@ -18,19 +16,13 @@
     disconnectPtyTerminal,
     getModelProviders,
   } from '../lib/stores.svelte.js';
-  import type { ConversationTurn, CreateSessionOptions } from '../lib/types.js';
+  import type { CreateSessionOptions } from '../lib/types.js';
 
   import SessionSidebar from '$lib/components/features/session-sidebar.svelte';
-  import SessionConsole from '$lib/components/features/session-console.svelte';
   import TerminalConsole from '$lib/components/features/terminal-console.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
-
-  let { onOpenEscalation }: { onOpenEscalation?: () => void } = $props();
-
-  let sending = $state(false);
-  let sessionHistory = $state<ConversationTurn[]>([]);
 
   // Bound TerminalConsole instance for the selected web-pty session.
   let terminalRef = $state<TerminalConsole | undefined>(undefined);
@@ -67,12 +59,6 @@
     }
   }
 
-  // Docker Agent Mode (web-pty) exposes the launch options (workspace / provider
-  // / model) in the New-session flow; the code-mode chatbox keeps the
-  // persona-only quick-pick. Read from the daemon status so the flow is chosen
-  // before any session exists.
-  const launchOptionsEnabled = $derived(appState.daemonStatus?.sessionMode === 'docker');
-
   async function loadProviderProfiles(): Promise<string[]> {
     const providers = await getModelProviders();
     // The reserved 'native' profile is default routing; the dropdown's empty
@@ -82,6 +68,10 @@
   }
 
   async function handleCreate(opts: CreateSessionOptions): Promise<void> {
+    if (appState.daemonStatus?.sessionMode !== 'container') {
+      createError = 'Web sessions require container mode. Restart the daemon with container mode enabled.';
+      return;
+    }
     creatingSession = true;
     createError = '';
     try {
@@ -106,58 +96,6 @@
       endingSession = null;
     }
   }
-
-  async function handleSend(text: string): Promise<void> {
-    if (!appState.selectedSessionLabel || sending) return;
-
-    const label = appState.selectedSessionLabel;
-    sending = true;
-
-    // Add user message to output immediately
-    appState.addOutput(label, {
-      kind: 'user',
-      text,
-      timestamp: new Date().toISOString(),
-    });
-
-    try {
-      await sendSessionMessage(label, text);
-    } catch (err) {
-      appState.addOutput(label, {
-        kind: 'error',
-        text: `Failed to send: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: new Date().toISOString(),
-      });
-    } finally {
-      sending = false;
-    }
-  }
-
-  // Guard against stale history responses when the user switches sessions quickly
-  let historyVersion = 0;
-
-  // Load history when a turn-based session is selected. D2 guard: a web-pty
-  // session has no turn history/budget/diagnostics, so skip the fetch entirely
-  // (selecting it must not fire those RPCs). The kind is read untracked so this
-  // effect still depends only on the selected label, not on every session update.
-  $effect(() => {
-    const label = appState.selectedSessionLabel;
-    if (label === null) return;
-    const kind = untrack(() => appState.sessions.get(label)?.source.kind);
-    if (kind === 'web-pty') return;
-    const version = ++historyVersion;
-    loadSessionHistory(label)
-      .then((history) => {
-        if (version === historyVersion) {
-          sessionHistory = history;
-        }
-      })
-      .catch(() => {
-        if (version === historyVersion) {
-          sessionHistory = [];
-        }
-      });
-  });
 
   // The selected session's label iff it is a web-pty terminal, else null.
   // A primitive derived: it flips null -> N when a freshly created pty session
@@ -205,7 +143,6 @@
     creating={creatingSession}
     {createError}
     loadPersonasFn={listPersonas}
-    {launchOptionsEnabled}
     loadProviderProfilesFn={loadProviderProfiles}
   />
 
@@ -278,16 +215,25 @@
         </div>
       </div>
     {:else}
-      <SessionConsole
-        session={appState.selectedSession}
-        output={appState.getOutput(appState.selectedSessionLabel!)}
-        history={sessionHistory}
-        onsend={handleSend}
-        onend={handleEnd}
-        {onOpenEscalation}
-        {sending}
-        ending={endingSession === appState.selectedSessionLabel}
-      />
+      {@const session = appState.selectedSession}
+      <div class="flex-1 flex items-center justify-center text-muted-foreground">
+        <div class="max-w-sm text-center px-6">
+          <div class="text-sm font-semibold text-foreground mb-1">Unsupported session type</div>
+          <div class="text-sm">
+            Session <span class="font-mono">#{session.label}</span> is
+            <span class="font-mono">{session.source.kind}</span>. The web UI only supports container terminal sessions.
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            class="mt-4"
+            loading={endingSession === session.label}
+            onclick={handleEnd}
+          >
+            {endingSession === session.label ? 'Ending' : 'End session'}
+          </Button>
+        </div>
+      </div>
     {/if}
   {:else}
     <div class="flex-1 flex items-center justify-center text-muted-foreground">

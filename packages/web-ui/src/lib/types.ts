@@ -5,9 +5,9 @@
 
 export interface SessionSource {
   /**
-   * `web-pty` is a live Docker-agent PTY session streamed to the web UI as an
+   * `web-pty` is a live container PTY session streamed to the web UI as an
    * xterm terminal (never registered in the daemon's SessionManager). It is
-   * rendered with `TerminalConsole` instead of the turn-based chatbox.
+   * rendered with `TerminalConsole`.
    */
   readonly kind: 'signal' | 'cron' | 'web' | 'web-pty';
   readonly jobId?: string;
@@ -100,12 +100,12 @@ export interface DaemonStatusDto {
    */
   readonly allowPolicyMutation?: boolean;
   /**
-   * The daemon's process-global session mode. `docker` → new sessions are
+   * The daemon's process-global session mode. `container` → new sessions are
    * `web-pty` live terminals (launch options + trusted-input bar); `builtin` →
-   * the turn-based chatbox. Optional in the mirror so a pre-existing daemon that
-   * omits it deserializes cleanly; treat `undefined` as `builtin` (chatbox).
+   * legacy daemon-managed sessions. Optional in the mirror so a pre-existing
+   * daemon that omits it deserializes cleanly.
    */
-  readonly sessionMode?: 'builtin' | 'docker';
+  readonly sessionMode?: 'builtin' | 'container';
 }
 
 export interface JobDefinition {
@@ -206,8 +206,8 @@ export interface PersonaListItem {
 
 /**
  * Launch options for `sessions.create`. `persona` applies to every session mode;
- * `workspacePath` / `providerProfileName` / `model` are Docker-agent (web-pty)
- * launch options (mux `/new` parity) and are ignored by the code-mode chatbox path.
+ * `workspacePath` / `providerProfileName` / `model` are container web-pty launch
+ * options (mux `/new` parity).
  */
 export interface CreateSessionOptions {
   readonly persona?: string;

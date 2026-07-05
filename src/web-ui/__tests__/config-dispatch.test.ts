@@ -81,7 +81,7 @@ afterEach(() => {
 
 describe('config.getModelProviders', () => {
   it('returns native-only registry when modelProviders is absent', async () => {
-    writeConfig({ preferredMode: 'docker' });
+    writeConfig({ preferredMode: 'container' });
     const dto = await get(makeCtx(false));
     expect(dto.default).toBe('native');
     expect(dto.profiles.native).toEqual({ type: 'native' });

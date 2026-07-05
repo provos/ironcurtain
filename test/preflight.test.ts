@@ -30,7 +30,7 @@ const oauthOnlySources: CredentialSources = {
 function createTestConfig(
   overrides: {
     anthropicApiKey?: string;
-    preferredMode?: 'docker' | 'builtin';
+    preferredMode?: 'container' | 'builtin';
     agentModelId?: string;
   } = {},
 ): IronCurtainConfig {
@@ -82,7 +82,7 @@ function createTestConfig(
       gooseProvider: 'anthropic',
       gooseModel: 'claude-sonnet-4-20250514',
       preferredDockerAgent: 'claude-code',
-      preferredMode: overrides.preferredMode ?? 'docker',
+      preferredMode: overrides.preferredMode ?? 'container',
       packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
       dockerResources: { memoryMb: 8192, cpus: 4 },
     },
@@ -143,7 +143,7 @@ describe('resolveSessionMode', () => {
       expect(result.reason).toBe('Explicit --agent selection (API key)');
     });
 
-    it('throws PreflightError when Docker is unavailable', async () => {
+    it('throws PreflightError when the selected container runtime is unavailable', async () => {
       const promise = resolveSessionMode({
         config: createTestConfig(),
         requestedAgent: 'claude-code' as AgentId,
@@ -152,7 +152,7 @@ describe('resolveSessionMode', () => {
       });
 
       await expect(promise).rejects.toThrow(PreflightError);
-      await expect(promise).rejects.toThrow(/Docker/);
+      await expect(promise).rejects.toThrow(/selected container runtime is not available/);
     });
 
     it('throws PreflightError when no credentials are available', async () => {
@@ -179,7 +179,7 @@ describe('resolveSessionMode', () => {
       expect(result.reason).toBe('Explicit --agent builtin');
     });
 
-    it('checks Docker before credentials (Docker error shown first)', async () => {
+    it('checks container runtime before credentials (runtime error shown first)', async () => {
       await expect(
         resolveSessionMode({
           config: createTestConfig({ anthropicApiKey: '' }),
@@ -187,7 +187,7 @@ describe('resolveSessionMode', () => {
           isDockerAvailable: dockerUnavailable,
           credentialSources: noOAuthSources,
         }),
-      ).rejects.toThrow(/Docker/);
+      ).rejects.toThrow(/selected container runtime is not available/);
     });
 
     it('succeeds with OAuth credentials and no API key', async () => {
@@ -268,7 +268,7 @@ describe('resolveSessionMode', () => {
   });
 
   describe('default mode (no --agent)', () => {
-    describe('preferredMode = docker', () => {
+    describe('preferredMode = container', () => {
       it('selects Docker (claude-code, API key) when both Docker and API key are available', async () => {
         const result = await resolveSessionMode({
           config: createTestConfig(),
@@ -349,7 +349,7 @@ describe('resolveSessionMode', () => {
         await expect(promise).rejects.toThrow(/OAuth credentials are not usable with goose/);
       });
 
-      it('throws when Docker is unavailable, with --agent builtin and ironcurtain config hints', async () => {
+      it('throws when the container runtime is unavailable, with --agent builtin and ironcurtain config hints', async () => {
         const promise = resolveSessionMode({
           config: createTestConfig(),
           isDockerAvailable: dockerUnavailable,
@@ -357,7 +357,7 @@ describe('resolveSessionMode', () => {
         });
 
         await expect(promise).rejects.toThrow(PreflightError);
-        await expect(promise).rejects.toThrow(/Docker is not available/);
+        await expect(promise).rejects.toThrow(/selected container runtime is not available/);
         await expect(promise).rejects.toThrow(/--agent builtin/);
         await expect(promise).rejects.toThrow(/ironcurtain config/);
       });
@@ -373,7 +373,7 @@ describe('resolveSessionMode', () => {
         // The preferred-mode helper leads with "preferredMode is" and offers
         // both the one-shot and permanent escapes. The explicit-mode helper
         // would say "--agent claude-code requires authentication" instead.
-        await expect(promise).rejects.toThrow(/preferredMode is "docker"/);
+        await expect(promise).rejects.toThrow(/preferredMode is "container"/);
         await expect(promise).rejects.not.toThrow(/--agent claude-code requires authentication/);
       });
     });
@@ -462,9 +462,9 @@ describe('resolveSessionMode', () => {
     });
 
     describe('--agent overrides preferredMode', () => {
-      it('--agent builtin wins when preferredMode = docker', async () => {
+      it('--agent builtin wins when preferredMode = container', async () => {
         const result = await resolveSessionMode({
-          config: createTestConfig({ preferredMode: 'docker' }),
+          config: createTestConfig({ preferredMode: 'container' }),
           requestedAgent: 'builtin' as AgentId,
           isDockerAvailable: dockerAvailable,
           credentialSources: noOAuthSources,
@@ -490,7 +490,7 @@ describe('resolveSessionMode', () => {
         expect(dockerSpy).not.toHaveBeenCalled();
       });
 
-      it('--agent claude-code with Docker unavailable throws the explicit-mode message', async () => {
+      it('--agent claude-code with unavailable container runtime throws the explicit-mode message', async () => {
         const promise = resolveSessionMode({
           config: createTestConfig({ preferredMode: 'builtin' }),
           requestedAgent: 'claude-code' as AgentId,
@@ -499,9 +499,8 @@ describe('resolveSessionMode', () => {
         });
 
         await expect(promise).rejects.toThrow(PreflightError);
-        // The explicit-mode message preserves its existing wording so the
-        // error is attributed to the flag the user typed.
-        await expect(promise).rejects.toThrow(/--agent claude-code requires Docker/);
+        // The explicit-mode message attributes the failure to the flag the user typed.
+        await expect(promise).rejects.toThrow(/--agent claude-code requires container mode/);
       });
     });
   });
@@ -536,7 +535,7 @@ describe('resolveSessionMode', () => {
       });
 
       await expect(promise).rejects.toThrow(PreflightError);
-      await expect(promise).rejects.toThrow(/preferredMode is "docker"/);
+      await expect(promise).rejects.toThrow(/preferredMode is "container"/);
     });
 
     it('blocks when the selected OpenRouter profile has no key (missing creds, not native fallthrough)', async () => {
@@ -569,7 +568,7 @@ describe('resolveSessionMode', () => {
 
       await expect(promise).rejects.toThrow('Unknown provider profile "does-not-exist". Available: native, glm.');
       // The confusing generic credential error must NOT be what the user sees.
-      await expect(promise).rejects.not.toThrow(/preferredMode is "docker"/);
+      await expect(promise).rejects.not.toThrow(/preferredMode is "container"/);
     });
 
     it('surfaces the unknown-profile error identically even when the default profile HAS creds', async () => {

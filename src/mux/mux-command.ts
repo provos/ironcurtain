@@ -170,13 +170,13 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
   process.stderr.write(chalk.dim(formatModeLine(preflight)) + '\n');
 
   // Builtin mode does not have a `--agent` flag to pass to the child PTY,
-  // and the PTY child requires Docker mode anyway. Refuse cleanly here so
+  // and the PTY child requires container mode anyway. Refuse cleanly here so
   // the user gets a single coherent message rather than per-tab failures.
   if (preflight.mode.kind !== 'docker') {
     process.stderr.write(
       chalk.red(
-        'ironcurtain mux requires Docker agent mode.\n' +
-          'Pass --agent claude-code, --agent goose, or --agent codex; or set Session Mode > Preferred mode to "docker" in `ironcurtain config`.\n',
+        'ironcurtain mux requires container agent mode.\n' +
+          'Pass --agent claude-code, --agent goose, or --agent codex; or set Session Mode > Preferred mode to "container" in `ironcurtain config`.\n',
       ),
     );
     process.exit(1);

@@ -239,11 +239,11 @@ export async function checkActiveRuntime(
  * Reports whether the user's `preferredMode` is satisfiable on this host.
  *
  * Reuses the prior `dockerResult` from `checkDocker` so Docker is probed
- * exactly once per `doctor` run. Maps the (preferredMode × dockerResult ×
+ * exactly once per `doctor` run. Maps the (preferredMode × runtime availability ×
  * api-key-presence) tuple to a status:
  *
- *   - preferredMode: 'docker' + Docker ok          -> ok
- *   - preferredMode: 'docker' + Docker unavailable -> fail (sessions will refuse to start)
+ *   - preferredMode: 'container' + active runtime ok          -> ok
+ *   - preferredMode: 'container' + active runtime unavailable -> fail (sessions will refuse to start)
  *   - preferredMode: 'builtin' + API key present   -> ok
  *   - preferredMode: 'builtin' + no API key        -> warn (sessions will fail to start by default)
  */
@@ -254,14 +254,14 @@ export function checkPreferredMode(
 ): CheckResult {
   const preferredMode = config.userConfig.preferredMode;
 
-  if (preferredMode === 'docker') {
+  if (preferredMode === 'container') {
     if (dockerResult.status === 'ok') {
-      return { name: 'Preferred mode', status: 'ok', message: 'docker' };
+      return { name: 'Preferred mode', status: 'ok', message: 'container' };
     }
     return {
       name: 'Preferred mode',
       status: 'fail',
-      message: `docker, but ${runtimeLabel} is unavailable. Sessions will refuse to start.`,
+      message: `container, but ${runtimeLabel} is unavailable. Sessions will refuse to start.`,
       hint: `Start ${runtimeLabel}, or run \`ironcurtain config\` and set Session Mode > Preferred mode to "builtin".`,
     };
   }

@@ -1,16 +1,17 @@
-import { expect, type Page, type APIRequestContext } from '@playwright/test';
+import { expect, type Page, type APIRequestContext, type Locator } from '@playwright/test';
+import { WebSocket } from 'ws';
+
+export const PTY_BANNER_TEXT = 'Type to send keystrokes';
+export const PTY_LIVE_FRAME_TEXT = '[mock] agent working';
 
 /**
  * Reset the mock server's mutable state so tests are isolated. Pass
  * `allowPolicyMutation: false` to simulate a daemon launched WITHOUT
- * `--allow-policy-mutation` (persona-mutation controls hidden). Pass
- * `mode: 'docker'` to flip the single mock instance into Docker Agent Mode so
- * `sessions.create` yields a `web-pty` terminal session; a bare reset (no
- * `mode`) always restores the default chatbox mode.
+ * `--allow-policy-mutation` (persona-mutation controls hidden).
  */
 export async function resetMockServer(
   request: APIRequestContext,
-  opts?: { allowPolicyMutation?: boolean; mode?: 'default' | 'docker' },
+  opts?: { allowPolicyMutation?: boolean },
 ): Promise<void> {
   await request.post('http://localhost:7401/__reset', opts ? { data: opts } : undefined);
 }
@@ -89,17 +90,15 @@ export async function approveSeededGate(page: Page): Promise<void> {
 }
 
 /**
- * Create a new session using the "New" dropdown and selecting "Default".
+ * Create a new session using the "New" dropdown and launch button.
  * Returns the session label text (e.g., "#1").
  */
 export async function createDefaultSession(page: Page): Promise<string> {
   await navigateTo(page, 'Sessions');
 
-  // Click "New" to open the persona picker dropdown
   await page.getByRole('button', { name: 'New' }).click();
-
-  // Select "Default" from the dropdown via data-testid
-  await page.getByTestId('persona-default').click();
+  await expect(page.getByTestId('launch-start')).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId('launch-start').click();
 
   // Wait for a session entry to appear in the sidebar list.
   // Session items have data-testid="session-item-{label}"
@@ -115,12 +114,130 @@ export async function createDefaultSession(page: Page): Promise<string> {
   return label;
 }
 
+export function sessionLabelNumber(labelText: string): number {
+  const match = labelText.match(/#(\d+)/);
+  if (!match) throw new Error(`Could not parse session label from "${labelText}"`);
+  return Number(match[1]);
+}
+
+export function ptyRows(page: Page): Locator {
+  return page.getByTestId('pty-terminal').locator('.xterm-rows');
+}
+
+export async function waitForPtyTerminal(page: Page): Promise<void> {
+  await expect(page.getByTestId('pty-terminal')).toBeVisible({ timeout: 10_000 });
+  await expect(ptyRows(page)).toContainText(PTY_BANNER_TEXT, { timeout: 15_000 });
+}
+
+export async function focusPtyTerminal(page: Page): Promise<void> {
+  await page.locator('.xterm-screen').click();
+}
+
 /**
- * Send a message in the currently selected session and wait for
- * the input to become enabled again (message accepted by server).
+ * Deliver a full string to xterm as one input frame. Browser paste maps to a
+ * single `sessions.ptyInput`, unlike keyboard typing which fires per key.
  */
-export async function sendMessage(page: Page, text: string): Promise<void> {
-  const textarea = page.getByPlaceholder('Send a message...');
-  await textarea.fill(text);
-  await textarea.press('Enter');
+export async function pasteIntoPtyTerminal(page: Page, text: string): Promise<void> {
+  await focusPtyTerminal(page);
+  await page.evaluate((value) => {
+    const textarea = document.querySelector('.xterm-helper-textarea');
+    if (!textarea) throw new Error('xterm helper textarea not found');
+    const data = new DataTransfer();
+    data.setData('text/plain', value);
+    const event = new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true });
+    textarea.dispatchEvent(event);
+  }, text);
+}
+
+export async function sendTrustedPtyPrompt(page: Page, text: string): Promise<void> {
+  await page.getByTestId('pty-prompt-input').fill(text);
+  await page.getByTestId('pty-prompt-send').click();
+}
+
+let rpcSeq = 0;
+
+/**
+ * Send a PTY trusted prompt through a separate JSON-RPC WebSocket. This lets a
+ * test raise a terminal-backed escalation while the UI remains on another view.
+ */
+export async function sendPtyPromptRpc(label: number, text: string): Promise<void> {
+  const ws = new WebSocket('ws://127.0.0.1:7400/ws?token=mock-dev-token');
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Timed out opening mock WebSocket'));
+      }, 5_000);
+
+      function cleanup(): void {
+        clearTimeout(timer);
+        ws.off('open', onOpen);
+        ws.off('error', onError);
+      }
+
+      function onOpen(): void {
+        cleanup();
+        resolve();
+      }
+
+      function onError(err: Error): void {
+        cleanup();
+        reject(err);
+      }
+
+      ws.once('open', onOpen);
+      ws.once('error', onError);
+    });
+
+    const id = `e2e-pty-prompt-${Date.now()}-${++rpcSeq}`;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting for ${id}`));
+      }, 5_000);
+
+      function cleanup(): void {
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        ws.off('error', onError);
+        ws.off('close', onClose);
+      }
+
+      function onMessage(raw: WebSocket.RawData): void {
+        let frame: { id?: string; ok?: boolean; error?: { message?: string } };
+        try {
+          frame = JSON.parse(raw.toString()) as { id?: string; ok?: boolean; error?: { message?: string } };
+        } catch {
+          return;
+        }
+        if (frame.id !== id) return;
+        cleanup();
+        if (frame.ok) {
+          resolve();
+        } else {
+          reject(new Error(frame.error?.message ?? `Mock RPC ${id} failed`));
+        }
+      }
+
+      function onError(err: Error): void {
+        cleanup();
+        reject(err);
+      }
+
+      function onClose(): void {
+        cleanup();
+        reject(new Error('Mock WebSocket closed before RPC response'));
+      }
+
+      ws.on('message', onMessage);
+      ws.once('error', onError);
+      ws.once('close', onClose);
+      ws.send(JSON.stringify({ id, method: 'sessions.ptyPrompt', params: { label, text } }));
+    });
+  } finally {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
+  }
 }

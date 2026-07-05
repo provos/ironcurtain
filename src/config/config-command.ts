@@ -1422,13 +1422,13 @@ async function handleServerCredentials(resolved: ResolvedUserConfig, pending: Us
 
 /** Human-readable labels for session modes. */
 const SESSION_MODE_LABELS: Readonly<Record<SessionModeKind, string>> = {
-  docker: 'Docker (recommended)',
+  container: 'Container (recommended)',
   builtin: 'Builtin (V8 sandbox)',
 };
 
 /** Short labels used in hints (no parenthetical). */
 const SESSION_MODE_SHORT_LABELS: Readonly<Record<SessionModeKind, string>> = {
-  docker: 'Docker',
+  container: 'Container',
   builtin: 'Builtin',
 };
 

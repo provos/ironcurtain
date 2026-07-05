@@ -52,7 +52,7 @@ interface MockSession {
   totalTokens: number;
   stepCount: number;
   estimatedCostUsd: number;
-  /** True for a docker-mode `web-pty` (terminal) session. */
+  /** True for a container-mode `web-pty` (terminal) session. */
   isPty?: boolean;
   /** ISO timestamp of the most recent ptyAttach (web-pty only). */
   lastAttachedAt?: string;
@@ -82,29 +82,19 @@ const MOCK_TOKEN = 'mock-dev-token';
 const startTime = Date.now();
 
 // ---------------------------------------------------------------------------
-// PTY (Docker Agent Mode) simulation
+// PTY (Container Agent Mode) simulation
 //
-// A docker-mode daemon serves live xterm terminals instead of the chatbox. The
-// mock picks its mode from MOCK_SESSION_MODE: `docker` makes sessions.create
-// return a `web-pty` session and enables the sessions.pty* handlers; anything
-// else (default) keeps the turn-based `web` chatbox so the existing e2e suite
-// is unaffected.
-//
-// The mode is also switchable at runtime via `POST /__reset { mode }` so the
-// single Playwright mock instance can serve BOTH the chatbox specs (default)
-// and the PTY spec (docker) without a second server. A bare reset (no `mode`)
-// always restores the env-derived initial mode, so a PTY spec that flips to
-// docker never contaminates a later chatbox spec's default-mode reset.
+// The mock now mirrors a container-mode daemon: new browser sessions are always
+// live `web-pty` terminals. `POST /__reset { mode }` still accepts the old
+// docker/container aliases for compatibility, but reset no longer changes the
+// session surface.
 // ---------------------------------------------------------------------------
 
-type SessionMode = 'default' | 'docker';
+type ResetModeAlias = 'docker' | 'container' | 'default';
 
-const INITIAL_SESSION_MODE: SessionMode = process.env.MOCK_SESSION_MODE === 'docker' ? 'docker' : 'default';
-
-let sessionMode: SessionMode = INITIAL_SESSION_MODE;
-
-function isPtyMode(): boolean {
-  return sessionMode === 'docker';
+interface ResetOptions {
+  allowPolicyMutation?: boolean;
+  mode?: ResetModeAlias;
 }
 
 /** base64 of the UTF-8 bytes of a terminal string (matches the daemon framing). */
@@ -204,12 +194,14 @@ function parseReplayArgs(): ReplayConfig | null {
   }
 
   // Explicit definition override
-  if (values.definition) {
-    definitionPath = resolve(values.definition);
+  const definition = values.definition;
+  if (typeof definition === 'string' && definition !== '') {
+    definitionPath = resolve(definition);
   }
 
   // Speedup factor
-  const speedup = Math.max(1, parseInt(values.speedup ?? '50', 10) || 50);
+  const speedupValue = typeof values.speedup === 'string' ? values.speedup : '50';
+  const speedup = Math.max(1, parseInt(speedupValue, 10) || 50);
 
   return { jsonlPath, definitionPath, speedup };
 }
@@ -1352,11 +1344,7 @@ function buildMessageLogFixtures(workflowId: string): Array<Record<string, unkno
 const jobs = structuredClone(CANNED_JOBS);
 
 /** Reset all mutable state for test isolation. */
-function resetState(opts?: { allowPolicyMutation?: boolean; mode?: SessionMode }): void {
-  // Restore the session mode: an explicit `mode` flips it (a PTY spec asks for
-  // 'docker'), otherwise fall back to the env-derived initial mode so a bare
-  // reset from a chatbox spec always lands back in 'default'.
-  sessionMode = opts?.mode ?? INITIAL_SESSION_MODE;
+function resetState(opts?: ResetOptions): void {
   stopAllPtyFrames();
   sessions.clear();
   escalations.clear();
@@ -1471,9 +1459,8 @@ function buildStatusDto() {
     // true so the e2e happy paths work; a per-test POST /__reset override can
     // flip it OFF to exercise the controls-hidden path.
     allowPolicyMutation,
-    // Surface the session mode so the UI shows the web-pty launch-options flow
-    // in docker mode. Mirrors the daemon's `ctx.mode.kind`.
-    sessionMode: sessionMode === 'docker' ? 'docker' : 'builtin',
+    // Surface the process-global mode so the UI shows the web-pty launch flow.
+    sessionMode: 'container',
   };
 }
 
@@ -1689,8 +1676,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         totalTokens: 0,
         stepCount: 0,
         estimatedCostUsd: 0,
-        // In docker mode the daemon returns a terminal (web-pty) session.
-        ...(isPtyMode() ? { isPty: true } : {}),
+        isPty: true,
       };
       sessions.set(label, session);
       broadcast('session.created', buildSessionDto(session));
@@ -1698,7 +1684,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     }
 
     // -----------------------------------------------------------------------
-    // PTY terminal streaming (docker mode). attach replays a snapshot + starts
+    // PTY terminal streaming (container mode). attach replays a snapshot + starts
     // a fake-TUI frame timer; input echoes back (and routes "escalate" to the
     // overlay); resize is a noop ack; detach stops the frames.
     // -----------------------------------------------------------------------
@@ -2544,10 +2530,10 @@ const httpServer = createServer((req, res) => {
       body += chunk.toString();
     });
     req.on('end', () => {
-      let opts: { allowPolicyMutation?: boolean; mode?: SessionMode } | undefined;
+      let opts: ResetOptions | undefined;
       if (body.trim().length > 0) {
         try {
-          opts = JSON.parse(body) as { allowPolicyMutation?: boolean; mode?: SessionMode };
+          opts = JSON.parse(body) as ResetOptions;
         } catch {
           opts = undefined;
         }
@@ -2604,7 +2590,6 @@ if (replayConfig && replayPlan) {
     Terminal 1: cd packages/web-ui && npm run mock-server
     Terminal 2: cd packages/web-ui && npm run dev
 
-  Session mode: ${isPtyMode() ? 'docker (web-pty terminals)' : 'code (turn-based chatbox)'}
-    Set MOCK_SESSION_MODE=docker to demo the xterm terminal view.
+  Session mode: container (web-pty terminals)
 `);
 }

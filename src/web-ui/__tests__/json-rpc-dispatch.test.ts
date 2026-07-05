@@ -828,6 +828,7 @@ describe('dispatch()', () => {
       expect(dto.webUiListening).toBe(true);
       expect(dto.activeSessions).toBe(ctx.sessionManager.size);
       expect(typeof dto.nextFireTime).toBe('string');
+      expect(dto.sessionMode).toBe('container');
     });
 
     it('returns null nextFireTime when no scheduled jobs', () => {
@@ -842,6 +843,12 @@ describe('dispatch()', () => {
       const ctx = createMockContext({ handler });
       const dto = buildStatusDto(ctx);
       expect(dto.nextFireTime).toBeNull();
+    });
+
+    it('returns builtin sessionMode for builtin daemon mode', () => {
+      const ctx = createMockContext({ mode: { kind: 'builtin' } });
+      const dto = buildStatusDto(ctx);
+      expect(dto.sessionMode).toBe('builtin');
     });
   });
 });

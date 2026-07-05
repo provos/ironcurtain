@@ -139,7 +139,7 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
     gooseProvider: 'anthropic' as const,
     gooseModel: 'claude',
     preferredDockerAgent: 'claude-code' as const,
-    preferredMode: 'docker' as const,
+    preferredMode: 'container' as const,
     packageInstall: { enabled: true, quarantineDays: 2, allowedPackages: [], deniedPackages: [] },
     dockerResources: { memoryMb: 8192, cpus: 4 },
   };
@@ -317,20 +317,20 @@ describe('checkPreferredMode', () => {
     hint: 'docker: command not found',
   };
 
-  function configWithMode(mode: 'docker' | 'builtin', anthropicApiKey = '') {
+  function configWithMode(mode: 'container' | 'builtin', anthropicApiKey = '') {
     return buildConfig({
       userConfig: { ...buildConfig().userConfig, preferredMode: mode, anthropicApiKey },
     });
   }
 
-  it('preferredMode=docker + Docker ok -> ok', () => {
-    const r = checkPreferredMode(configWithMode('docker', 'sk-test'), dockerOk);
+  it('preferredMode=container + Docker ok -> ok', () => {
+    const r = checkPreferredMode(configWithMode('container', 'sk-test'), dockerOk);
     expect(r.status).toBe('ok');
-    expect(r.message).toBe('docker');
+    expect(r.message).toBe('container');
   });
 
-  it('preferredMode=docker + Docker unavailable -> fail', () => {
-    const r = checkPreferredMode(configWithMode('docker', 'sk-test'), dockerWarn);
+  it('preferredMode=container + Docker unavailable -> fail', () => {
+    const r = checkPreferredMode(configWithMode('container', 'sk-test'), dockerWarn);
     expect(r.status).toBe('fail');
     expect(r.message).toMatch(/Docker is unavailable/);
     expect(r.hint).toMatch(/Start Docker/);

@@ -37,15 +37,18 @@ const startSpec: CommandSpec = {
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     {
       flag: 'pty',
-      description: 'Legacy raw PTY/debug mode; use ironcurtain mux for normal interactive Docker sessions',
+      description: 'Legacy raw PTY/debug mode; use ironcurtain mux for normal interactive container sessions',
     },
     { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
     {
       flag: 'provider-profile',
-      description: 'Route the Docker agent through a named provider profile (OpenRouter)',
+      description: 'Route the container agent through a named provider profile (OpenRouter)',
       placeholder: '<name>',
     },
-    { flag: 'capture-traces', description: 'Capture LLM API traces for this run (overrides config; Docker mode only)' },
+    {
+      flag: 'capture-traces',
+      description: 'Capture LLM API traces for this run (overrides config; container mode only)',
+    },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
   examples: [
@@ -165,14 +168,14 @@ export async function main(args?: string[]): Promise<void> {
 
   const mode = preflight.mode;
 
-  // F4: --provider-profile only affects Docker Agent Mode; the builtin
+  // F4: --provider-profile only affects container agent mode; the builtin
   // (Code Mode) agent never reaches profile resolution. Warn on a harmless
   // no-op rather than silently ignoring the flag. Skip on resume (already
   // warned above that the flag is ignored).
   if (providerProfileName && !resumeSessionId && mode.kind !== 'docker') {
     process.stderr.write(
       chalk.yellow(
-        'Note: --provider-profile applies only to Docker Agent Mode; ignored for the builtin (Code Mode) agent.\n',
+        'Note: --provider-profile applies only to container agent mode; ignored for the builtin (Code Mode) agent.\n',
       ),
     );
   }
@@ -201,11 +204,13 @@ export async function main(args?: string[]): Promise<void> {
     }
   }
 
-  // PTY mode: attach terminal directly to Claude Code in a Docker container
+  // PTY mode: attach terminal directly to Claude Code in an agent container.
   if (values.pty) {
     if (mode.kind !== 'docker') {
       process.stderr.write(
-        chalk.red('PTY mode requires Docker agent mode. Use --agent claude-code or ensure Docker is available.\n'),
+        chalk.red(
+          'PTY mode requires container agent mode. Use --agent claude-code or ensure a container runtime is available.\n',
+        ),
       );
       process.exit(1);
     }

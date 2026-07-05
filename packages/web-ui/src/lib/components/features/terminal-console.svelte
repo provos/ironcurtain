@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Presentational xterm.js terminal for a `web-pty` (Docker Agent Mode)
+   * Presentational xterm.js terminal for a `web-pty` (Container Agent Mode)
    * session. Renders the container's live TUI streamed over the WebSocket.
    *
    * Layering: this is a `features/` component — it takes data via props /

@@ -3,7 +3,7 @@
  *
  * When `--agent` is explicit, validates prerequisites and fails fast.
  * When no `--agent` is given, dispatches on the user's `preferredMode`
- * (`'docker'` or `'builtin'`) — there is no silent fallback. If the
+ * (`'container'` or `'builtin'`) — there is no silent fallback. If the
  * preferred mode's prerequisites are unmet, a `PreflightError` is raised
  * with remediation hints and the session refuses to start.
  */
@@ -31,8 +31,9 @@ import { checkDockerAvailable, type DockerAvailability } from '../docker/docker-
 
 /**
  * Thrown when explicit `--agent` prerequisites are not met, or when the
- * user's `preferredMode` cannot be honored (Docker unavailable while
- * preferring docker, missing API key while preferring builtin, etc.).
+ * user's `preferredMode` cannot be honored (the selected container runtime is
+ * unavailable while preferring container, missing API key while preferring
+ * builtin, etc.).
  */
 export class PreflightError extends Error {
   constructor(message: string) {
@@ -169,7 +170,7 @@ async function probeDockerAndCredentials(
  * preflight error message. Centralized so the wording can't drift between
  * the docker-unavailable, builtin-needs-key, and credential-missing paths.
  */
-function formatModeRemediation(targetMode: 'docker' | 'builtin'): string[] {
+function formatModeRemediation(targetMode: 'container' | 'builtin'): string[] {
   if (targetMode === 'builtin') {
     return [
       'To run this session in builtin mode, pass:',
@@ -181,12 +182,12 @@ function formatModeRemediation(targetMode: 'docker' | 'builtin'): string[] {
     ];
   }
   return [
-    'To run this session in Docker mode, pass:',
+    'To run this session in container mode, pass:',
     '  --agent claude-code',
     '',
-    'To make Docker the default permanently, run:',
+    'To make container mode the default permanently, run:',
     '  ironcurtain config',
-    'and set Session Mode > Preferred mode to "docker".',
+    'and set Session Mode > Preferred mode to "container".',
   ];
 }
 
@@ -226,7 +227,7 @@ function credentialErrorMessageForPreferredMode(
 ): string {
   const lines: string[] = [
     'Cannot start IronCurtain.',
-    `preferredMode is "docker" but no credentials are configured for "${agentId}".`,
+    `preferredMode is "container" but no credentials are configured for "${agentId}".`,
     '',
   ];
   if (agentId === 'goose') {
@@ -263,7 +264,7 @@ function credentialErrorMessageForPreferredMode(
 function dockerUnavailableMessage(detailedMessage: string): string {
   return [
     'Cannot start IronCurtain.',
-    'preferredMode is "docker" but Docker is not available:',
+    'preferredMode is "container" but the selected container runtime is not available:',
     '',
     detailedMessage,
     '',
@@ -286,7 +287,7 @@ function builtinNeedsApiKeyMessage(provider: ProviderId, qualifiedModelId: strin
   }
   lines.push(
     '',
-    ...formatModeRemediation('docker'),
+    ...formatModeRemediation('container'),
     '',
     `Set ${envVar} in your environment, or run \`ironcurtain config\`.`,
   );
@@ -296,12 +297,12 @@ function builtinNeedsApiKeyMessage(provider: ProviderId, qualifiedModelId: strin
 /**
  * Renders the user-facing `Mode: ...` banner shown at session startup.
  * Single source of truth so `ironcurtain start`, the daemon, and cron
- * jobs all print identically. Docker mode includes the agent + auth
+ * jobs all print identically. Container mode includes the agent + auth
  * kind via `reason`; builtin has no parenthetical.
  */
 export function formatModeLine(preflight: PreflightResult): string {
   if (preflight.mode.kind === 'builtin') return 'Mode: builtin';
-  return `Mode: docker / ${preflight.reason}`;
+  return `Mode: container / ${preflight.reason}`;
 }
 
 /** Per-call-site message strategy for `resolveDockerAgent`. */
@@ -347,7 +348,7 @@ async function resolveDockerAgent(
  *
  * - Explicit agent: validates prerequisites; throws PreflightError on failure.
  * - Default path: dispatches on `preferredMode`. There is no silent
- *   fallback — Docker unavailability or missing credentials throw.
+ *   fallback — container-runtime unavailability or missing credentials throw.
  */
 export async function resolveSessionMode(options: PreflightOptions): Promise<PreflightResult> {
   const { config, requestedAgent, credentialSources } = options;
@@ -392,8 +393,8 @@ async function resolveExplicit(
 
   return resolveDockerAgent(agent, config, isDockerAvailable, credentialSources, providerProfileName, {
     dockerUnavailable: (detailedMessage) =>
-      `--agent ${agent} requires Docker, but it is not available:\n\n${detailedMessage}\n\n` +
-      'Please fix your Docker installation or use the builtin agent.',
+      `--agent ${agent} requires container mode, but the selected container runtime is not available:\n\n${detailedMessage}\n\n` +
+      'Please fix your container runtime installation or use the builtin agent.',
     credentialsMissing: (oauthOnly) => credentialErrorMessageForExplicit(agent, config, oauthOnly),
     successReason: (authKind) => `Explicit --agent selection (${authKindLabel(authKind)})`,
   });

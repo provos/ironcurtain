@@ -18,7 +18,7 @@ Opt-in Svelte 5 SPA served by the IronCurtain daemon via `--web-ui`. Communicate
 ```
 src/lib/components/ui/       -- Reusable UI primitives (Button, Badge, Card, etc.)
                                 No domain imports. Only cn(), svelte, third-party.
-src/lib/components/features/ -- Domain-specific components (EscalationCard, SessionConsole, etc.)
+src/lib/components/features/ -- Domain-specific components (EscalationCard, TerminalConsole, etc.)
                                 May import from types.ts and ui/ components.
 src/lib/                     -- State, logic, utilities
                                 types.ts, stores.svelte.ts, event-handler.ts, etc.
@@ -66,11 +66,11 @@ src/
       features/           -- Domain-specific components
         escalation-card.svelte   -- Single escalation with approve/deny/whitelist
         escalation-modal.svelte  -- Tabbed modal for pending escalations
-        session-sidebar.svelte   -- Session list with persona picker
-        session-console.svelte   -- Chat output, collapsible groups, message input
+        session-sidebar.svelte   -- Session list with container launch options
+        terminal-console.svelte  -- xterm terminal for web-pty sessions
   routes/
     Dashboard.svelte      -- Overview cards, active sessions table, upcoming jobs
-    Sessions.svelte       -- Thin coordinator: wires sidebar + console to store
+    Sessions.svelte       -- Thin coordinator: wires sidebar + terminal to store
     Escalations.svelte    -- Pending escalation cards with approve/deny
     Jobs.svelte           -- Job table with run/enable/disable/recompile/remove
 ```
@@ -149,12 +149,11 @@ cd packages/web-ui && npm run dev
 
 Open `http://localhost:5173?token=mock-dev-token` in your browser. The mock server simulates the full JSON-RPC protocol with canned data:
 
-- **Chat**: Messages produce realistic event sequences (thinking → tool calls → markdown response)
-- **Escalations**: Send a message containing the word "escalate" to trigger an escalation
+- **PTY terminal (Container Agent Mode)**: `sessions.create` returns a `web-pty` session that renders a live xterm terminal (canned replay banner + fake-TUI frames; type or prompt "escalate" to raise an escalation)
+- **Escalations**: Send PTY input/prompt containing the word "escalate" to trigger an escalation
 - **Jobs**: Three canned jobs with working enable/disable/remove actions
-- **Personas**: Three canned personas in the session creation picker
+- **Personas**: Canned personas in the session launch selector
 - **Dashboard**: Live status updates every 10 seconds
-- **PTY terminal (Docker Agent Mode)**: start the mock with `MOCK_SESSION_MODE=docker npm run mock-server` so `sessions.create` returns a `web-pty` session that renders a live xterm terminal (canned replay banner + fake-TUI frames; type "escalate" to raise an escalation over the terminal)
 
 ## Testing
 
@@ -168,7 +167,6 @@ npm run test:watch -w packages/web-ui  # Watch mode during development
 Tests cover:
 
 - **`event-handler.test.ts`** -- All WebSocket event types, state mutations, edge cases
-- **`output-grouping.test.ts`** -- Collapsible group logic, summary formatting
 - **`ws-client.test.ts`** -- Request correlation, event dispatch, reconnect, timeouts
 - **`stores-pty.test.ts`** -- PTY store actions + the buffering sink registry (frames that arrive before the terminal connects are held and drained in order; see "PTY terminal streaming" below)
 
@@ -176,12 +174,11 @@ Root `npm test` also runs the web-ui tests after the main test suite.
 
 ### Architecture for testability
 
-Event handling and output grouping logic are extracted into pure, non-Svelte modules:
+Event handling is extracted into a pure, non-Svelte module:
 
 - `src/lib/event-handler.ts` -- `handleEvent(state, effects, event, payload)` with `AppStateLike` interface
-- `src/lib/output-grouping.ts` -- `groupOutputLines(lines)` with `OutputEntry` types
 
-These can be tested without any Svelte, DOM, or WebSocket dependency.
+This can be tested without any Svelte, DOM, or WebSocket dependency.
 
 ### E2E tests (Playwright)
 
@@ -193,9 +190,9 @@ npm run e2e:headed                # Run with visible browser for debugging
 
 Playwright auto-starts both the mock WS server (port 7400) and Vite dev server (port 5173) via the `webServer` config in `playwright.config.ts`. Tests reset mock state via `POST http://localhost:7401/__reset` in `beforeEach`.
 
-Tests cover: Dashboard stats, session lifecycle (create/send/end), escalation approve/deny, job actions, theme switching, error states, and the PTY terminal (`pty-terminal.spec.ts`).
+Tests cover: Dashboard stats, container terminal session lifecycle (create/prompt/end), escalation approve/deny, job actions, theme switching, error states, and the PTY terminal (`pty-terminal.spec.ts`).
 
-**Docker Agent Mode in E2E** — the chatbox specs run the mock in its default (code) mode; `pty-terminal.spec.ts` flips the _single_ running mock into Docker Agent Mode per-test with `resetMockServer(request, { mode: 'docker' })` (→ `POST /__reset { mode: 'docker' }`). A bare `/__reset` (no `mode`) always restores the env-derived initial mode, so a PTY spec never contaminates a later chatbox spec. Read xterm output in assertions via `getByTestId('pty-terminal').locator('.xterm-rows')`.
+**Container Agent Mode in E2E** — the mock defaults to `web-pty` sessions and returns `sessionMode: 'container'`. Tests reset mutable state with `resetMockServer(request)` and read xterm output via `getByTestId('pty-terminal').locator('.xterm-rows')`.
 
 ## Keeping the Mock WS Server in Sync
 
@@ -208,17 +205,17 @@ The mock server (`scripts/mock-ws-server.ts`) must stay in sync with the real da
 
 The mock server is the source of truth for E2E tests — if it diverges from the real protocol, tests pass but don't validate real behavior.
 
-## PTY terminal streaming (Docker Agent Mode)
+## PTY terminal streaming (Container Agent Mode)
 
-A `web-pty` session (`source.kind === 'web-pty'`) renders a live xterm.js terminal instead of the turn-based chatbox. The session mode is process-global on the daemon (docker → terminal, code → chatbox), so a session either is or isn't a PTY for its whole life.
+A `web-pty` session (`source.kind === 'web-pty'`) renders a live xterm.js terminal. The web UI supports container terminal sessions; non-PTY legacy session types render an unsupported-state panel.
 
 **Protocol.** Methods (client → daemon): `sessions.ptyAttach` / `ptyDetach` / `ptyInput { data }` / `ptyResize { cols, rows }` / `ptyPrompt { text }`. Events (daemon → client): `session.pty_replay { label, snapshot }` (one-shot full-screen snapshot on attach) and `session.pty_output { label, data }` (incremental deltas). `data`/`snapshot` are base64 of the UTF-8 bytes of the terminal stream — the component decodes to a `Uint8Array` and lets xterm own UTF-8 (never `atob`-to-string, which corrupts multibyte codepoints split across chunks). Codec: `src/lib/pty-codec.ts`.
 
 **Trusted-message bar (mux parity).** A docked input row below the terminal (in `Sessions.svelte`, subordinate to the terminal) sends a TRUSTED message via `sessions.ptyPrompt { label, text }` → `{ accepted: true }`. Unlike `ptyInput` (raw keystrokes, base64, **never** trusted), `text` is PLAIN text: the daemon records it as trusted user-context (authorizing auto-approval) and injects it into the child PTY. This bar is the ONLY path to auto-approval from the browser. Store action: `sendPtyPrompt(label, text)`.
 
-**Launch options (`sessions.create`).** In Docker Agent Mode `sessions.create` also accepts optional `workspacePath` / `providerProfileName` / `model` (mux `/new` parity; the code-mode chatbox ignores them). The New-session sidebar surfaces these three fields plus a "Start session" button (`launch-*` test ids) only when `sessionMode === 'docker'`; the provider dropdown is populated from `config.getModelProviders`. `createSession(opts?: CreateSessionOptions)` sends only the provided keys.
+**Launch options (`sessions.create`).** In Container Agent Mode `sessions.create` accepts optional `persona` / `workspacePath` / `providerProfileName` / `model` (mux `/new` parity). The New-session sidebar always surfaces these launch fields plus a "Start session" button (`launch-*` test ids); selecting a persona does not start a session. The provider dropdown is populated from `config.getModelProviders`. `createSession(opts?: CreateSessionOptions)` sends only the provided keys.
 
-**Session mode (`DaemonStatusDto.sessionMode`).** The daemon status carries `sessionMode: 'builtin' | 'docker'` (from `ctx.mode.kind`) so the UI picks the web-pty terminal + launch-options create flow (`docker`) vs the turn-based chatbox (`builtin`) BEFORE a session exists. Route views read `appState.daemonStatus?.sessionMode === 'docker'`.
+**Session mode (`DaemonStatusDto.sessionMode`).** The daemon status carries `sessionMode: 'builtin' | 'container'`. The backend maps internal `SessionMode.kind === 'docker'` to the public `container` value so the UI does not expose a Docker-only label when Apple Container is the active runtime.
 
 **Component (`features/terminal-console.svelte`).** Presentational: no store import (route wiring only). Creates the xterm terminal in **`onMount`, not `$effect`** — the route passes inline callback props whose identity changes on every parent re-render, and a reactive `$effect` re-runs on that churn, disposing and recreating the terminal and **dropping the one-shot replay** (the bug the E2E caught: reconnect to an idle session blanked). On mount it hands the route a live `{ write, reset }` handle via `onready`. Input is keyboard-only (mux parity: no `onBinary`/app-mouse forwarding; wheel = local scrollback; Ctrl+C stays SIGINT).
 

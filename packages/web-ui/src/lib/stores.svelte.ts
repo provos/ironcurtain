@@ -12,8 +12,6 @@ import type {
   JobListDto,
   OutputLine,
   PendingEscalation,
-  ConversationTurn,
-  BudgetSummaryDto,
   PersonaListItem,
   PersonaDetailDto,
   PersonaEditResultDto,
@@ -517,8 +515,8 @@ export async function resolveEscalation(
 
 /**
  * Create a session. `persona` applies to every mode; `workspacePath`,
- * `providerProfileName`, and `model` are docker/web-pty launch options (mux
- * `/new` parity) and are IGNORED by the code-mode chatbox path server-side.
+ * `providerProfileName`, and `model` are container/web-pty launch options (mux
+ * `/new` parity).
  * Only the provided keys are sent so the backend schema's optionals stay unset.
  */
 export async function createSession(opts?: CreateSessionOptions): Promise<{ label: number }> {
@@ -530,20 +528,8 @@ export async function createSession(opts?: CreateSessionOptions): Promise<{ labe
   return getWsClient().request<{ label: number }>('sessions.create', params);
 }
 
-export async function sendSessionMessage(label: number, text: string): Promise<void> {
-  await getWsClient().request('sessions.send', { label, text });
-}
-
 export async function endSession(label: number): Promise<void> {
   await getWsClient().request('sessions.end', { label });
-}
-
-export async function loadSessionHistory(label: number): Promise<ConversationTurn[]> {
-  return getWsClient().request<ConversationTurn[]>('sessions.history', { label });
-}
-
-export async function loadSessionBudget(label: number): Promise<BudgetSummaryDto> {
-  return getWsClient().request<BudgetSummaryDto>('sessions.budget', { label });
 }
 
 // ── PTY terminal RPC actions (web-pty sessions) ──────────────────────

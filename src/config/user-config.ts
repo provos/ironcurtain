@@ -39,7 +39,7 @@ export const USER_CONFIG_DEFAULTS = {
   auditRedaction: {
     enabled: true,
   },
-  preferredMode: 'docker',
+  preferredMode: 'container',
   dockerResources: {
     /** Memory ceiling in MB; null means "do not pass --memory". */
     memoryMb: 8192,
@@ -253,11 +253,13 @@ export type GooseProvider = (typeof GOOSE_PROVIDERS)[number];
 export const DOCKER_AGENTS = ['claude-code', 'goose', 'codex'] as const;
 export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 
-export const SESSION_MODES = ['docker', 'builtin'] as const;
+export const SESSION_MODES = ['container', 'builtin'] as const;
 export type SessionModeKind = (typeof SESSION_MODES)[number];
 
+const preferredModeSchema = z.preprocess((value) => (value === 'docker' ? 'container' : value), z.enum(SESSION_MODES));
+
 /**
- * Container runtime backend for Docker Agent Mode sessions. 'auto'
+ * Container runtime backend for Container mode sessions. 'auto'
  * prefers the Apple container runtime when its preflight passes
  * (Apple silicon, macOS 26+, container CLI >= 1.0 with services
  * running) and falls back to Docker otherwise. The
@@ -390,7 +392,7 @@ export const userConfigSchema = z.object({
   gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
   gooseModel: z.string().min(1).optional(),
   preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
-  preferredMode: z.enum(SESSION_MODES).optional(),
+  preferredMode: preferredModeSchema.optional(),
   containerRuntime: z.enum(CONTAINER_RUNTIMES).optional(),
   packageInstall: packageInstallSchema,
   dockerResources: dockerResourcesSchema,
@@ -550,7 +552,7 @@ export interface ResolvedUserConfig {
   readonly gooseModel: string;
   /** Preferred Docker agent for auto-detection. */
   readonly preferredDockerAgent: DockerAgent;
-  /** Preferred session mode: 'docker' (default) or 'builtin'. */
+  /** Preferred session mode: 'container' (default) or 'builtin'. */
   readonly preferredMode: SessionModeKind;
   /** Container runtime backend: 'auto' (default), 'docker', or 'apple-container'. */
   readonly containerRuntime: ContainerRuntimeSetting;
@@ -824,6 +826,11 @@ function validateConfig(parsed: unknown, configPath: string): UserConfig {
     throw new Error(`Invalid config in ${configPath}:\n${issues}`);
   }
   return result.data;
+}
+
+function normalizeLegacyPreferredMode(config: Record<string, unknown>): Record<string, unknown> {
+  if (config['preferredMode'] !== 'docker') return config;
+  return { ...config, preferredMode: 'container' };
 }
 
 /**
@@ -1198,7 +1205,7 @@ export function saveUserConfig(changes: UserConfig): void {
     mkdirSync(dirname(configPath), { recursive: true });
   }
 
-  const merged = stripEnvOpenrouterKeys(deepMergeConfig(existing, changes), existing);
+  const merged = normalizeLegacyPreferredMode(stripEnvOpenrouterKeys(deepMergeConfig(existing, changes), existing));
 
   // Validate the merged result (only known fields)
   const result = userConfigSchema.safeParse(merged);

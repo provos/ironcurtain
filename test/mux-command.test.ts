@@ -69,7 +69,7 @@ const mockConfig: IronCurtainConfig = {
     gooseProvider: 'anthropic',
     gooseModel: 'claude-sonnet-4-20250514',
     preferredDockerAgent: 'claude-code',
-    preferredMode: 'docker',
+    preferredMode: 'container',
   },
 };
 
@@ -177,7 +177,7 @@ describe('ironcurtain mux preflight integration', () => {
     expect(fakeApp.start).toHaveBeenCalledOnce();
     // Mode line must reach stderr in the same shape as `start`/`daemon`/`bot`.
     const stderrText = stderr.lines.join('');
-    expect(stderrText).toMatch(/Mode: docker \/ claude-code \(API key\)/);
+    expect(stderrText).toMatch(/Mode: container \/ claude-code \(API key\)/);
   });
 
   it('--capture-traces forwards captureTraces: true to the MuxApp', async () => {
@@ -296,7 +296,7 @@ describe('ironcurtain mux preflight integration', () => {
     expect(createMuxApp).not.toHaveBeenCalled();
   });
 
-  it('builtin mode is rejected with a clean error (mux requires Docker)', async () => {
+  it('builtin mode is rejected with a clean error (mux requires container agent mode)', async () => {
     // If preferredMode resolves to builtin, the mux child PTY can't run.
     // Fail fast with a single coherent message rather than per-tab spam.
     const resolveSessionMode = vi.fn().mockResolvedValue({
@@ -315,7 +315,7 @@ describe('ironcurtain mux preflight integration', () => {
 
     expect(createMuxApp).not.toHaveBeenCalled();
     const stderrText = stderr.lines.join('');
-    expect(stderrText).toMatch(/ironcurtain mux requires Docker agent mode/);
+    expect(stderrText).toMatch(/ironcurtain mux requires container agent mode/);
   });
 
   it('uses the resolved preflight agent (not the raw --agent value) when constructing the MuxApp', async () => {

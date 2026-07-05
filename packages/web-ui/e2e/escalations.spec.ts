@@ -1,5 +1,26 @@
-import { test, expect } from '@playwright/test';
-import { connectWithToken, navigateTo, createDefaultSession, sendMessage, resetMockServer } from './helpers.js';
+import { test, expect, type Page } from '@playwright/test';
+import {
+  connectWithToken,
+  navigateTo,
+  createDefaultSession,
+  resetMockServer,
+  sendTrustedPtyPrompt,
+  sendPtyPromptRpc,
+  sessionLabelNumber,
+  waitForPtyTerminal,
+} from './helpers.js';
+
+async function createEscalationFromEscalationsView(page: Page): Promise<void> {
+  const label = sessionLabelNumber(await createDefaultSession(page));
+  await navigateTo(page, 'Escalations');
+  await sendPtyPromptRpc(label, 'escalate');
+}
+
+async function createEscalationFromSessionsView(page: Page): Promise<void> {
+  await createDefaultSession(page);
+  await waitForPtyTerminal(page);
+  await sendTrustedPtyPrompt(page, 'escalate');
+}
 
 test.describe('Escalations', () => {
   test.beforeEach(async ({ page, request }) => {
@@ -13,30 +34,14 @@ test.describe('Escalations', () => {
   });
 
   test('creates an escalation by sending "escalate" keyword', async ({ page }) => {
-    await createDefaultSession(page);
-
-    // Navigate to escalations view BEFORE sending escalation to avoid modal overlay
-    await navigateTo(page, 'Escalations');
-
-    // Select the session and send the escalation trigger
-    await navigateTo(page, 'Sessions');
-    await page.locator('[data-testid^="session-item-"]').first().click();
-    await sendMessage(page, 'please escalate this');
-
-    // Navigate to escalations view -- modal does not open because we're on escalations page
-    await navigateTo(page, 'Escalations');
+    await createEscalationFromEscalationsView(page);
 
     // The mock server creates an escalation for filesystem/write_file
     await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
   });
 
   test('escalation card shows server name and tool info', async ({ page }) => {
-    await createDefaultSession(page);
-    await navigateTo(page, 'Escalations');
-    await navigateTo(page, 'Sessions');
-    await page.locator('[data-testid^="session-item-"]').first().click();
-    await sendMessage(page, 'escalate');
-    await navigateTo(page, 'Escalations');
+    await createEscalationFromEscalationsView(page);
 
     // Wait for the escalation card to appear
     await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
@@ -50,12 +55,7 @@ test.describe('Escalations', () => {
   });
 
   test('approving an escalation removes the card', async ({ page }) => {
-    await createDefaultSession(page);
-    await navigateTo(page, 'Escalations');
-    await navigateTo(page, 'Sessions');
-    await page.locator('[data-testid^="session-item-"]').first().click();
-    await sendMessage(page, 'escalate');
-    await navigateTo(page, 'Escalations');
+    await createEscalationFromEscalationsView(page);
 
     // Wait for escalation to appear
     await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
@@ -68,12 +68,7 @@ test.describe('Escalations', () => {
   });
 
   test('denying an escalation removes the card', async ({ page }) => {
-    await createDefaultSession(page);
-    await navigateTo(page, 'Escalations');
-    await navigateTo(page, 'Sessions');
-    await page.locator('[data-testid^="session-item-"]').first().click();
-    await sendMessage(page, 'escalate');
-    await navigateTo(page, 'Escalations');
+    await createEscalationFromEscalationsView(page);
 
     // Wait for escalation to appear
     await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
@@ -86,12 +81,7 @@ test.describe('Escalations', () => {
   });
 
   test('whitelist candidates are displayed and can be selected before approval', async ({ page }) => {
-    await createDefaultSession(page);
-    await navigateTo(page, 'Escalations');
-    await navigateTo(page, 'Sessions');
-    await page.locator('[data-testid^="session-item-"]').first().click();
-    await sendMessage(page, 'escalate');
-    await navigateTo(page, 'Escalations');
+    await createEscalationFromEscalationsView(page);
 
     // Wait for the escalation card to appear
     await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
@@ -116,8 +106,7 @@ test.describe('Escalations', () => {
   });
 
   test('escalation badge appears in sidebar nav', async ({ page }) => {
-    await createDefaultSession(page);
-    await sendMessage(page, 'escalate');
+    await createEscalationFromSessionsView(page);
 
     // The nav item for Escalations should show a badge count
     // Wait for the escalation event to propagate
@@ -136,8 +125,7 @@ test.describe('Escalation Modal', () => {
   });
 
   test('modal auto-opens when escalation fires during sessions view', async ({ page }) => {
-    await createDefaultSession(page);
-    await sendMessage(page, 'escalate');
+    await createEscalationFromSessionsView(page);
 
     // The modal should auto-open since we're on the Sessions view
     const modal = page.getByRole('dialog');
@@ -149,8 +137,7 @@ test.describe('Escalation Modal', () => {
   });
 
   test('modal can be dismissed with Escape and sidebar badge still shows count', async ({ page }) => {
-    await createDefaultSession(page);
-    await sendMessage(page, 'escalate');
+    await createEscalationFromSessionsView(page);
 
     // Wait for the modal to auto-open
     const modal = page.getByRole('dialog');
@@ -167,8 +154,7 @@ test.describe('Escalation Modal', () => {
   });
 
   test('approving in modal removes the escalation', async ({ page }) => {
-    await createDefaultSession(page);
-    await sendMessage(page, 'escalate');
+    await createEscalationFromSessionsView(page);
 
     // Wait for the modal to auto-open
     const modal = page.getByRole('dialog');
@@ -183,8 +169,7 @@ test.describe('Escalation Modal', () => {
   });
 
   test('View Session link navigates to session view', async ({ page }) => {
-    await createDefaultSession(page);
-    await sendMessage(page, 'escalate');
+    await createEscalationFromSessionsView(page);
 
     // Wait for the modal to auto-open
     const modal = page.getByRole('dialog');
@@ -196,13 +181,12 @@ test.describe('Escalation Modal', () => {
     // Modal should close
     await expect(modal).not.toBeVisible({ timeout: 3_000 });
 
-    // Should be on sessions view with the session selected
-    await expect(page.getByTestId('session-output')).toBeVisible();
+    // Should be on sessions view with the terminal session selected
+    await expect(page.getByTestId('pty-terminal')).toBeVisible();
   });
 
   test('pressing "a" key approves the active escalation', async ({ page }) => {
-    await createDefaultSession(page);
-    await sendMessage(page, 'escalate');
+    await createEscalationFromSessionsView(page);
 
     // Wait for the modal to auto-open
     const modal = page.getByRole('dialog');
@@ -222,18 +206,7 @@ test.describe('Escalation Modal', () => {
   });
 
   test('modal does NOT auto-open when already on Escalations page', async ({ page }) => {
-    await createDefaultSession(page);
-
-    // Navigate to Escalations page first
-    await navigateTo(page, 'Escalations');
-
-    // Go back to sessions to send the escalation trigger
-    await navigateTo(page, 'Sessions');
-    await page.locator('[data-testid^="session-item-"]').first().click();
-    await sendMessage(page, 'escalate');
-
-    // Immediately navigate to Escalations
-    await navigateTo(page, 'Escalations');
+    await createEscalationFromEscalationsView(page);
 
     // Wait for escalation to appear on the page
     await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
