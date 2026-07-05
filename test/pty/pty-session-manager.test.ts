@@ -436,12 +436,40 @@ describe('PtySessionManager', () => {
       expect(ptyReplays(h.sender.calls)).toHaveLength(0);
 
       // Drained: the drain-poll flush resyncs with a full snapshot (not a delta).
+      // The drain poll runs at the coarser PTY_DRAIN_POLL_MS (150ms), so advance
+      // past it.
       ws.bufferedAmount = 0;
-      vi.advanceTimersByTime(20);
+      vi.advanceTimersByTime(160);
       const replays = ptyReplays(h.sender.calls);
       expect(replays).toHaveLength(1);
       expect(replays[0].payload).toEqual({ label, snapshot: b64('SNAPSHOT') });
       expect(replays[0].clients.has(ws)).toBe(true);
+    });
+
+    it('new output preempts the drain poll: healthy clients still flush at the coalesce cadence', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
+      const slow = fakeWs();
+      const healthy = fakeWs();
+      h.manager.attach(label, slow);
+      h.manager.attach(label, healthy);
+      h.sender.calls.length = 0; // drop the attach replays
+
+      // Slow client backpressured: the first flush desyncs it and arms the
+      // 150ms drain poll (the healthy client got that delta).
+      slow.bufferedAmount = 5 * 1024 * 1024;
+      h.lastBridge().emitData('burst-1');
+      vi.advanceTimersByTime(20);
+      h.sender.calls.length = 0;
+
+      // New output arrives while the 150ms drain poll is pending. It must reach
+      // the healthy client at the 16ms coalesce cadence, NOT wait for the poll.
+      h.lastBridge().emitData('burst-2');
+      vi.advanceTimersByTime(20); // < PTY_DRAIN_POLL_MS (150)
+      const outs = ptyOutputs(h.sender.calls);
+      expect(outs).toHaveLength(1);
+      expect(outs[0].clients.has(healthy)).toBe(true);
+      expect(outs[0].clients.has(slow)).toBe(false); // still desynced
     });
   });
 

@@ -57,6 +57,15 @@ const PTY_INITIAL_ROWS = 24;
 
 /** Output coalescing: flush accumulated onData on this timer or at the byte cap. */
 const PTY_COALESCE_MS = 16;
+
+/**
+ * Drain-poll interval while a client is backpressured: coarser than the 16ms
+ * coalesce timer so a slow/backgrounded client does not cause 60+ daemon
+ * wakeups/sec just to poll `bufferedAmount`. New output still reaches healthy
+ * clients at the coalesce cadence because `scheduleFlush` lets a shorter request
+ * preempt this longer poll.
+ */
+const PTY_DRAIN_POLL_MS = 150;
 const PTY_COALESCE_MAX_BYTES = 32 * 1024;
 
 /** Backpressure threshold: above this `bufferedAmount`, skip deltas + resync on drain. */
@@ -169,6 +178,8 @@ export class PtyWebSession {
   private buffer = '';
   private bufferBytes = 0;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Delay (ms) of the pending flush timer, so a shorter request can preempt a longer one. */
+  private flushTimerDelay = PTY_COALESCE_MS;
 
   constructor(
     readonly label: number,
@@ -272,12 +283,19 @@ export class PtyWebSession {
     this.bufferBytes = 0;
   }
 
-  private scheduleFlush(): void {
-    if (this.flushTimer) return;
+  private scheduleFlush(delayMs: number = PTY_COALESCE_MS): void {
+    // A shorter request (new output at the coalesce cadence) preempts a pending
+    // longer one (the backpressure drain poll), so healthy clients never wait
+    // the coarse interval for output while another client is backpressured.
+    if (this.flushTimer) {
+      if (delayMs >= this.flushTimerDelay) return;
+      clearTimeout(this.flushTimer);
+    }
+    this.flushTimerDelay = delayMs;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       this.flushNow();
-    }, PTY_COALESCE_MS);
+    }, delayMs);
   }
 
   /**
@@ -318,8 +336,9 @@ export class PtyWebSession {
       if (client.bufferedAmount <= PTY_BACKPRESSURE_BYTES) this.sendReplay(client);
     }
 
-    // Keep polling for drain while any client is still backpressured.
-    if (this.desynced.size > 0) this.scheduleFlush();
+    // Keep polling for drain while any client is still backpressured, at the
+    // coarser drain interval (a fresh output burst preempts it back to 16ms).
+    if (this.desynced.size > 0) this.scheduleFlush(PTY_DRAIN_POLL_MS);
   }
 
   /** Sends a one-shot full-screen snapshot; clears the client's desync flag. */

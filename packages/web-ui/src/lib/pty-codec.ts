@@ -15,9 +15,13 @@
 /** Encode a terminal string as base64 of its UTF-8 bytes. */
 export function encodeB64Utf8(text: string): string {
   const bytes = new TextEncoder().encode(text);
+  // Build the binary string in chunks. Per-byte `binary += ...` is O(n^2) for
+  // large payloads (e.g. a big paste), while `String.fromCharCode(...allBytes)`
+  // overflows the call-stack argument limit. 8 KiB chunks keep it linear + safe.
+  const CHUNK = 0x8000;
   let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(binary);
 }
