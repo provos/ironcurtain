@@ -27,6 +27,9 @@ const ptyResizeSchema = z.object({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
 });
+// A trusted user message (not raw keystrokes): the daemon writes user-context
+// (source 'mux-trusted-input') and injects the text into the PTY.
+const ptyPromptSchema = z.object({ label: z.number().int().positive(), text: z.string().min(1) });
 
 // ---------------------------------------------------------------------------
 // Dispatch
@@ -66,6 +69,12 @@ export function ptyDispatch(
       const { label, cols, rows } = validateParams(ptyResizeSchema, params);
       manager.resize(label, cols, rows);
       return { resized: true };
+    }
+
+    case 'sessions.ptyPrompt': {
+      const { label, text } = validateParams(ptyPromptSchema, params);
+      manager.sendPrompt(label, text);
+      return { accepted: true };
     }
 
     default:

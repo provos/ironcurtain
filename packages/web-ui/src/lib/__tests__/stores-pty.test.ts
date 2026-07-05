@@ -36,6 +36,8 @@ import {
   detachPty,
   sendPtyInput,
   sendPtyResize,
+  sendPtyPrompt,
+  createSession,
   registerPtySink,
   unregisterPtySink,
   connectPtyTerminal,
@@ -67,6 +69,56 @@ describe('PTY store actions', () => {
   it('sendPtyResize sends sessions.ptyResize with { label, cols, rows }', async () => {
     await sendPtyResize(5, 120, 40);
     expect(mockRequest).toHaveBeenCalledWith('sessions.ptyResize', { label: 5, cols: 120, rows: 40 });
+  });
+
+  it('sendPtyPrompt sends sessions.ptyPrompt with PLAIN text (not base64)', async () => {
+    await sendPtyPrompt(5, 'approve the write');
+    expect(mockRequest).toHaveBeenCalledWith('sessions.ptyPrompt', { label: 5, text: 'approve the write' });
+  });
+});
+
+describe('createSession launch options', () => {
+  beforeEach(() => {
+    mockRequest.mockReset();
+    mockRequest.mockResolvedValue({ label: 1 });
+  });
+
+  it('sends an empty params object when no options are given', async () => {
+    await createSession();
+    expect(mockRequest).toHaveBeenCalledWith('sessions.create', {});
+  });
+
+  it('sends only persona when only persona is provided', async () => {
+    await createSession({ persona: 'reviewer' });
+    expect(mockRequest).toHaveBeenCalledWith('sessions.create', { persona: 'reviewer' });
+  });
+
+  it('sends only the provided launch-option keys (omits the rest)', async () => {
+    await createSession({ workspacePath: '/repo', model: 'anthropic/claude-sonnet-4.5' });
+    expect(mockRequest).toHaveBeenCalledWith('sessions.create', {
+      workspacePath: '/repo',
+      model: 'anthropic/claude-sonnet-4.5',
+    });
+  });
+
+  it('sends all keys when all launch options are provided', async () => {
+    await createSession({
+      persona: 'reviewer',
+      workspacePath: '/repo',
+      providerProfileName: 'glm-5.2',
+      model: 'z-ai/glm-5.2',
+    });
+    expect(mockRequest).toHaveBeenCalledWith('sessions.create', {
+      persona: 'reviewer',
+      workspacePath: '/repo',
+      providerProfileName: 'glm-5.2',
+      model: 'z-ai/glm-5.2',
+    });
+  });
+
+  it('drops empty-string option values (does not send blank keys)', async () => {
+    await createSession({ persona: '', workspacePath: '', providerProfileName: '', model: '' });
+    expect(mockRequest).toHaveBeenCalledWith('sessions.create', {});
   });
 });
 

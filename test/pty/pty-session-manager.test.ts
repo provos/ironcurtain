@@ -221,6 +221,27 @@ describe('PtySessionManager', () => {
       expect(seen[0].rows).toBe(24);
     });
 
+    it('threads workspace / provider-profile / model options to the bridge factory', async () => {
+      const seen: PtyBridgeOptions[] = [];
+      const h = makeHarness({
+        createBridge: async (opts) => {
+          seen.push(opts);
+          return new StubBridge() as unknown as PtyBridge;
+        },
+      });
+      await h.manager.create({
+        persona: 'researcher',
+        workspacePath: '/work/x',
+        providerProfileName: 'openrouter-1',
+        model: 'claude-opus-4-8',
+      });
+
+      expect(seen[0].persona).toBe('researcher');
+      expect(seen[0].workspacePath).toBe('/work/x');
+      expect(seen[0].providerProfileName).toBe('openrouter-1');
+      expect(seen[0].model).toBe('claude-opus-4-8');
+    });
+
     it('fails cleanly with PtyUnavailableError when preflight rejects', async () => {
       const h = makeHarness({
         preflight: async () => {
@@ -229,6 +250,57 @@ describe('PtySessionManager', () => {
       });
       await expect(h.manager.create()).rejects.toThrow('PTY terminal unavailable: node-pty missing');
       expect(h.manager.size).toBe(0);
+    });
+  });
+
+  describe('sendPrompt (trusted input)', () => {
+    const tempDirs: string[] = [];
+    const makeDir = (): string => {
+      const dir = mkdtempSync(join(tmpdir(), 'pty-trusted-'));
+      tempDirs.push(dir);
+      return dir;
+    };
+    afterEach(() => {
+      for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('writes trusted user-context, injects the text, then Enter after the delay', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
+      const bridge = h.lastBridge();
+      const dir = makeDir();
+      bridge.emitDiscovered({ sessionId: 's', escalationDir: dir, label: 'l', startedAt: '', pid: 4242 });
+
+      h.manager.sendPrompt(label, 'hello agent');
+
+      // Text injected immediately; user-context written as trusted.
+      expect(bridge.write).toHaveBeenCalledWith('hello agent');
+      const ctx = JSON.parse(readFileSync(join(dir, 'user-context.json'), 'utf-8'));
+      expect(ctx.source).toBe('mux-trusted-input');
+      expect(ctx.userMessage).toBe('hello agent');
+      expect(typeof ctx.timestamp).toBe('string');
+
+      // Enter is deferred so Ink processes the text + submit as distinct events.
+      expect(bridge.write).not.toHaveBeenCalledWith('\r');
+      vi.advanceTimersByTime(60);
+      expect(bridge.write).toHaveBeenCalledWith('\r');
+    });
+
+    it('injects untrusted (no user-context) when discovery has not yielded the escalation dir', async () => {
+      const h = makeHarness();
+      const { label } = await h.manager.create();
+      const bridge = h.lastBridge();
+
+      h.manager.sendPrompt(label, 'early');
+
+      expect(bridge.write).toHaveBeenCalledWith('early');
+      vi.advanceTimersByTime(60);
+      expect(bridge.write).toHaveBeenCalledWith('\r');
+    });
+
+    it('throws SessionNotFoundError for an unknown label', () => {
+      const h = makeHarness();
+      expect(() => h.manager.sendPrompt(999, 'x')).toThrow();
     });
   });
 

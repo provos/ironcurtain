@@ -34,6 +34,7 @@ import type {
   SetModelProvidersDto,
   OpenrouterModelsDto,
   PtySink,
+  CreateSessionOptions,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
@@ -487,9 +488,18 @@ export async function resolveEscalation(
 
 // ── Session RPC actions ──────────────────────────────────────────────
 
-export async function createSession(persona?: string): Promise<{ label: number }> {
+/**
+ * Create a session. `persona` applies to every mode; `workspacePath`,
+ * `providerProfileName`, and `model` are docker/web-pty launch options (mux
+ * `/new` parity) and are IGNORED by the code-mode chatbox path server-side.
+ * Only the provided keys are sent so the backend schema's optionals stay unset.
+ */
+export async function createSession(opts?: CreateSessionOptions): Promise<{ label: number }> {
   const params: Record<string, unknown> = {};
-  if (persona) params.persona = persona;
+  if (opts?.persona) params.persona = opts.persona;
+  if (opts?.workspacePath) params.workspacePath = opts.workspacePath;
+  if (opts?.providerProfileName) params.providerProfileName = opts.providerProfileName;
+  if (opts?.model) params.model = opts.model;
   return getWsClient().request<{ label: number }>('sessions.create', params);
 }
 
@@ -530,6 +540,16 @@ export async function sendPtyInput(label: number, dataB64: string): Promise<void
 
 export async function sendPtyResize(label: number, cols: number, rows: number): Promise<void> {
   await getWsClient().request('sessions.ptyResize', { label, cols, rows });
+}
+
+/**
+ * Send a TRUSTED user message to a web-pty session. Unlike `sendPtyInput`
+ * (raw keystrokes, base64, never trusted), `text` is PLAIN text: the daemon
+ * records it as trusted user-context (authorizing auto-approval) and injects it
+ * into the child PTY. This is the only browser path to auto-approval.
+ */
+export async function sendPtyPrompt(label: number, text: string): Promise<void> {
+  await getWsClient().request('sessions.ptyPrompt', { label, text });
 }
 
 // ── Job RPC actions ──────────────────────────────────────────────────

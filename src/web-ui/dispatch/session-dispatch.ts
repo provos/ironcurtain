@@ -46,6 +46,14 @@ const sessionCreateSchema = z.object({
    * docs/designs/mitm-token-trajectory-capture.md §10.
    */
   captureTraces: z.boolean().optional(),
+  /**
+   * Docker-agent (web-pty) launch options, mirroring mux `/new`. Ignored by the
+   * code-mode chatbox path. The child `ironcurtain start --pty` validates the
+   * workspace (containment) and resolves the provider profile / model.
+   */
+  workspacePath: z.string().min(1).optional(),
+  providerProfileName: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
 });
 const sessionSendSchema = z.object({ label: z.number().int().positive(), text: z.string().min(1) });
 
@@ -83,13 +91,13 @@ export async function sessionDispatch(
       return getSession(ctx, label);
     }
     case 'sessions.create': {
-      const { persona, captureTraces } = validateParams(sessionCreateSchema, params);
+      const opts = validateParams(sessionCreateSchema, params);
       // Docker mode streams a live terminal (web-pty); code mode keeps the
       // turn-based chatbox session. The daemon's SessionMode is process-global.
       if (ctx.mode.kind === 'docker') {
-        return createPtySession(ctx, persona, captureTraces);
+        return createPtySession(ctx, opts);
       }
-      return createWebSession(ctx, persona, captureTraces);
+      return createWebSession(ctx, opts.persona, opts.captureTraces);
     }
     case 'sessions.end': {
       const { label } = validateParams(labelSchema, params);
@@ -178,8 +186,7 @@ function getSession(ctx: DispatchContext, label: number): SessionDetailDto {
  */
 async function createPtySession(
   ctx: DispatchContext,
-  persona?: string,
-  captureTracesOverride?: boolean,
+  opts: z.infer<typeof sessionCreateSchema>,
 ): Promise<{ label: number }> {
   const manager = ctx.ptySessionManager;
   if (!manager) {
@@ -189,8 +196,11 @@ async function createPtySession(
     throw new RpcError('RATE_LIMITED', `PTY session limit reached (max ${ctx.maxConcurrentWebSessions})`);
   }
   return manager.create({
-    ...(persona ? { persona } : {}),
-    ...(captureTracesOverride !== undefined ? { captureTraces: captureTracesOverride } : {}),
+    ...(opts.persona ? { persona: opts.persona } : {}),
+    ...(opts.captureTraces !== undefined ? { captureTraces: opts.captureTraces } : {}),
+    ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+    ...(opts.providerProfileName ? { providerProfileName: opts.providerProfileName } : {}),
+    ...(opts.model ? { model: opts.model } : {}),
   });
 }
 

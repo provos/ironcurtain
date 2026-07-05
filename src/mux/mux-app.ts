@@ -12,7 +12,7 @@ import { resolveIroncurtainBin } from '../pty/resolve-ironcurtain-bin.js';
 import { createMuxInputHandler, SCROLL_LINES, type MuxInputHandler } from './mux-input-handler.js';
 import { createMuxEscalationManager, type MuxEscalationManager } from './mux-escalation-manager.js';
 import { createMuxRenderer, type MuxRenderer } from './mux-renderer.js';
-import { writeTrustedUserContext } from './trusted-input.js';
+import { writeTrustedUserContext } from '../escalation/trusted-input.js';
 import { createPasteInterceptor, type PasteInterceptor } from './paste-interceptor.js';
 import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';

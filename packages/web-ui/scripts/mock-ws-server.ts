@@ -1471,6 +1471,9 @@ function buildStatusDto() {
     // true so the e2e happy paths work; a per-test POST /__reset override can
     // flip it OFF to exercise the controls-hidden path.
     allowPolicyMutation,
+    // Surface the session mode so the UI shows the web-pty launch-options flow
+    // in docker mode. Mirrors the daemon's `ctx.mode.kind`.
+    sessionMode: sessionMode === 'docker' ? 'docker' : 'builtin',
   };
 }
 
@@ -1481,6 +1484,30 @@ function buildEscalationDto(esc: MockEscalation) {
     ...esc,
     sessionSource: { kind },
   };
+}
+
+/**
+ * Raise the canned "write to protected system path" escalation for a session and
+ * broadcast it. Shared by the turn simulation and both PTY input paths (raw
+ * keystrokes and trusted prompt) so the "escalate" trigger stays identical.
+ */
+function raiseWriteEscalation(label: number): void {
+  const escalationId = `esc-${Date.now()}`;
+  const esc: MockEscalation = {
+    escalationId,
+    sessionLabel: label,
+    toolName: 'filesystem__write_file',
+    serverName: 'filesystem',
+    arguments: { path: '/etc/hosts', content: 'malicious content' },
+    reason: 'Write to protected system path',
+    whitelistCandidates: [
+      { description: 'Allow filesystem.write_file within /etc/' },
+      { description: 'Allow filesystem.write_file for this exact path: /etc/hosts' },
+    ],
+    receivedAt: new Date().toISOString(),
+  };
+  escalations.set(escalationId, esc);
+  broadcast('escalation.created', buildEscalationDto(esc));
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,23 +1537,7 @@ async function simulateTurn(ws: WebSocket, label: number, text: string): Promise
 
     await delay(600);
 
-    const escalationId = `esc-${Date.now()}`;
-    const esc: MockEscalation = {
-      escalationId,
-      sessionLabel: label,
-      toolName: 'filesystem__write_file',
-      serverName: 'filesystem',
-      arguments: { path: '/etc/hosts', content: 'malicious content' },
-      reason: 'Write to protected system path',
-      whitelistCandidates: [
-        { description: 'Allow filesystem.write_file within /etc/' },
-        { description: 'Allow filesystem.write_file for this exact path: /etc/hosts' },
-      ],
-      receivedAt: new Date().toISOString(),
-    };
-    escalations.set(escalationId, esc);
-
-    broadcast('escalation.created', buildEscalationDto(esc));
+    raiseWriteEscalation(label);
     // Session stays in processing until escalation is resolved
     return;
   }
@@ -1721,24 +1732,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       if (!inputSession) return errorResult('SESSION_NOT_FOUND', `Session #${label} not found`);
       const text = Buffer.from(dataB64, 'base64').toString('utf-8');
       // Route "escalate" to a structured escalation so the overlay is demoable.
-      if (text.toLowerCase().includes('escalate')) {
-        const escalationId = `esc-${Date.now()}`;
-        const esc: MockEscalation = {
-          escalationId,
-          sessionLabel: label,
-          toolName: 'filesystem__write_file',
-          serverName: 'filesystem',
-          arguments: { path: '/etc/hosts', content: 'malicious content' },
-          reason: 'Write to protected system path',
-          whitelistCandidates: [
-            { description: 'Allow filesystem.write_file within /etc/' },
-            { description: 'Allow filesystem.write_file for this exact path: /etc/hosts' },
-          ],
-          receivedAt: new Date().toISOString(),
-        };
-        escalations.set(escalationId, esc);
-        broadcast('escalation.created', buildEscalationDto(esc));
-      }
+      if (text.toLowerCase().includes('escalate')) raiseWriteEscalation(label);
       // Echo the keystrokes back so typed characters appear at the cursor.
       broadcast('session.pty_output', { label, data: dataB64 });
       return { accepted: true };
@@ -1747,6 +1741,20 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'sessions.ptyResize': {
       // Last-writer-wins; the mock has no real PTY to resize.
       return { resized: true };
+    }
+
+    case 'sessions.ptyPrompt': {
+      // Trusted message: PLAIN text (not base64). The daemon records it as
+      // trusted user-context (authorizing auto-approval) and injects it into the
+      // child PTY. The mock injects an observable echo so the round-trip is
+      // assertable, and reuses the "escalate" trigger path.
+      const label = params.label as number;
+      const text = params.text as string;
+      const promptSession = sessions.get(label);
+      if (!promptSession) return errorResult('SESSION_NOT_FOUND', `Session #${label} not found`);
+      if (text.toLowerCase().includes('escalate')) raiseWriteEscalation(label);
+      broadcast('session.pty_output', { label, data: b64(`\r\n> ${text}\r\n`) });
+      return { accepted: true };
     }
 
     case 'sessions.get': {

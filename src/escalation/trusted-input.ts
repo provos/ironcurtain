@@ -1,13 +1,16 @@
 /**
- * Trusted input module for the terminal multiplexer.
+ * Trusted input for host-mediated PTY sessions (mux terminal multiplexer and
+ * the web-ui PTY terminal).
  *
  * Writes user-context.json with a `source: "mux-trusted-input"` field
- * that the auto-approver can check to distinguish trusted input from
- * context written by the session (which is in-sandbox and untrusted
- * in PTY mode).
+ * that the auto-approver can check to distinguish trusted input written by the
+ * trusted host from context written by the session (which is in-sandbox and
+ * untrusted in PTY mode). The `mux-trusted-input` source string is the wire
+ * contract the auto-approver checks (see tool-call-pipeline `isUserContextTrusted`);
+ * it is kept for both host front-ends.
  */
 
-import { atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
+import { atomicWriteJsonSync } from './escalation-watcher.js';
 import { resolve } from 'node:path';
 
 /**

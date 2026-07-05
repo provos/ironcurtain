@@ -99,6 +99,13 @@ export interface DaemonStatusDto {
    * `undefined` as `false` (no mutation controls).
    */
   readonly allowPolicyMutation?: boolean;
+  /**
+   * The daemon's process-global session mode. `docker` → new sessions are
+   * `web-pty` live terminals (launch options + trusted-input bar); `builtin` →
+   * the turn-based chatbox. Optional in the mirror so a pre-existing daemon that
+   * omits it deserializes cleanly; treat `undefined` as `builtin` (chatbox).
+   */
+  readonly sessionMode?: 'builtin' | 'docker';
 }
 
 export interface JobDefinition {
@@ -195,6 +202,18 @@ export interface PersonaListItem {
   readonly name: string;
   readonly description: string;
   readonly compiled: boolean;
+}
+
+/**
+ * Launch options for `sessions.create`. `persona` applies to every session mode;
+ * `workspacePath` / `providerProfileName` / `model` are Docker-agent (web-pty)
+ * launch options (mux `/new` parity) and are ignored by the code-mode chatbox path.
+ */
+export interface CreateSessionOptions {
+  readonly persona?: string;
+  readonly workspacePath?: string;
+  readonly providerProfileName?: string;
+  readonly model?: string;
 }
 
 /** An escalation enriched with a monotonic display number for modal ordering. */

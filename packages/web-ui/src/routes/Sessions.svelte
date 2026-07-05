@@ -11,18 +11,21 @@
     detachPty,
     sendPtyInput,
     sendPtyResize,
+    sendPtyPrompt,
     registerPtySink,
     unregisterPtySink,
     connectPtyTerminal,
     disconnectPtyTerminal,
+    getModelProviders,
   } from '../lib/stores.svelte.js';
-  import type { ConversationTurn } from '../lib/types.js';
+  import type { ConversationTurn, CreateSessionOptions } from '../lib/types.js';
 
   import SessionSidebar from '$lib/components/features/session-sidebar.svelte';
   import SessionConsole from '$lib/components/features/session-console.svelte';
   import TerminalConsole from '$lib/components/features/terminal-console.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
 
   let { onOpenEscalation }: { onOpenEscalation?: () => void } = $props();
 
@@ -39,11 +42,50 @@
   // Session end state
   let endingSession = $state<number | null>(null);
 
-  async function handleCreate(persona?: string): Promise<void> {
+  // Trusted-message bar state (web-pty sessions). A prompt is PLAIN text sent
+  // via `sessions.ptyPrompt`; the daemon records it as trusted user-context
+  // (authorizing auto-approval) — distinct from raw keystrokes, which are never
+  // trusted. This is the only browser path to auto-approval.
+  let promptText = $state('');
+  let promptError = $state('');
+  let sendingPrompt = $state(false);
+
+  async function handleSendPrompt(): Promise<void> {
+    const label = selectedPtyLabel;
+    if (label === null) return;
+    const text = promptText.trim();
+    if (!text) return;
+    sendingPrompt = true;
+    promptError = '';
+    try {
+      await sendPtyPrompt(label, text);
+      promptText = '';
+    } catch (err) {
+      promptError = err instanceof Error ? err.message : String(err);
+    } finally {
+      sendingPrompt = false;
+    }
+  }
+
+  // Docker Agent Mode (web-pty) exposes the launch options (workspace / provider
+  // / model) in the New-session flow; the code-mode chatbox keeps the
+  // persona-only quick-pick. Read from the daemon status so the flow is chosen
+  // before any session exists.
+  const launchOptionsEnabled = $derived(appState.daemonStatus?.sessionMode === 'docker');
+
+  async function loadProviderProfiles(): Promise<string[]> {
+    const providers = await getModelProviders();
+    // The reserved 'native' profile is default routing; the dropdown's empty
+    // "Default" option already covers it (omitting providerProfileName), so it
+    // is not listed as an explicit choice.
+    return Object.keys(providers.profiles).filter((name) => name !== 'native');
+  }
+
+  async function handleCreate(opts: CreateSessionOptions): Promise<void> {
     creatingSession = true;
     createError = '';
     try {
-      const result = await createSession(persona);
+      const result = await createSession(opts);
       appState.selectedSessionLabel = result.label;
     } catch (err) {
       createError = err instanceof Error ? err.message : String(err);
@@ -163,6 +205,8 @@
     creating={creatingSession}
     {createError}
     loadPersonasFn={listPersonas}
+    {launchOptionsEnabled}
+    loadProviderProfilesFn={loadProviderProfiles}
   />
 
   {#if appState.selectedSession}
@@ -198,6 +242,40 @@
             onresize={(cols, rows) => sendPtyResize(ptySession.label, cols, rows)}
           />
         {/key}
+
+        <!-- Trusted-message bar: docked below the terminal, subordinate to it.
+             Plain text (NOT keystrokes) sent via `sessions.ptyPrompt` — the daemon
+             records it as trusted user-context (authorizes auto-approval). -->
+        <div class="px-4 py-3 border-t border-border bg-card/50 shrink-0">
+          <form
+            class="flex items-center gap-2"
+            onsubmit={(e) => {
+              e.preventDefault();
+              handleSendPrompt();
+            }}
+          >
+            <Input
+              data-testid="pty-prompt-input"
+              bind:value={promptText}
+              placeholder="Send a trusted message..."
+              class="flex-1 py-1.5"
+              disabled={ptySession.status !== 'ready' || sendingPrompt}
+            />
+            <Button
+              type="submit"
+              data-testid="pty-prompt-send"
+              size="sm"
+              loading={sendingPrompt}
+              disabled={!promptText.trim() || ptySession.status !== 'ready'}
+            >
+              Send
+            </Button>
+          </form>
+          <div class="mt-1 text-xs text-muted-foreground">Trusted message — authorizes auto-approval</div>
+          {#if promptError}
+            <div class="mt-1 text-xs text-destructive" data-testid="pty-prompt-error">{promptError}</div>
+          {/if}
+        </div>
       </div>
     {:else}
       <SessionConsole

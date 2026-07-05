@@ -159,5 +159,8 @@ export function buildStatusDto(ctx: DispatchContext): DaemonStatusDto {
     // mutation controls. Defaults to false (off) when the daemon was not
     // launched with `--allow-policy-mutation`.
     allowPolicyMutation: ctx.allowPolicyMutation ?? false,
+    // Surface the process-global session mode so the UI picks the web-pty
+    // terminal create flow (with launch options) vs the chatbox pre-create.
+    sessionMode: ctx.mode.kind,
   };
 }

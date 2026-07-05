@@ -32,7 +32,9 @@ import type { WebEventBus } from './web-event-bus.js';
 import { createPtyBridge, type PtyBridge, type PtyBridgeOptions } from '../pty/pty-bridge.js';
 import { resolveIroncurtainBin } from '../pty/resolve-ironcurtain-bin.js';
 import { createEscalationWatcher, type EscalationWatcher } from '../escalation/escalation-watcher.js';
+import { writeTrustedUserContext } from '../escalation/trusted-input.js';
 import { RpcError, SessionNotFoundError, type EscalationDto } from './web-ui-types.js';
+import * as logger from '../logger.js';
 // Runtime edge is one-directional (this module -> dispatch/types.ts); the
 // back-reference from types.ts to PtyWebSession/PtySessionManager is type-only.
 import { toPtySessionDto } from './dispatch/types.js';
@@ -65,6 +67,14 @@ const PTY_REPLAY_SCROLLBACK = 1000;
 
 /** Bounded await for child exits on daemon shutdown (mirrors mux doShutdown). */
 const PTY_CLOSE_TIMEOUT_MS = 5000;
+
+/**
+ * Delay before the injected Enter (`\r`) on a trusted message, so Claude Code's
+ * Ink UI processes the text and the submit as distinct input events. A single
+ * `text\r` write can arrive as one chunk and Ink may not trigger Enter (mux
+ * parity -- see mux-app.ts).
+ */
+const PTY_ENTER_DELAY_MS = 50;
 
 // ---------------------------------------------------------------------------
 // Encoding + collaborator seams
@@ -370,7 +380,18 @@ export class PtySessionManager {
    * borrowed label. The initial size is a sane 80x24 default; the first browser
    * attach re-sizes it (§11 D1).
    */
-  async create(options: { persona?: string; captureTraces?: boolean } = {}): Promise<{ label: number }> {
+  async create(
+    options: {
+      persona?: string;
+      captureTraces?: boolean;
+      /** Workspace dir passed as `--workspace` (the child validates containment). */
+      workspacePath?: string;
+      /** Provider-profile name passed as `--provider-profile`. */
+      providerProfileName?: string;
+      /** Model ID override passed as `--model`. */
+      model?: string;
+    } = {},
+  ): Promise<{ label: number }> {
     await this.preflight();
 
     const label = this.sessionManager.reserveLabel();
@@ -385,6 +406,9 @@ export class PtySessionManager {
       prefixArgs,
       agent,
       ...(options.persona ? { persona: options.persona } : {}),
+      ...(options.workspacePath ? { workspacePath: options.workspacePath } : {}),
+      ...(options.providerProfileName ? { providerProfileName: options.providerProfileName } : {}),
+      ...(options.model ? { model: options.model } : {}),
       captureTraces,
       muxId: this.ownerId,
       muxPid: this.ownerPid,
@@ -448,6 +472,34 @@ export class PtySessionManager {
   input(label: number, dataB64: string): void {
     const session = this.requireSession(label);
     session.bridge.write(decodeBytes(dataB64));
+  }
+
+  /**
+   * Sends a TRUSTED user message. Writes user-context.json (source
+   * `mux-trusted-input`, fresh timestamp) to the session's escalation dir so the
+   * auto-approver can act on the user's intent, then injects the message into
+   * the child PTY. This is the web-ui equivalent of mux's command-mode trusted
+   * input -- the ONLY path that lets a browser user authorize auto-approval;
+   * raw {@link input} keystrokes are never trusted. If discovery has not yet
+   * yielded the escalation dir, the message is still injected but is NOT trusted
+   * (a warning is logged); the user simply gets an escalation instead.
+   */
+  sendPrompt(label: number, text: string): void {
+    const session = this.requireSession(label);
+    if (!session.bridge.alive) return;
+    if (session.escalationDir) {
+      writeTrustedUserContext(session.escalationDir, text);
+    } else {
+      logger.warn(`[WebUI] PTY session #${label}: escalation dir not ready; message sent untrusted`);
+    }
+    // Inject the text, then the Enter separately after a short delay (see
+    // PTY_ENTER_DELAY_MS). Capture the bridge so a session reaped in the gap
+    // doesn't throw.
+    session.bridge.write(text);
+    const bridge = session.bridge;
+    setTimeout(() => {
+      if (bridge.alive) bridge.write('\r');
+    }, PTY_ENTER_DELAY_MS);
   }
 
   /** Resizes the child PTY (browser xterm is just another resize source). */

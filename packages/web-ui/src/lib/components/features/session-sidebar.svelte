@@ -1,7 +1,8 @@
 <script lang="ts">
-  import type { SessionDto, PersonaListItem } from '../../types.js';
+  import type { SessionDto, PersonaListItem, CreateSessionOptions } from '../../types.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
   import { DropdownMenu, DropdownMenuItem } from '$lib/components/ui/dropdown-menu/index.js';
 
   import Plus from 'phosphor-svelte/lib/Plus';
@@ -14,19 +15,32 @@
     creating,
     createError,
     loadPersonasFn,
+    launchOptionsEnabled = false,
+    loadProviderProfilesFn,
   }: {
     sessions: Map<number, SessionDto>;
     selectedLabel: number | null;
     onselect: (label: number) => void;
-    oncreate: (persona?: string) => void;
+    oncreate: (opts: CreateSessionOptions) => void;
     creating: boolean;
     createError: string;
     loadPersonasFn: () => Promise<PersonaListItem[]>;
+    /** True in Docker Agent Mode: reveal the web-pty launch options (workspace / provider / model). */
+    launchOptionsEnabled?: boolean;
+    /** Loads selectable provider-profile names for the launch options; only used when enabled. */
+    loadProviderProfilesFn?: () => Promise<string[]>;
   } = $props();
 
   let showPersonaPicker = $state(false);
   let personas = $state<PersonaListItem[]>([]);
   let loadingPersonas = $state(false);
+
+  // Docker/web-pty launch options (mux `/new` parity). Ambient inputs carried
+  // into `oncreate` alongside the chosen persona; ignored by the chatbox path.
+  let workspacePath = $state('');
+  let providerProfileName = $state('');
+  let model = $state('');
+  let providerProfiles = $state<string[]>([]);
 
   async function loadPersonas(): Promise<void> {
     loadingPersonas = true;
@@ -39,14 +53,33 @@
     }
   }
 
+  async function loadProviderProfiles(): Promise<void> {
+    if (!loadProviderProfilesFn) return;
+    try {
+      providerProfiles = await loadProviderProfilesFn();
+    } catch {
+      providerProfiles = [];
+    }
+  }
+
   function openPersonaPicker(): void {
     showPersonaPicker = true;
     loadPersonas();
+    if (launchOptionsEnabled) loadProviderProfiles();
   }
 
   function handleCreate(persona?: string): void {
     showPersonaPicker = false;
-    oncreate(persona);
+    oncreate({
+      persona,
+      ...(launchOptionsEnabled
+        ? {
+            workspacePath: workspacePath.trim() || undefined,
+            providerProfileName: providerProfileName || undefined,
+            model: model.trim() || undefined,
+          }
+        : {}),
+    });
   }
 </script>
 
@@ -62,6 +95,45 @@
           {creating ? 'Starting...' : 'New'}
         </Button>
       {/snippet}
+      {#if launchOptionsEnabled}
+        <div class="px-3 py-3 border-b border-border space-y-2.5">
+          <div class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Launch options</div>
+          <label class="block">
+            <span class="text-xs text-muted-foreground">Workspace</span>
+            <Input
+              data-testid="launch-workspace"
+              bind:value={workspacePath}
+              placeholder="/path/to/workspace (optional)"
+              class="mt-1 px-2 py-1.5 text-xs"
+            />
+          </label>
+          <label class="block">
+            <span class="text-xs text-muted-foreground">Provider profile</span>
+            <select
+              data-testid="launch-provider"
+              bind:value={providerProfileName}
+              class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
+            >
+              <option value="">Default</option>
+              {#each providerProfiles as profile (profile)}
+                <option value={profile}>{profile}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-xs text-muted-foreground">Model</span>
+            <Input
+              data-testid="launch-model"
+              bind:value={model}
+              placeholder="Profile default (optional)"
+              class="mt-1 px-2 py-1.5 text-xs"
+            />
+          </label>
+          <Button data-testid="launch-start" variant="default" size="sm" class="w-full" onclick={() => handleCreate()}>
+            Start session
+          </Button>
+        </div>
+      {/if}
       <DropdownMenuItem data-testid="persona-default" onclick={() => handleCreate()} class="border-b border-border">
         <div class="font-medium">Default</div>
         <div class="text-xs text-muted-foreground">No persona</div>

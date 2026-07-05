@@ -145,6 +145,44 @@ test.describe('PTY terminal (Docker Agent Mode)', () => {
     await expect(ptyRows(page)).toContainText(BANNER_TEXT, { timeout: 15_000 });
   });
 
+  test('sends a trusted message from the docked bar and echoes it into the terminal', async ({ page }) => {
+    await createDefaultSession(page);
+    await expect(ptyRows(page)).toContainText(BANNER_TEXT, { timeout: 15_000 });
+
+    // The trusted-message bar (below the terminal) sends PLAIN text via
+    // sessions.ptyPrompt — distinct from raw keystrokes. The mock injects it back
+    // as a pty_output frame, so seeing it in xterm proves the round-trip.
+    const message = 'trusted-approve-99';
+    await page.getByTestId('pty-prompt-input').fill(message);
+    await page.getByTestId('pty-prompt-send').click();
+
+    await expect(ptyRows(page)).toContainText(message, { timeout: 15_000 });
+    // The input clears after a successful send.
+    await expect(page.getByTestId('pty-prompt-input')).toHaveValue('');
+  });
+
+  test('creates a web-pty session with launch options set', async ({ page }) => {
+    await navigateTo(page, 'Sessions');
+
+    // Open the New-session dropdown; docker mode reveals the launch options.
+    await page.getByRole('button', { name: 'New' }).click();
+
+    await page.getByTestId('launch-workspace').fill('/tmp/demo-workspace');
+    await page.getByTestId('launch-model').fill('anthropic/claude-sonnet-4.5');
+
+    // The provider profile <select> is populated from config.getModelProviders.
+    const providerSelect = page.getByTestId('launch-provider');
+    await expect(providerSelect.locator('option', { hasText: 'glm-5.2' })).toHaveCount(1, { timeout: 10_000 });
+    await providerSelect.selectOption('glm-5.2');
+
+    // Start with the entered launch options (default persona).
+    await page.getByTestId('launch-start').click();
+
+    // The web-pty terminal renders for the newly created session.
+    await expect(page.getByTestId('pty-terminal')).toBeVisible({ timeout: 10_000 });
+    await expect(ptyRows(page)).toContainText(BANNER_TEXT, { timeout: 15_000 });
+  });
+
   test('re-attaches and replays after a page reload', async ({ page }) => {
     await createDefaultSession(page);
     await expect(ptyRows(page)).toContainText(BANNER_TEXT, { timeout: 15_000 });
