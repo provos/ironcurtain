@@ -1,8 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server as HttpServer } from 'node:http';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { stripHtmlFallback } from '../src/servers/fetch-server.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const projectRoot = resolve(__dirname, '..');
+const fetchServerPath = resolve(projectRoot, 'src/servers/fetch-server.ts');
+const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
 
 const TEST_HTML = `<!DOCTYPE html>
 <html><head><title>Test Page</title></head>
@@ -116,8 +124,8 @@ beforeAll(async () => {
 
   // Spawn fetch server via MCP SDK
   const transport = new StdioClientTransport({
-    command: 'npx',
-    args: ['tsx', 'src/servers/fetch-server.ts'],
+    command: tsxBin,
+    args: [fetchServerPath],
   });
   client = new Client({ name: 'test-client', version: '1.0.0' });
   await client.connect(transport);

@@ -33,6 +33,9 @@ import type { CompiledPolicyFile, StoredToolAnnotationsFile } from '../src/pipel
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const projectRoot = resolve(__dirname, '..');
+const proxyServerPath = resolve(projectRoot, 'src/trusted-process/mcp-proxy-server.ts');
+const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -488,8 +491,8 @@ describe('Proxy MCP Server Integration', { timeout: 30_000 }, () => {
       const generatedDir = resolve(__dirname, '..', 'src', 'config', 'generated');
 
       transport = new StdioClientTransport({
-        command: 'npx',
-        args: ['tsx', 'src/trusted-process/mcp-proxy-server.ts'],
+        command: tsxBin,
+        args: [proxyServerPath],
         env: {
           ...process.env,
           SERVER_FILTER: 'proxy',

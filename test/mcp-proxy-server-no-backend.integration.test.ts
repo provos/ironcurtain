@@ -17,6 +17,9 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const projectRoot = resolve(__dirname, '..');
+const proxyServerPath = resolve(projectRoot, 'src/trusted-process/mcp-proxy-server.ts');
+const tsxBin = resolve(projectRoot, 'node_modules/.bin/tsx');
 
 const MISSING_VAR = 'IRONCURTAIN_TEST_DEFINITELY_NOT_SET_VAR';
 
@@ -41,7 +44,7 @@ describe('mcp-proxy-server no-backend exit', { timeout: 30_000 }, () => {
     };
     delete env[MISSING_VAR];
 
-    const child = spawn('npx', ['tsx', 'src/trusted-process/mcp-proxy-server.ts'], {
+    const child = spawn(tsxBin, [proxyServerPath], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
@@ -84,7 +87,7 @@ describe('mcp-proxy-server no-backend exit', { timeout: 30_000 }, () => {
       SANDBOX_POLICY: 'warn',
     };
 
-    const child = spawn('npx', ['tsx', 'src/trusted-process/mcp-proxy-server.ts'], {
+    const child = spawn(tsxBin, [proxyServerPath], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
