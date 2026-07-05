@@ -65,6 +65,7 @@
   });
 
   function handleCreate(): void {
+    if (creating) return;
     const persona = selectedPersona || undefined;
     const workspace = workspacePath.trim();
     const selectedModel = model.trim();
@@ -84,6 +85,7 @@
 
   <div class="px-3 py-3 border-b border-border bg-card/40">
     <form
+      data-testid="session-launch-form"
       class="space-y-2.5"
       onsubmit={(e) => {
         e.preventDefault();
@@ -98,6 +100,7 @@
           bind:value={workspacePath}
           placeholder="/path/to/workspace (optional)"
           class="mt-1 px-2 py-1.5 text-xs"
+          disabled={creating}
         />
       </label>
       <label class="block">
@@ -106,6 +109,7 @@
           data-testid="launch-provider"
           bind:value={providerProfileName}
           class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
+          disabled={creating}
         >
           <option value="">Default</option>
           {#each providerProfiles as profile (profile)}
@@ -120,6 +124,7 @@
           bind:value={model}
           placeholder="Profile default (optional)"
           class="mt-1 px-2 py-1.5 text-xs"
+          disabled={creating}
         />
       </label>
       <label class="block">
@@ -128,6 +133,7 @@
           data-testid="launch-persona"
           bind:value={selectedPersona}
           class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
+          disabled={creating}
         >
           <option value="">Default</option>
           {#each personas as persona (persona.name)}

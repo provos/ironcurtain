@@ -140,6 +140,15 @@ describe('SessionSidebar', () => {
     expect(oncreate).toHaveBeenCalledWith({});
   });
 
+  it('ignores native form submit while a session is already being created', async () => {
+    const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
+    render(SessionSidebar, { props: makeProps({ creating: true, oncreate }) });
+
+    await fireEvent.submit(screen.getByTestId('session-launch-form'));
+
+    expect(oncreate).not.toHaveBeenCalled();
+  });
+
   it('still selects existing sessions from the list', async () => {
     const onselect = vi.fn();
     render(SessionSidebar, {

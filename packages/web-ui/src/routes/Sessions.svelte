@@ -68,7 +68,20 @@
   }
 
   async function handleCreate(opts: CreateSessionOptions): Promise<void> {
-    if (appState.daemonStatus?.sessionMode !== 'container') {
+    if (creatingSession) return;
+
+    if (!appState.daemonStatus) {
+      createError = 'Daemon status is not available yet. Wait for the daemon connection to finish, then try again.';
+      return;
+    }
+
+    if (appState.daemonStatus.sessionMode === undefined) {
+      createError =
+        'Web sessions require daemon session-mode support. Upgrade or restart the daemon, then refresh this page.';
+      return;
+    }
+
+    if (appState.daemonStatus.sessionMode !== 'container') {
       createError = 'Web sessions require container mode. Restart the daemon with container mode enabled.';
       return;
     }
