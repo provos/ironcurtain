@@ -84,17 +84,13 @@ const startTime = Date.now();
 // ---------------------------------------------------------------------------
 // PTY (Container Agent Mode) simulation
 //
-// The mock now mirrors a container-mode daemon: new browser sessions are always
-// live `web-pty` terminals. `POST /__reset { mode }` still accepts the old
-// docker/container aliases for compatibility, but reset no longer changes the
-// session surface.
+// The mock mirrors the current daemon launcher: new browser sessions are always
+// live `web-pty` terminals. Chatbox/session-console launch modes are not
+// available.
 // ---------------------------------------------------------------------------
-
-type ResetModeAlias = 'docker' | 'container' | 'default';
 
 interface ResetOptions {
   allowPolicyMutation?: boolean;
-  mode?: ResetModeAlias;
 }
 
 /** base64 of the UTF-8 bytes of a terminal string (matches the daemon framing). */

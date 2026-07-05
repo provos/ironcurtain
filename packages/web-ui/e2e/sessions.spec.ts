@@ -20,9 +20,21 @@ test.describe('Sessions', () => {
     await expect(page.getByText('No active sessions')).toBeVisible();
   });
 
-  test('creates a new session via New > Start session', async ({ page }) => {
+  test('creates a new session via the explicit Start session action', async ({ page }) => {
     const label = await createDefaultSession(page);
     expect(label).toMatch(/#\d+/);
+  });
+
+  test('keeps workspace, provider, and persona launch options available before start', async ({ page }) => {
+    await navigateTo(page, 'Sessions');
+
+    await expect(page.getByText('Launch options')).toBeVisible();
+    await expect(page.getByTestId('launch-workspace')).toBeVisible();
+    await expect(page.getByTestId('launch-provider')).toBeVisible();
+    await expect(page.getByTestId('launch-persona')).toBeVisible();
+    await expect(page.getByTestId('launch-start')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'New' })).toHaveCount(0);
+    await expect(page.locator('[data-testid^="session-item-"]')).toHaveCount(0);
   });
 
   test('session appears in the sidebar after creation', async ({ page }) => {

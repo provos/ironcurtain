@@ -1,11 +1,9 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { SessionDto, PersonaListItem, CreateSessionOptions } from '../../types.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
-  import { DropdownMenu } from '$lib/components/ui/dropdown-menu/index.js';
-
-  import Plus from 'phosphor-svelte/lib/Plus';
 
   let {
     sessions,
@@ -28,7 +26,6 @@
     loadProviderProfilesFn?: () => Promise<string[]>;
   } = $props();
 
-  let showLaunchOptions = $state(false);
   let personas = $state<PersonaListItem[]>([]);
   let loadingPersonas = $state(false);
 
@@ -62,14 +59,12 @@
     }
   }
 
-  function openLaunchOptions(): void {
-    showLaunchOptions = true;
+  onMount(() => {
     loadPersonas();
     loadProviderProfiles();
-  }
+  });
 
   function handleCreate(): void {
-    showLaunchOptions = false;
     const persona = selectedPersona || undefined;
     const workspace = workspacePath.trim();
     const selectedModel = model.trim();
@@ -83,83 +78,75 @@
 </script>
 
 <div data-testid="session-sidebar" class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0 min-h-0">
-  <div class="px-4 py-3 border-b border-border flex items-center justify-between">
+  <div class="px-4 py-3 border-b border-border">
     <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
-    <DropdownMenu bind:open={showLaunchOptions} align="bottom-right" contentClass="w-72">
-      {#snippet trigger()}
-        <Button variant="default" size="sm" loading={creating} onclick={openLaunchOptions}>
-          {#if !creating}
-            <Plus size={14} weight="bold" />
-          {/if}
-          {creating ? 'Starting...' : 'New'}
-        </Button>
-      {/snippet}
-      <div class="px-3 py-3 space-y-2.5">
-        <div class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Launch options</div>
-        <label class="block">
-          <span class="text-xs text-muted-foreground">Persona</span>
-          <select
-            data-testid="launch-persona"
-            bind:value={selectedPersona}
-            class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
-          >
-            <option value="">Default</option>
-            {#each personas as persona (persona.name)}
-              <option value={persona.name} disabled={!persona.compiled}>
-                {persona.name}{#if !persona.compiled}
-                  (not compiled){/if}
-              </option>
-            {/each}
-          </select>
-          {#if loadingPersonas}
-            <span class="mt-1 block text-xs text-muted-foreground">Loading personas...</span>
-          {:else if personas.length === 0}
-            <span class="mt-1 block text-xs text-muted-foreground">No personas available</span>
-          {/if}
-        </label>
-        <label class="block">
-          <span class="text-xs text-muted-foreground">Workspace</span>
-          <Input
-            data-testid="launch-workspace"
-            bind:value={workspacePath}
-            placeholder="/path/to/workspace (optional)"
-            class="mt-1 px-2 py-1.5 text-xs"
-          />
-        </label>
-        <label class="block">
-          <span class="text-xs text-muted-foreground">Provider profile</span>
-          <select
-            data-testid="launch-provider"
-            bind:value={providerProfileName}
-            class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
-          >
-            <option value="">Default</option>
-            {#each providerProfiles as profile (profile)}
-              <option value={profile}>{profile}</option>
-            {/each}
-          </select>
-        </label>
-        <label class="block">
-          <span class="text-xs text-muted-foreground">Model</span>
-          <Input
-            data-testid="launch-model"
-            bind:value={model}
-            placeholder="Profile default (optional)"
-            class="mt-1 px-2 py-1.5 text-xs"
-          />
-        </label>
-        <Button
-          data-testid="launch-start"
-          variant="default"
-          size="sm"
-          class="w-full"
-          loading={creating}
-          onclick={() => handleCreate()}
+  </div>
+
+  <div class="px-3 py-3 border-b border-border bg-card/40">
+    <form
+      class="space-y-2.5"
+      onsubmit={(e) => {
+        e.preventDefault();
+        handleCreate();
+      }}
+    >
+      <div class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Launch options</div>
+      <label class="block">
+        <span class="text-xs text-muted-foreground">Workspace</span>
+        <Input
+          data-testid="launch-workspace"
+          bind:value={workspacePath}
+          placeholder="/path/to/workspace (optional)"
+          class="mt-1 px-2 py-1.5 text-xs"
+        />
+      </label>
+      <label class="block">
+        <span class="text-xs text-muted-foreground">Provider profile</span>
+        <select
+          data-testid="launch-provider"
+          bind:value={providerProfileName}
+          class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
         >
-          Start session
-        </Button>
-      </div>
-    </DropdownMenu>
+          <option value="">Default</option>
+          {#each providerProfiles as profile (profile)}
+            <option value={profile}>{profile}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="block">
+        <span class="text-xs text-muted-foreground">Model</span>
+        <Input
+          data-testid="launch-model"
+          bind:value={model}
+          placeholder="Profile default (optional)"
+          class="mt-1 px-2 py-1.5 text-xs"
+        />
+      </label>
+      <label class="block">
+        <span class="text-xs text-muted-foreground">Persona</span>
+        <select
+          data-testid="launch-persona"
+          bind:value={selectedPersona}
+          class="mt-1 w-full px-2 py-1.5 bg-background border border-border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring"
+        >
+          <option value="">Default</option>
+          {#each personas as persona (persona.name)}
+            <option value={persona.name} disabled={!persona.compiled}>
+              {persona.name}{#if !persona.compiled}
+                (not compiled){/if}
+            </option>
+          {/each}
+        </select>
+        {#if loadingPersonas}
+          <span class="mt-1 block text-xs text-muted-foreground">Loading personas...</span>
+        {:else if personas.length === 0}
+          <span class="mt-1 block text-xs text-muted-foreground">No personas available</span>
+        {/if}
+      </label>
+      <Button data-testid="launch-start" type="submit" variant="default" size="sm" class="w-full" loading={creating}>
+        {creating ? 'Starting...' : 'Start session'}
+      </Button>
+    </form>
   </div>
 
   {#if createError}

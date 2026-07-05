@@ -127,8 +127,6 @@ test.describe('PTY terminal (Container Agent Mode)', () => {
   test('creates a web-pty session with launch options set', async ({ page }) => {
     await navigateTo(page, 'Sessions');
 
-    await page.getByRole('button', { name: 'New' }).click();
-
     const personaSelect = page.getByTestId('launch-persona');
     await expect(personaSelect).toBeVisible({ timeout: 10_000 });
     await personaSelect.selectOption('researcher');

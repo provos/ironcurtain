@@ -90,14 +90,16 @@ export async function approveSeededGate(page: Page): Promise<void> {
 }
 
 /**
- * Create a new session using the "New" dropdown and launch button.
+ * Create a new session using the visible launcher and explicit start button.
  * Returns the session label text (e.g., "#1").
  */
 export async function createDefaultSession(page: Page): Promise<string> {
   await navigateTo(page, 'Sessions');
 
-  await page.getByRole('button', { name: 'New' }).click();
   await expect(page.getByTestId('launch-start')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('launch-workspace')).toBeVisible();
+  await expect(page.getByTestId('launch-provider')).toBeVisible();
+  await expect(page.getByTestId('launch-persona')).toBeVisible();
   await page.getByTestId('launch-start').click();
 
   // Wait for a session entry to appear in the sidebar list.

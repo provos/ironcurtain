@@ -37,7 +37,9 @@ test.describe('Error handling', () => {
     await navigateTo(page, 'Sessions');
 
     // Create a session and verify it appears with a numeric label
-    await page.getByRole('button', { name: 'New' }).click();
+    await expect(page.getByTestId('launch-workspace')).toBeVisible();
+    await expect(page.getByTestId('launch-provider')).toBeVisible();
+    await expect(page.getByTestId('launch-persona')).toBeVisible();
     await page.getByTestId('launch-start').click();
     await expect(page.locator('[data-testid^="session-item-"]').first()).toBeVisible({ timeout: 5_000 });
     await expect(page.getByTestId('pty-terminal')).toBeVisible({ timeout: 10_000 });

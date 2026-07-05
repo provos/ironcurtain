@@ -52,16 +52,12 @@ function makeProps(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function openNewDropdown(): Promise<void> {
-  await fireEvent.click(screen.getByText('New'));
-}
-
 describe('SessionSidebar', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('always opens the launch-options panel and loads personas/provider profiles', async () => {
+  it('shows launch options and loads personas/provider profiles without creating a session', async () => {
     const loadPersonasFn = vi
       .fn<() => Promise<PersonaListItem[]>>()
       .mockResolvedValue([
@@ -72,17 +68,19 @@ describe('SessionSidebar', () => {
 
     render(SessionSidebar, { props: makeProps({ loadPersonasFn, loadProviderProfilesFn }) });
 
-    await openNewDropdown();
-
     expect(screen.getByText('Launch options')).toBeTruthy();
     expect(screen.getByTestId('launch-persona')).toBeTruthy();
     expect(screen.getByTestId('launch-workspace')).toBeTruthy();
     expect(screen.getByTestId('launch-provider')).toBeTruthy();
     expect(screen.getByTestId('launch-model')).toBeTruthy();
     expect(screen.getByTestId('launch-start')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start session' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'New' })).toBeNull();
     expect(screen.queryByTestId('persona-default')).toBeNull();
-    expect(loadPersonasFn).toHaveBeenCalledTimes(1);
-    expect(loadProviderProfilesFn).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(loadPersonasFn).toHaveBeenCalledTimes(1);
+      expect(loadProviderProfilesFn).toHaveBeenCalledTimes(1);
+    });
 
     const personaSelect = screen.getByTestId('launch-persona') as HTMLSelectElement;
     await waitFor(() => {
@@ -98,7 +96,7 @@ describe('SessionSidebar', () => {
     });
   });
 
-  it('does not create when selecting a persona and submits only from launch start', async () => {
+  it('does not create when selecting launch options and submits only from start session', async () => {
     const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
     render(SessionSidebar, {
       props: makeProps({
@@ -110,19 +108,17 @@ describe('SessionSidebar', () => {
       }),
     });
 
-    await openNewDropdown();
-
     const personaSelect = screen.getByTestId('launch-persona') as HTMLSelectElement;
     await waitFor(() => {
       expect(Array.from(personaSelect.options).some((option) => option.value === 'coder')).toBe(true);
     });
 
     await fireEvent.change(personaSelect, { target: { value: 'coder' } });
-    expect(oncreate).not.toHaveBeenCalled();
-
     await fireEvent.input(screen.getByTestId('launch-workspace'), { target: { value: '  /tmp/workspace  ' } });
     await fireEvent.change(screen.getByTestId('launch-provider'), { target: { value: 'ops' } });
     await fireEvent.input(screen.getByTestId('launch-model'), { target: { value: '  gpt-5  ' } });
+    expect(oncreate).not.toHaveBeenCalled();
+
     await fireEvent.click(screen.getByTestId('launch-start'));
 
     expect(oncreate).toHaveBeenCalledTimes(1);
@@ -138,7 +134,6 @@ describe('SessionSidebar', () => {
     const oncreate = vi.fn<(opts: CreateSessionOptions) => void>();
     render(SessionSidebar, { props: makeProps({ oncreate }) });
 
-    await openNewDropdown();
     await fireEvent.click(screen.getByTestId('launch-start'));
 
     expect(oncreate).toHaveBeenCalledTimes(1);
