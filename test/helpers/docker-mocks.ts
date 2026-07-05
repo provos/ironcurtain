@@ -79,6 +79,8 @@ export function createMockDocker(options: CreateMockDockerOptions = {}): Contain
   let commitSeq = 0;
 
   return {
+    supportsImageSnapshots: true,
+
     async preflight() {},
     async create(config: DockerContainerConfig) {
       tracker?.createCalls.push(config);

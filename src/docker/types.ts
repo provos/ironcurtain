@@ -174,6 +174,9 @@ export interface DockerImageInfo {
  * agent containers.
  */
 export interface ContainerRuntime {
+  /** True when this runtime can commit containers to images and manage snapshot images. */
+  readonly supportsImageSnapshots: boolean;
+
   /** Check that the runtime is available and the image exists. */
   preflight(image: string): Promise<void>;
 

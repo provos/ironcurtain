@@ -278,6 +278,8 @@ export function createAppleContainerManager(
   };
 
   return {
+    supportsImageSnapshots: false,
+
     async preflight(image: string): Promise<void> {
       const status = await availabilityProbe(execFileFn);
       if (!status.available) {

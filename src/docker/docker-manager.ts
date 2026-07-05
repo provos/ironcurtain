@@ -339,6 +339,8 @@ export function createDockerManager(
   const runStreamed = makeRunStreamed('docker', streamOpts, progressSinkFactory);
 
   return {
+    supportsImageSnapshots: true,
+
     async preflight(image: string): Promise<void> {
       const status = await dockerAvailabilityProbe();
       if (!status.available) {

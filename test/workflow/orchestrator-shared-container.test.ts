@@ -483,6 +483,42 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     }
   });
 
+  it('gates snapshotting on the runtime image-snapshot capability', async () => {
+    const docker = {
+      ...createMockDocker(),
+      supportsImageSnapshots: false,
+      commit: vi.fn(async () => {
+        throw new Error('snapshot should not be attempted');
+      }),
+    };
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir));
+    type SnapshotHarness = {
+      snapshotResumableScopes(instance: unknown): Promise<Readonly<Record<string, unknown>> | undefined>;
+    };
+    const instance = {
+      id: 'workflow-capability-gate',
+      definition: {
+        ...dockerWorkflowDef,
+        settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true, snapshotOnStop: true },
+      },
+      bundlesByScope: new Map([
+        [
+          'primary',
+          {
+            ...makeStubInfrastructure('workflow-capability-gate', 'primary' as BundleId),
+            docker,
+            containerId: 'container-primary',
+          },
+        ],
+      ]),
+    };
+
+    const snapshots = await (orchestrator as unknown as SnapshotHarness).snapshotResumableScopes(instance);
+
+    expect(snapshots).toBeUndefined();
+    expect(docker.commit).not.toHaveBeenCalled();
+  });
+
   it('supersedes (removes) the previous snapshot digest on a resume-then-stop', async () => {
     const snapshotDef: WorkflowDefinition = {
       name: 'docker-snapshot-supersede',

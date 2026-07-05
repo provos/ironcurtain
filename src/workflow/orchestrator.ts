@@ -132,6 +132,7 @@ import {
   isWorkflowTransientFailureError,
 } from './errors.js';
 import { commitContainerSnapshot, removeContainerSnapshotImages } from './container-snapshots.js';
+import { commandExists } from '../trusted-process/container-command.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -1265,11 +1266,9 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const snapshots: Record<string, ContainerSnapshotRef> = {};
     for (const [scope, infra] of entries) {
-      // Container snapshots require Docker's commit/image APIs, which the Apple
-      // `container` runtime does not provide. Skip cleanly (the workflow stops
-      // without a resumable container snapshot) rather than attempting a commit
-      // that the runtime would reject.
-      if (infra.runtimeKind !== 'docker') {
+      // Container snapshots require image commit/management APIs. Key off the
+      // runtime capability so new runtimes do not need orchestrator changes.
+      if (!infra.docker.supportsImageSnapshots) {
         writeStderr(
           `[workflow] Container snapshots are not supported on the "${infra.runtimeKind}" runtime; ` +
             `stopping ${instance.id} scope "${scope}" without a snapshot.`,
@@ -1292,10 +1291,11 @@ export class WorkflowOrchestrator implements WorkflowController {
     return Object.keys(snapshots).length > 0 ? snapshots : undefined;
   }
 
-  private async dockerForSnapshotCleanup(instance: WorkflowInstance): Promise<ContainerRuntime> {
+  private async dockerForSnapshotCleanup(instance: WorkflowInstance): Promise<ContainerRuntime | undefined> {
     if (instance.bundlesByScope.size > 0) {
       return [...instance.bundlesByScope.values()][0].docker;
     }
+    if (!commandExists('docker')) return undefined;
     const { createDockerManager } = await import('../docker/docker-manager.js');
     return createDockerManager();
   }
