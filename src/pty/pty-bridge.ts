@@ -164,8 +164,6 @@ export function buildSpawnArgs(options: PtyBridgeOptions): string[] {
   return spawnArgs;
 }
 
-/** Session discovery timeout (ms). */
-const DISCOVERY_TIMEOUT_MS = 10_000;
 /** Session discovery poll interval (ms). */
 const DISCOVERY_POLL_MS = 200;
 /** Headless scrollback cap (lines). Bounds daemon memory on long-running sessions. */
@@ -331,9 +329,17 @@ async function discoverSessionRegistration(
   signal: AbortSignal,
 ): Promise<PtySessionRegistration | null> {
   const registryDir = getPtyRegistryDir();
-  const deadline = Date.now() + DISCOVERY_TIMEOUT_MS;
 
-  while (Date.now() < deadline && !signal.aborted) {
+  // Poll until the registration appears or the child exits (signal aborts).
+  // A fixed wall-clock timeout was too short for slow container runtimes: the
+  // Apple `container` runtime boots a VM per container, so `start --pty` ->
+  // registration can take well over 10s. When discovery gave up early it
+  // resolved `null`, `onSessionDiscovered(null)` skipped starting the
+  // escalation watcher, and escalations then NEVER surfaced (the agent hung on
+  // an approval nobody saw). The child-exit abort is the correct give-up
+  // signal -- a live child WILL eventually register -- and mirrors mux's
+  // unbounded registry polling.
+  while (!signal.aborted) {
     const registrations = readActiveRegistrations(registryDir);
     const match = registrations.find((r) => r.pid === childPid);
     if (match) return match;

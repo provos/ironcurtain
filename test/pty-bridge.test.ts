@@ -6,7 +6,7 @@
  *    registry mocked so no real child is spawned and discovery resolves at once.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { buildSpawnArgs, createPtyBridge, type PtyBridgeOptions } from '../src/pty/pty-bridge.js';
 
 /** Shared, mutable fake-child state reachable from the hoisted node-pty mock. */
@@ -34,10 +34,16 @@ vi.mock('node-pty', () => {
   return { default: { spawn }, spawn };
 });
 
-// Resolve discovery immediately with a matching registration so the bridge's
-// background poll returns on its first iteration -- no 200ms timer outlives a test.
+// Registry mock, controllable per-test. Default: resolve discovery immediately
+// with a matching registration so the bridge's background poll returns on its
+// first iteration -- no 200ms timer outlives a test. The session-discovery
+// tests override the return value to exercise slow/late/never registration.
+const registryMock = vi.hoisted(() => {
+  const DEFAULT = [{ pid: 424242, sessionId: 'sess-test', escalationDir: '/tmp/esc-test' }];
+  return { readActiveRegistrations: vi.fn(() => DEFAULT), DEFAULT };
+});
 vi.mock('../src/escalation/session-registry.js', () => ({
-  readActiveRegistrations: () => [{ pid: 424242, sessionId: 'sess-test', escalationDir: '/tmp/esc-test' }],
+  readActiveRegistrations: registryMock.readActiveRegistrations,
 }));
 
 /** Minimal always-required options; per-test flags are layered on top. */
@@ -211,5 +217,56 @@ describe('createPtyBridge — output wiring (onData / serialize)', () => {
     const snap = bridge.serialize({ scrollback: 0 });
     expect(typeof snap).toBe('string');
     bridge.kill();
+  });
+});
+
+describe('createPtyBridge — session discovery (no fixed timeout)', () => {
+  afterEach(() => {
+    registryMock.readActiveRegistrations.mockImplementation(() => registryMock.DEFAULT);
+    ptyMock.state.exitCb = undefined;
+    vi.useRealTimers();
+  });
+
+  it('discovers a registration that appears long after the child spawns', async () => {
+    // Regression: a slow container runtime (Apple `container` boots a VM per
+    // container) can take well over the former 10s discovery deadline to
+    // register. Discovery must keep polling while the child is alive, else the
+    // escalation watcher never starts and escalations never surface.
+    vi.useFakeTimers();
+    registryMock.readActiveRegistrations.mockReturnValue([]); // not registered yet
+    const bridge = await createPtyBridge(baseOptions());
+    let discovered: unknown = 'unset';
+    bridge.onSessionDiscovered((reg) => {
+      discovered = reg;
+    });
+
+    // Well past the former 10s deadline with no registration -> still polling,
+    // NOT resolved to null (the bug: it used to give up here).
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(discovered).toBe('unset');
+
+    // Registration finally appears; the next poll surfaces it.
+    registryMock.readActiveRegistrations.mockReturnValue([
+      { pid: 424242, sessionId: 'sess-late', escalationDir: '/tmp/esc-late' },
+    ]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(discovered).toMatchObject({ sessionId: 'sess-late', escalationDir: '/tmp/esc-late' });
+    bridge.kill();
+  });
+
+  it('resolves discovery to null when the child exits before registering', async () => {
+    vi.useFakeTimers();
+    registryMock.readActiveRegistrations.mockReturnValue([]); // never registers
+    const bridge = await createPtyBridge(baseOptions());
+    let discovered: unknown = 'unset';
+    bridge.onSessionDiscovered((reg) => {
+      discovered = reg;
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(discovered).toBe('unset');
+
+    // Child exits -> discovery aborts -> queued callbacks flush with null.
+    ptyMock.state.exitCb?.({ exitCode: 1 });
+    expect(discovered).toBeNull();
   });
 });
