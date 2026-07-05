@@ -18,6 +18,7 @@ import type { SessionManager } from '../session/session-manager.js';
 import type { ControlRequestHandler } from '../daemon/control-socket.js';
 import type { SessionMode } from '../session/types.js';
 import type { TokenStreamBridge } from './token-stream-bridge.js';
+import { PtySessionManager } from './pty-session-manager.js';
 import { WebEventBus } from './web-event-bus.js';
 import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from './web-ui-types.js';
 import { dispatch, buildStatusDto, type WorkflowDispatchContext } from './json-rpc-dispatch.js';
@@ -72,6 +73,13 @@ export interface WebUiServerOptions {
    * hides mutation controls (via `DaemonStatusDto.allowPolicyMutation`).
    */
   readonly allowPolicyMutation?: boolean;
+  /**
+   * Owner id/pid for Docker-agent PTY sessions, stamped into the PTY registry
+   * (`webui-<daemonId>`, §11 Q1). Defaults to a random id + this process's pid
+   * when the daemon does not supply them.
+   */
+  readonly daemonId?: string;
+  readonly daemonPid?: number;
 }
 
 export class WebUiServer {
@@ -83,6 +91,7 @@ export class WebUiServer {
   private readonly eventBus = new WebEventBus();
   private readonly dispatchCtx: WorkflowDispatchContext;
   private tokenStreamBridge: TokenStreamBridge | null = null;
+  private readonly ptySessionManager: PtySessionManager;
   private eventSeq = 0;
   private statusInterval: ReturnType<typeof setInterval> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -103,6 +112,16 @@ export class WebUiServer {
       this.staticRoot = rawStaticRoot;
     }
 
+    this.ptySessionManager = new PtySessionManager({
+      sender: this,
+      sessionManager: options.sessionManager,
+      eventBus: this.eventBus,
+      mode: options.mode,
+      daemonId: options.daemonId ?? randomBytes(4).toString('hex'),
+      daemonPid: options.daemonPid ?? process.pid,
+      captureTracesDefault: options.captureTracesDefault ?? false,
+    });
+
     this.dispatchCtx = {
       handler: options.handler,
       sessionManager: options.sessionManager,
@@ -113,6 +132,7 @@ export class WebUiServer {
       workflowManager: options.workflowManager,
       captureTracesDefault: options.captureTracesDefault ?? false,
       allowPolicyMutation: options.allowPolicyMutation ?? false,
+      ptySessionManager: this.ptySessionManager,
     };
 
     // Subscribe to own event bus and broadcast to WS clients
@@ -214,6 +234,11 @@ export class WebUiServer {
         logger.warn(`[WebUI] Error ending web session #${managed.label}: ${String(err)}`);
       });
     }
+
+    // Kill all Docker-agent PTY children (container teardown), bounded await.
+    await this.ptySessionManager.close().catch((err: unknown) => {
+      logger.warn(`[WebUI] Error closing PTY sessions: ${String(err)}`);
+    });
 
     if (this.wss) {
       this.wss.close();
@@ -493,6 +518,7 @@ export class WebUiServer {
       ws.on('close', () => {
         this.removeClient(ws);
         this.tokenStreamBridge?.removeAllForClient(ws);
+        this.ptySessionManager.removeAllForClient(ws);
         logger.info(`[WebUI] Client disconnected (${this.clients.size} active)`);
         this.startOrphanTimerIfNeeded();
       });
@@ -501,6 +527,7 @@ export class WebUiServer {
         logger.warn(`[WebUI] WebSocket error: ${err.message}`);
         this.removeClient(ws);
         this.tokenStreamBridge?.removeAllForClient(ws);
+        this.ptySessionManager.removeAllForClient(ws);
         this.startOrphanTimerIfNeeded();
       });
     });

@@ -2,7 +2,7 @@
  * Shared types for the terminal multiplexer (`ironcurtain mux`).
  */
 
-import type { PtyBridge } from './pty-bridge.js';
+import type { PtyBridge } from '../pty/pty-bridge.js';
 
 /** Input mode for the mux. */
 export type InputMode =

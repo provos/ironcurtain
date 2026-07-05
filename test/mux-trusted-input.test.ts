@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { writeTrustedUserContext } from '../src/mux/trusted-input.js';
+import { writeTrustedUserContext } from '../src/escalation/trusted-input.js';
 
 describe('writeTrustedUserContext', () => {
   let tempDir: string;

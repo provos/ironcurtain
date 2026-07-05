@@ -37,6 +37,8 @@
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
     "@fontsource/orbitron": "^5.2.8",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.11",
     "marked": "^15.0.12",

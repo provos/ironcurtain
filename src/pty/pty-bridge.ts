@@ -3,17 +3,23 @@
  *
  * Data flow:
  *   node-pty child -> raw bytes -> @xterm/headless Terminal.write()
- *   @xterm/headless buffer -> readBuffer() -> MuxRenderer
+ *   @xterm/headless buffer -> readBuffer() -> MuxRenderer   (grid sink, mux)
+ *   @xterm/headless buffer -> onData(chunk) -> WS stream    (stream sink, web-ui)
  *
  * Each PtyBridge instance owns:
  * - One node-pty child process (the `ironcurtain start --pty` invocation)
- * - One @xterm/headless Terminal (the virtual terminal buffer)
+ * - One @xterm/headless Terminal (the virtual terminal buffer + scrollback)
  * - The session's escalation directory path (for trusted input writes)
+ *
+ * Leaf module under src/pty/: both `mux/` (grid sink) and `web-ui/` (stream sink)
+ * consume it, so it must not import from either.
  */
 
 import type { Terminal as TerminalType } from '@xterm/headless';
 import xtermHeadless from '@xterm/headless';
 const { Terminal } = xtermHeadless;
+import serializeAddonPkg from '@xterm/addon-serialize';
+const { SerializeAddon } = serializeAddonPkg;
 import { getPtyRegistryDir } from '../config/paths.js';
 import { readActiveRegistrations } from '../escalation/session-registry.js';
 import type { PtySessionRegistration } from '../docker/pty-types.js';
@@ -54,9 +60,29 @@ export interface PtyBridge {
   kill(): void;
 
   /**
-   * Registers a callback invoked when new output arrives.
+   * Registers a callback invoked when new output arrives (a "something changed"
+   * signal with no payload). This is the GRID sink used by the mux renderer.
    */
   onOutput(callback: () => void): void;
+
+  /**
+   * Registers a callback invoked with each raw output chunk from the child.
+   * The callback fires AFTER the headless terminal buffer has been updated with
+   * the chunk, so a `serialize()` taken inside the callback already reflects it
+   * (the reconnect ordering invariant). Returns an unsubscribe function. This is
+   * the STREAM sink used by the web-ui to forward bytes to a browser xterm; the
+   * mux grid sink ignores it.
+   */
+  onData(callback: (chunk: string) => void): () => void;
+
+  /**
+   * Serializes the current screen + scrollback (the alternate buffer is included)
+   * into a replayable ANSI string, for reconnect replay into a fresh xterm.
+   * Backed by `@xterm/addon-serialize`. Pass `{ scrollback }` to cap the replayed
+   * scrollback tail (the alternate buffer has no scrollback, so a live TUI's
+   * snapshot is tiny regardless).
+   */
+  serialize(options?: { scrollback?: number }): string;
 
   /**
    * Registers a callback invoked when the child process exits.
@@ -138,10 +164,10 @@ export function buildSpawnArgs(options: PtyBridgeOptions): string[] {
   return spawnArgs;
 }
 
-/** Session discovery timeout (ms). */
-const DISCOVERY_TIMEOUT_MS = 10_000;
 /** Session discovery poll interval (ms). */
 const DISCOVERY_POLL_MS = 200;
+/** Headless scrollback cap (lines). Bounds daemon memory on long-running sessions. */
+const SCROLLBACK_LINES = 5000;
 
 /**
  * Spawns a new `ironcurtain start --pty` child process via node-pty
@@ -153,8 +179,11 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   const terminal = new Terminal({
     cols: options.cols,
     rows: options.rows,
+    scrollback: SCROLLBACK_LINES,
     allowProposedApi: true,
   });
+  const serializeAddon = new SerializeAddon();
+  terminal.loadAddon(serializeAddon);
 
   const spawnArgs = buildSpawnArgs(options);
   // Create a copy of process.env so we don't mutate the shared object
@@ -174,6 +203,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   });
 
   const outputCallbacks: Array<() => void> = [];
+  const dataCallbacks: Array<(chunk: string) => void> = [];
   const exitCallbacks: Array<(exitCode: number) => void> = [];
   const sessionCallbacks: Array<(reg: PtySessionRegistration | null) => void> = [];
 
@@ -181,10 +211,14 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   let _exitCode: number | undefined;
   let _registration: PtySessionRegistration | null | undefined;
 
-  // Wire child output to headless terminal
+  // Wire child output to the headless terminal. Both sinks fire from INSIDE the
+  // write callback so the buffer already reflects `data`: the grid sink
+  // (onOutput) first -- unchanged mux ordering -- then the stream sink (onData),
+  // which guarantees a serialize() taken in an onData handler includes the chunk.
   child.onData((data: string) => {
     terminal.write(data, () => {
       for (const cb of outputCallbacks) cb();
+      for (const cb of dataCallbacks) cb(data);
     });
   });
 
@@ -248,6 +282,18 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
       outputCallbacks.push(callback);
     },
 
+    onData(callback: (chunk: string) => void): () => void {
+      dataCallbacks.push(callback);
+      return () => {
+        const idx = dataCallbacks.indexOf(callback);
+        if (idx !== -1) dataCallbacks.splice(idx, 1);
+      };
+    },
+
+    serialize(options?: { scrollback?: number }): string {
+      return serializeAddon.serialize(options);
+    },
+
     onExit(callback: (exitCode: number) => void): void {
       if (!_alive && _exitCode !== undefined) {
         callback(_exitCode);
@@ -283,9 +329,17 @@ async function discoverSessionRegistration(
   signal: AbortSignal,
 ): Promise<PtySessionRegistration | null> {
   const registryDir = getPtyRegistryDir();
-  const deadline = Date.now() + DISCOVERY_TIMEOUT_MS;
 
-  while (Date.now() < deadline && !signal.aborted) {
+  // Poll until the registration appears or the child exits (signal aborts).
+  // A fixed wall-clock timeout was too short for slow container runtimes: the
+  // Apple `container` runtime boots a VM per container, so `start --pty` ->
+  // registration can take well over 10s. When discovery gave up early it
+  // resolved `null`, `onSessionDiscovered(null)` skipped starting the
+  // escalation watcher, and escalations then NEVER surfaced (the agent hung on
+  // an approval nobody saw). The child-exit abort is the correct give-up
+  // signal -- a live child WILL eventually register -- and mirrors mux's
+  // unbounded registry polling.
+  while (!signal.aborted) {
     const registrations = readActiveRegistrations(registryDir);
     const match = registrations.find((r) => r.pid === childPid);
     if (match) return match;

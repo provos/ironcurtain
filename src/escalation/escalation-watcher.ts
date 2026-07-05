@@ -112,6 +112,12 @@ export function createEscalationWatcher(
   return {
     start(): void {
       if (pollInterval) return;
+      // Poll once immediately, before scheduling the interval, so a request
+      // written in the window before the first interval tick (~pollIntervalMs)
+      // is not missed -- a missed escalation hangs the agent waiting on an
+      // approval nobody sees. The `seenEscalationIds` dedup makes this safe:
+      // the interval never re-fires an escalation the immediate poll surfaced.
+      pollEscalationDirectory();
       pollInterval = setInterval(pollEscalationDirectory, pollIntervalMs);
       // Don't keep the process alive just for escalation polling.
       pollInterval.unref();

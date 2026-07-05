@@ -33,6 +33,8 @@ import type {
   GetModelProvidersDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
+  PtySink,
+  CreateSessionOptions,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
@@ -172,6 +174,104 @@ export const personasChangedGeneration = $state({ value: 0 });
  */
 export const configChangedGeneration = $state({ value: 0 });
 
+/**
+ * Per-label terminal sink registry. A `web-pty` session's frames
+ * (`session.pty_replay` / `session.pty_output`) can arrive BEFORE its
+ * `TerminalConsole` has created its xterm terminal — a fast daemon sends the
+ * one-shot replay the instant it receives `ptyAttach`, which can beat the
+ * component's mount effect. So each sink BUFFERS frames until the route connects
+ * the mounted terminal's live handle, then drains them in order — a replay
+ * snapshot is never dropped (which would blank a reconnect to an idle session).
+ * The pure event handler routes `session.pty_*` events here via `getPtySink`.
+ * Not reactive — imperative handles, never rendered.
+ */
+/**
+ * Cap on the pre-connect buffer (base64 chars ~= bytes). Bounds memory if a
+ * terminal never connects (render error) or mounts late during heavy output;
+ * the common case (mount within a frame or two) never trips it, and a snapshot
+ * `reset()` supersedes the buffer entirely.
+ */
+const PTY_SINK_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+
+class BufferingPtySink implements PtySink {
+  private live: PtySink | null = null;
+  private buffered: Array<{ reset: boolean; b64: string }> = [];
+  private bufferedBytes = 0;
+
+  write(dataB64: string): void {
+    if (this.live) {
+      this.live.write(dataB64);
+      return;
+    }
+    this.buffered.push({ reset: false, b64: dataB64 });
+    this.bufferedBytes += dataB64.length;
+    this.capBuffer();
+  }
+
+  reset(snapshotB64: string): void {
+    if (this.live) {
+      this.live.reset(snapshotB64);
+      return;
+    }
+    // A fresh snapshot is the source of truth: it supersedes buffered deltas.
+    this.buffered = [{ reset: true, b64: snapshotB64 }];
+    this.bufferedBytes = snapshotB64.length;
+  }
+
+  /** Drops the oldest buffered frames once over the cap (always keeps >=1). */
+  private capBuffer(): void {
+    while (this.bufferedBytes > PTY_SINK_MAX_BUFFERED_BYTES && this.buffered.length > 1) {
+      const dropped = this.buffered.shift();
+      if (dropped) this.bufferedBytes -= dropped.b64.length;
+    }
+  }
+
+  /** Connect the mounted terminal and flush any buffered frames, in order. */
+  connect(handle: PtySink): void {
+    this.live = handle;
+    for (const frame of this.buffered) {
+      if (frame.reset) handle.reset(frame.b64);
+      else handle.write(frame.b64);
+    }
+    this.buffered = [];
+    this.bufferedBytes = 0;
+  }
+
+  disconnect(): void {
+    this.live = null;
+  }
+}
+
+const ptySinks = new Map<number, BufferingPtySink>();
+
+/** Registers a buffering sink for a label. Idempotent — never clobbers a live sink. */
+export function registerPtySink(label: number): void {
+  if (!ptySinks.has(label)) ptySinks.set(label, new BufferingPtySink());
+}
+
+export function unregisterPtySink(label: number): void {
+  ptySinks.delete(label);
+}
+
+/**
+ * Connects a mounted terminal's live handle for `label`, draining buffered
+ * frames. Order-independent with `registerPtySink` (creates the sink if the
+ * terminal mounted before the route registered it).
+ */
+export function connectPtyTerminal(label: number, handle: PtySink): void {
+  let sink = ptySinks.get(label);
+  if (!sink) {
+    sink = new BufferingPtySink();
+    ptySinks.set(label, sink);
+  }
+  sink.connect(handle);
+}
+
+/** Disconnects the live handle (the terminal unmounted); later frames re-buffer. */
+export function disconnectPtyTerminal(label: number): void {
+  ptySinks.get(label)?.disconnect();
+}
+
 // WebSocket client singleton
 let wsClient: WsClient | null = null;
 
@@ -232,6 +332,7 @@ function wireEventHandlers(client: WsClient): void {
           configChangedGeneration.value++;
         },
         assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
+        getPtySink: (label: number) => ptySinks.get(label),
       },
       event,
       payload,
@@ -414,9 +515,18 @@ export async function resolveEscalation(
 
 // ── Session RPC actions ──────────────────────────────────────────────
 
-export async function createSession(persona?: string): Promise<{ label: number }> {
+/**
+ * Create a session. `persona` applies to every mode; `workspacePath`,
+ * `providerProfileName`, and `model` are docker/web-pty launch options (mux
+ * `/new` parity) and are IGNORED by the code-mode chatbox path server-side.
+ * Only the provided keys are sent so the backend schema's optionals stay unset.
+ */
+export async function createSession(opts?: CreateSessionOptions): Promise<{ label: number }> {
   const params: Record<string, unknown> = {};
-  if (persona) params.persona = persona;
+  if (opts?.persona) params.persona = opts.persona;
+  if (opts?.workspacePath) params.workspacePath = opts.workspacePath;
+  if (opts?.providerProfileName) params.providerProfileName = opts.providerProfileName;
+  if (opts?.model) params.model = opts.model;
   return getWsClient().request<{ label: number }>('sessions.create', params);
 }
 
@@ -434,6 +544,39 @@ export async function loadSessionHistory(label: number): Promise<ConversationTur
 
 export async function loadSessionBudget(label: number): Promise<BudgetSummaryDto> {
   return getWsClient().request<BudgetSummaryDto>('sessions.budget', { label });
+}
+
+// ── PTY terminal RPC actions (web-pty sessions) ──────────────────────
+//
+// Attach/detach manage this client's subscription to a session's terminal
+// stream; input/resize forward keystrokes and the browser xterm's size to the
+// child PTY. `data` is base64 of the UTF-8 bytes of the keystroke string.
+// Ending a PTY session reuses `endSession` (`sessions.end`).
+
+export async function attachPty(label: number): Promise<void> {
+  await getWsClient().request('sessions.ptyAttach', { label });
+}
+
+export async function detachPty(label: number): Promise<void> {
+  await getWsClient().request('sessions.ptyDetach', { label });
+}
+
+export async function sendPtyInput(label: number, dataB64: string): Promise<void> {
+  await getWsClient().request('sessions.ptyInput', { label, data: dataB64 });
+}
+
+export async function sendPtyResize(label: number, cols: number, rows: number): Promise<void> {
+  await getWsClient().request('sessions.ptyResize', { label, cols, rows });
+}
+
+/**
+ * Send a TRUSTED user message to a web-pty session. Unlike `sendPtyInput`
+ * (raw keystrokes, base64, never trusted), `text` is PLAIN text: the daemon
+ * records it as trusted user-context (authorizing auto-approval) and injects it
+ * into the child PTY. This is the only browser path to auto-approval.
+ */
+export async function sendPtyPrompt(label: number, text: string): Promise<void> {
+  await getWsClient().request('sessions.ptyPrompt', { label, text });
 }
 
 // ── Job RPC actions ──────────────────────────────────────────────────

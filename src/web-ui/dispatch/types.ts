@@ -11,6 +11,7 @@ import type { SessionManager, ManagedSession } from '../../session/session-manag
 import type { ControlRequestHandler } from '../../daemon/control-socket.js';
 import type { SessionMode } from '../../session/types.js';
 import type { TokenStreamBridge } from '../token-stream-bridge.js';
+import type { PtySessionManager, PtyWebSession } from '../pty-session-manager.js';
 import type { WebEventBus } from '../web-event-bus.js';
 import { type SessionDto, type BudgetSummaryDto, type DaemonStatusDto, InvalidParamsError } from '../web-ui-types.js';
 
@@ -34,6 +35,8 @@ export interface DispatchContext {
   readonly sessionQueues: Map<number, Promise<void>>;
   /** Bridge for per-client token stream subscriptions. */
   tokenStreamBridge?: TokenStreamBridge;
+  /** Manager for Docker-agent PTY terminal sessions (docker mode only). */
+  ptySessionManager?: PtySessionManager;
   /**
    * Daemon-process capture-traces default. Used by `sessions.create`
    * when the JSON-RPC payload does not include `captureTraces`. See
@@ -91,6 +94,40 @@ export function toSessionDto(managed: ManagedSession): SessionDto {
   };
 }
 
+/**
+ * Builds a SessionDto for a Docker-agent PTY session. A PTY session has no
+ * turn/budget accounting, so `turnCount` is 0 and the budget is zeroed with
+ * `tokenTrackingAvailable:false`. `status` reflects the child's liveness so an
+ * abandoned-but-alive terminal is distinguishable in the list. The frontend
+ * branches on `source.kind === 'web-pty'` to render a terminal (Phase 5).
+ */
+export function toPtySessionDto(session: PtyWebSession): SessionDto {
+  const persona = session.persona;
+  return {
+    label: session.label,
+    source: { kind: 'web-pty', ...(persona ? { persona } : {}) },
+    status: session.alive ? 'ready' : 'closed',
+    turnCount: 0,
+    createdAt: session.createdAt,
+    hasPendingEscalation: session.listEscalationDtos().length > 0,
+    messageInFlight: false,
+    budget: zeroedBudgetDto(),
+    ...(persona ? { persona } : {}),
+    ...(session.lastAttachedAt ? { lastAttachedAt: session.lastAttachedAt } : {}),
+  };
+}
+
+export function zeroedBudgetDto(): BudgetSummaryDto {
+  return {
+    totalTokens: 0,
+    stepCount: 0,
+    elapsedSeconds: 0,
+    estimatedCostUsd: 0,
+    tokenTrackingAvailable: false,
+    limits: { maxTotalTokens: null, maxSteps: null, maxSessionSeconds: null, maxEstimatedCostUsd: null },
+  };
+}
+
 export function toBudgetDto(managed: ManagedSession): BudgetSummaryDto {
   const status = managed.session.getBudgetStatus();
   return {
@@ -115,11 +152,15 @@ export function buildStatusDto(ctx: DispatchContext): DaemonStatusDto {
     jobs: status.jobs,
     signalConnected: status.signalConnected,
     webUiListening: true,
-    activeSessions: ctx.sessionManager.size,
+    // Include PTY sessions so the dashboard doesn't undercount (§11 D4).
+    activeSessions: ctx.sessionManager.size + (ctx.ptySessionManager?.size ?? 0),
     nextFireTime: status.nextFireTime?.toISOString() ?? null,
     // Phase 1c: surface the policy-mutation kill switch so the UI can hide
     // mutation controls. Defaults to false (off) when the daemon was not
     // launched with `--allow-policy-mutation`.
     allowPolicyMutation: ctx.allowPolicyMutation ?? false,
+    // Surface the process-global session mode so the UI picks the web-pty
+    // terminal create flow (with launch options) vs the chatbox pre-create.
+    sessionMode: ctx.mode.kind,
   };
 }

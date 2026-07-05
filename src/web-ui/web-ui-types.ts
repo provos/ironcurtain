@@ -49,6 +49,14 @@ export type MethodName =
   | 'sessions.unsubscribeTokenStream'
   | 'sessions.subscribeAllTokenStreams'
   | 'sessions.unsubscribeAllTokenStreams'
+  // Docker-agent PTY terminal streaming (web-pty session kind). Attach/detach
+  // manage per-client subscription to a session's terminal stream; input/resize
+  // forward keystrokes and the browser xterm's size to the child PTY.
+  | 'sessions.ptyAttach'
+  | 'sessions.ptyDetach'
+  | 'sessions.ptyInput'
+  | 'sessions.ptyResize'
+  | 'sessions.ptyPrompt'
   | 'escalations.list'
   | 'escalations.resolve'
   | 'personas.list'
@@ -159,6 +167,13 @@ export interface SessionDto {
   readonly messageInFlight: boolean;
   readonly budget: BudgetSummaryDto;
   readonly persona?: string;
+  /**
+   * ISO 8601 timestamp of the most recent browser attach. Populated only for
+   * `web-pty` sessions (see `toPtySessionDto`) so the operator can spot an
+   * abandoned-but-alive terminal in the session list; absent for all other
+   * kinds. Additive/optional — existing consumers ignore it.
+   */
+  readonly lastAttachedAt?: string;
 }
 
 export interface BudgetSummaryDto {
@@ -211,6 +226,14 @@ export interface DaemonStatusDto {
    * Off by default, CLI-only, not config-persisted.
    */
   readonly allowPolicyMutation: boolean;
+  /**
+   * The daemon's process-global session mode. `docker` → new sessions are
+   * `web-pty` live terminals that accept launch options (workspace / provider
+   * profile / model) and mediate trusted input; `builtin` → the turn-based
+   * chatbox. Populated by `buildStatusDto` from `ctx.mode.kind` so the UI can
+   * pick the correct create flow before a session exists.
+   */
+  readonly sessionMode: 'builtin' | 'docker';
 }
 
 /** Job list entry with scheduling and last-run info. */

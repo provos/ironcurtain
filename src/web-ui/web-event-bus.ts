@@ -85,6 +85,14 @@ export interface WebEventMap {
   // Token stream events (targeted delivery via bridge, not broadcast)
   'session.token_stream': { label: number; events: readonly TokenStreamEvent[] };
 
+  // Docker-agent PTY terminal events (targeted per-label delivery via
+  // PtySessionManager -> sendToSubscribers, like session.token_stream — NOT
+  // broadcast). `data`/`snapshot` are base64-encoded terminal bytes. A
+  // `pty_replay` is a one-shot full-screen snapshot sent on attach/resync; a
+  // `pty_output` is a coalesced incremental delta to all subscribers.
+  'session.pty_output': { label: number; data: string };
+  'session.pty_replay': { label: number; snapshot: string };
+
   // Persona streamed-compile events (Phase 1b). FOUR events; the snapshot in
   // the orchestrator's operation record is the source of truth, these are
   // best-effort/lossy. `personas.changed` is a Phase 1c CRUD concern and is

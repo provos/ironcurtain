@@ -22,6 +22,9 @@ import type {
   PersonaCompileProgressEvent,
   PersonaCompileDoneEvent,
   PersonaCompileFailedEvent,
+  PtyOutputEvent,
+  PtyReplayEvent,
+  PtySink,
 } from './types.js';
 import { PHASE } from './types.js';
 
@@ -118,6 +121,12 @@ export interface EventSideEffects {
    */
   refreshConfig(): void;
   assignDisplayNumber(escalationId: string): number;
+  /**
+   * Look up the terminal sink the Sessions route installed for a `web-pty`
+   * label, if any. Returns undefined when no terminal is bound (session not
+   * selected / not a PTY), in which case the `session.pty_*` event is a no-op.
+   */
+  getPtySink(label: number): PtySink | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +198,9 @@ export type WebEvent =
   | { event: 'persona.compile.done'; payload: PersonaCompileDoneEvent }
   | { event: 'persona.compile.failed'; payload: PersonaCompileFailedEvent }
   | { event: 'personas.changed'; payload: Record<string, never> }
-  | { event: 'config.changed'; payload: Record<string, never> };
+  | { event: 'config.changed'; payload: Record<string, never> }
+  | { event: 'session.pty_output'; payload: PtyOutputEvent }
+  | { event: 'session.pty_replay'; payload: PtyReplayEvent };
 
 /**
  * Parse a raw event name + payload into a typed WebEvent.
@@ -272,6 +283,10 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
       return { event, payload: {} as Record<string, never> };
     case 'config.changed':
       return { event, payload: {} as Record<string, never> };
+    case 'session.pty_output':
+      return { event, payload: data as unknown as PtyOutputEvent };
+    case 'session.pty_replay':
+      return { event, payload: data as unknown as PtyReplayEvent };
     default:
       return undefined;
   }
@@ -583,6 +598,21 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     case 'config.changed':
       effects.refreshConfig();
       return true;
+
+    // PTY terminal stream. Both cases forward the raw base64 payload to the
+    // per-label sink (the bound TerminalConsole), which decodes at the xterm
+    // boundary. A missing sink (session not selected) is a benign no-op.
+    case 'session.pty_output': {
+      const { label, data } = parsed.payload;
+      effects.getPtySink(label)?.write(data);
+      return true;
+    }
+
+    case 'session.pty_replay': {
+      const { label, snapshot } = parsed.payload;
+      effects.getPtySink(label)?.reset(snapshot);
+      return true;
+    }
 
     default:
       return false;

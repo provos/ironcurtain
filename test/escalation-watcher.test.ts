@@ -106,6 +106,32 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
+  it('polls immediately on start so a request written before start() is not missed', () => {
+    const escalations: EscalationRequest[] = [];
+    const events: EscalationWatcherEvents = {
+      onEscalation: (req) => escalations.push(req),
+      onEscalationExpired: () => {},
+    };
+
+    // The pre-start-window race: the request file already exists when start()
+    // is called. The immediate poll must surface it without any timer advance.
+    writeRequest('esc-immediate');
+
+    const watcher = createEscalationWatcher(escalationDir, events, { pollIntervalMs: 50 });
+    watcher.start();
+
+    // No advancePastPoll(): the immediate poll fires synchronously in start().
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].escalationId).toBe('esc-immediate');
+    expect(watcher.getPending()?.escalationId).toBe('esc-immediate');
+
+    // And the interval must not re-fire the already-seen escalation.
+    advancePastPoll();
+    expect(escalations).toHaveLength(1);
+
+    watcher.stop();
+  });
+
   it('does not emit the same escalation twice', () => {
     const escalations: EscalationRequest[] = [];
     const events: EscalationWatcherEvents = {

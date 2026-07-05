@@ -1,13 +1,50 @@
 /**
- * Unit tests for `buildSpawnArgs` (mux PTY bridge child-argv construction, F6).
- *
- * The argv construction was extracted from `createPtyBridge` into a pure,
- * exported function so the flag-append behavior — including the new
- * `--provider-profile <name>` (G13) — is testable without spawning a process.
+ * Unit tests for the PTY bridge (src/pty/pty-bridge.ts):
+ *  - `buildSpawnArgs`: pure child-argv construction (F6), testable without spawning.
+ *  - `createPtyBridge` output wiring: the `onData` stream sink + `serialize()`
+ *    reconnect snapshot (web-ui additions), with node-pty and the session
+ *    registry mocked so no real child is spawned and discovery resolves at once.
  */
 
-import { describe, it, expect } from 'vitest';
-import { buildSpawnArgs, type PtyBridgeOptions } from '../src/mux/pty-bridge.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { buildSpawnArgs, createPtyBridge, type PtyBridgeOptions } from '../src/pty/pty-bridge.js';
+
+/** Shared, mutable fake-child state reachable from the hoisted node-pty mock. */
+const ptyMock = vi.hoisted(() => {
+  const state: {
+    dataCb?: (d: string) => void;
+    exitCb?: (e: { exitCode: number }) => void;
+  } = {};
+  return { state };
+});
+
+vi.mock('node-pty', () => {
+  const spawn = () => ({
+    pid: 424242,
+    onData: (cb: (d: string) => void) => {
+      ptyMock.state.dataCb = cb;
+    },
+    onExit: (cb: (e: { exitCode: number }) => void) => {
+      ptyMock.state.exitCb = cb;
+    },
+    write: vi.fn(),
+    resize: vi.fn(),
+    kill: vi.fn(() => ptyMock.state.exitCb?.({ exitCode: 0 })),
+  });
+  return { default: { spawn }, spawn };
+});
+
+// Registry mock, controllable per-test. Default: resolve discovery immediately
+// with a matching registration so the bridge's background poll returns on its
+// first iteration -- no 200ms timer outlives a test. The session-discovery
+// tests override the return value to exercise slow/late/never registration.
+const registryMock = vi.hoisted(() => {
+  const DEFAULT = [{ pid: 424242, sessionId: 'sess-test', escalationDir: '/tmp/esc-test' }];
+  return { readActiveRegistrations: vi.fn(() => DEFAULT), DEFAULT };
+});
+vi.mock('../src/escalation/session-registry.js', () => ({
+  readActiveRegistrations: registryMock.readActiveRegistrations,
+}));
 
 /** Minimal always-required options; per-test flags are layered on top. */
 function baseOptions(overrides: Partial<PtyBridgeOptions> = {}): PtyBridgeOptions {
@@ -108,5 +145,128 @@ describe('buildSpawnArgs', () => {
       'm',
       '--capture-traces',
     ]);
+  });
+});
+
+describe('createPtyBridge — output wiring (onData / serialize)', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  beforeEach(() => {
+    ptyMock.state.dataCb = undefined;
+    ptyMock.state.exitCb = undefined;
+  });
+
+  it('onData fires with the chunk AFTER the headless buffer reflects it', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const observed: Array<{ chunk: string; inSnapshot: boolean }> = [];
+    // A serialize() taken inside the onData handler must already contain the chunk
+    // -- this is the reconnect ordering invariant (onData fires post buffer-write).
+    bridge.onData((chunk) => {
+      observed.push({ chunk, inSnapshot: bridge.serialize().includes('MARKER') });
+    });
+
+    ptyMock.state.dataCb?.('MARKER-text');
+    await tick();
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0].chunk).toBe('MARKER-text');
+    expect(observed[0].inSnapshot).toBe(true);
+    bridge.kill();
+  });
+
+  it('fires onOutput (grid sink) before onData (stream sink)', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const order: string[] = [];
+    bridge.onOutput(() => order.push('output'));
+    bridge.onData(() => order.push('data'));
+
+    ptyMock.state.dataCb?.('x');
+    await tick();
+
+    expect(order).toEqual(['output', 'data']);
+    bridge.kill();
+  });
+
+  it('onData unsubscribe stops further callbacks', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const seen: string[] = [];
+    const unsub = bridge.onData((c) => seen.push(c));
+
+    ptyMock.state.dataCb?.('a');
+    await tick();
+    unsub();
+    ptyMock.state.dataCb?.('b');
+    await tick();
+
+    expect(seen).toEqual(['a']);
+    bridge.kill();
+  });
+
+  it('serialize() reflects written screen content', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    ptyMock.state.dataCb?.('hello serialize');
+    await tick();
+    expect(bridge.serialize()).toContain('hello serialize');
+    bridge.kill();
+  });
+
+  it('serialize({ scrollback }) caps the tail without throwing', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    ptyMock.state.dataCb?.('line one\r\nline two');
+    await tick();
+    const snap = bridge.serialize({ scrollback: 0 });
+    expect(typeof snap).toBe('string');
+    bridge.kill();
+  });
+});
+
+describe('createPtyBridge — session discovery (no fixed timeout)', () => {
+  afterEach(() => {
+    registryMock.readActiveRegistrations.mockImplementation(() => registryMock.DEFAULT);
+    ptyMock.state.exitCb = undefined;
+    vi.useRealTimers();
+  });
+
+  it('discovers a registration that appears long after the child spawns', async () => {
+    // Regression: a slow container runtime (Apple `container` boots a VM per
+    // container) can take well over the former 10s discovery deadline to
+    // register. Discovery must keep polling while the child is alive, else the
+    // escalation watcher never starts and escalations never surface.
+    vi.useFakeTimers();
+    registryMock.readActiveRegistrations.mockReturnValue([]); // not registered yet
+    const bridge = await createPtyBridge(baseOptions());
+    let discovered: unknown = 'unset';
+    bridge.onSessionDiscovered((reg) => {
+      discovered = reg;
+    });
+
+    // Well past the former 10s deadline with no registration -> still polling,
+    // NOT resolved to null (the bug: it used to give up here).
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(discovered).toBe('unset');
+
+    // Registration finally appears; the next poll surfaces it.
+    registryMock.readActiveRegistrations.mockReturnValue([
+      { pid: 424242, sessionId: 'sess-late', escalationDir: '/tmp/esc-late' },
+    ]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(discovered).toMatchObject({ sessionId: 'sess-late', escalationDir: '/tmp/esc-late' });
+    bridge.kill();
+  });
+
+  it('resolves discovery to null when the child exits before registering', async () => {
+    vi.useFakeTimers();
+    registryMock.readActiveRegistrations.mockReturnValue([]); // never registers
+    const bridge = await createPtyBridge(baseOptions());
+    let discovered: unknown = 'unset';
+    bridge.onSessionDiscovered((reg) => {
+      discovered = reg;
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(discovered).toBe('unset');
+
+    // Child exits -> discovery aborts -> queued callbacks flush with null.
+    ptyMock.state.exitCb?.({ exitCode: 1 });
+    expect(discovered).toBeNull();
   });
 });

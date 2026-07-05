@@ -13,6 +13,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { syncGitRepo } from '../cron/git-sync.js';
 import { resolve } from 'node:path';
 import { createStandaloneSession } from '../session/index.js';
@@ -762,6 +763,11 @@ export class IronCurtainDaemon {
       devMode: this.webUiOptions?.devMode,
       captureTracesDefault: this.captureTracesDefault,
       allowPolicyMutation: this.allowPolicyMutation,
+      // Owner id/pid for Docker-agent PTY sessions (registry ownership, §11 Q1).
+      // The WebUiServer owns PTY session lifecycle, so its stop() (already
+      // awaited in shutdown()) reaps the children -- no separate close here.
+      daemonId: randomBytes(4).toString('hex'),
+      daemonPid: process.pid,
     });
     const workflowManager = new WorkflowManager({
       eventBus: server.getEventBus(),

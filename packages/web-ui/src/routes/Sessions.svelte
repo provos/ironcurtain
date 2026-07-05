@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack, tick } from 'svelte';
   import {
     appState,
     createSession,
@@ -6,16 +7,33 @@
     endSession,
     loadSessionHistory,
     listPersonas,
+    attachPty,
+    detachPty,
+    sendPtyInput,
+    sendPtyResize,
+    sendPtyPrompt,
+    registerPtySink,
+    unregisterPtySink,
+    connectPtyTerminal,
+    disconnectPtyTerminal,
+    getModelProviders,
   } from '../lib/stores.svelte.js';
-  import type { ConversationTurn } from '../lib/types.js';
+  import type { ConversationTurn, CreateSessionOptions } from '../lib/types.js';
 
   import SessionSidebar from '$lib/components/features/session-sidebar.svelte';
   import SessionConsole from '$lib/components/features/session-console.svelte';
+  import TerminalConsole from '$lib/components/features/terminal-console.svelte';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
 
   let { onOpenEscalation }: { onOpenEscalation?: () => void } = $props();
 
   let sending = $state(false);
   let sessionHistory = $state<ConversationTurn[]>([]);
+
+  // Bound TerminalConsole instance for the selected web-pty session.
+  let terminalRef = $state<TerminalConsole | undefined>(undefined);
 
   // Session creation state
   let creatingSession = $state(false);
@@ -24,11 +42,50 @@
   // Session end state
   let endingSession = $state<number | null>(null);
 
-  async function handleCreate(persona?: string): Promise<void> {
+  // Trusted-message bar state (web-pty sessions). A prompt is PLAIN text sent
+  // via `sessions.ptyPrompt`; the daemon records it as trusted user-context
+  // (authorizing auto-approval) — distinct from raw keystrokes, which are never
+  // trusted. This is the only browser path to auto-approval.
+  let promptText = $state('');
+  let promptError = $state('');
+  let sendingPrompt = $state(false);
+
+  async function handleSendPrompt(): Promise<void> {
+    const label = selectedPtyLabel;
+    if (label === null) return;
+    const text = promptText.trim();
+    if (!text) return;
+    sendingPrompt = true;
+    promptError = '';
+    try {
+      await sendPtyPrompt(label, text);
+      promptText = '';
+    } catch (err) {
+      promptError = err instanceof Error ? err.message : String(err);
+    } finally {
+      sendingPrompt = false;
+    }
+  }
+
+  // Docker Agent Mode (web-pty) exposes the launch options (workspace / provider
+  // / model) in the New-session flow; the code-mode chatbox keeps the
+  // persona-only quick-pick. Read from the daemon status so the flow is chosen
+  // before any session exists.
+  const launchOptionsEnabled = $derived(appState.daemonStatus?.sessionMode === 'docker');
+
+  async function loadProviderProfiles(): Promise<string[]> {
+    const providers = await getModelProviders();
+    // The reserved 'native' profile is default routing; the dropdown's empty
+    // "Default" option already covers it (omitting providerProfileName), so it
+    // is not listed as an explicit choice.
+    return Object.keys(providers.profiles).filter((name) => name !== 'native');
+  }
+
+  async function handleCreate(opts: CreateSessionOptions): Promise<void> {
     creatingSession = true;
     createError = '';
     try {
-      const result = await createSession(persona);
+      const result = await createSession(opts);
       appState.selectedSessionLabel = result.label;
     } catch (err) {
       createError = err instanceof Error ? err.message : String(err);
@@ -79,23 +136,63 @@
   // Guard against stale history responses when the user switches sessions quickly
   let historyVersion = 0;
 
-  // Load history when session is selected
+  // Load history when a turn-based session is selected. D2 guard: a web-pty
+  // session has no turn history/budget/diagnostics, so skip the fetch entirely
+  // (selecting it must not fire those RPCs). The kind is read untracked so this
+  // effect still depends only on the selected label, not on every session update.
   $effect(() => {
     const label = appState.selectedSessionLabel;
-    if (label !== null) {
-      const version = ++historyVersion;
-      loadSessionHistory(label)
-        .then((history) => {
-          if (version === historyVersion) {
-            sessionHistory = history;
-          }
-        })
-        .catch(() => {
-          if (version === historyVersion) {
-            sessionHistory = [];
-          }
-        });
-    }
+    if (label === null) return;
+    const kind = untrack(() => appState.sessions.get(label)?.source.kind);
+    if (kind === 'web-pty') return;
+    const version = ++historyVersion;
+    loadSessionHistory(label)
+      .then((history) => {
+        if (version === historyVersion) {
+          sessionHistory = history;
+        }
+      })
+      .catch(() => {
+        if (version === historyVersion) {
+          sessionHistory = [];
+        }
+      });
+  });
+
+  // The selected session's label iff it is a web-pty terminal, else null.
+  // A primitive derived: it flips null -> N when a freshly created pty session
+  // first lands in the map, but does NOT change on unrelated session updates
+  // (budget/status), so the attach effect never churns attach/detach.
+  const selectedPtyLabel = $derived(
+    appState.selectedSession?.source.kind === 'web-pty' ? appState.selectedSession.label : null,
+  );
+
+  // PTY attach lifecycle. Register the buffering sink BEFORE attaching (the
+  // daemon sends a one-shot pty_replay on attach, which can beat the terminal's
+  // mount): the sink buffers frames until the mounted TerminalConsole connects
+  // its live handle via `onready`, so a replay is never dropped. Detach +
+  // unregister on switch/unmount.
+  $effect(() => {
+    const label = selectedPtyLabel;
+    if (label === null) return;
+
+    registerPtySink(label);
+    attachPty(label).catch((err) => console.error('Failed to attach PTY:', err));
+
+    return () => {
+      disconnectPtyTerminal(label);
+      unregisterPtySink(label);
+      detachPty(label).catch(() => {});
+    };
+  });
+
+  // Return focus to the terminal after the escalation overlay is dismissed
+  // (the modal, owned by App.svelte, steals focus). `escalationDismissedAt` is
+  // bumped by App on dismiss.
+  $effect(() => {
+    void appState.escalationDismissedAt;
+    if (selectedPtyLabel === null) return;
+    tick().then(() => terminalRef?.focus());
   });
 </script>
 
@@ -108,19 +205,90 @@
     creating={creatingSession}
     {createError}
     loadPersonasFn={listPersonas}
+    {launchOptionsEnabled}
+    loadProviderProfilesFn={loadProviderProfiles}
   />
 
   {#if appState.selectedSession}
-    <SessionConsole
-      session={appState.selectedSession}
-      output={appState.getOutput(appState.selectedSessionLabel!)}
-      history={sessionHistory}
-      onsend={handleSend}
-      onend={handleEnd}
-      {onOpenEscalation}
-      {sending}
-      ending={endingSession === appState.selectedSessionLabel}
-    />
+    {#if appState.selectedSession.source.kind === 'web-pty'}
+      {@const ptySession = appState.selectedSession}
+      <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <div class="px-6 py-3 border-b border-border flex items-center justify-between bg-card/50">
+          <div class="flex items-center gap-2">
+            <span class="font-mono font-semibold">#{ptySession.label}</span>
+            {#if ptySession.persona}
+              <Badge variant="default">{ptySession.persona}</Badge>
+            {/if}
+            <Badge variant="secondary">terminal</Badge>
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="text-xs text-muted-foreground hidden sm:inline">Resizing affects all viewers</span>
+            <Button variant="destructive" size="sm" loading={endingSession === ptySession.label} onclick={handleEnd}>
+              {endingSession === ptySession.label ? 'Ending' : 'End'}
+            </Button>
+          </div>
+        </div>
+
+        <!-- Remount a fresh terminal per label so switching PTY sessions never
+             leaks buffer state from the previous one. -->
+        {#key ptySession.label}
+          <TerminalConsole
+            bind:this={terminalRef}
+            onready={(handle) => {
+              connectPtyTerminal(ptySession.label, handle);
+              terminalRef?.focus();
+            }}
+            oninput={(dataB64) => sendPtyInput(ptySession.label, dataB64)}
+            onresize={(cols, rows) => sendPtyResize(ptySession.label, cols, rows)}
+          />
+        {/key}
+
+        <!-- Trusted-message bar: docked below the terminal, subordinate to it.
+             Plain text (NOT keystrokes) sent via `sessions.ptyPrompt` — the daemon
+             records it as trusted user-context (authorizes auto-approval). -->
+        <div class="px-4 py-3 border-t border-border bg-card/50 shrink-0">
+          <form
+            class="flex items-center gap-2"
+            onsubmit={(e) => {
+              e.preventDefault();
+              handleSendPrompt();
+            }}
+          >
+            <Input
+              data-testid="pty-prompt-input"
+              bind:value={promptText}
+              placeholder="Send a trusted message..."
+              class="flex-1 py-1.5"
+              disabled={ptySession.status !== 'ready' || sendingPrompt}
+            />
+            <Button
+              type="submit"
+              data-testid="pty-prompt-send"
+              size="sm"
+              loading={sendingPrompt}
+              disabled={!promptText.trim() || ptySession.status !== 'ready'}
+            >
+              Send
+            </Button>
+          </form>
+          <div class="mt-1 text-xs text-muted-foreground">Trusted message — authorizes auto-approval</div>
+          {#if promptError}
+            <div class="mt-1 text-xs text-destructive" data-testid="pty-prompt-error">{promptError}</div>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <SessionConsole
+        session={appState.selectedSession}
+        output={appState.getOutput(appState.selectedSessionLabel!)}
+        history={sessionHistory}
+        onsend={handleSend}
+        onend={handleEnd}
+        {onOpenEscalation}
+        {sending}
+        ending={endingSession === appState.selectedSessionLabel}
+      />
+    {/if}
   {:else}
     <div class="flex-1 flex items-center justify-center text-muted-foreground">
       <div class="text-center">

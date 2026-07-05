@@ -14,6 +14,7 @@ import type {
   PendingEscalation,
   WorkflowSummaryDto,
   LiveWorkflowPhase,
+  PtySink,
 } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -87,12 +88,13 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
 
 let displayNumberCounter = 0;
 
-function createMockEffects(): EventSideEffects {
+function createMockEffects(getPtySink: (label: number) => PtySink | undefined = () => undefined): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
     refreshPersonas: vi.fn(),
     refreshConfig: vi.fn(),
     assignDisplayNumber: vi.fn(() => ++displayNumberCounter),
+    getPtySink: vi.fn(getPtySink),
   };
 }
 
@@ -1310,5 +1312,67 @@ describe('handleEvent', () => {
       expect(evicted.has('run-old')).toBe(true);
       expect(evicted.has('gate-old')).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PTY terminal stream routing
+// ---------------------------------------------------------------------------
+
+describe('handleEvent - PTY stream', () => {
+  function makeSinkSpy(): PtySink & { writes: string[]; resets: string[] } {
+    const writes: string[] = [];
+    const resets: string[] = [];
+    return {
+      writes,
+      resets,
+      write: (dataB64: string) => writes.push(dataB64),
+      reset: (snapshotB64: string) => resets.push(snapshotB64),
+    };
+  }
+
+  it('routes session.pty_output to the registered sink (raw base64 forwarded)', () => {
+    const state = createMockState();
+    const sink = makeSinkSpy();
+    const effects = createMockEffects((label) => (label === 7 ? sink : undefined));
+
+    const handled = handleEvent(state, effects, 'session.pty_output', { label: 7, data: 'aGVsbG8=' });
+
+    expect(handled).toBe(true);
+    expect(sink.writes).toEqual(['aGVsbG8=']);
+    expect(sink.resets).toEqual([]);
+  });
+
+  it('routes session.pty_replay to sink.reset', () => {
+    const state = createMockState();
+    const sink = makeSinkSpy();
+    const effects = createMockEffects((label) => (label === 3 ? sink : undefined));
+
+    const handled = handleEvent(state, effects, 'session.pty_replay', { label: 3, snapshot: 'c25hcA==' });
+
+    expect(handled).toBe(true);
+    expect(sink.resets).toEqual(['c25hcA==']);
+    expect(sink.writes).toEqual([]);
+  });
+
+  it('is a benign no-op when no sink is registered for the label', () => {
+    const state = createMockState();
+    // Default effects return no sink.
+    const handledOut = handleEvent(state, createMockEffects(), 'session.pty_output', { label: 9, data: 'eA==' });
+    const handledReplay = handleEvent(state, createMockEffects(), 'session.pty_replay', { label: 9, snapshot: 'eA==' });
+
+    // Recognized (returns true) but does nothing observable.
+    expect(handledOut).toBe(true);
+    expect(handledReplay).toBe(true);
+  });
+
+  it('only delivers to the sink matching the event label', () => {
+    const state = createMockState();
+    const sink7 = makeSinkSpy();
+    const effects = createMockEffects((label) => (label === 7 ? sink7 : undefined));
+
+    handleEvent(state, effects, 'session.pty_output', { label: 8, data: 'b3RoZXI=' });
+
+    expect(sink7.writes).toEqual([]);
   });
 });
