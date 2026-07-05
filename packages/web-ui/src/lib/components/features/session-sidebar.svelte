@@ -76,6 +76,12 @@
       ...(selectedModel ? { model: selectedModel } : {}),
     });
   }
+
+  function handleLaunchSubmit(event: SubmitEvent): void {
+    event.preventDefault();
+    if (creating) return;
+    handleCreate();
+  }
 </script>
 
 <div data-testid="session-sidebar" class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0 min-h-0">
@@ -84,14 +90,7 @@
   </div>
 
   <div class="px-3 py-3 border-b border-border bg-card/40">
-    <form
-      data-testid="session-launch-form"
-      class="space-y-2.5"
-      onsubmit={(e) => {
-        e.preventDefault();
-        handleCreate();
-      }}
-    >
+    <form data-testid="session-launch-form" class="space-y-2.5" onsubmit={handleLaunchSubmit}>
       <div class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Launch options</div>
       <label class="block">
         <span class="text-xs text-muted-foreground">Workspace</span>
