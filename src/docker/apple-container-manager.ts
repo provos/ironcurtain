@@ -241,7 +241,9 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
     // escaping — reject paths that would corrupt it rather than emit a
     // wrong mount.
     if (mount.source.includes(':') || mount.target.includes(':')) {
-      throw new Error(`mount path contains ':' which the -v format cannot escape: ${mount.source}`);
+      throw new Error(
+        `mount path contains ':' which the -v format cannot escape (source=${mount.source}, target=${mount.target})`,
+      );
     }
     const readonlySuffix = mount.readonly ? ':ro' : '';
     args.push('-v', `${mount.source}:${mount.target}${readonlySuffix}`);
@@ -250,7 +252,10 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   for (const publish of config.publishSockets ?? []) {
     // Same colon-separated format as -v; same escaping rule.
     if (publish.hostPath.includes(':') || publish.containerPath.includes(':')) {
-      throw new Error(`publish-socket path contains ':' which the format cannot escape: ${publish.hostPath}`);
+      throw new Error(
+        `publish-socket path contains ':' which the format cannot escape ` +
+          `(hostPath=${publish.hostPath}, containerPath=${publish.containerPath})`,
+      );
     }
     args.push('--publish-socket', `${publish.hostPath}:${publish.containerPath}`);
   }

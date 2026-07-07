@@ -207,7 +207,7 @@ function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): vo
  * Claude Code, attaches the terminal, and blocks until the session ends.
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
-  const { prepareDockerInfrastructure, writeHostOnlyAptProxyConfig, checkHostOnlyConnectivity } =
+  const { prepareDockerInfrastructure, writeAptProxyConfigViaExec, checkHostOnlyConnectivity } =
     await import('./docker-infrastructure.js');
 
   // When resuming, validate the snapshot and reuse the existing session directory
@@ -438,9 +438,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let extraHosts: string[] | undefined;
     let publishSockets: { hostPath: string; containerPath: string }[] | undefined;
     let hostPtyPort: number | undefined;
-    // tcp-hostonly only: apt proxy config written into the container via
-    // exec after start (apple container cannot bind-mount single files).
-    let hostOnlyAptProxyUrl: string | undefined;
+    // apple-container only (both `uds` and the retained `tcp-hostonly`):
+    // apt proxy config written into the container via exec after start
+    // instead of bind-mounted — see writeAptProxyConfigViaExec.
+    let execAptProxyUrl: string | undefined;
     const mainContainerName = `ironcurtain-pty-${shortId}`;
 
     // Remove stale main container from a crashed previous session (same session
@@ -464,7 +465,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         HTTPS_PROXY: proxyUrl,
         HTTP_PROXY: proxyUrl,
       };
-      hostOnlyAptProxyUrl = proxyUrl;
+      execAptProxyUrl = proxyUrl;
 
       network = infra.hostOnlyNetwork.name;
       // Report the prepare-phase network as networkName so the finally
@@ -576,7 +577,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         // host-side socket materializes when the guest bind()s, so
         // waitForPtyReady's existence poll below is a valid readiness
         // signal on both runtimes.
-        hostOnlyAptProxyUrl = udsProxyUrl;
+        execAptProxyUrl = udsProxyUrl;
         if (ptySockPath !== undefined) {
           publishSockets = [{ hostPath: resolve(socketsDir, PTY_SOCK_NAME), containerPath: ptySockPath }];
         }
@@ -670,8 +671,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
     // apple-container (uds and the retained tcp-hostonly): write the apt
     // proxy config inside the container via exec instead of a bind mount.
-    if (hostOnlyAptProxyUrl !== undefined) {
-      await writeHostOnlyAptProxyConfig(docker, containerId, hostOnlyAptProxyUrl);
+    if (execAptProxyUrl !== undefined) {
+      await writeAptProxyConfigViaExec(docker, containerId, execAptProxyUrl);
     }
     // tcp-hostonly only: fail-closed connectivity gate (gateway proxies
     // reachable, internet egress blocked) before attaching.

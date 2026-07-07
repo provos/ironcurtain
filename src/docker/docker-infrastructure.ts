@@ -1157,12 +1157,11 @@ export async function createSessionContainers(
     };
     let network: string | null;
     let extraHosts: string[] | undefined;
-    // tcp-hostonly only: apt proxy config to write into the container via
-    // exec after start. Apple container's virtiofs shares directories
-    // only — the single-file bind mount the Docker topologies use for
-    // /etc/apt/apt.conf.d/90-ironcurtain-proxy is rejected with
-    // "path ... is not a directory".
-    let hostOnlyAptProxyUrl: string | undefined;
+    // apple-container only (both `uds` and the retained `tcp-hostonly`):
+    // the apt proxy config is written into the container via exec after
+    // start instead of bind-mounted — see writeAptProxyConfigViaExec for
+    // the virtiofs constraints that make the bind mount unworkable.
+    let execAptProxyUrl: string | undefined;
 
     if (core.topology === 'tcp-hostonly') {
       // Apple container host-only mode: the agent VM reaches the host
@@ -1179,7 +1178,7 @@ export async function createSessionContainers(
         HTTPS_PROXY: proxyUrl,
         HTTP_PROXY: proxyUrl,
       };
-      hostOnlyAptProxyUrl = proxyUrl;
+      execAptProxyUrl = proxyUrl;
 
       network = core.hostOnlyNetwork.name;
       // Report the host-only network as `internalNetwork` so the standard
@@ -1266,7 +1265,7 @@ export async function createSessionContainers(
       // exec-based writer runs after start instead. Linux Docker keeps
       // the single-file bind mount.
       if (core.runtimeKind === 'apple-container') {
-        hostOnlyAptProxyUrl = udsProxyUrl;
+        execAptProxyUrl = udsProxyUrl;
       } else {
         const aptProxyPathUds = resolve(core.orientationDir, 'apt-proxy.conf');
         writeFileSync(
@@ -1376,9 +1375,9 @@ export async function createSessionContainers(
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
 
     // tcp-hostonly: write the apt proxy config inside the container (the
-    // Docker topologies bind-mount it; see hostOnlyAptProxyUrl above).
-    if (hostOnlyAptProxyUrl !== undefined) {
-      await writeHostOnlyAptProxyConfig(core.docker, mainContainerId, hostOnlyAptProxyUrl);
+    // Docker topologies bind-mount it; see execAptProxyUrl above).
+    if (execAptProxyUrl !== undefined) {
+      await writeAptProxyConfigViaExec(core.docker, mainContainerId, execAptProxyUrl);
     }
 
     // Connectivity check: verify the container can reach host proxies
@@ -1438,14 +1437,17 @@ async function checkInternalNetworkConnectivity(
 
 /**
  * Writes /etc/apt/apt.conf.d/90-ironcurtain-proxy inside a running
- * container via exec (as root). Used by the tcp-hostonly topology in
- * both batch and PTY modes — Apple container's virtiofs shares
- * directories only, so the single-file bind mount the Docker topologies
- * use is rejected. The URL is built from our own gateway address and
- * OS-assigned port — runtime-generated values, not untrusted input — so
- * embedding it in the sh script is safe.
+ * container via exec (as root). Used by apple-container in both batch
+ * and PTY modes — the single-file bind mount the Docker topologies use
+ * is unworkable there: on `tcp-hostonly` (pre-1.1.0) `--mount` rejected
+ * non-directory sources, and on `uds` (1.1.0+) a `-v <dir>/file` mount
+ * whose source nests under the already-shared orientation dir silently
+ * drops that dir share. The URL is built from IronCurtain's own
+ * gateway/loopback address and OS-assigned port — runtime-generated
+ * values, not untrusted input — so embedding it in the sh script is
+ * safe.
  */
-export async function writeHostOnlyAptProxyConfig(
+export async function writeAptProxyConfigViaExec(
   docker: ContainerRuntime,
   containerId: string,
   proxyUrl: string,
