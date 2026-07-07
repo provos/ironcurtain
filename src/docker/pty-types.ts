@@ -59,5 +59,14 @@ export const LISTENER_LOCK_FILE = 'escalation-listener.lock';
 /** PTY socket filename (Linux UDS mode). */
 export const PTY_SOCK_NAME = 'pty.sock';
 
+/**
+ * Guest-side PTY socket path on apple-container. `/run/ironcurtain` is
+ * auto-created `root:root 0755` by the per-file `-v` socket mounts, so
+ * the non-root `codespace` user cannot `bind()` there; `/tmp` is
+ * world-writable. Bridged to `<socketsDir>/pty.sock` on the host via
+ * `--publish-socket`.
+ */
+export const APPLE_PTY_GUEST_SOCK = '/tmp/ironcurtain-pty.sock';
+
 /** Default PTY port inside the container (macOS TCP mode only). */
 export const DEFAULT_PTY_PORT = 19000;

@@ -4,14 +4,20 @@
  * Docker Agent Mode reaches host-side proxies through one of three
  * topologies (see docs/designs/apple-container-runtime.md §2):
  *
- *  - `uds`          — Linux Docker: `--network=none` + bind-mounted Unix
- *                     domain sockets.
+ *  - `uds`          — Linux Docker AND Apple `container` (>= 1.1.0):
+ *                     `--network none` + Unix-domain-socket proxies. On
+ *                     Linux the sockets directory is bind-mounted; on
+ *                     Apple `container` each socket file is mounted via
+ *                     `-v` (vsock relay) since virtiofs directory shares
+ *                     do not carry sockets.
  *  - `tcp-sidecar`  — macOS Docker Desktop: `--internal` bridge network +
  *                     socat sidecar forwarding exactly the two proxy ports.
- *  - `tcp-hostonly` — Apple `container`: a host-only (`--internal`) vmnet
- *                     network. No sidecar: the host is natively reachable
- *                     at the network's gateway IP, and internet egress is
- *                     blocked at the network layer.
+ *  - `tcp-hostonly` — Retained but not currently selected by any backend.
+ *                     Host-only (`--internal`) vmnet network with proxies
+ *                     on 0.0.0.0 guarded by `makeSourceAddressGuard`. Was
+ *                     the Apple `container` topology before 1.1.0 added
+ *                     working UDS relays; kept for tests and potential
+ *                     future runtimes.
  *
  * For `tcp-hostonly`, the vmnet bridge interface does not exist on the
  * host until the first container attaches, so proxies cannot bind the
@@ -31,15 +37,16 @@ export type NetworkTopology = 'uds' | 'tcp-sidecar' | 'tcp-hostonly';
 
 /**
  * Resolves the proxy-transport topology for a runtime kind on the current
- * platform. Apple `container` always uses the host-only topology; Docker
- * keeps its existing platform split (`dockerUsesTcp` is injectable for
- * tests, defaulting to the live platform check).
+ * platform. Apple `container` (floor 1.1.0) uses the `uds` topology;
+ * Docker keeps its platform split (`dockerUsesTcp` is injectable for
+ * tests, defaulting to the live platform check). `tcp-hostonly` is never
+ * returned here — it exists only as a retained code path.
  */
 export function resolveNetworkTopology(
   kind: ContainerRuntimeKind,
   dockerUsesTcp: boolean = useTcpTransport(),
 ): NetworkTopology {
-  if (kind === 'apple-container') return 'tcp-hostonly';
+  if (kind === 'apple-container') return 'uds';
   return dockerUsesTcp ? 'tcp-sidecar' : 'uds';
 }
 

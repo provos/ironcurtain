@@ -163,10 +163,9 @@ describe('buildAppleCreateArgs', () => {
     expect(args).toContain('--network');
     expect(args).toContain('--init');
     expect(args.join(' ')).toContain('--cap-drop ALL');
-    expect(args.join(' ')).toContain('--mount source=/home/user/.ironcurtain/sessions/abc/sandbox,target=/workspace');
-    expect(args.join(' ')).toContain(
-      '--mount source=/home/user/.ironcurtain/sessions/abc/orientation,target=/etc/ironcurtain,readonly',
-    );
+    expect(args.join(' ')).toContain('-v /home/user/.ironcurtain/sessions/abc/sandbox:/workspace');
+    expect(args.join(' ')).toContain('-v /home/user/.ironcurtain/sessions/abc/orientation:/etc/ironcurtain:ro');
+    expect(args.join(' ')).not.toContain('--mount');
     expect(args.join(' ')).toContain('-e ANTHROPIC_API_KEY=sk-test-key');
     expect(args.join(' ')).toContain('--label ironcurtain.bundle=abc-bundle-id');
     expect(args.join(' ')).toContain('--memory 4096M');
@@ -220,15 +219,36 @@ describe('buildAppleCreateArgs', () => {
     );
   });
 
-  it("throws on network 'none'", () => {
-    expect(() => buildAppleCreateArgs({ ...sampleConfig, network: 'none' })).toThrow(/host-only/);
+  it("emits '--network none' for the uds topology", () => {
+    const args = buildAppleCreateArgs({ ...sampleConfig, network: 'none' });
+    const idx = args.indexOf('--network');
+    expect(args[idx + 1]).toBe('none');
   });
 
-  it('throws on mount paths the --mount format cannot escape', () => {
+  it('throws on mount paths the -v format cannot escape', () => {
     expect(() =>
       buildAppleCreateArgs({
         ...sampleConfig,
-        mounts: [{ source: '/tmp/a,b', target: '/workspace', readonly: false }],
+        mounts: [{ source: '/tmp/a:b', target: '/workspace', readonly: false }],
+      }),
+    ).toThrow(/cannot escape/);
+  });
+
+  it('emits --publish-socket for guest-listens/host-connects UDS bridges', () => {
+    const args = buildAppleCreateArgs({
+      ...sampleConfig,
+      publishSockets: [
+        { hostPath: '/home/user/.ironcurtain/run/abc/sockets/pty.sock', containerPath: '/tmp/pty.sock' },
+      ],
+    });
+    expect(args.join(' ')).toContain('--publish-socket /home/user/.ironcurtain/run/abc/sockets/pty.sock:/tmp/pty.sock');
+  });
+
+  it('throws on publish-socket paths containing a colon', () => {
+    expect(() =>
+      buildAppleCreateArgs({
+        ...sampleConfig,
+        publishSockets: [{ hostPath: '/tmp/a:b', containerPath: '/tmp/c' }],
       }),
     ).toThrow(/cannot escape/);
   });
@@ -284,9 +304,19 @@ describe('checkAppleContainerAvailable', () => {
     if (!result.available) expect(result.reason).toMatch(/too old/);
   });
 
+  it('reports unavailable on 1.0.x (no UDS relay / --network none)', async () => {
+    mock.setResponse('container CLI version 1.0.0 (build: release, commit: ee848e3)');
+    const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
+    expect(result.available).toBe(false);
+    if (!result.available) {
+      expect(result.reason).toMatch(/>= 1\.1\.0/);
+      expect(result.detailedMessage).toMatch(/Unix-domain-socket/);
+    }
+  });
+
   it('reports unavailable when system services are not running', async () => {
     mock.setSequence([
-      { stdout: 'container CLI version 1.0.0 (build: release, commit: ee848e3)' },
+      { stdout: 'container CLI version 1.1.0 (build: release, commit: 5973b9c)' },
       { error: true, code: 1, stderr: 'apiserver not running' },
     ]);
     const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
@@ -296,13 +326,19 @@ describe('checkAppleContainerAvailable', () => {
 
   it('reports available when all checks pass', async () => {
     mock.setSequence([
-      { stdout: 'container CLI version 1.0.0 (build: release, commit: ee848e3)' },
+      { stdout: 'container CLI version 1.1.0 (build: release, commit: 5973b9c)' },
       { stdout: 'status running' },
     ]);
     const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
     expect(result).toEqual({ available: true });
     expect(mock.calls[0]?.args).toEqual(['--version']);
     expect(mock.calls[1]?.args).toEqual(['system', 'status']);
+  });
+
+  it('accepts a future major version', async () => {
+    mock.setSequence([{ stdout: 'container CLI version 2.0.0' }, { stdout: 'status running' }]);
+    const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
+    expect(result).toEqual({ available: true });
   });
 });
 

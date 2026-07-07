@@ -172,6 +172,10 @@ async function readContainerConfigChanges(exec: ExecFileFn, containerId: string)
  * Exported for testing.
  */
 export function buildCreateArgs(config: DockerContainerConfig): string[] {
+  if (config.publishSockets && config.publishSockets.length > 0) {
+    throw new Error('publishSockets is apple-container-only (--publish-socket has no Docker equivalent)');
+  }
+
   const args = ['create'];
 
   args.push('--name', config.name);

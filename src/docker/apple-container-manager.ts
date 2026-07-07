@@ -44,8 +44,15 @@ import { createDockerProgressSink } from './docker-progress-sink.js';
 /** Grace period for `container stop` before the runtime kills the VM. */
 const STOP_TIMEOUT_SECONDS = 10;
 
-/** Minimum supported `container` CLI major version (1.0.0 stability line). */
+/**
+ * Minimum supported `container` CLI version. 1.1.0 is the floor for the
+ * `uds` topology this backend now uses: it adds working per-file UDS
+ * relays via `-v <host.sock>:<guest.sock>` (host-listens / guest-connects
+ * over vsock) and a functional `--network none`. 1.0.x lacks both and
+ * would need the retired `tcp-hostonly` topology.
+ */
 const MIN_MAJOR_VERSION = 1;
+const MIN_MINOR_VERSION = 1;
 
 /**
  * Minimum Darwin kernel major for macOS 26. The `container network`
@@ -143,12 +150,14 @@ export async function checkAppleContainerAvailable(
 
   const match = /version\s+(\d+)\.(\d+)\.(\d+)/.exec(versionLine);
   const major = match ? Number.parseInt(match[1], 10) : 0;
-  if (!match || major < MIN_MAJOR_VERSION) {
+  const minor = match ? Number.parseInt(match[2], 10) : 0;
+  if (!match || major < MIN_MAJOR_VERSION || (major === MIN_MAJOR_VERSION && minor < MIN_MINOR_VERSION)) {
     return {
       available: false,
-      reason: `container CLI too old (need >= ${MIN_MAJOR_VERSION}.0.0)`,
+      reason: `container CLI too old (need >= ${MIN_MAJOR_VERSION}.${MIN_MINOR_VERSION}.0)`,
       detailedMessage:
-        `Found "${versionLine}" but IronCurtain requires the ${MIN_MAJOR_VERSION}.0.0 stability line. ` +
+        `Found "${versionLine}" but IronCurtain requires >= ${MIN_MAJOR_VERSION}.${MIN_MINOR_VERSION}.0 ` +
+        '(Unix-domain-socket relays and `--network none` for the UDS topology). ' +
         'Upgrade from https://github.com/apple/container/releases.',
     };
   }
@@ -170,20 +179,17 @@ export async function checkAppleContainerAvailable(
  * Builds the `container create` argument list from a container config.
  * Exported for testing.
  *
- * Configs that encode Docker-only mechanisms (`extraHosts`, `restartPolicy`,
- * `network: 'none'`) throw rather than being silently dropped: they only
- * occur on the Docker-specific topologies, and reaching here with one set
- * means a wiring bug, not a portable request.
+ * Configs that encode Docker-only mechanisms (`extraHosts`, `restartPolicy`)
+ * throw rather than being silently dropped: they only occur on the
+ * Docker-specific topologies, and reaching here with one set means a
+ * wiring bug, not a portable request.
  */
 export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   if (config.extraHosts && config.extraHosts.length > 0) {
-    throw new Error('apple-container does not support extra host mappings (--add-host); use a host-only network');
+    throw new Error('apple-container does not support extra host mappings (--add-host)');
   }
   if (config.restartPolicy) {
     throw new Error('apple-container does not support restart policies');
-  }
-  if (config.network === 'none') {
-    throw new Error("apple-container has no '--network=none'; use an --internal (host-only) network");
   }
 
   const args = ['create'];
@@ -226,14 +232,32 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   }
 
   for (const mount of config.mounts) {
-    // `--mount` is the only syntax with an explicit readonly option. Its
-    // comma/equals-separated format has no escaping, so reject paths that
-    // would corrupt it rather than emit a wrong mount.
-    if (/[,=]/.test(mount.source) || /[,=]/.test(mount.target)) {
-      throw new Error(`mount path contains ',' or '=' which the --mount format cannot escape: ${mount.source}`);
+    // `-v` is the only mount syntax that handles directories, single
+    // files, AND Unix-domain sockets uniformly on 1.1.0+: a socket
+    // source becomes a vsock relay (host-listens / guest-connects), a
+    // file source is a virtiofs single-file share, a directory source
+    // is a virtiofs share. `--mount` still rejects non-directory
+    // sources, so we do not use it. The colon-separated format has no
+    // escaping — reject paths that would corrupt it rather than emit a
+    // wrong mount.
+    if (mount.source.includes(':') || mount.target.includes(':')) {
+      throw new Error(
+        `mount path contains ':' which the -v format cannot escape (source=${mount.source}, target=${mount.target})`,
+      );
     }
-    const readonlySuffix = mount.readonly ? ',readonly' : '';
-    args.push('--mount', `source=${mount.source},target=${mount.target}${readonlySuffix}`);
+    const readonlySuffix = mount.readonly ? ':ro' : '';
+    args.push('-v', `${mount.source}:${mount.target}${readonlySuffix}`);
+  }
+
+  for (const publish of config.publishSockets ?? []) {
+    // Same colon-separated format as -v; same escaping rule.
+    if (publish.hostPath.includes(':') || publish.containerPath.includes(':')) {
+      throw new Error(
+        `publish-socket path contains ':' which the format cannot escape ` +
+          `(hostPath=${publish.hostPath}, containerPath=${publish.containerPath})`,
+      );
+    }
+    args.push('--publish-socket', `${publish.hostPath}:${publish.containerPath}`);
   }
 
   for (const [key, value] of Object.entries(config.env)) {
