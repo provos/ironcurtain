@@ -368,6 +368,27 @@ export function createDockerManager(
       await exec('docker', ['start', nameOrId], { timeout: 30_000 });
     },
 
+    async probeImageVersion(image: string, command: readonly string[]): Promise<string | undefined> {
+      const [entrypoint, ...rest] = command;
+      if (!entrypoint) return undefined;
+      try {
+        // `--network none`: the probe executes the agent binary (e.g.
+        // `claude --version`), which may attempt update-check/telemetry egress.
+        // Agent containers run with no network; keep this diagnostic isolated too
+        // (a version string is baked in and needs no network).
+        const { stdout } = await exec(
+          'docker',
+          ['run', '--rm', '--network', 'none', '--entrypoint', entrypoint, image, ...rest],
+          { timeout: 20_000 },
+        );
+        const version = stdout.trim();
+        return version.length > 0 ? version : undefined;
+      } catch {
+        // Best-effort diagnostic — never fail over a version probe.
+        return undefined;
+      }
+    },
+
     async exec(
       nameOrId: string,
       command: readonly string[],

@@ -118,6 +118,11 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
       return CLAUDE_CODE_IMAGE;
     },
 
+    // Claude Code is installed unpinned in the image; log the resolved version
+    // at infra prep so a silent minor bump (which can change subagent semantics
+    // — issue #367) is visible.
+    versionProbe: ['claude', '--version'],
+
     // Generates MCP config file passed via --mcp-config on the command line.
     // socketPath is either a UDS path or a TCP host:port address.
     generateMcpConfig(socketPath: string): AgentConfigFile[] {
@@ -274,6 +279,18 @@ exit $STATUS
         CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
         // Node.js does not use the system CA store -- must set this explicitly
         NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
+        // Force subagents (Agent/Task tool) and `run_in_background` to run in the
+        // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
+        // Code v2.1.198 subagents run in the *background* by default: the tool
+        // returns immediately and the parent is "notified automatically when it
+        // completes" via a persistent supervisor that re-fires the session. We
+        // invoke `claude -p` as a one-shot subprocess with no such supervisor, so
+        // when a workflow agent (e.g. vuln-discovery `analyze`) fans out to
+        // parallel subagents, the turn never receives their completions and stalls
+        // ("Response stalled mid-stream" / no `agent_status` block). This env var
+        // restores the pre-2.1.198 synchronous behavior, which the FSM's
+        // one-turn=one-result model requires. See docs/en/env-vars.
+        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
       };
 
       if (modelId) {

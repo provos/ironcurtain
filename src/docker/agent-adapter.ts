@@ -215,6 +215,15 @@ export interface AgentAdapter {
   getImage(): Promise<string>;
 
   /**
+   * Command that prints the installed agent CLI version, run against the built
+   * image via {@link ContainerRuntime.probeImageVersion} (e.g.
+   * `['claude', '--version']`). The agent CLI is installed UNPINNED in the image,
+   * so infra prep logs the resolved version to surface silent drift on rebuild
+   * (issue #367). Omit to skip version logging for this adapter.
+   */
+  readonly versionProbe?: readonly string[];
+
+  /**
    * Generates the MCP client configuration file that tells
    * the agent how to connect to IronCurtain's proxy.
    *
