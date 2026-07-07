@@ -6,12 +6,16 @@ export default defineConfig({
     testTimeout: 30_000,
     // Match CI's default pool explicitly so local and CI runs behave the same.
     pool: 'forks',
-    // Mitigation (not a root-cause fix): the MCP SDK's StdioClientTransport.close()
-    // does not await the child's 'close' after SIGKILL, so under a loaded runner a
-    // spawned MCP server can still be exiting when teardown completes, briefly
-    // holding its stdio pipe FDs open. That intermittently tripped the default 10s
-    // teardown limit ("close timed out after 10000ms … Worker exited unexpectedly")
-    // even though all tests passed. Give slow child-reaping more slack.
+    // Teardown safety net for the macOS "Worker exited unexpectedly" /
+    // "prevents Vite server from exiting" flake. Root cause: some test files
+    // leave a listening TCP server open after their own cleanup; the forks pool
+    // reuses workers, so those handles accumulate and keep a worker's event loop
+    // alive, which the slow macOS runners can't drain within the teardown
+    // budget. handle-leak-guard runs LAST in each file's teardown and
+    // force-closes any leaked server. See project-vitest-worker-exit-flake.
+    setupFiles: ['./test/setup/handle-leak-guard.ts'],
+    // Keep extra teardown slack as belt-and-suspenders (the leak fix above is
+    // the real mitigation, not this timeout).
     teardownTimeout: 30_000,
   },
 });
