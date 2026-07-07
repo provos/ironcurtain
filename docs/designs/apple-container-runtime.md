@@ -104,3 +104,28 @@ Platform floor: Apple silicon, macOS 26 (the `container network` commands do not
 - **`--publish-socket` is a functional UDS bridge, but only one direction.** Verified on 1.0.0: `--publish-socket <hostPath>:<guestPath>` bridges a real vsock-backed socket — the guest listens, the host connects, and data round-trips (host `connect()` succeeds and an echo returns, vs the ECONNREFUSED of a plain `-v` socket mount). Direction is fixed: **guest-listens / host-connects**, the same shape as `--ssh` (which is the inbound counterpart, hardcoded to `SSH_AUTH_SOCK`).
   - This matches the **PTY** transport exactly (host connects to the agent's PTY socket), so PTY on `tcp-hostonly` could move from its TCP port to a published UDS — guarded by filesystem permissions instead of the subnet predicate. Optional follow-up; the TCP PTY path already works.
   - It does **not** match the **proxy** transport (MITM / Code Mode), which needs host-listens / agent-connects. There is no general inbound-socket flag (only `--ssh`'s fixed path), and a guest-side relay can't escape this since the guest's only host-reachable channel is TCP to the gateway. The proxies therefore stay on TCP over the host-only network. Dropping TCP entirely still requires the upstream feature request — a generalized inbound socket flag; `--publish-socket` is the outbound half of it.
+
+## 1.1.0 — UDS topology (supersedes `tcp-hostonly`)
+
+`container` 1.1.0 (July 2026) closes the inbound-socket gap: `-v <host.sock>:<guest.sock>` (the file, **not** its directory) is now auto-detected as a socket and creates a **host-listens / guest-connects** vsock relay, and `--network none` yields a loopback-only VM. Verified on 1.1.0 (Darwin 25.5):
+
+| Mechanism                                              | 1.0.0        | 1.1.0                                                                          |
+| ------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------ |
+| `-v host.sock:guest.sock` (host-listens/guest-connect) | ECONNREFUSED | works — guest side is `root:root` with the **host mode bits propagated**       |
+| `-v dir:dir` with a socket **inside**                  | ENOTSUP      | still ENOTSUP (virtiofs) — sockets must be mounted **per-file**                |
+| `--mount source=<sock>,target=…`                       | rejected     | still "not a directory" — only `-v` handles sockets/files                      |
+| `-v file:file[:ro]` (regular file)                     | rejected     | works                                                                          |
+| `--network none`                                       | rejected     | loopback only; egress `Network unreachable`                                    |
+| `--publish-socket host:guest` (guest-listens)          | works        | works — host socket materializes when the guest `bind()`s                      |
+
+This lets apple-container adopt the same **`uds` topology** as Linux Docker, so `resolveNetworkTopology('apple-container')` now returns `'uds'` and the availability probe's floor is **1.1.0**. `tcp-hostonly` (subnet pool, `0.0.0.0` listeners, `makeSourceAddressGuard`, `checkHostOnlyConnectivity`, `writeHostOnlyAptProxyConfig`) is retained in the tree for tests and potential future backends but is no longer selected. Decision 5's security delta (host services on `0.0.0.0` reachable from the agent VM) is resolved: the agent VM has no network interface at all.
+
+Implementation deltas vs the Linux `uds` path:
+
+- **Per-file socket mounts.** `buildUdsSocketMounts` (`docker-infrastructure.ts`) mounts `<socketsDir>/{proxy,mitm-proxy}.sock` individually at `/run/ironcurtain/{proxy,mitm-proxy}.sock`; Linux keeps mounting the directory. `buildAppleCreateArgs` emits every mount via `-v src:tgt[:ro]` (dirs, files, sockets uniformly); `--mount` is dropped.
+- **Nested-source virtiofs quirk.** Verified on 1.1.0: `-v <dir>:<A>` **plus** `-v <dir>/file:<B>` silently drops the directory share (`<A>` ENOENT) while the file share works. The apt proxy config lives under `orientationDir`, so on apple-container it is written via `writeHostOnlyAptProxyConfig` (root exec) after start instead of bind-mounted — same mechanism `tcp-hostonly` used. No other IronCurtain mount pair nests source paths.
+- **Mode-bit propagation.** The vsock relay copies the host socket's mode (owner is always root inside), so the non-root `codespace` user can only `connect()` when "other" has write. `prepareDockerInfrastructure` chmods both proxy sockets `0o666` after `listen()`; the parent `sockets/` dir is `0o700` so this does not widen host exposure.
+- **PTY back-channel.** `DockerContainerConfig.publishSockets` → `--publish-socket <socketsDir>/pty.sock:/tmp/ironcurtain-pty.sock`. The guest listens under `/tmp` (the auto-created `/run/ironcurtain` is `root:root 0755` and `codespace` cannot `bind()` there); the host connects at the same `<socketsDir>/pty.sock` path Linux uses, so `waitForPtyReady`'s existence poll is unchanged.
+- **UID remap stays Linux-only.** `buildAgentUidRemap` is skipped when `runtimeKind === 'apple-container'` (it was previously keyed on `useTcp`, which is now `false` here).
+
+The container-side wiring is unchanged: the entrypoints' `[ -S /run/ironcurtain/mitm-proxy.sock ]` gate sees the vsock-relayed socket as type `s`, and the `socat TCP-LISTEN:18080 → UNIX-CONNECT` bridge / `HTTPS_PROXY=http://127.0.0.1:18080` env work identically to Linux.

@@ -675,6 +675,14 @@ export async function prepareDockerInfrastructure(
   } else {
     logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
   }
+  // apple-container's `-v <sock>` vsock relay propagates the host
+  // socket's mode bits to the guest side (owner is always root there),
+  // so the non-root `codespace` user can only connect() when "other"
+  // has write. The parent `sockets/` dir is 0o700, so widening the
+  // socket mode does not expose it to other host users.
+  if (!useTcp && runtimeKind === 'apple-container' && mitmAddr.socketPath !== undefined) {
+    chmodSync(mitmAddr.socketPath, 0o666);
+  }
 
   // Compute control address for the proxy tools MCP server instance
   const controlAddr =
@@ -699,6 +707,9 @@ export async function prepareDockerInfrastructure(
     );
   } else {
     logger.info(`Code Mode proxy listening on ${proxy.socketPath}`);
+  }
+  if (!useTcp && runtimeKind === 'apple-container') {
+    chmodSync(socketPath, 0o666);
   }
 
   // Remaining setup steps can fail -- clean up started proxies on error.
@@ -1022,18 +1033,23 @@ export function buildBundleLabels(core: Pick<PreContainerInfrastructure, 'bundle
  * so the entrypoint (running as root) can renumber the codespace
  * account before dropping privileges via `runuser`.
  *
- * On macOS (`useTcp === true`), Docker Desktop's VirtioFS handles UID
- * translation transparently and `--user 0:0` would defeat it; this
- * function returns an empty mapping there, leaving the container to
- * run as the baked `codespace` user from the Dockerfile.
+ * When `skipRemap` is true this returns an empty mapping so the
+ * container runs as the baked `codespace` user from the Dockerfile.
+ * Skipped on macOS Docker Desktop (VirtioFS handles UID translation
+ * transparently and `--user 0:0` would defeat it) AND on apple-container
+ * (virtiofs presents host files as root; the existing sessions work
+ * without the Linux renumber-and-drop dance) — i.e., remap is Linux
+ * Docker only. Callers pass `runtimeKind === 'apple-container' || useTcp`
+ * so apple-container's `uds` topology does not accidentally trip the
+ * Linux-only remap.
  *
  * Exported for testability.
  */
-export function buildAgentUidRemap(useTcp: boolean): {
+export function buildAgentUidRemap(skipRemap: boolean): {
   readonly user: string | undefined;
   readonly env: Record<string, string>;
 } {
-  if (useTcp) return { user: undefined, env: {} };
+  if (skipRemap) return { user: undefined, env: {} };
   const uid = process.getuid?.() ?? 1000;
   const gid = process.getgid?.() ?? 1000;
   return {
@@ -1043,6 +1059,35 @@ export function buildAgentUidRemap(useTcp: boolean): {
       IRONCURTAIN_AGENT_GID: String(gid),
     },
   };
+}
+
+/** In-container mount root for the UDS proxies (both runtimes). */
+export const CONTAINER_SOCKETS_DIR = '/run/ironcurtain';
+
+/**
+ * Returns the `uds`-topology socket mounts for a given runtime. Linux
+ * Docker bind-mounts the whole `sockets/` directory (the sockets are
+ * shared kernel objects). Apple `container` mounts each socket FILE via
+ * `-v` so the runtime creates a per-socket vsock relay — a virtiofs
+ * directory share does not carry sockets (verified: `connect()` on a
+ * socket inside a shared dir fails ENOTSUP on 1.1.0). Shared by batch
+ * (`createSessionContainers`) and PTY (`runPtySession`).
+ */
+export function buildUdsSocketMounts(
+  runtimeKind: ContainerRuntimeKind,
+  socketsDir: string,
+): { source: string; target: string; readonly: boolean }[] {
+  if (runtimeKind === 'apple-container') {
+    return [
+      { source: resolve(socketsDir, 'proxy.sock'), target: `${CONTAINER_SOCKETS_DIR}/proxy.sock`, readonly: false },
+      {
+        source: resolve(socketsDir, 'mitm-proxy.sock'),
+        target: `${CONTAINER_SOCKETS_DIR}/mitm-proxy.sock`,
+        readonly: false,
+      },
+    ];
+  }
+  return [{ source: socketsDir, target: CONTAINER_SOCKETS_DIR, readonly: false }];
 }
 
 /** Container-level resources layered on top of the pre-container bundle. */
@@ -1203,35 +1248,47 @@ export async function createSessionContainers(
       extraHosts = [`${DOCKER_HOST_GATEWAY}:${sidecarIp}`];
       logger.info(`Sidecar ${sidecarName} bridging ports ${mcpPort},${mitmPort} at ${sidecarIp}`);
     } else {
-      // Linux UDS mode: --network=none, session dir with sockets mounted
-      const linuxProxyUrl = 'http://127.0.0.1:18080';
+      // UDS mode (Linux Docker AND apple-container >= 1.1.0):
+      // --network none, proxy sockets mounted at /run/ironcurtain.
+      const udsProxyUrl = 'http://127.0.0.1:18080';
       env = {
         ...env,
-        HTTPS_PROXY: linuxProxyUrl,
-        HTTP_PROXY: linuxProxyUrl,
+        HTTPS_PROXY: udsProxyUrl,
+        HTTP_PROXY: udsProxyUrl,
       };
       network = null;
 
-      // Write apt proxy config so sudo apt-get routes through the MITM proxy
-      const aptProxyPathLinux = resolve(core.orientationDir, 'apt-proxy.conf');
-      writeFileSync(
-        aptProxyPathLinux,
-        `Acquire::http::Proxy "${linuxProxyUrl}";\nAcquire::https::Proxy "${linuxProxyUrl}";\n`,
-      );
-      mounts.push({
-        source: aptProxyPathLinux,
-        target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy',
-        readonly: true,
-      });
+      // Write apt proxy config so sudo apt-get routes through the MITM
+      // proxy. On apple-container we CANNOT bind-mount this file: it
+      // lives inside `orientationDir`, and 1.1.0's virtiofs silently
+      // drops a directory share when a file inside that directory is
+      // ALSO `-v`-mounted (verified — /etc/ironcurtain vanishes). The
+      // exec-based writer runs after start instead. Linux Docker keeps
+      // the single-file bind mount.
+      if (core.runtimeKind === 'apple-container') {
+        hostOnlyAptProxyUrl = udsProxyUrl;
+      } else {
+        const aptProxyPathUds = resolve(core.orientationDir, 'apt-proxy.conf');
+        writeFileSync(
+          aptProxyPathUds,
+          `Acquire::http::Proxy "${udsProxyUrl}";\nAcquire::https::Proxy "${udsProxyUrl}";\n`,
+        );
+        mounts.push({
+          source: aptProxyPathUds,
+          target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy',
+          readonly: true,
+        });
+      }
 
-      // Mount ONLY the per-bundle `sockets/` directory into the
-      // container. The sockets dir lives under a short
-      // `~/.ironcurtain/run/<bid12>/` path (see `getBundleSocketsDir`)
-      // so the host path stays under `sockaddr_un.sun_path` on both
-      // macOS and Linux. The host-only MITM control socket lives in a
-      // sibling `host/` dir, NOT under this mount, so it is not
-      // visible to the container.
-      mounts.push({ source: core.socketsDir, target: '/run/ironcurtain', readonly: false });
+      // Mount ONLY the per-bundle proxy sockets into the container. The
+      // sockets dir lives under a short `~/.ironcurtain/run/<bid12>/`
+      // path (see `getBundleSocketsDir`) so host paths stay under
+      // `sockaddr_un.sun_path`. Linux mounts the directory; apple-
+      // container mounts each socket file so the runtime creates a
+      // vsock relay per socket (see buildUdsSocketMounts). The
+      // host-only MITM control socket lives in a sibling `host/` dir
+      // and is never mounted.
+      mounts.push(...buildUdsSocketMounts(core.runtimeKind, core.socketsDir));
     }
 
     // Mount conversation state directory for session resume (e.g., claude --continue)
@@ -1276,7 +1333,7 @@ export async function createSessionContainers(
     // passing `--user 0:0` would actually break that translation,
     // so we leave the container running as the baked codespace user
     // and skip the env vars entirely.
-    const uidRemap = buildAgentUidRemap(core.useTcp);
+    const uidRemap = buildAgentUidRemap(core.runtimeKind === 'apple-container' || core.useTcp);
 
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as

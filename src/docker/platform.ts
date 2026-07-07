@@ -10,9 +10,11 @@
 import { platform } from 'node:os';
 
 /**
- * Returns true when the Docker session should use TCP transport
+ * Returns true when a **Docker** session should use TCP transport
  * instead of Unix domain sockets. Currently true on macOS where
  * Docker Desktop's VirtioFS does not support UDS in bind mounts.
+ * (Not consulted for apple-container, which uses UDS via per-file
+ * `-v` vsock relays regardless of platform — see network-topology.ts.)
  */
 export function useTcpTransport(): boolean {
   return platform() === 'darwin';

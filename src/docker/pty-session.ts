@@ -24,7 +24,7 @@ import { createSessionId, getBundleShortId, type BundleId, type SessionMode } fr
 import { buildSessionConfig } from '../session/index.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
-import { PTY_SOCK_NAME, DEFAULT_PTY_PORT } from './pty-types.js';
+import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import type { ContainerRuntime } from './types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
@@ -35,7 +35,7 @@ import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
-import { buildAgentUidRemap } from './docker-infrastructure.js';
+import { buildAgentUidRemap, buildUdsSocketMounts } from './docker-infrastructure.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -414,8 +414,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // Write the effective system prompt to the session directory for debugging
     writeFileSync(resolve(sessionDir, 'system-prompt.txt'), systemPrompt);
 
-    // Determine PTY connection target
-    const ptySockPath = useTcp ? undefined : `/run/ironcurtain/${PTY_SOCK_NAME}`;
+    // Determine PTY connection target. On apple-container the guest
+    // listens under /tmp (see APPLE_PTY_GUEST_SOCK) and the runtime's
+    // --publish-socket bridges it to <socketsDir>/pty.sock on the host,
+    // so the host-side ptyTarget below is identical to Linux.
+    const ptySockPath = useTcp
+      ? undefined
+      : infra.runtimeKind === 'apple-container'
+        ? APPLE_PTY_GUEST_SOCK
+        : `/run/ironcurtain/${PTY_SOCK_NAME}`;
     const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;
 
     // Build the PTY command
@@ -429,6 +436,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let network: string | null;
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
+    let publishSockets: { hostPath: string; containerPath: string }[] | undefined;
     let hostPtyPort: number | undefined;
     // tcp-hostonly only: apt proxy config written into the container via
     // exec after start (apple container cannot bind-mount single files).
@@ -544,28 +552,43 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         { source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
     } else {
-      // Linux UDS mode
-      const linuxProxyUrl = 'http://127.0.0.1:18080';
+      // UDS mode (Linux Docker AND apple-container >= 1.1.0)
+      const udsProxyUrl = 'http://127.0.0.1:18080';
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
-        HTTPS_PROXY: linuxProxyUrl,
-        HTTP_PROXY: linuxProxyUrl,
+        HTTPS_PROXY: udsProxyUrl,
+        HTTP_PROXY: udsProxyUrl,
       };
       network = null;
 
-      // Write apt proxy config so sudo apt-get routes through the MITM proxy
-      const aptProxyPathLinux = resolve(orientationDir, 'apt-proxy.conf');
-      writeFileSync(
-        aptProxyPathLinux,
-        `Acquire::http::Proxy "${linuxProxyUrl}";\nAcquire::https::Proxy "${linuxProxyUrl}";\n`,
-      );
-
       mounts = [
         { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
-        { source: socketsDir, target: '/run/ironcurtain', readonly: false },
+        ...buildUdsSocketMounts(infra.runtimeKind, socketsDir),
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
-        { source: aptProxyPathLinux, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
+
+      if (infra.runtimeKind === 'apple-container') {
+        // apple-container: 1.1.0's virtiofs silently drops a directory
+        // share when a file inside that directory is ALSO -v-mounted, so
+        // the apt config (which lives under orientationDir) is written
+        // via exec after start instead of bind-mounted. Bridge the
+        // guest's PTY listener back to the host via a vsock relay; the
+        // host-side socket materializes when the guest bind()s, so
+        // waitForPtyReady's existence poll below is a valid readiness
+        // signal on both runtimes.
+        hostOnlyAptProxyUrl = udsProxyUrl;
+        if (ptySockPath !== undefined) {
+          publishSockets = [{ hostPath: resolve(socketsDir, PTY_SOCK_NAME), containerPath: ptySockPath }];
+        }
+      } else {
+        // Linux Docker: single-file bind mount for the apt proxy config.
+        const aptProxyPathUds = resolve(orientationDir, 'apt-proxy.conf');
+        writeFileSync(
+          aptProxyPathUds,
+          `Acquire::http::Proxy "${udsProxyUrl}";\nAcquire::https::Proxy "${udsProxyUrl}";\n`,
+        );
+        mounts.push({ source: aptProxyPathUds, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
+      }
     }
 
     // Mount conversation state directory if the adapter supports resume
@@ -610,7 +633,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // setup in `docker-infrastructure.ts::createSessionContainers`;
     // when adding fields here, mirror the change there. macOS skips
     // the remap because VirtioFS translates UIDs transparently.
-    const uidRemap = buildAgentUidRemap(useTcp);
+    const uidRemap = buildAgentUidRemap(infra.runtimeKind === 'apple-container' || useTcp);
 
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as
@@ -630,6 +653,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       bundleLabel: bundleId,
       resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
       extraHosts,
+      publishSockets,
       capAdd: [
         'SETUID', // sudo setuid
         'SETGID', // sudo setgid
@@ -644,13 +668,14 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
 
-    // tcp-hostonly: write the apt proxy config inside the container and
-    // run the fail-closed connectivity gate (gateway proxies reachable,
-    // internet egress blocked) before attaching.
+    // apple-container (uds and the retained tcp-hostonly): write the apt
+    // proxy config inside the container via exec instead of a bind mount.
+    if (hostOnlyAptProxyUrl !== undefined) {
+      await writeHostOnlyAptProxyConfig(docker, containerId, hostOnlyAptProxyUrl);
+    }
+    // tcp-hostonly only: fail-closed connectivity gate (gateway proxies
+    // reachable, internet egress blocked) before attaching.
     if (infra.topology === 'tcp-hostonly' && infra.hostOnlyNetwork !== undefined && proxy.port !== undefined) {
-      if (hostOnlyAptProxyUrl !== undefined) {
-        await writeHostOnlyAptProxyConfig(docker, containerId, hostOnlyAptProxyUrl);
-      }
       await checkHostOnlyConnectivity(docker, containerId, infra.hostOnlyNetwork.gateway, proxy.port);
     }
 

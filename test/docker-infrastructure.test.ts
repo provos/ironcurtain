@@ -160,15 +160,16 @@ describe('DockerInfrastructure interface', () => {
 });
 
 describe('buildAgentUidRemap (issue #232)', () => {
-  it('returns empty mapping on macOS (useTcp=true)', () => {
+  it('returns empty mapping when skipRemap is true (macOS Docker Desktop, apple-container)', () => {
     // VirtioFS handles UID translation transparently; passing
     // `--user 0:0` would break that. macOS path must be a pure no-op.
+    // apple-container likewise skips the Linux renumber-and-drop.
     const remap = buildAgentUidRemap(true);
     expect(remap.user).toBeUndefined();
     expect(remap.env).toEqual({});
   });
 
-  it('returns 0:0 + host UID/GID env on Linux (useTcp=false)', () => {
+  it('returns 0:0 + host UID/GID env on Linux Docker (skipRemap=false)', () => {
     const remap = buildAgentUidRemap(false);
     expect(remap.user).toBe('0:0');
     // The entrypoint reads these to renumber codespace before
@@ -602,6 +603,8 @@ interface MockCoreOptions {
   /** Defaults to 'tcp-sidecar' when useTcp, else 'uds'. */
   readonly topology?: PreContainerInfrastructure['topology'];
   readonly hostOnlyNetwork?: PreContainerInfrastructure['hostOnlyNetwork'];
+  /** Defaults to 'apple-container' for tcp-hostonly, 'docker' otherwise. */
+  readonly runtimeKind?: PreContainerInfrastructure['runtimeKind'];
 }
 
 /**
@@ -645,7 +648,7 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
-    runtimeKind: opts.topology === 'tcp-hostonly' ? 'apple-container' : 'docker',
+    runtimeKind: opts.runtimeKind ?? (opts.topology === 'tcp-hostonly' ? 'apple-container' : 'docker'),
     topology: opts.topology ?? (opts.useTcp ? 'tcp-sidecar' : 'uds'),
     useTcp: opts.useTcp,
     hostOnlyNetwork: opts.hostOnlyNetwork,
@@ -706,6 +709,41 @@ describe('createSessionContainers', () => {
     // And neither is the escalation dir or audit log.
     expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
     expect(mounts.some((m) => m.source === core.auditLogPath)).toBe(false);
+  });
+
+  it('uds/apple-container: mounts each proxy socket file, --network none, no UID remap', async () => {
+    // apple-container's virtiofs directory shares do not carry sockets;
+    // each socket is mounted per-file so the runtime creates a vsock relay.
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker });
+
+    const result = await createSessionContainers(core, makeMockConfig());
+
+    expect(result.sidecarContainerId).toBeUndefined();
+    expect(result.internalNetwork).toBeUndefined();
+    expect(createCalls).toHaveLength(1);
+
+    const main = createCalls[0];
+    expect(main.network).toBe('none');
+    expect(main.env.HTTPS_PROXY).toBe('http://127.0.0.1:18080');
+    // No Linux UID remap on apple-container.
+    expect(main.user).toBeUndefined();
+    expect(main.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
+
+    // Per-file socket mounts (NOT the sockets directory).
+    const mounts = main.mounts;
+    expect(mounts.some((m) => m.source === core.socketsDir)).toBe(false);
+    const proxyMount = mounts.find((m) => m.target === '/run/ironcurtain/proxy.sock');
+    const mitmMount = mounts.find((m) => m.target === '/run/ironcurtain/mitm-proxy.sock');
+    expect(proxyMount?.source).toBe(join(core.socketsDir, 'proxy.sock'));
+    expect(mitmMount?.source).toBe(join(core.socketsDir, 'mitm-proxy.sock'));
+
+    // apt config is written via exec (nested-source virtiofs quirk), not
+    // bind-mounted.
+    expect(mounts.some((m) => m.target === '/etc/apt/apt.conf.d/90-ironcurtain-proxy')).toBe(false);
+    // Security invariant carries over: bundle/escalation/audit never mounted.
+    expect(mounts.some((m) => m.source === core.bundleDir)).toBe(false);
+    expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
   });
 
   // --- Skills mount tests ---

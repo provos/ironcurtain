@@ -101,6 +101,21 @@ export interface DockerContainerConfig {
   readonly tty?: boolean;
 
   /**
+   * Guest-listens / host-connects Unix-domain-socket bridges
+   * (`container create --publish-socket <hostPath>:<containerPath>`).
+   *
+   * Apple `container` only — the runtime creates a vsock relay so a
+   * socket the guest `bind()`s at `containerPath` becomes reachable on
+   * the host at `hostPath`. Used by PTY mode on the `uds` topology to
+   * expose the in-container PTY listener without any network interface.
+   * The host-side socket materializes when the guest binds, so
+   * existence-polling is a valid readiness signal.
+   *
+   * Docker has no equivalent; `buildCreateArgs` throws when this is set.
+   */
+  readonly publishSockets?: readonly { readonly hostPath: string; readonly containerPath: string }[];
+
+  /**
    * Override the container's effective user at creation time.
    * Maps to `docker create --user <value>` (formats: `uid`, `uid:gid`,
    * or `name[:group]`).
