@@ -743,6 +743,9 @@ export async function prepareDockerInfrastructure(
     const agentImage = await adapter.getImage();
     const agentBuildHash = await ensureImage(agentImage, docker, ca);
     const image = agentImage;
+    // Surface the (unpinned) agent CLI version baked into the image so silent
+    // version drift on rebuild is visible in logs (issue #367).
+    await logResolvedAgentVersion(docker, agentImage, adapter.versionProbe);
     const workflowDependencyMounts = prepareWorkflowDependencyMounts(agentBuildHash, scriptsDir, getIronCurtainHome());
 
     const orientationDir = resolve(bundleDir, 'orientation');
@@ -1689,6 +1692,40 @@ async function buildImageFromCleanContext(
     await docker.buildImage(image, resolve(tmpContext, dockerfile), tmpContext, labels);
   } finally {
     rmSync(tmpContext, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Agent images whose baked CLI version has already been logged this process, so
+ * the diagnostic probe (a throwaway `docker run --version`) runs at most once
+ * per image rather than on every session/workflow-state.
+ */
+const loggedAgentVersions = new Set<string>();
+
+/**
+ * Best-effort: log the agent CLI version baked into `image`. The agent CLI is
+ * installed UNPINNED in the Docker image, so any change to a hashed build input
+ * (Dockerfile / *.sh) rebuilds the image and can silently pull a newer agent —
+ * see issue #367, where a Claude Code minor bump flipped subagents to run in the
+ * background, breaking the one-shot `claude -p` workflow model. Surfacing the
+ * resolved version makes that drift visible. Skipped when the adapter defines no
+ * probe or the runtime can't run an ephemeral container; never throws.
+ */
+async function logResolvedAgentVersion(
+  runtime: ContainerRuntime,
+  image: string,
+  versionProbe: readonly string[] | undefined,
+): Promise<void> {
+  if (!versionProbe || versionProbe.length === 0 || !runtime.probeImageVersion) return;
+  if (loggedAgentVersions.has(image)) return;
+  loggedAgentVersions.add(image);
+  try {
+    const version = await runtime.probeImageVersion(image, versionProbe);
+    if (version) {
+      logger.info(`[docker] ${image} agent version (unpinned): ${version}`);
+    }
+  } catch {
+    // Diagnostic only — never disturb infra prep.
   }
 }
 

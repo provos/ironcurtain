@@ -256,6 +256,15 @@ export interface ContainerRuntime {
   /** Read a label value from a Docker image. Returns undefined if image or label doesn't exist. */
   getImageLabel(image: string, label: string): Promise<string | undefined>;
 
+  /**
+   * Probe the version string of an agent binary baked into an image by running
+   * a throwaway container (`run --rm --entrypoint <command[0]> <image>
+   * <command[1..]>`) and returning its trimmed stdout. Best-effort: returns
+   * undefined on any failure. Optional — runtimes that cannot cheaply run an
+   * ephemeral container may omit it, in which case callers skip version logging.
+   */
+  probeImageVersion?(image: string, command: readonly string[]): Promise<string | undefined>;
+
   /** Create a Docker network. No-op if it already exists. */
   createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }): Promise<void>;
 
