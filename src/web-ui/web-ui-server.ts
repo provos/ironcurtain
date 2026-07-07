@@ -249,6 +249,13 @@ export class WebUiServer {
       const server = this.httpServer;
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
+        // `http.Server.close()` stops listening but WAITS for live connections
+        // to end on their own — it does not destroy them. Any lingering
+        // WS/keep-alive socket would otherwise keep both the server and its
+        // socket handles open, which keeps the process (and, under tests, the
+        // vitest forks worker) alive. Force-destroy them so close() resolves
+        // promptly. (`closeAllConnections` is Node >= 18.2; we run 24/26.)
+        server.closeAllConnections();
       });
       this.httpServer = null;
     }
