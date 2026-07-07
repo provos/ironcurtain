@@ -744,8 +744,9 @@ export async function prepareDockerInfrastructure(
     const agentBuildHash = await ensureImage(agentImage, docker, ca);
     const image = agentImage;
     // Surface the (unpinned) agent CLI version baked into the image so silent
-    // version drift on rebuild is visible in logs (issue #367).
-    await logResolvedAgentVersion(docker, agentImage, adapter.versionProbe);
+    // version drift on rebuild is visible in logs (issue #367). Keyed by build
+    // hash so a same-process rebuild re-logs the possibly-changed version.
+    await logResolvedAgentVersion(docker, agentImage, agentBuildHash, adapter.versionProbe);
     const workflowDependencyMounts = prepareWorkflowDependencyMounts(agentBuildHash, scriptsDir, getIronCurtainHome());
 
     const orientationDir = resolve(bundleDir, 'orientation');
@@ -1696,9 +1697,13 @@ async function buildImageFromCleanContext(
 }
 
 /**
- * Agent images whose baked CLI version has already been logged this process, so
- * the diagnostic probe (a throwaway `docker run --version`) runs at most once
- * per image rather than on every session/workflow-state.
+ * `${image}@${buildHash}` keys whose baked CLI version has already been logged
+ * this process, so the diagnostic probe (a throwaway `docker run --version`)
+ * runs at most once per built image rather than on every session/workflow-state.
+ * Keyed by build hash — not the tag alone — so a same-process rebuild (which
+ * keeps the `:latest` tag but changes `ironcurtain.build-hash`) re-probes and
+ * re-logs the possibly-changed version, which is the whole point of surfacing
+ * drift.
  */
 const loggedAgentVersions = new Set<string>();
 
@@ -1714,11 +1719,13 @@ const loggedAgentVersions = new Set<string>();
 async function logResolvedAgentVersion(
   runtime: ContainerRuntime,
   image: string,
+  buildHash: string,
   versionProbe: readonly string[] | undefined,
 ): Promise<void> {
   if (!versionProbe || versionProbe.length === 0 || !runtime.probeImageVersion) return;
-  if (loggedAgentVersions.has(image)) return;
-  loggedAgentVersions.add(image);
+  const cacheKey = `${image}@${buildHash}`;
+  if (loggedAgentVersions.has(cacheKey)) return;
+  loggedAgentVersions.add(cacheKey);
   try {
     const version = await runtime.probeImageVersion(image, versionProbe);
     if (version) {

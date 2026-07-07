@@ -258,8 +258,10 @@ export interface ContainerRuntime {
 
   /**
    * Probe the version string of an agent binary baked into an image by running
-   * a throwaway container (`run --rm --entrypoint <command[0]> <image>
-   * <command[1..]>`) and returning its trimmed stdout. Best-effort: returns
+   * a throwaway, network-isolated container (`run --rm --network none
+   * --entrypoint <command[0]> <image> <command[1..]>`) and returning its trimmed
+   * stdout. Network isolation is required — the probe executes an agent binary
+   * that may attempt update-check/telemetry egress. Best-effort: returns
    * undefined on any failure. Optional — runtimes that cannot cheaply run an
    * ephemeral container may omit it, in which case callers skip version logging.
    */

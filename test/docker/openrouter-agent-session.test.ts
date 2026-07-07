@@ -367,6 +367,9 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
     expect(env).toEqual({
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
       NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
+      // Forces subagents synchronous (issue #367); set on every path — native
+      // and OpenRouter — not an OpenRouter-specific var.
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
       IRONCURTAIN_API_KEY: 'sk-ant-api03-ironcurtain-FAKE',
     });
     // No OpenRouter vars leaked in.

@@ -372,9 +372,15 @@ export function createDockerManager(
       const [entrypoint, ...rest] = command;
       if (!entrypoint) return undefined;
       try {
-        const { stdout } = await exec('docker', ['run', '--rm', '--entrypoint', entrypoint, image, ...rest], {
-          timeout: 20_000,
-        });
+        // `--network none`: the probe executes the agent binary (e.g.
+        // `claude --version`), which may attempt update-check/telemetry egress.
+        // Agent containers run with no network; keep this diagnostic isolated too
+        // (a version string is baked in and needs no network).
+        const { stdout } = await exec(
+          'docker',
+          ['run', '--rm', '--network', 'none', '--entrypoint', entrypoint, image, ...rest],
+          { timeout: 20_000 },
+        );
         const version = stdout.trim();
         return version.length > 0 ? version : undefined;
       } catch {
