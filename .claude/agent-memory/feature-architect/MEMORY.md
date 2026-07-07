@@ -1,293 +1,70 @@
 # IronCurtain Architecture Notes
 
 ## Topic files
-- [anvil-trajectory-capture.md](anvil-trajectory-capture.md) — Anvil PRD vs real MITM trajectory capture; key hole: no artifact IDs so cross-state lineage is path/content inference, not a deterministic join
-- [workflow-human-gates.md](workflow-human-gates.md) — human_gate machinery: event vocab (APPROVE/FORCE_REVISION/REPLAN/ABORT), WF004 present-artifact rule, surfacing/resolveGate/resume, terminal→phase mapping (`failed` name → phase:completed!), resetVisitCounts
-- [daemon-ws-jsonrpc.md](daemon-ws-jsonrpc.md) — daemon WS JSON-RPC surface: discovery file is `web-ui.json` (not web-ui-state.json), `--web-ui` required, wire types in web-ui-types.ts, observe-command.ts has inline WS client to extract, gate DTO = artifact NAMES only
-- [evolve-workflow-package.md](evolve-workflow-package.md) — evolve FSM + scripts/evolve_core engine + run_spec schema + evaluator-command wiring seam (cli.py:243 shell-formats `{quoted_code_path}`); docker venv-provisioning ALREADY EXISTS (uv pip install via container exec, sentinel-gated); `--experiment` threading chain (CLI→workflows.start RPC→controller.start); circle_packing_demo reference layout
-- [workflow-fsm-single-active-state.md](workflow-fsm-single-active-state.md) — FSM is single-active-state by construction (`String(snapshot.value)` orchestrator.ts:**1873** as of 2026-06-18, single currentState/activeGateId/persona, flat checkpoint); vestigial DEAD parallel scaffolding (PARALLEL_*/MERGE_*/worktree/maxParallelism types.ts:115/435/458, parallelKey removed, WF005 retired lint.ts:43); det executor serial; evolve DB cross-process-safe but cognition store races. For evolve-parallelism brainstorm.
-- [xstate-actor-await-reuse.md](xstate-actor-await-reuse.md) — repo ships xstate 5.30 (waitFor/toPromise exported); hand-rolled actor.subscribe settle-loops in workflow/ are a recurring missed-reuse (caveat: waitFor resolves on error, manual loops reject)
-- [evolve-fanout-concurrency.md](evolve-fanout-concurrency.md) — evolve N-way fan-out (commit 9d07b98 Phase 4): durable hazards are concurrent writes to SHARED non-lane-scoped scratch — stop_signals.json non-atomic last-writer-wins routing race; cognition.json RLock is in-process-only + non-atomic _save + brittle json.load → file corruption (not just lost-lesson); nextStateSlug check-then-act dir collision. Aggregate tokens SAFE (bus sums all sessionIds). Distinct-parent partition + barrier correct. Gate 2&3 have runnable non-Docker coverage.
-- [coordinator-mutex-concurrency.md](coordinator-mutex-concurrency.md) — ToolCallCoordinator FIFO callMutex serializes EVERY tool call (tool-call-coordinator.ts:310/348); escalation await is INSIDE the held mutex (tool-call-pipeline.ts:821/866/881) → agent-path escalation stalls all concurrent lanes; det docker.exec is off-mutex; ensureBundleForScope mint race (orchestrator.ts:820-824 comment). For any agent-parallelism design.
-- [evolve-phase5-cognition-promotion.md](evolve-phase5-cognition-promotion.md) — Phase 5 (commit 6f92a20) `.promote.lock` retirement is SAFE/CORRECT: discriminator is `lane is None` (evolve_result.py:1123) which aligns w/ workers:1 (buildFanOutLaneContext:2935 leaves lane undefined→inline promote) vs workers>1 (barrier promote_cognition once/batch, gated `verdict==recorded`). Mixed-verdict recorded lanes promoted on resume (not lost). workers:1-identical + workers:3 gates have runnable non-Docker coverage (REAL_ENGINE=numpy+yaml). evolve_core untouched, no P6/7/8 leak.
-- [evolve-phase7-crash-resume.md](evolve-phase7-crash-resume.md) — Phase 7 (UNCOMMITTED) crash-resume DUP review: nodes.json walk re-spelled TS↔Python (reconstructFanOutBatchFromDb ≈ _next_batch_index/_sorted_nodes/_node_id/_find_recorded_node_for_step; EVOLVE_LANE_STEP_RE dup of STEP_NAME_RE); test dups writeLaneNodes≡writeEvolveNodes + barrier deterministicStub re-spell + evolveBarrierDefinition not back-applied to old inline test. Good reuse: evolveRunDirForFanOutSegment/containerPathToWorkspaceRelative/buildEvolveBarrierInput threading.
-- [memory-server-architecture.md](memory-server-architecture.md) — memory-mcp-server layering for feature design: tool handlers are config-free (LLM/config lives in engine closure → new LLM-on-write = new MemoryEngine method); LLM-free sync write path + deferred consolidation; reuse llmComplete (haiku, no structured-output, parse-defensively, no retries); timestamp backdate = no schema change. SCHEMA_VERSION='4' NOW READ at open (dropStaleSchema database.ts:90 NUMERIC compare: older=drop/recreate, NEWER=fail-closed throw) — drop-recreate IS the migration story, no in-place ALTER. Segments off-index: vec/fts populated only via insertMemory + memories_ai trigger, so a non-`memories` table is structurally invisible to the ranker. Designs: docs/designs/memory-ingest-tool.md, docs/designs/memory-parent-context-retrieval.md (parent/segment retention, index-fine-return-coarse, expand:'none'|'parent' default none)- [memory-server-retrieval-benchmark.md](memory-server-retrieval-benchmark.md) — memory-fusion evolve dogfood map: 4 evolved fns in scoring.ts (composite reads 5 fields), raw pool tap after pipeline.ts:50 (--retrieval-only does NOT expose it), TWO benchmark harnesses (Python labeled=dogfood metric, TS=separate quality bench), LoCoMo dia_id (in-repo) vs LongMemEval session_id (HF-download, biggest risk), both pure set-membership; evolve container has Node22 not tsx → candidate as .mjs. Design: docs/designs/evolve-memory-fusion-dogfood.md
-- [evolve-phase6-aggregated-escalation.md](evolve-phase6-aggregated-escalation.md) — Phase 6 (commit ae74ea1) drain + single gate: CORRECT-WITH-FIXES. XState 5.30 stop() VERIFIED (stopped≠done/error, complete-only, late promise ignored → no torn transition/2nd gate). One-gate is STRUCTURAL (single parent actor). Drained-recovery safe via lane-scoped path backstop (bare current/ never written at workers>1). KEY GAP: fromPromise bodies ignore XState signal → stop() can't cancel in-flight docker.exec (FSM-M3, documented) → peer mid-analysis_record records out-of-band, reconciled by engine idempotency. SHOULD-FIX: workers:1 (DEFAULT) escalation msg "Fan-out batch escalated" misleads orchestrator LLM away from legacy evaluate-resume. 2nd same-tick blocker surfaces as `drained` not `blocked` (under-reported in gate summary). Gate item 5 has runnable non-Docker coverage.
+- [anvil-trajectory-capture.md](anvil-trajectory-capture.md) — Anvil PRD vs real MITM trajectory capture; no artifact IDs so cross-state lineage is path/content inference, not a deterministic join
+- [workflow-human-gates.md](workflow-human-gates.md) — human_gate machinery: event vocab (APPROVE/FORCE_REVISION/REPLAN/ABORT), WF004 present-artifact rule, surfacing/resolveGate/resume, terminal→phase mapping, resetVisitCounts
+- [daemon-ws-jsonrpc.md](daemon-ws-jsonrpc.md) — daemon WS JSON-RPC surface: discovery file `web-ui.json`, `--web-ui` required, wire types in web-ui-types.ts, observe-command.ts inline WS client, gate DTO = artifact NAMES only
+- [evolve-workflow-package.md](evolve-workflow-package.md) — evolve FSM + scripts/evolve_core engine + run_spec schema + evaluator-command wiring (cli.py:243); docker venv-provisioning exists (uv pip, sentinel-gated); `--experiment` threading chain; circle_packing_demo layout
+- [workflow-fsm-single-active-state.md](workflow-fsm-single-active-state.md) — FSM single-active-state by construction (orchestrator.ts:1873, single currentState/gate/persona, flat checkpoint); vestigial DEAD parallel scaffolding; det executor serial; cognition store races
+- [xstate-actor-await-reuse.md](xstate-actor-await-reuse.md) — repo ships xstate 5.30 (waitFor/toPromise exported); hand-rolled actor.subscribe settle-loops in workflow/ are recurring missed-reuse (waitFor resolves on error, manual loops reject)
+- [evolve-fanout-concurrency.md](evolve-fanout-concurrency.md) — evolve N-way fan-out (Phase 4): durable hazards = concurrent writes to shared non-lane scratch (stop_signals.json race; cognition.json in-process RLock + non-atomic save → corruption; nextStateSlug collision). Aggregate tokens SAFE. Gate 2&3 non-Docker coverage.
+- [coordinator-mutex-concurrency.md](coordinator-mutex-concurrency.md) — ToolCallCoordinator FIFO callMutex serializes EVERY tool call (tool-call-coordinator.ts:310/348); escalation await INSIDE held mutex (pipeline.ts:821/866/881) stalls concurrent lanes; det docker.exec off-mutex; ensureBundleForScope mint race
+- [evolve-phase5-cognition-promotion.md](evolve-phase5-cognition-promotion.md) — Phase 5 `.promote.lock` retirement SAFE: discriminator `lane is None` (evolve_result.py:1123); workers:1 inline promote vs workers>1 barrier once/batch gated `verdict==recorded`; mixed-verdict promoted on resume. Non-Docker gates.
+- [evolve-phase7-crash-resume.md](evolve-phase7-crash-resume.md) — Phase 7 crash-resume DUP review: nodes.json walk re-spelled TS↔Python; EVOLVE_LANE_STEP_RE dup of STEP_NAME_RE; test dups. Good reuse: evolveRunDirForFanOutSegment/containerPathToWorkspaceRelative/buildEvolveBarrierInput
+- [memory-server-architecture.md](memory-server-architecture.md) — memory-mcp-server: tool handlers config-free (LLM in engine closure); LLM-free sync write + deferred consolidation; reuse llmComplete (haiku); SCHEMA_VERSION read at open (drop-recreate migration); segments off-index unless via insertMemory+trigger. Designs: memory-ingest-tool.md, memory-parent-context-retrieval.md
+- [memory-server-retrieval-benchmark.md](memory-server-retrieval-benchmark.md) — memory-fusion evolve dogfood: 4 evolved fns in scoring.ts, raw pool tap after pipeline.ts:50, TWO harnesses (Python labeled=metric, TS=quality), LoCoMo dia_id vs LongMemEval session_id (HF), set-membership; evolve container Node22 not tsx. Design: evolve-memory-fusion-dogfood.md
+- [docker-mode-provider-mitm.md](docker-mode-provider-mitm.md) — Docker provider/MITM/adapter seams: chokepoint order (CONNECT→endpoint→key swap mitm:2143→body rewriter mitm:1259→upstreamTarget mitm:896→SSE resolveSseProvider:340); rewriter ctx has NO session id (threadable); resolveRealKey docker-inf:1447; cost costUsd:307 wrong for reroute; MODEL_PRICING:78. Design: openrouter-integration.md
+- [webui-pty-terminal.md](webui-pty-terminal.md) — two control planes (turn-based Transport vs container-PTY/mux) + reuse seams to stream Claude Code's in-container TUI to web UI: createPtyBridge (add raw onData fan-out), createEscalationWatcher dir-watch, SessionMode process-global, reserveLabel, binary WS lane on authed /ws
+- [evolve-phase6-aggregated-escalation.md](evolve-phase6-aggregated-escalation.md) — Phase 6 drain + single gate CORRECT-WITH-FIXES: XState stop() verified; one-gate structural; KEY GAP fromPromise ignores signal (can't cancel docker.exec, FSM-M3); workers:1 escalation msg misleads; 2nd blocker surfaces `drained` not `blocked`
 
 ## Key Files
-- `src/trusted-process/policy-engine.ts` - two-phase engine: structural invariants + compiled declarative rules
-- `src/trusted-process/policy-types.ts` - EvaluationResult interface
-- `src/types/mcp.ts` - ToolCallRequest, PolicyDecision, ToolCallResult
-- `src/pipeline/types.ts` - ToolAnnotation, CompiledRule, TestScenario, etc.
-- `src/pipeline/compile.ts` - CLI entry point for policy compilation
-- `src/config/constitution.md` - 3 principles (Least privilege, No destruction, Human oversight)
-- `src/config/generated/` - LLM-generated artifacts (tool-annotations.json, compiled-policy.json, test-scenarios.json)
-- `docs/secure-agent-runtime-v2.md` - vision doc (many features aspirational)
-- `docs/ironcurtain-poc-handoff.md` - PoC handoff (significantly stale)
-- `docs/designs/policy-compilation-pipeline.md` - pipeline design (mostly accurate, effect->roles drift)
-- `docs/designs/policy-compilation-implementation-plan.md` - implementation plan (completed, some drift)
+- `src/trusted-process/policy-engine.ts` — two-phase engine (structural invariants + compiled rules); `policy-types.ts` EvaluationResult
+- `src/types/mcp.ts` — ToolCallRequest, PolicyDecision, ToolCallResult; `src/types/argument-roles.ts` — ArgumentRole + RoleDefinition registry (+ resolveRealPath)
+- `src/pipeline/types.ts` (ToolAnnotation, CompiledRule, TestScenario), `compile.ts` (CLI entry)
+- `src/config/constitution.md` — 3 principles (Least privilege, No destruction, Human oversight); `generated/` = LLM artifacts; `generated-readonly/` = hand-authored read-only policy
+- Design docs live in `docs/designs/`; `docs/secure-agent-runtime-v2.md` (aspirational), `docs/ironcurtain-poc-handoff.md` (stale)
 
 ## Architecture Patterns
-- **Policy evaluation**: two-phase: structural invariants, then compiled declarative rules
-- **Multi-role evaluation**: each distinct role evaluated independently, most-restrictive-wins (deny > escalate > allow)
-- **Three-state decisions**: `allow | deny | escalate` (PolicyDecisionStatus)
-- **Tool naming**: `serverName__toolName` format
-- **Path security**: `node:path.resolve()` before directory containment checks
-- **Protected paths**: exact path + directory containment (not substring matching)
-- **Tool classification**: via LLM-generated ToolAnnotation (args with ArgumentRole: read-path, write-path, delete-path, none)
+- **Policy evaluation**: two-phase — (1) structural invariants (protected paths + unknown tools), (2) compiled declarative rules (per-role, most-restrictive-wins deny>escalate>allow), (3) default deny
+- **Three-state decisions**: `allow | deny | escalate`; compiled rules only emit allow/escalate, deny is the fallthrough
+- **Tool naming**: `serverName__toolName`; **tool classification** via LLM ToolAnnotation (ArgumentRole: read/write/delete-path, url/opaque, none)
+- **Path security**: symlink-aware `resolveRealPath()` before containment; exact path + directory containment (not substring)
 - **Content-hash caching**: per-stage inputHash skips LLM calls when inputs unchanged
+- **RoleCategory** `path|url|opaque` dispatches structural invariants; url-category → domain-allowlist escalate (not deny)
+- **Multi-mode tools** (git_branch/stash/remote): conditional `when` clauses so read ops resolve read-path only (else all-modes = most restrictive)
 
 ## Dual-Mode Trusted Process
-1. **Proxy mode** (`mcp-proxy-server.ts`) - standalone child process for Code Mode
-2. **In-process mode** (`index.ts`) - TrustedProcess class for tests/direct tool calls
-Both use the same PolicyEngine with compiled artifacts.
+- Proxy mode (`mcp-proxy-server.ts`, child process, Code Mode) + In-process mode (`index.ts` TrustedProcess). Both use same PolicyEngine + compiled artifacts.
+- Live coordinator: `ToolCallCoordinator` owns PolicyEngine, AuditLog, CircuitBreaker, Whitelist, ServerContextMap; two mutexes (policy swap + tool-call serialize)
 
-## Policy Evaluation Order (actual implementation)
-1. Structural invariants (hardcoded): protected paths + unknown tools
-2. Compiled declarative rules (per-role evaluation, most-restrictive-wins)
-3. Default deny
+## Implemented design decisions (nuances not obvious from code)
+- `effect` field dropped from ToolAnnotation; rules match on `roles`. Only `list_allowed_directories` has `sideEffects:false`
+- Reads outside sandbox escalate (not deny) per Human-oversight; ALL move ops denied (source has delete-path role)
+- Artifacts always written to disk even on verification failure (inspection/caching)
+- Escalation IPC = file rendezvous in per-session escalation dir: proxy writes `request-{id}.json`, polls `response-{id}.json`; watcher surfaces to transport
+- Handwritten scenarios are human ground truth — never LLM-mutated (dual-feedback repair loop auto-corrects only generated ones)
 
-## Key Design Decisions (implemented)
-- `effect` field was dropped from ToolAnnotation; rules use `roles` matching instead
-- Only `list_allowed_directories` gets `sideEffects: false`; all path-taking tools are `sideEffects: true`
-- Reads outside sandbox escalate (not deny) per "Human oversight" principle
-- ALL move operations denied because source has delete-path role
-- Artifacts always written to disk even on verification failure (for inspection/caching)
-- AI SDK v6: `generateText()` with `Output.object({ schema })`, not `generateObject()`
+## AI SDK v6 (multi-turn)
+- `generateText()` with `Output.object({ schema })`, NOT `generateObject()`; uses `inputSchema`/`stopWhen`/`toolCalls[].input`
+- `ModelMessage` (@ai-sdk/provider-utils) / `ResponseMessage` (ai); accepts `messages[]` OR `prompt` (exclusive)
+- result `response.messages` = append back for multi-turn; `pruneMessages()` for context window; `totalUsage.{promptTokens,completionTokens}`
 
-## AI SDK v6 Message Types (for multi-turn)
-- `ModelMessage = SystemModelMessage | UserModelMessage | AssistantModelMessage | ToolModelMessage` (from `@ai-sdk/provider-utils`)
-- `ResponseMessage = AssistantModelMessage | ToolModelMessage` (from `ai`)
-- `generateText()` accepts `messages: Array<ModelMessage>` OR `prompt: string` (mutually exclusive)
-- `generateText()` result has `response.messages: Array<ResponseMessage>` -- these are what you append back for multi-turn
-- `pruneMessages()` exported from `ai` for context window management
-- `totalUsage` on result has `promptTokens` + `completionTokens`
+## Session / transport model
+- `createSession()` sole constructor; `createStandaloneSession()` for CLI/daemon/signal/web (docker resumes AgentConversationId). Modes: `{kind:'builtin'}` (Code Mode, V8, no TTY) | `{kind:'docker',agent}`
+- `Transport{run(session),close()}` decouples I/O; `sendMessage(text)→Promise<string>`; per-session audit `audit-{id}.jsonl`; `onDiagnostic` callback + getDiagnosticLog()
+- Multi-provider model IDs `provider:model-id` (bare=Anthropic); `src/config/model-provider.ts` parseModelId/createLanguageModel; per-provider keys; dynamic provider imports
+- User config `~/.ironcurtain/config.json` (`user-config.ts`), resolution env>file>defaults; `serverCredentials` merged into spawn env; user constitution `constitution-user.md` never overwritten
 
-## Multi-Turn Session Design (designed 2026-02-17, decisions finalized)
-- See `docs/multi-turn-session-design.md` for full spec
-- Session interface: `sendMessage(text) -> Promise<string>`, `getHistory()`, `getDiagnosticLog()`, `resolveEscalation()`, `getPendingEscalation()`, `close()`
-- Transport interface: `run(session) -> Promise<void>` -- decouples I/O from session logic
-- AgentSession owns: Sandbox, ModelMessage[] history, ConversationTurn[] log, DiagnosticEvent[] log, escalation dir
-- Factory function `createSession()` is the only public constructor
-- Single-shot mode = create session, send one message, close
-- CliTransport handles both single-shot (with initialMessage) and interactive REPL
-- Slash commands: /quit, /logs, /approve, /deny
-- Escalation IPC: file-based rendezvous via per-session escalation directory (ESCALATION_DIR env var)
-- Proxy writes request-{id}.json, polls for response-{id}.json; session watches dir, transport surfaces to user
-- Per-session audit log: audit-{sessionId}.jsonl
-- Sandbox injection: factory pattern via SessionOptions.sandboxFactory
-- Diagnostic logging: delegated to transport via onDiagnostic callback + accumulated in getDiagnosticLog()
-- buildSystemPrompt() extracted to src/agent/prompts.ts (shared utility)
-- Context window: fail with clear error, no automatic pruning
-
-## Logger Design (designed 2026-02-18)
-- Module singleton at `src/logger.ts` with `setup()`/`teardown()` lifecycle
-- File-based: `appendFileSync` to `~/.ironcurtain/sessions/{id}/session.log`
-- Console interception: monkey-patches console.log/error/warn/debug, saves originals for restoration
-- No-op when not set up (safe for code running both inside/outside sessions)
-- User-facing output (escalation banners, agent responses) uses `process.stderr.write()`/`process.stdout.write()` to bypass interception
-- Proxy process (`mcp-proxy-server.ts`) does NOT import logger (separate child process)
-- Pipeline (`compile.ts`) does NOT import logger (standalone CLI tool)
-- `getSessionLogPath()` added to `src/config/paths.ts`
-- Session factory calls `setup()`, session close calls `teardown()`
-
-## ArgumentRole Registry Design (designed 2026-02-18)
-- See design spec in conversation for full details
-- New file: `src/types/argument-roles.ts` -- canonical source for ArgumentRole type + RoleDefinition registry
-- `src/pipeline/types.ts` re-exports ArgumentRole for backward compat
-- `normalizeToolArgsFromAnnotation(args, annotation)` in path-utils.ts replaces heuristic normalization
-- PolicyEngine gets `getAnnotation()` public method to expose annotation lookup
-- Heuristic `normalizeToolArgPaths` retained (deprecated) for defense-in-depth in structural invariants
-- Registry uses ReadonlyMap<ArgumentRole, RoleDefinition> with normalize function per role
-- getResourceRoles() replaces hardcoded `['read-path', 'write-path', 'delete-path']`
-- getArgumentRoleValues() returns tuple for z.enum() compatibility in Zod schemas
-- Compile-time completeness check ensures every union member has a registry entry
-- Generated JSON artifacts unchanged (roles stay as strings)
-- 4-PR migration: (1) add registry, (2) pipeline strings, (3) engine strings, (4) annotation-driven normalization
-
-## MCP Roots Integration Design (designed 2026-02-18)
-- See `docs/designs/mcp-roots-integration.md` for full spec
-- New file: `src/trusted-process/policy-roots.ts` -- `extractPolicyRoots()` + `toMcpRoots()`
-- Extracts directories from compiled policy rules where `then` is `allow` or `escalate` and `paths.within` exists
-- Sandbox directory always included as first root
-- MCPClientManager.connect() gains optional `roots` parameter; declares `roots` capability, registers `ListRootsRequestSchema` handler
-- Proxy mode: roots passed via `POLICY_ROOTS` env var (JSON array of `{ uri, name }`)
-- In-process mode: TrustedProcess extracts roots in constructor, passes to MCPClientManager
-- CLI args retained as fallback for servers without roots support
-- No `notifications/roots/list_changed` -- roots are static per session
-
-## MCP SDK Roots API
-- `Client` constructor accepts `{ capabilities: { roots: { listChanged: boolean } } }`
-- Server calls `roots/list` on client after init; client responds with `{ roots: [{ uri, name? }] }`
-- `ListRootsRequestSchema` imported from `@modelcontextprotocol/sdk/types.js`
-- `client.sendRootsListChanged()` sends notification (not needed for static roots)
-- Filesystem server: when roots provided, they REPLACE CLI args entirely
-
-## Current Constitution (updated 2026-02-18)
-- Only 3 principles now: Least privilege, No destruction, Human oversight
-- Concrete guidance: RWD in Downloads, read-only in Documents
-
-## User Config File Design (designed 2026-02-19, implemented)
-- See `docs/designs/config-file.md` for full spec
-- File: `~/.ironcurtain/config.json`, auto-created with defaults
-- `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`
-- Settings: agentModelId, policyModelId, anthropicApiKey, escalationTimeoutSeconds
-- Resolution order: env var > config file > defaults
-- Pipeline loads user config directly (standalone CLI, not part of session layer)
-
-## Multi-Provider Model Design (designed 2026-02-19)
-- See `docs/designs/multi-provider-models.md` for full spec
-- Qualified model IDs: `provider:model-id` format (e.g. `anthropic:claude-sonnet-4-6`)
-- Bare model IDs (no colon) default to Anthropic for backward compatibility
-- New file: `src/config/model-provider.ts` -- `parseModelId()`, `createLanguageModel()`
-- Dynamic imports for provider packages (only used provider needs to be installed)
-- Per-provider API keys: anthropicApiKey, googleApiKey, openaiApiKey
-- Env var precedence: ANTHROPIC_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, OPENAI_API_KEY
-- `anthropicApiKey` removed from IronCurtainConfig; replaced by `userConfig: ResolvedUserConfig`
-- API key validation deferred to first LLM call (AI SDK gives better errors than we can)
-- AI SDK's `createProviderRegistry` rejected: requires eager instantiation of all providers
-- Only two callsites need changes: agent-session.ts:260 and compile.ts:588-589
-
-## Dual-Feedback Repair Loop Design (designed 2026-02-19)
-- Current repair loop only feeds failures to constitution compiler; fails when scenario expectations are wrong
-- Judge gets `failureAttributions` array in response schema with `blame: 'rule' | 'scenario' | 'both'`
-- New types: `FailureBlame` (discriminated union), `AttributedFailure`, `ScenarioCorrection`
-- `applyScenarioCorrections()` does targeted patches on generated scenarios; handwritten scenarios never auto-corrected
-- Repair loop: apply scenario corrections first, then conditionally recompile rules, then re-verify
-- Both channels can fire in same iteration to prevent oscillation
-- Corrected scenarios written to disk with `-corrected` hash suffix
-- Files changed: `types.ts`, `policy-verifier.ts`, `compile.ts`; no new files needed
-- Key invariant: handwritten scenarios are human ground truth, never mutated by LLM
-
-## Execution Containment Design (TB0, designed 2026-02-19)
-- See `docs/designs/execution-containment.md` for full spec
-- Integrates `@anthropic-ai/sandbox-runtime` (npm) for OS-level process sandboxing
-- Integration point: `mcp-proxy-server.ts` (proxy spawns MCP servers, so proxy wraps them)
-- New module: `src/trusted-process/sandbox-integration.ts`
-- `SandboxManager.wrapWithSandbox(cmd, binShell, customConfig)` returns shell string
-- Shell bridge: `command='/bin/sh'`, `args=['-c', wrappedString]` for StdioClientTransport (which uses `shell:false`)
-- Sandbox-by-default: omitted `sandbox` field = sandboxed with restrictive defaults
-- Opt-out: `"sandbox": false` for mediated servers (e.g., filesystem)
-- Per-command filesystem via `customConfig` param; network is process-wide (union of all servers' domains)
-- Session sandbox dir auto-injected into `allowWrite`
-- Platform degradation: `SandboxAvailabilityPolicy = 'enforce' | 'warn' | 'skip'` (default: warn)
-- New types: `ServerSandboxConfig`, `SandboxNetworkConfig`, `SandboxFilesystemConfig`, `ResolvedSandboxConfig`
-- New diagnostic event: `sandbox_violation` (heuristic EPERM detection)
-- New audit field: `sandboxed?: boolean`
-- 4-phase migration: (1) types+module, (2) proxy integration, (3) violation detection, (4) integration tests
-
-### sandbox-runtime API Key Facts
-- Singleton per process: one network config (HTTP/SOCKS proxy pair)
-- `wrapWithSandbox(command, binShell?, customConfig?, abortSignal?)` -> `Promise<string>`
-- `customConfig: Partial<SandboxRuntimeConfig>` allows per-command filesystem overrides
-- `isSupportedPlatform()` and `checkDependencies()` for detection
-- `initialize(config)`, `reset()`, `updateConfig(newConfig)`
-- Linux: bubblewrap + seccomp-bpf + `--unshare-net` with socat bridges
-- macOS: Seatbelt (sandbox-exec, deprecated but functional)
-- No Windows support
-- stdio passes through transparently (MCP compatible)
-
-## TB1: Multi-Server Onboarding Design (designed 2026-02-19)
-- See `docs/designs/multi-server-onboarding.md` for full spec
-- Target servers: `@cyanheads/git-mcp-server` (TS, 28 tools, Apache 2.0) + custom fetch server
-- Official MCP git server is Python-only (rejected); official fetch also Python (rejected)
-- Custom fetch server: single `fetch` tool with url, method, headers, body, max_length args
-- New `RoleCategory` type: `'path' | 'url' | 'opaque'` groups roles for structural invariant dispatch
-- New roles: `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`
-- Each `RoleDefinition` has `category` and `annotationGuidance` fields; method: `canonicalize`
-- URL normalizers: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`
-- Policy engine untrusted domain gate: domain allowlist check for url-category roles (escalate, not deny)
-- `serverDomainAllowlists` derived from sandbox network config's `allowedDomains`
-- New compiled rule condition: `DomainCondition { roles, allowed }` alongside `PathCondition`
-- Annotation prompt dynamically built from registry `annotationGuidance` fields
-- User constitution: separate file `~/.ironcurtain/constitution-user.md` (never overwritten by updates)
-- User credentials: `serverCredentials` in config.json, merged into server spawn env
-- LLM-assisted constitution customization: `npm run customize-policy` interactive CLI
-- 6-phase migration: (1) role extensibility, (2) engine domain support, (3) git server, (4) fetch server, (5) user config, (6) constitution customizer
-
-## Memory MCP Server Design (designed 2026-03-09)
-- See `docs/designs/memory-mcp-server.md` for full spec
-- Uses `@modelcontextprotocol/server-memory` (official, MIT, knowledge graph, JSONL)
-- Dynamically injected into mcpServers (not static in mcp-servers.json)
-- Namespaced via MEMORY_FILE_PATH env var per session type
-- Storage: `~/.ironcurtain/personas/<name>/memory.jsonl`, `jobs/<id>/memory.jsonl`, `memory/default.jsonl`
-- Config: `memory.enabled` in user-config (default: true)
-- Policy: blanket allow for memory server (all args are 'none' role)
-- System prompt: pointer to memory server (NOT full content injection)
-- Replaces `memory.md` system prompt injection approach
-- Always included in server allowlist (like filesystem)
-
-## Docker MITM Proxy -- see `docker-mitm-proxy.md` topic file
-## Auto-Approver -- see `auto-approver.md` topic file
-## Signal Transport -- `docs/designs/signal-transport.md`; `src/signal/` module
-## Docker Agent Mode -- see `docker-agent.md` topic file
-## OAuth Docker Support -- `docs/designs/oauth-docker-support.md`
-## Goose Agent Integration -- see `goose-integration.md` topic file
-## Conditional Argument Roles -- `docs/designs/conditional-argument-roles.md`
-
-## Google Workspace MCP Server Integration (designed 2026-03-16)
-- See `docs/designs/google-workspace-integration.md` for full spec
-- Depends on third-party-oauth.md (Phases 1-3, already implemented)
-- **Credential-file rendezvous**: IronCurtain writes `.gworkspace-credentials.json` with access_token only (NO refresh_token)
-- Omitting refresh_token prevents MCP server from independently refreshing (avoids rotation races)
-- `TokenFileRefresher` in proxy process proactively writes fresh credential files before expiry
-- MCP server's `loadCredentialsQuietly()` re-reads file on each tool call, picks up refreshed tokens
-- Per-session credential directories: `{settingsDir}/{serverName}-creds/`
-- Sandbox: network allowlist `*.googleapis.com`, denyRead `~/.ironcurtain/oauth`
-- `npx -y` cache redirected via `npm_config_cache` env var to sandbox-writable location
-- New files: `gworkspace-credentials.ts`, `token-file-refresher.ts`
-- Modified: `mcp-proxy-server.ts` (OAuth injection in spawn loop), `mcp-servers.json`
-
-## Cron Job System (implemented)
-- `src/cron/` module: job-commands.ts, job-store.ts, compile-task-policy.ts, headless-transport.ts
-- `src/daemon/ironcurtain-daemon.ts` -- orchestrates cron scheduling + Signal + sessions
-- JobDefinition: id (branded JobId), taskDescription, taskConstitution, schedule, gitRepo, etc.
-- Jobs stored at `~/.ironcurtain/jobs/{id}/job.json` with workspace/ and generated/ subdirs
-- `compileTaskPolicy()` wraps PipelineRunner with constitutionKind: 'task-policy'
-- `buildTaskCompilerSystemPrompt()` in pipeline-runner.ts -- whitelist-generation from task text
-- `SessionOptions.policyDir` loads per-job policy; `systemPromptAugmentation` injects task context
-- Review loop in `runJobReviewLoop()` with confirm/edit cycle using @clack/prompts
-
-## Multi-Agent Workflow System (designed 2026-03-31)
-- See `docs/designs/multi-agent-workflow-implementation.md` for full spec
-- WorkflowController: narrow interface (start, getStatus, resolveGate, abort) exposed to mux
-- WorkflowOrchestrator: concrete impl, deps injected (session factory, tab factory, escalation bridge)
-- XState v5 state machine, file-based checkpointing per transition
-- Workflow agents = builtin sessions via createSession(), driven by sendMessage()
-- Human gates reuse escalation picker (workflowGate field on PendingEscalation)
-- Read-only workflow tabs: same xterm buffer, readOnly flag on MuxTab
-- WorkflowSession wraps Session (composition), WorkflowTabHandle for output routing
-- Transition middleware: parseAgentStatus() (YAML block) + agentOutputToEvent() (pure functions)
-- Guards: isStalled (hash), hasTestCountRegression, isRoundLimitReached
-- WorktreeManager: git CLI via execFile, fast-forward then merge-commit strategy
-- Workflow definitions: JSON files with states/transitions/guards/parallel_key
-- 9-phase incremental implementation: types -> middleware -> machine -> checkpoint -> session -> mux -> gates -> worktrees -> scaffold
-
-## UTCP Custom Protocol Registration (spiked 2026-04-16)
-- See `utcp-custom-protocol.md` topic file
-- `CommunicationProtocol` is a public abstract class in `@utcp/sdk`
-- Custom protocols register via `communicationProtocols[type] = instance` static map
-- Enables direct in-process callTool hook (no stdio/subprocess needed)
-- Used by workflow-container-lifecycle v4 for UTCP → ToolCallCoordinator direct hook
-
-## Workflow Container Lifecycle v4 Design (designed 2026-04-16)
-- See `docs/designs/workflow-container-lifecycle.md`
-- UTCP spike: direct in-process `IronCurtainCommunicationProtocol.callTool` feasible
-- `ToolCallCoordinator` owns PolicyEngine, AuditLog, CircuitBreaker, Whitelist, ServerContextMap
-- Two mutexes: policy mutex (loadPolicy swap) + tool-call mutex (serializes handleToolCall)
-- `parallelKey` is a live codebase feature, not future; homogeneous-persona parallelism works under tool-call mutex
-- Parallel heterogeneous personas rejected: schema check + coordinator runtime guard
-- Control endpoint: `POST /__ironcurtain/policy/load` (MITM's `/__ironcurtain/domains/*` stays separate)
-- `validateToolArguments` moves to coordinator (coupled to `isTrustedServer` + synthesizes audit deny)
-- `MITM_CONTROL_ADDR` retained ONLY on virtual-proxy subprocess (`SERVER_FILTER=proxy`)
-
-## Auto-Constitution Generation Design (designed 2026-03-05)
-- See `docs/designs/auto-constitution-generation.md`
-- LLM explores MCP servers via bridged tools (list-resolver pattern, NOT full Code Mode)
-- Tool filtering: `isReadOnlyTool()` checks annotations for sideEffects + role safety
-- Hand-authored read-only policy at `src/config/generated-readonly/compiled-policy.json` (documentation)
-- `src/cron/constitution-generator.ts` -- `generateConstitution()` returns constitution + reasoning
-- `src/cron/job-customizer.ts` -- `runJobConstitutionCustomizer()` reuses customizer patterns
-- Integrated into job review loop as "Generate constitution" menu option
-- Graceful degradation: works without MCP servers (task description only)
-- 4-phase migration: read-only artifact, generator module, customizer, CLI integration
+## Design pointers (spec in docs/designs unless noted; most implemented)
+- Multi-turn session — `docs/multi-turn-session-design.md`; Logger `src/logger.ts` (singleton setup/teardown, console monkey-patch, user output via stderr/stdout to bypass)
+- ArgumentRole registry — `src/types/argument-roles.ts` (ReadonlyMap, compile-time completeness, getArgumentRoleValues for z.enum)
+- MCP roots — mcp-roots-integration.md; `policy-roots.ts` extractPolicyRoots/toMcpRoots; static per session; POLICY_ROOTS env (proxy)
+- Dual-feedback repair loop, config-file, multi-provider-models — see docs/designs/*
+- Execution containment (TB0) — execution-containment.md; `@anthropic-ai/sandbox-runtime`, `sandbox-integration.ts`, sandbox-by-default, SandboxAvailabilityPolicy enforce|warn|skip
+- Multi-server onboarding (TB1) — multi-server-onboarding.md; git (@cyanheads) + custom fetch; roles fetch-url/git-remote-url/branch-name/commit-message; DomainCondition rule; customize-policy CLI
+- Memory MCP — memory-mcp-server.md; MEMORY_FILE_PATH per session type; `memory.enabled` default true; blanket-allow (all args 'none')
+- Google Workspace — google-workspace-integration.md; credential-file rendezvous (access_token only, no refresh_token → TokenFileRefresher); `gworkspace-credentials.ts`, `token-file-refresher.ts`
+- Cron — `src/cron/` (job-store, compile-task-policy, headless-transport); jobs at `~/.ironcurtain/jobs/{id}/`; compileTaskPolicy wraps PipelineRunner
+- Multi-agent workflow — multi-agent-workflow-implementation.md; WorkflowController(start/getStatus/resolveGate/abort)+Orchestrator; XState v5, file checkpoints; gates reuse escalation picker
+- Workflow container lifecycle v4 — workflow-container-lifecycle.md; UTCP `IronCurtainCommunicationProtocol.callTool` in-process hook; policy control `POST /__ironcurtain/policy/load`
+- Auto-constitution — auto-constitution-generation.md; `constitution-generator.ts`/`job-customizer.ts`; isReadOnlyTool() filter; graceful w/o MCP
