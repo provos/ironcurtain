@@ -6,16 +6,11 @@ export default defineConfig({
     testTimeout: 30_000,
     // Match CI's default pool explicitly so local and CI runs behave the same.
     pool: 'forks',
-    // Teardown safety net for the macOS "Worker exited unexpectedly" /
-    // "prevents Vite server from exiting" flake. Root cause: some test files
-    // leave a listening TCP server open after their own cleanup; the forks pool
-    // reuses workers, so those handles accumulate and keep a worker's event loop
-    // alive, which the slow macOS runners can't drain within the teardown
-    // budget. handle-leak-guard runs LAST in each file's teardown and
-    // force-closes any leaked server. See project-vitest-worker-exit-flake.
-    setupFiles: ['./test/setup/handle-leak-guard.ts'],
-    // Keep extra teardown slack as belt-and-suspenders (the leak fix above is
-    // the real mitigation, not this timeout).
+    // The macOS "Worker exited unexpectedly" / "prevents Vite server from
+    // exiting" teardown flake (issue #363) is handled by a bounded retry in
+    // scripts/test.sh, not here — attempts to neutralize it at the vitest layer
+    // (closing/unref-ing leaked handles) did not fix it. Extra teardown slack is
+    // kept as belt-and-suspenders.
     teardownTimeout: 30_000,
   },
 });
