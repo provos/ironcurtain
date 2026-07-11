@@ -27,9 +27,10 @@ environment variables read by the **host-side** MITM proxy:
 | `IRONCURTAIN_MITM_STREAM_DELAY_HOST` | Optional substring filter on the upstream host (e.g. `anthropic`, `openrouter`) so only one provider path is delayed.                                                                                                                                                                  |
 | `IRONCURTAIN_MITM_STREAM_DRIP_BYTES` | `drip` mode only: bytes emitted per `…_DELAY_MS` tick (default `1`). Higher = faster trickle.                                                                                                                                                                                          |
 
-`stall` modes (`mid-stream`/`first-token`) test **idle-based** aborts (time since
-last byte); `drip` keeps bytes flowing below any idle threshold so it isolates
-**duration/throughput-based** aborts — the better match for "very slow models".
+`stall` modes (`mid-stream`/`first-token`) exercise the **byte watchdog**
+(raw-byte idle, ~180 s); `drip` keeps raw bytes flowing so the byte watchdog
+stays quiet and exposes the **stream watchdog** (decoded-SSE-event idle,
+~300 s) — the mechanism that bites very slow models. See Findings below.
 
 Applies only to LLM completion endpoints (`isLlmMessagesEndpoint`: `/v1/messages`,
 `/api/v1/messages`, …). It sits at the tail of the forwarding pipe, so the
@@ -67,54 +68,53 @@ stalled request it re-issues a new completion POST, visible in the MITM log
 (`POST …/v1/messages … → FORWARDED`). The interval between those POSTs is the
 active abort threshold.
 
-## Findings (Claude Code 2.1.201)
+## Findings (Claude Code 2.1.201, native Anthropic)
 
-Measured by injecting a 320 s mid-stream gap and reading the retry cadence.
-When a mechanism aborts the held request it re-issues the completion POST; the
-inter-POST interval is that mechanism's threshold.
+Two independent client-side idle watchdogs guard a completion stream. Each
+**aborts and retries** the request when its threshold is crossed; whichever
+fires first wins. Neither is a total-duration cap — disable the governing one
+and a slow request runs indefinitely (verified below). Method: inject a
+delay/drip and read the retry cadence in the MITM log (a re-issued completion
+POST == an abort); the inter-POST interval is that mechanism's threshold.
 
-**Native Anthropic path**
+| Watchdog                                              | Measures                                  | Threshold |
+| ----------------------------------------------------- | ----------------------------------------- | --------- |
+| **byte watchdog** (`CLAUDE_ENABLE_BYTE_WATCHDOG`)     | idle on the **raw byte** stream           | ~180 s    |
+| **stream watchdog** (`CLAUDE_ENABLE_STREAM_WATCHDOG`) | idle on **decoded SSE events** (progress) | ~300 s    |
 
-| Config                            | Abort / retry cadence          |
-| --------------------------------- | ------------------------------ |
-| baseline (defaults)               | **~180 s**                     |
-| `CLAUDE_ENABLE_STREAM_WATCHDOG=0` | **~180 s** (identical)         |
-| `CLAUDE_ENABLE_BYTE_WATCHDOG=0`   | **~300 s** (threshold shifted) |
+| Scenario (injected)              | baseline        | `STREAM_WATCHDOG=0`   | `BYTE_WATCHDOG=0` |
+| -------------------------------- | --------------- | --------------------- | ----------------- |
+| complete stall (no bytes at all) | ~180 s (byte)   | ~180 s (unchanged)    | ~300 s (stream)   |
+| slow trickle (`drip`, 1 B / 2 s) | ~300 s (stream) | **no abort** (>400 s) | —                 |
 
-The first client-side abort is the **byte watchdog** (`CLAUDE_ENABLE_BYTE_WATCHDOG`,
-~180 s of stream idle → abort + retry). Turn it off and the fallback is a hard
-**~300 s client-side request timeout** inside Claude Code (the agent opens a new
-connection and re-POSTs at 300 s, with no MITM- or upstream-side error).
+The **stall** case is dominated by the byte watchdog at ~180 s, so
+`STREAM_WATCHDOG=0` looks inert there (the byte watchdog still fires). The
+**drip** case keeps the byte watchdog happy (raw bytes every 2 s) but the agent
+decodes no SSE events, so the **stream watchdog** fires at ~300 s — and
+`CLAUDE_ENABLE_STREAM_WATCHDOG=0` disables it: the request then streams past
+300 s with no abort. `API_TIMEOUT_MS=900000` moves neither threshold (so the
+~300 s is the stream watchdog, not a request-duration timeout).
 
-**OpenRouter path** (`openrouter.ai`, byte watchdog off by default there)
+> OpenRouter (`openrouter.ai`) was only tested with a raw stall, where a ~300 s
+> abort fired that neither `STREAM_WATCHDOG=0` nor `API_FORCE_IDLE_TIMEOUT=0`
+> moved — the non-Anthropic path likely uses a different mechanism and needs a
+> `drip` re-test before drawing conclusions.
 
-| Config                            | Cadence    |
-| --------------------------------- | ---------- |
-| baseline                          | **~300 s** |
-| `CLAUDE_ENABLE_STREAM_WATCHDOG=0` | **~300 s** |
-| `API_FORCE_IDLE_TIMEOUT=0`        | **~300 s** |
+## Bearing on PR #376 (`CLAUDE_ENABLE_STREAM_WATCHDOG=0`) — effective for slow models
 
-The ~300 s hard client request timeout governs; none of the idle-watchdog knobs
-move it.
+PR #376 disables the **stream (event-idle) watchdog**: the one that fires ~300 s
+after the last _decoded_ SSE event and emits "Response stalled mid-stream"
+(matching #367's `duration_ms: 305993`). That is exactly the "very slow model"
+failure — a model that goes >300 s without producing a decodable event (slow
+first token, a long mid-response thinking pause) trips it even while the
+connection is alive and bytes trickle. **The env var prevents that abort**
+(verified: a 1 B/2 s drip that baseline aborts at ~300 s runs indefinitely with
+it set). It does **not** help a raw-connection stall (byte watchdog, ~180 s),
+but that is a genuinely dead stream, not a slow model.
 
-**The ~300 s ceiling is a hard client-side request timeout.** It persisted with
-the byte watchdog off, `API_FORCE_IDLE_TIMEOUT=0`, `API_TIMEOUT_MS=900000`, and
-even with the MITM's own inner-server `requestTimeout`/`headersTimeout`/`timeout`
-disabled — the agent simply reconnects and retries at 300 s. So it is neither
-the stream watchdog, nor `API_TIMEOUT_MS`, nor a MITM/upstream timeout, and it
-caps this harness's usable injected-gap at ~300 s.
-
-## Bearing on PR #376 (`CLAUDE_ENABLE_STREAM_WATCHDOG=0`)
-
-**The env var has no measurable effect on the stall/abort behavior on either
-provider path in 2.1.201.** The stream idle watchdog it disables is dominated by
-(a) the byte watchdog (~180 s, native) and (b) the hard ~300 s client request
-timeout (both paths), each of which fires first. The only knob that changed
-anything was `CLAUDE_ENABLE_BYTE_WATCHDOG`.
-
-Caveat: the observed aborts are **abort-and-retry**, not fatal — a genuinely
-slow-but-progressing model resets the idle timer on each byte and never exhausts
-retries. The terminal "Response stalled mid-stream" only appears once retries
-are exhausted, which needs a _permanent_ stall (as injected here). This matches
-the conclusion of #372/#367: the fatal `analyze` stall was the background-subagent
-issue (fixed by `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`), not the stream watchdog.
+Relationship to #372: both are valid fixes for the same "Response stalled
+mid-stream" symptom from different angles. #372 removes a _cause_ of the event
+idle (a parent turn waiting on background subagents produces no events);
+#376 removes the _abort_ on event idle. A genuinely slow model produces sparse
+events for reasons unrelated to subagents, so #372 doesn't cover it and #376
+does — which is why the follow-up was needed.
