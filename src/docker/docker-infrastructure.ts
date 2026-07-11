@@ -50,10 +50,11 @@ import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import {
   createIronCurtainInternalNetwork,
-  dockerAllocationPoolForSubnet,
+  InternalNetworkConnectivityError,
   managedResourceLabels,
-  reconcileIronCurtainDockerResources,
+  reconcileIronCurtainDockerResourcesBestEffort,
   releaseManagedResourceLease,
+  withInternalNetworkAllocationRetry,
 } from './docker-resource-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
 import { errorMessage } from '../utils/error-message.js';
@@ -61,6 +62,8 @@ import { createCachedStager } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
 import { withProvisionLock } from './provision-lock.js';
 import * as logger from '../logger.js';
+
+export { InternalNetworkConnectivityError };
 
 /**
  * Create a bundle-owned directory and enforce 0o700 permissions even if
@@ -1142,31 +1145,18 @@ export async function createSessionContainers(
   options?: CreateDockerInfrastructureOptions,
 ): Promise<ContainerResources> {
   if (core.runtimeKind === 'docker') {
-    await reconcileIronCurtainDockerResources(core.docker);
+    await reconcileIronCurtainDockerResourcesBestEffort(core.docker, 'session startup');
   }
 
-  const excludedSubnets = new Set<string>();
   const maxAttempts = core.topology === 'tcp-sidecar' ? 4 : 1;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const allocationState: { subnet?: string } = {};
-    try {
-      return await createSessionContainersAttempt(core, config, options, excludedSubnets, allocationState);
-    } catch (error) {
-      lastError = error;
-      if (!(error instanceof InternalNetworkConnectivityError) || !allocationState.subnet || attempt === maxAttempts) {
-        throw error;
-      }
-      const rejectedPool = dockerAllocationPoolForSubnet(allocationState.subnet);
-      excludedSubnets.add(rejectedPool);
-      logger.warn(
-        `Internal Docker network ${allocationState.subnet} failed its end-to-end checks; rejecting ${rejectedPool} and ` +
-          `retrying with another allocation (${attempt}/${maxAttempts})`,
-      );
-      await reconcileIronCurtainDockerResources(core.docker);
-    }
-  }
-  throw lastError;
+  return withInternalNetworkAllocationRetry(
+    {
+      maxAttempts,
+      description: 'Internal Docker network',
+      reconcile: () => reconcileIronCurtainDockerResourcesBestEffort(core.docker, 'internal network retry'),
+    },
+    (excludedSubnets, attempt) => createSessionContainersAttempt(core, config, options, excludedSubnets, attempt),
+  );
 }
 
 async function createSessionContainersAttempt(
@@ -1174,7 +1164,7 @@ async function createSessionContainersAttempt(
   config: IronCurtainConfig,
   options: CreateDockerInfrastructureOptions | undefined,
   excludedSubnets: ReadonlySet<string>,
-  allocationState: { subnet?: string },
+  attempt: number,
 ): Promise<ContainerResources> {
   const shortId = getBundleShortId(core.bundleId);
   const mainContainerName = `${CONTAINER_NAME_PREFIX}${shortId}`;
@@ -1193,6 +1183,7 @@ async function createSessionContainersAttempt(
   let mainContainerId: string | undefined;
   let sidecarContainerId: string | undefined;
   let internalNetwork: string | undefined;
+  let allocatedNetworkSubnet: string | undefined;
 
   try {
     const mainImage =
@@ -1260,11 +1251,12 @@ async function createSessionContainersAttempt(
       mounts.push({ source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
 
       // Create a per-session --internal Docker network that blocks internet egress.
-      const networkName = getInternalNetworkName(shortId);
+      const baseNetworkName = getInternalNetworkName(shortId);
+      const networkName = attempt === 1 ? baseNetworkName : `${baseNetworkName}-a${attempt}`;
       const allocatedNetwork = await createIronCurtainInternalNetwork(core.docker, networkName, core.bundleId, {
         excludedSubnets,
       });
-      allocationState.subnet = allocatedNetwork.subnet;
+      allocatedNetworkSubnet = allocatedNetwork.subnet;
       internalNetwork = networkName;
       network = networkName;
       logger.info(`Allocated internal Docker network ${networkName} at ${allocatedNetwork.subnet}`);
@@ -1449,7 +1441,14 @@ async function createSessionContainersAttempt(
       if (core.mitmAddr.port === undefined) {
         throw new Error('tcp-sidecar bundle is missing its MITM proxy port');
       }
-      await checkInternalNetworkConnectivity(core.docker, mainContainerId, core.proxy.port, core.mitmAddr.port);
+      try {
+        await checkInternalNetworkConnectivity(core.docker, mainContainerId, core.proxy.port, core.mitmAddr.port);
+      } catch (error) {
+        if (error instanceof InternalNetworkConnectivityError) {
+          throw new InternalNetworkConnectivityError(error.message, allocatedNetworkSubnet);
+        }
+        throw error;
+      }
     }
 
     return {
@@ -1477,10 +1476,6 @@ async function createSessionContainersAttempt(
  * Probes whether the container can reach host-side proxies via the socat
  * sidecar on the internal Docker network. Throws a descriptive error if not.
  */
-export class InternalNetworkConnectivityError extends Error {
-  subnet?: string;
-}
-
 export async function checkInternalNetworkConnectivity(
   docker: ContainerRuntime,
   containerId: string,

@@ -1,15 +1,18 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createIronCurtainInternalNetwork,
+  InternalNetworkConnectivityError,
   IRONCURTAIN_MANAGED_LABEL,
   IRONCURTAIN_OWNER_PID_LABEL,
   IRONCURTAIN_OWNER_TOKEN_LABEL,
   managedResourceLabels,
   reconcileIronCurtainDockerResources,
+  reconcileIronCurtainDockerResourcesBestEffort,
   releaseManagedResourceLease,
+  withInternalNetworkAllocationRetry,
 } from '../src/docker/docker-resource-lifecycle.js';
 import type { ContainerRuntime, DockerContainerInfo, DockerNetworkInfo } from '../src/docker/types.js';
 
@@ -20,12 +23,8 @@ function runtimeWithInventory(input: {
 }): ContainerRuntime {
   return {
     supportsImageSnapshots: true,
-    async listContainers() {
-      return input.containers ?? [];
-    },
-    async listNetworks() {
-      return input.networks ?? [];
-    },
+    listContainers: vi.fn(async () => input.containers ?? []),
+    listNetworks: vi.fn(async () => input.networks ?? []),
     createNetwork: input.createNetwork ?? vi.fn(async () => {}),
     remove: vi.fn(async () => {}),
     removeNetwork: vi.fn(async () => {}),
@@ -104,6 +103,43 @@ describe('Docker resource crash reconciliation', () => {
     expect(result.removedNetworks).toEqual(['ironcurtain-1234567890ab']);
     expect(docker.remove).toHaveBeenCalledWith('container-id');
     expect(docker.removeNetwork).toHaveBeenCalledWith('ironcurtain-1234567890ab');
+  });
+
+  it('reclaims a lease when its PID was recycled by another process', async () => {
+    const labels = managedResourceLabels('bundle-recycled-pid');
+    const docker = runtimeWithInventory({ networks: [network({ labels })] });
+
+    const result = await reconcileIronCurtainDockerResources(docker, {
+      pidAlive: () => true,
+      processIdentity: () => ({ bootId: 'same-boot', startedAt: 'different-process-start' }),
+    });
+
+    expect(result.removedNetworks).toEqual(['ironcurtain-1234567890ab']);
+    expect(docker.removeNetwork).toHaveBeenCalledWith('ironcurtain-1234567890ab');
+  });
+
+  it('replaces a reconciliation lock held by a recycled PID', async () => {
+    const lockRoot = resolve(home, 'run', 'docker-owners');
+    mkdirSync(lockRoot, { recursive: true });
+    writeFileSync(
+      resolve(lockRoot, 'reconcile.lock'),
+      JSON.stringify({ pid: process.pid, identity: { bootId: 'old-boot', startedAt: 'old-process' } }),
+    );
+    const docker = runtimeWithInventory({});
+
+    await reconcileIronCurtainDockerResources(docker, {
+      processIdentity: () => ({ bootId: 'current-boot', startedAt: 'current-process' }),
+    });
+
+    expect(docker.listContainers).toHaveBeenCalledOnce();
+    expect(docker.listNetworks).toHaveBeenCalledOnce();
+  });
+
+  it('keeps startup reconciliation best-effort when Docker inventory fails', async () => {
+    const docker = runtimeWithInventory({});
+    vi.mocked(docker.listContainers!).mockRejectedValueOnce(new Error('concurrent inspect failure'));
+
+    await expect(reconcileIronCurtainDockerResourcesBestEffort(docker, 'test startup')).resolves.toBeUndefined();
   });
 
   it('reclaims a failed teardown in the same live process after its bundle lease is released', async () => {
@@ -191,5 +227,26 @@ describe('IronCurtain Docker subnet allocator', () => {
     expect(attempts).toHaveLength(2);
     expect(allocated.subnet).toBe(attempts[1]);
     expect(attempts[0]).not.toBe(attempts[1]);
+  });
+
+  it('shares failed-pool exclusion and reconciliation across allocation retries', async () => {
+    const docker = runtimeWithInventory({});
+    const reconcile = vi.fn(async () => {});
+    const attempts: ReadonlySet<string>[] = [];
+
+    const result = await withInternalNetworkAllocationRetry(
+      { maxAttempts: 2, description: 'Test network', reconcile },
+      async (excludedSubnets, attempt) => {
+        attempts.push(new Set(excludedSubnets));
+        if (attempt === 1) throw new InternalNetworkConnectivityError('unreachable', '172.20.1.0/29');
+        return 'allocated';
+      },
+    );
+
+    expect(result).toBe('allocated');
+    expect(attempts[0]).toEqual(new Set());
+    expect(attempts[1]).toEqual(new Set(['172.20.0.0/14']));
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(docker.removeNetwork).not.toHaveBeenCalled();
   });
 });

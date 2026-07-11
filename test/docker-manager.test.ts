@@ -648,6 +648,28 @@ describe('DockerManager', () => {
       ]);
     });
 
+    it('keeps networks that survive a concurrent ls/inspect deletion', async () => {
+      const surviving = {
+        Id: 'network-live',
+        Name: 'ironcurtain-live',
+        Created: '2026-01-01T00:00:00Z',
+        Labels: { 'ironcurtain.managed': 'true' },
+        IPAM: { Config: [{ Subnet: '172.20.0.0/29' }] },
+        Containers: {},
+      };
+      mock.setSequence([
+        { stdout: 'network-live\nnetwork-gone\n' },
+        { error: true, code: 1, stderr: 'Error response from daemon: network network-gone not found' },
+        { stdout: JSON.stringify([surviving]) },
+        { error: true, code: 1, stderr: 'Error response from daemon: network network-gone not found' },
+      ]);
+
+      const manager = createDockerManager(mock.mockExec);
+      await expect(manager.listNetworks?.()).resolves.toEqual([
+        expect.objectContaining({ id: 'network-live', name: 'ironcurtain-live' }),
+      ]);
+    });
+
     it('parses all-container inspect data and applies a label filter', async () => {
       mock.setSequence([
         { stdout: 'container-id\n' },
@@ -675,6 +697,27 @@ describe('DockerManager', () => {
         },
       ]);
       expect(mock.calls[0].args).toContain('label=ironcurtain.managed=true');
+    });
+
+    it('keeps containers that survive a concurrent ls/inspect deletion', async () => {
+      const surviving = {
+        Id: 'container-live',
+        Name: '/ironcurtain-live',
+        Created: '2026-01-01T00:00:00Z',
+        Config: { Labels: { 'ironcurtain.managed': 'true' } },
+        State: { Running: true },
+      };
+      mock.setSequence([
+        { stdout: 'container-live\ncontainer-gone\n' },
+        { error: true, code: 1, stderr: 'Error: No such container: container-gone' },
+        { stdout: JSON.stringify([surviving]) },
+        { error: true, code: 1, stderr: 'Error: No such container: container-gone' },
+      ]);
+
+      const manager = createDockerManager(mock.mockExec);
+      await expect(manager.listContainers?.()).resolves.toEqual([
+        expect.objectContaining({ id: 'container-live', name: 'ironcurtain-live' }),
+      ]);
     });
   });
 

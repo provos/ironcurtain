@@ -10,8 +10,9 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
 import * as logger from '../logger.js';
@@ -25,7 +26,7 @@ export const IRONCURTAIN_OWNER_TOKEN_LABEL = 'ironcurtain.owner-token';
 export const IRONCURTAIN_CREATED_AT_LABEL = 'ironcurtain.created-at';
 export const IRONCURTAIN_RESOURCE_SCHEMA_LABEL = 'ironcurtain.resource-schema';
 const IRONCURTAIN_BUNDLE_LABEL = 'ironcurtain.bundle';
-const RESOURCE_SCHEMA = '1';
+const RESOURCE_SCHEMA = '2';
 // Current bundle slugs are 12 hex digits; pre-identity-refactor names used a
 // raw UUID substring and therefore contain a hyphen after eight digits.
 const LEGACY_NETWORK_RE = /^ironcurtain-(?:[a-f0-9]{12}|[a-f0-9]{8}-[a-f0-9]{3})$/;
@@ -34,11 +35,56 @@ const LEGACY_EMPTY_NETWORK_GRACE_MS = 2 * 60_000;
 interface OwnerLease {
   readonly token: string;
   readonly pid: number;
+  readonly identity: ProcessIdentity;
   readonly path: string;
+}
+
+export interface ProcessIdentity {
+  /** Stable for a single host boot, preventing a pre-reboot lease from matching. */
+  readonly bootId: string;
+  /** OS-reported process start time, preventing a recycled PID from matching. */
+  readonly startedAt: string;
 }
 
 const ownerLeases = new Map<string, OwnerLease>();
 let exitHookInstalled = false;
+let cachedBootId: string | undefined;
+
+function currentBootId(): string {
+  if (cachedBootId) return cachedBootId;
+  try {
+    if (platform() === 'linux') {
+      cachedBootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    } else if (platform() === 'darwin') {
+      const bootTime = execFileSync('sysctl', ['-n', 'kern.boottime'], {
+        encoding: 'utf8',
+        timeout: 1_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const match = bootTime.match(/sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)/);
+      if (match) cachedBootId = `darwin:${match[1]}.${match[2]}`;
+    }
+  } catch {
+    // Process start time remains sufficient to distinguish recycled PIDs.
+  }
+  cachedBootId ||= `${platform()}:unknown-boot`;
+  return cachedBootId;
+}
+
+function defaultProcessIdentity(pid: number): ProcessIdentity | undefined {
+  try {
+    const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 1_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+    }).trim();
+    if (!startedAt) return undefined;
+    return { bootId: currentBootId(), startedAt };
+  } catch {
+    return undefined;
+  }
+}
 
 function leaseRoot(): string {
   return resolve(getIronCurtainHome(), 'run', 'docker-owners');
@@ -71,11 +117,14 @@ function getOwnerLease(bundleId: string): OwnerLease {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const token = randomUUID();
   const path = resolve(root, `${token}.json`);
-  const lease = { token, pid: process.pid, path };
-  writeFileSync(path, JSON.stringify({ token, pid: process.pid, bundleId, createdAt: new Date().toISOString() }), {
-    mode: 0o600,
-    flag: 'wx',
-  });
+  const identity = defaultProcessIdentity(process.pid);
+  if (!identity) throw new Error(`Unable to determine the identity of owner process ${process.pid}`);
+  const lease = { token, pid: process.pid, identity, path };
+  writeFileSync(
+    path,
+    JSON.stringify({ token, pid: process.pid, identity, bundleId, createdAt: new Date().toISOString() }),
+    { mode: 0o600, flag: 'wx' },
+  );
   ownerLeases.set(key, lease);
   installExitHook();
   return lease;
@@ -120,6 +169,7 @@ function defaultPidAlive(pid: number): boolean {
 function ownerIsAlive(
   labels: Readonly<Record<string, string>>,
   pidAlive: (pid: number) => boolean,
+  processIdentity: (pid: number) => ProcessIdentity | undefined,
   root = leaseRoot(),
 ): boolean {
   const pid = Number(labels[IRONCURTAIN_OWNER_PID_LABEL]);
@@ -129,8 +179,22 @@ function ownerIsAlive(
     const lease = JSON.parse(readFileSync(resolve(root, `${token}.json`), 'utf8')) as {
       token?: unknown;
       pid?: unknown;
+      identity?: Partial<ProcessIdentity>;
     };
-    return lease.token === token && lease.pid === pid;
+    if (
+      lease.token !== token ||
+      lease.pid !== pid ||
+      typeof lease.identity?.bootId !== 'string' ||
+      typeof lease.identity.startedAt !== 'string'
+    ) {
+      return false;
+    }
+    const currentIdentity = processIdentity(pid);
+    return (
+      currentIdentity !== undefined &&
+      currentIdentity.bootId === lease.identity.bootId &&
+      currentIdentity.startedAt === lease.identity.startedAt
+    );
   } catch {
     return false;
   }
@@ -140,6 +204,7 @@ interface ReconcileOptions {
   readonly dryRun?: boolean;
   readonly now?: Date;
   readonly pidAlive?: (pid: number) => boolean;
+  readonly processIdentity?: (pid: number) => ProcessIdentity | undefined;
   readonly legacyGraceMs?: number;
 }
 
@@ -155,7 +220,10 @@ function resourceAgeMs(created: string, now: Date): number {
   return Number.isFinite(timestamp) ? Math.max(0, now.getTime() - timestamp) : Number.POSITIVE_INFINITY;
 }
 
-async function withReconcileLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
+async function withReconcileLock<T>(
+  fn: () => Promise<T>,
+  processIdentity: (pid: number) => ProcessIdentity | undefined,
+): Promise<T | undefined> {
   const root = leaseRoot();
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const lockPath = resolve(root, 'reconcile.lock');
@@ -163,18 +231,31 @@ async function withReconcileLock<T>(fn: () => Promise<T>): Promise<T | undefined
   try {
     try {
       fd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) }));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
-        const owner = JSON.parse(readFileSync(lockPath, 'utf8')) as { pid?: unknown };
-        if (typeof owner.pid === 'number' && defaultPidAlive(owner.pid)) return undefined;
+        const owner = JSON.parse(readFileSync(lockPath, 'utf8')) as {
+          pid?: unknown;
+          identity?: Partial<ProcessIdentity>;
+        };
+        const currentIdentity = typeof owner.pid === 'number' ? processIdentity(owner.pid) : undefined;
+        if (
+          typeof owner.pid === 'number' &&
+          defaultPidAlive(owner.pid) &&
+          currentIdentity !== undefined &&
+          owner.identity !== undefined &&
+          currentIdentity.bootId === owner.identity.bootId &&
+          currentIdentity.startedAt === owner.identity.startedAt
+        ) {
+          return undefined;
+        }
       } catch {
         // Invalid/stale lock: replace it below.
       }
       rmSync(lockPath, { force: true });
       fd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) }));
     }
     return await fn();
   } finally {
@@ -201,6 +282,12 @@ export async function reconcileIronCurtainDockerResources(
   };
   if (!docker.listNetworks || !docker.listContainers) return empty;
 
+  const identityProbe = options.processIdentity ?? defaultProcessIdentity;
+  const identityCache = new Map<number, ProcessIdentity | undefined>();
+  const processIdentity = (pid: number): ProcessIdentity | undefined => {
+    if (!identityCache.has(pid)) identityCache.set(pid, identityProbe(pid));
+    return identityCache.get(pid);
+  };
   const result = await withReconcileLock(async (): Promise<ReconcileResult> => {
     const pidAlive = options.pidAlive ?? defaultPidAlive;
     const now = options.now ?? new Date();
@@ -212,7 +299,7 @@ export async function reconcileIronCurtainDockerResources(
 
     const managedContainers = await docker.listContainers?.({ labelFilter: `${IRONCURTAIN_MANAGED_LABEL}=true` });
     for (const container of managedContainers ?? []) {
-      if (ownerIsAlive(container.labels, pidAlive)) {
+      if (ownerIsAlive(container.labels, pidAlive, processIdentity)) {
         retainedActiveResources++;
         continue;
       }
@@ -240,7 +327,7 @@ export async function reconcileIronCurtainDockerResources(
       const legacy = !managed && LEGACY_NETWORK_RE.test(network.name);
       if (!managed && !legacy) continue;
 
-      if (managed && ownerIsAlive(network.labels, pidAlive)) {
+      if (managed && ownerIsAlive(network.labels, pidAlive, processIdentity)) {
         retainedActiveResources++;
         continue;
       }
@@ -276,8 +363,22 @@ export async function reconcileIronCurtainDockerResources(
     }
 
     return { removedContainers, removedNetworks, retainedActiveResources, skippedUnsafeNetworks };
-  });
+  }, processIdentity);
   return result ?? empty;
+}
+
+/** Startup/retry reconciliation must never become a Docker session prerequisite. */
+export async function reconcileIronCurtainDockerResourcesBestEffort(
+  docker: ContainerRuntime,
+  context: string,
+): Promise<void> {
+  try {
+    await reconcileIronCurtainDockerResources(docker);
+  } catch (error) {
+    logger.warn(
+      `[docker-gc] ${context} reconciliation skipped: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 interface Ipv4Cidr {
@@ -332,6 +433,46 @@ export function dockerAllocationPoolForSubnet(subnet: string): string {
       return parsed !== undefined && cidrsOverlap(candidate, parsed);
     }) ?? subnet
   );
+}
+
+export class InternalNetworkConnectivityError extends Error {
+  constructor(
+    message: string,
+    readonly subnet?: string,
+  ) {
+    super(message);
+    this.name = 'InternalNetworkConnectivityError';
+  }
+}
+
+export async function withInternalNetworkAllocationRetry<T>(
+  options: {
+    readonly maxAttempts: number;
+    readonly description: string;
+    readonly reconcile?: () => Promise<void>;
+  },
+  runAttempt: (excludedSubnets: ReadonlySet<string>, attempt: number) => Promise<T>,
+): Promise<T> {
+  const excludedSubnets = new Set<string>();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
+    try {
+      return await runAttempt(excludedSubnets, attempt);
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof InternalNetworkConnectivityError) || !error.subnet || attempt === options.maxAttempts) {
+        throw error;
+      }
+      const rejectedPool = dockerAllocationPoolForSubnet(error.subnet);
+      excludedSubnets.add(rejectedPool);
+      logger.warn(
+        `${options.description} ${error.subnet} failed its end-to-end checks; rejecting ${rejectedPool} and ` +
+          `retrying with another allocation (${attempt}/${options.maxAttempts})`,
+      );
+      await options.reconcile?.();
+    }
+  }
+  throw lastError;
 }
 
 function* candidateSubnets(name: string): Generator<string> {

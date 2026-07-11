@@ -85,6 +85,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+async function inspectDockerObjects(
+  exec: ExecFileFn,
+  kind: 'network' | 'container',
+  ids: readonly string[],
+): Promise<readonly Record<string, unknown>[]> {
+  if (ids.length === 0) return [];
+  try {
+    const { stdout } = await exec('docker', [kind, 'inspect', ...ids], {
+      timeout: 30_000,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const parsed = JSON.parse(stdout) as unknown;
+    if (!Array.isArray(parsed)) throw new Error(`Unexpected docker ${kind} inspect result: expected array`);
+    return parsed.filter(isRecord);
+  } catch (error) {
+    const disappeared = isExecError(error) && /not found|no such (?:network|container|object)/i.test(error.stderr);
+    if (!disappeared) throw error;
+    if (ids.length === 1) return [];
+
+    // A resource disappeared between `docker ... ls` and inspect. Split the
+    // failed batch to retain every object that still exists without masking
+    // unrelated daemon/permission failures.
+    const middle = Math.ceil(ids.length / 2);
+    const left = await inspectDockerObjects(exec, kind, ids.slice(0, middle));
+    const right = await inspectDockerObjects(exec, kind, ids.slice(middle));
+    return [...left, ...right];
+  }
+}
+
 function parseDockerImageInfo(raw: unknown): DockerImageInfo {
   if (!isRecord(raw)) {
     throw new Error('Unexpected docker image inspect result: expected object');
@@ -680,13 +709,8 @@ export function createDockerManager(
         .map((line) => line.trim())
         .filter(Boolean);
       if (ids.length === 0) return [];
-      const { stdout } = await exec('docker', ['network', 'inspect', ...ids], {
-        timeout: 30_000,
-        maxBuffer: 50 * 1024 * 1024,
-      });
-      const parsed = JSON.parse(stdout) as unknown;
-      if (!Array.isArray(parsed)) throw new Error('Unexpected docker network inspect result: expected array');
-      return parsed.filter(isRecord).map((entry): DockerNetworkInfo => {
+      const inspected = await inspectDockerObjects(exec, 'network', ids);
+      return inspected.map((entry): DockerNetworkInfo => {
         const ipam = isRecord(entry.IPAM) && Array.isArray(entry.IPAM.Config) ? entry.IPAM.Config : [];
         const subnets = ipam
           .filter(isRecord)
@@ -716,13 +740,8 @@ export function createDockerManager(
         .map((line) => line.trim())
         .filter(Boolean);
       if (ids.length === 0) return [];
-      const { stdout } = await exec('docker', ['container', 'inspect', ...ids], {
-        timeout: 30_000,
-        maxBuffer: 50 * 1024 * 1024,
-      });
-      const parsed = JSON.parse(stdout) as unknown;
-      if (!Array.isArray(parsed)) throw new Error('Unexpected docker container inspect result: expected array');
-      return parsed.filter(isRecord).map((entry): DockerContainerInfo => {
+      const inspected = await inspectDockerObjects(exec, 'container', ids);
+      return inspected.map((entry): DockerContainerInfo => {
         const config = isRecord(entry.Config) ? entry.Config : {};
         const state = isRecord(entry.State) ? entry.State : {};
         const rawName = typeof entry.Name === 'string' ? entry.Name : '';

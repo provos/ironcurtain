@@ -224,6 +224,21 @@ describe('TcpServerTransport', () => {
     firstClient.destroy();
   });
 
+  it('bounds idle unclassified connections and replaces older pending clients', async () => {
+    transport = new TcpServerTransport('127.0.0.1', 0, { firstByteTimeoutMs: 50 });
+    await transport.start();
+
+    const firstPending = await connectToTcp('127.0.0.1', transport.port);
+    const firstClosed = new Promise<void>((resolve) => firstPending.once('close', () => resolve()));
+    clientSocket = await connectToTcp('127.0.0.1', transport.port);
+    await firstClosed;
+
+    const secondClosed = new Promise<void>((resolve) => clientSocket!.once('close', () => resolve()));
+    await secondClosed;
+    expect(firstPending.destroyed).toBe(true);
+    expect(clientSocket.destroyed).toBe(true);
+  });
+
   it('answers a side-effect-free health probe without evicting the MCP client', async () => {
     transport = new TcpServerTransport('127.0.0.1', 0);
     const { messages, waitForMessages } = createMessageCollector(transport);

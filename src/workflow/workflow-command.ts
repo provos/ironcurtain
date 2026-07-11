@@ -48,6 +48,7 @@ import {
 import { runRunState } from './run-state-command.js';
 import { runDaemonGateCommand } from './daemon-gate-commands.js';
 import { sweepContainerSnapshots } from './container-snapshots.js';
+import { installWorkflowShutdownSignals } from './shutdown-signals.js';
 import {
   formatDiagnostic,
   printDiagnostics,
@@ -236,16 +237,9 @@ async function runStart(args: string[]): Promise<void> {
   orchestrator.onEvent(printLifecycleEvent);
 
   const controller = new AbortController();
-  let shutdownSignal: NodeJS.Signals | undefined;
-  const handleShutdownSignal = (signal: NodeJS.Signals): void => {
-    if (shutdownSignal) return;
-    shutdownSignal = signal;
-    writeStderr(`\n[workflow] Caught ${signal}, shutting down...`);
-    controller.abort();
-  };
-  process.on('SIGINT', handleShutdownSignal);
-  process.on('SIGTERM', handleShutdownSignal);
-  process.on('SIGHUP', handleShutdownSignal);
+  const uninstallShutdownSignals = installWorkflowShutdownSignals(controller, {
+    onFirstSignal: (signal) => writeStderr(`\n[workflow] Caught ${signal}, shutting down...`),
+  });
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -281,9 +275,7 @@ async function runStart(args: string[]): Promise<void> {
     // Joins any in-flight teardown (see WorkflowInstance.teardownPromise)
     // so the process.exit below never strands infrastructure.
     await orchestrator.shutdownAll().catch(() => {});
-    process.off('SIGINT', handleShutdownSignal);
-    process.off('SIGTERM', handleShutdownSignal);
-    process.off('SIGHUP', handleShutdownSignal);
+    uninstallShutdownSignals();
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
   process.exit(exitCode);
@@ -365,16 +357,9 @@ async function runResume(args: string[]): Promise<void> {
   orchestrator.onEvent(printLifecycleEvent);
 
   const controller = new AbortController();
-  let shutdownSignal: NodeJS.Signals | undefined;
-  const handleShutdownSignal = (signal: NodeJS.Signals): void => {
-    if (shutdownSignal) return;
-    shutdownSignal = signal;
-    writeStderr(`\n[workflow] Caught ${signal}, shutting down...`);
-    controller.abort();
-  };
-  process.on('SIGINT', handleShutdownSignal);
-  process.on('SIGTERM', handleShutdownSignal);
-  process.on('SIGHUP', handleShutdownSignal);
+  const uninstallShutdownSignals = installWorkflowShutdownSignals(controller, {
+    onFirstSignal: (signal) => writeStderr(`\n[workflow] Caught ${signal}, shutting down...`),
+  });
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -400,9 +385,7 @@ async function runResume(args: string[]): Promise<void> {
   } finally {
     rl.close();
     await orchestrator.shutdownAll().catch(() => {});
-    process.off('SIGINT', handleShutdownSignal);
-    process.off('SIGTERM', handleShutdownSignal);
-    process.off('SIGHUP', handleShutdownSignal);
+    uninstallShutdownSignals();
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
   process.exit(exitCode);

@@ -35,13 +35,14 @@ import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
-import { buildAgentUidRemap, buildUdsSocketMounts, InternalNetworkConnectivityError } from './docker-infrastructure.js';
+import { buildAgentUidRemap, buildUdsSocketMounts } from './docker-infrastructure.js';
 import {
   createIronCurtainInternalNetwork,
-  dockerAllocationPoolForSubnet,
+  InternalNetworkConnectivityError,
   managedResourceLabels,
-  reconcileIronCurtainDockerResources,
+  reconcileIronCurtainDockerResourcesBestEffort,
   releaseManagedResourceLease,
+  withInternalNetworkAllocationRetry,
 } from './docker-resource-lifecycle.js';
 
 export interface PtySessionOptions {
@@ -214,25 +215,28 @@ function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): vo
  * Claude Code, attaches the terminal, and blocks until the session ends.
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
-  const excludedSubnets = new Set<string>();
-  const maxAttempts = 4;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      await runPtySessionAttempt(options, excludedSubnets);
-      return;
-    } catch (error) {
-      if (!(error instanceof InternalNetworkConnectivityError) || !error.subnet || attempt === maxAttempts) throw error;
-      const rejectedPool = dockerAllocationPoolForSubnet(error.subnet);
-      excludedSubnets.add(rejectedPool);
-      logger.warn(
-        `PTY internal Docker network ${error.subnet} failed its end-to-end checks; rejecting ${rejectedPool} and ` +
-          `retrying with another allocation (${attempt}/${maxAttempts})`,
-      );
-    }
-  }
+  let retryDocker: ContainerRuntime | undefined;
+  await withInternalNetworkAllocationRetry(
+    {
+      maxAttempts: 4,
+      description: 'PTY internal Docker network',
+      reconcile: async () => {
+        if (retryDocker) await reconcileIronCurtainDockerResourcesBestEffort(retryDocker, 'PTY internal network retry');
+      },
+    },
+    (excludedSubnets, attempt) =>
+      runPtySessionAttempt(options, excludedSubnets, attempt, (docker) => {
+        retryDocker = docker;
+      }),
+  );
 }
 
-async function runPtySessionAttempt(options: PtySessionOptions, excludedSubnets: ReadonlySet<string>): Promise<void> {
+async function runPtySessionAttempt(
+  options: PtySessionOptions,
+  excludedSubnets: ReadonlySet<string>,
+  attempt: number,
+  onDockerReady: (docker: ContainerRuntime) => void,
+): Promise<void> {
   const {
     prepareDockerInfrastructure,
     writeAptProxyConfigViaExec,
@@ -396,6 +400,7 @@ async function runPtySessionAttempt(options: PtySessionOptions, excludedSubnets:
     }
 
     ({ docker, proxy, mitmProxy, useTcp } = infra);
+    onDockerReady(docker);
     const {
       adapter,
       fakeKeys,
@@ -462,7 +467,8 @@ async function runPtySessionAttempt(options: PtySessionOptions, excludedSubnets:
     // Build container configuration
     const shortId = getBundleShortId(bundleId);
     const { quote } = await import('shell-quote');
-    const internalNetworkName = getInternalNetworkName(shortId);
+    const baseInternalNetworkName = getInternalNetworkName(shortId);
+    const internalNetworkName = attempt === 1 ? baseInternalNetworkName : `${baseInternalNetworkName}-a${attempt}`;
     const managedLabels = infra.runtimeKind === 'docker' ? managedResourceLabels(bundleId) : undefined;
     const resourceLabels = managedLabels
       ? Object.fromEntries(Object.entries(managedLabels).filter(([key]) => key !== 'ironcurtain.bundle'))
@@ -480,7 +486,7 @@ async function runPtySessionAttempt(options: PtySessionOptions, excludedSubnets:
     const mainContainerName = `ironcurtain-pty-${shortId}`;
 
     if (infra.runtimeKind === 'docker') {
-      await reconcileIronCurtainDockerResources(docker);
+      await reconcileIronCurtainDockerResourcesBestEffort(docker, 'PTY session startup');
     }
 
     // Remove stale main container from a crashed previous session (same session
@@ -725,7 +731,9 @@ async function runPtySessionAttempt(options: PtySessionOptions, excludedSubnets:
       try {
         await checkInternalNetworkConnectivity(docker, containerId, proxy.port, mitmAddr.port);
       } catch (error) {
-        if (error instanceof InternalNetworkConnectivityError) error.subnet = allocatedNetworkSubnet;
+        if (error instanceof InternalNetworkConnectivityError) {
+          throw new InternalNetworkConnectivityError(error.message, allocatedNetworkSubnet);
+        }
         throw error;
       }
     }

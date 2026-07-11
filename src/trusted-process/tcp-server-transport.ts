@@ -29,6 +29,8 @@ export interface TcpServerTransportOptions {
    * reach the unauthenticated MCP endpoint.
    */
   readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+  /** Maximum time an unclassified connection may wait to send its first bytes. */
+  readonly firstByteTimeoutMs?: number;
 }
 
 /** Side-effect-free liveness exchange used by the Docker sidecar startup gate. */
@@ -39,8 +41,10 @@ export class TcpServerTransport implements Transport {
   private readonly host: string;
   private readonly requestedPort: number;
   private readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+  private readonly firstByteTimeoutMs: number;
   private server: NetServer | null = null;
   private activeSocket: Socket | null = null;
+  private pendingSocket: Socket | null = null;
   private readBuffer = new ReadBuffer();
   private _port: number | null = null;
 
@@ -52,6 +56,7 @@ export class TcpServerTransport implements Transport {
     this.host = host;
     this.requestedPort = port;
     this.allowRemoteAddress = options?.allowRemoteAddress;
+    this.firstByteTimeoutMs = options?.firstByteTimeoutMs ?? 5_000;
   }
 
   /** The actual port the server is listening on. Only valid after start(). */
@@ -107,6 +112,8 @@ export class TcpServerTransport implements Transport {
   async close(): Promise<void> {
     this.activeSocket?.destroy();
     this.activeSocket = null;
+    this.pendingSocket?.destroy();
+    this.pendingSocket = null;
 
     const server = this.server;
     if (server) {
@@ -133,6 +140,12 @@ export class TcpServerTransport implements Transport {
 
     // Delay claiming the single MCP connection until the first bytes arrive.
     // A health probe is answered locally and never evicts the real client.
+    // Permit only one unclassified connection, and bound how long it can hold
+    // resources without identifying itself as MCP traffic or a health probe.
+    if (this.pendingSocket && !this.pendingSocket.destroyed) this.pendingSocket.destroy();
+    this.pendingSocket = socket;
+    const firstByteTimer = setTimeout(() => socket.destroy(), this.firstByteTimeoutMs);
+    firstByteTimer.unref();
     let pending = Buffer.alloc(0);
     const inspectFirstBytes = (chunk: Buffer): void => {
       pending = Buffer.concat([pending, chunk]);
@@ -141,6 +154,8 @@ export class TcpServerTransport implements Transport {
         return;
       }
       socket.off('data', inspectFirstBytes);
+      clearTimeout(firstByteTimer);
+      if (this.pendingSocket === socket) this.pendingSocket = null;
       if (text === TCP_TRANSPORT_HEALTH_REQUEST) {
         socket.end(TCP_TRANSPORT_HEALTH_RESPONSE);
         return;
@@ -160,6 +175,8 @@ export class TcpServerTransport implements Transport {
     socket.on('data', inspectFirstBytes);
 
     socket.on('close', () => {
+      clearTimeout(firstByteTimer);
+      if (this.pendingSocket === socket) this.pendingSocket = null;
       if (this.activeSocket === socket) {
         this.activeSocket = null;
       }
