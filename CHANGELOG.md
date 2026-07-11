@@ -4,18 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.13.0] - 2026-07-11
+
 ### Features
 
 - **First-class OpenRouter provider profiles** — named profiles in `config.json` `modelProviders` route Docker agents (Claude Code, Codex, Goose) through openrouter.ai with a bound model map and per-profile key, with no LiteLLM sidecar (the implicit `native` profile remains the fallback). GLM prompt caching is preserved via a MITM soft `z-ai` provider pin plus stable session affinity, and billing uses the authoritative `usage.cost` reported by OpenRouter rather than the CLI self-report. A profile is selectable across three surfaces — the global `modelProviders.default`, `ironcurtain start --provider-profile <name>`, and the mux `/new` picker — and is configurable via `ironcurtain config` → Model Providers and the web UI Settings view (#361).
+- **Live web terminal for Docker Agent sessions** — the Sessions view now runs real PTY-backed agent sessions through an xterm.js terminal, including terminal state serialization, reconnect/replay, trusted-input forwarding, and escalation events. The former chatbox session mode has been removed so the web UI and mux share the same interactive terminal model (#366, #368).
+- **Apple container UDS isolation** — Apple `container` 1.1.0 and newer now use the same Unix-domain-socket topology as Linux Docker, with `--network none`, per-socket host/guest relays, and no host service listeners exposed on `0.0.0.0` (#371).
+- **Docker resource garbage collection** — `ironcurtain gc` can inspect orphaned IronCurtain containers and networks in dry-run mode or explicitly reclaim them, using the same crash-recovery reconciler invoked during session startup (#380).
 
 ### Behavior changes
 
 - **Node.js 26 support** — bumped the V8 sandbox dependency `isolated-vm` to 7.0.0 (via an npm `override`, since it is transitive through `@utcp/code-mode`) so Code Mode initializes on Node 26; `isolated-vm` 6.x has no Node 26 prebuild and fails to compile against Node 26's V8. Supported lines are now the even-numbered major lines **22, 24, and 26**: Node 24 and 26 install prebuilt native binaries, while Node 22 compiles `isolated-vm` from source at install (no prebuilt binary ships for it, so a C/C++ toolchain is required). Odd non-LTS lines (23, 25) run within `engines` (`>=22.0.0 <27`) but are untested — `ironcurtain doctor` reports them as a warning, not an `ok`. CI runs Node 24 and 26 on every PR and adds a Node 22 source-compile job on pushes to master (#356, #358).
+- **Claude Code workflow execution** — subagents run synchronously and Claude Code's own streaming idle watchdog is disabled. IronCurtain's workflow budgets remain the timeout authority, avoiding false “Response stalled mid-stream” failures during long tool-use turns behind the MITM proxy (#372, #376).
+- **Runtime-capability-based workflow snapshots** — workflow snapshot creation and cleanup now depend on the selected runtime's declared snapshot capability. Docker opts in; Apple `container` skips unsupported image commits cleanly (#369).
 
 ### Fixes
 
-- **Crash-safe Docker network lifecycle on macOS** — Docker containers and per-bundle networks now carry owner leases and labels, and later sessions reconcile resources left by `SIGKILL` or host crashes. macOS Docker uses collision-checked `/29` allocations outside `192.168/16`, retries a different subnet when end-to-end MCP/MITM routing checks fail, and handles `SIGTERM`/`SIGHUP` during workflow shutdown. `ironcurtain gc` exposes the same reconciler as a dry-run or explicit cleanup command.
-- **MITM proxy certificate generation on Node 22 / OpenSSL 3.0** — `randomSerialNumber()` produced a 16-byte serial with no DER sign padding, so ~50% of generated certificates had a leading byte ≥ `0x80` and were encoded as a _negative_ ASN.1 INTEGER. Strict OpenSSL builds (Node 22 / OpenSSL 3.0.x) reject these at cert-load with `asn1 encoding routines::illegal padding`, so MITM cert generation (CA and every leaf cert) failed intermittently on Node 22; Node 26's OpenSSL 3.6 tolerated it. Serials are now always positive DER INTEGERs.
+- **Crash-safe Docker network lifecycle on macOS** — Docker containers and per-bundle networks now carry owner leases and labels, and later sessions reconcile resources left by `SIGKILL` or host crashes. macOS Docker uses collision-checked `/29` allocations outside `192.168/16`, retries a different subnet when end-to-end MCP/MITM routing checks fail, and handles `SIGTERM`/`SIGHUP` with bounded shutdown escalation (#380).
+- **Docker writable-storage exhaustion diagnostics** — session startup now probes the container's writable layer before reporting “Session ready,” gives targeted `docker system df` guidance for `ENOSPC`, and treats a zero-exit/no-output Claude Code turn as a hard failure without poisoning the next conversation resume (#381).
+- **Debian package validation and auditing** — plain-HTTP apt traffic now passes through the same denylist validation and `package-audit.jsonl` path as HTTPS registry traffic, closing a path where denied `.deb` packages could install without an audit record (#355).
+- **MITM proxy certificate generation on Node 22 / OpenSSL 3.0** — serial numbers are now always encoded as positive DER integers, eliminating intermittent `asn1 encoding routines::illegal padding` failures when generating CA or leaf certificates (#360).
+- **Workflow daemon-gate startup under tsx** — detached daemon launches preserve `process.execArgv`, so `--ensure-daemon` works from the documented `tsx src/cli.ts` development entry point instead of timing out (#354).
+- **MCP stdio shutdown reliability** — benign `EPIPE` and `ECONNRESET` errors on closing stdio transports no longer become unhandled worker failures (#353).
+
+### Dependencies
+
+- Bumped the AI SDK providers, Anthropic sandbox runtime, MCP/UTCP packages, XState, YAML, Zod, jsdom, and related production dependencies.
+- Added `@xterm/addon-serialize` for terminal reconnection and refreshed the web UI dependency set.
+- Refreshed TypeScript, ESLint, Prettier, tsx, lint-staged, and other development tooling.
+
+### Internal
+
+- Added a deterministic MITM stream-delay harness and documented the streaming-watchdog investigation (#379).
+- Hardened macOS CI against benign teardown races and native dependency download failures (#374, #375).
+- Added packaged README documentation for the Evolve and Vulnerability Discovery workflows and expanded agent-memory architecture notes (#373).
 
 ## [0.12.0] - 2026-06-26
 
@@ -516,6 +541,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.13.0]: https://github.com/provos/ironcurtain/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/provos/ironcurtain/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/provos/ironcurtain/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/provos/ironcurtain/compare/v0.9.1...v0.10.0
