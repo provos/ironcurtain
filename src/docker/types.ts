@@ -53,6 +53,9 @@ export interface DockerContainerConfig {
    */
   readonly scopeLabel?: string;
 
+  /** Additional runtime ownership/housekeeping labels. */
+  readonly labels?: Readonly<Record<string, string>>;
+
   /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.3"]). When set, suppresses the default host-gateway mapping. */
   readonly extraHosts?: readonly string[];
 
@@ -176,6 +179,32 @@ export interface DockerImageInfo {
   readonly created: string;
 }
 
+/** Docker network state used by crash reconciliation and subnet allocation. */
+export interface DockerNetworkInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly created: string;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly subnets: readonly string[];
+  readonly containerIds: readonly string[];
+}
+
+/** Docker container state used by crash reconciliation. */
+export interface DockerContainerInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly created: string;
+  readonly running: boolean;
+  readonly labels: Readonly<Record<string, string>>;
+}
+
+export interface DockerNetworkCreateOptions {
+  readonly internal?: boolean;
+  readonly subnet?: string;
+  readonly gateway?: string;
+  readonly labels?: Readonly<Record<string, string>>;
+}
+
 /**
  * Manages container lifecycle for agent sessions.
  *
@@ -268,10 +297,19 @@ export interface ContainerRuntime {
   probeImageVersion?(image: string, command: readonly string[]): Promise<string | undefined>;
 
   /** Create a Docker network. No-op if it already exists. */
-  createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }): Promise<void>;
+  createNetwork(name: string, options?: DockerNetworkCreateOptions): Promise<void>;
+
+  /** Enumerate Docker networks. Optional for non-Docker runtimes. */
+  listNetworks?(): Promise<readonly DockerNetworkInfo[]>;
+
+  /** Enumerate Docker containers, including stopped containers. Optional for non-Docker runtimes. */
+  listContainers?(options?: { readonly labelFilter?: string }): Promise<readonly DockerContainerInfo[]>;
 
   /** Remove a Docker network. Ignores errors (e.g., already removed). */
   removeNetwork(name: string): Promise<void>;
+
+  /** Check whether a named network still exists. Optional for non-Docker runtimes. */
+  networkExists?(name: string): Promise<boolean>;
 
   /** Pull a Docker image from a registry. */
   pullImage(image: string): Promise<void>;

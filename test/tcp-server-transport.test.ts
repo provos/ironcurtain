@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { connect as netConnect, type Socket } from 'node:net';
-import { TcpServerTransport } from '../src/trusted-process/tcp-server-transport.js';
+import {
+  TCP_TRANSPORT_HEALTH_REQUEST,
+  TCP_TRANSPORT_HEALTH_RESPONSE,
+  TcpServerTransport,
+} from '../src/trusted-process/tcp-server-transport.js';
 import { serializeMessage, deserializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 
@@ -218,5 +222,33 @@ describe('TcpServerTransport', () => {
     });
 
     firstClient.destroy();
+  });
+
+  it('answers a side-effect-free health probe without evicting the MCP client', async () => {
+    transport = new TcpServerTransport('127.0.0.1', 0);
+    const { messages, waitForMessages } = createMessageCollector(transport);
+    await transport.start();
+
+    clientSocket = await connectToTcp('127.0.0.1', transport.port);
+    sendMessage(clientSocket, { jsonrpc: '2.0', id: 1, method: 'setup' });
+    await waitForMessages(1);
+
+    const probe = await connectToTcp('127.0.0.1', transport.port);
+    const response = new Promise<string>((resolve, reject) => {
+      let received = '';
+      probe.on('data', (chunk: Buffer) => {
+        received += chunk.toString();
+      });
+      probe.on('end', () => resolve(received));
+      probe.on('error', reject);
+    });
+    // Split the magic request to cover TCP fragmentation.
+    probe.write(TCP_TRANSPORT_HEALTH_REQUEST.slice(0, 8));
+    probe.write(TCP_TRANSPORT_HEALTH_REQUEST.slice(8));
+    expect(await response).toBe(TCP_TRANSPORT_HEALTH_RESPONSE);
+
+    sendMessage(clientSocket, { jsonrpc: '2.0', id: 2, method: 'still-alive' });
+    await waitForMessages(2);
+    expect(messages[1]).toMatchObject({ id: 2, method: 'still-alive' });
   });
 });

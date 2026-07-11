@@ -14,7 +14,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixes
 
-- **MITM proxy certificate generation on Node 22 / OpenSSL 3.0** — `randomSerialNumber()` produced a 16-byte serial with no DER sign padding, so ~50% of generated certificates had a leading byte ≥ `0x80` and were encoded as a *negative* ASN.1 INTEGER. Strict OpenSSL builds (Node 22 / OpenSSL 3.0.x) reject these at cert-load with `asn1 encoding routines::illegal padding`, so MITM cert generation (CA and every leaf cert) failed intermittently on Node 22; Node 26's OpenSSL 3.6 tolerated it. Serials are now always positive DER INTEGERs.
+- **Crash-safe Docker network lifecycle on macOS** — Docker containers and per-bundle networks now carry owner leases and labels, and later sessions reconcile resources left by `SIGKILL` or host crashes. macOS Docker uses collision-checked `/29` allocations outside `192.168/16`, retries a different subnet when end-to-end MCP/MITM routing checks fail, and handles `SIGTERM`/`SIGHUP` during workflow shutdown. `ironcurtain gc` exposes the same reconciler as a dry-run or explicit cleanup command.
+- **MITM proxy certificate generation on Node 22 / OpenSSL 3.0** — `randomSerialNumber()` produced a 16-byte serial with no DER sign padding, so ~50% of generated certificates had a leading byte ≥ `0x80` and were encoded as a _negative_ ASN.1 INTEGER. Strict OpenSSL builds (Node 22 / OpenSSL 3.0.x) reject these at cert-load with `asn1 encoding routines::illegal padding`, so MITM cert generation (CA and every leaf cert) failed intermittently on Node 22; Node 26's OpenSSL 3.6 tolerated it. Serials are now always positive DER INTEGERs.
 
 ## [0.12.0] - 2026-06-26
 

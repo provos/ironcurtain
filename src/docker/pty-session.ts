@@ -35,7 +35,14 @@ import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
-import { buildAgentUidRemap, buildUdsSocketMounts } from './docker-infrastructure.js';
+import { buildAgentUidRemap, buildUdsSocketMounts, InternalNetworkConnectivityError } from './docker-infrastructure.js';
+import {
+  createIronCurtainInternalNetwork,
+  dockerAllocationPoolForSubnet,
+  managedResourceLabels,
+  reconcileIronCurtainDockerResources,
+  releaseManagedResourceLease,
+} from './docker-resource-lifecycle.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -207,8 +214,31 @@ function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): vo
  * Claude Code, attaches the terminal, and blocks until the session ends.
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
-  const { prepareDockerInfrastructure, writeAptProxyConfigViaExec, checkHostOnlyConnectivity } =
-    await import('./docker-infrastructure.js');
+  const excludedSubnets = new Set<string>();
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await runPtySessionAttempt(options, excludedSubnets);
+      return;
+    } catch (error) {
+      if (!(error instanceof InternalNetworkConnectivityError) || !error.subnet || attempt === maxAttempts) throw error;
+      const rejectedPool = dockerAllocationPoolForSubnet(error.subnet);
+      excludedSubnets.add(rejectedPool);
+      logger.warn(
+        `PTY internal Docker network ${error.subnet} failed its end-to-end checks; rejecting ${rejectedPool} and ` +
+          `retrying with another allocation (${attempt}/${maxAttempts})`,
+      );
+    }
+  }
+}
+
+async function runPtySessionAttempt(options: PtySessionOptions, excludedSubnets: ReadonlySet<string>): Promise<void> {
+  const {
+    prepareDockerInfrastructure,
+    writeAptProxyConfigViaExec,
+    checkHostOnlyConnectivity,
+    checkInternalNetworkConnectivity,
+  } = await import('./docker-infrastructure.js');
 
   // When resuming, validate the snapshot and reuse the existing session directory
   const resumeSnapshot = options.resumeSessionId
@@ -291,6 +321,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
   let useTcp: boolean;
   let networkName: string | null = null;
+  let allocatedNetworkSubnet: string | undefined;
   // Flushes the trajectory-capture session (clean, non-poisoned session-end)
   // before infra teardown. Assigned inside the try once the bundle exists;
   // invoked in finally. Undefined when capture is disabled. PTY mode tears
@@ -432,6 +463,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     const shortId = getBundleShortId(bundleId);
     const { quote } = await import('shell-quote');
     const internalNetworkName = getInternalNetworkName(shortId);
+    const managedLabels = infra.runtimeKind === 'docker' ? managedResourceLabels(bundleId) : undefined;
+    const resourceLabels = managedLabels
+      ? Object.fromEntries(Object.entries(managedLabels).filter(([key]) => key !== 'ironcurtain.bundle'))
+      : undefined;
     let env: Record<string, string>;
     let network: string | null;
     let mounts: { source: string; target: string; readonly: boolean }[];
@@ -443,6 +478,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // instead of bind-mounted — see writeAptProxyConfigViaExec.
     let execAptProxyUrl: string | undefined;
     const mainContainerName = `ironcurtain-pty-${shortId}`;
+
+    if (infra.runtimeKind === 'docker') {
+      await reconcileIronCurtainDockerResources(docker);
+    }
 
     // Remove stale main container from a crashed previous session (same session
     // ID means same deterministic name, which would conflict on docker create).
@@ -492,11 +531,13 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       const aptProxyPath = resolve(orientationDir, 'apt-proxy.conf');
       writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
 
-      await docker.createNetwork(internalNetworkName, {
-        internal: true,
+      const allocatedNetwork = await createIronCurtainInternalNetwork(docker, internalNetworkName, bundleId, {
+        excludedSubnets,
       });
+      allocatedNetworkSubnet = allocatedNetwork.subnet;
       network = internalNetworkName;
       networkName = internalNetworkName;
+      logger.info(`Allocated internal Docker network ${internalNetworkName} at ${allocatedNetwork.subnet}`);
 
       const socatImage = 'alpine/socat';
       if (!(await docker.imageExists(socatImage))) {
@@ -527,6 +568,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         // PTY sessions are standalone (no workflow/scope), so only the
         // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
         bundleLabel: bundleId,
+        labels: resourceLabels,
         ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
         command: [
           '-c',
@@ -652,6 +694,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       // PTY sessions are standalone (no workflow/scope), so only the
       // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
       bundleLabel: bundleId,
+      labels: resourceLabels,
       resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
       extraHosts,
       publishSockets,
@@ -678,6 +721,13 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // reachable, internet egress blocked) before attaching.
     if (infra.topology === 'tcp-hostonly' && infra.hostOnlyNetwork !== undefined && proxy.port !== undefined) {
       await checkHostOnlyConnectivity(docker, containerId, infra.hostOnlyNetwork.gateway, proxy.port);
+    } else if (infra.topology === 'tcp-sidecar' && proxy.port !== undefined && mitmAddr.port !== undefined) {
+      try {
+        await checkInternalNetworkConnectivity(docker, containerId, proxy.port, mitmAddr.port);
+      } catch (error) {
+        if (error instanceof InternalNetworkConnectivityError) error.subnet = allocatedNetworkSubnet;
+        throw error;
+      }
     }
 
     // Write session registration for the escalation listener
@@ -793,6 +843,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         networkName,
       });
     }
+    releaseManagedResourceLease(effectiveSessionId);
 
     // Stop proxies
     await mitmProxy?.stop().catch(() => {});

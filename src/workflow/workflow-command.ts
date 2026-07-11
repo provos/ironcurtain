@@ -236,10 +236,16 @@ async function runStart(args: string[]): Promise<void> {
   orchestrator.onEvent(printLifecycleEvent);
 
   const controller = new AbortController();
-  process.on('SIGINT', () => {
-    writeStderr(`\n[workflow] Caught SIGINT, shutting down...`);
+  let shutdownSignal: NodeJS.Signals | undefined;
+  const handleShutdownSignal = (signal: NodeJS.Signals): void => {
+    if (shutdownSignal) return;
+    shutdownSignal = signal;
+    writeStderr(`\n[workflow] Caught ${signal}, shutting down...`);
     controller.abort();
-  });
+  };
+  process.on('SIGINT', handleShutdownSignal);
+  process.on('SIGTERM', handleShutdownSignal);
+  process.on('SIGHUP', handleShutdownSignal);
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -247,8 +253,9 @@ async function runStart(args: string[]): Promise<void> {
   // fully drains first. Calling process.exit() inside the try — as this code
   // used to — terminates the process synchronously and cuts off the async
   // teardown in the finally, orphaning each run's per-session --internal
-  // Docker network (which has no stale-reaper) until Docker's address pools
-  // are exhausted. The apple-container backend loses this race every time
+  // Docker network. Crash reconciliation now repairs that state on the next
+  // startup, but graceful exits must still drain teardown rather than relying
+  // on recovery. The apple-container backend loses this race every time
   // (slower VM shutdown), so the fix matters there in particular.
   // Definitely assigned before the post-finally `process.exit`: the only way
   // to skip that assignment is a throw, which propagates past it.
@@ -274,6 +281,9 @@ async function runStart(args: string[]): Promise<void> {
     // Joins any in-flight teardown (see WorkflowInstance.teardownPromise)
     // so the process.exit below never strands infrastructure.
     await orchestrator.shutdownAll().catch(() => {});
+    process.off('SIGINT', handleShutdownSignal);
+    process.off('SIGTERM', handleShutdownSignal);
+    process.off('SIGHUP', handleShutdownSignal);
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
   process.exit(exitCode);
@@ -355,10 +365,16 @@ async function runResume(args: string[]): Promise<void> {
   orchestrator.onEvent(printLifecycleEvent);
 
   const controller = new AbortController();
-  process.on('SIGINT', () => {
-    writeStderr(`\n[workflow] Caught SIGINT, shutting down...`);
+  let shutdownSignal: NodeJS.Signals | undefined;
+  const handleShutdownSignal = (signal: NodeJS.Signals): void => {
+    if (shutdownSignal) return;
+    shutdownSignal = signal;
+    writeStderr(`\n[workflow] Caught ${signal}, shutting down...`);
     controller.abort();
-  });
+  };
+  process.on('SIGINT', handleShutdownSignal);
+  process.on('SIGTERM', handleShutdownSignal);
+  process.on('SIGHUP', handleShutdownSignal);
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -384,6 +400,9 @@ async function runResume(args: string[]): Promise<void> {
   } finally {
     rl.close();
     await orchestrator.shutdownAll().catch(() => {});
+    process.off('SIGINT', handleShutdownSignal);
+    process.off('SIGTERM', handleShutdownSignal);
+    process.off('SIGHUP', handleShutdownSignal);
     writeStdout(`${DIM}Artifacts preserved at: ${baseDir}${RESET}`);
   }
   process.exit(exitCode);

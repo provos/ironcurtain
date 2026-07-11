@@ -4,6 +4,7 @@
  */
 
 import type { ContainerRuntime } from './types.js';
+import * as logger from '../logger.js';
 
 /**
  * Stop and remove Docker containers and their per-session network in parallel.
@@ -42,8 +43,17 @@ export async function cleanupContainers(
 
   await Promise.all(cleanups);
 
+  for (const id of [opts.containerId, opts.sidecarContainerId]) {
+    if (id && (await docker.containerExists(id))) {
+      logger.warn(`cleanupContainers: container ${id} still exists after removal`);
+    }
+  }
+
   // Remove per-session internal network after both containers are gone
   if (opts.networkName !== null) {
     await docker.removeNetwork(opts.networkName).catch(() => {});
+    if (docker.networkExists && (await docker.networkExists(opts.networkName))) {
+      logger.warn(`cleanupContainers: network ${opts.networkName} still exists after removal`);
+    }
   }
 }

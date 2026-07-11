@@ -1437,6 +1437,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   }
 
   outerServer.on('request', (req, res) => {
+    // Side-effect-free round-trip probe for the macOS Docker sidecar. This
+    // proves that traffic reached the host proxy, not merely the sidecar's
+    // listening socket. The reserved host is never forwarded upstream.
+    if (req.method === 'GET' && req.url === 'http://ironcurtain.invalid/__ironcurtain/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', Connection: 'close' });
+      res.end('IRONCURTAIN_OK/1\n');
+      return;
+    }
     // Handle plain HTTP proxy requests. HTTP proxy clients send absolute URLs:
     // "GET http://host:port/path HTTP/1.1". We parse the absolute URL into
     // hostname, port, and origin-form path before dispatching.

@@ -23,7 +23,13 @@
  */
 
 import { arch, platform, release } from 'node:os';
-import type { ContainerRuntime, DockerContainerConfig, DockerExecResult, DockerImageInfo } from './types.js';
+import type {
+  ContainerRuntime,
+  DockerContainerConfig,
+  DockerExecResult,
+  DockerImageInfo,
+  DockerNetworkCreateOptions,
+} from './types.js';
 import * as logger from '../logger.js';
 import type { DockerAvailability } from './docker-probe.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
@@ -463,12 +469,12 @@ export function createAppleContainerManager(
       }
     },
 
-    async createNetwork(
-      name: string,
-      options?: { internal?: boolean; subnet?: string; gateway?: string },
-    ): Promise<void> {
+    async createNetwork(name: string, options?: DockerNetworkCreateOptions): Promise<void> {
       if (options?.gateway) {
         throw new Error('apple-container networks do not support an explicit gateway; the runtime assigns it');
+      }
+      if (options?.labels && Object.keys(options.labels).length > 0) {
+        throw new Error('apple-container networks do not support labels');
       }
       try {
         const args = ['network', 'create'];

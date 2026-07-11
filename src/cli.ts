@@ -37,6 +37,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'workflow', description: 'Run multi-agent workflows (start, resume, inspect)' },
     { name: 'observe', description: 'Watch live LLM token output for running sessions' },
     { name: 'doctor', description: 'Diagnose installation, credentials, and MCP server health' },
+    { name: 'gc', description: 'Inspect or reclaim orphaned IronCurtain Docker resources' },
     { name: 'help', description: 'Show this help message' },
   ],
   options: [
@@ -206,6 +207,11 @@ switch (subcommand) {
   case 'doctor': {
     const { runDoctorCommand } = await import('./doctor/doctor-command.js');
     await runDoctorCommand(process.argv.slice(3));
+    break;
+  }
+  case 'gc': {
+    const { runDockerGcCommand } = await import('./docker/gc-command.js');
+    await runDockerGcCommand(process.argv.slice(3));
     break;
   }
   case 'setup-signal': {

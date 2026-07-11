@@ -751,6 +751,37 @@ describe('MitmProxy', () => {
     expect(existsSync(socketPath)).toBe(true);
   });
 
+  it('answers the reserved sidecar health request without upstream access', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath,
+          method: 'GET',
+          path: 'http://ironcurtain.invalid/__ironcurtain/health',
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => {
+            body += chunk;
+          });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    expect(response).toEqual({ status: 200, body: 'IRONCURTAIN_OK/1\n' });
+  });
+
   it('returns 403 for CONNECT to denied host', async () => {
     proxy = createMitmProxy({
       socketPath,

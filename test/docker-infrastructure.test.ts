@@ -25,6 +25,7 @@ import { resolveActiveProfile } from '../src/config/user-config.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
 import { makeOpenRouterProvider, makeOpenRouterRewriter } from '../src/docker/openrouter.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
+import { dockerAllocationPoolForSubnet } from '../src/docker/docker-resource-lifecycle.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
 // Container target the mock adapter advertises via `skills.containerPath`.
@@ -664,12 +665,17 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
 
 describe('createSessionContainers', () => {
   let tempDir: string;
+  let originalHome: string | undefined;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'create-session-containers-'));
+    originalHome = process.env.IRONCURTAIN_HOME;
+    process.env.IRONCURTAIN_HOME = join(tempDir, 'home');
   });
 
   afterEach(() => {
+    if (originalHome === undefined) delete process.env.IRONCURTAIN_HOME;
+    else process.env.IRONCURTAIN_HOME = originalHome;
     if (existsSync(tempDir)) {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -846,8 +852,10 @@ describe('createSessionContainers', () => {
     // break it; the agent container must run as the baked codespace user.
     // We construct a TCP-mode core but bypass the connectivity check by
     // returning exitCode 0 from the mocked exec.
-    const { docker, createCalls } = makeMockDocker({
-      async exec() {
+    const healthCommands: string[][] = [];
+    const { docker, createCalls, createdNetworks } = makeMockDocker({
+      async exec(_container, command) {
+        healthCommands.push([...command]);
         return { exitCode: 0, stdout: '', stderr: '' };
       },
     });
@@ -860,6 +868,15 @@ describe('createSessionContainers', () => {
     expect(mainCreate.user).toBeUndefined();
     expect(mainCreate.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
     expect(mainCreate.env.IRONCURTAIN_AGENT_GID).toBeUndefined();
+    expect(healthCommands).toHaveLength(2);
+    expect(healthCommands[0].join(' ')).toContain('IRONCURTAIN_HEALTH/1');
+    expect(healthCommands[1].join(' ')).toContain('http://ironcurtain.invalid/__ironcurtain/health');
+    expect(createdNetworks).toHaveLength(1);
+    expect(createdNetworks[0].options).toMatchObject({
+      internal: true,
+      subnet: expect.stringMatching(/\/29$/),
+      labels: expect.objectContaining({ 'ironcurtain.managed': 'true' }),
+    });
   });
 
   it('mounts an empty skills directory when set (workflow-mode invariant)', async () => {
@@ -888,7 +905,7 @@ describe('createSessionContainers', () => {
   // both TCP-mode resources (sidecar + network) AND the main container
   // to defend against regressions from either end of the rollback path.
   it('throws when connectivity check fails and cleans up sidecar, network, and main container', async () => {
-    const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker({
+    const { docker, stoppedContainers, removedContainers, removedNetworks, createdNetworks } = makeMockDocker({
       async exec() {
         // Simulate the connectivity check failing: container can't reach
         // host-side proxies through the socat sidecar.
@@ -912,6 +929,10 @@ describe('createSessionContainers', () => {
     // The per-session internal network must also be cleaned up.
     const expectedNetworkName = getInternalNetworkName(TEST_SHORT_ID);
     expect(removedNetworks).toContain(expectedNetworkName);
+    expect(createdNetworks).toHaveLength(4);
+    const attemptedSubnets = createdNetworks.map((entry) => entry.options?.subnet);
+    expect(new Set(attemptedSubnets).size).toBe(4);
+    expect(new Set(attemptedSubnets.map((subnet) => dockerAllocationPoolForSubnet(String(subnet)))).size).toBe(4);
   });
 
   // --- tcp-hostonly topology (apple-container) ---

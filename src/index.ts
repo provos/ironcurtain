@@ -284,7 +284,10 @@ export async function main(args?: string[]): Promise<void> {
     process.stderr.write(chalk.dim('\nShutting down...\n'));
     transport.close();
     // Force exit if cleanup takes too long
-    const forceExitTimeout = setTimeout(() => process.exit(1), 5_000);
+    // Docker allows each stop operation ten seconds, followed by container
+    // removal and network removal. Keep the emergency deadline above that
+    // cleanup budget so the fallback does not itself orphan the network.
+    const forceExitTimeout = setTimeout(() => process.exit(1), 30_000);
     forceExitTimeout.unref();
     session
       .close()

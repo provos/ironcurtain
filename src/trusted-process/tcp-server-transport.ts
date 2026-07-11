@@ -31,6 +31,10 @@ export interface TcpServerTransportOptions {
   readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
 }
 
+/** Side-effect-free liveness exchange used by the Docker sidecar startup gate. */
+export const TCP_TRANSPORT_HEALTH_REQUEST = 'IRONCURTAIN_HEALTH/1\n';
+export const TCP_TRANSPORT_HEALTH_RESPONSE = 'IRONCURTAIN_OK/1\n';
+
 export class TcpServerTransport implements Transport {
   private readonly host: string;
   private readonly requestedPort: number;
@@ -123,22 +127,37 @@ export class TcpServerTransport implements Transport {
       return;
     }
 
-    // Close any existing connection -- only one client expected
-    if (this.activeSocket && !this.activeSocket.destroyed) {
-      this.activeSocket.destroy();
-    }
-
-    this.activeSocket = socket;
-    this.readBuffer = new ReadBuffer();
-
-    socket.on('data', (chunk: Buffer) => {
-      this.readBuffer.append(chunk);
-      this.processReadBuffer();
-    });
-
     socket.on('error', (err) => {
       this.onerror?.(err);
     });
+
+    // Delay claiming the single MCP connection until the first bytes arrive.
+    // A health probe is answered locally and never evicts the real client.
+    let pending = Buffer.alloc(0);
+    const inspectFirstBytes = (chunk: Buffer): void => {
+      pending = Buffer.concat([pending, chunk]);
+      const text = pending.toString('utf8');
+      if (TCP_TRANSPORT_HEALTH_REQUEST.startsWith(text) && pending.length < TCP_TRANSPORT_HEALTH_REQUEST.length) {
+        return;
+      }
+      socket.off('data', inspectFirstBytes);
+      if (text === TCP_TRANSPORT_HEALTH_REQUEST) {
+        socket.end(TCP_TRANSPORT_HEALTH_RESPONSE);
+        return;
+      }
+
+      // Close any existing connection -- only one MCP client is expected.
+      if (this.activeSocket && !this.activeSocket.destroyed) this.activeSocket.destroy();
+      this.activeSocket = socket;
+      this.readBuffer = new ReadBuffer();
+      this.readBuffer.append(pending);
+      this.processReadBuffer();
+      socket.on('data', (data: Buffer) => {
+        this.readBuffer.append(data);
+        this.processReadBuffer();
+      });
+    };
+    socket.on('data', inspectFirstBytes);
 
     socket.on('close', () => {
       if (this.activeSocket === socket) {

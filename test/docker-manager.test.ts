@@ -283,6 +283,7 @@ describe('DockerManager', () => {
         bundleLabel: 'bundle-xyz',
         workflowLabel: 'workflow-42',
         scopeLabel: 'state-foo',
+        labels: { 'ironcurtain.managed': 'true', 'ironcurtain.owner-pid': '123' },
       };
       const args = buildCreateArgs(config);
 
@@ -290,6 +291,8 @@ describe('DockerManager', () => {
       expect(labelArgs).toContain('ironcurtain.bundle=bundle-xyz');
       expect(labelArgs).toContain('ironcurtain.workflow=workflow-42');
       expect(labelArgs).toContain('ironcurtain.scope=state-foo');
+      expect(labelArgs).toContain('ironcurtain.managed=true');
+      expect(labelArgs).toContain('ironcurtain.owner-pid=123');
     });
 
     it('uses extraHosts instead of default host-gateway when provided', () => {
@@ -580,7 +583,7 @@ describe('DockerManager', () => {
       await expect(manager.createNetwork('ironcurtain-abc')).resolves.toBeUndefined();
     });
 
-    it('passes --internal, --subnet, and --gateway options', async () => {
+    it('passes --internal, --subnet, --gateway, and ownership labels', async () => {
       mock.setResponse('');
       const manager = createDockerManager(mock.mockExec);
 
@@ -588,6 +591,7 @@ describe('DockerManager', () => {
         internal: true,
         subnet: '172.30.0.0/24',
         gateway: '172.30.0.1',
+        labels: { 'ironcurtain.managed': 'true' },
       });
 
       const args = mock.calls[0].args;
@@ -596,6 +600,8 @@ describe('DockerManager', () => {
       expect(args[args.indexOf('--subnet') + 1]).toBe('172.30.0.0/24');
       expect(args).toContain('--gateway');
       expect(args[args.indexOf('--gateway') + 1]).toBe('172.30.0.1');
+      expect(args).toContain('--label');
+      expect(args[args.indexOf('--label') + 1]).toBe('ironcurtain.managed=true');
       expect(args[args.length - 1]).toBe('ironcurtain-internal');
     });
 
@@ -609,6 +615,66 @@ describe('DockerManager', () => {
       expect(args).not.toContain('--internal');
       expect(args).not.toContain('--subnet');
       expect(args).not.toContain('--gateway');
+    });
+  });
+
+  describe('managed resource inventory', () => {
+    it('parses network inspect data for reconciliation and IPAM', async () => {
+      mock.setSequence([
+        { stdout: 'network-id\n' },
+        {
+          stdout: JSON.stringify([
+            {
+              Id: 'network-id',
+              Name: 'ironcurtain-abcdef123456',
+              Created: '2026-01-01T00:00:00Z',
+              Labels: { 'ironcurtain.managed': 'true' },
+              IPAM: { Config: [{ Subnet: '172.20.0.0/29', Gateway: '172.20.0.1' }] },
+              Containers: { 'container-id': { Name: 'agent' } },
+            },
+          ]),
+        },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+      await expect(manager.listNetworks?.()).resolves.toEqual([
+        {
+          id: 'network-id',
+          name: 'ironcurtain-abcdef123456',
+          created: '2026-01-01T00:00:00Z',
+          labels: { 'ironcurtain.managed': 'true' },
+          subnets: ['172.20.0.0/29'],
+          containerIds: ['container-id'],
+        },
+      ]);
+    });
+
+    it('parses all-container inspect data and applies a label filter', async () => {
+      mock.setSequence([
+        { stdout: 'container-id\n' },
+        {
+          stdout: JSON.stringify([
+            {
+              Id: 'container-id',
+              Name: '/ironcurtain-abcdef123456',
+              Created: '2026-01-01T00:00:00Z',
+              Config: { Labels: { 'ironcurtain.managed': 'true' } },
+              State: { Running: true },
+            },
+          ]),
+        },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+      const containers = await manager.listContainers?.({ labelFilter: 'ironcurtain.managed=true' });
+      expect(containers).toEqual([
+        {
+          id: 'container-id',
+          name: 'ironcurtain-abcdef123456',
+          created: '2026-01-01T00:00:00Z',
+          running: true,
+          labels: { 'ironcurtain.managed': 'true' },
+        },
+      ]);
+      expect(mock.calls[0].args).toContain('label=ironcurtain.managed=true');
     });
   });
 
