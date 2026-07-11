@@ -33,9 +33,11 @@ stays quiet and exposes the **stream watchdog** (decoded-SSE-event idle,
 ~300 s) — the mechanism that bites very slow models. See Findings below.
 
 Applies only to LLM completion endpoints (`isLlmMessagesEndpoint`: `/v1/messages`,
-`/api/v1/messages`, …). It sits at the tail of the forwarding pipe, so the
-trajectory-capture fan-out branch is unaffected and captured traces stay
-byte-faithful. A loud `NOT FOR PRODUCTION` warning is logged when active.
+`/api/v1/messages`, …). It sits at the tail of the forwarding pipe, so captured
+traces stay byte-faithful — the knob only re-times delivery. (The capture branch
+tees off `upstreamRes`, so in stall modes the forwarding backpressure also pauses
+capture; the captured bytes are still identical, only their timing shifts.) A
+loud `NOT FOR PRODUCTION` warning is logged when active.
 
 ## Companion: watchdog env passthrough (`adapters/claude-code.ts`)
 
