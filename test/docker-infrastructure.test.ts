@@ -952,6 +952,19 @@ describe('createSessionContainers', () => {
     );
   });
 
+  it('does not diagnose unrelated writable-storage probe failures as disk exhaustion', async () => {
+    const docker = {
+      async exec() {
+        return { exitCode: 1, stdout: '', stderr: 'mkdir: Permission denied' };
+      },
+    } as unknown as ContainerRuntime;
+
+    await expect(checkDockerContainerWritableStorage(docker, 'container-id')).rejects.toThrow(
+      /Permission denied.*Inspect the container state, Docker daemon logs, and filesystem permissions/,
+    );
+    await expect(checkDockerContainerWritableStorage(docker, 'container-id')).rejects.not.toThrow(/docker system df/);
+  });
+
   // --- tcp-hostonly topology (apple-container) ---
 
   const HOST_ONLY = { name: 'ironcurtain-hostonly-net', subnet: '192.168.205.0/24', gateway: '192.168.205.1' };

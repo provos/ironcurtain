@@ -1542,10 +1542,10 @@ export async function checkDockerContainerWritableStorage(
   if (result.exitCode === 0) return;
 
   const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`;
-  throw new Error(
-    `Docker container writable storage check failed: ${detail}. ` +
-      'Docker storage may be full; inspect it with `docker system df` and reclaim unused data or increase the disk limit.',
-  );
+  const guidance = /ENOSPC|no space left on device/i.test(detail)
+    ? 'Docker storage may be full; inspect it with `docker system df` and reclaim unused data or increase the disk limit.'
+    : 'Inspect the container state, Docker daemon logs, and filesystem permissions.';
+  throw new Error(`Docker container writable storage check failed: ${detail}. ${guidance}`);
 }
 
 /**

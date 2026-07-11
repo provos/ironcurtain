@@ -279,8 +279,14 @@ export class DockerAgentSession implements Session {
   }
 
   async sendMessage(userMessage: string): Promise<string> {
-    const { text } = await this.sendMessageDetailed(userMessage);
-    return text;
+    const result = await this.sendMessageDetailed(userMessage);
+    // Non-workflow transports use the string-only Session API and cannot see
+    // the hardFailure flag. Rotate here so their next user turn never resumes
+    // a conversation whose failed CLI invocation produced no transcript.
+    // Workflow callers use sendMessageDetailed() and own their retry/rotation
+    // policy explicitly, so they do not pass through this branch.
+    if (result.hardFailure) this.rotateAgentConversationId();
+    return result.text;
   }
 
   async sendMessageDetailed(userMessage: string): Promise<AgentTurnResult> {
@@ -364,7 +370,7 @@ export class DockerAgentSession implements Session {
       // matches `extractResponse`'s hard-failure definition (stdout.trim()
       // empty); hard failures still route through rotateAgentConversationId()
       // at the orchestrator layer.
-      if (exitCode === 0 || stdout.trim().length > 0) {
+      if (stdout.trim().length > 0) {
         this.firstTurnComplete = true;
       }
 

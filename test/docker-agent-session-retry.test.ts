@@ -221,6 +221,44 @@ describe('DockerAgentSession retry path', () => {
     expect(flagValue(calls[1], '--resume')).toBeUndefined();
   });
 
+  it('exit 0 with empty stdout does not mark the conversation resumable', async () => {
+    const { exec, calls } = scriptedExec([
+      { exitCode: 0, stdout: '', stderr: '' },
+      { exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' },
+    ]);
+    const deps = buildDeps(tempDir, exec);
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const first = await session.sendMessageDetailed('attempt 1');
+    expect(first.hardFailure).toBe(true);
+    await session.sendMessageDetailed('attempt 2');
+
+    expect(flagValue(calls[0], '--session-id')).toBe(deps.agentConversationId);
+    expect(flagValue(calls[1], '--session-id')).toBe(deps.agentConversationId);
+    expect(flagValue(calls[1], '--resume')).toBeUndefined();
+  });
+
+  it('string-only sendMessage callers rotate after exit 0 with empty stdout', async () => {
+    const { exec, calls } = scriptedExec([
+      { exitCode: 0, stdout: '', stderr: '' },
+      { exitCode: 0, stdout: CLAUDE_JSON_OK, stderr: '' },
+    ]);
+    const deps = buildDeps(tempDir, exec);
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    expect(await session.sendMessage('attempt 1')).toContain('exited without producing output');
+    expect(await session.sendMessage('attempt 2')).toBe('all done');
+
+    const firstId = flagValue(calls[0], '--session-id');
+    const secondId = flagValue(calls[1], '--session-id');
+    expect(firstId).toBe(deps.agentConversationId);
+    expect(secondId).toBeDefined();
+    expect(secondId).not.toBe(firstId);
+    expect(flagValue(calls[1], '--resume')).toBeUndefined();
+  });
+
   it('after a partial-failure turn (exit!=0 with non-empty stdout), the next call uses --resume', async () => {
     // Regression: the Anthropic-API-400-mid-stream class produces exit=1 with
     // partial assistant text already on stdout AND a session JSONL on disk.
