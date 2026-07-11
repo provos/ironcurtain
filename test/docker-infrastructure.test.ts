@@ -13,6 +13,7 @@ import {
   canRefreshOAuth,
   computeWorkflowDependencyHash,
   buildWorkflowExecCommand,
+  checkDockerContainerWritableStorage,
   ensureImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, AgentId, ConversationStateConfig } from '../src/docker/agent-adapter.js';
@@ -868,9 +869,10 @@ describe('createSessionContainers', () => {
     expect(mainCreate.user).toBeUndefined();
     expect(mainCreate.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
     expect(mainCreate.env.IRONCURTAIN_AGENT_GID).toBeUndefined();
-    expect(healthCommands).toHaveLength(2);
-    expect(healthCommands[0].join(' ')).toContain('IRONCURTAIN_HEALTH/1');
-    expect(healthCommands[1].join(' ')).toContain('http://ironcurtain.invalid/__ironcurtain/health');
+    expect(healthCommands).toHaveLength(3);
+    expect(healthCommands[0].join(' ')).toContain('.ironcurtain-write-probe');
+    expect(healthCommands[1].join(' ')).toContain('IRONCURTAIN_HEALTH/1');
+    expect(healthCommands[2].join(' ')).toContain('http://ironcurtain.invalid/__ironcurtain/health');
     expect(createdNetworks).toHaveLength(1);
     expect(createdNetworks[0].options).toMatchObject({
       internal: true,
@@ -906,7 +908,10 @@ describe('createSessionContainers', () => {
   // to defend against regressions from either end of the rollback path.
   it('throws when connectivity check fails and cleans up sidecar, network, and main container', async () => {
     const { docker, stoppedContainers, removedContainers, removedNetworks, createdNetworks } = makeMockDocker({
-      async exec() {
+      async exec(_containerId, command) {
+        if (command.some((arg) => arg.includes('.ironcurtain-write-probe'))) {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
         // Simulate the connectivity check failing: container can't reach
         // host-side proxies through the socat sidecar.
         return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
@@ -933,6 +938,18 @@ describe('createSessionContainers', () => {
     const attemptedSubnets = createdNetworks.map((entry) => entry.options?.subnet);
     expect(new Set(attemptedSubnets).size).toBe(4);
     expect(new Set(attemptedSubnets.map((subnet) => dockerAllocationPoolForSubnet(String(subnet)))).size).toBe(4);
+  });
+
+  it('reports exhausted Docker writable storage before starting the agent', async () => {
+    const docker = {
+      async exec() {
+        return { exitCode: 1, stdout: '', stderr: 'mkdir: No space left on device' };
+      },
+    } as unknown as ContainerRuntime;
+
+    await expect(checkDockerContainerWritableStorage(docker, 'container-id')).rejects.toThrow(
+      /Docker container writable storage check failed: mkdir: No space left on device.*docker system df/,
+    );
   });
 
   // --- tcp-hostonly topology (apple-container) ---

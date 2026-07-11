@@ -422,6 +422,14 @@ exit $STATUS
         const hardFailure = stdout.trim().length === 0;
         return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}`, hardFailure };
       }
+      if (stdout.trim().length === 0) {
+        return {
+          text:
+            'Claude Code exited without producing output. Check the session log for startup failures ' +
+            '(for example, exhausted Docker storage).',
+          hardFailure: true,
+        };
+      }
       return parseClaudeCodeJson(stdout);
     },
 

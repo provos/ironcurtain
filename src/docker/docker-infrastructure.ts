@@ -1425,6 +1425,10 @@ async function createSessionContainersAttempt(
     await core.docker.start(mainContainerId);
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
 
+    if (core.runtimeKind === 'docker') {
+      await checkDockerContainerWritableStorage(core.docker, mainContainerId);
+    }
+
     // tcp-hostonly: write the apt proxy config inside the container (the
     // Docker topologies bind-mount it; see execAptProxyUrl above).
     if (execAptProxyUrl !== undefined) {
@@ -1517,6 +1521,31 @@ export async function checkInternalNetworkConnectivity(
         `the sidecar could not reach the host proxy.`,
     );
   }
+}
+
+/**
+ * Verifies that Docker's writable layer has space before an agent starts.
+ * Docker Desktop can keep creating/starting containers after its VM disk is
+ * full, while writes inside the container fail with ENOSPC. Claude Code then
+ * exits 0 with no output after its initialization timeout, which otherwise
+ * looks like a networking failure.
+ */
+export async function checkDockerContainerWritableStorage(
+  docker: ContainerRuntime,
+  containerId: string,
+): Promise<void> {
+  const result = await docker.exec(
+    containerId,
+    ['/bin/sh', '-c', 'probe="${HOME:-/home/codespace}/.ironcurtain-write-probe-$$"; mkdir "$probe" && rmdir "$probe"'],
+    5_000,
+  );
+  if (result.exitCode === 0) return;
+
+  const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`;
+  throw new Error(
+    `Docker container writable storage check failed: ${detail}. ` +
+      'Docker storage may be full; inspect it with `docker system df` and reclaim unused data or increase the disk limit.',
+  );
 }
 
 /**

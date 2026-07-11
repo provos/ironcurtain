@@ -240,6 +240,7 @@ async function runPtySessionAttempt(
   const {
     prepareDockerInfrastructure,
     writeAptProxyConfigViaExec,
+    checkDockerContainerWritableStorage,
     checkHostOnlyConnectivity,
     checkInternalNetworkConnectivity,
   } = await import('./docker-infrastructure.js');
@@ -717,6 +718,10 @@ async function runPtySessionAttempt(
 
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
+
+    if (infra.runtimeKind === 'docker') {
+      await checkDockerContainerWritableStorage(docker, containerId);
+    }
 
     // apple-container (uds and the retained tcp-hostonly): write the apt
     // proxy config inside the container via exec instead of a bind mount.

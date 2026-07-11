@@ -248,6 +248,13 @@ describe('Claude Code Adapter', () => {
     expect(response.quotaExhausted).toBeUndefined();
   });
 
+  it('does not silently accept a zero-byte successful process exit', () => {
+    const response = claudeCodeAdapter.extractResponse(0, '');
+    expect(response.hardFailure).toBe(true);
+    expect(response.text).toContain('exited without producing output');
+    expect(response.text).toContain('Docker storage');
+  });
+
   it('surfaces transientFailure when usage.output_tokens=0 AND stop_reason=null (degenerate stall envelope)', () => {
     // Mirrors the captured envelope from a sustained LiteLLM/Z.AI outage:
     // CLI exits 0, JSON parses, `result` non-empty (preamble), but the
