@@ -79,14 +79,24 @@ export class GapDelayTransform extends Transform {
 }
 
 /**
- * Re-paces a byte stream to a trickle: accepts upstream bytes as fast as they
- * arrive (buffering them) and re-emits `bytesPerTick` bytes every `intervalMs`.
+ * Bound the drip buffer: once this many undrained bytes are queued, stop
+ * accepting from upstream (withhold the write callback) until the trickle drains
+ * back below it. Keeps a large/fast upstream from growing the queue unbounded.
+ */
+const DRIP_HIGH_WATER_BYTES = 1 << 20; // 1 MiB
+
+/**
+ * Re-paces a byte stream to a trickle: accepts upstream bytes (buffering them,
+ * up to a high-water mark) and re-emits `bytesPerTick` bytes every `intervalMs`.
  * Simulates a very slow model whose stream never fully stalls. Bytes and their
- * order are preserved; only throughput is throttled.
+ * order are preserved; only throughput is throttled. Honors backpressure so the
+ * buffer stays bounded even if the upstream produces faster than the drip rate.
  */
 export class SlowDripTransform extends Transform {
   private readonly queue: Buffer[] = [];
   private headOffset = 0;
+  private queuedBytes = 0;
+  private pendingWriteCallback: TransformCallback | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private ended = false;
   private flushCallback: TransformCallback | null = null;
@@ -106,6 +116,7 @@ export class SlowDripTransform extends Transform {
   private emitBytes(n: number): void {
     const out: Buffer[] = [];
     let need = n;
+    let emitted = 0;
     while (need > 0 && this.queue.length > 0) {
       const head = this.queue[0];
       const avail = head.length - this.headOffset;
@@ -113,12 +124,20 @@ export class SlowDripTransform extends Transform {
       out.push(head.subarray(this.headOffset, this.headOffset + take));
       this.headOffset += take;
       need -= take;
+      emitted += take;
       if (this.headOffset >= head.length) {
         this.queue.shift();
         this.headOffset = 0;
       }
     }
     if (out.length > 0) this.push(Buffer.concat(out));
+    this.queuedBytes -= emitted;
+    // Draining below the mark resumes a withheld upstream write.
+    if (this.pendingWriteCallback && this.queuedBytes < DRIP_HIGH_WATER_BYTES) {
+      const cb = this.pendingWriteCallback;
+      this.pendingWriteCallback = null;
+      cb();
+    }
   }
 
   private ensureTimer(): void {
@@ -148,10 +167,19 @@ export class SlowDripTransform extends Transform {
   }
 
   _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
-    if (chunk.length > 0) this.queue.push(chunk);
+    if (chunk.length > 0) {
+      this.queue.push(chunk);
+      this.queuedBytes += chunk.length;
+    }
     this.ensureTimer();
-    // Accept immediately; emission is paced by the timer.
-    callback();
+    // Emission is paced by the timer. Accept more only while the buffer is under
+    // the high-water mark; otherwise withhold the callback so the upstream pipe
+    // slows down — the timer's drain resumes it. Keeps the buffer bounded.
+    if (this.queuedBytes < DRIP_HIGH_WATER_BYTES) {
+      callback();
+    } else {
+      this.pendingWriteCallback = callback;
+    }
   }
 
   _flush(callback: TransformCallback): void {
@@ -169,6 +197,12 @@ export class SlowDripTransform extends Transform {
 
   _destroy(error: Error | null, callback: (error: Error | null) => void): void {
     this.stopTimer();
+    // Settle a withheld upstream write so it doesn't hang on teardown.
+    if (this.pendingWriteCallback) {
+      const cb = this.pendingWriteCallback;
+      this.pendingWriteCallback = null;
+      cb(error);
+    }
     callback(error);
   }
 }

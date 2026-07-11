@@ -167,4 +167,13 @@ describe('SlowDripTransform', () => {
     await ended;
     expect(out).toHaveLength(0);
   });
+
+  it('bounds the buffer via backpressure yet preserves every byte', async () => {
+    // Input exceeds the 1 MiB high-water mark; drain it in a few large ticks.
+    const big = Buffer.alloc(1_300_000, 7);
+    const { out, ended } = drive(new SlowDripTransform(TICK, 512 * 1024), [big]);
+    await vi.advanceTimersByTimeAsync(TICK * 4);
+    await ended;
+    expect(Buffer.concat(out).equals(big)).toBe(true);
+  });
 });
