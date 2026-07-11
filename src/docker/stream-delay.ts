@@ -43,6 +43,7 @@ export interface StreamDelayConfig {
  */
 export class GapDelayTransform extends Transform {
   private chunkIndex = 0;
+  private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly delayMs: number;
   private readonly mode: 'mid-stream' | 'first-token';
 
@@ -56,10 +57,24 @@ export class GapDelayTransform extends Transform {
     const idx = this.chunkIndex++;
     const inject = this.mode === 'first-token' ? idx === 0 : idx === 1;
     if (inject) {
-      setTimeout(() => callback(null, chunk), this.delayMs);
+      this.pendingTimer = setTimeout(() => {
+        this.pendingTimer = null;
+        callback(null, chunk);
+      }, this.delayMs);
+      // A pending gap can be multi-minute; don't hold the event loop open, and
+      // clear it in _destroy so the callback never fires after teardown.
+      this.pendingTimer.unref();
     } else {
       callback(null, chunk);
     }
+  }
+
+  _destroy(error: Error | null, callback: (error: Error | null) => void): void {
+    if (this.pendingTimer) {
+      clearTimeout(this.pendingTimer);
+      this.pendingTimer = null;
+    }
+    callback(error);
   }
 }
 
@@ -121,6 +136,8 @@ export class SlowDripTransform extends Transform {
         cb?.();
       }
     }, this.intervalMs);
+    // Debug-only, possibly multi-minute interval: never keep the loop alive.
+    this.timer.unref();
   }
 
   private stopTimer(): void {
@@ -139,6 +156,13 @@ export class SlowDripTransform extends Transform {
 
   _flush(callback: TransformCallback): void {
     this.ended = true;
+    // If the queue already drained, finish now instead of waiting a full
+    // (possibly multi-minute) tick to notice.
+    if (!this.hasBytes()) {
+      this.stopTimer();
+      callback();
+      return;
+    }
     this.flushCallback = callback;
     this.ensureTimer();
   }

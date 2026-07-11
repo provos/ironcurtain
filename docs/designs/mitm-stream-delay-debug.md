@@ -44,7 +44,7 @@ Claude Code adapter forwards a curated allowlist of streaming-watchdog tuning
 vars from the host env into the container when set (no-op otherwise):
 
 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`, `CLAUDE_ENABLE_STREAM_WATCHDOG`,
-`CLAUDE_ENABLE_BYTE_WATCHDOG`, `API_FORCE_IDLE_TIMEOUT`.
+`CLAUDE_ENABLE_BYTE_WATCHDOG`, `API_FORCE_IDLE_TIMEOUT`, `API_TIMEOUT_MS`.
 
 ## How to run an experiment
 

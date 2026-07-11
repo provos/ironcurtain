@@ -1052,6 +1052,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             const delay = createStreamDelayTransform(streamDelayConfig);
             delay.pipe(clientRes);
             clientSink = delay;
+            // `.pipe()` does not destroy the source on a downstream close, so a
+            // premature client disconnect would otherwise leave the transform's
+            // pending timer/interval running. Tear it down explicitly.
+            clientRes.on('close', () => {
+              if (!delay.destroyed) delay.destroy();
+            });
             logger.info(
               `[mitm-proxy] DEBUG stream-delay: applying ${streamDelayConfig.mode} ` +
                 `(${streamDelayConfig.delayMs}ms) to ${targetHost}${path}`,

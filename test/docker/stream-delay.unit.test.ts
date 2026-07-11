@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Transform } from 'node:stream';
 import {
   GapDelayTransform,
@@ -6,28 +6,6 @@ import {
   createStreamDelayTransform,
   parseStreamDelayConfig,
 } from '../../src/docker/stream-delay.js';
-
-/**
- * Drive `chunks` through the transform and record each output chunk's
- * arrival time relative to the moment writing began.
- */
-function runThroughDelay(transform: Transform, chunks: Buffer[]): Promise<{ data: Buffer; offsets: number[] }> {
-  return new Promise((resolve, reject) => {
-    const out: Buffer[] = [];
-    const offsets: number[] = [];
-    const start = Date.now();
-    transform.on('data', (c: Buffer) => {
-      out.push(c);
-      offsets.push(Date.now() - start);
-    });
-    transform.on('end', () => resolve({ data: Buffer.concat(out), offsets }));
-    transform.on('error', reject);
-    for (const c of chunks) transform.write(c);
-    transform.end();
-  });
-}
-
-const DELAY = 80; // ms — small enough to keep the suite fast, large enough to measure
 
 describe('parseStreamDelayConfig', () => {
   it('returns null when the delay var is unset', () => {
@@ -89,57 +67,95 @@ describe('createStreamDelayTransform', () => {
   });
 });
 
+/**
+ * Write all chunks + end, and collect output. Timers are faked, so callers step
+ * time explicitly with `vi.advanceTimersByTimeAsync` and assertions stay
+ * deterministic (no wall-clock flakiness).
+ */
+function drive(transform: Transform, chunks: Buffer[]): { out: Buffer[]; ended: Promise<void> } {
+  const out: Buffer[] = [];
+  transform.on('data', (c: Buffer) => out.push(Buffer.from(c)));
+  const ended = new Promise<void>((resolve, reject) => {
+    transform.on('end', () => resolve());
+    transform.on('error', reject);
+  });
+  for (const c of chunks) transform.write(c);
+  transform.end();
+  return { out, ended };
+}
+
+const GAP = 1000;
+
 describe('GapDelayTransform', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
   const chunks = [Buffer.from('event: a\n\n'), Buffer.from('event: b\n\n'), Buffer.from('event: c\n\n')];
   const expected = Buffer.concat(chunks);
 
-  it('mid-stream: preserves bytes and injects the gap before the second chunk', async () => {
-    const { data, offsets } = await runThroughDelay(new GapDelayTransform(DELAY, 'mid-stream'), chunks);
-    expect(data.equals(expected)).toBe(true);
-    expect(offsets).toHaveLength(3);
-    // First chunk forwarded promptly; the gap lands between chunk 0 and chunk 1.
-    expect(offsets[0]).toBeLessThan(DELAY / 2);
-    expect(offsets[1] - offsets[0]).toBeGreaterThanOrEqual(DELAY * 0.6);
-    // Chunk 2 follows chunk 1 without an additional gap.
-    expect(offsets[2] - offsets[1]).toBeLessThan(DELAY / 2);
+  it('mid-stream: forwards the first chunk, then holds the rest for exactly the gap', async () => {
+    const { out, ended } = drive(new GapDelayTransform(GAP, 'mid-stream'), chunks);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(out).toHaveLength(1); // chunk 0 through; chunk 1 waiting on the gap
+    expect(out[0].equals(chunks[0])).toBe(true);
+    await vi.advanceTimersByTimeAsync(GAP - 1);
+    expect(out).toHaveLength(1); // gap not yet elapsed
+    await vi.advanceTimersByTimeAsync(1);
+    await ended;
+    expect(out).toHaveLength(3);
+    expect(Buffer.concat(out).equals(expected)).toBe(true);
   });
 
-  it('first-token: preserves bytes and injects the gap before the first chunk', async () => {
-    const { data, offsets } = await runThroughDelay(new GapDelayTransform(DELAY, 'first-token'), chunks);
-    expect(data.equals(expected)).toBe(true);
-    expect(offsets).toHaveLength(3);
-    // Nothing reaches the client until the first-token gap elapses.
-    expect(offsets[0]).toBeGreaterThanOrEqual(DELAY * 0.6);
-    // The rest follow immediately after.
-    expect(offsets[2] - offsets[0]).toBeLessThan(DELAY / 2);
+  it('first-token: holds everything until the gap elapses', async () => {
+    const { out, ended } = drive(new GapDelayTransform(GAP, 'first-token'), chunks);
+    await vi.advanceTimersByTimeAsync(GAP - 1);
+    expect(out).toHaveLength(0); // nothing before the first-token gap
+    await vi.advanceTimersByTimeAsync(1);
+    await ended;
+    expect(Buffer.concat(out).equals(expected)).toBe(true);
   });
 
   it('mid-stream is a pass-through when only one chunk is emitted', async () => {
-    const { data, offsets } = await runThroughDelay(new GapDelayTransform(DELAY, 'mid-stream'), [chunks[0]]);
-    expect(data.equals(chunks[0])).toBe(true);
-    expect(offsets[0]).toBeLessThan(DELAY / 2);
+    const { out, ended } = drive(new GapDelayTransform(GAP, 'mid-stream'), [chunks[0]]);
+    await vi.advanceTimersByTimeAsync(0);
+    await ended;
+    expect(out).toHaveLength(1);
+    expect(out[0].equals(chunks[0])).toBe(true);
   });
 });
 
 describe('SlowDripTransform', () => {
-  it('preserves bytes across input chunks and paces output over time', async () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const TICK = 100;
+
+  it('preserves bytes across input chunks and emits one byte per tick', async () => {
     const input = Buffer.from('abcdefgh'); // 8 bytes
-    const interval = 15;
-    const { data, offsets } = await runThroughDelay(new SlowDripTransform(interval, 1), [
-      input.subarray(0, 3),
-      input.subarray(3),
-    ]);
-    expect(data.equals(input)).toBe(true);
-    // 1 byte per tick ⇒ output is spread across multiple ticks, not delivered at once.
-    expect(offsets.length).toBeGreaterThanOrEqual(4);
-    const spread = offsets[offsets.length - 1] - offsets[0];
-    expect(spread).toBeGreaterThanOrEqual(interval * 3);
+    const { out, ended } = drive(new SlowDripTransform(TICK, 1), [input.subarray(0, 3), input.subarray(3)]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(out).toHaveLength(0); // nothing until the first tick
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(Buffer.concat(out)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(TICK * 7);
+    await ended;
+    expect(Buffer.concat(out).equals(input)).toBe(true);
+    expect(out).toHaveLength(8); // 1 byte per tick
   });
 
   it('honors bytes-per-tick', async () => {
     const input = Buffer.from('abcdefgh'); // 8 bytes, 4 per tick ⇒ 2 emissions
-    const { data, offsets } = await runThroughDelay(new SlowDripTransform(15, 4), [input]);
-    expect(data.equals(input)).toBe(true);
-    expect(offsets.length).toBe(2);
+    const { out, ended } = drive(new SlowDripTransform(TICK, 4), [input]);
+    await vi.advanceTimersByTimeAsync(TICK * 2);
+    await ended;
+    expect(Buffer.concat(out).equals(input)).toBe(true);
+    expect(out).toHaveLength(2);
+  });
+
+  it('finalizes promptly when the queue is already empty at flush', async () => {
+    const { out, ended } = drive(new SlowDripTransform(60_000, 1), []); // 60s tick, no data
+    await vi.advanceTimersByTimeAsync(0); // must not wait a full 60s tick to end
+    await ended;
+    expect(out).toHaveLength(0);
   });
 });
