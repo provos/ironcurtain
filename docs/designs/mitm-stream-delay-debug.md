@@ -20,11 +20,16 @@ any) suppresses it.
 Off by default; zero-cost when unset (no Transform installed). Enabled via host
 environment variables read by the **host-side** MITM proxy:
 
-| Env var                              | Meaning                                                                                                                                                                                                       |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IRONCURTAIN_MITM_STREAM_DELAY_MS`   | Idle gap to inject, in ms. Unset / `0` / non-numeric ⇒ disabled.                                                                                                                                              |
-| `IRONCURTAIN_MITM_STREAM_DELAY_MODE` | `mid-stream` (default): forward the first chunk, then inject the gap before the next chunk — faithful to "Response stalled **mid-stream**". `first-token`: hold the first chunk (stall before any body byte). |
-| `IRONCURTAIN_MITM_STREAM_DELAY_HOST` | Optional substring filter on the upstream host (e.g. `anthropic`, `openrouter`) so only one provider path is delayed.                                                                                         |
+| Env var                              | Meaning                                                                                                                                                                                                                                                                                |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IRONCURTAIN_MITM_STREAM_DELAY_MS`   | Gap to inject (stall modes) or inter-emit interval (drip mode), in ms. Unset / `0` / non-numeric ⇒ disabled.                                                                                                                                                                           |
+| `IRONCURTAIN_MITM_STREAM_DELAY_MODE` | `mid-stream` (default): forward the first chunk, then inject one gap before the next — faithful to a _complete_ stall ("Response stalled **mid-stream**"). `first-token`: hold the first chunk. `drip`: re-pace the whole response to a trickle — a _very slow but not stalled_ model. |
+| `IRONCURTAIN_MITM_STREAM_DELAY_HOST` | Optional substring filter on the upstream host (e.g. `anthropic`, `openrouter`) so only one provider path is delayed.                                                                                                                                                                  |
+| `IRONCURTAIN_MITM_STREAM_DRIP_BYTES` | `drip` mode only: bytes emitted per `…_DELAY_MS` tick (default `1`). Higher = faster trickle.                                                                                                                                                                                          |
+
+`stall` modes (`mid-stream`/`first-token`) test **idle-based** aborts (time since
+last byte); `drip` keeps bytes flowing below any idle threshold so it isolates
+**duration/throughput-based** aborts — the better match for "very slow models".
 
 Applies only to LLM completion endpoints (`isLlmMessagesEndpoint`: `/v1/messages`,
 `/api/v1/messages`, …). It sits at the tail of the forwarding pipe, so the

@@ -34,7 +34,7 @@ import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './pa
 import { DENY_ALL_VALIDATOR } from './package-validator.js';
 import { validateDomain, type DomainListing } from './proxy-tools.js';
 import { PassThrough } from 'node:stream';
-import { StreamDelayTransform, parseStreamDelayConfig } from './stream-delay.js';
+import { createStreamDelayTransform, parseStreamDelayConfig } from './stream-delay.js';
 import { getTokenStreamBus } from './token-stream-bus.js';
 import type { SseProvider } from './token-stream-types.js';
 import { SseExtractorTransform } from './sse-extractor.js';
@@ -1049,12 +1049,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             isLlmMessagesEndpoint(path as string) &&
             (!streamDelayConfig.hostFilter || targetHost.includes(streamDelayConfig.hostFilter))
           ) {
-            const delay = new StreamDelayTransform(streamDelayConfig.delayMs, streamDelayConfig.mode);
+            const delay = createStreamDelayTransform(streamDelayConfig);
             delay.pipe(clientRes);
             clientSink = delay;
             logger.info(
-              `[mitm-proxy] DEBUG stream-delay: injecting ${streamDelayConfig.delayMs}ms ` +
-                `(${streamDelayConfig.mode}) into ${targetHost}${path}`,
+              `[mitm-proxy] DEBUG stream-delay: applying ${streamDelayConfig.mode} ` +
+                `(${streamDelayConfig.delayMs}ms) to ${targetHost}${path}`,
             );
           }
 
