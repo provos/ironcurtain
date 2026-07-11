@@ -34,6 +34,7 @@ import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './pa
 import { DENY_ALL_VALIDATOR } from './package-validator.js';
 import { validateDomain, type DomainListing } from './proxy-tools.js';
 import { PassThrough } from 'node:stream';
+import { createStreamDelayTransform, parseStreamDelayConfig } from './stream-delay.js';
 import { getTokenStreamBus } from './token-stream-bus.js';
 import type { SseProvider } from './token-stream-types.js';
 import { SseExtractorTransform } from './sse-extractor.js';
@@ -639,6 +640,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const allowAllHosts =
     process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === '1' || process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === 'true';
 
+  // DEBUG (issue #367): optional stream-delay injection config, parsed once.
+  // Null (zero-cost) unless IRONCURTAIN_MITM_STREAM_DELAY_MS is set.
+  const streamDelayConfig = parseStreamDelayConfig();
+
   // Certificate cache: hostname → { ctx, expiresAt }
   const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
 
@@ -1031,13 +1036,43 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           // See §3 and §6 invariant 6 of the design doc.
           attachCaptureBranch(upstreamRes, captureHandle, sidAtCapture);
 
+          // DEBUG (issue #367): optionally insert an idle gap into the
+          // agent-facing forwarding stream to reproduce / test Claude Code's
+          // streaming idle watchdog behind the MITM. Zero-cost unless
+          // IRONCURTAIN_MITM_STREAM_DELAY_MS is set. Applies only to LLM
+          // completion endpoints; sits at the tail of the forwarding pipe.
+          // Captured trajectory CONTENT stays byte-faithful — this only
+          // re-times delivery. (In stall modes the held callback backpressures
+          // upstreamRes, which also pauses the capture tee; the captured bytes
+          // are still identical, only their capture timing shifts.)
+          let clientSink: NodeJS.WritableStream = clientRes;
+          if (
+            streamDelayConfig &&
+            isLlmMessagesEndpoint(path as string) &&
+            (!streamDelayConfig.hostFilter || targetHost.includes(streamDelayConfig.hostFilter))
+          ) {
+            const delay = createStreamDelayTransform(streamDelayConfig);
+            delay.pipe(clientRes);
+            clientSink = delay;
+            // `.pipe()` does not destroy the source on a downstream close, so a
+            // premature client disconnect would otherwise leave the transform's
+            // pending timer/interval running. Tear it down explicitly.
+            clientRes.on('close', () => {
+              if (!delay.destroyed) delay.destroy();
+            });
+            logger.info(
+              `[mitm-proxy] DEBUG stream-delay: applying ${streamDelayConfig.mode} ` +
+                `(${streamDelayConfig.delayMs}ms) to ${targetHost}${path}`,
+            );
+          }
+
           if (sidAtAttach && contentType.includes('text/event-stream')) {
             const tokenBus = getTokenStreamBus();
             const sseProvider = resolveSseProvider(targetHost, path);
             const extractor = new SseExtractorTransform(sseProvider, (event) => {
               tokenBus.push(sidAtAttach, event);
             });
-            upstreamRes.pipe(extractor).pipe(clientRes);
+            upstreamRes.pipe(extractor).pipe(clientSink);
           } else if (sidAtAttach && isLlmMessagesEndpoint(path as string) && contentType.includes('application/json')) {
             // Non-streaming JSON response: buffer for extraction while piping to client.
             // The passthrough stream always forwards the full response to the client.
@@ -1058,9 +1093,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
                 }
               });
             });
-            upstreamRes.pipe(passthrough).pipe(clientRes);
+            upstreamRes.pipe(passthrough).pipe(clientSink);
           } else {
-            upstreamRes.pipe(clientRes);
+            upstreamRes.pipe(clientSink);
           }
 
           /**
@@ -1992,6 +2027,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       if (allowAllHosts) {
         logger.warn(
           '[mitm-proxy] IRONCURTAIN_MITM_ALLOW_ALL_HOSTS is set — unknown hosts will be tunneled (egress filtering DISABLED for unknown hosts)',
+        );
+      }
+      if (streamDelayConfig) {
+        logger.warn(
+          `[mitm-proxy] DEBUG IRONCURTAIN_MITM_STREAM_DELAY_MS is set — injecting ${streamDelayConfig.delayMs}ms ` +
+            `(${streamDelayConfig.mode}) idle gaps into LLM completion responses` +
+            `${streamDelayConfig.hostFilter ? ` for hosts matching "${streamDelayConfig.hostFilter}"` : ''}. NOT FOR PRODUCTION.`,
         );
       }
 

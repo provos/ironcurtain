@@ -46,6 +46,20 @@ import {
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
 /**
+ * Claude Code streaming-watchdog tuning vars forwarded from the host env into
+ * the container when set (see `buildEnv`). Curated allowlist — these govern
+ * the idle-stream abort ("Response stalled mid-stream", issue #367) and let it
+ * be exercised against the MITM stream-delay knob without rebuilding the image.
+ */
+const WATCHDOG_ENV_PASSTHROUGH = [
+  'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
+  'CLAUDE_ENABLE_STREAM_WATCHDOG',
+  'CLAUDE_ENABLE_BYTE_WATCHDOG',
+  'API_FORCE_IDLE_TIMEOUT',
+  'API_TIMEOUT_MS',
+] as const;
+
+/**
  * Container path used as the parent for Claude Code's skill discovery.
  * Claude Code's `--add-dir <path>` flag scans `<path>/.claude/skills/`,
  * so the bind-mount target is the deeper `.claude/skills/` subpath
@@ -301,6 +315,16 @@ exit $STATUS
         // orchestrator already enforces its own wall-clock/step budgets.
         CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
       };
+
+      // DEBUG / operability (issue #367 watchdog harness): forward a curated
+      // allowlist of Claude Code streaming-watchdog tuning vars from the host
+      // env into the container when set. Lets the streaming idle watchdog be
+      // exercised against the MITM stream-delay knob (see stream-delay.ts)
+      // without rebuilding the image. No-op unless the host sets them.
+      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
+      }
 
       if (modelId) {
         env.IRONCURTAIN_MODEL = modelId;
