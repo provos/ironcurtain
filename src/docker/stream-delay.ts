@@ -191,12 +191,14 @@ export function createStreamDelayTransform(config: StreamDelayConfig): Transform
 export function parseStreamDelayConfig(env: NodeJS.ProcessEnv = process.env): StreamDelayConfig | null {
   const raw = env.IRONCURTAIN_MITM_STREAM_DELAY_MS;
   if (!raw) return null;
-  const delayMs = Number.parseInt(raw, 10);
-  if (!Number.isFinite(delayMs) || delayMs <= 0) return null;
+  // Strict: `Number(...)` (not parseInt) so a partially-numeric value like
+  // "100ms" is rejected rather than silently enabling the harness with 100.
+  const delayMs = Number(raw);
+  if (!Number.isInteger(delayMs) || delayMs <= 0) return null;
   const modeRaw = env.IRONCURTAIN_MITM_STREAM_DELAY_MODE;
   const mode: StreamDelayMode = modeRaw === 'first-token' || modeRaw === 'drip' ? modeRaw : 'mid-stream';
   const hostFilter = env.IRONCURTAIN_MITM_STREAM_DELAY_HOST || undefined;
-  const dripRaw = Number.parseInt(env.IRONCURTAIN_MITM_STREAM_DRIP_BYTES ?? '', 10);
-  const dripBytes = Number.isFinite(dripRaw) && dripRaw > 0 ? dripRaw : 1;
+  const dripRaw = Number(env.IRONCURTAIN_MITM_STREAM_DRIP_BYTES);
+  const dripBytes = Number.isInteger(dripRaw) && dripRaw > 0 ? dripRaw : 1;
   return { delayMs, mode, hostFilter, dripBytes };
 }

@@ -1040,9 +1040,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           // agent-facing forwarding stream to reproduce / test Claude Code's
           // streaming idle watchdog behind the MITM. Zero-cost unless
           // IRONCURTAIN_MITM_STREAM_DELAY_MS is set. Applies only to LLM
-          // completion endpoints; sits at the tail of the forwarding pipe, so
-          // the capture fan-out branch (attached above) is untouched and
-          // trajectories stay byte-faithful.
+          // completion endpoints; sits at the tail of the forwarding pipe.
+          // Captured trajectory CONTENT stays byte-faithful — this only
+          // re-times delivery. (In stall modes the held callback backpressures
+          // upstreamRes, which also pauses the capture tee; the captured bytes
+          // are still identical, only their capture timing shifts.)
           let clientSink: NodeJS.WritableStream = clientRes;
           if (
             streamDelayConfig &&

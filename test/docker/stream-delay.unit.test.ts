@@ -12,10 +12,19 @@ describe('parseStreamDelayConfig', () => {
     expect(parseStreamDelayConfig({})).toBeNull();
   });
 
-  it('returns null for non-positive or non-numeric delays', () => {
+  it('returns null for non-positive, non-integer, or partially-numeric delays', () => {
     expect(parseStreamDelayConfig({ IRONCURTAIN_MITM_STREAM_DELAY_MS: '0' })).toBeNull();
     expect(parseStreamDelayConfig({ IRONCURTAIN_MITM_STREAM_DELAY_MS: '-5' })).toBeNull();
     expect(parseStreamDelayConfig({ IRONCURTAIN_MITM_STREAM_DELAY_MS: 'abc' })).toBeNull();
+    expect(parseStreamDelayConfig({ IRONCURTAIN_MITM_STREAM_DELAY_MS: '100ms' })).toBeNull();
+    expect(parseStreamDelayConfig({ IRONCURTAIN_MITM_STREAM_DELAY_MS: '100.5' })).toBeNull();
+  });
+
+  it('ignores a partially-numeric drip-bytes value (falls back to 1)', () => {
+    expect(
+      parseStreamDelayConfig({ IRONCURTAIN_MITM_STREAM_DELAY_MS: '2000', IRONCURTAIN_MITM_STREAM_DRIP_BYTES: '4x' })
+        ?.dripBytes,
+    ).toBe(1);
   });
 
   it('defaults to mid-stream mode with no host filter and dripBytes=1', () => {
