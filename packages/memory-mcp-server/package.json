@@ -39,16 +39,16 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\""
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.11.1",
-    "sqlite-vec": "^0.1.9",
-    "@huggingface/transformers": "^4.2.0",
-    "openai": "^6.44.0"
+    "openai": "^6.48.0",
+    "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "tsx": "^4.22.4",
     "typescript": "^5.7.0",
-    "vitest": "^4.0.18",
-    "@types/better-sqlite3": "^7.6.13"
+    "vitest": "^4.0.18"
   }
 }
