@@ -17,8 +17,14 @@ import {
   type OAuthCredentials,
   type RefreshResult,
 } from '../docker/oauth-credentials.js';
+import type { OAuthClientKind } from '../docker/oauth-credentials.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { CheckResult, CheckStatus } from './checks.js';
+
+/** The re-authentication command for the CLI that issued a credential. */
+function loginCommand(clientKind: OAuthClientKind | undefined): string {
+  return clientKind === 'anthropic-cli' ? '`ant auth login`' : '`claude login`';
+}
 
 /**
  * Computes a human-readable description for an OAuth-typed AuthMethod,
@@ -34,7 +40,7 @@ function describeOAuthExpiry(auth: Extract<AuthMethod, { kind: 'oauth' }>): {
     return {
       message: 'OAuth (expired)',
       status: 'warn',
-      hint: 'Token will be refreshed automatically on next use, or run `claude login` to re-authenticate.',
+      hint: `Token will be refreshed automatically on next use, or run ${loginCommand(auth.credentials.clientKind)} to re-authenticate.`,
     };
   }
   const remainingDays = Math.floor(remainingMs / (24 * 60 * 60 * 1000));
@@ -101,7 +107,7 @@ export async function checkOAuthRefresh(config: IronCurtainConfig): Promise<Chec
   let elapsed: string;
   try {
     const start = Date.now();
-    result = await refreshOAuthToken(auth.credentials.refreshToken);
+    result = await refreshOAuthToken(auth.credentials.refreshToken, auth.credentials.clientKind);
     elapsed = formatElapsed(Date.now() - start);
   } catch (err) {
     const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
@@ -113,7 +119,7 @@ export async function checkOAuthRefresh(config: IronCurtainConfig): Promise<Chec
   }
 
   if (result.kind !== 'ok') {
-    return formatRefreshFailure(result, elapsed);
+    return formatRefreshFailure(result, elapsed, auth.credentials.clientKind);
   }
 
   // Refresh succeeded server-side; the old refresh token is now consumed.
@@ -126,7 +132,7 @@ export async function checkOAuthRefresh(config: IronCurtainConfig): Promise<Chec
       name: 'OAuth refresh',
       status: 'fail',
       message: `refresh succeeded but persistence failed: ${err instanceof Error ? err.message : String(err)}`,
-      hint: 'The server-side refresh token has rotated; your stored credentials are now invalid. Run `claude login` to recover.',
+      hint: `The server-side refresh token has rotated; your stored credentials are now invalid. Run ${loginCommand(auth.credentials.clientKind)} to recover.`,
     };
   }
 
@@ -134,7 +140,11 @@ export async function checkOAuthRefresh(config: IronCurtainConfig): Promise<Chec
   return { name: 'OAuth refresh', status: 'ok', message: `valid (${elapsed}, ${sourceLabel})` };
 }
 
-function formatRefreshFailure(result: Exclude<RefreshResult, { kind: 'ok' }>, elapsed: string): CheckResult {
+function formatRefreshFailure(
+  result: Exclude<RefreshResult, { kind: 'ok' }>,
+  elapsed: string,
+  clientKind: OAuthClientKind | undefined,
+): CheckResult {
   if (result.kind === 'http-error') {
     return {
       name: 'OAuth refresh',
@@ -142,8 +152,8 @@ function formatRefreshFailure(result: Exclude<RefreshResult, { kind: 'ok' }>, el
       message: `refresh rejected (HTTP ${result.status}, ${elapsed})`,
       hint:
         result.status === 400 || result.status === 401
-          ? 'Refresh token has been invalidated (likely consumed by an earlier refresh). Run `claude login` to issue a new one.'
-          : 'Run `claude login` to obtain a new refresh token.',
+          ? `Refresh token has been invalidated (likely consumed by an earlier refresh). Run ${loginCommand(clientKind)} to issue a new one.`
+          : `Run ${loginCommand(clientKind)} to obtain a new refresh token.`,
     };
   }
   if (result.kind === 'parse-error') {

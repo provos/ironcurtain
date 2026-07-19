@@ -20,11 +20,21 @@ import { execFileSync } from 'node:child_process';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 
+/**
+ * Which OAuth application issued a credential. Claude Code and the Anthropic
+ * CLI (`ant`) are separate OAuth clients with different client IDs, token
+ * endpoints, and grant encodings — a refresh grant presented with the wrong
+ * client is rejected as 400 invalid_grant. Undefined means Claude Code.
+ */
+export type OAuthClientKind = 'claude-code' | 'anthropic-cli';
+
 /** OAuth credentials from Claude Code's credential store. */
 export interface OAuthCredentials {
   readonly accessToken: string;
   readonly refreshToken: string;
   readonly expiresAt: number;
+  /** Issuing OAuth application; decides how the token is refreshed. */
+  readonly clientKind?: OAuthClientKind;
 }
 
 /** OAuth credentials from Codex CLI's ChatGPT auth cache. */
@@ -235,6 +245,7 @@ export function parseAnthropicCredentialsJson(json: string): OAuthCredentials | 
       accessToken: creds.access_token,
       refreshToken: creds.refresh_token,
       expiresAt: creds.expires_at * 1000,
+      clientKind: 'anthropic-cli',
     };
   } catch {
     return null;
@@ -379,6 +390,12 @@ const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
 /** Anthropic's OAuth token endpoint (platform.claude.com since mid-2025). */
 const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+
+/** The Anthropic CLI's (`ant`) public OAuth client ID. */
+const ANTHROPIC_CLI_OAUTH_CLIENT_ID = '41077d10-94b8-4194-be48-d251e9eb21b4';
+
+/** Token endpoint for the Anthropic CLI's OAuth client (JSON grants only). */
+const ANTHROPIC_CLI_OAUTH_TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 
@@ -398,38 +415,76 @@ export type RefreshResult =
 /**
  * Refreshes an OAuth access token using a refresh token grant.
  *
+ * The grant must be presented by the OAuth client that issued the token:
+ * Claude Code's client expects a form-encoded grant at platform.claude.com,
+ * the Anthropic CLI's client a JSON grant at api.anthropic.com. Neither
+ * grant carries workspace or organization identifiers — that binding lives
+ * in the token itself.
+ *
  * Returns a discriminated result so callers can distinguish HTTP failures
  * (refresh token invalidated) from network failures (transient) from
  * malformed responses (server bug). Production callers that only need
  * pass/fail should use `refreshResultToCreds` to flatten to OAuthCredentials | null.
  */
-export async function refreshOAuthToken(refreshToken: string): Promise<RefreshResult> {
+export async function refreshOAuthToken(
+  refreshToken: string,
+  clientKind: OAuthClientKind = 'claude-code',
+): Promise<RefreshResult> {
   const REFRESH_TIMEOUT_MS = 30_000;
   try {
-    const body = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: OAUTH_CLIENT_ID,
-    });
+    const request =
+      clientKind === 'anthropic-cli'
+        ? {
+            url: ANTHROPIC_CLI_OAUTH_TOKEN_URL,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              grant_type: 'refresh_token',
+              refresh_token: refreshToken,
+              client_id: ANTHROPIC_CLI_OAUTH_CLIENT_ID,
+            }),
+          }
+        : {
+            url: OAUTH_TOKEN_URL,
+            contentType: 'application/x-www-form-urlencoded',
+            body: new URLSearchParams({
+              grant_type: 'refresh_token',
+              refresh_token: refreshToken,
+              client_id: OAUTH_CLIENT_ID,
+            }).toString(),
+          };
 
-    const response = await fetch(OAUTH_TOKEN_URL, {
+    const response = await fetch(request.url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
+      headers: { 'Content-Type': request.contentType },
+      body: request.body,
       signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
 
     if (!response.ok) {
-      logger.warn(`OAuth token refresh failed: HTTP ${response.status}`);
+      const detail = await readErrorBodySnippet(response);
+      logger.warn(`OAuth token refresh failed: HTTP ${response.status}${detail ? ` ${detail}` : ''}`);
       return { kind: 'http-error', status: response.status };
     }
 
     const data = (await response.json()) as Record<string, unknown>;
-    return parseTokenResponse(data, refreshToken);
+    return parseTokenResponse(data, refreshToken, clientKind);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.warn(`OAuth token refresh error: ${message}`);
     return { kind: 'network-error', message };
+  }
+}
+
+/**
+ * Reads a bounded snippet of an error response body for diagnostics.
+ * The token endpoint's error bodies ({"error": "invalid_grant"}, invalid_scope
+ * details, etc.) are the only way to tell rejection modes apart.
+ */
+async function readErrorBodySnippet(response: Response): Promise<string> {
+  try {
+    return (await response.text()).slice(0, 300);
+  } catch {
+    return '';
   }
 }
 
@@ -473,9 +528,15 @@ export async function refreshCodexOAuthToken(refreshToken: string): Promise<Refr
  * Validates and extracts credentials from an OAuth token endpoint response.
  * Returns parse-error if access_token or expires_in are missing/invalid.
  * Preserves the original refresh token when the response omits refresh_token
- * (not all providers rotate refresh tokens on every grant).
+ * (not all providers rotate refresh tokens on every grant). The client kind
+ * is carried into the refreshed credentials so subsequent refreshes keep
+ * using the issuing client.
  */
-function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken: string): RefreshResult {
+function parseTokenResponse(
+  data: Record<string, unknown>,
+  fallbackRefreshToken: string,
+  clientKind?: OAuthClientKind,
+): RefreshResult {
   const { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn } = data;
 
   if (!isNonEmptyString(accessToken)) {
@@ -491,6 +552,7 @@ function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken:
       accessToken,
       refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
+      ...(clientKind === 'anthropic-cli' ? { clientKind } : {}),
     },
   };
 }
@@ -613,7 +675,7 @@ export function saveCodexOAuthCredentials(credentials: OAuthCredentials, filePat
 export interface CredentialSources {
   loadFromFile: () => OAuthCredentials | null;
   loadFromKeychain: () => OAuthCredentials | null;
-  refreshToken?: (refreshToken: string) => Promise<OAuthCredentials | null>;
+  refreshToken?: (refreshToken: string, clientKind?: OAuthClientKind) => Promise<OAuthCredentials | null>;
   saveToFile?: (credentials: OAuthCredentials, filePath?: string) => void;
   /**
    * Path-aware multi-file loader; preferred over loadFromFile when present.
@@ -629,7 +691,7 @@ export interface CredentialSources {
 const defaultSources: CredentialSources = {
   loadFromFile: loadOAuthCredentials,
   loadFromKeychain: extractFromKeychain,
-  refreshToken: async (rt) => refreshResultToCreds(await refreshOAuthToken(rt)),
+  refreshToken: async (rt, clientKind) => refreshResultToCreds(await refreshOAuthToken(rt, clientKind)),
   saveToFile: saveOAuthCredentials,
   loadFromFilesWithSource: loadAllOAuthCredentialFiles,
   loadFromKeychainWithService: extractFromKeychainWithService,
@@ -647,7 +709,7 @@ const defaultSources: CredentialSources = {
 export const preflightCredentialSources: CredentialSources = {
   loadFromFile: loadOAuthCredentials,
   loadFromKeychain: extractFromKeychain,
-  refreshToken: async (rt) => refreshResultToCreds(await refreshOAuthToken(rt)),
+  refreshToken: async (rt, clientKind) => refreshResultToCreds(await refreshOAuthToken(rt, clientKind)),
   saveToFile: saveOAuthCredentials,
   loadFromFilesWithSource: loadAllOAuthCredentialFiles,
   loadFromKeychainWithService: extractFromKeychainWithService,
@@ -758,11 +820,11 @@ function toFileResults(creds: OAuthCredentials | null): Array<{ credentials: OAu
  */
 async function tryRefreshFileCreds(
   fileCreds: OAuthCredentials,
-  doRefresh: (refreshToken: string) => Promise<OAuthCredentials | null>,
+  doRefresh: (refreshToken: string, clientKind?: OAuthClientKind) => Promise<OAuthCredentials | null>,
   saveToFile?: (credentials: OAuthCredentials, filePath?: string) => void,
   filePath?: string,
 ): Promise<AuthMethod | null> {
-  const refreshed = await doRefresh(fileCreds.refreshToken);
+  const refreshed = await doRefresh(fileCreds.refreshToken, fileCreds.clientKind);
   if (!refreshed) return null;
 
   try {
@@ -780,10 +842,10 @@ async function tryRefreshFileCreds(
  */
 async function tryRefreshKeychainCreds(
   keychainResult: KeychainResult,
-  doRefresh: (refreshToken: string) => Promise<OAuthCredentials | null>,
+  doRefresh: (refreshToken: string, clientKind?: OAuthClientKind) => Promise<OAuthCredentials | null>,
   doWriteToKeychain?: (credentials: OAuthCredentials, serviceName: string) => void,
 ): Promise<AuthMethod | null> {
-  const refreshed = await doRefresh(keychainResult.credentials.refreshToken);
+  const refreshed = await doRefresh(keychainResult.credentials.refreshToken, keychainResult.credentials.clientKind);
   if (!refreshed) return null;
 
   try {

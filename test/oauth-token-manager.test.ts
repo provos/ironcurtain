@@ -63,8 +63,32 @@ describe('OAuthTokenManager', () => {
 
       const token = await manager.getValidAccessToken();
       expect(token).toBe('access-token-refreshed');
-      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-token-expiring');
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-token-expiring', undefined);
       expect(deps.saveCredentials).toHaveBeenCalledWith(newCreds, '/fake/.credentials.json');
+    });
+
+    it('refreshes with the client kind of the credentials being refreshed', async () => {
+      const creds = nearExpiryCreds({ clientKind: 'anthropic-cli' });
+      const deps = makeDeps({
+        refreshToken: vi.fn(async () => refreshedCreds({ clientKind: 'anthropic-cli' })),
+      });
+      const manager = new OAuthTokenManager(creds, undefined, deps);
+
+      await manager.getValidAccessToken();
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-token-expiring', 'anthropic-cli');
+    });
+
+    it('takes the client kind from re-read file credentials over the initial ones', async () => {
+      const creds = nearExpiryCreds(); // untagged (claude-code)
+      const fileCreds = nearExpiryCreds({ refreshToken: 'refresh-from-file', clientKind: 'anthropic-cli' });
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => fileCreds),
+        refreshToken: vi.fn(async () => refreshedCreds({ clientKind: 'anthropic-cli' })),
+      });
+      const manager = new OAuthTokenManager(creds, undefined, deps);
+
+      await manager.getValidAccessToken();
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file', 'anthropic-cli');
     });
 
     it('re-reads credentials file before refreshing', async () => {
@@ -154,7 +178,7 @@ describe('OAuthTokenManager', () => {
 
       // File creds are also expired, so it should use the file's refresh token
       await manager.handleAuthFailure();
-      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file');
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file', undefined);
     });
   });
 
@@ -334,7 +358,7 @@ describe('OAuthTokenManager', () => {
       const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       await manager.handleAuthFailure();
-      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-keychain');
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-keychain', undefined);
     });
 
     it('prefers file refresh token over Keychain refresh token', async () => {
@@ -351,7 +375,7 @@ describe('OAuthTokenManager', () => {
       const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       await manager.handleAuthFailure();
-      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file');
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file', undefined);
     });
 
     it('does not consult Keychain when keychainServiceName is not set', async () => {

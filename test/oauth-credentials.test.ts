@@ -223,6 +223,13 @@ describe('parseAnthropicCredentialsJson', () => {
     expect(result!.expiresAt).toBe(VALID_ANTHROPIC_CLI_CREDENTIALS.expires_at * 1000);
   });
 
+  it('tags CLI-store credentials with clientKind anthropic-cli', () => {
+    const result = parseAnthropicCredentialsJson(JSON.stringify(VALID_ANTHROPIC_CLI_CREDENTIALS));
+    expect(result!.clientKind).toBe('anthropic-cli');
+    // Claude Code credentials stay untagged (undefined means claude-code)
+    expect(parseCredentialsJson(JSON.stringify(VALID_CREDENTIALS))!.clientKind).toBeUndefined();
+  });
+
   it('returns null when type is present but not oauth_token', () => {
     const creds = { ...VALID_ANTHROPIC_CLI_CREDENTIALS, type: 'api_key' };
     expect(parseAnthropicCredentialsJson(JSON.stringify(creds))).toBeNull();
@@ -561,6 +568,22 @@ describe('detectAuthMethod', () => {
       expect(result.filePath).toBe(cliPath);
     }
     expect(saveToFile).toHaveBeenCalledWith(refreshed, cliPath);
+  });
+
+  it('refreshes CLI-store credentials with their own client kind', async () => {
+    const cliPath = '/home/user/.config/anthropic/credentials/default.json';
+    const expiredCli = expiredCreds({ refreshToken: 'sk-ant-ort01-cli', clientKind: 'anthropic-cli' });
+    const refreshed = validCreds({ clientKind: 'anthropic-cli' });
+    const refreshToken = vi.fn(async () => refreshed);
+    const sources = makeSources({
+      loadFromFilesWithSource: () => [{ credentials: expiredCli, filePath: cliPath }],
+      refreshToken,
+      saveToFile: vi.fn(),
+    });
+
+    const result = await detectAuthMethod(makeConfig(), sources);
+    expect(result.kind).toBe('oauth');
+    expect(refreshToken).toHaveBeenCalledWith('sk-ant-ort01-cli', 'anthropic-cli');
   });
 
   it('falls back to apikey when no OAuth credentials', async () => {
@@ -935,14 +958,66 @@ describe('refreshOAuthToken', () => {
     expect(opts.signal).toBeDefined();
   });
 
+  it('sends a JSON grant with the Anthropic CLI client to api.anthropic.com for anthropic-cli credentials', async () => {
+    const mockResponse = {
+      ok: true,
+      json: async () => ({
+        access_token: 'new-cli-access-token',
+        refresh_token: 'new-cli-refresh-token',
+        expires_in: 28800,
+      }),
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as Response);
+
+    const result = await refreshOAuthToken('old-cli-refresh-token', 'anthropic-cli');
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('expected ok');
+    expect(result.credentials.accessToken).toBe('new-cli-access-token');
+    // The client kind must survive the refresh so the NEXT refresh also
+    // targets the issuing client instead of falling back to Claude Code's.
+    expect(result.credentials.clientKind).toBe('anthropic-cli');
+
+    const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(fetchCall[0]).toBe('https://api.anthropic.com/v1/oauth/token');
+    const opts = fetchCall[1] as RequestInit;
+    expect(opts.headers).toEqual({ 'Content-Type': 'application/json' });
+    const body = JSON.parse(opts.body as string) as Record<string, unknown>;
+    expect(body.grant_type).toBe('refresh_token');
+    expect(body.refresh_token).toBe('old-cli-refresh-token');
+    expect(body.client_id).toBe('41077d10-94b8-4194-be48-d251e9eb21b4');
+  });
+
+  it('does not tag claude-code refreshes with a clientKind', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: 'new-access', refresh_token: 'new-rt', expires_in: 3600 }),
+    } as Response);
+
+    const result = await refreshOAuthToken('old-refresh-token', 'claude-code');
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('expected ok');
+    expect(result.credentials.clientKind).toBeUndefined();
+  });
+
   it('returns http-error with status on non-2xx response', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: false,
       status: 400,
+      text: async () => '{"error": "invalid_grant"}',
     } as Response);
 
     const result = await refreshOAuthToken('bad-refresh-token');
     expect(result).toEqual({ kind: 'http-error', status: 400 });
+  });
+
+  it('tolerates an unreadable error body on non-2xx response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 500,
+    } as Response);
+
+    const result = await refreshOAuthToken('bad-refresh-token');
+    expect(result).toEqual({ kind: 'http-error', status: 500 });
   });
 
   it('returns network-error with message when fetch rejects', async () => {

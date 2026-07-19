@@ -14,7 +14,7 @@
  * to prevent duplicate refresh requests.
  */
 
-import type { OAuthCredentials } from './oauth-credentials.js';
+import type { OAuthClientKind, OAuthCredentials } from './oauth-credentials.js';
 import {
   isTokenExpired,
   loadCredentialsFromFile,
@@ -30,7 +30,7 @@ import * as logger from '../logger.js';
 export interface TokenManagerDeps {
   loadCredentials: (filePath: string) => OAuthCredentials | null;
   loadFromKeychain: () => OAuthCredentials | null;
-  refreshToken: (refreshToken: string) => Promise<OAuthCredentials | null>;
+  refreshToken: (refreshToken: string, clientKind?: OAuthClientKind) => Promise<OAuthCredentials | null>;
   saveCredentials: (credentials: OAuthCredentials, filePath?: string) => void;
   credentialsFilePath: string;
   /** When set, refreshed credentials are written to the Keychain instead of the file. */
@@ -44,7 +44,7 @@ export interface TokenManagerDeps {
 const defaultDeps: TokenManagerDeps = {
   loadCredentials: loadCredentialsFromFile,
   loadFromKeychain: extractFromKeychain,
-  refreshToken: async (rt) => refreshResultToCreds(await refreshOAuthToken(rt)),
+  refreshToken: async (rt, clientKind) => refreshResultToCreds(await refreshOAuthToken(rt, clientKind)),
   saveCredentials: saveOAuthCredentials,
   credentialsFilePath: getCredentialsFilePath(),
 };
@@ -144,8 +144,8 @@ export class OAuthTokenManager {
     }
 
     // For Keychain-sourced creds, check if the host process already refreshed.
-    // Capture the Keychain's refresh token in case it's newer than our startup copy.
-    let keychainRefreshToken: string | undefined;
+    // Capture the Keychain's credentials in case they're newer than our startup copy.
+    let staleKeychainCreds: OAuthCredentials | undefined;
     if (this.deps.keychainServiceName) {
       const keychainCreds = this.deps.loadFromKeychain();
       if (keychainCreds && !isTokenExpired(keychainCreds)) {
@@ -153,7 +153,7 @@ export class OAuthTokenManager {
         this.credentials = keychainCreds;
         return this.credentials.accessToken;
       }
-      keychainRefreshToken = keychainCreds?.refreshToken;
+      staleKeychainCreds = keychainCreds ?? undefined;
     }
 
     // Hard guard: when canRefresh is false, never POST a refresh grant
@@ -162,9 +162,11 @@ export class OAuthTokenManager {
       return null;
     }
 
-    // Pick the best available refresh token: file > keychain > initial credentials
-    const refreshToken = fileCreds?.refreshToken ?? keychainRefreshToken ?? this.credentials.refreshToken;
-    const newCreds = await this.deps.refreshToken(refreshToken);
+    // Pick the best available refresh token: file > keychain > initial
+    // credentials. The client kind must track the same source — a refresh
+    // grant presented with the wrong OAuth client is rejected as invalid_grant.
+    const refreshSource = fileCreds ?? staleKeychainCreds ?? this.credentials;
+    const newCreds = await this.deps.refreshToken(refreshSource.refreshToken, refreshSource.clientKind);
 
     if (newCreds) {
       logger.info('[oauth-token-manager] Token refresh successful');

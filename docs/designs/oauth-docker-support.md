@@ -99,6 +99,8 @@ Each credential file is considered independently: an expired file whose refresh 
 
 Token refresh writes back to the file the credentials were detected in, preserving that file's native format — the `AuthMethod` file variant carries a `filePath` for this. If the origin file vanished between detection and write-back, the format is decided by the target path (CLI store path → flat snake_case) so the wrong shape is never written into the Anthropic CLI's store.
 
+**Refresh client kind.** Claude Code and the Anthropic CLI (`ant`) are separate OAuth applications: Claude Code's client (`9d1c250a-…`) takes a form-encoded refresh grant at `platform.claude.com/v1/oauth/token`, while the Anthropic CLI's client (`41077d10-…`) takes a JSON grant at `api.anthropic.com/v1/oauth/token`. A refresh grant presented with the wrong client is rejected as `400 invalid_grant` (and the CLI's `user:developer` scope is not registered on Claude Code's client). Parsed credentials therefore carry a `clientKind` (`'anthropic-cli'` for the CLI store shape, undefined = Claude Code), and `refreshOAuthToken()` selects client ID, endpoint, and body encoding from it. The kind propagates through refreshed credentials so subsequent refreshes keep using the issuing client. Neither grant carries `workspace_id` or organization identifiers — that binding lives in the token itself.
+
 **Override:** `IRONCURTAIN_DOCKER_AUTH=apikey` forces API key mode.
 
 ### 4.2 OAuth credential structure on host
