@@ -43,6 +43,7 @@ import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 import { createDirectOutboundTransport, type OutboundTransport } from './outbound-transport.js';
+import { handleBuildEgressRequest, type BuildEgressGuard, type BuildEgressSeam } from './build-egress-proxy.js';
 
 /**
  * Runtime control surface for the MITM proxy's host allowlist.
@@ -184,6 +185,20 @@ export interface MitmProxyOptions {
   readonly outboundTransport?: OutboundTransport;
   /** Test-only escape hatch for loopback provider and registry fixtures. */
   readonly allowPrivateDestinationsForTests?: boolean;
+  /**
+   * Narrow current-Dockerfile build-egress mode. When present, this proxy
+   * serves ONLY the nested bundle's build path: it has no LLM providers,
+   * package registries, or dynamic passthrough. Every CONNECT is TLS-terminated
+   * and every decrypted (or plain-HTTP) request is authorized against the frozen
+   * manifest via the guard before forwarding through `outboundTransport`. See
+   * `build-egress-proxy.ts` for the seam design. Foundation code — inert behind
+   * the docker-workload admission fuse until a later phase constructs a session
+   * with a nested build path.
+   */
+  readonly buildEgress?: {
+    readonly guard: BuildEgressGuard;
+    readonly seam: BuildEgressSeam;
+  };
   /**
    * Connection-source filter for TCP mode. When set, sockets whose
    * remote address fails the predicate are destroyed before any request
@@ -613,6 +628,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   let capturePersona: string | undefined;
 
   const agentKind: AgentKind | undefined = options.agentKind;
+  const buildEgress = options.buildEgress;
   const captureWriter = options.capture;
   const captureRecordedAgentName = options.recordedAgentName;
   const captureWorkflowRunId = options.workflowRunId;
@@ -738,6 +754,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     readonly provider?: ProviderKeyMapping;
     readonly registry?: RegistryConfig;
     readonly passthrough: boolean;
+    readonly buildEgress?: boolean;
     readonly host: string;
     readonly port: number;
   }
@@ -858,6 +875,21 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const { host: targetHost, port: targetPort } = meta;
+
+    // Build-egress connections: authorize every decrypted request against the
+    // frozen manifest, then forward through the destination-bound transport.
+    if (meta.buildEgress && buildEgress) {
+      handleBuildEgressRequest(clientReq, clientRes, {
+        guard: buildEgress.guard,
+        seam: buildEgress.seam,
+        transport: outboundTransport,
+        scheme: 'https:',
+        targetHost,
+        targetPort,
+        requestTarget: clientReq.url ?? '/',
+      });
+      return;
+    }
 
     // Dispatch: registry connections are handled separately from provider connections
     if (meta.registry) {
@@ -1498,6 +1530,27 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       res.end('IRONCURTAIN_OK/1\n');
       return;
     }
+    // Build-egress mode: plain-HTTP proxy requests (apt speaks HTTP) are
+    // authorized against the frozen manifest and forwarded, same as the
+    // TLS-terminated HTTPS path. No registry/passthrough dispatch applies.
+    if (buildEgress) {
+      const target = req.url ? tryParseProxyUrl(req.url) : null;
+      if (!target) {
+        res.writeHead(405, { 'Content-Type': 'text/plain' });
+        res.end('Method Not Allowed');
+        return;
+      }
+      handleBuildEgressRequest(req, res, {
+        guard: buildEgress.guard,
+        seam: buildEgress.seam,
+        transport: outboundTransport,
+        scheme: 'http:',
+        targetHost: target.hostname,
+        targetPort: target.port,
+        requestTarget: target.path,
+      });
+      return;
+    }
     // Handle plain HTTP proxy requests. HTTP proxy clients send absolute URLs:
     // "GET http://host:port/path HTTP/1.1". We parse the absolute URL into
     // hostname, port, and origin-form path before dispatching.
@@ -1562,13 +1615,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     activeClientSockets.add(clientSocket);
     clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
-    // 1. Check allowlist (providers, registries, and dynamic passthrough)
+    // 1. Check allowlist (providers, registries, and dynamic passthrough).
+    // Build-egress mode has none of these — every host is TLS-terminated so the
+    // request layer can authorize it against the frozen manifest (or 403 it).
+    const isBuildEgress = buildEgress !== undefined;
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
     const isDynamicPassthrough = passthroughHosts.has(host);
     const isWildcardEligible = allowAllHosts && !isKnownStaticHost(host);
     const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
-    if (!provider && !registry && !isPassthrough) {
+    if (!isBuildEgress && !provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       clientSocket.destroy();
@@ -1576,7 +1632,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const passthroughKind = isDynamicPassthrough ? 'passthrough' : 'passthrough-wildcard';
-    const connType = provider ? 'provider' : registry ? 'registry' : passthroughKind;
+    const connType = isBuildEgress ? 'build-egress' : provider ? 'provider' : registry ? 'registry' : passthroughKind;
 
     // 2. Direct outer proxies may use a raw TCP tunnel for passthrough
     //    domains. Nested proxies must not expose a caller-selected CONNECT
@@ -1667,6 +1723,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       provider: provider ?? undefined,
       registry,
       passthrough: isPassthrough,
+      buildEgress: isBuildEgress,
       host,
       port,
     });

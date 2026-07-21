@@ -9,7 +9,6 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
-  lstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -24,6 +23,12 @@ import { createContainerRuntime } from '../docker/container-runtime.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import { inventoryOwnedResourceIds, revokeDockerWorkloadOuterResources } from './bundle-revocation.js';
 import {
+  assertExactTargetIdentity,
+  captureCleanupProof,
+  removeExactBundleState,
+  toWatchdogCleanupProof,
+} from './bundle-cleanup.js';
+import {
   closeDockerWorkloadLease,
   loadDockerWorkloadLease,
   recordDockerWorkloadLeaseIncident,
@@ -34,7 +39,6 @@ import {
   loadResourceWatchdogPolicy,
   ResourceWatchdog,
   type ResourceWatchdogAttestation,
-  type ResourceWatchdogCleanupProof,
   type ResourceWatchdogSample,
   type ResourceWatchdogTrip,
 } from '../docker/resource-watchdog.js';
@@ -405,76 +409,6 @@ function statusUpdate(
   update: Partial<Pick<ResourceWatchdogSupervisorStatus, 'state' | 'lastSample' | 'trip' | 'detail'>>,
 ): ResourceWatchdogSupervisorStatus {
   return supervisorStatusSchema.parse({ ...current, ...update, updatedAt: now.toISOString() });
-}
-
-async function captureCleanupProof(
-  runtime: ContainerRuntime,
-  lease: DockerWorkloadLease,
-  gapMs: number,
-  now: () => Date,
-  sleep: (milliseconds: number) => Promise<void>,
-): Promise<DockerWorkloadCleanupProof> {
-  const first = {
-    capturedAt: now().toISOString(),
-    ownedResourceIds: [...(await inventoryOwnedResourceIds(runtime, lease))],
-  };
-  await sleep(gapMs);
-  const second = {
-    capturedAt: now().toISOString(),
-    ownedResourceIds: [...(await inventoryOwnedResourceIds(runtime, lease))],
-  };
-  if (first.ownedResourceIds.length !== 0 || second.ownedResourceIds.length !== 0) {
-    throw new Error('watchdog supervisor cleanup inventories are not empty');
-  }
-  if (existsSync(lease.paths.stateRoot)) throw new Error('watchdog supervisor state root still exists after cleanup');
-  return { exactOuterResourcesAbsent: true, stateRootAbsent: true, inventories: [first, second] };
-}
-
-function assertExactTargetIdentity(lease: DockerWorkloadLease, device: number, inode: number): void {
-  const stats = lstatSync(lease.paths.stateRoot);
-  if (!stats.isDirectory() || stats.isSymbolicLink() || stats.dev !== device || stats.ino !== inode) {
-    throw new Error('watchdog supervisor refuses cleanup after state-root identity change');
-  }
-}
-
-function removeExactBundleState(lease: DockerWorkloadLease, leasePath: string): void {
-  const paths = [
-    lease.paths.apiRoot,
-    lease.paths.exchangeRoot,
-    lease.paths.runtimeRoot,
-    lease.paths.stagingRoot,
-    lease.paths.stateRoot,
-  ];
-  const unique = [...new Set(paths)].sort((left, right) => right.length - left.length);
-  for (const path of unique) {
-    assertSafeCleanupPath(path, lease.paths.workspaceRoot, leasePath);
-    rmSync(path, { recursive: true, force: true });
-  }
-}
-
-function assertSafeCleanupPath(path: string, workspaceRoot: string, leasePath: string): void {
-  const parts = path.split('/').filter(Boolean);
-  if (!isAbsolute(path) || resolve(path) !== path || parts.length < 2) {
-    throw new Error(`watchdog supervisor refuses unsafe cleanup path: ${path}`);
-  }
-  if (path === workspaceRoot || workspaceRoot.startsWith(`${path}/`) || path.startsWith(`${workspaceRoot}/`)) {
-    throw new Error(`watchdog supervisor refuses workspace cleanup path: ${path}`);
-  }
-  if (path === leasePath || leasePath.startsWith(`${path}/`)) {
-    throw new Error(`watchdog supervisor refuses cleanup path containing its lease: ${path}`);
-  }
-}
-
-function toWatchdogCleanupProof(cleanup: DockerWorkloadCleanupProof): ResourceWatchdogCleanupProof {
-  const [first, second] = cleanup.inventories;
-  return {
-    exactOuterResourceAbsent: cleanup.exactOuterResourcesAbsent,
-    stateRootAbsent: cleanup.stateRootAbsent,
-    inventories: [
-      { capturedAtMs: Date.parse(first.capturedAt), ownedResourceIds: first.ownedResourceIds },
-      { capturedAtMs: Date.parse(second.capturedAt), ownedResourceIds: second.ownedResourceIds },
-    ],
-  };
 }
 
 function loadStrictJson<T>(path: string, label: string, schema: z.ZodType<T>): T {

@@ -1,0 +1,25 @@
+# Preloaded-catalog freeze + config→provisioning plumbing (Phase 0F Item 1)
+
+Branch `feat/secure-nested-runtime`. Symbol/path claims are point-in-time — grep to confirm.
+
+## Two-location catalog design (load-bearing)
+- `buildPreloadedCatalogs` (src/docker/preloaded-catalog-builder.ts) writes `${role}.tar` archives AND `preloaded-catalog.{docker,apple-container}.json` into ONE `outputDirectory` that must be mode 0700 and empty. `resolvePreloadedImage` resolves each archive as `dirname(catalogPath)/entry.archive.fileName`, so catalog JSON + archives MUST be co-located.
+- Therefore the RUNTIME catalog lives under `$IRONCURTAIN_HOME/docker-workload/preloaded-catalog/` (trusted, 0700, archives beside it). The committed `config/docker-workload/preloaded-catalog.*.json` is a FROZEN RECORD only (evidence, like profile-ceiling.json) — NOT read at runtime because the repo checkout is the untrusted workspace for a nested workload. Path helpers: `src/docker/preloaded-catalog-paths.ts` (`getStagedCatalogPath`, `getFrozenCatalogPath`, `preloadedCatalogFileName`). config/ dirs are 0755 so they can never be the builder's outputDirectory.
+
+## Admission fuse gates preloaded mode (keep it)
+- `assertDockerWorkloadImplementationAvailable` (src/docker-workload/config.ts) throws whenever `dockerWorkload.enabled === true`. It's called at the TOP of both `ensureDockerImage` and `prepareDockerInfrastructure`. So preloaded provisioning is UNREACHABLE in production until the fuse is removed (Phase 0C). Any config→provisioning plumbing must sit AFTER the fuse.
+
+## config→provisioning: single mapping, four entry points
+- `imageProvisioningForConfig(dockerWorkload, resolvedRuntimeKind)` in docker-infrastructure.ts is the ONE mapping: disabled→undefined (legacy `build-if-stale`); enabled→`{imageMode:'preloaded-catalog', catalogPath: getStagedCatalogPath(kind), runtimeKind}` where kind = explicit `backend` unless `'auto'` (then resolvedRuntimeKind).
+- Both `ensureDockerImage` and `prepareDockerInfrastructure` derive it internally when the `imageProvisioning?` param is absent (param is a TEST override seam). All 4 production entry points pass no explicit provisioning, so all derive from config: src/index.ts preflight→ensureDockerImage; pty-session→prepareDockerInfrastructure; session/index.ts standalone + workflow/orchestrator → createDockerInfrastructure→prepareDockerInfrastructure(options?.imageProvisioning).
+- The single early branch is `resolveAgentImage(image, docker, provisioning)` in docker-infrastructure.ts: `imageMode==='preloaded-catalog'` → resolvePreloadedImage (zero build/pull); else ensureImageFromSpec. Both call paths funnel here.
+
+## Freeze command + image sources
+- `ironcurtain build-preloaded-catalog` → `runBuildPreloadedCatalogCommand` (src/docker/build-preloaded-catalog-command.ts). Core `runBuildPreloadedCatalog(deps)` is DI'd (runtimes/buildImage/stage injected) so it's testable without Docker. It builds all 11 roles base-first (agents `FROM ironcurtain-base:latest`), calls buildPreloadedCatalogs, then copies staged catalog JSON → frozen config dir. It's operator/trusted-host prep, so it does NOT call the fuse. Requires Docker to build (staging does `docker image save`); Apple optional (records Apple's imported index ID).
+- Build labels: the command stamps the FULL catalog label set via `buildImage(labels)` (--label), computed by mirroring `stagePreloadedImage`'s provisional-entry derivation (placeholder identity digests, real buildHash/arch/api/toolchain/provenance) so staging's expectedLabels match.
+- Source manifest: `src/docker/preloaded-catalog-sources.ts` (`catalogImageSources()`). 11 roles. Agent roles' buildHash MUST equal `computeAgentImageBuildHash(logicalName)` (else resolveAgentImage rejects) → injected as a dep. Non-agent roles use a self-consistent content hash (`computeContentBuildHash`) — no current consumer cross-checks it.
+- Image assets: base/agents/nested-daemon/nested-relay(fixed-relay) already existed. NEW: `docker/docker-workload/helper/` + `socat/` (minimal static Go, scratch, built from the repo's already-pinned `golang:1.24-bookworm@sha256:1a6d44...` so they're offline+pinned without a new external digest). target/scanner REUSE the existing fixture Dockerfiles at `test/docker-workload/fixtures/vulnerability-fixture/` (referenced from the src manifest — intentional per §7.3). NEW `Dockerfile.patched-target` there reuses target/main.go with `CMD ["--mode","patched"]` to get a distinct config digest from vulnerability-target.
+
+## Gotchas hit
+- eslint `no-unnecessary-condition`: `ResolvedDockerWorkloadConfig` enabled-branch has `imageMode:'preloaded-catalog'` as a literal, so a redundant `imageMode !== 'preloaded-catalog'` check fails lint. Rely on `enabled` alone.
+- Pre-existing lint error unrelated to this work: `test/docker-workload/fixtures/watchdog-coordinator.mjs` trips eslint's tsconfig-project parser (`npm run lint` reports it). Not introduced here.

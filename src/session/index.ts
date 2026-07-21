@@ -126,6 +126,13 @@ function applyResumeMetadata(options: SessionOptions): SessionOptions {
   if (!options.resumeSessionId) return options;
   const metadata = loadSessionMetadata(options.resumeSessionId);
   if (!metadata) return options;
+  if (metadata.dockerWorkload !== undefined) {
+    throw new SessionError(
+      `Cannot resume session "${options.resumeSessionId}": secure nested Docker-workload sessions have ephemeral ` +
+        `daemon state and are not resumable`,
+      'SESSION_INIT_FAILED',
+    );
+  }
   return {
     ...options,
     // Only spread defined metadata fields so undefined doesn't overwrite

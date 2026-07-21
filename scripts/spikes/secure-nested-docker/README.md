@@ -236,3 +236,38 @@ Verified evidence currently exists for `ac-rootless-path-0002` and
 `ac-rootless-relay-0005`. These modes still do not prove exhaustive vsock listeners, the real
 two-MITM/provider protocol, product watchdog, product entrypoint, the Phase 0F frozen contract, or
 0C qualification.
+
+## Phase 0F narrow build-egress cold-cache capture
+
+`build-egress-capture.mjs` records the complete endpoint set that a cold-cache rebuild of the
+current IronCurtain Dockerfiles fetches, so a reviewer can freeze
+`config/docker-workload/build-egress-manifest.json`. It stands up a recording MITM proxy that is the
+build's ONLY egress route, drives `docker build --no-cache` with a fresh builder, and records every
+fetched scheme/host/port/method/path plus every redirect hop. It emits a DRAFT
+`build-egress-manifest.draft.json` (top-level `draft: true`, deliberately NOT a loadable frozen
+manifest) and a `capture-evidence.json` summary. A tool that bypasses the proxy fails to connect;
+those failures land in the per-Dockerfile build logs and under `directConnectSuspected`, and any
+endpoint fetched but not recorded is by construction a direct connection — so the recorded set is
+the complete mediated set.
+
+Validate the recorder → synthesizer → evidence plumbing without Docker:
+
+```sh
+node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke \
+  --evidence-dir /absolute/outside-workspace/build-egress-smoke
+```
+
+The full cold-cache capture is a later operator-supervised validation step (a real build reaches the
+public internet through the proxy):
+
+```sh
+node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build \
+  --evidence-dir /absolute/outside-workspace/build-egress-capture \
+  --repo-root /absolute/path/to/ironcurtain \
+  --dockerfile docker/Dockerfile.base --dockerfile docker/Dockerfile.goose --context .
+```
+
+The draft is an input to review, not a frozen artifact. A human must pin every fetched artifact,
+choose each rule's BuildKit/frontend/base-image/RUN seam, and transform the draft into the strict
+frozen manifest that `src/docker-workload/build-egress-policy.ts` loads. Capturing does not freeze,
+qualify a backend, or make a network-dependent build reproducible.

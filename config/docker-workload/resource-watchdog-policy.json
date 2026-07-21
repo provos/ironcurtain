@@ -1,0 +1,18 @@
+{
+  "cleanupInventoryGapMs": 500,
+  "hardSafetyBytes": 8589934592,
+  "hostReserveBytes": 2147483648,
+  "maximumOvershootBytes": 1073741824,
+  "policyId": "docker-workload-observed-state-v1",
+  "sampleIntervalMs": 5000,
+  "sampleTimeoutMs": 5000,
+  "schemaVersion": 1,
+  "softEvidenceBytes": 4294967296,
+  "staleAfterMs": 30000,
+  "stateClasses": [
+    { "id": "daemon-state", "kind": "directory", "relativePath": "daemon", "required": false },
+    { "id": "api-state", "kind": "directory", "relativePath": "api", "required": false },
+    { "id": "exchange-state", "kind": "directory", "relativePath": "exchange", "required": false },
+    { "id": "staging-state", "kind": "directory", "relativePath": "staging", "required": false }
+  ]
+}

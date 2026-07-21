@@ -68,6 +68,8 @@ import {
   type RuntimeTrustMetadata,
 } from './runtime-trust.js';
 import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-image-catalog.js';
+import { getStagedCatalogPath } from './preloaded-catalog-paths.js';
+import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
 import * as logger from '../logger.js';
 
 export { InternalNetworkConnectivityError };
@@ -415,6 +417,38 @@ export type AgentImageResolution =
       readonly buildHash: string;
     }
   | (ResolvedPreloadedImage & { readonly imageRef: string });
+
+/**
+ * Derive the trusted image-resolution mode from the resolved Docker-workload
+ * configuration. This is the single mapping both image call paths use so they
+ * branch identically and early:
+ *
+ * - Feature off (or absent) -> `undefined`, i.e. today's `build-if-stale`.
+ * - Feature on with `preloaded-catalog` -> a preloaded-catalog provisioning
+ *   bound to the trusted staged catalog for the effective backend, so
+ *   `resolveAgentImage()` never calls `ensureImage`/`ensureBaseImage`/
+ *   `buildImage`/`pullImage`.
+ *
+ * `resolvedRuntimeKind` is the runtime the caller already resolved (env
+ * override > config > auto probe); the workload `backend` field selects the
+ * catalog only when it names a concrete backend, otherwise the resolved
+ * runtime wins. The mapping is pure so both call paths and tests can exercise
+ * it without a container runtime.
+ */
+export function imageProvisioningForConfig(
+  dockerWorkload: ResolvedDockerWorkloadConfig | undefined,
+  resolvedRuntimeKind: ContainerRuntimeKind,
+): ImageProvisioning | undefined {
+  // The enabled config always carries `imageMode: 'preloaded-catalog'` today;
+  // feature-off is the only other state and maps to the legacy build path.
+  if (dockerWorkload?.enabled !== true) return undefined;
+  const runtimeKind = dockerWorkload.backend === 'auto' ? resolvedRuntimeKind : dockerWorkload.backend;
+  return {
+    imageMode: 'preloaded-catalog',
+    catalogPath: getStagedCatalogPath(runtimeKind),
+    runtimeKind,
+  };
+}
 
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
@@ -797,7 +831,12 @@ export async function prepareDockerInfrastructure(
     // runtime into mounted caches below; they are no longer baked into
     // per-workflow Docker images.
     const agentImage = await adapter.getImage();
-    const imageResolution = await resolveAgentImage(agentImage, docker, imageProvisioning);
+    // Explicit override wins (tests); otherwise derive from resolved config so
+    // this path branches on the same trusted image mode as the `ensureDockerImage`
+    // preflight. Behind the admission fuse this is always `build-if-stale` today.
+    const resolvedImageProvisioning =
+      imageProvisioning ?? imageProvisioningForConfig(config.userConfig.dockerWorkload, runtimeKind);
+    const imageResolution = await resolveAgentImage(agentImage, docker, resolvedImageProvisioning);
     const agentBuildHash = imageResolution.buildHash;
     const image = imageResolution.imageRef;
     // Surface the (unpinned) agent CLI version baked into the image so silent
@@ -1812,8 +1851,12 @@ export async function ensureDockerImage(
   await registerBuiltinAdapters(userConfig);
   const adapter = getAgent(agentId);
   const image = await adapter.getImage();
-  const docker = createContainerRuntime(await resolveRuntimeKind(userConfig.containerRuntime));
-  await resolveAgentImage(image, docker, imageProvisioning);
+  const runtimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
+  const docker = createContainerRuntime(runtimeKind);
+  // An explicit override wins (tests); otherwise derive from resolved config so
+  // the preflight branches on the same trusted image mode as the session path.
+  const provisioning = imageProvisioning ?? imageProvisioningForConfig(userConfig.dockerWorkload, runtimeKind);
+  await resolveAgentImage(image, docker, provisioning);
 }
 
 /**

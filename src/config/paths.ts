@@ -752,3 +752,65 @@ export function getBundleMitmProxySocketPath(bundleId: BundleId): string {
 export function getBundleMitmControlSocketPath(bundleId: BundleId): string {
   return resolve(getBundleHostOnlyDir(bundleId), 'mitm-control.sock');
 }
+
+// ---------------------------------------------------------------------------
+// Secure nested Docker-workload host-only layout
+// ---------------------------------------------------------------------------
+//
+// The control tree (`docker-workload/leases/<leaseId>/`) and the revocable
+// state tree (`docker-workload/state/<leaseId>/`) are deliberate SIBLINGS
+// under `docker-workload/`. This separation is load-bearing: the watchdog
+// supervisor refuses to run control files that live inside the deletable
+// state root, and the bundle-lease refuses host-only paths that live inside
+// the workspace. Both trees are owner-only (`0o700`); neither is ever mounted
+// into the untrusted bundle.
+
+/**
+ * Lowercase, path-safe leaseId. Stricter than the lease-JSON identifier
+ * schema (which also permits `.`/`:`) so a leaseId can never introduce a
+ * path traversal or an unexpected separator into the host-only layout.
+ */
+function assertDockerWorkloadLeaseId(leaseId: string): void {
+  assertPathSafeSlug('docker-workload lease ID', leaseId);
+}
+
+/**
+ * Returns the Docker-workload root directory: {home}/docker-workload/
+ * Parent of the sibling `leases/` (control) and `state/` (revocable) trees.
+ */
+export function getDockerWorkloadRoot(): string {
+  return resolve(getIronCurtainHome(), 'docker-workload');
+}
+
+/**
+ * Returns the Docker-workload leases (control) root:
+ *   {home}/docker-workload/leases/
+ */
+export function getDockerWorkloadLeasesRoot(): string {
+  return resolve(getDockerWorkloadRoot(), 'leases');
+}
+
+/**
+ * Returns the host-only control directory for one lease:
+ *   {home}/docker-workload/leases/<leaseId>/
+ *
+ * Holds the control files (`lease.json`, `policy.json`, `status.json`,
+ * `stop.json`) and the `evidence/` subtree. Never mounted into the bundle.
+ */
+export function getDockerWorkloadLeaseDir(leaseId: string): string {
+  assertDockerWorkloadLeaseId(leaseId);
+  return resolve(getDockerWorkloadLeasesRoot(), leaseId);
+}
+
+/**
+ * Returns the revocable per-session state root:
+ *   {home}/docker-workload/state/<leaseId>/
+ *
+ * Its `daemon/`, `api/`, `exchange/`, and `staging/` subdirectories are the
+ * watchdog state classes and the exact tree teardown removes. A sibling of
+ * the control directory so the supervisor never deletes its own control files.
+ */
+export function getDockerWorkloadStateRoot(leaseId: string): string {
+  assertDockerWorkloadLeaseId(leaseId);
+  return resolve(getDockerWorkloadRoot(), 'state', leaseId);
+}

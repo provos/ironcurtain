@@ -38,6 +38,10 @@ const topLevelSpec: CommandSpec = {
     { name: 'observe', description: 'Watch live LLM token output for running sessions' },
     { name: 'doctor', description: 'Diagnose installation, credentials, and MCP server health' },
     { name: 'gc', description: 'Inspect or reclaim orphaned IronCurtain Docker resources' },
+    {
+      name: 'build-preloaded-catalog',
+      description: 'Freeze the trusted preloaded image catalog (secure nested Docker)',
+    },
     { name: 'help', description: 'Show this help message' },
   ],
   options: [
@@ -212,6 +216,11 @@ switch (subcommand) {
   case 'gc': {
     const { runDockerGcCommand } = await import('./docker/gc-command.js');
     await runDockerGcCommand(process.argv.slice(3));
+    break;
+  }
+  case 'build-preloaded-catalog': {
+    const { runBuildPreloadedCatalogCommand } = await import('./docker/build-preloaded-catalog-command.js');
+    await runBuildPreloadedCatalogCommand(process.argv.slice(3));
     break;
   }
   case 'setup-signal': {

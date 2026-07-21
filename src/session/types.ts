@@ -140,6 +140,21 @@ export interface SessionMetadata {
    * case (legacy-session fallback).
    */
   readonly agentConversationId?: AgentConversationId;
+
+  /**
+   * Present only for secure nested Docker-workload sessions. Records the
+   * host-only lease identity and its frozen attestation bindings for audit
+   * and post-hoc inspection. Because a Docker-workload bundle's daemon state
+   * is ephemeral (`daemonState: ephemeral`), a persisted lease can never be
+   * revived, so resume validation refuses any session carrying this field.
+   */
+  readonly dockerWorkload?: {
+    readonly leaseId: string;
+    readonly generation: string;
+    readonly configHash: string;
+    readonly watchdogPolicySha256: string;
+    readonly backend: 'docker' | 'apple-container';
+  };
 }
 
 /**
