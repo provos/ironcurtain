@@ -61,6 +61,8 @@ vi.mock('../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: vi.fn(),
   createSessionContainers: vi.fn(),
   prepareConversationStateDir: vi.fn(),
+  // Only invoked on the Docker-workload path (handle present); harmless here.
+  dockerWorkloadSessionMetadata: vi.fn(),
 }));
 
 // Mock claude-md-seed so we can exercise the error path by making the

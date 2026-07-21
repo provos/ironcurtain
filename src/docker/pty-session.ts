@@ -35,7 +35,8 @@ import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
-import { buildAgentUidRemap, buildUdsSocketMounts } from './docker-infrastructure.js';
+import { buildAgentUidRemap, buildUdsSocketMounts, ledgerOuterResourceCreate } from './docker-infrastructure.js';
+import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import {
   createIronCurtainInternalNetwork,
@@ -325,6 +326,10 @@ async function runPtySessionAttempt(
   let proxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['proxy'] | null = null;
   let mitmProxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['mitmProxy'] | null = null;
   let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
+  // Secure nested Docker-workload lease handle, captured in outer scope so the
+  // finally block can tear it down first (§8.3). Undefined for ordinary PTY
+  // sessions — the capability is gated behind the admission fuse.
+  let dockerWorkload: DockerWorkloadBundleHandle | undefined;
   let useTcp: boolean;
   let networkName: string | null = null;
   let allocatedNetworkSubnet: string | undefined;
@@ -402,6 +407,7 @@ async function runPtySessionAttempt(
     }
 
     ({ docker, proxy, mitmProxy, useTcp } = infra);
+    dockerWorkload = infra.dockerWorkload;
     onDockerReady(docker);
     const {
       adapter,
@@ -691,31 +697,56 @@ async function runPtySessionAttempt(
     // "no flag emitted" (see clampDockerResources docs).
     const { effective: ptyResources } = clampDockerResources(options.config.userConfig.dockerResources);
 
-    containerId = await docker.create({
-      image,
-      name: mainContainerName,
-      network: network ?? 'none',
-      mounts,
-      env: { ...env, ...uidRemap.env },
-      user: uidRemap.user,
-      command: ptyCommand,
-      // PTY sessions are standalone (no workflow/scope), so only the
-      // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
-      bundleLabel: bundleId,
-      labels: resourceLabels,
-      resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
-      extraHosts,
-      publishSockets,
-      capAdd: [
-        'SETUID', // sudo setuid
-        'SETGID', // sudo setgid
-        'CHOWN', // apt-get chown on installed files
-        'FOWNER', // apt-get set permissions on files it doesn't own
-        'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
-        'AUDIT_WRITE', // sudo audit logging
-      ],
-      tty: true,
-    });
+    // Build the PTY agent container create args for a given name + ownership
+    // labels. When `ownershipLabels` is present (Docker-workload ledgering) the
+    // labels field is the base resource labels merged with the generation
+    // ownership label; otherwise the plain resource labels are used
+    // (byte-identical to the pre-ledger create).
+    const createPtyContainer = (name: string, ownershipLabels?: Readonly<Record<string, string>>): Promise<string> =>
+      infra.docker.create({
+        image,
+        name,
+        network: network ?? 'none',
+        mounts,
+        env: { ...env, ...uidRemap.env },
+        user: uidRemap.user,
+        command: ptyCommand,
+        // PTY sessions are standalone (no workflow/scope), so only the
+        // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
+        bundleLabel: bundleId,
+        labels: ownershipLabels ? { ...resourceLabels, ...ownershipLabels } : resourceLabels,
+        resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
+        extraHosts,
+        publishSockets,
+        capAdd: [
+          'SETUID', // sudo setuid
+          'SETGID', // sudo setgid
+          'CHOWN', // apt-get chown on installed files
+          'FOWNER', // apt-get set permissions on files it doesn't own
+          'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
+          'AUDIT_WRITE', // sudo audit logging
+        ],
+        tty: true,
+      });
+
+    // §8.2 step 1: ledger the agent container before create when a
+    // Docker-workload bundle is admitted; ordinary sessions create directly.
+    // Mirrors createSessionContainers in the batch path.
+    if (dockerWorkload) {
+      ({ id: containerId } = await ledgerOuterResourceCreate(
+        dockerWorkload,
+        { kind: 'container', role: 'agent' },
+        async (name, ownershipLabels) => ({
+          id: await createPtyContainer(name, ownershipLabels),
+          expanded: { mounts },
+        }),
+      ));
+      // §8.2 step 4: activate the lease once the agent container is observed,
+      // before `docker.start` unblocks the agent.
+      dockerWorkload.activate();
+    } else {
+      containerId = await createPtyContainer(mainContainerName);
+    }
 
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
@@ -850,7 +881,17 @@ async function runPtySessionAttempt(
       await flushCapture();
     }
 
-    if (docker) {
+    if (dockerWorkload) {
+      // §8.3: an admitted Docker-workload bundle tears its ledgered outer
+      // resources down through the lease first — teardown removes the exact
+      // agent container with an absence proof and closes the lease via the
+      // watchdog-supervisor handshake, superseding cleanupContainers for it.
+      await dockerWorkload
+        .teardown()
+        .catch((err: unknown) =>
+          logger.warn(`PTY dockerWorkload.teardown() failed: ${err instanceof Error ? err.message : String(err)}`),
+        );
+    } else if (docker) {
       await cleanupContainers(docker, {
         containerId,
         sidecarContainerId,

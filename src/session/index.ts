@@ -291,7 +291,8 @@ async function createDockerSession(
       // the deterministic `ironcurtain-<sessionId[0:12]>` container
       // name for prior-crash recovery.
       const bundleId = bundleIdFromSessionId(sessionId);
-      const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+      const { createDockerInfrastructure, dockerWorkloadSessionMetadata } =
+        await import('../docker/docker-infrastructure.js');
       // Trajectory-capture: pass the RAW override; the infra layer is the
       // single place that resolves it against userConfig. Writer is only
       // constructed when enabled — zero cost when disabled. See
@@ -321,6 +322,26 @@ async function createDockerSession(
       // destroyed by `session.close()` (ownsInfra=true).
       infra.setTokenSessionId(sessionId);
       builtInfra = true;
+
+      // §8.4: persist the Docker-workload lease identity + attestation bindings
+      // for audit/inspection. Merged into the metadata `buildSessionConfig`
+      // already wrote — the lease tuple is only known after admission, which
+      // runs inside `createDockerInfrastructure`. Inert for ordinary sessions
+      // (handle present only behind the admission fuse); a Docker-workload
+      // bundle is ephemeral and never resumed, so overwriting here is safe.
+      const resolvedDockerWorkload = sessionConfig.config.userConfig.dockerWorkload;
+      if (infra.dockerWorkload && !options.resumeSessionId && resolvedDockerWorkload?.enabled === true) {
+        const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
+        const existing = loadSessionMetadata(sessionId) ?? { createdAt: new Date().toISOString() };
+        saveSessionMetadata(sessionId, {
+          ...existing,
+          dockerWorkload: dockerWorkloadSessionMetadata(
+            infra.dockerWorkload,
+            dockerWorkloadConfigHash(resolvedDockerWorkload),
+            infra.runtimeKind,
+          ),
+        });
+      }
     }
 
     const claudeMdContent = buildDockerClaudeMd({

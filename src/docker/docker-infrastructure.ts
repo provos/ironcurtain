@@ -26,7 +26,13 @@ import { createHash } from 'node:crypto';
 import { quote } from 'shell-quote';
 import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
 import { getBundleRuntimeRoot } from '../config/paths.js';
-import { getBundleShortId, type BundleId, type SessionId, type SessionMode } from '../session/types.js';
+import {
+  getBundleShortId,
+  type BundleId,
+  type SessionId,
+  type SessionMetadata,
+  type SessionMode,
+} from '../session/types.js';
 import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
 import {
   CONTAINER_SCRIPTS_DIR,
@@ -70,6 +76,12 @@ import {
 import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-image-catalog.js';
 import { getStagedCatalogPath } from './preloaded-catalog-paths.js';
 import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
+import type {
+  DockerWorkloadBundleHandle,
+  OuterResourceKind,
+  OuterResourceRole,
+} from '../docker-workload/infrastructure.js';
+import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
 import * as logger from '../logger.js';
 
 export { InternalNetworkConnectivityError };
@@ -313,6 +325,19 @@ export interface PreContainerInfrastructure {
    * (§9). Undefined when capture is disabled. Not for orchestrator use.
    */
   readonly captureWriter?: TrajectoryCaptureWriter;
+
+  /**
+   * Present only for admitted secure nested Docker-workload bundles
+   * (docs/designs/secure-nested-runtime-implementation-plan.md §8.2–8.3).
+   * The host-owned lease handle: `createSessionContainers` / the PTY path
+   * ledger every outer resource through it before create and observe it
+   * after (§8.2 step 1); `createDockerInfrastructure` activates it once
+   * every resource is observed (§8.2 step 4); `destroyDockerInfrastructure`
+   * tears it down first (§8.3). Undefined for every ordinary session — the
+   * capability is gated behind the admission fuse in `docker-workload/
+   * config.ts`, so this is inert until Phase 0C flips it.
+   */
+  readonly dockerWorkload?: DockerWorkloadBundleHandle;
 }
 
 /**
@@ -575,6 +600,27 @@ export async function prepareDockerInfrastructure(
 
   const docker = createContainerRuntime(runtimeKind);
 
+  // §8.2 step 1: admit the secure nested Docker-workload bundle — create its
+  // host-owned lease before any proxy or outer resource is created. Placed
+  // here (after the runtime is resolved, before proxy startup) so the §8.2
+  // ordering "lease -> proxies -> watchdog attestation" holds. UNREACHABLE on
+  // the production path: the admission fuse (`assertDockerWorkloadImplement-
+  // ationAvailable`, above) throws whenever the capability is enabled, so this
+  // only runs behind a bypassed fuse in tests. `attestWatchdog()` (§8.2 step 3)
+  // is driven after the proxies start, below.
+  const dockerWorkloadConfig = config.userConfig.dockerWorkload;
+  const dockerWorkload =
+    dockerWorkloadConfig?.enabled === true
+      ? await admitDockerWorkloadForSession({
+          dockerWorkload: dockerWorkloadConfig,
+          runtime: docker,
+          runtimeKind,
+          bundleId,
+          workspaceRoot: workspaceDir,
+          auditLogPath,
+        })
+      : undefined;
+
   // tcp-hostonly: create the per-bundle host-only network BEFORE the
   // proxies are constructed. The gateway address feeds the container env,
   // the orientation proxy address, and the connection-source guard both
@@ -799,6 +845,14 @@ export async function prepareDockerInfrastructure(
 
   // Remaining setup steps can fail -- clean up started proxies on error.
   try {
+    // §8.2 step 3: attest the host watchdog now that the outer proxies are up.
+    // No-op unless a Docker-workload bundle was admitted above (unreachable
+    // behind the fuse). A failed attestation aborts admission and leaves a
+    // reconcilable `admitting` lease; the proxy cleanup in the catch below
+    // still runs, but the lease is intentionally NOT torn down here (crash
+    // reconciliation reclaims it) — see §8.3.
+    await dockerWorkload?.attestWatchdog();
+
     // Build orientation
     const helpData = proxy.getHelpData();
     const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
@@ -912,6 +966,7 @@ export async function prepareDockerInfrastructure(
       skillsMount,
       scriptsMount,
       ...workflowDependencyMounts,
+      dockerWorkload,
       restageSkills,
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
@@ -996,18 +1051,49 @@ export async function createDockerInfrastructure(
     options?.imageProvisioning,
   );
 
+  return assembleDockerInfrastructure(core, config, options);
+}
+
+/**
+ * Finalizes a prepared bundle into a running `DockerInfrastructure`: creates
+ * the session containers, provisions workflow dependencies, and — for an
+ * admitted secure nested Docker-workload bundle — activates the lease (§8.2
+ * step 4) once every outer resource is observed, immediately before the infra
+ * (and its agent) is handed to the caller.
+ *
+ * On any failure an admitted Docker-workload bundle is torn down FIRST (§8.3):
+ * `teardown()` removes the ledgered outer resources with absence proofs, so it
+ * supersedes the ordinary `cleanupContainers` fallback (which still runs for
+ * non-workload bundles). The proxies are always stopped last.
+ *
+ * Split out from `createDockerInfrastructure` so the §8.2/§8.3
+ * create -> activate -> teardown wiring is exercisable with a scripted
+ * `PreContainerInfrastructure` without standing up real proxies.
+ */
+export async function assembleDockerInfrastructure(
+  core: PreContainerInfrastructure,
+  config: IronCurtainConfig,
+  options?: CreateDockerInfrastructureOptions,
+): Promise<DockerInfrastructure> {
   let containerResources: ContainerResources | undefined;
   try {
     containerResources = await createSessionContainers(core, config, options);
     const infra = { ...core, ...containerResources };
     await provisionWorkflowDependencies(infra, config.userConfig.packageInstall.enabled);
+    // §8.2 step 4: every requested outer resource has now been observed, so
+    // activate the lease and start the host-owned heartbeat before the caller
+    // unblocks the agent. No-op for ordinary bundles (handle absent).
+    core.dockerWorkload?.activate();
     return infra;
   } catch (error) {
-    // Any partial container/sidecar/network cleanup happened inside
-    // createSessionContainers(). If provisioning failed after a complete
-    // container bundle was created, clean that bundle here before tearing
-    // down the proxies.
-    if (containerResources) {
+    // §8.3: an admitted Docker-workload bundle tears its ledgered outer
+    // resources down through the lease first — teardown supersedes the
+    // cleanupContainers fallback below (which still covers non-workload
+    // bundles). Any partial container/sidecar/network cleanup for those
+    // already happened inside createSessionContainers().
+    if (core.dockerWorkload) {
+      await core.dockerWorkload.teardown().catch(() => {});
+    } else if (containerResources) {
       await cleanupContainers(core.docker, {
         containerId: containerResources.containerId,
         sidecarContainerId: containerResources.sidecarContainerId ?? null,
@@ -1039,14 +1125,30 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
   // container stops; inverting would leave the proxy with in-flight
   // connections that get ECONNRESET during its own shutdown.
 
-  // Containers + sidecar + internal network. cleanupContainers() swallows
-  // per-resource failures internally, so no outer try/catch is needed here.
-  await cleanupContainers(infra.docker, {
-    containerId: infra.containerId,
-    sidecarContainerId: infra.sidecarContainerId ?? null,
-    networkName: infra.internalNetwork ?? null,
-  });
-  if (infra.runtimeKind === 'docker') releaseManagedResourceLease(infra.bundleId);
+  // Containers + sidecar + internal network.
+  if (infra.dockerWorkload) {
+    // §8.3: an admitted Docker-workload bundle tears its outer resources down
+    // through the lease first — teardown removes the exact ledgered
+    // containers/networks with absence proofs, then closes the lease via the
+    // watchdog-supervisor handshake. It supersedes cleanupContainers for those
+    // resources (which is therefore skipped). teardown() is idempotent and
+    // never throws for benign states, but is defended here so a teardown fault
+    // cannot abort the proxy/capture shutdown below.
+    await infra.dockerWorkload
+      .teardown()
+      .catch((err: unknown) =>
+        logger.warn(`destroyDockerInfrastructure: dockerWorkload.teardown() failed: ${errorMessage(err)}`),
+      );
+  } else {
+    // cleanupContainers() swallows per-resource failures internally, so no
+    // outer try/catch is needed here.
+    await cleanupContainers(infra.docker, {
+      containerId: infra.containerId,
+      sidecarContainerId: infra.sidecarContainerId ?? null,
+      networkName: infra.internalNetwork ?? null,
+    });
+    if (infra.runtimeKind === 'docker') releaseManagedResourceLease(infra.bundleId);
+  }
 
   // Proxies are independent producers -- stop them in parallel. Each
   // per-promise catch logs so one failure doesn't mask the other, and
@@ -1131,6 +1233,143 @@ export function buildBundleLabels(
     };
   }
   return { bundleLabel: core.bundleId, labels };
+}
+
+// ---------------------------------------------------------------------------
+// Secure nested Docker-workload wiring (§8.2–8.3)
+//
+// Everything in this section is inert for ordinary sessions: the handle is
+// only ever present behind the admission fuse in `docker-workload/config.ts`,
+// which throws before a bundle can be admitted. It exists so the §8.2 startup
+// and §8.3 teardown ordering is explicit and testable end-to-end.
+// ---------------------------------------------------------------------------
+
+/**
+ * Roles whose outer create is the nested daemon/VM component (§8.2 step 4):
+ * the watchdog must be proven fresh immediately before such a create. Phase 0F
+ * ships no production nested-daemon container, so no production create matches;
+ * the gate is exercised by a fake nested-daemon-role create in tests and the
+ * real daemon sidecar plugs in unchanged later.
+ */
+const WATCHDOG_GATED_OUTER_ROLES: ReadonlySet<OuterResourceRole> = new Set<OuterResourceRole>(['nested-daemon']);
+
+export interface LedgeredOuterCreateSpec {
+  readonly kind: OuterResourceKind;
+  readonly role: OuterResourceRole;
+  /**
+   * Labels the create would carry anyway (e.g. `buildBundleLabels().labels`).
+   * The generation ownership label is merged on top before the create runs.
+   */
+  readonly baseLabels?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Precommit one outer resource to the Docker-workload lease, run the caller's
+ * create with the ledgered name + merged ownership labels, then record the
+ * runtime-returned immutable ID (§8.2 step 1). Daemon/VM-role creates first
+ * prove the watchdog is fresh (§8.2 step 4).
+ *
+ * `create` receives the precommitted name and the merged labels and returns the
+ * immutable ID (for networks, read it back via `listNetworks` — `createNetwork`
+ * returns void) plus optional expanded-create evidence for the audit trail.
+ */
+export async function ledgerOuterResourceCreate(
+  handle: DockerWorkloadBundleHandle,
+  spec: LedgeredOuterCreateSpec,
+  create: (
+    name: string,
+    ownershipLabels: Readonly<Record<string, string>>,
+  ) => Promise<{ readonly id: string; readonly expanded?: ExpandedOuterCreate }>,
+): Promise<{ readonly id: string; readonly requestedName: string }> {
+  if (WATCHDOG_GATED_OUTER_ROLES.has(spec.role)) handle.assertWatchdogFresh();
+  const grant = handle.requestOuterResource(spec.kind, spec.role);
+  const labels = spec.baseLabels ? { ...spec.baseLabels, ...grant.labels } : grant.labels;
+  const { id, expanded } = await create(grant.requestedName, labels);
+  grant.observed(id, expanded);
+  return { id, requestedName: grant.requestedName };
+}
+
+/**
+ * Build the persisted `SessionMetadata.dockerWorkload` tuple for an admitted
+ * bundle (§8.4 audit surface). Pure; the caller supplies the resolved
+ * capability config hash and the effective backend so the persisted record is
+ * self-describing for post-hoc inspection.
+ */
+export function dockerWorkloadSessionMetadata(
+  handle: DockerWorkloadBundleHandle,
+  configHash: string,
+  backend: ContainerRuntimeKind,
+): NonNullable<SessionMetadata['dockerWorkload']> {
+  return {
+    leaseId: handle.leaseId,
+    generation: handle.generation,
+    configHash,
+    watchdogPolicySha256: handle.loadedPolicy.sha256,
+    backend,
+  };
+}
+
+interface DockerWorkloadAdmissionForSessionOptions {
+  readonly dockerWorkload: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>;
+  readonly runtime: ContainerRuntime;
+  readonly runtimeKind: ContainerRuntimeKind;
+  readonly bundleId: BundleId;
+  readonly workspaceRoot: string;
+  readonly auditLogPath: string;
+}
+
+/**
+ * Assemble and drive the §8.2-step-1 admission for a secure nested
+ * Docker-workload bundle.
+ *
+ * UNREACHABLE on the production path: `prepareDockerInfrastructure` calls the
+ * admission fuse (`assertDockerWorkloadImplementationAvailable`) earlier, which
+ * throws whenever the capability is enabled. This runs only behind a bypassed
+ * fuse in tests and keeps the §8.2 ordering explicit.
+ *
+ * The attestation bindings are PLACEHOLDERS derived from the resolved
+ * capability config hash: the real hash-bound qualification-admission record is
+ * produced by Phase 0C and is not available at this pre-proxy admission point.
+ * They are never treated as trusted evidence and are never exercised in
+ * production (the fuse blocks this whole path).
+ */
+async function admitDockerWorkloadForSession(
+  options: DockerWorkloadAdmissionForSessionOptions,
+): Promise<DockerWorkloadBundleHandle> {
+  const { admitDockerWorkloadBundle } = await import('../docker-workload/infrastructure.js');
+  const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
+  const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
+
+  const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  return admitDockerWorkloadBundle({
+    runtime: options.runtime,
+    runtimeKind: options.runtimeKind,
+    bundleId: String(options.bundleId),
+    workspaceRoot: options.workspaceRoot,
+    // Placeholder attestation bindings — see the function doc; 0C replaces these
+    // with the qualification-admission record. Namespaced so each field is a
+    // distinct valid sha256 rather than a repeated value.
+    bindings: {
+      qualificationContractSha256: configHash,
+      catalogSha256: namespacedConfigHash('catalog', configHash),
+      profileSha256: namespacedConfigHash('profile', configHash),
+      performanceBudgetSha256: namespacedConfigHash('performance-budget', configHash),
+      toolchainDigest: namespacedConfigHash('toolchain', configHash),
+    },
+    watchdogPolicyTemplatePath: resolve(packageRoot, 'config', 'docker-workload', 'resource-watchdog-policy.json'),
+    watchdogSupervisorEntrypointPath: resolve(
+      packageRoot,
+      'dist',
+      'docker-workload',
+      'resource-watchdog-supervisor-main.js',
+    ),
+    auditSink: createJsonlDockerWorkloadAuditSink(options.auditLogPath),
+  });
+}
+
+function namespacedConfigHash(namespace: string, configHash: string): string {
+  return createHash('sha256').update(`${namespace}:${configHash}`).digest('hex');
 }
 
 /**
@@ -1477,37 +1716,61 @@ async function createSessionContainersAttempt(
     // "no flag emitted" (see clampDockerResources docs).
     const { effective: containerResources } = clampDockerResources(config.userConfig.dockerResources);
 
-    mainContainerId = await core.docker.create({
-      image: mainImage,
-      name: mainContainerName,
-      network: network ?? 'none',
-      mounts,
-      env: {
-        ...env,
-        // Do NOT override PATH here. Docker `-e PATH=...` REPLACES the image's
-        // PATH (it does not append), which would discard the base image's real
-        // PATH — including the NVM directory where `node`/`npm` live on the x86
-        // devcontainer base. Bare-`node` workflow helpers would then fail to
-        // resolve. The workflow venv bin is instead prepended to the live
-        // `$PATH` at exec time (see buildWorkflowExecCommand), which is
-        // base-image-agnostic and preserves the image's own PATH.
-        ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
-        ...uidRemap.env,
-      },
-      user: uidRemap.user,
-      command: ['sleep', 'infinity'],
-      ...bundleLabels,
-      resources: { memoryMb: containerResources.memoryMb, cpus: containerResources.cpus },
-      extraHosts,
-      capAdd: [
-        'SETUID', // sudo setuid
-        'SETGID', // sudo setgid
-        'CHOWN', // apt-get chown on installed files
-        'FOWNER', // apt-get set permissions on files it doesn't own
-        'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
-        'AUDIT_WRITE', // sudo audit logging
-      ],
-    });
+    // Build the agent container create args for a given name + ownership
+    // labels. When `ownershipLabels` is present (Docker-workload ledgering) it
+    // overrides the labels field with the base bundle labels merged with the
+    // generation ownership label; otherwise the plain bundle labels are used
+    // (byte-identical to the pre-ledger create).
+    const createMainContainer = (name: string, ownershipLabels?: Readonly<Record<string, string>>): Promise<string> =>
+      core.docker.create({
+        image: mainImage,
+        name,
+        network: network ?? 'none',
+        mounts,
+        env: {
+          ...env,
+          // Do NOT override PATH here. Docker `-e PATH=...` REPLACES the image's
+          // PATH (it does not append), which would discard the base image's real
+          // PATH — including the NVM directory where `node`/`npm` live on the x86
+          // devcontainer base. Bare-`node` workflow helpers would then fail to
+          // resolve. The workflow venv bin is instead prepended to the live
+          // `$PATH` at exec time (see buildWorkflowExecCommand), which is
+          // base-image-agnostic and preserves the image's own PATH.
+          ...(core.workflowNodeModulesMount ? { NODE_PATH: core.workflowNodeModulesMount.target } : {}),
+          ...uidRemap.env,
+        },
+        user: uidRemap.user,
+        command: ['sleep', 'infinity'],
+        ...bundleLabels,
+        ...(ownershipLabels ? { labels: { ...bundleLabels.labels, ...ownershipLabels } } : {}),
+        resources: { memoryMb: containerResources.memoryMb, cpus: containerResources.cpus },
+        extraHosts,
+        capAdd: [
+          'SETUID', // sudo setuid
+          'SETGID', // sudo setgid
+          'CHOWN', // apt-get chown on installed files
+          'FOWNER', // apt-get set permissions on files it doesn't own
+          'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
+          'AUDIT_WRITE', // sudo audit logging
+        ],
+      });
+
+    // §8.2 step 1: ledger the agent container before create when a
+    // Docker-workload bundle is admitted (the grant supplies the precommitted
+    // name + ownership labels and observes the runtime ID after create).
+    // Ordinary sessions keep the deterministic name and create directly.
+    if (core.dockerWorkload) {
+      ({ id: mainContainerId } = await ledgerOuterResourceCreate(
+        core.dockerWorkload,
+        { kind: 'container', role: 'agent' },
+        async (name, ownershipLabels) => ({
+          id: await createMainContainer(name, ownershipLabels),
+          expanded: { mounts },
+        }),
+      ));
+    } else {
+      mainContainerId = await createMainContainer(mainContainerName);
+    }
 
     await core.docker.start(mainContainerId);
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);

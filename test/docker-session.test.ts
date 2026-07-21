@@ -764,6 +764,29 @@ describe('DockerAgentSession', () => {
       expect(spies.counts.proxyStops).toBe(0);
     });
 
+    it('does NOT tear down a Docker-workload lease on close() when ownsInfra=false', async () => {
+      // §8.3: the lease lives exactly as long as the bundle. A borrower never
+      // owns the bundle, so close() must never drive the lease teardown — the
+      // external owner does it via destroyDockerInfrastructure().
+      const spies = createTeardownSpies(deps.infra.bundleDir);
+      const teardown = vi.fn(async () => ({ alreadyClosed: false, supervisorLost: false }));
+      session = new DockerAgentSession({
+        ...deps,
+        ownsInfra: false,
+        infra: {
+          ...deps.infra,
+          docker: spies.docker,
+          mitmProxy: spies.mitmProxy,
+          proxy: spies.proxy,
+          dockerWorkload: { teardown } as unknown as NonNullable<DockerInfrastructure['dockerWorkload']>,
+        },
+      });
+      await session.initialize();
+      await session.close();
+
+      expect(teardown).not.toHaveBeenCalled();
+    });
+
     it('drives the capture lifecycle ONLY when ownsInfra=true', async () => {
       // In standalone (owns-infra) mode the session owns the single Claude
       // session and must call begin/endCaptureSession with `{ sessionId }`.

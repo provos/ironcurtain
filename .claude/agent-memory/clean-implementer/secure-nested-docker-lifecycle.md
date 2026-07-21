@@ -8,8 +8,38 @@ metadata:
 # Secure nested Docker-workload lifecycle foundations (branch feat/secure-nested-runtime)
 
 Phase 0F Item 3 of docs/designs/secure-nested-runtime-implementation-plan.md (§8.1–8.4).
-Plan is authority; grep symbols below before assuming they still exist. Steps 6–7 wiring
-(src/docker/docker-infrastructure.ts + pty-session.ts) is a SEPARATE follow-up, out of scope here.
+Plan is authority; grep symbols below before assuming they still exist.
+
+## Product wiring (Steps 6–7) — DONE (dead code behind the fuse)
+All inert until 0C flips `assertDockerWorkloadImplementationAvailable` (config.ts): the fuse
+throws in prepareDockerInfrastructure BEFORE admission runs, so `core.dockerWorkload` is always
+undefined for real sessions. Where each step landed (src/docker/docker-infrastructure.ts unless noted):
+- §8.2 s1 admit: `admitDockerWorkloadForSession` helper, called in prepareDockerInfrastructure right
+  after `createContainerRuntime` (before proxies). Bindings are PLACEHOLDER namespaced sha256 of
+  dockerWorkloadConfigHash — real qualification record is 0C's job (flagged). Template=config/docker-workload/
+  resource-watchdog-policy.json, entrypoint=dist/docker-workload/resource-watchdog-supervisor-main.js.
+- §8.2 s3 attest: `await dockerWorkload?.attestWatchdog()` first stmt inside the post-proxy try (attest
+  failure leaves an `admitting` lease for reconciliation — proxies cleaned, lease NOT torn down).
+- §8.2 s1 ledger + s4 gate: exported `ledgerOuterResourceCreate(handle,spec,create)` — requestOuterResource→
+  create(name,mergedLabels)→observed(id,expanded); WATCHDOG_GATED_OUTER_ROLES={'nested-daemon'} calls
+  assertWatchdogFresh() FIRST. Used for the AGENT container in createSessionContainersAttempt + pty-session.ts.
+- §8.2 s4 activate + §8.3 error teardown: EXTRACTED `assembleDockerInfrastructure(core,config,options)` from
+  createDockerInfrastructure (which now just prepare+delegate). activate() after provisionWorkflowDependencies
+  before return; catch runs `core.dockerWorkload.teardown()` FIRST else cleanupContainers. This is the testable
+  seam (drive with a scripted core + harness handle; no real proxies).
+- §8.3 destroy: destroyDockerInfrastructure + pty-session finally both branch `if(dockerWorkload) teardown()
+  else cleanupContainers()`. ownsInfra:false never calls destroy → never teardown (docker-agent-session close
+  unchanged; test in docker-session.test.ts ownsInfra describe).
+- §8.4 metadata: exported pure `dockerWorkloadSessionMetadata(handle,configHash,backend)`; wired in
+  createStandaloneSession AFTER infra (load+merge+save — tuple only known post-admission).
+- SCOPED OUT (flagged): tcp-sidecar sidecar + internal-network ledgering. Both supported backends resolve to
+  `uds` (agent container is the ONLY outer create); tcp-sidecar is macOS-Docker-Desktop, not a nested-Docker
+  backend, and is fuse-blocked. Ledgering the network needs reshaping createIronCurtainInternalNetwork
+  (hardcoded name/labels, returns no id). ledgerOuterResourceCreate is role-generic so they plug in later.
+- Tests: test/docker/docker-workload-wiring.test.ts (drives prepare→create→destroy via harness handle +
+  scripted core, uds mode); fuse test extended in docker-workload-admission.test.ts (prepareDockerInfrastructure
+  throws at fuse, empty IRONCURTAIN_HOME). GOTCHA: mocks of '../src/docker/docker-infrastructure.js' (e.g.
+  docker-session-factory.test.ts) must add `dockerWorkloadSessionMetadata` to the vi.mock factory.
 
 ## Module map (src/docker-workload/ unless noted)
 - bundle-cleanup.ts — frozen helpers assertExactTargetIdentity, removeExactBundleState,
