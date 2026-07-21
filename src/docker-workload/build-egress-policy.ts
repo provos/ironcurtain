@@ -156,11 +156,30 @@ const buildEgressManifestSchema = z
 export type BuildEgressManifest = z.infer<typeof buildEgressManifestSchema>;
 export type BuildEgressRule = BuildEgressManifest['rules'][number];
 
+declare const validatedBuildEgressManifestBrand: unique symbol;
+
+/**
+ * A {@link BuildEgressManifest} that has passed `buildEgressManifestSchema`
+ * validation. The brand lets the per-request hot path
+ * ({@link authorizeValidatedBuildEgressRequest}) skip re-parsing while keeping
+ * the raw-object entry ({@link authorizeBuildEgressRequest}) fail-closed for
+ * untrusted callers. Only {@link validateBuildEgressManifest},
+ * {@link loadBuildEgressManifest}, and the parsing entry produce this type.
+ */
+export type ValidatedBuildEgressManifest = BuildEgressManifest & {
+  readonly [validatedBuildEgressManifestBrand]: true;
+};
+
+/** Parse-and-brand a manifest once. The single validation seam for the hot path. */
+export function validateBuildEgressManifest(manifest: BuildEgressManifest): ValidatedBuildEgressManifest {
+  return buildEgressManifestSchema.parse(manifest) as ValidatedBuildEgressManifest;
+}
+
 export interface LoadedBuildEgressManifest {
   readonly path: string;
   readonly sha256: string;
   readonly sizeBytes: number;
-  readonly manifest: BuildEgressManifest;
+  readonly manifest: ValidatedBuildEgressManifest;
 }
 
 export interface BuildEgressRequest {
@@ -228,7 +247,7 @@ export function loadBuildEgressManifest(path: string): LoadedBuildEgressManifest
     path,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     sizeBytes: bytes.length,
-    manifest: validated.data,
+    manifest: validated.data as ValidatedBuildEgressManifest,
   };
 }
 
@@ -269,12 +288,25 @@ export function verifyBuildEgressDockerfileSources(
   });
 }
 
-/** Resolve one request to exactly one rule; ambiguity and undeclared behavior fail closed. */
+/**
+ * Resolve one request to exactly one rule; ambiguity and undeclared behavior
+ * fail closed. Validates the manifest first, so it is safe for untrusted
+ * (unvalidated) callers. The per-request proxy hot path holds a pre-validated
+ * manifest and calls {@link authorizeValidatedBuildEgressRequest} instead, so
+ * the schema is not re-parsed on every build fetch.
+ */
 export function authorizeBuildEgressRequest(
   manifest: BuildEgressManifest,
   request: BuildEgressRequest,
 ): AuthorizedBuildEgressRequest {
-  const validated = buildEgressManifestSchema.parse(manifest);
+  return authorizeValidatedBuildEgressRequest(validateBuildEgressManifest(manifest), request);
+}
+
+/** Resolve one request against an already-validated manifest; no per-request re-parse. */
+export function authorizeValidatedBuildEgressRequest(
+  validated: ValidatedBuildEgressManifest,
+  request: BuildEgressRequest,
+): AuthorizedBuildEgressRequest {
   const method = request.method.toUpperCase();
   if (method !== request.method || (method !== 'GET' && method !== 'HEAD')) {
     throw new Error('build-egress method must be canonical GET or HEAD');

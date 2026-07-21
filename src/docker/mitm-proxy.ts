@@ -43,6 +43,7 @@ import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 import { createDirectOutboundTransport, type OutboundTransport } from './outbound-transport.js';
+import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 import { handleBuildEgressRequest, type BuildEgressGuard, type BuildEgressSeam } from './build-egress-proxy.js';
 
 /**
@@ -1422,16 +1423,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     logger.info(`[mitm-proxy] ${method} http://${host}:${port}${path} -> PASSTHROUGH (plain HTTP)`);
 
     // Strip proxy-only and hop-by-hop headers so they are not leaked upstream
-    const hopByHop = new Set([
-      'connection',
-      'proxy-authorization',
-      'proxy-connection',
-      'keep-alive',
-      'upgrade',
-      'transfer-encoding',
-      'te',
-      'trailer',
-    ]);
+    const hopByHop = new Set(HOP_BY_HOP_HEADERS);
     // Also strip any headers named in the Connection header
     const connectionHeader = headers['connection'];
     if (typeof connectionHeader === 'string') {
@@ -1870,17 +1862,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       const lower = key.toLowerCase();
       if (lower === 'host') continue;
 
-      // Strip hop-by-hop and proxy-only headers (but preserve
-      // Connection/Upgrade and Sec-WebSocket-* for the handshake)
-      if (
-        lower === 'proxy-authorization' ||
-        lower === 'proxy-authenticate' ||
-        lower === 'proxy-connection' ||
-        lower === 'keep-alive' ||
-        lower === 'transfer-encoding' ||
-        lower === 'te' ||
-        lower === 'trailer'
-      ) {
+      // Strip hop-by-hop and proxy-only headers, but preserve Connection/Upgrade
+      // (and Sec-WebSocket-*) so the upgrade handshake reaches the upstream.
+      if (lower !== 'connection' && lower !== 'upgrade' && HOP_BY_HOP_HEADERS.has(lower)) {
         continue;
       }
 

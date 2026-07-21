@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -7,7 +7,9 @@ import {
   DOCKER_WORKLOAD_OWNERSHIP_LABEL_KEY,
   type DockerWorkloadAdmissionOptions,
   type ReconcileDockerWorkloadOptions,
+  type WatchdogSupervisorController,
 } from '../../src/docker-workload/infrastructure.js';
+import type { ResourceWatchdogSupervisorStatus } from '../../src/docker-workload/resource-watchdog-supervisor.js';
 import {
   activateDockerWorkloadLease,
   createDockerWorkloadLease,
@@ -199,6 +201,70 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     const closed = loadDockerWorkloadLease(stale.leasePath);
     expect(closed.status).toBe('closed');
     expect(closed.resources[0]).toMatchObject({ observedId: 'crashed-id' });
+  });
+
+  it('preserves a lease with a stale coordinator heartbeat but a fresh detached supervisor', async () => {
+    const runtime = createEventRuntime({ containers: [container('sup-id', 'ic-sup', 'gen-dw-sup')] });
+    const live = seedLease({
+      leaseId: 'dw-sup',
+      heartbeatIso: '2026-07-20T09:00:00.000Z', // coordinator heartbeat 3h stale
+      resources: [
+        { requestId: 'res-a', kind: 'container', role: 'nested-daemon', name: 'ic-sup', observedId: 'sup-id' },
+      ],
+      activate: true,
+    });
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: runtime.runtime,
+      runtimeKind: 'docker',
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => false, // coordinator process gone → exercise the supervisor-freshness branch
+      supervisor: createFakeSupervisor({ clock: clock.clock }), // fresh 'ready' status
+    });
+    expect(result).toMatchObject({ preserved: ['dw-sup'], reconciled: [], fenced: [] });
+    expect(loadDockerWorkloadLease(live.leasePath).status).toBe('active');
+  });
+
+  it('fails closed (fences) when a supervisor status exists but the rendered policy is unreadable', async () => {
+    const runtime = createEventRuntime();
+    const seeded = seedLease({ leaseId: 'dw-nopolicy', heartbeatIso: '2026-07-20T09:00:00.000Z' });
+    // Delete the rendered policy: the supervisor-freshness check can no longer
+    // read its staleAfterMs, so the lease must be treated as stale (not blindly
+    // preserved on the coordinator-heartbeat constant) and then fenced by
+    // recovery, which also refuses to run without the policy.
+    rmSync(join(getDockerWorkloadLeaseDir('dw-nopolicy'), 'policy.json'), { force: true });
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+    const status: ResourceWatchdogSupervisorStatus = {
+      schemaVersion: 1,
+      leaseId: seeded.leaseId,
+      generation: seeded.generation,
+      supervisorPid: 555_555,
+      state: 'ready',
+      policySha256: 'a'.repeat(64),
+      policyId: 'docker-workload-observed-state-v1',
+      startedAt: clock.clock().toISOString(),
+      updatedAt: clock.clock().toISOString(),
+      lastSample: { sampledAtMs: clock.clock().getTime(), availableBytes: 1, allocatedBytes: 1 },
+      trip: null,
+      detail: 'ready',
+    };
+    // Status is reported present WITHOUT reading the (now-deleted) policy file,
+    // so isLeaseLive reaches the rendered-policy load and fails closed.
+    const supervisor: WatchdogSupervisorController = {
+      ...createFakeSupervisor({ clock: clock.clock }),
+      readStatus: () => status,
+    };
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: runtime.runtime,
+      runtimeKind: 'docker',
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => false,
+      supervisor,
+    });
+    expect(result.fenced).toEqual(['dw-nopolicy']);
+    expect(loadDockerWorkloadLease(seeded.leasePath).status).toBe('incident');
   });
 
   it('fences a lease whose recovery exceeds the frozen bound and then blocks new admission', async () => {

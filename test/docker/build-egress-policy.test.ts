@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   authorizeBuildEgressRequest,
+  authorizeValidatedBuildEgressRequest,
   loadBuildEgressManifest,
+  validateBuildEgressManifest,
   verifyBuildEgressDockerfileSources,
   type BuildEgressManifest,
 } from '../../src/docker-workload/build-egress-policy.js';
@@ -118,6 +120,23 @@ describe('narrow current-Dockerfile build egress', () => {
         url: 'https://downloads.example.com/artifacts/tool.tar.gz',
       }),
     ).toThrow(/ambiguously/u);
+  });
+
+  it('authorizes against a pre-validated manifest without re-parsing on the hot path', () => {
+    // The guard validates once at construction and calls the validated hot path
+    // per request; prove that seam authorizes a loaded manifest identically.
+    const directory = tempDirectory();
+    const path = join(directory, 'manifest.json');
+    writeFileSync(path, JSON.stringify(manifest()), { mode: 0o400 });
+    const loaded = loadBuildEgressManifest(path);
+    const authorized = authorizeValidatedBuildEgressRequest(loaded.manifest, {
+      seam: 'run',
+      method: 'GET',
+      url: 'https://downloads.example.com/artifacts/tool.tar.gz',
+    });
+    expect(authorized.ruleId).toBe('artifact-download');
+    // The public entry still validates raw objects fail-closed for untrusted callers.
+    expect(() => validateBuildEgressManifest({ ...manifest(), rules: [] })).toThrow();
   });
 
   it('binds authorization to exact regular Dockerfile bytes', () => {

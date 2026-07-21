@@ -196,6 +196,12 @@ function normalizeHeaders(
   const result: http.OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers ?? {})) {
     const lower = name.toLowerCase();
+    // This is the final destination-bound transport, not a general forwarding
+    // proxy: its callers own message framing and have already stripped the
+    // full request-direction hop-by-hop set (see `HOP_BY_HOP_HEADERS`). It
+    // deliberately strips only the proxy-routing headers and rewrites `host` —
+    // stripping `transfer-encoding` here would corrupt the chunked LLM request
+    // bodies streamed through it (mitm-proxy `forwardRequest`).
     if (lower === 'host' || lower === 'proxy-authorization' || lower === 'proxy-connection') continue;
     const invalidValue =
       (typeof value === 'string' && /[\r\n]/u.test(value)) ||

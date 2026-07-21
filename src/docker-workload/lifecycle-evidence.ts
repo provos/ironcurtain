@@ -61,6 +61,10 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
       bundleId: identifierSchema,
       runtimeKind: z.enum(['docker', 'apple-container']),
       configHash: sha256Schema,
+      // Whether the attestation bindings are a real qualification-admission
+      // record or the Phase 0F placeholder — makes the evidence trail
+      // self-describing so a placeholder can never be mistaken for real evidence.
+      bindingsProvenance: z.enum(['placeholder', 'qualified']),
       watchdogPolicySha256: sha256Schema,
       watchdogTemplateSha256: sha256Schema,
       detail: z.string().min(1).max(4096),
@@ -203,6 +207,9 @@ export function sealLifecycleEvidence(
   if (firstInventory.ownedResourceIds.length !== 0 || secondInventory.ownedResourceIds.length !== 0) {
     throw new Error('lifecycle evidence requires two empty cleanup inventories');
   }
+  // The evidence dir may not exist yet (callers pass a fresh path); create it
+  // owner-only before the first write so sealing does not ENOENT.
+  mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
   writePrivateJsonFile(join(evidenceDir, 'lease.json'), options.contents.lease);
   writePrivateJsonFile(join(evidenceDir, 'policy.json'), options.contents.renderedPolicy);
   writePrivateJsonFile(join(evidenceDir, 'supervisor-status-history.json'), options.contents.supervisorStatusHistory);

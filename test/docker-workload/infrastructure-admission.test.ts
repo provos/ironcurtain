@@ -1,3 +1,4 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -5,6 +6,7 @@ import {
   reconcileDockerWorkloadLeases,
   type DockerWorkloadAdmissionOptions,
 } from '../../src/docker-workload/infrastructure.js';
+import { getDockerWorkloadRoot } from '../../src/config/paths.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
@@ -121,5 +123,61 @@ describe('Docker-workload admission (§8.2 order)', () => {
     const handle = await admitDockerWorkloadBundle(baseOptions(clock, runtime, supervisor));
     handle.requestOuterResource('container', 'nested-daemon');
     expect(() => handle.activate()).toThrow(/before every requested outer resource is observed/u);
+  });
+});
+
+describe('Docker-workload admission lock steal race', () => {
+  const DEAD_OWNER_PID = 999_001;
+  const LIVE_RACER_PID = 999_002;
+
+  function seedAdmissionLock(pid: number): string {
+    const root = getDockerWorkloadRoot();
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const lockPath = join(root, 'admission.lock');
+    writeFileSync(lockPath, `${JSON.stringify({ pid })}\n`, { mode: 0o600 });
+    return lockPath;
+  }
+
+  it('reclaims a stale lock whose owner is dead and proceeds with admission', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock });
+    seedAdmissionLock(DEAD_OWNER_PID);
+
+    const handle = await admitDockerWorkloadBundle({
+      ...baseOptions(clock, runtime, supervisor),
+      pidAlive: (pid) => pid !== DEAD_OWNER_PID,
+    });
+
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+  });
+
+  it("does not delete a racer's freshly created live lock during a raced steal (reports busy)", async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock });
+    const lockPath = seedAdmissionLock(DEAD_OWNER_PID);
+
+    // The moment we test the dead owner's liveness, a racer reclaims the stale
+    // lock and installs its own LIVE lock. The reclaim must detect this and
+    // leave the racer's lock intact rather than stealing it.
+    let collided = false;
+    const pidAlive = (pid: number): boolean => {
+      if (pid === DEAD_OWNER_PID) {
+        if (!collided) {
+          collided = true;
+          writeFileSync(lockPath, `${JSON.stringify({ pid: LIVE_RACER_PID })}\n`, { mode: 0o600 });
+        }
+        return false;
+      }
+      return true;
+    };
+
+    await expect(admitDockerWorkloadBundle({ ...baseOptions(clock, runtime, supervisor), pidAlive })).rejects.toThrow(
+      /is busy/u,
+    );
+
+    // The racer's live lock survived — it was never stolen or deleted.
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ pid: LIVE_RACER_PID });
   });
 });

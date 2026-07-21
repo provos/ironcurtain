@@ -22,6 +22,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -83,6 +84,7 @@ const SUPERVISOR_STOP_TIMEOUT_MS = 10_000;
 const SUPERVISOR_STOP_POLL_MS = 50;
 const BUSY_RETRY_ATTEMPTS = 4;
 const BUSY_RETRY_BACKOFF_MS = 50;
+const ADMISSION_LOCK_ACQUIRE_ATTEMPTS = 16;
 
 export type DockerWorkloadRuntimeKind = 'docker' | 'apple-container';
 export type OuterResourceKind = 'container' | 'network';
@@ -131,6 +133,15 @@ export interface DockerWorkloadAdmissionOptions {
   readonly bundleId: string;
   readonly workspaceRoot: string;
   readonly bindings: DockerWorkloadAdmissionBindings;
+  /**
+   * The real resolved capability config hash recorded in the admission audit
+   * event. Defaults to `bindings.qualificationContractSha256` so callers with a
+   * real qualification record need not supply it; callers whose `bindings` are
+   * placeholders pass the genuine config hash here so the audit trail keeps it.
+   */
+  readonly configHash?: string;
+  /** Provenance of `bindings` for the audit trail (default: 'placeholder'). */
+  readonly bindingsProvenance?: 'placeholder' | 'qualified';
   readonly watchdogPolicyTemplatePath: string;
   readonly watchdogSupervisorEntrypointPath: string;
   readonly leaseId?: string;
@@ -230,7 +241,8 @@ export async function admitDockerWorkloadBundle(
       decision: 'admitting',
       bundleId: options.bundleId,
       runtimeKind: options.runtimeKind,
-      configHash: options.bindings.qualificationContractSha256,
+      configHash: options.configHash ?? options.bindings.qualificationContractSha256,
+      bindingsProvenance: options.bindingsProvenance ?? 'placeholder',
       watchdogPolicySha256: loadedPolicy.sha256,
       watchdogTemplateSha256: template.sha256,
       detail: 'reconciled outstanding leases and created a fresh admitting lease',
@@ -567,24 +579,38 @@ function isLeaseLive(
   now: Date,
   staleHeartbeatMs: number,
 ): boolean {
+  // Coordinator-heartbeat freshness: the coordinator writes a heartbeat every
+  // DOCKER_WORKLOAD_HEARTBEAT_INTERVAL_MS, so staleHeartbeatMs is the right bound
+  // here — that is this constant's actual purpose.
   if (pidAlive(lease.coordinator.pid) && now.getTime() - Date.parse(lease.coordinator.heartbeatAt) < staleHeartbeatMs) {
     return true;
   }
+  // Supervisor freshness: the detached supervisor survives coordinator exit and
+  // samples on its own rendered-policy cadence, so its staleness bound is the
+  // lease's rendered policy `staleAfterMs`, NOT the coordinator-heartbeat
+  // constant. Fail closed (treat as stale) when a supervisor status exists but
+  // the rendered policy is missing/unreadable: recoverStaleLease then fences on
+  // the same unreadable policy rather than the reconciler blindly reclaiming.
   const status = supervisor.readStatus(join(leaseDir, STATUS_FILE));
-  if (status !== undefined) {
-    try {
-      assertResourceWatchdogSupervisorFresh(
-        status,
-        { leaseId: lease.leaseId, generation: lease.generation, policySha256: lease.bindings.watchdogPolicySha256 },
-        staleHeartbeatMs,
-        now,
-      );
-      return true;
-    } catch {
-      // Supervisor status is not fresh; the lease is stale.
-    }
+  if (status === undefined) return false;
+  let supervisorStaleAfterMs: number;
+  try {
+    supervisorStaleAfterMs = loadResourceWatchdogPolicy(join(leaseDir, POLICY_FILE)).policy.staleAfterMs;
+  } catch {
+    return false;
   }
-  return false;
+  try {
+    assertResourceWatchdogSupervisorFresh(
+      status,
+      { leaseId: lease.leaseId, generation: lease.generation, policySha256: lease.bindings.watchdogPolicySha256 },
+      supervisorStaleAfterMs,
+      now,
+    );
+    return true;
+  } catch {
+    // Supervisor status is not fresh; the lease is stale.
+    return false;
+  }
 }
 
 async function recoverStaleLease(context: {
@@ -736,18 +762,62 @@ async function withDockerWorkloadAdmissionLock<T>(
   }
 }
 
+/**
+ * Acquire the cross-process admission lock via an O_EXCL create, reclaiming a
+ * stale lock left by a crashed coordinator.
+ *
+ * Bounded retry loop so a lost race re-checks ownership instead of throwing a raw
+ * EEXIST, and so reclaiming and re-creating the lock is arbitrated by the atomic
+ * O_EXCL create rather than an unconditional re-create. A live owner is reported
+ * busy; a dead/unreadable owner's lock is reclaimed atomically
+ * ({@link reclaimStaleAdmissionLock}) without ever deleting a racer's freshly
+ * installed live lock. If the lock stays contended across every attempt the
+ * caller sees the mapped "is busy" error, never a raw EEXIST.
+ */
 function acquireAdmissionLock(lockPath: string, pidAlive: (pid: number) => boolean): number {
-  try {
-    return writeLockFile(lockPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const owner = readAdmissionLockOwner(lockPath);
-    if (owner !== undefined && pidAlive(owner.pid)) {
-      throw new Error(`Docker-workload admission is busy (owner pid ${owner.pid})`, { cause: error });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < ADMISSION_LOCK_ACQUIRE_ATTEMPTS; attempt += 1) {
+    try {
+      return writeLockFile(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      lastError = error;
+      const owner = readAdmissionLockOwner(lockPath);
+      if (owner !== undefined && pidAlive(owner.pid)) {
+        throw new Error(`Docker-workload admission is busy (owner pid ${owner.pid})`, { cause: error });
+      }
+      reclaimStaleAdmissionLock(lockPath, pidAlive);
     }
-    rmSync(lockPath, { force: true });
-    return writeLockFile(lockPath);
   }
+  throw new Error('Docker-workload admission is busy (lock remained contended after retries)', { cause: lastError });
+}
+
+/**
+ * Atomically move a stale admission lock aside and discard it. `renameSync`
+ * guarantees exactly one racer captures a given lock file; the loser sees ENOENT
+ * and retries the O_EXCL create. A racer that installed a fresh LIVE lock between
+ * our owner read and the rename is detected after capture and restored intact —
+ * we never delete a live owner's lock.
+ */
+function reclaimStaleAdmissionLock(lockPath: string, pidAlive: (pid: number) => boolean): void {
+  const captured = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+  try {
+    renameSync(lockPath, captured);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  const owner = readAdmissionLockOwner(captured);
+  if (owner !== undefined && pidAlive(owner.pid)) {
+    // We captured a live lock a racer installed after our read — put it back.
+    try {
+      renameSync(captured, lockPath);
+    } catch {
+      rmSync(captured, { force: true });
+    }
+    return;
+  }
+  rmSync(captured, { force: true });
 }
 
 function writeLockFile(lockPath: string): number {

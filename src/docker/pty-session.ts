@@ -33,9 +33,9 @@ import { getSessionDir, getSessionCapturesDir, getPtyRegistryDir, SESSION_STATE_
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
-import { cleanupContainers } from './container-lifecycle.js';
+import { destroyBundleOuterResources } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
-import { buildAgentUidRemap, buildUdsSocketMounts, ledgerOuterResourceCreate } from './docker-infrastructure.js';
+import { buildAgentUidRemap, buildUdsSocketMounts, createLedgeredAgentContainer } from './docker-infrastructure.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import {
@@ -697,12 +697,11 @@ async function runPtySessionAttempt(
     // "no flag emitted" (see clampDockerResources docs).
     const { effective: ptyResources } = clampDockerResources(options.config.userConfig.dockerResources);
 
-    // Build the PTY agent container create args for a given name + ownership
-    // labels. When `ownershipLabels` is present (Docker-workload ledgering) the
-    // labels field is the base resource labels merged with the generation
-    // ownership label; otherwise the plain resource labels are used
-    // (byte-identical to the pre-ledger create).
-    const createPtyContainer = (name: string, ownershipLabels?: Readonly<Record<string, string>>): Promise<string> =>
+    // Build the PTY agent container create args for a given name + resolved
+    // labels. `labels` is the base resource labels in the ordinary case and the
+    // base merged with the generation ownership label when the create is
+    // ledgered — the merge lives in createLedgeredAgentContainer.
+    const createPtyContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
       infra.docker.create({
         image,
         name,
@@ -714,7 +713,7 @@ async function runPtySessionAttempt(
         // PTY sessions are standalone (no workflow/scope), so only the
         // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
         bundleLabel: bundleId,
-        labels: ownershipLabels ? { ...resourceLabels, ...ownershipLabels } : resourceLabels,
+        labels,
         resources: { memoryMb: ptyResources.memoryMb, cpus: ptyResources.cpus },
         extraHosts,
         publishSockets,
@@ -731,21 +730,18 @@ async function runPtySessionAttempt(
 
     // §8.2 step 1: ledger the agent container before create when a
     // Docker-workload bundle is admitted; ordinary sessions create directly.
-    // Mirrors createSessionContainers in the batch path.
+    // Shared with createSessionContainers in the batch path.
+    containerId = await createLedgeredAgentContainer({
+      dockerWorkload,
+      deterministicName: mainContainerName,
+      baseLabels: resourceLabels,
+      mounts,
+      create: createPtyContainer,
+    });
     if (dockerWorkload) {
-      ({ id: containerId } = await ledgerOuterResourceCreate(
-        dockerWorkload,
-        { kind: 'container', role: 'agent' },
-        async (name, ownershipLabels) => ({
-          id: await createPtyContainer(name, ownershipLabels),
-          expanded: { mounts },
-        }),
-      ));
       // §8.2 step 4: activate the lease once the agent container is observed,
       // before `docker.start` unblocks the agent.
       dockerWorkload.activate();
-    } else {
-      containerId = await createPtyContainer(mainContainerName);
     }
 
     await docker.start(containerId);
@@ -881,24 +877,24 @@ async function runPtySessionAttempt(
       await flushCapture();
     }
 
-    if (dockerWorkload) {
-      // §8.3: an admitted Docker-workload bundle tears its ledgered outer
-      // resources down through the lease first — teardown removes the exact
-      // agent container with an absence proof and closes the lease via the
-      // watchdog-supervisor handshake, superseding cleanupContainers for it.
-      await dockerWorkload
-        .teardown()
-        .catch((err: unknown) =>
-          logger.warn(`PTY dockerWorkload.teardown() failed: ${err instanceof Error ? err.message : String(err)}`),
-        );
-    } else if (docker) {
-      await cleanupContainers(docker, {
+    if (docker) {
+      // §8.3: teardown-first for a Docker-workload bundle, then the
+      // belt-and-braces sweep for the non-ledgered sidecar/network, then release
+      // the managed-resource lease. See destroyBundleOuterResources.
+      await destroyBundleOuterResources({
+        docker,
+        dockerWorkload,
         containerId,
         sidecarContainerId,
         networkName,
+        bundleId: effectiveSessionId,
+        context: 'PTY session',
       });
+    } else {
+      // Infrastructure never came up: no outer resources, but a managed lease
+      // may have been acquired before the failure (no-op if not).
+      releaseManagedResourceLease(effectiveSessionId);
     }
-    releaseManagedResourceLease(effectiveSessionId);
 
     // Stop proxies
     await mitmProxy?.stop().catch(() => {});

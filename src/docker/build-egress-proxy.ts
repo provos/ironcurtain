@@ -45,12 +45,14 @@
  * hops (each hop is authorized on its own rule; the build client drives
  * redirects), and BuildKit per-seam tagging is a fixed per-listener value here.
  * Both are Phase 0C concerns and stay inert behind the docker-workload admission
- * fuse until then.
+ * fuse until then. The `MitmProxyOptions.buildEgress` mode flags in
+ * `mitm-proxy.ts` that route a listener here are a natural candidate for a later
+ * strategy-object consolidation of the proxy's per-listener modes.
  */
 
 import * as http from 'node:http';
 import {
-  authorizeBuildEgressRequest,
+  authorizeValidatedBuildEgressRequest,
   loadBuildEgressManifest,
   verifyBuildEgressDockerfileSources,
   type AuthorizedBuildEgressRequest,
@@ -58,6 +60,7 @@ import {
   type BuildEgressRule,
 } from '../docker-workload/build-egress-policy.js';
 import type { OutboundDestination, OutboundTransport } from './outbound-transport.js';
+import { HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
 import * as logger from '../logger.js';
 
 export type BuildEgressMode = 'disabled' | 'ironcurtain-dockerfiles';
@@ -113,6 +116,8 @@ export function createBuildEgressGuard(options: CreateBuildEgressGuardOptions): 
 
   const loaded = loadBuildEgressManifest(manifestPath);
   const dockerfiles = verifyBuildEgressDockerfileSources(loaded.manifest, repositoryRoot);
+  // The manifest is validated exactly once at guard construction; the per-request
+  // hot path below authorizes against the pre-validated manifest without re-parsing.
   const manifest = loaded.manifest;
 
   return {
@@ -124,7 +129,7 @@ export function createBuildEgressGuard(options: CreateBuildEgressGuardOptions): 
       dockerfiles: dockerfiles.map((source) => ({ path: source.path, sha256: source.sha256 })),
     },
     authorize(request: BuildEgressRequest): AuthorizedBuildEgressRequest {
-      return authorizeBuildEgressRequest(manifest, request);
+      return authorizeValidatedBuildEgressRequest(manifest, request);
     },
   };
 }
@@ -240,21 +245,13 @@ function toOutgoingHeaders(headers: Readonly<Record<string, string | readonly st
   return result;
 }
 
-/** Hop-by-hop and credential headers never propagate back into the build. */
-const STRIPPED_RESPONSE_HEADERS = new Set([
-  'connection',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-connection',
-  'set-cookie',
-  'transfer-encoding',
-  'upgrade',
-]);
-
 function sanitizeResponseHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  // Hop-by-hop and credential (set-cookie) headers never propagate back into the
+  // build. The shared response set adds `trailer`/`te`/`proxy-authorization` over
+  // the previous inline list, closing a `trailer` leak on chunked responses.
   const result: http.OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) {
-    if (value === undefined || STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) continue;
+    if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(name.toLowerCase())) continue;
     result[name] = value;
   }
   return result;

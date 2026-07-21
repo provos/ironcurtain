@@ -210,7 +210,7 @@ describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 step 4 
 });
 
 describe('Docker-workload wiring — destroyDockerInfrastructure (§8.3)', () => {
-  it('runs teardown first and skips cleanupContainers for the ledgered resources', async () => {
+  it('runs teardown first, then a belt-and-braces cleanupContainers sweep', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
     const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
@@ -221,12 +221,54 @@ describe('Docker-workload wiring — destroyDockerInfrastructure (§8.3)', () =>
 
     await destroyDockerInfrastructure(infra);
 
-    // teardown closed the lease and removed the ledgered container exactly once
-    // (a second removal would mean cleanupContainers also ran on it).
+    // teardown closed the lease and removed the ledgered container; the
+    // belt-and-braces cleanupContainers sweep then re-attempts it (a no-op) —
+    // assert the lease is closed and the container is gone.
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
-    expect(runtime.events.filter((event) => event === `stop:${agentId}`)).toHaveLength(1);
-    expect(runtime.events.filter((event) => event === `remove:${agentId}`)).toHaveLength(1);
+    expect(runtime.containers.map((container) => container.id)).not.toContain(agentId);
     expect(supervisor.calls.stopRequested).toBe(1);
+  });
+
+  it('sweeps the non-ledgered tcp-sidecar sidecar + internal network on destroy', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admit(clock, runtime, supervisor);
+    const core = makeCore(runtime.runtime, handle);
+    const infra: DockerInfrastructure = await assembleDockerInfrastructure(core, makeConfig());
+
+    // The lease only ledgers the agent container. A tcp-sidecar bundle also
+    // owns a socat sidecar + internal network that teardown does NOT track;
+    // seed them directly (bypassing the ledger) as un-ledgered leftovers.
+    runtime.containers.push({
+      id: 'sidecar-id',
+      name: 'ic-sidecar',
+      created: '2026-07-20T12:00:00Z',
+      running: true,
+      labels: {},
+    });
+    runtime.networks.push({
+      id: 'net-id',
+      name: 'ic-internal',
+      created: '2026-07-20T12:00:00Z',
+      labels: {},
+      subnets: [],
+      containerIds: [],
+    });
+    const infraWithSidecar: DockerInfrastructure = {
+      ...infra,
+      sidecarContainerId: 'sidecar-id',
+      internalNetwork: 'net-id',
+    };
+
+    await destroyDockerInfrastructure(infraWithSidecar);
+
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+    // Ledgered agent torn down via the lease; non-ledgered sidecar + network
+    // swept by the belt-and-braces cleanupContainers.
+    expect(runtime.containers.map((container) => container.id)).not.toContain(infra.containerId);
+    expect(runtime.containers.map((container) => container.id)).not.toContain('sidecar-id');
+    expect(runtime.networks.map((network) => network.id)).not.toContain('net-id');
   });
 });
 

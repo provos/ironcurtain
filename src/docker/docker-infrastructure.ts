@@ -53,7 +53,7 @@ import type { HostOnlyNetwork, NetworkTopology } from './network-topology.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
 import { parseUpstreamBaseUrl, type AgentKind, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import { getInternalNetworkName } from './platform.js';
-import { cleanupContainers } from './container-lifecycle.js';
+import { cleanupContainers, destroyBundleOuterResources } from './container-lifecycle.js';
 import {
   createIronCurtainInternalNetwork,
   InternalNetworkConnectivityError,
@@ -77,6 +77,7 @@ import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-
 import { getStagedCatalogPath } from './preloaded-catalog-paths.js';
 import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
 import type {
+  DockerWorkloadAdmissionBindings,
   DockerWorkloadBundleHandle,
   OuterResourceKind,
   OuterResourceRole,
@@ -1086,20 +1087,20 @@ export async function assembleDockerInfrastructure(
     core.dockerWorkload?.activate();
     return infra;
   } catch (error) {
-    // §8.3: an admitted Docker-workload bundle tears its ledgered outer
-    // resources down through the lease first — teardown supersedes the
-    // cleanupContainers fallback below (which still covers non-workload
-    // bundles). Any partial container/sidecar/network cleanup for those
-    // already happened inside createSessionContainers().
-    if (core.dockerWorkload) {
-      await core.dockerWorkload.teardown().catch(() => {});
-    } else if (containerResources) {
-      await cleanupContainers(core.docker, {
-        containerId: containerResources.containerId,
-        sidecarContainerId: containerResources.sidecarContainerId ?? null,
-        networkName: containerResources.internalNetwork ?? null,
-      });
-    }
+    // §8.3: tear the bundle's outer resources down (teardown-first for a
+    // Docker-workload bundle, then the belt-and-braces sweep) and release the
+    // managed-resource lease. A create that failed mid-flight already cleaned
+    // up its own partial containers/sidecar/network inside
+    // createSessionContainers; this covers the later activate()/provision steps.
+    await destroyBundleOuterResources({
+      docker: core.docker,
+      dockerWorkload: core.dockerWorkload,
+      containerId: containerResources?.containerId ?? null,
+      sidecarContainerId: containerResources?.sidecarContainerId ?? null,
+      networkName: containerResources?.internalNetwork ?? null,
+      bundleId: core.bundleId,
+      context: 'assembleDockerInfrastructure',
+    });
     await core.mitmProxy.stop().catch(() => {});
     await core.proxy.stop().catch(() => {});
     throw error;
@@ -1125,30 +1126,19 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
   // container stops; inverting would leave the proxy with in-flight
   // connections that get ECONNRESET during its own shutdown.
 
-  // Containers + sidecar + internal network.
-  if (infra.dockerWorkload) {
-    // §8.3: an admitted Docker-workload bundle tears its outer resources down
-    // through the lease first — teardown removes the exact ledgered
-    // containers/networks with absence proofs, then closes the lease via the
-    // watchdog-supervisor handshake. It supersedes cleanupContainers for those
-    // resources (which is therefore skipped). teardown() is idempotent and
-    // never throws for benign states, but is defended here so a teardown fault
-    // cannot abort the proxy/capture shutdown below.
-    await infra.dockerWorkload
-      .teardown()
-      .catch((err: unknown) =>
-        logger.warn(`destroyDockerInfrastructure: dockerWorkload.teardown() failed: ${errorMessage(err)}`),
-      );
-  } else {
-    // cleanupContainers() swallows per-resource failures internally, so no
-    // outer try/catch is needed here.
-    await cleanupContainers(infra.docker, {
-      containerId: infra.containerId,
-      sidecarContainerId: infra.sidecarContainerId ?? null,
-      networkName: infra.internalNetwork ?? null,
-    });
-    if (infra.runtimeKind === 'docker') releaseManagedResourceLease(infra.bundleId);
-  }
+  // Containers + sidecar + internal network + managed-resource lease. For an
+  // admitted Docker-workload bundle this tears the ledgered resources down
+  // through the lease first, then sweeps any non-ledgered sidecar/network; for
+  // an ordinary bundle it is the plain cleanup. See destroyBundleOuterResources.
+  await destroyBundleOuterResources({
+    docker: infra.docker,
+    dockerWorkload: infra.dockerWorkload,
+    containerId: infra.containerId,
+    sidecarContainerId: infra.sidecarContainerId ?? null,
+    networkName: infra.internalNetwork ?? null,
+    bundleId: infra.bundleId,
+    context: 'destroyDockerInfrastructure',
+  });
 
   // Proxies are independent producers -- stop them in parallel. Each
   // per-promise catch logs so one failure doesn't mask the other, and
@@ -1289,6 +1279,47 @@ export async function ledgerOuterResourceCreate(
   return { id, requestedName: grant.requestedName };
 }
 
+export interface CreateAgentContainerOptions {
+  /** Present only for an admitted secure nested Docker-workload bundle. */
+  readonly dockerWorkload: DockerWorkloadBundleHandle | undefined;
+  /** Deterministic name used when the bundle is not ledgered. */
+  readonly deterministicName: string;
+  /**
+   * Base resource labels the create carries anyway. The single place the
+   * generation ownership label is merged on top (in the ledgered case).
+   */
+  readonly baseLabels: Readonly<Record<string, string>> | undefined;
+  /** Bind mounts, recorded as expanded-create evidence for the audit trail. */
+  readonly mounts: readonly { readonly source: string; readonly target: string; readonly readonly: boolean }[];
+  /**
+   * Create the agent container with the given name + final labels (base merged
+   * with the ownership label in the ledgered case) and return its runtime ID.
+   */
+  readonly create: (name: string, labels: Readonly<Record<string, string>> | undefined) => Promise<string>;
+}
+
+/**
+ * Ledger-or-create the agent container: the shared shape used by the batch
+ * (`createSessionContainers`) and PTY (`runPtySession`) paths. When a
+ * Docker-workload bundle is admitted the create is ledgered before it runs (the
+ * grant supplies the precommitted name + ownership labels and the runtime ID is
+ * observed after create, with the mounts recorded as expanded evidence);
+ * otherwise the container is created directly with the deterministic name. Label
+ * merging lives entirely in `ledgerOuterResourceCreate` via `baseLabels`, so
+ * neither call site re-merges the ownership label.
+ */
+export async function createLedgeredAgentContainer(options: CreateAgentContainerOptions): Promise<string> {
+  if (!options.dockerWorkload) {
+    return options.create(options.deterministicName, options.baseLabels);
+  }
+  const { id } = await ledgerOuterResourceCreate(
+    options.dockerWorkload,
+    { kind: 'container', role: 'agent', baseLabels: options.baseLabels },
+    async (name, labels) => ({ id: await options.create(name, labels), expanded: { mounts: [...options.mounts] } }),
+  );
+  return id;
+}
+
 /**
  * Build the persisted `SessionMetadata.dockerWorkload` tuple for an admitted
  * bundle (§8.4 audit surface). Pure; the caller supplies the resolved
@@ -1347,16 +1378,14 @@ async function admitDockerWorkloadForSession(
     runtimeKind: options.runtimeKind,
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
-    // Placeholder attestation bindings — see the function doc; 0C replaces these
-    // with the qualification-admission record. Namespaced so each field is a
-    // distinct valid sha256 rather than a repeated value.
-    bindings: {
-      qualificationContractSha256: configHash,
-      catalogSha256: namespacedConfigHash('catalog', configHash),
-      profileSha256: namespacedConfigHash('profile', configHash),
-      performanceBudgetSha256: namespacedConfigHash('performance-budget', configHash),
-      toolchainDigest: namespacedConfigHash('toolchain', configHash),
-    },
+    // Placeholder attestation bindings — see the function doc; 0C replaces this
+    // seam with the real qualification-admission record. The real config hash is
+    // passed separately so the admission audit trail keeps it, and
+    // `bindingsProvenance: 'placeholder'` marks the bindings so a placeholder can
+    // never be mistaken for real evidence.
+    configHash,
+    bindings: placeholderAdmissionBindings(configHash),
+    bindingsProvenance: 'placeholder',
     watchdogPolicyTemplatePath: resolve(packageRoot, 'config', 'docker-workload', 'resource-watchdog-policy.json'),
     watchdogSupervisorEntrypointPath: resolve(
       packageRoot,
@@ -1368,8 +1397,25 @@ async function admitDockerWorkloadForSession(
   });
 }
 
-function namespacedConfigHash(namespace: string, configHash: string): string {
-  return createHash('sha256').update(`${namespace}:${configHash}`).digest('hex');
+/**
+ * Phase 0F placeholder attestation bindings. Every field is a uniformly
+ * namespaced derived hash (`sha256('ironcurtain-placeholder:'+field+':'+configHash)`)
+ * that CANNOT collide with a real qualification-artifact hash — no field is the
+ * bare config hash. These are never treated as trusted evidence (the admission
+ * fuse blocks this whole path in production) and the admission audit event
+ * records `bindingsProvenance: 'placeholder'`. Phase 0C MUST replace this seam
+ * with the real hash-bound qualification-admission record.
+ */
+function placeholderAdmissionBindings(configHash: string): DockerWorkloadAdmissionBindings {
+  const placeholder = (field: string): string =>
+    createHash('sha256').update(`ironcurtain-placeholder:${field}:${configHash}`).digest('hex');
+  return {
+    qualificationContractSha256: placeholder('qualificationContractSha256'),
+    catalogSha256: placeholder('catalogSha256'),
+    profileSha256: placeholder('profileSha256'),
+    performanceBudgetSha256: placeholder('performanceBudgetSha256'),
+    toolchainDigest: placeholder('toolchainDigest'),
+  };
 }
 
 /**
@@ -1716,12 +1762,11 @@ async function createSessionContainersAttempt(
     // "no flag emitted" (see clampDockerResources docs).
     const { effective: containerResources } = clampDockerResources(config.userConfig.dockerResources);
 
-    // Build the agent container create args for a given name + ownership
-    // labels. When `ownershipLabels` is present (Docker-workload ledgering) it
-    // overrides the labels field with the base bundle labels merged with the
-    // generation ownership label; otherwise the plain bundle labels are used
-    // (byte-identical to the pre-ledger create).
-    const createMainContainer = (name: string, ownershipLabels?: Readonly<Record<string, string>>): Promise<string> =>
+    // Build the agent container create args for a given name + resolved labels.
+    // `labels` is the base bundle labels in the ordinary case and the base merged
+    // with the generation ownership label when the create is ledgered — the merge
+    // itself lives in createLedgeredAgentContainer, so this closure just forwards.
+    const createMainContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
       core.docker.create({
         image: mainImage,
         name,
@@ -1742,7 +1787,7 @@ async function createSessionContainersAttempt(
         user: uidRemap.user,
         command: ['sleep', 'infinity'],
         ...bundleLabels,
-        ...(ownershipLabels ? { labels: { ...bundleLabels.labels, ...ownershipLabels } } : {}),
+        labels,
         resources: { memoryMb: containerResources.memoryMb, cpus: containerResources.cpus },
         extraHosts,
         capAdd: [
@@ -1756,21 +1801,15 @@ async function createSessionContainersAttempt(
       });
 
     // §8.2 step 1: ledger the agent container before create when a
-    // Docker-workload bundle is admitted (the grant supplies the precommitted
-    // name + ownership labels and observes the runtime ID after create).
-    // Ordinary sessions keep the deterministic name and create directly.
-    if (core.dockerWorkload) {
-      ({ id: mainContainerId } = await ledgerOuterResourceCreate(
-        core.dockerWorkload,
-        { kind: 'container', role: 'agent' },
-        async (name, ownershipLabels) => ({
-          id: await createMainContainer(name, ownershipLabels),
-          expanded: { mounts },
-        }),
-      ));
-    } else {
-      mainContainerId = await createMainContainer(mainContainerName);
-    }
+    // Docker-workload bundle is admitted; ordinary sessions keep the
+    // deterministic name and create directly. Shared with the PTY path.
+    mainContainerId = await createLedgeredAgentContainer({
+      dockerWorkload: core.dockerWorkload,
+      deterministicName: mainContainerName,
+      baseLabels: bundleLabels.labels,
+      mounts,
+      create: createMainContainer,
+    });
 
     await core.docker.start(mainContainerId);
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);

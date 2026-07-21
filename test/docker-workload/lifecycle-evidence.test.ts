@@ -121,6 +121,20 @@ describe('Docker-workload lifecycle evidence', () => {
     ]);
   });
 
+  it('creates a not-yet-existing evidence directory before the first write', () => {
+    const directory = join(evidenceDir(), 'nested', 'evidence');
+    const manifest = sealLifecycleEvidence(directory, sealOptions());
+    const plan: QualificationEvidencePlan = {
+      runId: 'docker-workload-lifecycle-001',
+      variant: 'apple-rootless-vfs',
+      platform: 'apple-container',
+      architecture: 'arm64',
+      bindings: EVIDENCE_BINDINGS,
+      files: EVIDENCE_PLAN_FILES,
+    };
+    expect(verifyQualificationEvidence(directory, plan).sha256).toBe(manifest.sha256);
+  });
+
   it('seals lifecycle evidence into a verifiable manifest', () => {
     const directory = evidenceDir();
     const manifest = sealLifecycleEvidence(directory, sealOptions());
