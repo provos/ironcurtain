@@ -25,6 +25,9 @@ forwarding, uplink-peer exclusion, relay-loss failure, and exact cleanup on an i
 network. Production staged images/contracts, the narrow
 build-egress profile, and 0C remain incomplete. No backend is implementation-qualified or
 preview-ready.
+**Amendment (2026-07-21, user-approved):** workload-image registry egress is promoted from Phase 3
+into 0F/0C scope; the frozen preloaded catalog now covers only trusted infrastructure images. See
+§6.4, §7.1, and §16.5.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
@@ -72,6 +75,7 @@ The earlier semantic broker is removed from the critical path. It may return lat
 - Launch a deliberately vulnerable target and one or more scanners on an inner-only Docker network.
 - Build hermetic workspace Dockerfiles offline from preloaded bases; rebuild current network-dependent IronCurtain Dockerfiles only through the frozen 0F narrow build-egress profile.
 - Use normal Docker tooling, including Compose-compatible clients where their required images are staged.
+- Pull public workload images from reviewed registries by digest or tag through the mediated registry-egress path (§6.4) when the session enables `public-registry` ingress; infrastructure images are never pulled.
 - Keep the host runtime API and host credentials outside the untrusted bundle.
 
 ### 1.3 Accepted tradeoff
@@ -325,11 +329,28 @@ qualification.
 
 Preloaded mode is offline except for 0F's narrow current-IronCurtain-Dockerfile profile, which fixes reviewed apt/npm/GitHub/toolchain origins through the outer MITM and rejects all client-selected targets. Phase 4 may later add generic reviewed workload/package destinations. Neither mode is a generic TCP relay, and no credential is injected into Dockerfile arguments, build secrets, environment, or layers.
 
+### 6.4 Workload-image registry egress (promoted from Phase 3)
+
+Images are two classes. **Trusted infrastructure images** — base, agent (per harness), nested-daemon, helper, fixed-relay, socat — are TCB: their identity is bound into qualification evidence and they only ever arrive through the preloaded catalog (§7.1). **Workload images** — anything the bundle runs inside its private daemon — are untrusted bundle state, so fetching one is threat-model-equivalent to installing a package through the mediated package path and may be mediated rather than pre-staged.
+
+When `imageIngress: public-registry` is enabled, the nested daemon receives proxy environment plus the session public CA and reaches only the fixed proxy path; there is still no direct registry route. The outer MITM adds a registry-aware handler frozen by `registry-egress-manifest.json`:
+
+- reviewed registry and token-service origins only (e.g. `registry-1.docker.io`, `auth.docker.io`, `ghcr.io`); client-selected hosts fail closed;
+- anonymous public pulls only: no registry credential exists in the bundle or is injected by the proxy; authenticated and private registries remain Phase 3;
+- pull-by-digest preferred; a tag pull is resolved and its digest recorded in audit before any blob is fetched;
+- content-addressed verification: every manifest and blob is hash-verified against the requested digest, so dynamic CDN redirect hosts cannot substitute content; redirects are followed only as the immediate bounded response to an authorized manifest/blob request;
+- per-request and per-image byte/time ceilings; push, delete, catalog enumeration, and all non-pull registry operations are rejected;
+- fetched images are recorded (registry, repository, resolved digest) as provenance but remain untrusted bundle state — mediation and provenance are the claims, not content trust.
+
+`preloaded-only` remains the default. Qualification runs use `preloaded-only` everywhere except the dedicated registry-path gates, so backend evidence never silently depends on live registry availability. The registry-aware handler joins the trusted network TCB and therefore requires its own frozen manifest, hermetic protocol fixtures, and 0C negatives before any preview.
+
 ## 7. Images, builds, and target/scanner workflows
 
 ### 7.1 Initial image model
 
-`imageMode: preloaded-catalog` resolves a trusted read-only catalog outside the workspace. Each entry binds immutable manifest/config digests and a backend-specific runtime image ID, exact build-hash schema+hash, toolchain digest, architecture/API range, runtime-trust schema, catalog generation, and provenance. Docker's runtime ID is the config digest; Apple `container` deterministically synthesizes a top-level descriptor during import, so trusted staging records that Apple-specific ID after independently verifying the archive. Trusted bootstrap stages the selected archive, verifies it before load, loads it only if the logical ref is absent, inspects the immutable loaded ID/config, compares every field, and returns/records the catalog hash. Mismatch fails before any build; mutable tags and automatic `buildImage` fallback are forbidden. Direct `docker pull` fails because the daemon has no registry route.
+The catalog governs the §6.4 infrastructure class only; workload images arrive through registry egress (§6.4), explicit archive staging, or bundle-local builds, and are never host-trusted.
+
+`imageMode: preloaded-catalog` resolves a trusted read-only catalog outside the workspace. Each entry binds immutable manifest/config digests and a backend-specific runtime image ID, exact build-hash schema+hash, toolchain digest, architecture/API range, runtime-trust schema, catalog generation, and provenance. Docker's runtime ID is the config digest; Apple `container` deterministically synthesizes a top-level descriptor during import, so trusted staging records that Apple-specific ID after independently verifying the archive. Trusted bootstrap stages the selected archive, verifies it before load, loads it only if the logical ref is absent, inspects the immutable loaded ID/config, compares every field, and returns/records the catalog hash. Mismatch fails before any build; mutable tags and automatic `buildImage` fallback are forbidden. In `preloaded-only` ingress mode direct `docker pull` fails because the daemon has no registry route; in `public-registry` mode pulls traverse only the fixed proxy path under the frozen §6.4 manifest.
 
 Both image call paths branch once, early, on trusted resolved image mode: the [`src/index.ts`](../../src/index.ts) `ensureDockerImage` preflight and `prepareDockerInfrastructure`/`ensureImage`. The branch occurs before legacy label staleness or build decisions. In preloaded mode there are zero calls to `ensureImage`, `ensureBaseImage`, `buildImage`, or `pullImage`. Tests cover both call paths and assert those call counts.
 
@@ -350,7 +371,7 @@ archive; mismatches fail with automatic build/pull disabled, and focused tests a
 calls. The complete production multi-image catalog, operator-facing option plumbing, persisted/resume
 tuple checks, and use through the private nested daemon remain open.
 
-Before load, verify archive index, manifest, and config hashes against catalog content. After load, normalized evidence compares immutable runtime image ID, manifest/config digest, platform, build-hash schema/hash, toolchain/trust/catalog generations, and provenance. The catalog covers base/agent/daemon/helper/relay/socat/target/patched-target/scanner images. Persist the complete resolved tuple in session metadata; resume requires exact compatibility rather than tag lookup.
+Before load, verify archive index, manifest, and config hashes against catalog content. After load, normalized evidence compares immutable runtime image ID, manifest/config digest, platform, build-hash schema/hash, toolchain/trust/catalog generations, and provenance. The catalog covers only the trusted infrastructure images: base, agent (per harness), nested-daemon, helper, fixed-relay, and socat. Target, patched-target, and scanner images are pinned test fixtures staged as sealed archives by the qualification harness, not production catalog roles. Persist the complete resolved tuple in session metadata; resume requires exact compatibility rather than tag lookup.
 
 Inside the bundle the workload may freely:
 
@@ -366,13 +387,15 @@ The repository's current Dockerfiles execute apt/curl/npm and related fetches. A
 
 ### 7.2 Host-mediated OCI ingress
 
+Anonymous public-registry pulls for workload images were promoted into 0F/0C scope by §16.5 and are specified in §6.4. Phase 3 now covers what §6.4 excludes: credentialed and private-registry ingress.
+
 A later host service accepts registry, repository, and preferably digest; applies host policy/escalation; fetches with trusted network code; records resolved digest and provenance; and creates a sealed bundle artifact for `docker load`. Mutable tags may be accepted only if product policy explicitly permits them and the resolved digest is recorded.
 
 Registry credentials never enter the bundle. Persistent shared image caches are deferred because they create cross-bundle state and poisoning questions. Daemon state is ephemeral per bundle initially.
 
 ### 7.3 Acceptance workflow
 
-The deterministic vertical fixture uses pinned target and scanner digests, an explicit readiness contract, and a new inner-only network. The scanner exits with a specified code and writes a versioned JSON report at a fixed `/workspace` path containing a stable finding ID. Qualification requires the expected finding, then four negatives: patched target yields no finding, unready target times out boundedly, malformed scanner output is rejected, and direct egress remains denied. Teardown removes the fixture stack while an unrelated inner container and an unrelated outer-runtime object survive. A second positive run builds the target locally from a pinned offline base before scanning it.
+The deterministic vertical fixture uses pinned target and scanner digests, an explicit readiness contract, and a new inner-only network. The scanner exits with a specified code and writes a versioned JSON report at a fixed `/workspace` path containing a stable finding ID. Qualification requires the expected finding, then four negatives: patched target yields no finding, unready target times out boundedly, malformed scanner output is rejected, and direct egress remains denied. Teardown removes the fixture stack while an unrelated inner container and an unrelated outer-runtime object survive. A second positive run builds the target locally from a pinned offline base before scanning it. The fixture stages its pinned images as sealed archives; it never depends on live registry egress.
 
 ## 8. Resources, lifecycle, and audit
 
@@ -613,7 +636,9 @@ both Mac outer runtimes. Trusted canonicalization/staging now records separate D
 runtime IDs, and the deterministic Compose target/scanner fixture passes its direct Mac acceptance
 workflow. An all-or-nothing catalog builder now requires every named role, stages one sealed
 archive per role for both backends, verifies the shared archive tuple, publishes neither backend
-catalog until all roles succeed, and removes partial artifacts on failure. The actual production
+catalog until all roles succeed, and removes partial artifacts on failure. The §16.5 amendment
+narrows the required role set to infrastructure images; fixture images move to the qualification
+harness. The actual production
 images and catalogs remain unstaged. Operator configuration resolves absence/empty/false to exactly
 `{enabled:false}` and rejects raw images, mounts, capabilities, profiles, relay targets, and runtime
 arguments. Production metadata plumbing, narrow build egress, contracts, and end-to-end product
@@ -649,7 +674,7 @@ exact inspected IDs. A live Docker Desktop integration check proves the fixed pa
 uplink-only peer, fails after relay loss, and leaves no owned resource. This focused check is 0F
 foundation evidence; it is not the complete post-attach G3 matrix or a 0C qualification record.
 
-Land the common CA-neutral image/bootstrap, ABI-keyed Linux dependency volume with `isolated-vm` and `node-pty` native-load probes, destination-bound parent `OutboundTransport`, hardened Desktop relay, pinned client compatibility matrix, host disk watchdog, preloaded catalog, feature-off plumbing, generalized JSON Vitest reporter, deterministic target/scanner fixtures, and `performance-budget.json`. Each staged image records architecture, Docker API range, CLI/daemon/Buildx/Compose versions, and public-CA generation.
+Land the common CA-neutral image/bootstrap, ABI-keyed Linux dependency volume with `isolated-vm` and `node-pty` native-load probes, destination-bound parent `OutboundTransport`, hardened Desktop relay, pinned client compatibility matrix, host disk watchdog, preloaded catalog, feature-off plumbing, generalized JSON Vitest reporter, deterministic target/scanner fixtures, a registry-aware workload-egress handler with `registry-egress-manifest.json` (§6.4), and `performance-budget.json`. Each staged image records architecture, Docker API range, CLI/daemon/Buildx/Compose versions, and public-CA generation.
 
 Freeze one canonical, fully expanded, hash-pinned `qualification-contract.json` per concrete backend/variant after 0B and before 0C. A shared template may generate it, but runtime overlays/dynamic selection are forbidden. Every named gate has exactly one disposition: `required-pass`; `backend-adapted-pass` with named equivalent invariant/test; `not-applicable-with-reviewed-rationale` plus adjudication; or `compatibility-blocker`. A blocker is terminal and cannot be overridden by config/UI; clearing it requires a versioned adjudicated contract and full rerun. `expected-fail`, `xfail`, auto-skip, and known-failure are prohibited. 0C cannot rewrite its contract. Every executable required/adapted selection is preflighted and zero-skip; N/A is a contract decision, not a runtime skip. Broad `npm test` skips remain inventory only.
 
@@ -659,7 +684,7 @@ Add `imageMode: preloaded-catalog`. Trusted code resolves a read-only catalog ou
 
 Current IronCurtain Dockerfiles use apt/curl/npm and other online fetches; a warm cache is not offline proof. Preloaded mode supports source/tests and explicitly hermetic Dockerfiles only. 0F freezes `build-egress-manifest.json` solely for current checked-in IronCurtain Dockerfiles. Each rule fixes scheme/host/port, methods/paths, redirect closure and hop limit, DNS/address policy, allowed/stripped headers, byte/time limits, and the BuildKit/frontend/worker/build/RUN seam where it applies. Reviewed apt/npm/GitHub/toolchain origins traverse the outer MITM; arbitrary client targets, credentials, and layer secrets are forbidden. Cold-cache/direct-connect traps prove all fetches are mediated; image history/config/layers are scanned for proxy credentials. The result is network-mediated and recorded, not reproducible unless every fetched artifact is also pinned. Disabled narrow egress fails fast; generic workload/package egress remains Phase 4.
 
-**0F exit:** foundations pass hermetic tests; contracts, catalog, relay/profile hashes, and performance budgets are frozen; the reporter rejects skip/pending/todo/zero/missing/wrong-image/wrong-CA cases; watchdog loss fails closed; offline Compose and narrowly scoped current-Dockerfile rebuild fixtures pass their respective modes.
+**0F exit:** foundations pass hermetic tests; contracts, catalog, relay/profile hashes, and performance budgets are frozen; the workload-registry manifest is frozen and its hermetic protocol/negative fixtures pass; the reporter rejects skip/pending/todo/zero/missing/wrong-image/wrong-CA cases; watchdog loss fails closed; offline Compose and narrowly scoped current-Dockerfile rebuild fixtures pass their respective modes.
 
 ### 9.6 Phase 0C — backend qualification and repository gates
 
@@ -677,7 +702,7 @@ npx vitest run test/uid-remap.integration.test.ts test/uid-remap.goose.integrati
 npx vitest run test/pty-entrypoint.integration.test.ts test/skills-end-to-end.integration.test.ts
 ```
 
-The 0F JSON reporter/verifier—not visual console output—adjudicates every required/adapted command at zero skip. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`, and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the frozen preloaded catalog, narrow current-Dockerfile build-egress profile, watchdog, cgroup ancestry, relay, and performance/state-growth budgets.
+The 0F JSON reporter/verifier—not visual console output—adjudicates every required/adapted command at zero skip. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`, and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the frozen preloaded catalog, narrow current-Dockerfile build-egress profile, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus unlisted-registry, credentialed-endpoint, redirect-abuse, and oversize negatives, run only in its dedicated gates), watchdog, cgroup ancestry, relay, and performance/state-growth budgets.
 
 The target/scanner acceptance fixture is mandatory even if no existing test covers it.
 
@@ -732,9 +757,9 @@ Linux repeats the evidence DAG independently: **LX-B** falsifies primitives on e
 
 **Exit:** G1-G10 pass on native Linux; security profiles are distribution/kernel-version scoped; no Mac evidence is cited as proof. A failure does not enable privileged DinD or host-socket fallback.
 
-### Phase 3 — Host-mediated OCI ingress
+### Phase 3 — Host-mediated OCI ingress (credentialed/private)
 
-Add policy-controlled registry/repository/digest requests, trusted fetch, provenance and resolved-digest audit, sealed archive staging, and revocation on teardown.
+Anonymous public pulls are §6.4 scope. Phase 3 adds policy-controlled credentialed and private-registry requests, trusted fetch, provenance and resolved-digest audit, sealed archive staging, and revocation on teardown.
 
 **Exit:** digest/provenance and credential tests pass; malicious archives remain untrusted bundle data; direct registry access and secret injection remain absent.
 
@@ -771,12 +796,14 @@ Each requires its own threat model and gates.
 - `src/docker-workload/resource-watchdog.ts` — host-only observed-disk/state measurement, reserve thresholds, revocation, and overshoot evidence.
 - `src/docker-workload/desktop-relay.ts` — fixed-target hardened DD-PROXY relay lifecycle/config/health evidence.
 - `src/docker-workload/build-egress-policy.ts` — frozen current-Dockerfile manifest resolution across BuildKit/frontend/worker/build/RUN seams.
+- `src/docker/registry-egress-policy.ts` — frozen workload-registry manifest resolution and pull-protocol authorization for the outer MITM registry path (§6.4).
 - `src/docker/outbound-transport.ts` — destination-bound parent-proxy transport shared by MITM and registry/package paths.
 - `docker/nested-daemon/` — pinned purpose-built daemon image, entrypoint, health probe, and image manifest.
 - `scripts/spikes/secure-nested-docker/` — timeboxed 0A ledger/traps/recovery, 0B probes, 0F freeze inputs, and 0C qualification/evidence.
 - `test/docker-workload/qualification-contracts/<variant>.json` — one canonical, fully expanded, hash-pinned contract per concrete variant.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
 - `config/docker-workload/build-egress-manifest.json` — current-Dockerfile-only destination and BuildKit-seam authorization.
+- `config/docker-workload/registry-egress-manifest.json` — reviewed public-registry origins, pull-protocol rules, and ceilings for workload-image pulls.
 - `config/docker-workload/preloaded-catalog.json` — immutable IDs/digests, build/toolchain/trust generations, API/platform scope, and provenance.
 - `test/docker-workload/performance-budget.json` — versioned backend/architecture time and state-growth ceilings.
 - `test/docker-workload/preloaded-catalog.test.ts` — mismatch failures and proof that both call paths invoke no legacy ensure/build/pull operation.
@@ -823,7 +850,7 @@ dockerWorkload:
     diskMb: 8192
 ```
 
-These values are non-normative suggested defaults, not guaranteed minima or frozen qualification budgets. `pids.desired` requests an operational ceiling; `pids.required=true` makes authoritative enforcement mandatory and therefore rejects Apple. With `required=false`, Apple records `unsupported` and may apply only advisory guest tuning; Desktop/Linux still report whether the desired value was enforced. No inner setting upgrades status. The coordinator clamps enforceable values while preserving host and trusted-relay/watchdog reserves, records requested versus effective, and never drops a required limit. Preview may set `diskMb: null` only with explicit `acceptObservedDiskRisk: true` and §8.1 watchdog evidence. `auto` prefers Apple for concurrent mutually-untrusted Mac sessions when qualified; explicit choice is honored or rejected. The untrusted agent cannot choose rootful Apple, profiles, mounts, network, relay targets, daemon image, catalog, watchdog, or contracts.
+These values are non-normative suggested defaults, not guaranteed minima or frozen qualification budgets. `imageIngress: public-registry` enables §6.4 anonymous workload pulls; the default remains `preloaded-only`, and the untrusted agent cannot edit the registry manifest or switch the mode. `pids.desired` requests an operational ceiling; `pids.required=true` makes authoritative enforcement mandatory and therefore rejects Apple. With `required=false`, Apple records `unsupported` and may apply only advisory guest tuning; Desktop/Linux still report whether the desired value was enforced. No inner setting upgrades status. The coordinator clamps enforceable values while preserving host and trusted-relay/watchdog reserves, records requested versus effective, and never drops a required limit. Preview may set `diskMb: null` only with explicit `acceptObservedDiskRisk: true` and §8.1 watchdog evidence. `auto` prefers Apple for concurrent mutually-untrusted Mac sessions when qualified; explicit choice is honored or rejected. The untrusted agent cannot choose rootful Apple, profiles, mounts, network, relay targets, daemon image, catalog, watchdog, or contracts.
 
 Feature/runtime/backend versions, exact resolved config hash, concrete qualification-contract hash, full profile tuple, workspace/runtime ABI, complete catalog image tuple/hash, performance budget, toolchain, relay binary/config/endpoint, watchdog/egress manifests, resource status, and proxy protocol are written to session metadata. Resume requires exact compatible tuples. A recorded `compatibility-blocker` is terminal with no config/UI override; only a versioned adjudicated contract plus full rerun clears it.
 
@@ -831,36 +858,36 @@ Rollout order is developer-only explicit opt-in, evidence-gated Mac backend prev
 
 ## 13. Verification matrix
 
-| Gate | Mandatory evidence                                                                                                                                                                                                                                  |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G0   | Two-day 0A ledger/trap/recovery passes; 0B precedes frozen 0F contracts/catalog/budgets; both 0C Mac tracks have schema-valid manifests and Linux non-inference.                                                                                    |
-| G1   | Canonical expanded contract; zero-skip required/adapted selections including Goose; pinned toolchain/API; pre/post-load catalog tuple proof across all images and both call paths; real primitives/e2e/Compose/scanner.                             |
-| G2   | Trusted outer inspect plus host/sibling/Mac canaries; no host runtime/control socket, secret, broad path, namespace, or device.                                                                                                                     |
-| G3   | DD-STRICT first; DD-PROXY Engine 28 isolated-v4/v6 preflight then post-attach matrix; trusted byte-relay mutation/malformed/exhaustion/death tests and exact outer-MITM endpoint evidence; Apple repeats its topology.                              |
-| G4   | `profile-ceiling.json` subset proof, denial/reviewer evidence, fresh cumulative P0-P4 runs and full frozen tuple; immutable outer cgroup; absolute stops; ECI/Sysbox never qualifies baseline.                                                      |
-| G5   | Provisioning/env/filesystem/image scans and supported two-MITM bootstrap tests; direct outer-fake/proxy use is an accepted collusion fixture; outer MITM alone is authoritative and holds real secrets/CA key.                                      |
-| G6   | Desktop/Linux immutable ancestor/migration negatives including relay reserve; Apple CPU/memory/fork pressure; desired/required PID behavior; watchdog pre-start/post-inventory lifecycle, death/recovery/coverage/overshoot tests; frozen budgets.  |
-| G7   | Host-only lease, `SIGKILL`/restart/API-loss/live-newer/foreign-preservation faults, nested heartbeat cessation, exact outer deletion, state/relay removal, recovery bound, and two empty inventories. Apple faults never kill the shared apiserver. |
-| G8   | Feature-off create-argument/effective-plan snapshots and targeted Docker/Apple/builtin/workflow e2e; no disabled-session image action/exposure, while inert cache presence is harmless.                                                             |
-| G9   | Independent frozen contract evidence plus complete G1-G10 rerun through actual CLI/UI/session/entrypoint/resume before each advertised variant preview; Linux runs LX-B/LX-F/LX-C first.                                                            |
-| G10  | Every blocker is terminal/no-override and clears only by versioned adjudication/full rerun; fallback tests exclude host sockets, outer privilege, direct registry/network, and broker fallback.                                                     |
+| Gate | Mandatory evidence                                                                                                                                                                                                                                                                                                                                  |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G0   | Two-day 0A ledger/trap/recovery passes; 0B precedes frozen 0F contracts/catalog/budgets; both 0C Mac tracks have schema-valid manifests and Linux non-inference.                                                                                                                                                                                    |
+| G1   | Canonical expanded contract; zero-skip required/adapted selections including Goose; pinned toolchain/API; pre/post-load catalog tuple proof across all images and both call paths; real primitives/e2e/Compose/scanner.                                                                                                                             |
+| G2   | Trusted outer inspect plus host/sibling/Mac canaries; no host runtime/control socket, secret, broad path, namespace, or device.                                                                                                                                                                                                                     |
+| G3   | DD-STRICT first; DD-PROXY Engine 28 isolated-v4/v6 preflight then post-attach matrix; trusted byte-relay mutation/malformed/exhaustion/death tests and exact outer-MITM endpoint evidence; Apple repeats its topology. Registry-egress negatives (unlisted registry, credentialed endpoint, redirect abuse, oversize) run wherever §6.4 is enabled. |
+| G4   | `profile-ceiling.json` subset proof, denial/reviewer evidence, fresh cumulative P0-P4 runs and full frozen tuple; immutable outer cgroup; absolute stops; ECI/Sysbox never qualifies baseline.                                                                                                                                                      |
+| G5   | Provisioning/env/filesystem/image scans and supported two-MITM bootstrap tests; direct outer-fake/proxy use is an accepted collusion fixture; outer MITM alone is authoritative and holds real secrets/CA key. Workload-registry pulls are anonymous-only with resolved digests audited.                                                            |
+| G6   | Desktop/Linux immutable ancestor/migration negatives including relay reserve; Apple CPU/memory/fork pressure; desired/required PID behavior; watchdog pre-start/post-inventory lifecycle, death/recovery/coverage/overshoot tests; frozen budgets.                                                                                                  |
+| G7   | Host-only lease, `SIGKILL`/restart/API-loss/live-newer/foreign-preservation faults, nested heartbeat cessation, exact outer deletion, state/relay removal, recovery bound, and two empty inventories. Apple faults never kill the shared apiserver.                                                                                                 |
+| G8   | Feature-off create-argument/effective-plan snapshots and targeted Docker/Apple/builtin/workflow e2e; no disabled-session image action/exposure, while inert cache presence is harmless.                                                                                                                                                             |
+| G9   | Independent frozen contract evidence plus complete G1-G10 rerun through actual CLI/UI/session/entrypoint/resume before each advertised variant preview; Linux runs LX-B/LX-F/LX-C first.                                                                                                                                                            |
+| G10  | Every blocker is terminal/no-override and clears only by versioned adjudication/full rerun; fallback tests exclude host sockets, outer privilege, direct registry/network, and broker fallback.                                                                                                                                                     |
 
 ## 14. Transition from the broker-first design
 
-| Former goal/design                          | Disposition                                                                                                                |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Early Mac no-descendant utility             | Retained in 0F common bootstrap work; no longer presented as the Docker goal.                                              |
-| Per-operation semantic broker authorization | Dropped for Docker capability; optional future stronger mode.                                                              |
-| Authenticated caller/mutation audit         | Replaced by bundle enablement, host lifecycle, ingress, egress, profile, and resource audit.                               |
-| Per-descendant mount handles                | Replaced by exact outer daemon/VM mount confinement and arbitrary bundle-visible inner mounts.                             |
-| No inner networking                         | Replaced by arbitrary bundle-internal networks with outer egress confinement.                                              |
-| Credential non-provisioning                 | Retained.                                                                                                                  |
-| Immutable approved inner images only        | Replaced by a trusted immutable preloaded catalog at admission plus untrusted bundle-local build/load/tag/commit.          |
-| Exact inner cleanup and broker WAL          | Replaced by exact outer sidecar/VM teardown and ephemeral state-root removal.                                              |
-| Normal-session equivalence                  | Retained.                                                                                                                  |
-| Linux-first proof                           | Reordered: Mac spike first because it is the available system; Linux remains independently mandatory before Linux support. |
-| Select only one Mac backend                 | Replaced by independent Docker Desktop and Apple support gates; both are product goals.                                    |
-| No weaker fallback                          | Retained and sharpened.                                                                                                    |
+| Former goal/design                          | Disposition                                                                                                                                                    |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Early Mac no-descendant utility             | Retained in 0F common bootstrap work; no longer presented as the Docker goal.                                                                                  |
+| Per-operation semantic broker authorization | Dropped for Docker capability; optional future stronger mode.                                                                                                  |
+| Authenticated caller/mutation audit         | Replaced by bundle enablement, host lifecycle, ingress, egress, profile, and resource audit.                                                                   |
+| Per-descendant mount handles                | Replaced by exact outer daemon/VM mount confinement and arbitrary bundle-visible inner mounts.                                                                 |
+| No inner networking                         | Replaced by arbitrary bundle-internal networks with outer egress confinement.                                                                                  |
+| Credential non-provisioning                 | Retained.                                                                                                                                                      |
+| Immutable approved inner images only        | Replaced by a trusted immutable infrastructure catalog at admission, §6.4 mediated anonymous workload pulls, and untrusted bundle-local build/load/tag/commit. |
+| Exact inner cleanup and broker WAL          | Replaced by exact outer sidecar/VM teardown and ephemeral state-root removal.                                                                                  |
+| Normal-session equivalence                  | Retained.                                                                                                                                                      |
+| Linux-first proof                           | Reordered: Mac spike first because it is the available system; Linux remains independently mandatory before Linux support.                                     |
+| Select only one Mac backend                 | Replaced by independent Docker Desktop and Apple support gates; both are product goals.                                                                        |
+| No weaker fallback                          | Retained and sharpened.                                                                                                                                        |
 
 ## 15. Decisions, residual risks, and open product questions
 
@@ -870,7 +897,7 @@ Rollout order is developer-only explicit opt-in, evidence-gated Mac backend prev
 2. Agent, daemon, targets, scanners, and descendants are not isolated from one another.
 3. Real Docker compatibility and existing daemon-facing integration tests are required.
 4. Initial daemon state is ephemeral and bundle-private.
-5. Initial external images use the trusted preloaded catalog. Hermetic builds are offline; only current IronCurtain Dockerfiles get 0F's narrow fixed-destination build egress. Generic egress is Phase 4.
+5. Infrastructure images use the trusted preloaded catalog. Workload images may additionally use §6.4 anonymous public-registry egress (user-approved amendment, 2026-07-21); credentialed and private registries remain Phase 3. Hermetic builds are offline; only current IronCurtain Dockerfiles get 0F's narrow fixed-destination build egress. Generic non-registry egress is Phase 4.
 6. No host port publication in the base capability.
 7. One total resource budget plus fixed trusted-infrastructure reserves is preferred over an agent-selected split.
 8. Docker Desktop/Linux outer privilege and host runtime sockets remain prohibited.
@@ -914,6 +941,13 @@ That review remains useful history but its broker requirements are not normative
 - **Judge binding adjudication:** `APPROVE AFTER INTEGRATION`. It further required the <=3600-byte goal; explicit relay/catalog/watchdog/resolved-config TCB; Engine-28-only DD-PROXY; checked-in subset-only profile ceiling; coordinator-surviving watchdog lifecycle; relay resource accounting; desired/required PID config; implementation-qualified 0C semantics and full product-entrypoint reruns; complete early image-mode branching and catalog tuple; terminal concrete-variant blockers including Goose; frozen BuildKit-seam egress manifest; canonical evidence root; and exact pre/post-create lease identity.
 - **Integrator actions:** applied both correction rounds throughout the goal, TCB, architecture, resources, Phase 0 protocol, product DAG, image/build paths, code/config maps, verification, decisions, and references. Removed stale preview qualification, relay compromise testing, alternate DD-PROXY boundary, scalar PID config, partial product-gate exits, and Phase 1 catalog-loader wording.
 - **Root validation and disposition:** `APPROVED FOR PHASE 0A`. Root validation corrected watchdog ordering, exact create identity, cgroup stop wording, contract layout, Goose inventory, profile tuple, and stale qualification language; then verified goal size, formatting, local links, referenced tests, and working-tree scope. Approval covers only the timeboxed spike harness; 0C yields an implementation-qualified candidate, and no backend reaches preview before its Phase 2 G1-G10 rerun. The adjudication raises no new user decision.
+
+### 16.5 Workload-registry promotion (user-approved, 2026-07-21)
+
+- **User direction:** the operator burden of staging every workload image through the frozen catalog is not justified by the threat model. A pulled workload image runs as the already-untrusted bundle, exactly like a package installed through the mediated package path; forcing workload images through TCB-image machinery added complexity without a matching security claim.
+- **Dispositions:** the preloaded catalog is retained unchanged for trusted infrastructure images (base, agent, nested-daemon, helper, fixed-relay, socat), whose identity is bound into qualification evidence. Target/scanner fixtures stay pinned sealed archives owned by the qualification harness so 0C evidence remains deterministic and offline. Workload images gain the §6.4 anonymous, manifest-frozen, digest-verified registry path, promoted from Phase 3; Phase 3 narrows to credentialed/private ingress. The /goal text is unchanged: G1 (infrastructure catalog integrity), G3 (fixed-proxy-only egress), and G5 (no credential provisioning) remain true under the amendment.
+- **New TCB surface acknowledged:** the registry-aware proxy handler joins the trusted network TCB and requires its own frozen `registry-egress-manifest.json`, hermetic protocol fixtures, and 0C negatives before any preview. Content-addressed digest verification is the control that neutralizes dynamic CDN redirect hosts; provenance recording, not content trust, is the claim for pulled images.
+- **Code follow-ups:** narrow the catalog builder's required role set to the infrastructure images; move the vulnerability-fixture archives to the qualification harness staging path; add `registry-egress-policy.ts` and the manifest; plumb `imageIngress: 'public-registry'` as strict opt-in.
 
 ## 17. Primary references
 
