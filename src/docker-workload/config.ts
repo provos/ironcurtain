@@ -43,7 +43,7 @@ export const dockerWorkloadRequestedSchema = z
     tier: z.literal('developer-only').optional(),
     backend: z.enum(DOCKER_WORKLOAD_BACKENDS).optional(),
     imageMode: z.literal('preloaded-catalog').optional(),
-    imageIngress: z.literal('preloaded-only').optional(),
+    imageIngress: z.enum(['preloaded-only', 'public-registry']).optional(),
     daemonState: z.literal('ephemeral').optional(),
     hostPortPublishing: z.literal(false).optional(),
     buildEgress: z.enum(['disabled', 'ironcurtain-dockerfiles']).optional(),
@@ -70,7 +70,7 @@ export type ResolvedDockerWorkloadConfig =
       readonly tier: 'developer-only';
       readonly backend: (typeof DOCKER_WORKLOAD_BACKENDS)[number];
       readonly imageMode: 'preloaded-catalog';
-      readonly imageIngress: 'preloaded-only';
+      readonly imageIngress: 'preloaded-only' | 'public-registry';
       readonly daemonState: 'ephemeral';
       readonly hostPortPublishing: false;
       readonly buildEgress: 'disabled' | 'ironcurtain-dockerfiles';

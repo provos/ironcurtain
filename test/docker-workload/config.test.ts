@@ -34,6 +34,17 @@ describe('secure nested Docker configuration', () => {
     });
   });
 
+  it('accepts public-registry ingress as strict opt-in while defaulting to preloaded-only', () => {
+    expect(resolveDockerWorkloadConfig({ enabled: true })).toMatchObject({ imageIngress: 'preloaded-only' });
+    expect(resolveDockerWorkloadConfig({ enabled: true, imageIngress: 'public-registry' })).toMatchObject({
+      imageIngress: 'public-registry',
+    });
+    // Any value outside the reviewed union is rejected before resolution.
+    expect(dockerWorkloadRequestedSchema.safeParse({ enabled: true, imageIngress: 'any-registry' }).success).toBe(
+      false,
+    );
+  });
+
   it('accepts bounded operator policy without accepting raw runtime authority', () => {
     expect(
       resolveDockerWorkloadConfig({

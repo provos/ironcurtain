@@ -28,6 +28,14 @@ import {
 } from './preloaded-image-staging.js';
 import type { ContainerRuntime } from './types.js';
 
+/**
+ * The trusted infrastructure image class (plan §6.4): base, the per-harness
+ * agents, and the fixed nested-runtime support images. Their identity is bound
+ * into qualification evidence and they only ever arrive through the preloaded
+ * catalog. Untrusted workload images (registry pulls, archives, local builds)
+ * and the pinned target/scanner qualification fixtures are deliberately NOT
+ * catalog roles.
+ */
 export const REQUIRED_PRELOADED_IMAGE_ROLES = [
   'base',
   'agent-claude-code',
@@ -37,9 +45,6 @@ export const REQUIRED_PRELOADED_IMAGE_ROLES = [
   'helper',
   'fixed-relay',
   'socat',
-  'vulnerability-target',
-  'patched-target',
-  'vulnerability-scanner',
 ] as const;
 export type PreloadedImageRole = (typeof REQUIRED_PRELOADED_IMAGE_ROLES)[number];
 

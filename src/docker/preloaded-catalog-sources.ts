@@ -5,9 +5,13 @@
  * metadata the freeze command needs to build, tag, and stage each image. It is
  * the single source of truth mapping catalog roles to on-disk build inputs.
  *
- * The target/patched-target/scanner roles reuse the existing deterministic
- * vulnerability fixture (§7.3) rather than duplicating its Go sources; the
- * helper/socat/relay/daemon roles use the purpose-built images under `docker/`.
+ * Under the two-class image split (plan §6.4) the catalog governs only the
+ * trusted infrastructure class: base, the per-harness agents, and the fixed
+ * nested-runtime support images (nested-daemon/helper/fixed-relay/socat), all
+ * built from purpose-built images under `docker/`. Untrusted workload images
+ * and the pinned target/patched-target/scanner qualification fixtures are NOT
+ * catalog roles — the fixtures are owned by the qualification harness (see
+ * `test/docker-workload/fixtures/vulnerability-fixture/image-sources.ts`).
  */
 
 import { createHash } from 'node:crypto';
@@ -73,12 +77,11 @@ function existsAt(dir: string, name: string): boolean {
   return readdirSync(dir).includes(name);
 }
 
-/** All eleven role sources, resolved to absolute paths for the current host. */
+/** All eight infrastructure role sources, resolved to absolute paths for the current host. */
 export function catalogImageSources(): readonly CatalogImageSource[] {
   const root = packageRoot();
   const dockerDir = resolve(root, 'docker');
   const workloadDir = resolve(dockerDir, 'docker-workload');
-  const fixtureDir = resolve(root, 'test', 'docker-workload', 'fixtures', 'vulnerability-fixture');
   const baseDockerfile = baseDockerfileName(dockerDir);
 
   const sources: readonly CatalogImageSource[] = [
@@ -121,30 +124,6 @@ export function catalogImageSources(): readonly CatalogImageSource[] {
       'ironcurtain-socat:latest',
       join(workloadDir, 'socat', 'Dockerfile'),
       join(workloadDir, 'socat'),
-      NO_TOOLCHAIN,
-      root,
-    ),
-    agentless(
-      'vulnerability-target',
-      'ironcurtain-vulnerability-target:latest',
-      join(fixtureDir, 'Dockerfile.target'),
-      fixtureDir,
-      NO_TOOLCHAIN,
-      root,
-    ),
-    agentless(
-      'patched-target',
-      'ironcurtain-patched-target:latest',
-      join(fixtureDir, 'Dockerfile.patched-target'),
-      fixtureDir,
-      NO_TOOLCHAIN,
-      root,
-    ),
-    agentless(
-      'vulnerability-scanner',
-      'ironcurtain-vulnerability-scanner:latest',
-      join(fixtureDir, 'Dockerfile.scanner'),
-      fixtureDir,
       NO_TOOLCHAIN,
       root,
     ),

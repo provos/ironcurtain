@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "policyId": "workload-registry-egress-draft-v1",
+  "status": "draft",
+  "origins": [
+    {
+      "id": "docker-hub-registry",
+      "destination": { "protocol": "https:", "hostname": "registry-1.docker.io", "port": 443 },
+      "operations": ["api-version", "manifest-pull", "blob-pull"],
+      "redirects": { "maxHops": 3, "followDynamicHosts": true },
+      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent", "range"] },
+      "limits": { "requestBytes": 1073741824, "requestTimeoutMs": 300000 }
+    },
+    {
+      "id": "docker-hub-token",
+      "destination": { "protocol": "https:", "hostname": "auth.docker.io", "port": 443 },
+      "operations": ["token"],
+      "tokenPaths": [{ "kind": "exact", "value": "/token" }],
+      "redirects": { "maxHops": 0, "followDynamicHosts": false },
+      "requestHeaders": { "allow": ["accept", "user-agent"] },
+      "limits": { "requestBytes": 1048576, "requestTimeoutMs": 30000 }
+    },
+    {
+      "id": "ghcr-registry",
+      "destination": { "protocol": "https:", "hostname": "ghcr.io", "port": 443 },
+      "operations": ["api-version", "manifest-pull", "blob-pull", "token"],
+      "tokenPaths": [{ "kind": "exact", "value": "/token" }],
+      "redirects": { "maxHops": 3, "followDynamicHosts": true },
+      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent", "range"] },
+      "limits": { "requestBytes": 1073741824, "requestTimeoutMs": 300000 }
+    }
+  ],
+  "imageLimits": { "totalBytes": 17179869184, "totalTimeoutMs": 1800000 },
+  "rejectedOperations": ["push", "delete", "catalog-enumeration", "tags-enumeration"]
+}
