@@ -28,6 +28,7 @@ import type { ResolvedUserConfig } from '../../config/user-config.js';
 import { OPENROUTER_BASE_URL, OPENROUTER_HOST } from '../../config/user-config.js';
 import { parseModelId } from '../../config/model-provider.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
+import { CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
 import {
   anthropicProvider,
   claudePlatformProvider,
@@ -292,7 +293,7 @@ exit $STATUS
       const env: Record<string, string> = {
         CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
         // Node.js does not use the system CA store -- must set this explicitly
-        NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
+        NODE_EXTRA_CA_CERTS: CONTAINER_RUNTIME_CA_CERT,
         // Force subagents (Agent/Task tool) and `run_in_background` to run in the
         // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
         // Code v2.1.198 subagents run in the *background* by default: the tool

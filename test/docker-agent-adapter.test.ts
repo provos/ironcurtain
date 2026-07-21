@@ -159,7 +159,7 @@ describe('Claude Code Adapter', () => {
     const env = claudeCodeAdapter.buildEnv(config, fakeKeys);
     expect(env.IRONCURTAIN_API_KEY).toBe('sk-ant-api03-ironcurtain-FAKE');
     expect(env.CLAUDE_CODE_DISABLE_UPDATE_CHECK).toBe('1');
-    expect(env.NODE_EXTRA_CA_CERTS).toBe('/usr/local/share/ca-certificates/ironcurtain-ca.crt');
+    expect(env.NODE_EXTRA_CA_CERTS).toBe('/etc/ironcurtain/ca-cert.pem');
   });
 
   it('extracts response and cost from valid JSON output', () => {

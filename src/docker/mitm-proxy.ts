@@ -14,7 +14,6 @@
  */
 
 import * as http from 'node:http';
-import * as https from 'node:https';
 import * as tls from 'node:tls';
 import * as net from 'node:net';
 import type { Socket } from 'node:net';
@@ -43,6 +42,7 @@ import { OPENROUTER_HOST } from '../config/user-config.js';
 import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
+import { createDirectOutboundTransport, type OutboundTransport } from './outbound-transport.js';
 
 /**
  * Runtime control surface for the MITM proxy's host allowlist.
@@ -176,6 +176,14 @@ export interface MitmProxyOptions {
    * Used in tests to avoid real DNS resolution.
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
+  /**
+   * Destination-bound upstream transport. Nested runtimes inject the fixed
+   * parent-proxy implementation so no request can fall back to direct egress
+   * or acquire a caller-selected generic CONNECT tunnel.
+   */
+  readonly outboundTransport?: OutboundTransport;
+  /** Test-only escape hatch for loopback provider and registry fixtures. */
+  readonly allowPrivateDestinationsForTests?: boolean;
   /**
    * Connection-source filter for TCP mode. When set, sockets whose
    * remote address fails the predicate are destroyed before any request
@@ -609,6 +617,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const captureRecordedAgentName = options.recordedAgentName;
   const captureWorkflowRunId = options.workflowRunId;
   const captureBundleId = options.bundleId;
+  const outboundTransport =
+    options.outboundTransport ??
+    createDirectOutboundTransport({
+      lookup: options.dnsLookup as typeof import('node:dns').lookup | undefined,
+      // dnsLookup is an existing test seam used throughout the MITM suite to
+      // resolve public-looking fixture names to loopback. Production callers
+      // do not supply it.
+      allowPrivateDestinationsForTests:
+        options.allowPrivateDestinationsForTests === true || options.dnsLookup !== undefined,
+    });
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -799,6 +817,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           validator: options.packageValidation?.validator ?? DENY_ALL_VALIDATOR,
           cache: allowedVersionCache,
           auditLogPath: options.packageValidation?.auditLogPath,
+          outboundTransport,
         })
         .catch((err: unknown) => {
           logger.info(`[mitm-proxy] registry request error: ${err instanceof Error ? err.message : String(err)}`);
@@ -963,13 +982,15 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       // Route to custom upstream gateway when configured; path prefix is
       // prepended AFTER endpoint filtering (which runs on the original path).
       const upstreamPath = upstreamPathPrefix ? `${upstreamPathPrefix}${path}` : path;
-      const requestFn = upstreamUseTls ? https.request : http.request;
-      const upstreamReq = requestFn(
+      const upstreamReq = outboundTransport.request(
         {
-          hostname: upstreamHost,
-          port: upstreamPort,
+          destination: {
+            protocol: upstreamUseTls ? 'https:' : 'http:',
+            hostname: upstreamHost,
+            port: upstreamPort,
+          },
           method,
-          path: upstreamPath,
+          path: upstreamPath ?? '/',
           headers: finalHeaders,
         },
         (upstreamRes) => {
@@ -1396,34 +1417,31 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
     }
 
-    const reqOpts: http.RequestOptions = {
-      hostname: host,
-      port,
-      method,
-      path,
-      headers: forwardHeaders,
-    };
-    if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup;
-    }
+    const upstreamReq = outboundTransport.request(
+      {
+        destination: { protocol: 'http:', hostname: host, port },
+        method,
+        path,
+        headers: forwardHeaders,
+      },
+      (upstreamRes) => {
+        upstreamRes.on('error', (err) => {
+          const log = isConnectionReset(err) ? logger.debug : logger.info;
+          log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end(`Upstream response error: ${err.message}`);
+          } else {
+            clientRes.socket?.destroy();
+          }
+        });
 
-    const upstreamReq = http.request(reqOpts, (upstreamRes) => {
-      upstreamRes.on('error', (err) => {
-        const log = isConnectionReset(err) ? logger.debug : logger.info;
-        log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
-        if (!clientRes.headersSent) {
-          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-          clientRes.end(`Upstream response error: ${err.message}`);
-        } else {
-          clientRes.socket?.destroy();
-        }
-      });
-
-      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      clientRes.flushHeaders();
-      clientRes.socket?.setNoDelay(true);
-      upstreamRes.pipe(clientRes);
-    });
+        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        clientRes.flushHeaders();
+        clientRes.socket?.setNoDelay(true);
+        upstreamRes.pipe(clientRes);
+      },
+    );
 
     activeUpstreamRequests.add(upstreamReq);
     upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
@@ -1560,10 +1578,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const passthroughKind = isDynamicPassthrough ? 'passthrough' : 'passthrough-wildcard';
     const connType = provider ? 'provider' : registry ? 'registry' : passthroughKind;
 
-    // 2. For passthrough domains, create a raw TCP tunnel (no MITM).
-    //    The proxy just pipes bytes bidirectionally — this supports both
-    //    plain HTTP and WebSocket connections through CONNECT.
-    if (isPassthrough) {
+    // 2. Direct outer proxies may use a raw TCP tunnel for passthrough
+    //    domains. Nested proxies must not expose a caller-selected CONNECT
+    //    primitive through the fixed parent transport, so they terminate TLS
+    //    below and re-originate HTTP(S) with the destination bound separately
+    //    from request headers. WSS on that nested path is intentionally
+    //    rejected by innerServer's upgrade handler.
+    if (isPassthrough && outboundTransport.kind === 'direct') {
       logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → TUNNEL (${connType})`);
 
       // Acknowledge immediately per standard proxy behavior — the client
@@ -1645,7 +1666,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     socketMetadata.set(tlsSocket, {
       provider: provider ?? undefined,
       registry,
-      passthrough: false,
+      passthrough: isPassthrough,
       host,
       port,
     });
@@ -1704,34 +1725,31 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     const forwardHeaders = { ...headers, host };
 
-    const requestFn = useHttps ? https.request : http.request;
-    const reqOpts: http.RequestOptions = {
-      hostname: host,
-      port,
-      method,
-      path,
-      headers: forwardHeaders,
-    };
-    if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup;
-    }
-    const upstreamReq = requestFn(reqOpts, (upstreamRes) => {
-      upstreamRes.on('error', (err) => {
-        const log = isConnectionReset(err) ? logger.debug : logger.info;
-        log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
-        if (!clientRes.headersSent) {
-          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-          clientRes.end(`Upstream response error: ${err.message}`);
-        } else {
-          clientRes.socket?.destroy();
-        }
-      });
+    const upstreamReq = outboundTransport.request(
+      {
+        destination: { protocol: useHttps ? 'https:' : 'http:', hostname: host, port },
+        method,
+        path: path ?? '/',
+        headers: forwardHeaders,
+      },
+      (upstreamRes) => {
+        upstreamRes.on('error', (err) => {
+          const log = isConnectionReset(err) ? logger.debug : logger.info;
+          log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end(`Upstream response error: ${err.message}`);
+          } else {
+            clientRes.socket?.destroy();
+          }
+        });
 
-      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      clientRes.flushHeaders();
-      clientRes.socket?.setNoDelay(true);
-      upstreamRes.pipe(clientRes);
-    });
+        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        clientRes.flushHeaders();
+        clientRes.socket?.setNoDelay(true);
+        upstreamRes.pipe(clientRes);
+      },
+    );
 
     activeUpstreamRequests.add(upstreamReq);
     upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
@@ -1812,20 +1830,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       forwardHeaders[key] = value;
     }
 
-    const requestFn = http.request;
-    const reqOpts: http.RequestOptions = {
-      hostname: targetHost,
-      port: targetPort,
+    const upstreamReq = outboundTransport.request({
+      destination: { protocol: 'http:', hostname: targetHost, port: targetPort },
       method: 'GET',
       path,
       headers: forwardHeaders,
-      timeout: 30_000,
-    };
-    if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup;
-    }
-
-    const upstreamReq = requestFn(reqOpts);
+    });
+    upstreamReq.setTimeout(30_000);
     activeUpstreamRequests.add(upstreamReq);
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {

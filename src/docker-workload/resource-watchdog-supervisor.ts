@@ -1,0 +1,546 @@
+/** Coordinator-independent process wrapper for the host resource watchdog. */
+
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { z } from 'zod';
+import { stableStringify } from '../hash.js';
+import { createContainerRuntime } from '../docker/container-runtime.js';
+import type { ContainerRuntime } from '../docker/types.js';
+import { inventoryOwnedResourceIds, revokeDockerWorkloadOuterResources } from './bundle-revocation.js';
+import {
+  closeDockerWorkloadLease,
+  loadDockerWorkloadLease,
+  recordDockerWorkloadLeaseIncident,
+  type DockerWorkloadCleanupProof,
+  type DockerWorkloadLease,
+} from './bundle-lease.js';
+import {
+  loadResourceWatchdogPolicy,
+  ResourceWatchdog,
+  type ResourceWatchdogAttestation,
+  type ResourceWatchdogCleanupProof,
+  type ResourceWatchdogSample,
+  type ResourceWatchdogTrip,
+} from '../docker/resource-watchdog.js';
+
+export const RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION = 1;
+export const MAX_RESOURCE_WATCHDOG_SUPERVISOR_JSON_BYTES = 1024 * 1024;
+
+const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._:-]{2,127}$/u);
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+const timestampSchema = z.iso.datetime({ offset: true });
+const runtimeIdentitySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u);
+
+const inventorySchema = z
+  .object({ capturedAt: timestampSchema, ownedResourceIds: z.array(runtimeIdentitySchema).max(4096) })
+  .strict();
+const stopRequestSchema = z
+  .object({
+    schemaVersion: z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION),
+    leaseId: identifierSchema,
+    generation: identifierSchema,
+    requestedAt: timestampSchema,
+    cleanup: z
+      .object({
+        exactOuterResourcesAbsent: z.literal(true),
+        stateRootAbsent: z.literal(true),
+        inventories: z.tuple([inventorySchema, inventorySchema]),
+      })
+      .strict(),
+  })
+  .strict();
+
+const sampleSchema = z
+  .object({
+    sampledAtMs: z.number().int().nonnegative(),
+    availableBytes: z.number().int().nonnegative(),
+    allocatedBytes: z.number().int().nonnegative(),
+  })
+  .strict();
+const tripSchema = z
+  .object({
+    code: z.enum(['hard-state-threshold', 'host-reserve', 'sample-error', 'sample-stale', 'target-identity']),
+    atMs: z.number().int().nonnegative(),
+    detail: z.string().min(1).max(8192),
+    overshootBytes: z.number().int().nonnegative(),
+    overshootWithinFrozenMaximum: z.boolean(),
+  })
+  .strict();
+const supervisorStatusSchema = z
+  .object({
+    schemaVersion: z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION),
+    leaseId: identifierSchema,
+    generation: identifierSchema,
+    supervisorPid: z.number().int().positive(),
+    state: z.enum(['starting', 'ready', 'revoking', 'closed', 'incident']),
+    policySha256: sha256Schema,
+    policyId: identifierSchema,
+    startedAt: timestampSchema,
+    updatedAt: timestampSchema,
+    lastSample: sampleSchema.nullable(),
+    trip: tripSchema.nullable(),
+    detail: z.string().min(1).max(8192).nullable(),
+  })
+  .strict();
+
+export type ResourceWatchdogSupervisorStatus = z.infer<typeof supervisorStatusSchema>;
+export type ResourceWatchdogSupervisorStopRequest = z.infer<typeof stopRequestSchema>;
+
+export interface RunResourceWatchdogSupervisorOptions {
+  readonly leasePath: string;
+  readonly policyPath: string;
+  readonly statusPath: string;
+  readonly stopRequestPath: string;
+  readonly runtime?: ContainerRuntime;
+  readonly now?: () => Date;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+export interface LaunchDetachedResourceWatchdogSupervisorOptions extends Omit<
+  RunResourceWatchdogSupervisorOptions,
+  'runtime' | 'now' | 'sleep'
+> {
+  readonly entrypointPath: string;
+  readonly startupTimeoutMs: number;
+}
+
+/** Run inside the detached child process until normal cleanup or a trip closes the lease. */
+export async function runResourceWatchdogSupervisor(options: RunResourceWatchdogSupervisorOptions): Promise<void> {
+  assertCanonicalHostPath(options.statusPath, 'watchdog supervisor status');
+  assertCanonicalHostPath(options.stopRequestPath, 'watchdog supervisor stop request');
+  const now = options.now ?? (() => new Date());
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+  const loadedPolicy = loadResourceWatchdogPolicy(options.policyPath);
+  let lease = loadDockerWorkloadLease(options.leasePath);
+  if (lease.bindings.watchdogPolicySha256 !== loadedPolicy.sha256) {
+    throw new Error('watchdog supervisor policy hash does not match the bundle lease');
+  }
+  if (lease.paths.stateRoot !== loadedPolicy.policy.targetRoot) {
+    throw new Error('watchdog supervisor target root does not match the bundle lease');
+  }
+  for (const controlPath of [options.leasePath, options.policyPath, options.statusPath, options.stopRequestPath]) {
+    if (controlPath === lease.paths.stateRoot || controlPath.startsWith(`${lease.paths.stateRoot}/`)) {
+      throw new Error('watchdog supervisor control files must be outside the revocable state root');
+    }
+  }
+  const runtime = options.runtime ?? createContainerRuntime(lease.runtimeKind);
+  const startedAt = now().toISOString();
+  const baseStatus = {
+    schemaVersion: RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION,
+    leaseId: lease.leaseId,
+    generation: lease.generation,
+    supervisorPid: process.pid,
+    policySha256: loadedPolicy.sha256,
+    policyId: loadedPolicy.policy.policyId,
+    startedAt,
+  } as const;
+  let lastStatus = supervisorStatusSchema.parse({
+    ...baseStatus,
+    state: 'starting',
+    updatedAt: startedAt,
+    lastSample: null,
+    trip: null,
+    detail: null,
+  });
+  writeStrictJsonAtomic(options.statusPath, lastStatus);
+
+  let attestation: ResourceWatchdogAttestation | undefined;
+  let tripped: ResourceWatchdogTrip | undefined;
+  const watchdog = new ResourceWatchdog(loadedPolicy.policy, {
+    schedule: false,
+    now: () => now().getTime(),
+    onTrip: async (trip) => {
+      tripped = trip;
+      lastStatus = statusUpdate(lastStatus, now(), {
+        state: 'revoking',
+        trip: compactTrip(trip),
+        detail: trip.detail,
+      });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+      try {
+        await revokeDockerWorkloadOuterResources(runtime, options.leasePath, lease.generation, now);
+        lease = loadDockerWorkloadLease(options.leasePath);
+        assertExactTargetIdentity(lease, loadedPolicy.policy.targetDevice, loadedPolicy.policy.targetInode);
+        removeExactBundleState(lease, options.leasePath);
+        const cleanup = await captureCleanupProof(
+          runtime,
+          lease,
+          loadedPolicy.policy.cleanupInventoryGapMs,
+          now,
+          sleep,
+        );
+        closeDockerWorkloadLease(options.leasePath, lease.generation, cleanup, now());
+        watchdog.stopAfterCleanup(toWatchdogCleanupProof(cleanup));
+        lastStatus = statusUpdate(lastStatus, now(), {
+          state: 'closed',
+          trip: compactTrip(trip),
+          detail: 'resource trip revoked exact outer resources and completed cleanup',
+        });
+        writeStrictJsonAtomic(options.statusPath, lastStatus);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        try {
+          const current = loadDockerWorkloadLease(options.leasePath);
+          if (current.status !== 'incident' && current.status !== 'closed') {
+            recordDockerWorkloadLeaseIncident(
+              options.leasePath,
+              current.generation,
+              { code: 'watchdog-revocation-failed', detail },
+              now(),
+            );
+          }
+        } catch {
+          // Status remains authoritative evidence that revocation was not completed.
+        }
+        lastStatus = statusUpdate(lastStatus, now(), {
+          state: 'incident',
+          trip: compactTrip(trip),
+          detail,
+        });
+        writeStrictJsonAtomic(options.statusPath, lastStatus);
+        throw error;
+      }
+    },
+    onSoftEvidence: (sample) => {
+      lastStatus = statusUpdate(lastStatus, now(), { lastSample: compactSample(sample) });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+    },
+  });
+
+  try {
+    attestation = await watchdog.start();
+  } catch (error) {
+    if (loadDockerWorkloadLease(options.leasePath).status === 'closed') return;
+    throw error;
+  }
+  lastStatus = statusUpdate(lastStatus, now(), {
+    state: 'ready',
+    lastSample: compactSample(attestation.firstSample),
+    detail: 'watchdog startup attestation passed',
+  });
+  writeStrictJsonAtomic(options.statusPath, lastStatus);
+
+  for (;;) {
+    await sleep(loadedPolicy.policy.sampleIntervalMs);
+    const stopRequest = tryLoadStopRequest(options.stopRequestPath);
+    if (stopRequest !== undefined) {
+      lease = loadDockerWorkloadLease(options.leasePath);
+      if (stopRequest.leaseId !== lease.leaseId || stopRequest.generation !== lease.generation) {
+        throw new Error('watchdog supervisor stop request lease identity mismatch');
+      }
+      if (lease.status === 'admitting' || lease.status === 'active') {
+        throw new Error('watchdog supervisor refuses to stop before lease revocation');
+      }
+      if (lease.resources.some((resource) => resource.removal === null)) {
+        throw new Error('watchdog supervisor refuses to stop before every outer-resource absence proof');
+      }
+      if (existsSync(lease.paths.stateRoot)) {
+        throw new Error('watchdog supervisor refuses to stop while the exact state root still exists');
+      }
+      const actuallyOwned = await inventoryOwnedResourceIds(runtime, lease);
+      if (actuallyOwned.length !== 0) {
+        throw new Error(`watchdog supervisor refuses to stop while owned resources remain: ${actuallyOwned.join(',')}`);
+      }
+      watchdog.stopAfterCleanup(toWatchdogCleanupProof(stopRequest.cleanup));
+      if (lease.status === 'revoking') {
+        closeDockerWorkloadLease(options.leasePath, lease.generation, stopRequest.cleanup, now());
+      } else if (lease.status !== 'closed') {
+        throw new Error(`watchdog supervisor refuses terminal stop from lease state ${lease.status}`);
+      }
+      lastStatus = statusUpdate(lastStatus, now(), {
+        state: 'closed',
+        detail: 'coordinator cleanup proof accepted',
+      });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+      return;
+    }
+    const sample = await watchdog.tick();
+    if (sample !== undefined) {
+      lastStatus = statusUpdate(lastStatus, now(), { lastSample: compactSample(sample) });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+    }
+    if (tripped !== undefined) return;
+  }
+}
+
+/** Spawn a process-group-independent child and wait for its hash-bound attestation. */
+export async function launchDetachedResourceWatchdogSupervisor(
+  options: LaunchDetachedResourceWatchdogSupervisorOptions,
+): Promise<{ readonly pid: number; readonly status: ResourceWatchdogSupervisorStatus }> {
+  if (!isAbsolute(options.entrypointPath) || resolve(options.entrypointPath) !== options.entrypointPath) {
+    throw new Error('watchdog supervisor entrypoint must be canonical and absolute');
+  }
+  if (
+    !Number.isSafeInteger(options.startupTimeoutMs) ||
+    options.startupTimeoutMs < 100 ||
+    options.startupTimeoutMs > 60_000
+  ) {
+    throw new Error('watchdog supervisor startup timeout is invalid');
+  }
+  const child = spawn(
+    process.execPath,
+    [
+      options.entrypointPath,
+      '--lease',
+      options.leasePath,
+      '--policy',
+      options.policyPath,
+      '--status',
+      options.statusPath,
+      '--stop-request',
+      options.stopRequestPath,
+    ],
+    { detached: true, stdio: 'ignore', env: process.env },
+  );
+  const pid = child.pid;
+  if (pid === undefined) throw new Error('watchdog supervisor child has no process ID');
+  child.unref();
+  const deadline = Date.now() + options.startupTimeoutMs;
+  for (;;) {
+    let status: ResourceWatchdogSupervisorStatus | undefined;
+    try {
+      status = loadResourceWatchdogSupervisorStatus(options.statusPath);
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw new Error('watchdog supervisor did not attest before the startup deadline', { cause: error });
+      }
+    }
+    if (status !== undefined) {
+      if (status.supervisorPid !== pid) throw new Error('watchdog supervisor status process ID mismatch');
+      if (status.state === 'ready' || status.state === 'closed') return { pid, status };
+      if (status.state === 'incident') {
+        throw new Error(`watchdog supervisor startup incident: ${status.detail ?? 'unknown'}`);
+      }
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+}
+
+export function requestResourceWatchdogSupervisorStop(
+  path: string,
+  lease: Pick<DockerWorkloadLease, 'leaseId' | 'generation'>,
+  cleanup: DockerWorkloadCleanupProof,
+  now = new Date(),
+): void {
+  writeStrictJsonAtomic(
+    path,
+    stopRequestSchema.parse({
+      schemaVersion: RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION,
+      leaseId: lease.leaseId,
+      generation: lease.generation,
+      requestedAt: now.toISOString(),
+      cleanup,
+    }),
+  );
+}
+
+export function loadResourceWatchdogSupervisorStatus(path: string): ResourceWatchdogSupervisorStatus {
+  return loadStrictJson(path, 'watchdog supervisor status', supervisorStatusSchema);
+}
+
+export function assertResourceWatchdogSupervisorFresh(
+  status: ResourceWatchdogSupervisorStatus,
+  expected: { readonly leaseId: string; readonly generation: string; readonly policySha256: string },
+  staleAfterMs: number,
+  now = new Date(),
+): void {
+  const validated = supervisorStatusSchema.parse(status);
+  if (
+    validated.leaseId !== expected.leaseId ||
+    validated.generation !== expected.generation ||
+    validated.policySha256 !== expected.policySha256
+  ) {
+    throw new Error('watchdog supervisor status binding mismatch');
+  }
+  if (validated.state !== 'ready') throw new Error(`watchdog supervisor is not ready: ${validated.state}`);
+  if (now.getTime() - Date.parse(validated.updatedAt) >= staleAfterMs) {
+    throw new Error('watchdog supervisor heartbeat is stale');
+  }
+}
+
+function tryLoadStopRequest(path: string): ResourceWatchdogSupervisorStopRequest | undefined {
+  if (!existsSync(path)) return undefined;
+  return loadStrictJson(path, 'watchdog supervisor stop request', stopRequestSchema);
+}
+
+function compactSample(sample: ResourceWatchdogSample) {
+  return {
+    sampledAtMs: sample.sampledAtMs,
+    availableBytes: sample.availableBytes,
+    allocatedBytes: sample.allocatedBytes,
+  };
+}
+
+function compactTrip(trip: ResourceWatchdogTrip) {
+  return {
+    code: trip.code,
+    atMs: trip.atMs,
+    detail: trip.detail,
+    overshootBytes: trip.overshootBytes,
+    overshootWithinFrozenMaximum: trip.overshootWithinFrozenMaximum,
+  };
+}
+
+function statusUpdate(
+  current: ResourceWatchdogSupervisorStatus,
+  now: Date,
+  update: Partial<Pick<ResourceWatchdogSupervisorStatus, 'state' | 'lastSample' | 'trip' | 'detail'>>,
+): ResourceWatchdogSupervisorStatus {
+  return supervisorStatusSchema.parse({ ...current, ...update, updatedAt: now.toISOString() });
+}
+
+async function captureCleanupProof(
+  runtime: ContainerRuntime,
+  lease: DockerWorkloadLease,
+  gapMs: number,
+  now: () => Date,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<DockerWorkloadCleanupProof> {
+  const first = {
+    capturedAt: now().toISOString(),
+    ownedResourceIds: [...(await inventoryOwnedResourceIds(runtime, lease))],
+  };
+  await sleep(gapMs);
+  const second = {
+    capturedAt: now().toISOString(),
+    ownedResourceIds: [...(await inventoryOwnedResourceIds(runtime, lease))],
+  };
+  if (first.ownedResourceIds.length !== 0 || second.ownedResourceIds.length !== 0) {
+    throw new Error('watchdog supervisor cleanup inventories are not empty');
+  }
+  if (existsSync(lease.paths.stateRoot)) throw new Error('watchdog supervisor state root still exists after cleanup');
+  return { exactOuterResourcesAbsent: true, stateRootAbsent: true, inventories: [first, second] };
+}
+
+function assertExactTargetIdentity(lease: DockerWorkloadLease, device: number, inode: number): void {
+  const stats = lstatSync(lease.paths.stateRoot);
+  if (!stats.isDirectory() || stats.isSymbolicLink() || stats.dev !== device || stats.ino !== inode) {
+    throw new Error('watchdog supervisor refuses cleanup after state-root identity change');
+  }
+}
+
+function removeExactBundleState(lease: DockerWorkloadLease, leasePath: string): void {
+  const paths = [
+    lease.paths.apiRoot,
+    lease.paths.exchangeRoot,
+    lease.paths.runtimeRoot,
+    lease.paths.stagingRoot,
+    lease.paths.stateRoot,
+  ];
+  const unique = [...new Set(paths)].sort((left, right) => right.length - left.length);
+  for (const path of unique) {
+    assertSafeCleanupPath(path, lease.paths.workspaceRoot, leasePath);
+    rmSync(path, { recursive: true, force: true });
+  }
+}
+
+function assertSafeCleanupPath(path: string, workspaceRoot: string, leasePath: string): void {
+  const parts = path.split('/').filter(Boolean);
+  if (!isAbsolute(path) || resolve(path) !== path || parts.length < 2) {
+    throw new Error(`watchdog supervisor refuses unsafe cleanup path: ${path}`);
+  }
+  if (path === workspaceRoot || workspaceRoot.startsWith(`${path}/`) || path.startsWith(`${workspaceRoot}/`)) {
+    throw new Error(`watchdog supervisor refuses workspace cleanup path: ${path}`);
+  }
+  if (path === leasePath || leasePath.startsWith(`${path}/`)) {
+    throw new Error(`watchdog supervisor refuses cleanup path containing its lease: ${path}`);
+  }
+}
+
+function toWatchdogCleanupProof(cleanup: DockerWorkloadCleanupProof): ResourceWatchdogCleanupProof {
+  const [first, second] = cleanup.inventories;
+  return {
+    exactOuterResourceAbsent: cleanup.exactOuterResourcesAbsent,
+    stateRootAbsent: cleanup.stateRootAbsent,
+    inventories: [
+      { capturedAtMs: Date.parse(first.capturedAt), ownedResourceIds: first.ownedResourceIds },
+      { capturedAtMs: Date.parse(second.capturedAt), ownedResourceIds: second.ownedResourceIds },
+    ],
+  };
+}
+
+function loadStrictJson<T>(path: string, label: string, schema: z.ZodType<T>): T {
+  assertCanonicalHostPath(path, label);
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    throw new Error(`${label} must be a readable regular non-symlink file: ${path}`, { cause: error });
+  }
+  let bytes: Buffer;
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || (stats.mode & 0o077) !== 0) throw new Error(`${label} must be an owner-only regular file`);
+    if (stats.size < 2 || stats.size > MAX_RESOURCE_WATCHDOG_SUPERVISOR_JSON_BYTES) {
+      throw new Error(`${label} size is outside the allowed range`);
+    }
+    bytes = readFileSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON`, { cause: error });
+  }
+  const value = schema.parse(parsed);
+  if (!bytes.equals(Buffer.from(`${stableStringify(value)}\n`))) throw new Error(`${label} is not canonical JSON`);
+  return value;
+}
+
+function writeStrictJsonAtomic(path: string, value: unknown): void {
+  assertCanonicalHostPath(path, 'watchdog supervisor output');
+  const temporary = resolve(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    writeFileSync(descriptor, `${stableStringify(value)}\n`, 'utf8');
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+    const directoryDescriptor = openSync(dirname(path), constants.O_RDONLY);
+    try {
+      fsyncSync(directoryDescriptor);
+    } finally {
+      closeSync(directoryDescriptor);
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    rmSync(temporary, { force: true });
+  }
+}
+
+function assertCanonicalHostPath(path: string, label: string): void {
+  if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`${label} path must be canonical and absolute`);
+  const parent = statSync(dirname(path));
+  if (!parent.isDirectory() || (parent.mode & 0o077) !== 0) {
+    throw new Error(`${label} parent must be an owner-only directory`);
+  }
+  const relativePath = relative(dirname(path), path);
+  if (relativePath === '' || relativePath.startsWith('..')) throw new Error(`${label} path is invalid`);
+}

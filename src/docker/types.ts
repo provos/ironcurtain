@@ -16,6 +16,9 @@ export interface DockerContainerConfig {
   /** Docker network name for the container. */
   readonly network: string;
 
+  /** Trusted coordinator-selected static IPv4 address on the named network. */
+  readonly ipv4Address?: string;
+
   /** Environment variables passed to the container. */
   readonly env: Readonly<Record<string, string>>;
 
@@ -201,8 +204,12 @@ export interface DockerContainerInfo {
 export interface DockerNetworkCreateOptions {
   readonly internal?: boolean;
   readonly subnet?: string;
+  readonly ipv6Subnet?: string;
   readonly gateway?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  readonly enableIPv6?: boolean;
+  /** Exact trusted bridge options; never populated from agent input. */
+  readonly driverOptions?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -278,6 +285,9 @@ export interface ContainerRuntime {
 
   /** Inspect one local Docker image. Returns undefined when the image does not exist. */
   inspectImage(ref: string): Promise<DockerImageInfo | undefined>;
+
+  /** Load a host-verified OCI image archive. Never accepts stdin. */
+  loadImageArchive(archivePath: string): Promise<void>;
 
   /** Build a Docker image from a Dockerfile. Optional labels are stamped on the image. */
   buildImage(tag: string, dockerfilePath: string, contextDir: string, labels?: Record<string, string>): Promise<void>;

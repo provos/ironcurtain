@@ -59,6 +59,33 @@ describe('loadUserConfig', () => {
     expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     expect(config.anthropicApiKey).toBe('');
+    expect(config.dockerWorkload).toEqual({ enabled: false });
+  });
+
+  it('keeps nested Docker authority off by default and resolves only the strict opt-in shape', () => {
+    writeConfigFile({
+      dockerWorkload: {
+        enabled: true,
+        backend: 'apple-container',
+        resources: { memoryMb: 8192, diskMb: 16384 },
+      },
+    });
+    expect(loadUserConfig().dockerWorkload).toMatchObject({
+      enabled: true,
+      backend: 'apple-container',
+      imageMode: 'preloaded-catalog',
+      imageIngress: 'preloaded-only',
+      daemonState: 'ephemeral',
+      hostPortPublishing: false,
+      resources: { memoryMb: 8192, diskMb: 16384 },
+    });
+  });
+
+  it('rejects raw nested Docker mounts, images, capabilities, and runtime arguments', () => {
+    for (const field of ['mounts', 'image', 'capAdd', 'runtimeArgs']) {
+      writeConfigFile({ dockerWorkload: { enabled: true, [field]: ['unsafe'] } });
+      expect(() => loadUserConfig()).toThrow(/dockerWorkload/u);
+    }
   });
 
   it('auto-creates config file with defaults when missing', () => {

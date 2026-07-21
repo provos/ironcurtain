@@ -9,6 +9,7 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { isIPv4 } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -224,6 +225,12 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
 
   args.push('--name', config.name);
   args.push('--network', config.network);
+  if (config.ipv4Address !== undefined) {
+    if (config.network === 'none' || !isIPv4(config.ipv4Address)) {
+      throw new Error('container ipv4Address requires a named network and an IPv4 literal');
+    }
+    args.push('--ip', config.ipv4Address);
+  }
 
   // Run an init process (docker-init / tini) as PID 1 so zombie children are
   // reaped. Without this, processes orphaned inside the container linger as
@@ -632,6 +639,14 @@ export function createDockerManager(
       }
     },
 
+    async loadImageArchive(archivePath: string): Promise<void> {
+      await runStreamed({
+        operation: 'docker image load',
+        args: ['image', 'load', '--input', archivePath],
+        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
+      });
+    },
+
     async buildImage(
       tag: string,
       dockerfilePath: string,
@@ -687,7 +702,12 @@ export function createDockerManager(
         const args = ['network', 'create'];
         if (options?.internal) args.push('--internal');
         if (options?.subnet) args.push('--subnet', options.subnet);
+        if (options?.ipv6Subnet) args.push('--subnet', options.ipv6Subnet);
         if (options?.gateway) args.push('--gateway', options.gateway);
+        if (options?.enableIPv6) args.push('--ipv6');
+        for (const [key, value] of Object.entries(options?.driverOptions ?? {})) {
+          args.push('--opt', `${key}=${value}`);
+        }
         for (const [key, value] of Object.entries(options?.labels ?? {})) {
           args.push('--label', `${key}=${value}`);
         }

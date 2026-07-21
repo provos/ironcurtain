@@ -13,6 +13,11 @@ import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
 import { parseModelId } from './model-provider.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
+import {
+  dockerWorkloadRequestedSchema,
+  resolveDockerWorkloadConfig,
+  type ResolvedDockerWorkloadConfig,
+} from '../docker-workload/config.js';
 
 export const USER_CONFIG_DEFAULTS = {
   agentModelId: 'anthropic:claude-sonnet-4-6',
@@ -398,6 +403,7 @@ export const userConfigSchema = z.object({
   dockerResources: dockerResourcesSchema,
   capture: captureSchema,
   snapshot: snapshotSchema,
+  dockerWorkload: dockerWorkloadRequestedSchema.optional(),
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -562,6 +568,8 @@ export interface ResolvedUserConfig {
   readonly dockerResources: ResolvedDockerResourcesConfig;
   /** Workflow container snapshot retention and global enablement. */
   readonly snapshot: ResolvedSnapshotConfig;
+  /** Opt-in nested Docker authority; normal loads always resolve absent config to `{ enabled: false }`. */
+  readonly dockerWorkload?: ResolvedDockerWorkloadConfig;
   /**
    * Trajectory-capture config. Optional — absent from
    * USER_CONFIG_DEFAULTS so the `?? false` at the session-factory
@@ -923,6 +931,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
           : USER_CONFIG_DEFAULTS.snapshot.maxAgeDays,
       sweepIntervalHours: config.snapshot?.sweepIntervalHours ?? USER_CONFIG_DEFAULTS.snapshot.sweepIntervalHours,
     },
+    dockerWorkload: resolveDockerWorkloadConfig(config.dockerWorkload),
     // Capture is left undefined unless the user explicitly set
     // `capture.enabled` in the config file. The session-factory
     // resolver applies the `?? false` default (§10).

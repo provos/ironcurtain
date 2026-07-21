@@ -22,6 +22,7 @@ import { DEFAULT_GLM_SLUG, OPENROUTER_API_V1, OPENROUTER_HOST } from '../../conf
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { codexAuthProvider, codexChatGptProvider } from '../provider-config.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
+import { CONTAINER_RUNTIME_CA_BUNDLE, CONTAINER_RUNTIME_CA_CERT } from '../runtime-trust.js';
 import { loadCodexOAuthCredentials } from '../oauth-credentials.js';
 import { parseModelId } from '../../config/model-provider.js';
 import {
@@ -223,8 +224,8 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         return {
           CODEX_HOME: '/home/codespace/.codex',
           OPENROUTER_API_KEY: fakeKey,
-          CODEX_CA_CERTIFICATE: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
-          SSL_CERT_FILE: '/etc/ssl/certs/ca-certificates.crt',
+          CODEX_CA_CERTIFICATE: CONTAINER_RUNTIME_CA_CERT,
+          SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
           RUST_LOG: 'error',
         };
       }
@@ -239,8 +240,8 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         IRONCURTAIN_CODEX_ACCESS_TOKEN: fakeToken,
         IRONCURTAIN_CODEX_ID_TOKEN: CODEX_FAKE_ID_TOKEN,
         IRONCURTAIN_CODEX_ACCOUNT_ID: 'ironcurtain-account',
-        CODEX_CA_CERTIFICATE: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
-        SSL_CERT_FILE: '/etc/ssl/certs/ca-certificates.crt',
+        CODEX_CA_CERTIFICATE: CONTAINER_RUNTIME_CA_CERT,
+        SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
         RUST_LOG: 'error',
       };
     },

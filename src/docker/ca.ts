@@ -2,8 +2,9 @@
  * IronCurtain MITM CA certificate generation and management.
  *
  * Generates a self-signed CA on first run and loads it on subsequent runs.
- * The CA key never leaves the host process; only the certificate is
- * baked into Docker images for trust.
+ * The CA key never leaves the host process. The public certificate is staged
+ * per session into the read-only orientation mount; Docker images are
+ * CA-neutral.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';

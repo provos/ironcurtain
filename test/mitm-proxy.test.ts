@@ -20,6 +20,7 @@ import {
 import type { RegistryConfig } from '../src/docker/package-types.js';
 import { DENY_ALL_VALIDATOR, createPackageValidator } from '../src/docker/package-validator.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
+import type { DestinationBoundRequest, OutboundTransport } from '../src/docker/outbound-transport.js';
 
 // Mock node:https so a single test can observe the upstream target of a
 // registry forward. The default wraps the real implementation (call-through),
@@ -1968,6 +1969,67 @@ describe('MitmProxy', () => {
       socket!.destroy();
     } finally {
       httpServer.close();
+    }
+  });
+
+  it('MITMs nested HTTPS passthrough and uses only the fixed parent transport', async () => {
+    const received: DestinationBoundRequest[] = [];
+    const upstream = http.createServer((req, res) => {
+      expect(req.url).toBe('/health');
+      res.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify({ route: 'fixed-parent' }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        resolve((upstream.address() as import('node:net').AddressInfo).port);
+      });
+    });
+    const fixedParentTransport: OutboundTransport = {
+      kind: 'fixed-parent-proxy',
+      request(request, onResponse) {
+        received.push(request);
+        return http.request(
+          {
+            hostname: '127.0.0.1',
+            port: upstreamPort,
+            method: request.method,
+            path: request.path,
+            headers: { ...request.headers, host: 'fixed-parent.test' },
+          },
+          onResponse,
+        );
+      },
+    };
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        outboundTransport: fixedParentTransport,
+      });
+      await proxy.start();
+      proxy.hosts.addHost('nested-passthrough.example.com');
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'nested-passthrough.example.com', 443);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // This TLS handshake could not succeed if the proxy had retained its
+      // direct-mode raw TCP tunnel: the only local upstream speaks HTTP.
+      const response = await makeHttpsRequest(socket!, ca, 'nested-passthrough.example.com', {
+        path: '/health',
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain('fixed-parent');
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({
+        destination: { protocol: 'https:', hostname: 'nested-passthrough.example.com', port: 443 },
+        method: 'GET',
+        path: '/health',
+      });
+    } finally {
+      upstream.close();
     }
   });
 

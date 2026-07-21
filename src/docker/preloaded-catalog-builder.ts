@@ -1,0 +1,210 @@
+/** Trusted all-or-nothing builder for complete backend-bound image catalogs. */
+
+import { randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, isAbsolute, join, resolve } from 'node:path';
+import { stableStringify } from '../hash.js';
+import type { ExecFileFn } from './docker-manager.js';
+import {
+  loadPreloadedImageCatalog,
+  type LoadedPreloadedImageCatalog,
+  type PreloadedImageCatalog,
+} from './preloaded-image-catalog.js';
+import {
+  stagePreloadedImage,
+  type StagePreloadedImageOptions,
+  type StagedPreloadedImage,
+} from './preloaded-image-staging.js';
+import type { ContainerRuntime } from './types.js';
+
+export const REQUIRED_PRELOADED_IMAGE_ROLES = [
+  'base',
+  'agent-claude-code',
+  'agent-codex',
+  'agent-goose',
+  'nested-daemon',
+  'helper',
+  'fixed-relay',
+  'socat',
+  'vulnerability-target',
+  'patched-target',
+  'vulnerability-scanner',
+] as const;
+export type PreloadedImageRole = (typeof REQUIRED_PRELOADED_IMAGE_ROLES)[number];
+
+export interface PreloadedCatalogBuilderImage extends Omit<
+  StagePreloadedImageOptions,
+  'outputArchivePath' | 'catalogGeneration'
+> {
+  readonly role: PreloadedImageRole;
+}
+
+export interface BuildPreloadedCatalogsOptions {
+  readonly exec: ExecFileFn;
+  readonly dockerRuntime: Pick<ContainerRuntime, 'inspectImage'>;
+  readonly appleRuntime?: Pick<ContainerRuntime, 'inspectImage' | 'loadImageArchive' | 'removeImage'>;
+  readonly outputDirectory: string;
+  readonly generation: string;
+  readonly createdAt: string;
+  readonly images: readonly PreloadedCatalogBuilderImage[];
+  readonly stage?: (options: {
+    readonly exec: ExecFileFn;
+    readonly dockerRuntime: Pick<ContainerRuntime, 'inspectImage'>;
+    readonly appleRuntime?: Pick<ContainerRuntime, 'inspectImage' | 'loadImageArchive' | 'removeImage'>;
+    readonly image: StagePreloadedImageOptions;
+  }) => Promise<StagedPreloadedImage>;
+}
+
+export interface BuiltPreloadedCatalogs {
+  readonly docker: LoadedPreloadedImageCatalog;
+  readonly appleContainer?: LoadedPreloadedImageCatalog;
+}
+
+/** Stage every required role before publishing either catalog file. */
+export async function buildPreloadedCatalogs(options: BuildPreloadedCatalogsOptions): Promise<BuiltPreloadedCatalogs> {
+  validateBuilderOptions(options);
+  const stage = options.stage ?? stagePreloadedImage;
+  const createdArtifacts: string[] = [];
+  const dockerEntries = [];
+  const appleEntries = [];
+  const dockerCatalogPath = join(options.outputDirectory, 'preloaded-catalog.docker.json');
+  const appleCatalogPath = join(options.outputDirectory, 'preloaded-catalog.apple-container.json');
+  try {
+    for (const image of [...options.images].sort((left, right) => left.role.localeCompare(right.role))) {
+      const archivePath = join(options.outputDirectory, `${image.role}.tar`);
+      if (existsSync(archivePath))
+        throw new Error(`preloaded catalog artifact already exists: ${basename(archivePath)}`);
+      const staged = await stage({
+        exec: options.exec,
+        dockerRuntime: options.dockerRuntime,
+        ...(options.appleRuntime === undefined ? {} : { appleRuntime: options.appleRuntime }),
+        image: {
+          ...image,
+          catalogGeneration: options.generation,
+          outputArchivePath: archivePath,
+        },
+      });
+      createdArtifacts.push(archivePath);
+      if (staged.docker.archive.fileName !== basename(archivePath)) {
+        throw new Error(`Docker staged archive name differs for role: ${image.role}`);
+      }
+      dockerEntries.push(staged.docker);
+      if (options.appleRuntime !== undefined) {
+        if (staged.appleContainer === undefined) {
+          throw new Error(`Apple Container staging result is missing for role: ${image.role}`);
+        }
+        if (
+          staged.appleContainer.archive.fileName !== staged.docker.archive.fileName ||
+          staged.appleContainer.archive.sha256 !== staged.docker.archive.sha256 ||
+          staged.appleContainer.archive.sizeBytes !== staged.docker.archive.sizeBytes
+        ) {
+          throw new Error(`backend catalog entries do not share one sealed archive for role: ${image.role}`);
+        }
+        appleEntries.push(staged.appleContainer);
+      }
+    }
+
+    const common = {
+      schemaVersion: 1 as const,
+      generation: options.generation,
+      createdAt: options.createdAt,
+    };
+    writeCatalogAtomic(dockerCatalogPath, {
+      ...common,
+      runtimeKind: 'docker',
+      images: dockerEntries,
+    });
+    createdArtifacts.push(dockerCatalogPath);
+    const docker = loadPreloadedImageCatalog(dockerCatalogPath);
+
+    let appleContainer: LoadedPreloadedImageCatalog | undefined;
+    if (options.appleRuntime !== undefined) {
+      writeCatalogAtomic(appleCatalogPath, {
+        ...common,
+        runtimeKind: 'apple-container',
+        images: appleEntries,
+      });
+      createdArtifacts.push(appleCatalogPath);
+      appleContainer = loadPreloadedImageCatalog(appleCatalogPath);
+    }
+    return { docker, ...(appleContainer === undefined ? {} : { appleContainer }) };
+  } catch (error) {
+    for (const path of createdArtifacts.reverse()) rmSync(path, { force: true });
+    throw error;
+  }
+}
+
+function validateBuilderOptions(options: BuildPreloadedCatalogsOptions): void {
+  if (!isAbsolute(options.outputDirectory) || resolve(options.outputDirectory) !== options.outputDirectory) {
+    throw new Error('preloaded catalog output directory must be canonical and absolute');
+  }
+  const stats = lstatSync(options.outputDirectory);
+  if (!stats.isDirectory() || stats.isSymbolicLink() || (stats.mode & 0o077) !== 0) {
+    throw new Error('preloaded catalog output directory must be a private real directory');
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(options.generation)) {
+    throw new Error('preloaded catalog generation is invalid');
+  }
+  if (Number.isNaN(Date.parse(options.createdAt)) || new Date(options.createdAt).toISOString() !== options.createdAt) {
+    throw new Error('preloaded catalog createdAt must be a canonical ISO timestamp');
+  }
+  const roles = options.images.map((image) => image.role);
+  const names = options.images.map((image) => image.logicalName);
+  if (new Set(roles).size !== roles.length) throw new Error('preloaded catalog contains a duplicate image role');
+  if (new Set(names).size !== names.length)
+    throw new Error('preloaded catalog contains a duplicate logical image name');
+  const missing = REQUIRED_PRELOADED_IMAGE_ROLES.filter((role) => !roles.includes(role));
+  const extra = roles.filter((role) => !REQUIRED_PRELOADED_IMAGE_ROLES.includes(role));
+  if (missing.length !== 0 || extra.length !== 0 || roles.length !== REQUIRED_PRELOADED_IMAGE_ROLES.length) {
+    throw new Error(`preloaded catalog role coverage mismatch: missing=${missing.join(',') || '(none)'}`);
+  }
+  for (const image of options.images) {
+    if (image.provenance.createdAt !== options.createdAt) {
+      throw new Error(`preloaded catalog provenance time differs for role: ${image.role}`);
+    }
+  }
+  for (const path of [
+    join(options.outputDirectory, 'preloaded-catalog.docker.json'),
+    join(options.outputDirectory, 'preloaded-catalog.apple-container.json'),
+  ]) {
+    if (existsSync(path)) throw new Error(`preloaded catalog output already exists: ${basename(path)}`);
+  }
+}
+
+function writeCatalogAtomic(path: string, catalog: PreloadedImageCatalog): void {
+  const temporary = join(resolve(path, '..'), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    writeFileSync(descriptor, `${stableStringify(catalog)}\n`, 'utf8');
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    chmodSync(temporary, 0o400);
+    renameSync(temporary, path);
+    const directoryDescriptor = openSync(resolve(path, '..'), constants.O_RDONLY);
+    try {
+      fsyncSync(directoryDescriptor);
+    } finally {
+      closeSync(directoryDescriptor);
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    rmSync(temporary, { force: true });
+  }
+}

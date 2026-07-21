@@ -16,6 +16,7 @@ import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync
 import { join } from 'node:path';
 import * as logger from '../src/logger.js';
 import { getSessionsDir } from '../src/config/paths.js';
+import { createMockRuntimeTrust } from './helpers/docker-mocks.js';
 
 // --- Module mocks (hoisted) ---
 
@@ -166,6 +167,7 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     docker: createMockDocker(),
     adapter: createMockAdapter(),
     ca: createMockCA(rootDir),
+    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake']]),
     orientationDir,
     systemPrompt: 'You are a borrowed test agent.',

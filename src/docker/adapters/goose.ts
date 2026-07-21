@@ -27,6 +27,7 @@ import { DEFAULT_GLM_SLUG, OPENROUTER_HOST } from '../../config/user-config.js';
 import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
+import { CONTAINER_RUNTIME_CA_BUNDLE } from '../runtime-trust.js';
 import { resolveApiKeyForProvider } from '../../config/model-provider.js';
 import {
   buildResizePtyScript,
@@ -296,7 +297,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
           GOOSE_MODE: 'auto',
           GOOSE_MAX_TURNS: '200',
           OPENROUTER_API_KEY: fakeKey,
-          SSL_CERT_FILE: '/etc/ssl/certs/ca-certificates.crt',
+          SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
           SSL_CERT_DIR: '/etc/ssl/certs',
         };
       }
@@ -308,7 +309,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         GOOSE_MAX_TURNS: '200',
         // Defensive TLS cert env vars for Rust-based Goose.
         // Covers native-tls and rustls-native-certs backends.
-        SSL_CERT_FILE: '/etc/ssl/certs/ca-certificates.crt',
+        SSL_CERT_FILE: CONTAINER_RUNTIME_CA_BUNDLE,
         SSL_CERT_DIR: '/etc/ssl/certs',
       };
 

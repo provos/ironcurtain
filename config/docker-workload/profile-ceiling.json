@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "status": "probe-only-dd-h1-h2-supported-not-qualified",
+  "maximumArtifactsPerCategory": 1,
+  "categories": {
+    "idMap": {
+      "level": "P1",
+      "subordinateIdFiles": ["/etc/subuid", "/etc/subgid"],
+      "allowedSetuidHelpers": ["/usr/bin/newuidmap", "/usr/bin/newgidmap"],
+      "outerCapabilities": ["SETUID", "SETGID"],
+      "noNewPrivileges": false,
+      "status": "probe-only-cap-setid-required-daemon-supported",
+      "denialEvidence": [
+        {
+          "runId": "dd-p2-daemon-0003",
+          "observation": "newuidmap execution returned EPERM with NoNewPrivs=1 after clone/unshare passed"
+        },
+        {
+          "runId": "dd-p2-idmap-daemon-0001",
+          "observation": "newuidmap execution still returned EPERM with NoNewPrivs=0 and an empty capability bounding set"
+        }
+      ],
+      "positiveEvidence": {
+        "namespaceRunId": "dd-p2-capsetid-0003",
+        "daemonRunId": "dd-p2-capsetid-daemon-0004",
+        "privateApiRunId": "dd-h2-private-api-0004"
+      }
+    },
+    "seccomp": {
+      "eligibleGroups": {
+        "userNamespace": ["clone", "clone3", "unshare"],
+        "nestedOciLifecycle": [
+          "fsconfig",
+          "fsmount",
+          "fsopen",
+          "fspick",
+          "mount",
+          "mount_setattr",
+          "move_mount",
+          "open_tree",
+          "pivot_root",
+          "setns",
+          "umount",
+          "umount2"
+        ]
+      },
+      "forbidden": [
+        "bpf",
+        "io_uring_enter",
+        "io_uring_register",
+        "io_uring_setup",
+        "kexec_file_load",
+        "kexec_load",
+        "perf_event_open"
+      ],
+      "source": {
+        "url": "https://raw.githubusercontent.com/moby/profiles/refs/tags/seccomp/v0.2.1/seccomp/default.json",
+        "sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+        "canonicalSha256": "afb4934b023cfceaaec1a9d752ca3f801aaa96eb2e59abe6e7ea16976948e080"
+      },
+      "artifact": {
+        "path": "config/docker-workload/seccomp/desktop-p2-userns.json",
+        "sha256": "e5be04f5d37728c4c863768deea26eae3e64c07437e11c7363cb6e5ee27f983f"
+      },
+      "additions": [
+        {
+          "syscall": "clone",
+          "arguments": "all",
+          "group": "userNamespace",
+          "denialEvidence": {
+            "runId": "dd-p2-daemon-0002",
+            "rootManifestSha256": "20931f04a15f3cc86847893c8dfc729b325ea3ac741db9ff86f2bc7fc598cea1",
+            "commandPath": "commands/10-daemon-logs.json",
+            "commandSha256": "70ec8dcbc9040e0d528de0783780c836de726569940ffeaa8584f3092f69c323",
+            "observation": "RootlessKit 2.3.6 still returned EPERM after a CLONE_NEWUSER-only masked rule; its nested namespace lifecycle therefore requires the eligible clone syscall beyond that single flag combination"
+          },
+          "namespaceInterpretation": "Clone namespace flags become available only inside the sidecar's unchanged outer user/mount/network/PID/cgroup boundaries; no outer capability is added.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        },
+        {
+          "syscall": "mount",
+          "arguments": "all",
+          "group": "nestedOciLifecycle",
+          "denialEvidence": {
+            "runId": "dd-p2-capsetid-daemon-0001",
+            "rootManifestSha256": "241c3c9fe23ba8e02d018347776e6c52c920f50b8bf56527e3c0fa39d0582e15",
+            "commandPath": "commands/93-daemon-logs.json",
+            "commandSha256": "27d285652fd6594590eaf871258d2cd04b3770c53108705b5fc08cb1da44364a",
+            "observation": "RootlessKit completed UID/GID mapping with SETUID/SETGID, then failed to mark / shared with EPERM"
+          },
+          "namespaceInterpretation": "Mount is available after RootlessKit enters its child user/mount namespace; the outer sidecar has no SYS_ADMIN capability or host mount namespace.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        },
+        {
+          "syscall": "pivot_root",
+          "arguments": "all",
+          "group": "nestedOciLifecycle",
+          "denialEvidence": {
+            "runId": "dd-h3-functional-0001",
+            "rootManifestSha256": "d21aeeb1fa49c4f369f89d9436501ec5b8a00718611b69fec80e7ba82daeb19b",
+            "commandPath": "commands/39-inner-load-staged-image.json",
+            "commandSha256": "92148862d49c48867504894a69c858ba97c5464668dd73072a5b3096de8c6973",
+            "observation": "Moby image load returned its chroot-fallback EPERM; pinned switchroot_linux.go shows the eligible pivot_root attempt immediately precedes that forbidden fallback",
+            "source": "https://github.com/moby/moby/blob/11ee7e07df4203b65b9cb23302aed9f8d81af0b6/daemon/internal/mounttree/switchroot_linux.go"
+          },
+          "namespaceInterpretation": "PivotRoot is available only to Moby's unpack helper inside RootlessKit's nested user/mount namespace; chroot remains denied and outside the ceiling.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        },
+        {
+          "syscall": "setns",
+          "arguments": "all",
+          "group": "nestedOciLifecycle",
+          "denialEvidence": {
+            "runId": "dd-p2-capsetid-daemon-0003",
+            "rootManifestSha256": "cf1cea1f4a1b375139fda1727c0d49a95fde362492cb43a0e23327ffabcfe019",
+            "commandPath": "commands/10-daemon-logs.json",
+            "commandSha256": "3495fcd5f0a4aaf5b8f2958fc92ebf905d8407b8187f13380f57f9c0ff788dd3",
+            "observation": "With RootlessKit networking explicitly disabled, its parent failed to setns back into the newly created user namespace with EPERM"
+          },
+          "namespaceInterpretation": "Setns is available only for namespace transitions already permitted inside the sidecar's unchanged outer namespace and capability envelope.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        },
+        {
+          "syscall": "unshare",
+          "arguments": "all",
+          "group": "userNamespace",
+          "denialEvidence": {
+            "runId": "dd-p0-run-0002",
+            "rootManifestSha256": "39adecaef874f9fa5e3eee94884ffd0a9303d2d9cde6841d206d8d15bb85a4b7",
+            "commandPath": "commands/10-namespace-inventory.json",
+            "commandSha256": "e1482beb76f0a083c394c4d755e94a319904cd801d6188d1f71d89a04c6f2fec",
+            "observation": "unshare(CLONE_NEWUSER) returned EPERM under P0; subordinate ID files and helpers were already present"
+          },
+          "namespaceInterpretation": "The probe requests only a new user namespace; no outer capability is added.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        },
+        {
+          "syscall": "umount2",
+          "arguments": "all",
+          "group": "nestedOciLifecycle",
+          "denialEvidence": {
+            "runId": "dd-h3-functional-0002",
+            "rootManifestSha256": "cd11504ac1e1f7ae1222cb75b2500418936da8e42575347e54c279aef078eaa5",
+            "commandPath": "commands/39-inner-load-staged-image.json",
+            "commandSha256": "07855a49e35e25fc915059d43163e5b01660a77548aab8d66d71ffe6404b985e",
+            "observation": "After pivot_root was admitted, Moby image load failed at the pinned source's unix.Unmount(oldRoot, MNT_DETACH) call with EPERM",
+            "source": "https://github.com/moby/moby/blob/11ee7e07df4203b65b9cb23302aed9f8d81af0b6/daemon/internal/mounttree/switchroot_linux.go"
+          },
+          "namespaceInterpretation": "Umount2 is available only for nested OCI/image lifecycle mounts inside RootlessKit's user/mount namespace; outer mounts remain outside that namespace.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        }
+      ]
+    },
+    "apparmor": {
+      "eligibleRuleClasses": ["exact-bundle-private-runtime-path", "nested-user-mount-namespace"],
+      "artifact": null,
+      "additions": []
+    },
+    "mountMask": {
+      "eligibleEntryClasses": ["exact-bundle-private-run-or-data", "namespaced-nonsensitive-guest-proc-sys"],
+      "artifact": null,
+      "additions": []
+    }
+  },
+  "versionScope": {
+    "architecture": "arm64",
+    "dockerDesktopEngine": "29.2.1",
+    "kernel": "6.12.76-linuxkit",
+    "outerImage": "docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255",
+    "rootlessImageId": "sha256:a9ceeb4d02aa025a92d5ed84ba0be884ee7c436ea01d7c0b9120b4e65fd2e022"
+  },
+  "absoluteStops": [
+    "outer-privileged",
+    "SYS_ADMIN",
+    "NET_ADMIN",
+    "host-runtime-socket",
+    "host-namespace",
+    "host-cgroup-write",
+    "device-or-fuse",
+    "seccomp-unconfined",
+    "apparmor-unconfined-or-complain",
+    "systempaths-unconfined",
+    "direct-external-network"
+  ]
+}

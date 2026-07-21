@@ -1,0 +1,22 @@
+{
+  "architecture": "arm64",
+  "budgetId": "apple-rootless-vfs-arm64-v1",
+  "maxima": {
+    "daemonReadinessMs": 90000,
+    "ironcurtainBuildMs": 600000,
+    "mandatorySuiteMs": 1800000,
+    "peakOwnedStateBytes": 8589934592,
+    "primitiveSuiteMs": 600000,
+    "retainedOwnedStateBytes": 0,
+    "scannerWorkflowMs": 300000,
+    "wholeQualificationMs": 4500000
+  },
+  "platform": "apple-container",
+  "schemaVersion": 1,
+  "variant": "apple-rootless-vfs",
+  "versionScope": {
+    "innerDocker": "29.2.1",
+    "outerRuntime": "container 1.1.0",
+    "storageDriver": "vfs"
+  }
+}

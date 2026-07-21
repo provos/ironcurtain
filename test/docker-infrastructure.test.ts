@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { arch, tmpdir } from 'node:os';
 import type { DockerInfrastructure, PreContainerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import {
   buildAgentUidRemap,
@@ -15,6 +15,8 @@ import {
   buildWorkflowExecCommand,
   checkDockerContainerWritableStorage,
   ensureImage,
+  computeAgentImageBuildHash,
+  resolveAgentImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, AgentId, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
@@ -27,6 +29,7 @@ import { generateFakeKey } from '../src/docker/fake-keys.js';
 import { makeOpenRouterProvider, makeOpenRouterRewriter } from '../src/docker/openrouter.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import { dockerAllocationPoolForSubnet } from '../src/docker/docker-resource-lifecycle.js';
+import { buildPreloadedImageLabels, type PreloadedImageCatalog } from '../src/docker/preloaded-image-catalog.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
 // Container target the mock adapter advertises via `skills.containerPath`.
@@ -44,9 +47,11 @@ import {
   createMockAdapter,
   createMockCA,
   createMockDocker,
+  createMockRuntimeTrust,
   type CreateMockDockerOptions,
   type DockerCallTracker,
 } from './helpers/docker-mocks.js';
+import { writeOciArchiveFixture } from './helpers/oci-archive-fixture.js';
 
 /**
  * Type-level tests for the DockerInfrastructure interface.
@@ -122,6 +127,7 @@ describe('DockerInfrastructure interface', () => {
         certPath: '/tmp/ca-cert.pem',
         keyPath: '/tmp/ca-key.pem',
       },
+      runtimeTrust: createMockRuntimeTrust(),
       fakeKeys: new Map(),
       orientationDir: '/tmp/test/sessions/test-session-id/orientation',
       systemPrompt: 'Test system prompt',
@@ -646,6 +652,7 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     docker: opts.docker,
     adapter: opts.adapter ?? createMockAdapter(),
     ca: createMockCA(opts.tempDir),
+    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
     orientationDir,
     systemPrompt: 'You are a test agent.',
@@ -733,6 +740,8 @@ describe('createSessionContainers', () => {
     const main = createCalls[0];
     expect(main.network).toBe('none');
     expect(main.env.HTTPS_PROXY).toBe('http://127.0.0.1:18080');
+    expect(main.env.NODE_EXTRA_CA_CERTS).toBe('/etc/ironcurtain/ca-cert.pem');
+    expect(main.env.SSL_CERT_FILE).toBe('/etc/ironcurtain/ca-bundle.pem');
     // No Linux UID remap on apple-container.
     expect(main.user).toBeUndefined();
     expect(main.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
@@ -1020,6 +1029,7 @@ describe('createSessionContainers', () => {
     const aptWrite = execTargets.find((t) => t.includes('/etc/apt/apt.conf.d/90-ironcurtain-proxy'));
     expect(aptWrite).toBeDefined();
     expect(aptWrite).toContain(`http://${HOST_ONLY.gateway}:8443`);
+    expect(aptWrite).toContain('Acquire::https::CaInfo "/etc/ironcurtain/ca-bundle.pem";');
     expect(execTargets.some((t) => t.includes(`TCP:${HOST_ONLY.gateway}:9123`))).toBe(true);
     expect(execTargets.some((t) => t.includes('TCP:1.1.1.1:443'))).toBe(true);
   });
@@ -1396,10 +1406,9 @@ describe('ensureImage builds no per-workflow image', () => {
 
   it('returns the shared agent image and builds only the agent + base images', async () => {
     const docker = createMockDocker();
-    const ca = createMockCA(tempDir);
     const built = trackBuiltTags(docker);
 
-    const buildHash = await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    const buildHash = await ensureImage('ironcurtain-claude-code:latest', docker);
 
     expect(typeof buildHash).toBe('string');
     expect(buildHash.length).toBeGreaterThan(0);
@@ -1409,14 +1418,67 @@ describe('ensureImage builds no per-workflow image', () => {
 
   it('skips the rebuild when images are already up to date (content-hash labels)', async () => {
     const docker = createMockDocker();
-    const ca = createMockCA(tempDir);
 
     // First call builds; second call must be a no-op (labels already stamped).
-    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    await ensureImage('ironcurtain-claude-code:latest', docker);
     const built = trackBuiltTags(docker);
-    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    await ensureImage('ironcurtain-claude-code:latest', docker);
 
     expect(built).toEqual([]);
+  });
+
+  it('preloaded-catalog mode returns the immutable ID with zero build or pull calls', async () => {
+    const image = 'ironcurtain-claude-code:latest';
+    const buildHash = computeAgentImageBuildHash(image);
+    const architecture = arch() === 'arm64' ? 'arm64' : 'amd64';
+    const generation = 'catalog-test.1';
+    const entry = writeOciArchiveFixture({
+      directory: tempDir,
+      logicalName: image,
+      buildHash,
+      architecture,
+      catalogGeneration: generation,
+    });
+    const catalog: PreloadedImageCatalog = {
+      schemaVersion: 1,
+      runtimeKind: 'docker',
+      generation,
+      createdAt: '2026-07-20T12:00:00.000Z',
+      images: [entry],
+    };
+    const catalogPath = join(tempDir, 'catalog.json');
+    writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o444 });
+
+    const docker = createMockDocker();
+    let buildCalls = 0;
+    let pullCalls = 0;
+    docker.buildImage = async () => {
+      buildCalls++;
+      throw new Error('build must not be called');
+    };
+    docker.pullImage = async () => {
+      pullCalls++;
+      throw new Error('pull must not be called');
+    };
+    docker.inspectImage = async () => ({
+      id: entry.runtimeImageId,
+      repoTags: [image],
+      created: entry.provenance.createdAt,
+      labels: buildPreloadedImageLabels(entry, catalog.generation),
+    });
+
+    const resolved = await resolveAgentImage(image, docker, {
+      imageMode: 'preloaded-catalog',
+      catalogPath,
+      runtimeKind: 'docker',
+      architecture,
+      dockerApiVersion: '1.45',
+    });
+
+    expect(resolved.mode).toBe('preloaded-catalog');
+    expect(resolved.imageRef).toBe(entry.runtimeImageId);
+    expect(buildCalls).toBe(0);
+    expect(pullCalls).toBe(0);
   });
 });
 

@@ -47,6 +47,7 @@ import {
   createMockDocker,
   createMockMitmProxy,
   createMockProxy,
+  createMockRuntimeTrust,
   scriptedExec,
 } from '../helpers/docker-mocks.js';
 
@@ -366,7 +367,7 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
     const env = adapter.buildEnv(nativeConfig, fakeKeys);
     expect(env).toEqual({
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
-      NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
+      NODE_EXTRA_CA_CERTS: '/etc/ironcurtain/ca-cert.pem',
       // Forces subagents synchronous (issue #367); set on every path — native
       // and OpenRouter — not an OpenRouter-specific var.
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
@@ -603,6 +604,7 @@ describe('OpenRouter — D6 authoritative-cost accumulation', () => {
       docker: createMockDocker({ exec }),
       adapter: createClaudeCodeAdapter(),
       ca: createMockCA(tempDir),
+      runtimeTrust: createMockRuntimeTrust(),
       fakeKeys: openrouterFakeKeys(),
       orientationDir: join(sessionDir, 'orientation'),
       systemPrompt: 'You are a test agent.',

@@ -1,0 +1,23 @@
+{
+  "architecture": "arm64",
+  "buildxVersion": "0.31.1",
+  "composeVersion": "5.1.0",
+  "docker": {
+    "cliVersion": "29.2.1",
+    "clientApiVersion": "1.53",
+    "compatibleApiRange": {
+      "max": "1.53",
+      "min": "1.44"
+    },
+    "daemonApiVersion": "1.53",
+    "daemonVersion": "29.2.1",
+    "minimumDaemonApiVersion": "1.44"
+  },
+  "generation": "docker-rootless-29.2.1-mac-arm64-v1",
+  "platform": "linux",
+  "schemaVersion": 1,
+  "source": {
+    "daemonImage": "docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255",
+    "daemonImageId": "sha256:a9ceeb4d02aa025a92d5ed84ba0be884ee7c436ea01d7c0b9120b4e65fd2e022"
+  }
+}

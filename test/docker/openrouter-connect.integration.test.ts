@@ -212,15 +212,14 @@ describe.skipIf(!process.env.INTEGRATION_TEST || !dockerReady)('OpenRouter real-
       providers: [{ config: redirected, fakeKey, realKey: REAL_KEY }],
       listenPort: 0,
       initialTokenSessionId: TOKEN_SESSION_ID,
+      allowPrivateDestinationsForTests: true,
     });
     const started = await proxy.start();
     proxyPort = (started as { port: number }).port;
 
-    // Write the (host = baked) CA cert into the bind-mount for curl's explicit
-    // `--cacert`. The container already trusts this CA system-wide (baked into
-    // its store at build time), so `claude`'s Node TLS trusts the MITM leaf
-    // certs without any extra config. Regular-file bind mounts work fine on
-    // macOS VirtioFS (only UDS connections don't), so this is macOS-portable.
+    // Write the session CA cert into the bind-mount for curl's explicit
+    // `--cacert`. Product containers receive this same public certificate as
+    // runtime trust material; this integration harness mounts it directly.
     writeFileSync(join(tempDir, 'ca-cert.pem'), ca.certPem);
 
     // Default-bridge container with an explicit host-gateway alias so

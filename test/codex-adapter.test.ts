@@ -97,7 +97,8 @@ describe('CodexAdapter', () => {
     expect(env.CODEX_HOME).toBe('/home/codespace/.codex');
     expect(env.IRONCURTAIN_CODEX_ACCESS_TOKEN).toBe('codex-fake-token');
     expect(env.IRONCURTAIN_CODEX_ID_TOKEN).toMatch(/^[^.]+\.[^.]+\.[^.]+$/);
-    expect(env.CODEX_CA_CERTIFICATE).toBe('/usr/local/share/ca-certificates/ironcurtain-ca.crt');
+    expect(env.CODEX_CA_CERTIFICATE).toBe('/etc/ironcurtain/ca-cert.pem');
+    expect(env.SSL_CERT_FILE).toBe('/etc/ironcurtain/ca-bundle.pem');
     expect(env.CODEX_ACCESS_TOKEN).toBeUndefined();
     expect(env.OPENAI_API_KEY).toBeUndefined();
   });

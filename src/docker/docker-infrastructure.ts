@@ -61,6 +61,13 @@ import { errorMessage } from '../utils/error-message.js';
 import { createCachedStager } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
 import { withProvisionLock } from './provision-lock.js';
+import {
+  buildRuntimeTrustEnv,
+  renderAptProxyConfig,
+  stageRuntimeTrust,
+  type RuntimeTrustMetadata,
+} from './runtime-trust.js';
+import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-image-catalog.js';
 import * as logger from '../logger.js';
 
 export { InternalNetworkConnectivityError };
@@ -175,10 +182,14 @@ export interface PreContainerInfrastructure {
   readonly docker: ContainerRuntime;
   readonly adapter: AgentAdapter;
   readonly ca: CertificateAuthority;
+  /** Hash-bound public trust material staged into the read-only orientation mount. */
+  readonly runtimeTrust: RuntimeTrustMetadata;
   readonly fakeKeys: Map<string, string>;
   readonly orientationDir: string;
   readonly systemPrompt: string;
   readonly image: string;
+  /** Exact image-resolution tuple; catalog mode carries its immutable evidence. */
+  readonly imageResolution?: AgentImageResolution;
   /** Container runtime backend this bundle was built for. */
   readonly runtimeKind: ContainerRuntimeKind;
   /**
@@ -386,6 +397,25 @@ export interface CaptureSetupInput {
   readonly workflowRunId?: WorkflowId;
 }
 
+export type ImageProvisioning =
+  | { readonly imageMode?: 'build-if-stale' }
+  | {
+      readonly imageMode: 'preloaded-catalog';
+      readonly catalogPath: string;
+      readonly runtimeKind: ContainerRuntimeKind;
+      readonly architecture?: 'amd64' | 'arm64';
+      readonly dockerApiVersion?: string;
+    };
+
+export type AgentImageResolution =
+  | {
+      readonly mode: 'build-if-stale';
+      readonly logicalName: string;
+      readonly imageRef: string;
+      readonly buildHash: string;
+    }
+  | (ResolvedPreloadedImage & { readonly imageRef: string });
+
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
   mode: SessionMode & { kind: 'docker' },
@@ -399,6 +429,7 @@ export async function prepareDockerInfrastructure(
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
   providerProfileName?: string,
+  imageProvisioning?: ImageProvisioning,
 ): Promise<PreContainerInfrastructure> {
   // Resolve and STAMP the active provider profile as the FIRST step (§9.7 F1),
   // before any container-runtime probe, adapter registration, or auth
@@ -412,6 +443,8 @@ export async function prepareDockerInfrastructure(
   // stamp below relies on).
   const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
   config.activeProviderProfile = activeProfile;
+  const { assertDockerWorkloadImplementationAvailable } = await import('../docker-workload/config.js');
+  assertDockerWorkloadImplementationAvailable(config.userConfig.dockerWorkload);
   if (activeProfile.type === 'openrouter' && activeProfile.apiKey === '') {
     const activeName = providerProfileName ?? config.userConfig.modelProviders.default;
     throw new Error(
@@ -755,19 +788,23 @@ export async function prepareDockerInfrastructure(
     const proxyAddress = useTcp && proxy.port !== undefined ? `${proxyHost}:${proxy.port}` : undefined;
     const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, workspaceDir, proxyAddress);
 
-    // Ensure the stock agent image is built and up-to-date. Workflow
-    // dependencies are provisioned at runtime into mounted caches below;
-    // they are no longer baked into per-workflow Docker images.
+    const orientationDir = resolve(bundleDir, 'orientation');
+    const runtimeTrust = stageRuntimeTrust(orientationDir, ca.certPem);
+
+    // Resolve the stock agent image once, before any container operation.
+    // Preloaded-catalog mode returns an immutable ID and cannot fall through
+    // to the legacy build path. Workflow dependencies are provisioned at
+    // runtime into mounted caches below; they are no longer baked into
+    // per-workflow Docker images.
     const agentImage = await adapter.getImage();
-    const agentBuildHash = await ensureImage(agentImage, docker, ca);
-    const image = agentImage;
+    const imageResolution = await resolveAgentImage(agentImage, docker, imageProvisioning);
+    const agentBuildHash = imageResolution.buildHash;
+    const image = imageResolution.imageRef;
     // Surface the (unpinned) agent CLI version baked into the image so silent
     // version drift on rebuild is visible in logs (issue #367). Keyed by build
     // hash so a same-process rebuild re-logs the possibly-changed version.
-    await logResolvedAgentVersion(docker, agentImage, agentBuildHash, adapter.versionProbe);
+    await logResolvedAgentVersion(docker, image, agentBuildHash, adapter.versionProbe);
     const workflowDependencyMounts = prepareWorkflowDependencyMounts(agentBuildHash, scriptsDir, getIronCurtainHome());
-
-    const orientationDir = resolve(bundleDir, 'orientation');
 
     // Set up conversation state directory if the adapter supports resume
     const conversationStateConfig = adapter.getConversationStateConfig?.();
@@ -818,10 +855,12 @@ export async function prepareDockerInfrastructure(
       docker,
       adapter,
       ca,
+      runtimeTrust,
       fakeKeys,
       orientationDir,
       systemPrompt,
       image,
+      imageResolution,
       runtimeKind,
       topology,
       useTcp,
@@ -915,6 +954,7 @@ export async function createDockerInfrastructure(
     captureInput,
     scriptsDir,
     providerProfileName,
+    options?.imageProvisioning,
   );
 
   let containerResources: ContainerResources | undefined;
@@ -1136,6 +1176,8 @@ export interface CreateDockerInfrastructureOptions {
    * workflow dependency caches keep their base-image hash.
    */
   readonly baseImageOverride?: string;
+  /** Trusted image selection; omitted preserves the existing build-if-stale path. */
+  readonly imageProvisioning?: ImageProvisioning;
 }
 
 /**
@@ -1208,6 +1250,7 @@ async function createSessionContainersAttempt(
     ];
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
+      ...buildRuntimeTrustEnv(),
     };
     let network: string | null;
     let extraHosts: string[] | undefined;
@@ -1255,7 +1298,7 @@ async function createSessionContainersAttempt(
 
       // Write apt proxy config so sudo apt-get routes through the MITM proxy
       const aptProxyPath = resolve(core.orientationDir, 'apt-proxy.conf');
-      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
+      writeFileSync(aptProxyPath, renderAptProxyConfig(proxyUrl));
       mounts.push({ source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
 
       // Create a per-session --internal Docker network that blocks internet egress.
@@ -1327,10 +1370,7 @@ async function createSessionContainersAttempt(
         execAptProxyUrl = udsProxyUrl;
       } else {
         const aptProxyPathUds = resolve(core.orientationDir, 'apt-proxy.conf');
-        writeFileSync(
-          aptProxyPathUds,
-          `Acquire::http::Proxy "${udsProxyUrl}";\nAcquire::https::Proxy "${udsProxyUrl}";\n`,
-        );
+        writeFileSync(aptProxyPathUds, renderAptProxyConfig(udsProxyUrl));
         mounts.push({
           source: aptProxyPathUds,
           target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy',
@@ -1573,13 +1613,10 @@ export async function writeAptProxyConfigViaExec(
   containerId: string,
   proxyUrl: string,
 ): Promise<void> {
+  const content = renderAptProxyConfig(proxyUrl);
   const aptWrite = await docker.exec(
     containerId,
-    [
-      'sh',
-      '-c',
-      `printf 'Acquire::http::Proxy "%s";\\nAcquire::https::Proxy "%s";\\n' '${proxyUrl}' '${proxyUrl}' > /etc/apt/apt.conf.d/90-ironcurtain-proxy`,
-    ],
+    ['sh', '-c', 'printf %s "$1" > /etc/apt/apt.conf.d/90-ironcurtain-proxy', 'sh', content],
     10_000,
     'root',
   );
@@ -1762,29 +1799,32 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
  * `ensureImage` call inside `prepareDockerInfrastructure` is content-hash
  * cached, so a second call from the session-init path is a cheap no-op.
  */
-export async function ensureDockerImage(agentId: AgentId, userConfig: ResolvedUserConfig): Promise<void> {
+export async function ensureDockerImage(
+  agentId: AgentId,
+  userConfig: ResolvedUserConfig,
+  imageProvisioning?: ImageProvisioning,
+): Promise<void> {
+  const { assertDockerWorkloadImplementationAvailable } = await import('../docker-workload/config.js');
+  assertDockerWorkloadImplementationAvailable(userConfig.dockerWorkload);
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
-  const { loadOrCreateCA } = await import('./ca.js');
   const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
-  const { getIronCurtainHome } = await import('../config/paths.js');
 
   await registerBuiltinAdapters(userConfig);
   const adapter = getAgent(agentId);
   const image = await adapter.getImage();
   const docker = createContainerRuntime(await resolveRuntimeKind(userConfig.containerRuntime));
-  const ca = loadOrCreateCA(resolve(getIronCurtainHome(), 'ca'));
-  await ensureImage(image, docker, ca);
+  await resolveAgentImage(image, docker, imageProvisioning);
 }
 
 /**
- * Ensures the agent Docker image exists and is up-to-date. Builds the base
- * image first (with the IronCurtain CA cert baked in) and then the
- * agent-specific image. Content-hash labels on each image drive staleness
- * detection so repeated calls skip rebuilds when nothing has changed.
+ * Ensures the CA-neutral agent Docker image exists and is up-to-date. Builds
+ * the base image first and then the agent-specific image. Content-hash labels
+ * on each image drive staleness detection so repeated calls skip rebuilds
+ * when source inputs have not changed. Per-session trust is staged at runtime.
  */
 /**
  * Builds `image` from a fresh temp directory populated with the contents of
- * `dockerDir` (plus any `extraFiles`, keyed dest→src). Building from a clean
+ * `dockerDir`. Building from a clean
  * dir outside any git repo is REQUIRED for Apple `container build`, which
  * resolves an EMPTY context when handed a git-tracked source directory (the
  * repo's docker/ in a checkout/worktree) — making `COPY` fail with "not
@@ -1797,15 +1837,13 @@ async function buildImageFromCleanContext(
   dockerDir: string,
   dockerfile: string,
   labels: Record<string, string>,
-  extraFiles: Record<string, string> = {},
 ): Promise<void> {
   const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-build-'));
   try {
-    for (const file of readdirSync(dockerDir)) {
-      copyFileSync(resolve(dockerDir, file), resolve(tmpContext, file));
-    }
-    for (const [dest, src] of Object.entries(extraFiles)) {
-      copyFileSync(src, resolve(tmpContext, dest));
+    for (const entry of readdirSync(dockerDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) continue;
+      if (!entry.isFile()) throw new Error(`unsupported Docker build-context entry: ${entry.name}`);
+      copyFileSync(resolve(dockerDir, entry.name), resolve(tmpContext, entry.name));
     }
     await docker.buildImage(image, resolve(tmpContext, dockerfile), tmpContext, labels);
   } finally {
@@ -1853,9 +1891,45 @@ async function logResolvedAgentVersion(
   }
 }
 
+interface AgentImageBuildSpec {
+  readonly dockerDir: string;
+  readonly baseDockerfile: string;
+  readonly baseImage: string;
+  readonly baseBuildHash: string;
+  readonly agentDockerfile: string;
+  readonly agentBuildHash: string;
+}
+
+/** Resolve an agent image through exactly one trusted image mode. */
+export async function resolveAgentImage(
+  image: string,
+  docker: ContainerRuntime,
+  provisioning: ImageProvisioning = { imageMode: 'build-if-stale' },
+): Promise<AgentImageResolution> {
+  const spec = computeAgentImageBuildSpec(image);
+  if (provisioning.imageMode === 'preloaded-catalog') {
+    const resolved = await resolvePreloadedImage(docker, {
+      catalogPath: provisioning.catalogPath,
+      runtimeKind: provisioning.runtimeKind,
+      logicalName: image,
+      expectedBuildHash: spec.agentBuildHash,
+      architecture: provisioning.architecture,
+      dockerApiVersion: provisioning.dockerApiVersion,
+    });
+    return { ...resolved, imageRef: resolved.immutableImageId };
+  }
+
+  const buildHash = await ensureImageFromSpec(image, docker, spec);
+  return { mode: 'build-if-stale', logicalName: image, imageRef: image, buildHash };
+}
+
 // `docker` is typed `ContainerRuntime` (the apple-container generalization of
 // the former `DockerManager`); exported because callers/tests import it.
-export async function ensureImage(image: string, docker: ContainerRuntime, ca: CertificateAuthority): Promise<string> {
+export async function ensureImage(image: string, docker: ContainerRuntime): Promise<string> {
+  return ensureImageFromSpec(image, docker, computeAgentImageBuildSpec(image));
+}
+
+function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const dockerDir = resolve(packageRoot, 'docker');
 
@@ -1865,31 +1939,50 @@ export async function ensureImage(image: string, docker: ContainerRuntime, ca: C
       ? 'Dockerfile.base.arm64'
       : 'Dockerfile.base';
 
-  // Build base image with CA cert baked in (if stale or missing)
+  // Agent images are CA-neutral. Session-specific public trust is staged in
+  // the read-only orientation mount by stageRuntimeTrust().
   const baseImage = 'ironcurtain-base:latest';
-  const baseBuildHash = computeBuildHash(dockerDir, [baseDockerfile], ca.certPem);
-  const baseRebuilt = await ensureBaseImage(baseImage, docker, ca, dockerDir, baseDockerfile, baseBuildHash);
+  const baseBuildHash = computeBuildHash(dockerDir, [baseDockerfile]);
 
-  // Build the agent-specific image (if stale, missing, or base was rebuilt)
   const agentName = image.replace(CONTAINER_NAME_PREFIX, '').replace(':latest', '');
-  const dockerfile = `Dockerfile.${agentName}`;
-  const agentDockerfilePath = resolve(dockerDir, dockerfile);
+  const agentDockerfile = `Dockerfile.${agentName}`;
+  const agentDockerfilePath = resolve(dockerDir, agentDockerfile);
   if (!existsSync(agentDockerfilePath)) {
     throw new Error(`Dockerfile not found for agent "${agentName}": ${agentDockerfilePath}`);
   }
+  const agentBuildHash = computeBuildHash(dockerDir, [agentDockerfile], baseBuildHash);
+  return { dockerDir, baseDockerfile, baseImage, baseBuildHash, agentDockerfile, agentBuildHash };
+}
 
-  const agentBuildHash = computeBuildHash(dockerDir, [dockerfile], ca.certPem, baseBuildHash);
-  const needsAgentBuild = baseRebuilt || (await isImageStale(image, docker, agentBuildHash));
+/** Exact build hash a trusted preloaded-catalog builder must record. */
+export function computeAgentImageBuildHash(image: string): string {
+  return computeAgentImageBuildSpec(image).agentBuildHash;
+}
+
+async function ensureImageFromSpec(
+  image: string,
+  docker: ContainerRuntime,
+  spec: AgentImageBuildSpec,
+): Promise<string> {
+  const baseRebuilt = await ensureBaseImage(
+    spec.baseImage,
+    docker,
+    spec.dockerDir,
+    spec.baseDockerfile,
+    spec.baseBuildHash,
+  );
+
+  const needsAgentBuild = baseRebuilt || (await isImageStale(image, docker, spec.agentBuildHash));
 
   if (needsAgentBuild) {
     logger.info(`Building Docker image ${image}...`);
-    await buildImageFromCleanContext(docker, image, dockerDir, dockerfile, {
-      'ironcurtain.build-hash': agentBuildHash,
+    await buildImageFromCleanContext(docker, image, spec.dockerDir, spec.agentDockerfile, {
+      'ironcurtain.build-hash': spec.agentBuildHash,
     });
     logger.info(`Docker image ${image} built successfully`);
   }
 
-  return agentBuildHash;
+  return spec.agentBuildHash;
 }
 
 export function computeWorkflowDependencyHash(agentBuildHash: string, scriptsDir: string): string {
@@ -2097,7 +2190,6 @@ async function provisionWorkflowNodeDependencies(infra: DockerInfrastructure): P
 async function ensureBaseImage(
   baseImage: string,
   docker: ContainerRuntime,
-  ca: CertificateAuthority,
   dockerDir: string,
   dockerfile: string,
   buildHash: string,
@@ -2106,14 +2198,9 @@ async function ensureBaseImage(
 
   logger.info('Building base Docker image (this may take a while on first run)...');
 
-  await buildImageFromCleanContext(
-    docker,
-    baseImage,
-    dockerDir,
-    dockerfile,
-    { 'ironcurtain.build-hash': buildHash },
-    { 'ironcurtain-ca-cert.pem': ca.certPath },
-  );
+  await buildImageFromCleanContext(docker, baseImage, dockerDir, dockerfile, {
+    'ironcurtain.build-hash': buildHash,
+  });
   logger.info('Base Docker image built successfully');
   return true;
 }
@@ -2124,7 +2211,7 @@ async function isImageStale(image: string, docker: ContainerRuntime, expectedHas
   return storedHash !== expectedHash;
 }
 
-function computeBuildHash(dockerDir: string, dockerfiles: string[], caCertPem: string, parentHash?: string): string {
+function computeBuildHash(dockerDir: string, dockerfiles: string[], parentHash?: string): string {
   const hash = createHash('sha256');
 
   const files = readdirSync(dockerDir).sort();
@@ -2134,9 +2221,6 @@ function computeBuildHash(dockerDir: string, dockerfiles: string[], caCertPem: s
       hash.update(readFileSync(resolve(dockerDir, file)));
     }
   }
-
-  hash.update('ca-cert\n');
-  hash.update(caCertPem);
 
   if (parentHash) {
     hash.update(`parent:${parentHash}\n`);

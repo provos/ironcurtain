@@ -10,7 +10,6 @@
  */
 
 import * as http from 'node:http';
-import * as https from 'node:https';
 import { promises as fs } from 'node:fs';
 import type {
   PackageIdentity,
@@ -23,6 +22,9 @@ import type {
 } from './package-types.js';
 import { packageCacheKey, canonicalPackageName } from './package-validator.js';
 import * as logger from '../logger.js';
+import { createDirectOutboundTransport, type OutboundTransport } from './outbound-transport.js';
+
+const DEFAULT_OUTBOUND_TRANSPORT = createDirectOutboundTransport();
 
 // ── Built-in registry configs ───────────────────────────────────────
 
@@ -631,6 +633,8 @@ export interface RegistryHandlerOptions {
   readonly validator: PackageValidator;
   readonly cache: AllowedVersionCache;
   readonly auditLogPath?: string;
+  /** Destination-bound route selected by the owning MITM proxy. */
+  readonly outboundTransport?: OutboundTransport;
 }
 
 /**
@@ -656,7 +660,7 @@ export async function handleRegistryRequest(
         await handleTarballDownload(registry, path, clientRes, host, port, options, 'npm');
       } else {
         // npm internal endpoints (/-/ping, /-/v1/security/...) or unknown paths -- pass through
-        await forwardUpstream(clientReq, clientRes, host, port);
+        await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
       }
       break;
     case 'pypi':
@@ -667,7 +671,7 @@ export async function handleRegistryRequest(
         await handleTarballDownload(registry, path, clientRes, host, port, options, 'pypi');
       } else {
         // All other pypi.org paths -- pass through
-        await forwardUpstream(clientReq, clientRes, host, port);
+        await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
       }
       break;
     case 'debian':
@@ -686,13 +690,13 @@ export async function handleRegistryRequest(
         if (parseCargoDownloadUrl(path)) {
           await handleTarballDownload(registry, path, clientRes, host, port, options, 'cargo');
         } else {
-          await forwardUpstream(clientReq, clientRes, host, port);
+          await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
         }
       } else if (parseCargoSparseIndexUrl(path)) {
         await handleCargoSparseIndex(registry, path, clientReq, clientRes, host, port, options);
       } else {
         // index.crates.io/config.json and anything unrecognized — pass through.
-        await forwardUpstream(clientReq, clientRes, host, port);
+        await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
       }
       break;
     default: {
@@ -715,12 +719,12 @@ async function handleNpmMetadata(
 ): Promise<void> {
   const pkg = parseNpmUrl(path);
   if (!pkg) {
-    await forwardUpstream(clientReq, clientRes, host, port);
+    await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
     return;
   }
 
   try {
-    const upstream = await fetchUpstreamJson<NpmPackument>(host, port, path);
+    const upstream = await fetchUpstreamJson<NpmPackument>(host, port, path, options.outboundTransport);
     if (!upstream) {
       clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
       clientRes.end('Failed to fetch package metadata from upstream');
@@ -795,15 +799,15 @@ async function handlePypiSimple(
 ): Promise<void> {
   const pkg = parsePypiSimpleUrl(path);
   if (!pkg) {
-    await forwardUpstream(clientReq, clientRes, host, port);
+    await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
     return;
   }
 
   try {
     // Fetch Simple Repository HTML and version timestamps concurrently
     const [html, versionTimestamps] = await Promise.all([
-      fetchUpstreamText(host, port, path, 'text/html'),
-      fetchPypiVersionTimestamps(host, port, pkg.name),
+      fetchUpstreamText(host, port, path, 'text/html', options.outboundTransport),
+      fetchPypiVersionTimestamps(host, port, pkg.name, options.outboundTransport),
     ]);
 
     if (html === undefined) {
@@ -899,7 +903,10 @@ async function handleTarballDownload(
         source: 'tarball-backstop',
         requestPath: path,
       });
-      await forwardToUpstream(clientRes, host, port, path, { timeoutMs: 60_000 });
+      await forwardToUpstream(clientRes, host, port, path, {
+        timeoutMs: 60_000,
+        outboundTransport: options.outboundTransport,
+      });
       return;
     }
     // In cache but not in allowed set -- was filtered during metadata validation
@@ -938,7 +945,10 @@ async function handleTarballDownload(
         source: 'tarball-backstop',
         requestPath: path,
       });
-      await forwardToUpstream(clientRes, host, port, path, { timeoutMs: 60_000 });
+      await forwardToUpstream(clientRes, host, port, path, {
+        timeoutMs: 60_000,
+        outboundTransport: options.outboundTransport,
+      });
     } else {
       const name = canonicalPackageName(pkg);
       logger.info(`[registry-proxy] tarball backstop (cache miss): denied ${name}@${pkg.version}: ${decision.reason}`);
@@ -991,12 +1001,12 @@ async function handleCargoSparseIndex(
 ): Promise<void> {
   const pkg = parseCargoSparseIndexUrl(path);
   if (!pkg) {
-    await forwardUpstream(clientReq, clientRes, host, port);
+    await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
     return;
   }
 
   try {
-    const ndjson = await fetchUpstreamText(host, port, path, 'text/plain');
+    const ndjson = await fetchUpstreamText(host, port, path, 'text/plain', options.outboundTransport);
     if (ndjson === undefined) {
       // Cargo treats 404/non-200 here as "crate not found" — preserve that.
       clientRes.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -1076,7 +1086,7 @@ async function handleDebianRequest(
       clientRes.end('Forbidden: unable to identify Debian package from URL');
       return;
     }
-    await forwardUpstream(clientReq, clientRes, host, port);
+    await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
     return;
   }
 
@@ -1096,7 +1106,7 @@ async function handleDebianRequest(
   });
 
   if (decision.status === 'allow') {
-    await forwardUpstream(clientReq, clientRes, host, port);
+    await forwardUpstream(clientReq, clientRes, host, port, options.outboundTransport);
   } else {
     logger.info(`[registry-proxy] debian backstop: denied ${pkg.name}_${pkg.version}: ${decision.reason}`);
     clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
@@ -1115,7 +1125,12 @@ async function fetchAndValidateVersion(
 ): Promise<PackageDecision> {
   if (registry.type === 'npm') {
     const metadataPath = pkg.scope ? `/@${pkg.scope}/${pkg.name}` : `/${pkg.name}`;
-    const packument = await fetchUpstreamJson<NpmPackument>(registry.host, 443, metadataPath);
+    const packument = await fetchUpstreamJson<NpmPackument>(
+      registry.host,
+      443,
+      metadataPath,
+      options.outboundTransport,
+    );
     if (!packument) return { status: 'deny', reason: 'Failed to fetch package metadata from upstream' };
 
     const { filtered, denied } = filterNpmPackument(packument, options.validator, pkg.name, pkg.scope);
@@ -1133,7 +1148,7 @@ async function fetchAndValidateVersion(
     // Sparse index carries pubtime per line — fetch it directly from
     // index.crates.io regardless of which mirror the tarball request hit.
     const indexPath = `/${cargoSparseIndexPath(pkg.name)}`;
-    const ndjson = await fetchUpstreamText(cargoRegistry.host, 443, indexPath, 'text/plain');
+    const ndjson = await fetchUpstreamText(cargoRegistry.host, 443, indexPath, 'text/plain', options.outboundTransport);
     if (ndjson === undefined) {
       return { status: 'deny', reason: 'Failed to fetch crate index from upstream' };
     }
@@ -1148,7 +1163,7 @@ async function fetchAndValidateVersion(
   }
 
   // PyPI: fetch JSON API for timestamps, validate ALL versions, populate cache
-  const versionTimestamps = await fetchPypiVersionTimestamps(registry.host, 443, pkg.name);
+  const versionTimestamps = await fetchPypiVersionTimestamps(registry.host, 443, pkg.name, options.outboundTransport);
   const allowedVersions = new Set<string>();
   let requestedVersionReason: string | undefined;
 
@@ -1175,12 +1190,17 @@ async function fetchAndValidateVersion(
  * Fetches a response body from upstream registry via HTTPS.
  * Returns the raw Buffer, or undefined on non-200 or error.
  */
-async function fetchUpstream(host: string, port: number, path: string, accept: string): Promise<Buffer | undefined> {
+async function fetchUpstream(
+  host: string,
+  port: number,
+  path: string,
+  accept: string,
+  outboundTransport: OutboundTransport = DEFAULT_OUTBOUND_TRANSPORT,
+): Promise<Buffer | undefined> {
   return new Promise((resolve) => {
-    const req = https.request(
+    const req = outboundTransport.request(
       {
-        hostname: host,
-        port,
+        destination: { protocol: 'https:', hostname: host, port },
         path,
         method: 'GET',
         headers: { accept, host },
@@ -1210,8 +1230,13 @@ async function fetchUpstream(host: string, port: number, path: string, accept: s
 /**
  * Fetches JSON from upstream registry via HTTPS.
  */
-async function fetchUpstreamJson<T>(host: string, port: number, path: string): Promise<T | undefined> {
-  const buf = await fetchUpstream(host, port, path, 'application/json');
+async function fetchUpstreamJson<T>(
+  host: string,
+  port: number,
+  path: string,
+  outboundTransport?: OutboundTransport,
+): Promise<T | undefined> {
+  const buf = await fetchUpstream(host, port, path, 'application/json', outboundTransport);
   if (!buf) return undefined;
   try {
     return JSON.parse(buf.toString()) as T;
@@ -1228,8 +1253,9 @@ async function fetchUpstreamText(
   port: number,
   path: string,
   accept: string,
+  outboundTransport?: OutboundTransport,
 ): Promise<string | undefined> {
-  const buf = await fetchUpstream(host, port, path, accept);
+  const buf = await fetchUpstream(host, port, path, accept, outboundTransport);
   return buf?.toString();
 }
 
@@ -1237,9 +1263,14 @@ async function fetchUpstreamText(
  * Fetches PyPI version timestamps from the JSON API.
  * Returns a map of version -> publish date.
  */
-async function fetchPypiVersionTimestamps(host: string, port: number, packageName: string): Promise<Map<string, Date>> {
+async function fetchPypiVersionTimestamps(
+  host: string,
+  port: number,
+  packageName: string,
+  outboundTransport?: OutboundTransport,
+): Promise<Map<string, Date>> {
   const timestamps = new Map<string, Date>();
-  const data = await fetchUpstreamJson<PypiJsonApi>(host, port, `/pypi/${packageName}/json`);
+  const data = await fetchUpstreamJson<PypiJsonApi>(host, port, `/pypi/${packageName}/json`, outboundTransport);
   if (!data?.releases) return timestamps;
 
   for (const [version, files] of Object.entries(data.releases)) {
@@ -1271,6 +1302,8 @@ interface ForwardOptions {
   readonly forwardHeaders?: boolean;
   /** Timeout in milliseconds. Default: 30s. */
   readonly timeoutMs?: number;
+  /** Destination-bound route selected by the owning MITM proxy. */
+  readonly outboundTransport?: OutboundTransport;
 }
 
 /**
@@ -1285,15 +1318,19 @@ async function forwardToUpstream(
   path: string,
   options: ForwardOptions = {},
 ): Promise<void> {
-  const { clientReq, forwardHeaders = !!clientReq, timeoutMs = 30_000 } = options;
+  const {
+    clientReq,
+    forwardHeaders = !!clientReq,
+    timeoutMs = 30_000,
+    outboundTransport = DEFAULT_OUTBOUND_TRANSPORT,
+  } = options;
 
   return new Promise((resolve) => {
     const headers = forwardHeaders && clientReq ? { ...clientReq.headers, host } : { host };
 
-    const upstreamReq = https.request(
+    const upstreamReq = outboundTransport.request(
       {
-        hostname: host,
-        port,
+        destination: { protocol: 'https:', hostname: host, port },
         method: clientReq?.method ?? 'GET',
         path: clientReq?.url ?? path,
         headers,
@@ -1344,10 +1381,12 @@ async function forwardUpstream(
   clientRes: http.ServerResponse,
   host: string,
   port: number,
+  outboundTransport?: OutboundTransport,
 ): Promise<void> {
   await forwardToUpstream(clientRes, host, port, clientReq.url ?? '/', {
     clientReq,
     forwardHeaders: true,
+    outboundTransport,
   });
 }
 

@@ -36,6 +36,7 @@ import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
 import { buildAgentUidRemap, buildUdsSocketMounts } from './docker-infrastructure.js';
+import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import {
   createIronCurtainInternalNetwork,
   InternalNetworkConnectivityError,
@@ -508,6 +509,7 @@ async function runPtySessionAttempt(
       const proxyUrl = `http://${infra.hostOnlyNetwork.gateway}:${mitmAddr.port}`;
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
+        ...buildRuntimeTrustEnv(),
         HTTPS_PROXY: proxyUrl,
         HTTP_PROXY: proxyUrl,
       };
@@ -530,13 +532,14 @@ async function runPtySessionAttempt(
       const proxyUrl = `http://host.docker.internal:${mitmPort}`;
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
+        ...buildRuntimeTrustEnv(),
         HTTPS_PROXY: proxyUrl,
         HTTP_PROXY: proxyUrl,
       };
 
       // Write apt proxy config so sudo apt-get routes through the MITM proxy
       const aptProxyPath = resolve(orientationDir, 'apt-proxy.conf');
-      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
+      writeFileSync(aptProxyPath, renderAptProxyConfig(proxyUrl));
 
       const allocatedNetwork = await createIronCurtainInternalNetwork(docker, internalNetworkName, bundleId, {
         excludedSubnets,
@@ -606,6 +609,7 @@ async function runPtySessionAttempt(
       const udsProxyUrl = 'http://127.0.0.1:18080';
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
+        ...buildRuntimeTrustEnv(),
         HTTPS_PROXY: udsProxyUrl,
         HTTP_PROXY: udsProxyUrl,
       };
@@ -633,10 +637,7 @@ async function runPtySessionAttempt(
       } else {
         // Linux Docker: single-file bind mount for the apt proxy config.
         const aptProxyPathUds = resolve(orientationDir, 'apt-proxy.conf');
-        writeFileSync(
-          aptProxyPathUds,
-          `Acquire::http::Proxy "${udsProxyUrl}";\nAcquire::https::Proxy "${udsProxyUrl}";\n`,
-        );
+        writeFileSync(aptProxyPathUds, renderAptProxyConfig(udsProxyUrl));
         mounts.push({ source: aptProxyPathUds, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
       }
     }

@@ -331,7 +331,7 @@ describe('GooseAdapter.buildEnv', () => {
     const adapter = createGooseAdapter();
     const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-api03-ironcurtain-FAKE']]);
     const env = adapter.buildEnv(config, fakeKeys);
-    expect(env.SSL_CERT_FILE).toBe('/etc/ssl/certs/ca-certificates.crt');
+    expect(env.SSL_CERT_FILE).toBe('/etc/ironcurtain/ca-bundle.pem');
     expect(env.SSL_CERT_DIR).toBe('/etc/ssl/certs');
   });
 
