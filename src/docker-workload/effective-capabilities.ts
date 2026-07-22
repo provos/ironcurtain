@@ -2,12 +2,11 @@
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
 import type { ResolvedDockerWorkloadConfig } from './config.js';
 
 export const EFFECTIVE_CAPABILITIES_SCHEMA_VERSION = 1;
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const positiveSchema = z.number().positive();
 
 const measurementSchema = z

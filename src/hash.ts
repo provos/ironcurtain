@@ -7,6 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 
 /**
  * Deterministic JSON serialization with sorted keys.
@@ -35,3 +36,11 @@ export function computeHash(value: unknown): string {
     .update(stableStringify(value) ?? '')
     .digest('hex');
 }
+
+/** SHA-256 hex digest of raw bytes (Buffer/Uint8Array) or a UTF-8 string. */
+export function sha256Hex(data: string | Uint8Array): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/** Lowercase 64-char SHA-256 hex string, shared across host-owned record schemas. */
+export const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/u);

@@ -1,9 +1,7 @@
 /** Trusted Docker client/daemon compatibility manifest and live preflight. */
 
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { loadImmutableHostJson } from '../hardened-fs.js';
 import { catalogTupleDigest } from '../docker/preloaded-image-catalog.js';
 import type { ContainerRuntime } from '../docker/types.js';
 
@@ -104,45 +102,12 @@ export interface ClientToolchainPreflight {
 
 /** Load a host-owned, immutable compatibility matrix through one no-follow descriptor. */
 export function loadClientToolchainManifest(path: string): LoadedClientToolchainManifest {
-  if (!isAbsolute(path)) throw new Error('client toolchain manifest path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`client toolchain manifest must be a readable regular non-symlink file: ${path}`, {
-      cause: error,
-    });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error(`client toolchain manifest must be a regular file: ${path}`);
-    if ((stats.mode & 0o022) !== 0) {
-      throw new Error(`client toolchain manifest must not be group/world writable: ${path}`);
-    }
-    if (stats.size < 2 || stats.size > MAX_CLIENT_TOOLCHAIN_MANIFEST_BYTES) {
-      throw new Error(`client toolchain manifest size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('client toolchain manifest is not valid JSON', { cause: error });
-  }
-  const validated = clientToolchainManifestSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`client toolchain manifest is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
-  return {
-    path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    manifest: validated.data,
-  };
+  const loaded = loadImmutableHostJson(path, {
+    label: 'client toolchain manifest',
+    schema: clientToolchainManifestSchema,
+    maxBytes: MAX_CLIENT_TOOLCHAIN_MANIFEST_BYTES,
+  });
+  return { path: loaded.path, sha256: loaded.sha256, manifest: loaded.value };
 }
 
 /**

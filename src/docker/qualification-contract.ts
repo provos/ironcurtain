@@ -1,16 +1,15 @@
 /** Frozen Phase 0F qualification contracts and Vitest result adjudication. */
 
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
+import { loadImmutableHostJson } from '../hardened-fs.js';
+import { addDuplicateIssues } from '../zod-helpers.js';
 
 export const QUALIFICATION_CONTRACT_SCHEMA_VERSION = 1;
 export const QUALIFICATION_RUN_SCHEMA_VERSION = 1;
 export const MAX_QUALIFICATION_JSON_BYTES = 4 * 1024 * 1024;
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
 const nonEmptySchema = z.string().min(1).max(2048);
@@ -309,49 +308,7 @@ export function verifyQualificationRunSet(
 }
 
 function loadStrictJson<T>(path: string, label: string, schema: z.ZodType<T>): LoadedQualificationJson<T> {
-  if (!isAbsolute(path)) throw new Error(`${label} path must be absolute`);
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`${label} must be a readable regular non-symlink file: ${path}`, { cause: error });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error(`${label} must be a regular file: ${path}`);
-    if ((stats.mode & 0o022) !== 0) throw new Error(`${label} must not be group/world writable: ${path}`);
-    if (stats.size < 2 || stats.size > MAX_QUALIFICATION_JSON_BYTES) {
-      throw new Error(`${label} size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error(`${label} is not valid JSON`, { cause: error });
-  }
-  const validated = schema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`${label} is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
-  return {
-    path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    sizeBytes: bytes.length,
-    value: validated.data,
-  };
-}
-
-function addDuplicateIssues(values: readonly string[], label: string, context: z.RefinementCtx): void {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) context.addIssue({ code: 'custom', message: `duplicate ${label}: ${value}` });
-    seen.add(value);
-  }
+  return loadImmutableHostJson(path, { label, schema, maxBytes: MAX_QUALIFICATION_JSON_BYTES });
 }
 
 function assertExactSet(actual: readonly string[], expected: readonly string[], label: string): void {

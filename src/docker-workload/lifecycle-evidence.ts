@@ -8,6 +8,7 @@
 import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
+import { sha256HexSchema as sha256Schema } from '../hash.js';
 import {
   QUALIFICATION_EVIDENCE_SCHEMA_VERSION,
   writeQualificationEvidenceManifest,
@@ -19,7 +20,6 @@ import type { DockerWorkloadCleanupProof } from './bundle-lease.js';
 
 const timestampSchema = z.iso.datetime({ offset: true });
 const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._:-]{2,127}$/u);
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const runtimeIdentitySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u);
 const resourceNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u);
 

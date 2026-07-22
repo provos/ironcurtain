@@ -1,25 +1,21 @@
 /** Frozen, current-Dockerfile-only authorization for nested build egress. */
 
-import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { z } from 'zod';
+import { sha256Hex, sha256HexSchema } from '../hash.js';
+import { assertCanonicalHostPath } from '../hardened-fs.js';
+import {
+  addDuplicateIssues,
+  HEADER_NAME_REGEX,
+  headerNameSchema,
+  hostnameSchema,
+  identifierSchema,
+} from '../zod-helpers.js';
 
 export const BUILD_EGRESS_MANIFEST_SCHEMA_VERSION = 1;
 export const MAX_BUILD_EGRESS_MANIFEST_BYTES = 1024 * 1024;
 
-const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
-const hostnameSchema = z
-  .string()
-  .min(1)
-  .max(253)
-  .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u)
-  .refine(
-    (value) => value === value.toLowerCase() && !value.includes('..'),
-    'hostname must be canonical lowercase DNS',
-  );
-const headerNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,127}$/u);
 const sourcePathSchema = z
   .string()
   .min(1)
@@ -135,7 +131,7 @@ const buildEgressManifestSchema = z
     schemaVersion: z.literal(BUILD_EGRESS_MANIFEST_SCHEMA_VERSION),
     policyId: identifierSchema,
     sourceDockerfiles: z
-      .array(z.object({ path: sourcePathSchema, sha256: sha256Schema }).strict())
+      .array(z.object({ path: sourcePathSchema, sha256: sha256HexSchema }).strict())
       .min(1)
       .max(64),
     rules: z.array(buildEgressRuleSchema).min(1).max(512),
@@ -251,7 +247,7 @@ export function loadBuildEgressManifest(path: string): LoadedBuildEgressManifest
   }
   return {
     path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
+    sha256: sha256Hex(bytes),
     sizeBytes: bytes.length,
     manifest: validated.data as ValidatedBuildEgressManifest,
   };
@@ -263,9 +259,7 @@ export function verifyBuildEgressDockerfileSources(
   repositoryRoot: string,
 ): readonly { readonly path: string; readonly sha256: string; readonly sizeBytes: number }[] {
   const validated = buildEgressManifestSchema.parse(manifest);
-  if (!isAbsolute(repositoryRoot) || resolve(repositoryRoot) !== repositoryRoot) {
-    throw new Error('build-egress repository root must be canonical and absolute');
-  }
+  assertCanonicalHostPath(repositoryRoot, 'build-egress repository root');
   return validated.sourceDockerfiles.map((source) => {
     const path = resolve(repositoryRoot, source.path);
     const relativePath = relative(repositoryRoot, path).split('\\').join('/');
@@ -288,7 +282,7 @@ export function verifyBuildEgressDockerfileSources(
     } finally {
       closeSync(descriptor);
     }
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const sha256 = sha256Hex(bytes);
     if (sha256 !== source.sha256) throw new Error(`build-egress Dockerfile hash mismatch: ${source.path}`);
     return { path: source.path, sha256, sizeBytes: bytes.length };
   });
@@ -402,7 +396,7 @@ function sanitizeHeaders(
   const result: Record<string, string | readonly string[]> = {};
   for (const [rawName, rawValue] of Object.entries(headers)) {
     const name = rawName.toLowerCase();
-    if (name !== rawName || !headerNameSchema.safeParse(name).success) {
+    if (name !== rawName || !HEADER_NAME_REGEX.test(name)) {
       throw new Error(`build-egress header name is not canonical: ${rawName}`);
     }
     if (rawValue === undefined) continue;
@@ -426,12 +420,4 @@ function requiredRule(manifest: BuildEgressManifest, id: string): BuildEgressRul
   const rule = manifest.rules.find((candidate) => candidate.id === id);
   if (rule === undefined) throw new Error(`build-egress redirect chain references unknown rule: ${id}`);
   return rule;
-}
-
-function addDuplicateIssues(values: readonly string[], label: string, context: z.RefinementCtx): void {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) context.addIssue({ code: 'custom', message: `duplicate ${label}: ${value}` });
-    seen.add(value);
-  }
 }

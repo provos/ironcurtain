@@ -1,10 +1,9 @@
 /** Linux-only node_modules identity and native-load qualification. */
 
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { isAbsolute, posix } from 'node:path';
 import { z } from 'zod';
-import { computeHash, stableStringify } from '../hash.js';
+import { computeHash, sha256Hex, sha256HexSchema, stableStringify } from '../hash.js';
+import { loadImmutableHostJson } from '../hardened-fs.js';
 import type { ContainerRuntime } from './types.js';
 
 export const LINUX_DEPENDENCY_ABI_SCHEMA_VERSION = 1;
@@ -12,7 +11,6 @@ export const LINUX_DEPENDENCY_ABI_MANIFEST = '.ironcurtain-linux-dependencies.js
 export const MAX_LINUX_DEPENDENCY_MANIFEST_BYTES = 64 * 1024;
 export const REQUIRED_NATIVE_MODULES = ['isolated-vm', 'node-pty'] as const;
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const versionSchema = z
   .string()
   .min(1)
@@ -38,7 +36,7 @@ const linuxDependencyAbiSchema = z
         version: versionSchema,
       })
       .strict(),
-    lockfileSha256: sha256Schema,
+    lockfileSha256: sha256HexSchema,
     nativeModules: z.tuple([z.literal('isolated-vm'), z.literal('node-pty')]),
   })
   .strict();
@@ -79,7 +77,7 @@ export function createLinuxDependencyAbiManifest(
     nodeAbi: options.nodeAbi,
     libc: options.libc,
     packageManager: { name: 'npm', version: options.npmVersion },
-    lockfileSha256: createHash('sha256').update(options.lockfileBytes).digest('hex'),
+    lockfileSha256: sha256Hex(options.lockfileBytes),
     nativeModules: REQUIRED_NATIVE_MODULES,
   });
 }
@@ -97,43 +95,11 @@ export function serializeLinuxDependencyAbiManifest(manifest: LinuxDependencyAbi
 
 /** Read the provisioned manifest without following a workspace-controlled symlink. */
 export function loadLinuxDependencyAbiManifest(path: string): LinuxDependencyAbiManifest {
-  if (!isAbsolute(path)) throw new Error('Linux dependency ABI manifest path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`Linux dependency ABI manifest must be a readable regular non-symlink file: ${path}`, {
-      cause: error,
-    });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error(`Linux dependency ABI manifest must be a regular file: ${path}`);
-    if ((stats.mode & 0o022) !== 0) {
-      throw new Error(`Linux dependency ABI manifest must not be group/world writable: ${path}`);
-    }
-    if (stats.size < 2 || stats.size > MAX_LINUX_DEPENDENCY_MANIFEST_BYTES) {
-      throw new Error(`Linux dependency ABI manifest size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('Linux dependency ABI manifest is not valid JSON', { cause: error });
-  }
-  const validated = linuxDependencyAbiSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(
-      `Linux dependency ABI manifest is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`,
-    );
-  }
-  return validated.data;
+  return loadImmutableHostJson(path, {
+    label: 'Linux dependency ABI manifest',
+    schema: linuxDependencyAbiSchema,
+    maxBytes: MAX_LINUX_DEPENDENCY_MANIFEST_BYTES,
+  }).value;
 }
 
 /** Reject stale/macOS/wrong-ABI stores with a field-level diagnostic. */

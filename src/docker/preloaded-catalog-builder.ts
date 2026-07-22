@@ -1,20 +1,8 @@
 /** Trusted all-or-nothing builder for complete backend-bound image catalogs. */
 
-import { randomUUID } from 'node:crypto';
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  existsSync,
-  fsyncSync,
-  lstatSync,
-  openSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
-import { stableStringify } from '../hash.js';
+import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
 import type { ExecFileFn } from './docker-manager.js';
 import {
   loadPreloadedImageCatalog,
@@ -151,9 +139,7 @@ export async function buildPreloadedCatalogs(options: BuildPreloadedCatalogsOpti
 }
 
 function validateBuilderOptions(options: BuildPreloadedCatalogsOptions): void {
-  if (!isAbsolute(options.outputDirectory) || resolve(options.outputDirectory) !== options.outputDirectory) {
-    throw new Error('preloaded catalog output directory must be canonical and absolute');
-  }
+  assertCanonicalHostPath(options.outputDirectory, 'preloaded catalog output directory');
   const stats = lstatSync(options.outputDirectory);
   if (!stats.isDirectory() || stats.isSymbolicLink() || (stats.mode & 0o077) !== 0) {
     throw new Error('preloaded catalog output directory must be a private real directory');
@@ -188,28 +174,5 @@ function validateBuilderOptions(options: BuildPreloadedCatalogsOptions): void {
 }
 
 function writeCatalogAtomic(path: string, catalog: PreloadedImageCatalog): void {
-  const temporary = join(resolve(path, '..'), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(
-      temporary,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    writeFileSync(descriptor, `${stableStringify(catalog)}\n`, 'utf8');
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    chmodSync(temporary, 0o400);
-    renameSync(temporary, path);
-    const directoryDescriptor = openSync(resolve(path, '..'), constants.O_RDONLY);
-    try {
-      fsyncSync(directoryDescriptor);
-    } finally {
-      closeSync(directoryDescriptor);
-    }
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-    rmSync(temporary, { force: true });
-  }
+  writeStableJsonAtomic(path, catalog, { mode: 0o400 });
 }

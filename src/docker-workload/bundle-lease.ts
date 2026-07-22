@@ -1,28 +1,25 @@
 /** Durable host-only lease for one secure nested Docker authority bundle. */
 
-import { randomUUID } from 'node:crypto';
 import {
-  chmodSync,
   closeSync,
   constants,
   fstatSync,
   fsyncSync,
   openSync,
   readFileSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
+import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
 
 export const DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION = 1;
 export const MAX_DOCKER_WORKLOAD_LEASE_BYTES = 1024 * 1024;
 
 const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._:-]{2,127}$/u);
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const absolutePathSchema = z
   .string()
   .min(1)
@@ -426,31 +423,7 @@ function requiredResource(lease: DockerWorkloadLease, requestId: string): Docker
 }
 
 function writeLeaseAtomic(path: string, lease: DockerWorkloadLease): void {
-  const directory = dirname(path);
-  const temporaryPath = resolve(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(
-      temporaryPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    writeFileSync(descriptor, `${stableStringify(lease)}\n`, 'utf8');
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    chmodSync(temporaryPath, 0o600);
-    renameSync(temporaryPath, path);
-    const directoryDescriptor = openSync(directory, constants.O_RDONLY);
-    try {
-      fsyncSync(directoryDescriptor);
-    } finally {
-      closeSync(directoryDescriptor);
-    }
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-    rmSync(temporaryPath, { force: true });
-  }
+  writeStableJsonAtomic(path, lease, { mode: 0o600 });
 }
 
 function withLeaseLock<T>(path: string, operation: () => T): T {
@@ -505,8 +478,7 @@ function processStartTime(): string {
 }
 
 function assertCanonicalLeasePath(path: string): void {
-  if (!isAbsolute(path) || resolve(path) !== path)
-    throw new Error('Docker-workload lease path must be canonical and absolute');
+  assertCanonicalHostPath(path, 'Docker-workload lease path');
   const parent = statSync(dirname(path));
   if (!parent.isDirectory()) throw new Error('Docker-workload lease parent must be a directory');
   if ((parent.mode & 0o077) !== 0) throw new Error('Docker-workload lease parent must be owner-only');

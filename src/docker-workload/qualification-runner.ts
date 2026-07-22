@@ -13,9 +13,10 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { stableStringify } from '../hash.js';
+import { assertCanonicalHostPath } from '../hardened-fs.js';
 import {
   loadQualificationContract,
   loadQualificationRun,
@@ -166,7 +167,7 @@ function validateExecutableCommand(command: QualificationCommand): void {
 }
 
 function validateDirectory(path: string, label: string, ownerOnly: boolean): string {
-  if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`${label} must be canonical and absolute`);
+  assertCanonicalHostPath(path, label);
   const stats = lstatSync(path);
   if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error(`${label} must be a real directory`);
   if (ownerOnly && (stats.mode & 0o077) !== 0) throw new Error(`${label} must be owner-only`);

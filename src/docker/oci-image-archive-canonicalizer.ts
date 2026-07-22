@@ -16,7 +16,9 @@ import {
   writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { basename, dirname, join, posix } from 'node:path';
+import { sha256Hex } from '../hash.js';
+import { assertCanonicalHostPath } from '../hardened-fs.js';
 import { verifyOciImageArchive, type VerifiedOciImageArchive } from './oci-image-archive.js';
 
 const TAR_BLOCK_BYTES = 512;
@@ -130,12 +132,8 @@ export async function canonicalizeDockerSaveArchive(
 }
 
 function validateOptions(options: CanonicalizeDockerSaveArchiveOptions): void {
-  if (!isAbsolute(options.sourceArchivePath) || resolve(options.sourceArchivePath) !== options.sourceArchivePath) {
-    throw new Error('Docker-save source path must be canonical and absolute');
-  }
-  if (!isAbsolute(options.outputArchivePath) || resolve(options.outputArchivePath) !== options.outputArchivePath) {
-    throw new Error('canonical image archive output path must be canonical and absolute');
-  }
+  assertCanonicalHostPath(options.sourceArchivePath, 'Docker-save source path');
+  assertCanonicalHostPath(options.outputArchivePath, 'canonical image archive output path');
   if (options.sourceArchivePath === options.outputArchivePath)
     throw new Error('source and output image archives must differ');
   if (!/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/u.test(options.logicalName) || !options.logicalName.includes(':')) {
@@ -565,5 +563,5 @@ function assertDigest(value: string, label: string): void {
 }
 
 function digest(value: Uint8Array): string {
-  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+  return `sha256:${sha256Hex(value)}`;
 }

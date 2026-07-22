@@ -6,10 +6,11 @@
  * read-only orientation directory. The CA private key never enters this API.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { rootCertificates } from 'node:tls';
+import { sha256Hex } from '../hash.js';
 
 export const CONTAINER_RUNTIME_CA_CERT = '/etc/ironcurtain/ca-cert.pem';
 export const CONTAINER_RUNTIME_CA_BUNDLE = '/etc/ironcurtain/ca-bundle.pem';
@@ -38,9 +39,9 @@ export function stageRuntimeTrust(
   const normalizedRoots = [...new Set(publicRoots.map((pem) => normalizeCertificate(pem, 'public root')))].sort();
   const rootsPem = `${normalizedRoots.join('\n')}\n`;
   const bundlePem = `${normalizedRoots.join('\n')}\n${normalizedCa}\n`;
-  const caCertificateSha256 = sha256(normalizedCa);
-  const publicRootsSha256 = sha256(rootsPem);
-  const bundleSha256 = sha256(bundlePem);
+  const caCertificateSha256 = sha256Hex(normalizedCa);
+  const publicRootsSha256 = sha256Hex(rootsPem);
+  const bundleSha256 = sha256Hex(bundlePem);
   const metadata: RuntimeTrustMetadata = {
     schemaVersion: RUNTIME_TRUST_SCHEMA_VERSION,
     generation: `${RUNTIME_TRUST_SCHEMA}:${caCertificateSha256}`,
@@ -124,8 +125,4 @@ function writePublicFileAtomic(directory: string, filename: string, content: str
   } finally {
     rmSync(temporary, { force: true });
   }
-}
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
 }

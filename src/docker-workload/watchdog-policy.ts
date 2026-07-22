@@ -12,23 +12,10 @@
  * audit/evidence.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { basename, dirname, isAbsolute, posix, resolve } from 'node:path';
+import { lstatSync } from 'node:fs';
+import { posix } from 'node:path';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { assertCanonicalHostPath, loadImmutableHostJson, writeStableJsonAtomic } from '../hardened-fs.js';
 import {
   loadResourceWatchdogPolicy,
   RESOURCE_WATCHDOG_POLICY_SCHEMA_VERSION,
@@ -114,43 +101,12 @@ export interface LoadedWatchdogPolicyTemplate {
 
 /** Load the checked-in frozen template through one no-follow descriptor and hash its exact bytes. */
 export function loadFrozenWatchdogPolicyTemplate(path: string): LoadedWatchdogPolicyTemplate {
-  if (!isAbsolute(path)) throw new Error('watchdog policy template path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`watchdog policy template must be a readable regular non-symlink file: ${path}`, { cause: error });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error(`watchdog policy template must be a regular file: ${path}`);
-    if ((stats.mode & 0o022) !== 0) {
-      throw new Error(`watchdog policy template must not be group/world writable: ${path}`);
-    }
-    if (stats.size < 2 || stats.size > MAX_WATCHDOG_POLICY_TEMPLATE_BYTES) {
-      throw new Error(`watchdog policy template size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('watchdog policy template is not valid JSON', { cause: error });
-  }
-  const validated = watchdogPolicyTemplateSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`watchdog policy template is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
-  return {
-    path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    sizeBytes: bytes.length,
-    template: validated.data,
-  };
+  const loaded = loadImmutableHostJson(path, {
+    label: 'watchdog policy template',
+    schema: watchdogPolicyTemplateSchema,
+    maxBytes: MAX_WATCHDOG_POLICY_TEMPLATE_BYTES,
+  });
+  return { path: loaded.path, sha256: loaded.sha256, sizeBytes: loaded.sizeBytes, template: loaded.value };
 }
 
 /**
@@ -163,12 +119,8 @@ export function renderWatchdogPolicy(
   stateRoot: string,
   outputPath: string,
 ): LoadedResourceWatchdogPolicy {
-  if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot) {
-    throw new Error('watchdog policy state root must be canonical and absolute');
-  }
-  if (!isAbsolute(outputPath) || resolve(outputPath) !== outputPath) {
-    throw new Error('watchdog policy output path must be canonical and absolute');
-  }
+  assertCanonicalHostPath(stateRoot, 'watchdog policy state root');
+  assertCanonicalHostPath(outputPath, 'watchdog policy output path');
   const stats = lstatSync(stateRoot);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new Error('watchdog policy state root must be a real directory');
@@ -189,34 +141,6 @@ export function renderWatchdogPolicy(
     maximumOvershootBytes: template.maximumOvershootBytes,
     cleanupInventoryGapMs: template.cleanupInventoryGapMs,
   };
-  writeRenderedPolicyAtomic(outputPath, rendered);
+  writeStableJsonAtomic(outputPath, rendered, { mode: 0o400 });
   return loadResourceWatchdogPolicy(outputPath);
-}
-
-function writeRenderedPolicyAtomic(path: string, value: unknown): void {
-  const directory = dirname(path);
-  const temporary = resolve(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(
-      temporary,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    writeFileSync(descriptor, `${stableStringify(value)}\n`, 'utf8');
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    chmodSync(temporary, 0o400);
-    renameSync(temporary, path);
-    const directoryDescriptor = openSync(directory, constants.O_RDONLY);
-    try {
-      fsyncSync(directoryDescriptor);
-    } finally {
-      closeSync(directoryDescriptor);
-    }
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-    rmSync(temporary, { force: true });
-  }
 }

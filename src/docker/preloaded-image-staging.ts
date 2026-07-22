@@ -2,7 +2,8 @@
 
 import { chmodSync, lstatSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
+import { assertCanonicalHostPath } from '../hardened-fs.js';
 import type { ExecFileFn } from './docker-manager.js';
 import { canonicalizeDockerSaveArchive } from './oci-image-archive-canonicalizer.js';
 import {
@@ -130,9 +131,7 @@ export async function stagePreloadedImage(options: {
 }
 
 function validateStageOptions(options: StagePreloadedImageOptions): void {
-  if (!isAbsolute(options.outputArchivePath) || resolve(options.outputArchivePath) !== options.outputArchivePath) {
-    throw new Error('preloaded staging output path must be canonical and absolute');
-  }
+  assertCanonicalHostPath(options.outputArchivePath, 'preloaded staging output path');
   const parent = lstatSync(resolve(options.outputArchivePath, '..'));
   if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o022) !== 0) {
     throw new Error('preloaded staging output directory must be a private real directory');

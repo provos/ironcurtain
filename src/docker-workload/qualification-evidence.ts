@@ -1,6 +1,6 @@
 /** Canonical, exact-set evidence root for one concrete backend qualification. */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -16,16 +16,17 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { sha256Hex, sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
+import { assertCanonicalHostPath } from '../hardened-fs.js';
+import { addDuplicateIssues } from '../zod-helpers.js';
 
 export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 1;
 export const QUALIFICATION_EVIDENCE_ROOT_FILE = 'root-manifest.json';
 export const MIN_CLEANUP_INVENTORY_SEPARATION_MS = 100;
 export const MAX_QUALIFICATION_EVIDENCE_FILE_BYTES = 128 * 1024 * 1024;
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
 const relativePathSchema = z
   .string()
@@ -213,7 +214,7 @@ export function loadQualificationEvidenceManifest(path: string): LoadedQualifica
   }
   return {
     path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
+    sha256: sha256Hex(bytes),
     manifest: validated.data,
   };
 }
@@ -249,9 +250,7 @@ function validatePlan<T extends QualificationEvidencePlan>(plan: T): T {
 }
 
 function validateRoot(root: string): void {
-  if (!isAbsolute(root) || resolve(root) !== root) {
-    throw new Error('qualification evidence root must be canonical and absolute');
-  }
+  assertCanonicalHostPath(root, 'qualification evidence root');
   const stats = lstatSync(root);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new Error('qualification evidence root must be a real directory');
@@ -293,7 +292,7 @@ function hashEvidenceFile(root: string, relativePath: string): { readonly sha256
   if (resolvedRelative !== relativePath) throw new Error(`qualification evidence path escapes root: ${relativePath}`);
   const bytes = readRegularPrivateFile(path, MAX_QUALIFICATION_EVIDENCE_FILE_BYTES);
   if (containsSecretMarker(bytes)) throw new Error(`qualification evidence contains a secret marker: ${relativePath}`);
-  return { sha256: createHash('sha256').update(bytes).digest('hex'), sizeBytes: bytes.length };
+  return { sha256: sha256Hex(bytes), sizeBytes: bytes.length };
 }
 
 function readRegularPrivateFile(path: string, maximumBytes: number): Buffer {
@@ -387,13 +386,5 @@ function writeCanonicalFileAtomic(path: string, value: unknown): void {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
     rmSync(temporary, { force: true });
-  }
-}
-
-function addDuplicateIssues(values: readonly string[], label: string, context: z.RefinementCtx): void {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) context.addIssue({ code: 'custom', message: `duplicate ${label}: ${value}` });
-    seen.add(value);
   }
 }

@@ -1,24 +1,11 @@
 /** Coordinator-independent process wrapper for the host resource watchdog. */
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
+import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
 import { createContainerRuntime } from '../docker/container-runtime.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import { inventoryOwnedResourceIds, revokeDockerWorkloadOuterResources } from './bundle-revocation.js';
@@ -47,7 +34,6 @@ export const RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION = 1;
 export const MAX_RESOURCE_WATCHDOG_SUPERVISOR_JSON_BYTES = 1024 * 1024;
 
 const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._:-]{2,127}$/u);
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestampSchema = z.iso.datetime({ offset: true });
 const runtimeIdentitySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u);
 
@@ -126,8 +112,8 @@ export interface LaunchDetachedResourceWatchdogSupervisorOptions extends Omit<
 
 /** Run inside the detached child process until normal cleanup or a trip closes the lease. */
 export async function runResourceWatchdogSupervisor(options: RunResourceWatchdogSupervisorOptions): Promise<void> {
-  assertCanonicalHostPath(options.statusPath, 'watchdog supervisor status');
-  assertCanonicalHostPath(options.stopRequestPath, 'watchdog supervisor stop request');
+  assertCanonicalPrivatePath(options.statusPath, 'watchdog supervisor status');
+  assertCanonicalPrivatePath(options.stopRequestPath, 'watchdog supervisor stop request');
   const now = options.now ?? (() => new Date());
   const sleep =
     options.sleep ??
@@ -289,9 +275,7 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
 export async function launchDetachedResourceWatchdogSupervisor(
   options: LaunchDetachedResourceWatchdogSupervisorOptions,
 ): Promise<{ readonly pid: number; readonly status: ResourceWatchdogSupervisorStatus }> {
-  if (!isAbsolute(options.entrypointPath) || resolve(options.entrypointPath) !== options.entrypointPath) {
-    throw new Error('watchdog supervisor entrypoint must be canonical and absolute');
-  }
+  assertCanonicalHostPath(options.entrypointPath, 'watchdog supervisor entrypoint');
   if (
     !Number.isSafeInteger(options.startupTimeoutMs) ||
     options.startupTimeoutMs < 100 ||
@@ -412,7 +396,7 @@ function statusUpdate(
 }
 
 function loadStrictJson<T>(path: string, label: string, schema: z.ZodType<T>): T {
-  assertCanonicalHostPath(path, label);
+  assertCanonicalPrivatePath(path, label);
   let descriptor: number;
   try {
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -442,34 +426,11 @@ function loadStrictJson<T>(path: string, label: string, schema: z.ZodType<T>): T
 }
 
 function writeStrictJsonAtomic(path: string, value: unknown): void {
-  assertCanonicalHostPath(path, 'watchdog supervisor output');
-  const temporary = resolve(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(
-      temporary,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    writeFileSync(descriptor, `${stableStringify(value)}\n`, 'utf8');
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, path);
-    const directoryDescriptor = openSync(dirname(path), constants.O_RDONLY);
-    try {
-      fsyncSync(directoryDescriptor);
-    } finally {
-      closeSync(directoryDescriptor);
-    }
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-    rmSync(temporary, { force: true });
-  }
+  assertCanonicalPrivatePath(path, 'watchdog supervisor output');
+  writeStableJsonAtomic(path, value, { mode: 0o600 });
 }
 
-function assertCanonicalHostPath(path: string, label: string): void {
+function assertCanonicalPrivatePath(path: string, label: string): void {
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error(`${label} path must be canonical and absolute`);
   const parent = statSync(dirname(path));
   if (!parent.isDirectory() || (parent.mode & 0o077) !== 0) {

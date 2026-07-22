@@ -8,11 +8,11 @@
  * by the catalog.
  */
 
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { arch } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
+import { readHardenedFile } from '../hardened-fs.js';
+import { sha256Hex, sha256HexSchema } from '../hash.js';
 import type { ContainerRuntime, DockerImageInfo } from './types.js';
 import { RUNTIME_TRUST_SCHEMA } from './runtime-trust.js';
 import { verifyOciImageArchive } from './oci-image-archive.js';
@@ -23,7 +23,6 @@ export const PRELOADED_IMAGE_CATALOG_SCHEMA_VERSION = 1;
 export const IMAGE_BUILD_HASH_SCHEMA = 'ironcurtain-build-v1';
 export const MAX_PRELOADED_CATALOG_BYTES = 1024 * 1024;
 
-const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const apiVersionSchema = z.string().regex(/^\d{1,3}\.\d{1,3}$/u);
 const nonEmptySchema = z.string().min(1).max(512);
@@ -143,32 +142,13 @@ const IMAGE_LABELS = {
 /** Read, bound, parse, and internally validate one trusted catalog file. */
 export function loadPreloadedImageCatalog(catalogPath: string): LoadedPreloadedImageCatalog {
   if (!catalogPath.startsWith('/')) throw new Error('preloaded image catalog path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(catalogPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`preloaded image catalog must be a readable regular non-symlink file: ${catalogPath}`, {
-      cause: error,
-    });
-  }
-  let bytes: Buffer;
-  try {
-    // Validate and read through the same no-follow descriptor so a rename or
-    // symlink swap between path checks cannot change the bytes we authorize.
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) {
-      throw new Error(`preloaded image catalog must be a regular file: ${catalogPath}`);
-    }
-    if ((stats.mode & 0o022) !== 0) {
-      throw new Error(`preloaded image catalog must not be group/world writable: ${catalogPath}`);
-    }
-    if (stats.size < 2 || stats.size > MAX_PRELOADED_CATALOG_BYTES) {
-      throw new Error(`preloaded image catalog size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
+  // Validate and read through one no-follow descriptor so a rename or symlink
+  // swap between path checks cannot change the bytes we authorize.
+  const bytes = readHardenedFile(catalogPath, {
+    label: 'preloaded image catalog',
+    minBytes: 2,
+    maxBytes: MAX_PRELOADED_CATALOG_BYTES,
+  });
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(bytes.toString('utf8')) as unknown;
@@ -199,7 +179,7 @@ export function loadPreloadedImageCatalog(catalogPath: string): LoadedPreloadedI
 
   return {
     path: catalogPath,
-    sha256: sha256(bytes),
+    sha256: sha256Hex(bytes),
     catalog: parsed.data,
   };
 }
@@ -290,7 +270,7 @@ export async function resolvePreloadedImage(
 }
 
 export function catalogTupleDigest(value: unknown): string {
-  return sha256(Buffer.from(canonicalJson(value), 'utf8'));
+  return sha256Hex(Buffer.from(canonicalJson(value), 'utf8'));
 }
 
 /** Build one fully self-consistent catalog tuple; staging never hand-writes digests. */
@@ -389,8 +369,4 @@ function canonicalJson(value: unknown): string {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
     .join(',')}}`;
-}
-
-function sha256(value: Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex');
 }

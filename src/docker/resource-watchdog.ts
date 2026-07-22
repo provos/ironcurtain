@@ -1,10 +1,10 @@
 /** Host-only observed-state watchdog for secure nested Docker bundles. */
 
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, statfsSync } from 'node:fs';
+import { lstatSync, readdirSync, statfsSync } from 'node:fs';
 import { isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { computeHash } from '../hash.js';
+import { loadImmutableHostJson } from '../hardened-fs.js';
 
 export const RESOURCE_WATCHDOG_POLICY_SCHEMA_VERSION = 1;
 export const MAX_RESOURCE_WATCHDOG_POLICY_BYTES = 256 * 1024;
@@ -150,6 +150,7 @@ interface ResourceWatchdogOptions {
  */
 export class ResourceWatchdog {
   private readonly policy: ResourceWatchdogPolicy;
+  private readonly expectedStateClassIdsJson: string;
   private readonly sampleState: () => Promise<ResourceWatchdogSample>;
   private readonly onTrip: (trip: ResourceWatchdogTrip) => Promise<void>;
   private readonly onSoftEvidence: ((sample: ResourceWatchdogSample) => void) | undefined;
@@ -164,7 +165,8 @@ export class ResourceWatchdog {
 
   constructor(policy: ResourceWatchdogPolicy, options: ResourceWatchdogOptions) {
     this.policy = resourceWatchdogPolicySchema.parse(policy);
-    this.sampleState = options.sample ?? (() => Promise.resolve(sampleResourceState(this.policy)));
+    this.expectedStateClassIdsJson = JSON.stringify(this.policy.stateClasses.map((stateClass) => stateClass.id).sort());
+    this.sampleState = options.sample ?? (() => Promise.resolve(sampleValidatedResourceState(this.policy, Date.now)));
     this.onTrip = options.onTrip;
     this.onSoftEvidence = options.onSoftEvidence;
     this.now = options.now ?? Date.now;
@@ -270,9 +272,8 @@ export class ResourceWatchdog {
           `got ${sample.targetDevice}:${sample.targetInode}`,
       );
     }
-    const expectedIds = this.policy.stateClasses.map((stateClass) => stateClass.id).sort();
     const actualIds = sample.classes.map((stateClass) => stateClass.id).sort();
-    if (JSON.stringify(actualIds) !== JSON.stringify(expectedIds)) {
+    if (JSON.stringify(actualIds) !== this.expectedStateClassIdsJson) {
       throw new Error('watchdog target identity/scope changed: state class set mismatch');
     }
     const total = sample.classes.reduce((sum, stateClass) => sum + stateClass.allocatedBytes, 0);
@@ -309,47 +310,21 @@ export class ResourceWatchdog {
 }
 
 export function loadResourceWatchdogPolicy(path: string): LoadedResourceWatchdogPolicy {
-  if (!isAbsolute(path)) throw new Error('resource watchdog policy path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`resource watchdog policy must be a readable regular non-symlink file: ${path}`, { cause: error });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error(`resource watchdog policy must be a regular file: ${path}`);
-    if ((stats.mode & 0o022) !== 0)
-      throw new Error(`resource watchdog policy must not be group/world writable: ${path}`);
-    if (stats.size < 2 || stats.size > MAX_RESOURCE_WATCHDOG_POLICY_BYTES) {
-      throw new Error(`resource watchdog policy size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('resource watchdog policy is not valid JSON', { cause: error });
-  }
-  const validated = resourceWatchdogPolicySchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`resource watchdog policy is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
-  return {
-    path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    sizeBytes: bytes.length,
-    policy: validated.data,
-  };
+  const loaded = loadImmutableHostJson(path, {
+    label: 'resource watchdog policy',
+    schema: resourceWatchdogPolicySchema,
+    maxBytes: MAX_RESOURCE_WATCHDOG_POLICY_BYTES,
+  });
+  return { path: loaded.path, sha256: loaded.sha256, sizeBytes: loaded.sizeBytes, policy: loaded.value };
 }
 
 /** Measure allocated host blocks for non-overlapping exact state classes. */
 export function sampleResourceState(policy: ResourceWatchdogPolicy, now = Date.now): ResourceWatchdogSample {
-  const validated = resourceWatchdogPolicySchema.parse(policy);
+  return sampleValidatedResourceState(resourceWatchdogPolicySchema.parse(policy), now);
+}
+
+/** Sample using an already-validated policy; the ResourceWatchdog hot path skips the per-tick re-parse. */
+function sampleValidatedResourceState(validated: ResourceWatchdogPolicy, now: () => number): ResourceWatchdogSample {
   const root = lstatSync(validated.targetRoot);
   if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('watchdog target identity is not a real directory');
   if (root.dev !== validated.targetDevice || root.ino !== validated.targetInode) {

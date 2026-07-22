@@ -1,9 +1,7 @@
 /** Frozen runtime/time/state budgets used by secure nested qualification. */
 
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { loadImmutableHostJson } from '../hardened-fs.js';
 
 export const PERFORMANCE_BUDGET_SCHEMA_VERSION = 1;
 export const MAX_PERFORMANCE_BUDGET_BYTES = 256 * 1024;
@@ -85,41 +83,12 @@ export interface PerformanceBudgetScope {
 }
 
 export function loadPerformanceBudget(path: string): LoadedPerformanceBudget {
-  if (!isAbsolute(path)) throw new Error('performance budget path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`performance budget must be a readable regular non-symlink file: ${path}`, { cause: error });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error(`performance budget must be a regular file: ${path}`);
-    if ((stats.mode & 0o022) !== 0) throw new Error(`performance budget must not be group/world writable: ${path}`);
-    if (stats.size < 2 || stats.size > MAX_PERFORMANCE_BUDGET_BYTES) {
-      throw new Error(`performance budget size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('performance budget is not valid JSON', { cause: error });
-  }
-  const validated = performanceBudgetSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`performance budget is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
-  return {
-    path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    sizeBytes: bytes.length,
-    budget: validated.data,
-  };
+  const loaded = loadImmutableHostJson(path, {
+    label: 'performance budget',
+    schema: performanceBudgetSchema,
+    maxBytes: MAX_PERFORMANCE_BUDGET_BYTES,
+  });
+  return { path: loaded.path, sha256: loaded.sha256, sizeBytes: loaded.sizeBytes, budget: loaded.value };
 }
 
 /** Reject selecting a budget measured for another concrete runtime tuple. */

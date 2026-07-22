@@ -31,11 +31,18 @@
  * must freeze (reviewed origins, exact ceilings, hermetic protocol fixtures).
  */
 
-import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { sha256Hex } from '../hash.js';
+import {
+  addDuplicateIssues,
+  HEADER_NAME_REGEX,
+  headerNameSchema,
+  hostnameSchema,
+  identifierSchema,
+} from '../zod-helpers.js';
 import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 
 export const REGISTRY_EGRESS_MANIFEST_SCHEMA_VERSION = 1;
@@ -73,16 +80,6 @@ export type RejectedRegistryOperation = 'push' | 'delete' | 'catalog-enumeration
 /** Content pulls whose immediate 3xx Location may be followed as a derived redirect. */
 const CONTENT_OPERATIONS: readonly RegistryPullOperation[] = ['manifest-pull', 'blob-pull'];
 
-const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
-const hostnameSchema = z
-  .string()
-  .min(1)
-  .max(253)
-  .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u)
-  .refine(
-    (value) => value === value.toLowerCase() && !value.includes('..'),
-    'hostname must be canonical lowercase DNS',
-  );
 const originPathSchema = z
   .string()
   .min(1)
@@ -91,8 +88,6 @@ const originPathSchema = z
     (value) => value.startsWith('/') && !value.startsWith('//') && !value.includes('?') && !value.includes('#'),
     'token path pattern must be an origin pathname without query or fragment',
   );
-const headerNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,127}$/u);
-
 /** Pull operations only; the rejected set is intentionally not expressible. */
 const pullOperationSchema = z.enum(['api-version', 'token', 'manifest-pull', 'blob-pull']);
 
@@ -298,7 +293,7 @@ export function loadRegistryEgressManifest(path: string): LoadedRegistryEgressMa
   }
   return {
     path,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
+    sha256: sha256Hex(bytes),
     sizeBytes: bytes.length,
     manifest: validated.data as ValidatedRegistryEgressManifest,
   };
@@ -591,7 +586,7 @@ function sanitizeHeaders(
   const result: Record<string, string | readonly string[]> = {};
   for (const [rawName, rawValue] of Object.entries(headers)) {
     const name = rawName.toLowerCase();
-    if (name !== rawName || !headerNameSchema.safeParse(name).success) {
+    if (name !== rawName || !HEADER_NAME_REGEX.test(name)) {
       throw new Error(`registry-egress header name is not canonical: ${rawName}`);
     }
     if (rawValue === undefined) continue;
@@ -629,12 +624,4 @@ function admitBearerAuthorization(value: string | readonly string[]): string {
     throw new Error('registry-egress authorization must be a single anonymous Bearer token');
   }
   return value;
-}
-
-function addDuplicateIssues(values: readonly string[], label: string, context: z.RefinementCtx): void {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) context.addIssue({ code: 'custom', message: `duplicate ${label}: ${value}` });
-    seen.add(value);
-  }
 }
