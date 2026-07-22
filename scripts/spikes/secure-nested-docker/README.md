@@ -250,7 +250,7 @@ endpoint fetched but not recorded is by construction a direct connection — so 
 the complete mediated set. Records are attributed to the Dockerfile under build (builds run
 sequentially).
 
-The recorder has two modes:
+The recorder has three modes:
 
 - **tunnel (default for `--build`)** — CONNECT requests are recorded as
   scheme/host/port/byte-counts/duration and then blind-piped to the real destination. No TLS
@@ -262,8 +262,24 @@ The recorder has two modes:
   host; the build container only ever names destinations. A CONNECT that fails to resolve/connect
   is recorded under `failedFetchAttempts` (evidence), not a crash.
 - **terminate-tls (`--terminate-tls`; used by `--smoke`)** — the proxy MITMs TLS with an ephemeral
-  capture CA and records full HTTPS paths. Only usable against images that trust the capture CA,
-  so it is kept for future capture-CA-trusting images and the hermetic smoke path.
+  capture CA and records full HTTPS paths. Only usable against images that already trust the capture
+  CA; against the unmodified production Dockerfiles every handshake fails and every endpoint is
+  connect-only, so this bare mode is kept for future capture-CA-trusting images and the smoke path.
+- **terminate-tls + CA injection (`--ca-inject`; implies `--terminate-tls`)** — the way to get real
+  per-host HTTPS path prefixes from the current production Dockerfiles **without editing them**. For
+  each target the harness generates a per-target _capture overlay_ Dockerfile under
+  `<evidence-dir>/overlays`: the original text verbatim, with a CA-trust preamble injected after each
+  non-`scratch` `FROM` via BuildKit heredocs (`# syntax=docker/dockerfile:1`; no build-context file
+  needed). The preamble drops the ephemeral capture CA into the system trust store, runs
+  `update-ca-certificates`, and `ENV`s the full trust set (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+  `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `PIP_CERT`, `REQUESTS_CA_BUNDLE`, `CARGO_HTTP_CAINFO`) plus the
+  proxy env and the apt proxy/CaInfo config. The build runs against the **original** context
+  (`docker build -f <overlay>`) so every `COPY` in the production Dockerfile still resolves. Tools
+  that honor the system CA (curl, apt, npm/node, cargo, pip, git, playwright) then complete the MITM
+  handshake and their full paths are recorded (`pathVisibility: 'full'`). A tool with a
+  statically-pinned trust store refuses the capture CA — its handshake fails, the endpoint is
+  recorded connect-only plus a `failedFetchAttempts` note naming the host, and the build continues.
+  Partial path visibility is an expected outcome, not an error.
 
 macOS Docker Desktop reachability: the proxy listens on `127.0.0.1` host-side, but RUN steps
 execute inside build containers where `127.0.0.1` is the container itself, so the proxy URL passed
@@ -284,14 +300,43 @@ node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke-tunnel
 ```
 
 The full cold-cache capture is a later operator-supervised validation step (a real build reaches the
-public internet through the proxy):
+public internet through the proxy). Dockerfiles are grouped by their build **context** — the context
+is the directory containing the files each Dockerfile `COPY`s, exactly as the live build selects it
+(`src/docker/preloaded-catalog-sources.ts`): the base and agent Dockerfiles share `docker`, while the
+Go/scratch workload images each use their own subdirectory. Tunnel mode (host+port only for HTTPS):
 
 ```sh
 node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build \
   --evidence-dir /absolute/outside-workspace/build-egress-capture \
   --repo-root /absolute/path/to/ironcurtain \
-  --dockerfile docker/Dockerfile.base --dockerfile docker/Dockerfile.goose --context .
+  --dockerfile docker/Dockerfile.base.arm64 --dockerfile docker/Dockerfile.goose --context docker
 ```
+
+Terminate-TLS with CA injection (real per-host HTTPS **path prefixes**, one invocation per context
+group). Because `--pull=false` keeps base-image resolution off the RUN-step path, pre-pull the
+base images and BuildKit frontends the Dockerfiles reference first (this is the daemon-layer
+base-image/frontend seam, inventoried separately from RUN-step egress): `docker pull node:22-trixie`,
+the digest-pinned `golang:1.24-bookworm@sha256:…` and `docker@sha256:…` bases, and `docker pull
+docker/dockerfile:1` (plus the pinned `docker/dockerfile:1.7@sha256:…` the Go Dockerfiles pin). Then:
+
+```sh
+node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build --ca-inject \
+  --evidence-dir /absolute/outside-workspace/build-egress-capture-tls/context-docker \
+  --repo-root /absolute/path/to/ironcurtain --context docker \
+  --dockerfile docker/Dockerfile.base.arm64 \
+  --dockerfile docker/Dockerfile.claude-code \
+  --dockerfile docker/Dockerfile.codex \
+  --dockerfile docker/Dockerfile.goose
+# ...then one invocation each for the Go/scratch images, e.g.:
+node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build --ca-inject \
+  --evidence-dir /absolute/outside-workspace/build-egress-capture-tls/helper \
+  --repo-root /absolute/path/to/ironcurtain --context docker/docker-workload/helper \
+  --dockerfile docker/docker-workload/helper/Dockerfile
+```
+
+The `--ca-inject` draft marks each endpoint `pathVisibility: 'full'` with the observed path prefixes
+where the tool trusted the capture CA, and `'connect-only'` (with a `failedFetchAttempts` note) where
+the tool pinned its own trust store. Overlays are written to `<evidence-dir>/overlays` for audit.
 
 The draft is an input to review, not a frozen artifact. A human must pin every fetched artifact,
 choose each rule's BuildKit/frontend/base-image/RUN seam, decide path shapes for every

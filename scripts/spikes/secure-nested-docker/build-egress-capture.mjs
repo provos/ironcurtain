@@ -27,6 +27,23 @@
  *     Dockerfiles do not and must not be modified, so this mode is kept for
  *     future capture-CA-trusting images and for the hermetic smoke path.
  *
+ *   terminate-tls + CA injection (--ca-inject; implies terminate-tls): the
+ *     production Dockerfiles are NOT modified, but a per-target capture OVERLAY
+ *     Dockerfile is generated in a temp dir OUTSIDE the repo. The overlay reads
+ *     the target verbatim and, after EACH non-`scratch` `FROM`, injects a
+ *     transient CA-trust preamble (BuildKit heredoc, no build-context file):
+ *     it writes the ephemeral capture CA into the system trust store, runs
+ *     `update-ca-certificates`, and ENVs the full trust set (NODE_EXTRA_CA_CERTS,
+ *     SSL_CERT_FILE, CURL_CA_BUNDLE, GIT_SSL_CAINFO, PIP_CERT, REQUESTS_CA_BUNDLE,
+ *     CARGO_HTTP_CAINFO) plus the proxy env + apt proxy/CaInfo config. The build
+ *     still uses the ORIGINAL context (via `-f <overlay>`) so `COPY` resolves.
+ *     Tools that honor the system CA (curl, apt, npm/node, cargo, pip, git,
+ *     playwright) then complete the MITM handshake and their full HTTPS paths
+ *     are recorded (`pathVisibility: 'full'`); a tool with a statically-pinned
+ *     trust store refuses the capture CA — its handshake fails, the endpoint is
+ *     recorded connect-only (host visible, path not) plus a failed-fetch note,
+ *     and the build continues. Partial path visibility is an expected outcome.
+ *
  * macOS Docker Desktop reachability: the proxy listens on 127.0.0.1
  * host-side, but RUN steps execute inside build containers where 127.0.0.1
  * is the container itself. The proxy URL handed to the build therefore uses
@@ -62,7 +79,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -78,7 +95,7 @@ const USAGE = `Usage:
   build-egress-capture.mjs --smoke-tunnel --evidence-dir <abs>   hermetic smoke of the tunnel recorder (CONNECT pass-through + plain HTTP; no docker)
   build-egress-capture.mjs --build --evidence-dir <abs> --repo-root <abs>
       --dockerfile <rel> [--dockerfile <rel> ...] [--context <rel>]
-      [--proxy-host <name>] [--terminate-tls]
+      [--proxy-host <name>] [--terminate-tls | --ca-inject]
 
 Flags:
   --evidence-dir <abs>   Absolute directory for draft manifest + evidence output (required).
@@ -91,14 +108,21 @@ Flags:
                          On native Linux, Docker Engine has no host.docker.internal by default —
                          pass the docker0 gateway instead, typically: --proxy-host 172.17.0.1
   --terminate-tls        Use the TLS-terminating (MITM) recorder for --build instead of the
-                         default non-terminating tunnel mode. Requires images that trust the
-                         ephemeral capture CA; the production Dockerfiles do not (and must not
-                         be modified), so leave this off for real captures.
+                         default non-terminating tunnel mode. Requires images that already trust
+                         the ephemeral capture CA (the production Dockerfiles do not); without
+                         --ca-inject those handshakes fail and every endpoint is connect-only.
+  --ca-inject            Terminate TLS AND make the build trust the capture CA WITHOUT editing the
+                         production Dockerfiles: a per-target capture overlay Dockerfile is generated
+                         under <evidence-dir>/overlays and a CA-trust preamble is injected after each
+                         non-'scratch' FROM (heredoc; the original context is still used so COPY
+                         resolves). Yields real per-host HTTPS path prefixes where the tool honors the
+                         system CA; endpoints whose tool pins its own trust store stay connect-only.
+                         Implies --terminate-tls. Only affects --build.
   --help                 Show this help.
 `;
 
 function parseArgs(argv) {
-  const values = { dockerfiles: [], terminateTls: false };
+  const values = { dockerfiles: [], terminateTls: false, caInject: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--help' || arg === '-h') {
@@ -110,6 +134,12 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--terminate-tls') {
+      values.terminateTls = true;
+      continue;
+    }
+    if (arg === '--ca-inject') {
+      // CA injection only makes sense with a TLS-terminating recorder.
+      values.caInject = true;
       values.terminateTls = true;
       continue;
     }
@@ -133,6 +163,7 @@ function createRecorder() {
   const fetches = [];
   const redirects = [];
   const connects = [];
+  const intercepts = [];
   const failedFetchAttempts = [];
   const directConnectSuspected = [];
   let currentDockerfile = null;
@@ -145,6 +176,7 @@ function createRecorder() {
     fetches,
     redirects,
     connects,
+    intercepts,
     failedFetchAttempts,
     directConnectSuspected,
     setCurrentDockerfile(dockerfile) {
@@ -159,6 +191,12 @@ function createRecorder() {
     recordConnect(entry) {
       connects.push(stamp(entry));
     },
+    // terminate-tls: a CONNECT whose TLS we MITM. Records the destination host
+    // so an endpoint whose client refuses the capture CA (handshake fails, no
+    // HTTP request seen) is still visible as connect-only, not invisible.
+    recordIntercept(entry) {
+      intercepts.push(stamp(entry));
+    },
     recordFailedFetchAttempt(entry) {
       failedFetchAttempts.push(stamp(entry));
     },
@@ -170,11 +208,26 @@ function createRecorder() {
 
 // ── Ephemeral capture CA + leaf certs (terminate-tls mode only) ──────
 
+/**
+ * Random serial as a hex string, mirroring src/docker/ca.ts randomSerialNumber.
+ * node-forge encodes the serial's bytes verbatim with no sign pad: a leading
+ * byte >= 0x80 becomes a NEGATIVE DER INTEGER and a leading 0x00 is a redundant
+ * pad — both make strict OpenSSL (Node 22 / OpenSSL 3.x) reject the cert at load
+ * with "asn1 …::illegal padding", which aborts the MITM handshake. Clear the
+ * high bit for a positive serial and avoid a 0x00 leading byte.
+ */
+function randomSerialNumber() {
+  const hex = forge.util.bytesToHex(forge.random.getBytesSync(16));
+  let first = parseInt(hex.slice(0, 2), 16) & 0x7f;
+  if (first === 0) first = 0x01;
+  return first.toString(16).padStart(2, '0') + hex.slice(2);
+}
+
 function generateCa() {
   const keys = forge.pki.rsa.generateKeyPair(2048);
   const cert = forge.pki.createCertificate();
   cert.publicKey = keys.publicKey;
-  cert.serialNumber = '01';
+  cert.serialNumber = randomSerialNumber();
   cert.validity.notBefore = new Date();
   cert.validity.notAfter = new Date(Date.now() + 24 * 60 * 60 * 1000);
   const attrs = [{ name: 'commonName', value: 'IronCurtain Build-Egress Capture CA' }];
@@ -196,7 +249,7 @@ function createLeafContextFactory(ca) {
     const leafKeys = forge.pki.rsa.generateKeyPair(2048);
     const leaf = forge.pki.createCertificate();
     leaf.publicKey = leafKeys.publicKey;
-    leaf.serialNumber = Date.now().toString(16).padStart(16, '0');
+    leaf.serialNumber = randomSerialNumber();
     leaf.validity.notBefore = new Date();
     leaf.validity.notAfter = new Date(Date.now() + 24 * 60 * 60 * 1000);
     leaf.setSubject([{ name: 'commonName', value: hostname }]);
@@ -261,11 +314,27 @@ function startRecordingProxy({ recorder, allowInsecureUpstream, terminateTls }) 
     if (terminateTls) {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length > 0) clientSocket.unshift(head);
+      // Record the interception up front: even if the client refuses our capture
+      // CA (handshake fails, no request reaches `inner`), the destination host
+      // stays visible in the draft as connect-only rather than disappearing.
+      recorder.recordIntercept({ scheme: 'https:', host, port });
       const tlsSocket = new tls.TLSSocket(clientSocket, {
         isServer: true,
         SNICallback: (servername, cb) => cb(null, leafContext(servername || host)),
       });
-      tlsSocket.on('error', () => tlsSocket.destroy());
+      tlsSocket.on('error', (error) => {
+        // A server-side TLS error before any request almost always means the
+        // build tool rejected the capture CA (statically-pinned trust store):
+        // record which host resisted so the reviewer can host-gate just that one.
+        recorder.recordFailedFetchAttempt({
+          scheme: 'https:',
+          host,
+          port,
+          method: 'CONNECT',
+          error: `tls handshake failed (capture CA likely untrusted by client): ${error.message}`,
+        });
+        tlsSocket.destroy();
+      });
       meta.set(tlsSocket, { host, port });
       inner.emit('connection', tlsSocket);
       return;
@@ -416,6 +485,7 @@ function synthesizeDraft(recorder, context) {
         paths: new Set(),
         dockerfiles: new Set(),
         connectCount: 0,
+        interceptCount: 0,
         bytesUp: 0,
         bytesDown: 0,
       };
@@ -440,6 +510,15 @@ function synthesizeDraft(recorder, context) {
     entry.bytesDown += connect.bytesDown;
     if (connect.dockerfile) entry.dockerfiles.add(connect.dockerfile);
   }
+  for (const intercept of recorder.intercepts) {
+    // terminate-tls: a MITMed CONNECT. The host is now known; if a full request
+    // followed (CA trusted) a fetch above already flipped pathVisibility to
+    // 'full'. If not (CA resisted), the entry stays connect-only by default.
+    const entry = ensure(intercept.scheme, intercept.host, intercept.port);
+    entry.methods.add('CONNECT');
+    entry.interceptCount += 1;
+    if (intercept.dockerfile) entry.dockerfiles.add(intercept.dockerfile);
+  }
   const proposedRules = [...byDestination.values()].map((entry, index) => ({
     proposedId: `capture-${entry.host.replace(/[^a-z0-9]+/g, '-')}-${index}`,
     reviewerMustDecideSeam: ['dockerfile-frontend', 'base-image', 'run'],
@@ -459,6 +538,7 @@ function synthesizeDraft(recorder, context) {
     ...(entry.connectCount > 0
       ? { observedConnects: { count: entry.connectCount, bytesUp: entry.bytesUp, bytesDown: entry.bytesDown } }
       : {}),
+    ...(entry.interceptCount > 0 ? { observedTlsIntercepts: entry.interceptCount } : {}),
   }));
   return {
     draft: true,
@@ -487,11 +567,13 @@ function writeEvidence(evidenceDir, recorder, draft, context) {
         fetchCount: recorder.fetches.length,
         redirectCount: recorder.redirects.length,
         connectCount: recorder.connects.length,
+        interceptCount: recorder.intercepts.length,
         failedFetchAttemptCount: recorder.failedFetchAttempts.length,
         directConnectSuspectedCount: recorder.directConnectSuspected.length,
         fetches: recorder.fetches,
         redirects: recorder.redirects,
         connects: recorder.connects,
+        intercepts: recorder.intercepts,
         failedFetchAttempts: recorder.failedFetchAttempts,
         directConnectSuspected: recorder.directConnectSuspected,
       },
@@ -599,13 +681,31 @@ async function runBuild(args) {
     writeFileSync(caPath, proxy.caCertPem, { mode: 0o600 });
   }
   const proxyUrl = `http://${proxyHost}:${proxy.port}`;
+  // CA-injection overlays: generated per-target OUTSIDE the repo (under the
+  // evidence dir). The overlay is what `docker build -f` reads; the original
+  // context is still used so every COPY in the production Dockerfile resolves.
+  let overlayDir = null;
+  if (args.caInject) {
+    overlayDir = path.join(args['evidence-dir'], 'overlays');
+    mkdirSync(overlayDir, { recursive: true, mode: 0o700 });
+  }
+  const overlays = [];
   const buildLogs = [];
   try {
     for (const dockerfile of args.dockerfiles) {
       // Builds run sequentially; attribute every record to the Dockerfile under build.
       recorder.setCurrentDockerfile(dockerfile);
+      let dockerfileOverride = null;
+      if (args.caInject) {
+        const originalText = readFileSync(path.resolve(repoRoot, dockerfile), 'utf8');
+        const overlayText = generateCaptureOverlay(originalText, proxy.caCertPem, proxyUrl);
+        const overlayName = `${dockerfile.replace(/[^a-z0-9]+/giu, '_')}.overlay.Dockerfile`;
+        dockerfileOverride = path.join(overlayDir, overlayName);
+        writeFileSync(dockerfileOverride, overlayText, { mode: 0o600 });
+        overlays.push({ dockerfile, overlayPath: dockerfileOverride });
+      }
       // Fresh cold-cache builder per Dockerfile so no warm layer masks a fetch.
-      const log = await runColdCacheBuild({ repoRoot, dockerfile, buildContext, proxyUrl, caPath });
+      const log = await runColdCacheBuild({ repoRoot, dockerfile, buildContext, proxyUrl, dockerfileOverride });
       buildLogs.push({ dockerfile, ...log });
       if (/could not resolve|connection refused|network is unreachable|temporary failure/iu.test(log.stderr)) {
         recorder.recordDirectConnectSuspected({ dockerfile, note: 'build log shows an unmediated connection failure' });
@@ -618,11 +718,13 @@ async function runBuild(args) {
   const context = {
     mode: 'build',
     tlsMode,
+    caInject: args.caInject,
     proxyHost,
     proxyPort: proxy.port,
     dockerfiles: args.dockerfiles,
     buildContext,
     ...(caPath ? { caPath } : {}),
+    ...(overlays.length > 0 ? { overlays } : {}),
   };
   const draft = synthesizeDraft(recorder, context);
   const paths = writeEvidence(args['evidence-dir'], recorder, draft, context);
@@ -631,17 +733,21 @@ async function runBuild(args) {
   });
   console.log(
     `[capture] build capture complete — ${recorder.fetches.length} full-path fetches, ` +
-      `${recorder.connects.length} https tunnels, ${recorder.failedFetchAttempts.length} failed attempts ` +
-      `(tlsMode=${tlsMode}, proxy=${proxyHost}:${proxy.port})`,
+      `${recorder.connects.length} https tunnels, ${recorder.intercepts.length} tls intercepts, ` +
+      `${recorder.failedFetchAttempts.length} failed attempts ` +
+      `(tlsMode=${tlsMode}, caInject=${args.caInject}, proxy=${proxyHost}:${proxy.port})`,
   );
   console.log(`[capture] draft manifest: ${paths.draftPath}`);
   console.log(`[capture] evidence:       ${paths.evidencePath}`);
 }
 
-function runColdCacheBuild({ repoRoot, dockerfile, buildContext, proxyUrl, caPath }) {
+function runColdCacheBuild({ repoRoot, dockerfile, buildContext, proxyUrl, dockerfileOverride }) {
   // Route ALL build egress through the recording proxy. The proxy is the sole
   // route; a tool that ignores it fails to connect. In tunnel mode no CA is
-  // injected — production Dockerfiles stay unmodified and TLS is untouched.
+  // injected — production Dockerfiles stay unmodified and TLS is untouched. In
+  // --ca-inject mode `dockerfileOverride` is a capture overlay (generated outside
+  // the repo) that trusts the capture CA; the context stays the original so COPY
+  // resolves. --pull=false keeps base-image resolution off the RUN-step path.
   const buildArgs = [
     'build',
     '--no-cache',
@@ -655,9 +761,8 @@ function runColdCacheBuild({ repoRoot, dockerfile, buildContext, proxyUrl, caPat
     `http_proxy=${proxyUrl}`,
     '--build-arg',
     `https_proxy=${proxyUrl}`,
-    ...(caPath ? ['--secret', `id=capture-ca,src=${caPath}`] : []),
     '-f',
-    path.resolve(repoRoot, dockerfile),
+    dockerfileOverride ?? path.resolve(repoRoot, dockerfile),
     path.resolve(repoRoot, buildContext),
   ];
   return new Promise((resolve) => {
@@ -669,6 +774,94 @@ function runColdCacheBuild({ repoRoot, dockerfile, buildContext, proxyUrl, caPat
     child.on('error', (error) => resolve({ exitCode: -1, stdout, stderr: `${stderr}\n${error.message}` }));
     child.on('close', (exitCode) => resolve({ exitCode, stdout, stderr }));
   });
+}
+
+// ── Capture-CA overlay generation (--ca-inject) ──────────────────────
+//
+// The production Dockerfiles are never modified. Instead a per-target OVERLAY
+// Dockerfile is generated: the original text verbatim, with a CA-trust preamble
+// injected after every non-`scratch` `FROM`. The preamble uses BuildKit heredocs
+// (`COPY <<'EOF' /path`) so no build-context file is needed; the build still runs
+// against the ORIGINAL context so `COPY` in the production Dockerfile resolves.
+
+// Absolute path of the system trust bundle that `update-ca-certificates`
+// regenerates to INCLUDE the injected capture CA (Debian/Ubuntu/Node base).
+const CAPTURE_SYSTEM_CA_BUNDLE = '/etc/ssl/certs/ca-certificates.crt';
+const CAPTURE_CA_DROP_PATH = '/usr/local/share/ca-certificates/ironcurtain-capture.crt';
+
+/** Return the image reference of a `FROM` line, or null if the line is not a FROM. */
+function parseFromImage(line) {
+  const match = /^\s*FROM\s+(.+?)\s*$/iu.exec(line);
+  if (!match) return null;
+  const tokens = match[1].split(/\s+/u);
+  let index = 0;
+  while (index < tokens.length && tokens[index].startsWith('--')) index += 1; // skip --platform=...
+  const image = tokens[index];
+  return image ? image.toLowerCase() : null;
+}
+
+/** apt proxy + CaInfo config, mirroring src/docker/runtime-trust.ts renderAptProxyConfig. */
+function renderCaptureAptConfig(proxyUrl, caBundlePath) {
+  const parsed = new URL(proxyUrl); // http://host:port (validated by caller)
+  const endpoint = `http://${parsed.host}`;
+  return [
+    `Acquire::http::Proxy "${endpoint}";`,
+    `Acquire::https::Proxy "${endpoint}";`,
+    `Acquire::https::CaInfo "${caBundlePath}";`,
+  ];
+}
+
+/** The CA-trust preamble injected after each non-scratch FROM (array of Dockerfile lines). */
+function buildCaTrustPreamble(caCertPem, proxyUrl) {
+  const bundle = CAPTURE_SYSTEM_CA_BUNDLE;
+  const pemLines = caCertPem.replaceAll('\r\n', '\n').trim().split('\n');
+  const aptLines = renderCaptureAptConfig(proxyUrl, bundle);
+  return [
+    '',
+    '# >>> ironcurtain build-egress capture: CA-trust preamble (injected; NOT in the production Dockerfile) >>>',
+    'USER root',
+    `COPY <<'IRONCURTAIN_CAPTURE_PEM' ${CAPTURE_CA_DROP_PATH}`,
+    ...pemLines,
+    'IRONCURTAIN_CAPTURE_PEM',
+    // Guarded: images without update-ca-certificates (e.g. scratch-adjacent) skip it.
+    'RUN if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; fi',
+    `ENV NODE_EXTRA_CA_CERTS=${bundle} \\`,
+    `    SSL_CERT_FILE=${bundle} \\`,
+    `    CURL_CA_BUNDLE=${bundle} \\`,
+    `    GIT_SSL_CAINFO=${bundle} \\`,
+    `    PIP_CERT=${bundle} \\`,
+    `    REQUESTS_CA_BUNDLE=${bundle} \\`,
+    `    CARGO_HTTP_CAINFO=${bundle} \\`,
+    `    HTTP_PROXY=${proxyUrl} HTTPS_PROXY=${proxyUrl} \\`,
+    `    http_proxy=${proxyUrl} https_proxy=${proxyUrl}`,
+    "COPY <<'IRONCURTAIN_CAPTURE_APT' /etc/apt/apt.conf.d/00ironcurtain-capture",
+    ...aptLines,
+    'IRONCURTAIN_CAPTURE_APT',
+    '# <<< ironcurtain build-egress capture: CA-trust preamble <<<',
+    '',
+  ];
+}
+
+/**
+ * Generate a capture overlay Dockerfile from an original Dockerfile's text:
+ * inject the CA-trust preamble after each non-`scratch` FROM and ensure a
+ * heredoc-capable `# syntax` frontend directive on line 1.
+ */
+function generateCaptureOverlay(originalText, caCertPem, proxyUrl) {
+  const rawLines = originalText.replaceAll('\r\n', '\n').split('\n');
+  const preamble = buildCaTrustPreamble(caCertPem, proxyUrl);
+  const out = [];
+  // A parser directive is only honored on line 1. Keep an existing one (the Go
+  // Dockerfiles pin a digest-locked frontend); otherwise add a heredoc-capable one.
+  if (!/^#\s*syntax=/iu.test(rawLines[0] ?? '')) {
+    out.push('# syntax=docker/dockerfile:1');
+  }
+  for (const line of rawLines) {
+    out.push(line);
+    const image = parseFromImage(line);
+    if (image && image !== 'scratch') out.push(...preamble);
+  }
+  return `${out.join('\n')}\n`;
 }
 
 // ── Smoke helpers ────────────────────────────────────────────────────
