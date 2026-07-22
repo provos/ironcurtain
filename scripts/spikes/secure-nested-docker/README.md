@@ -241,20 +241,46 @@ two-MITM/provider protocol, product watchdog, product entrypoint, the Phase 0F f
 
 `build-egress-capture.mjs` records the complete endpoint set that a cold-cache rebuild of the
 current IronCurtain Dockerfiles fetches, so a reviewer can freeze
-`config/docker-workload/build-egress-manifest.json`. It stands up a recording MITM proxy that is the
-build's ONLY egress route, drives `docker build --no-cache` with a fresh builder, and records every
-fetched scheme/host/port/method/path plus every redirect hop. It emits a DRAFT
+`config/docker-workload/build-egress-manifest.json`. It stands up a recording proxy that is the
+build's ONLY egress route, drives `docker build --no-cache` with a fresh builder, and emits a DRAFT
 `build-egress-manifest.draft.json` (top-level `draft: true`, deliberately NOT a loadable frozen
 manifest) and a `capture-evidence.json` summary. A tool that bypasses the proxy fails to connect;
 those failures land in the per-Dockerfile build logs and under `directConnectSuspected`, and any
 endpoint fetched but not recorded is by construction a direct connection — so the recorded set is
-the complete mediated set.
+the complete mediated set. Records are attributed to the Dockerfile under build (builds run
+sequentially).
 
-Validate the recorder → synthesizer → evidence plumbing without Docker:
+The recorder has two modes:
+
+- **tunnel (default for `--build`)** — CONNECT requests are recorded as
+  scheme/host/port/byte-counts/duration and then blind-piped to the real destination. No TLS
+  interception, so the production Dockerfiles need no capture CA (they must not be modified) and
+  HTTPS paths are invisible: the draft marks these endpoints `pathVisibility: 'connect-only'`,
+  telling the reviewer that path shapes must be decided at freeze time. Plain HTTP through the
+  proxy (apt via `http://deb.debian.org`) is still recorded with full method/host/path and redirect
+  hops (`pathVisibility: 'full'`). DNS stays host-side: the proxy resolves and connects to the real
+  host; the build container only ever names destinations. A CONNECT that fails to resolve/connect
+  is recorded under `failedFetchAttempts` (evidence), not a crash.
+- **terminate-tls (`--terminate-tls`; used by `--smoke`)** — the proxy MITMs TLS with an ephemeral
+  capture CA and records full HTTPS paths. Only usable against images that trust the capture CA,
+  so it is kept for future capture-CA-trusting images and the hermetic smoke path.
+
+macOS Docker Desktop reachability: the proxy listens on `127.0.0.1` host-side, but RUN steps
+execute inside build containers where `127.0.0.1` is the container itself, so the proxy URL passed
+via build args uses `host.docker.internal` (Docker Desktop's alias for the host). Override with
+`--proxy-host` — on native Linux Docker Engine there is no `host.docker.internal` by default; pass
+the docker0 gateway, typically `--proxy-host 172.17.0.1`.
+
+Validate the recorder → synthesizer → evidence plumbing without Docker (`--smoke` exercises the
+terminate-TLS recorder; `--smoke-tunnel` exercises the blind CONNECT tunnel against a self-signed
+local HTTPS upstream — the client pins the upstream's own cert, so a successful handshake proves
+the proxy did not intercept — plus one plain-HTTP fetch and one recorded failed CONNECT):
 
 ```sh
 node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke \
   --evidence-dir /absolute/outside-workspace/build-egress-smoke
+node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke-tunnel \
+  --evidence-dir /absolute/outside-workspace/build-egress-smoke-tunnel
 ```
 
 The full cold-cache capture is a later operator-supervised validation step (a real build reaches the
@@ -268,6 +294,9 @@ node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build \
 ```
 
 The draft is an input to review, not a frozen artifact. A human must pin every fetched artifact,
-choose each rule's BuildKit/frontend/base-image/RUN seam, and transform the draft into the strict
-frozen manifest that `src/docker-workload/build-egress-policy.ts` loads. Capturing does not freeze,
-qualify a backend, or make a network-dependent build reproducible.
+choose each rule's BuildKit/frontend/base-image/RUN seam, decide path shapes for every
+`connect-only` endpoint, and transform the draft into the strict frozen manifest that
+`src/docker-workload/build-egress-policy.ts` loads. Capturing does not freeze, qualify a backend,
+or make a network-dependent build reproducible. Note that `FROM` base-image and Dockerfile-frontend
+pulls happen at the daemon layer and can bypass the proxy — those seams are inventoried separately,
+not by this recorder.
