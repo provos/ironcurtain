@@ -10,7 +10,7 @@
  * argv: <sharedConfigPath> <entrypointPath> <resultPath>
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   activateDockerWorkloadLease,
@@ -93,9 +93,7 @@ try {
     startupTimeoutMs: 30_000,
   });
 
-  writeFileSync(resultPath, `${JSON.stringify({ coordinatorPid: process.pid, supervisorPid: launched.pid })}\n`, {
-    mode: 0o600,
-  });
+  writeResultAtomically({ coordinatorPid: process.pid, supervisorPid: launched.pid });
 
   // Heartbeat forever; only the test's SIGKILL ends this process. A terminal
   // lease would make heartbeats throw, but by then this process is dead.
@@ -108,6 +106,13 @@ try {
   }, 100);
 } catch (error) {
   const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-  writeFileSync(resultPath, `${JSON.stringify({ error: message })}\n`, { mode: 0o600 });
+  writeResultAtomically({ error: message });
   process.exit(1);
+}
+
+/** Write-then-rename so the test never observes a partially written result file. */
+function writeResultAtomically(result: object): void {
+  const tempPath = `${resultPath}.tmp`;
+  writeFileSync(tempPath, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+  renameSync(tempPath, resultPath);
 }
