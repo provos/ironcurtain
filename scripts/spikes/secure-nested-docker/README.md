@@ -300,3 +300,29 @@ choose each rule's BuildKit/frontend/base-image/RUN seam, decide path shapes for
 or make a network-dependent build reproducible. Note that `FROM` base-image and Dockerfile-frontend
 pulls happen at the daemon layer and can bypass the proxy — those seams are inventoried separately,
 not by this recorder.
+
+## Phase 0C workload-registry live gate
+
+`registry-live-gate.ts` drives the production registry-egress proxy seam
+(`handleRegistryEgressRequest`, `src/docker/registry-egress-proxy.ts`) with a **frozen**
+manifest and a real `createDirectOutboundTransport` against Docker Hub's anonymous pull
+path. It plays the Docker daemon: it performs the anonymous `401 -> token -> retry` dance
+itself and follows the registry's derived CDN redirect through the proxy. No credential
+exists anywhere — the bearer token is obtained anonymously through the mediated path, per
+§6.4. Exit 0 = every positive and negative gate passed.
+
+```sh
+npx tsx scripts/spikes/secure-nested-docker/registry-live-gate.ts
+```
+
+Positives (live): api-version probe, anonymous tag manifest pull (token dance), by-digest
+image manifest pull, blob pull that follows the registry `307` to an unlisted CDN as a
+derived redirect, content-addressed digest match on the delivered blob, and provenance that
+retains the requested digest across the redirect (`docker-hub-registry:cdn`). Negatives
+(live, fail-closed with zero unmediated egress): unlisted host, blob-upload (push), tags
+and catalog enumeration, and a `Basic` Authorization scheme — all `403`.
+
+This validates the §16.6 controls end-to-end against a real registry. It is not itself the
+manifest freeze: freezing the checked-in `config/docker-workload/registry-egress-manifest.json`
+(flipping `status` to `frozen`) remains a deliberate 0C step after the origin/ceiling review
+and the operator decision on the anonymous bearer flow.
