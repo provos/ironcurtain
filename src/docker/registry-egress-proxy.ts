@@ -41,7 +41,6 @@
  */
 
 import * as http from 'node:http';
-import { Transform, pipeline } from 'node:stream';
 import {
   authorizeValidatedRegistryEgressRequest,
   authorizeValidatedRegistryRedirect,
@@ -51,20 +50,12 @@ import {
   type RegistryEgressRequest,
   type RegistryEgressSessionLimits,
 } from './registry-egress-policy.js';
-import type { OutboundDestination, OutboundTransport } from './outbound-transport.js';
-import { buildRequestUrl, sanitizeResponseHeaders, toOutgoingHeaders } from './egress-forwarding.js';
+import type { OutboundTransport } from './outbound-transport.js';
+import { buildRequestUrl, firstHeader } from './egress-forwarding.js';
+import { forwardMediatedEgress, rejectMediatedEgress, type MediatedEgressRequestSpec } from './mediated-egress.js';
 import * as logger from '../logger.js';
 
 export type RegistryEgressMode = 'disabled' | 'public-registry';
-
-const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
-
-/**
- * A legitimate registry redirect (3xx) carries a tiny or empty body. It is drained,
- * not delivered, but still consumes bandwidth, so it is bounded by this tight cap in
- * addition to the per-request and per-session byte ceilings (F1).
- */
-const MAX_REDIRECT_BODY_BYTES = 64 * 1024;
 
 /** Frozen manifest identity retained for audit and diagnostics. */
 export interface FrozenRegistryEgressManifest {
@@ -248,23 +239,12 @@ export interface RegistryEgressForwardContext {
   readonly recordProvenance?: (record: RegistryPullProvenance) => void;
 }
 
-/** Mutable per-request state: one logical pull, spanning any derived redirects. */
-interface RegistryEgressExchange {
-  readonly clientRes: http.ServerResponse;
-  readonly context: RegistryEgressForwardContext;
-  readonly lease: RegistryEgressLease;
-  deadline?: NodeJS.Timeout;
-  upstreamReq?: http.ClientRequest;
-  settled: boolean;
-}
-
 /**
- * Authorize one registry-originated request against the frozen manifest, reserve a
- * session concurrency slot, forward it through the destination-bound transport,
- * follow bounded derived redirects, and stream the response with backpressure under
- * the per-request and per-session ceilings. Any rejection is a fail-closed response
- * with no upstream contact; the request body is drained but never forwarded (only
- * GET/HEAD are authorizable).
+ * Authorize one registry-originated request against the frozen manifest (including
+ * anonymous-bearer admission), then hand it to the shared mediated forwarder with
+ * the registry-specific behaviors wired in: the per-session ledger, internal
+ * derived-redirect following, and digest provenance. Any authorization rejection is
+ * a fail-closed `403` with no upstream contact.
  */
 export function handleRegistryEgressRequest(
   clientReq: http.IncomingMessage,
@@ -285,219 +265,32 @@ export function handleRegistryEgressRequest(
     return;
   }
 
-  let lease: RegistryEgressLease;
-  try {
-    lease = context.guard.session.acquire();
-  } catch (error) {
-    rejectRegistryEgress(clientRes, context, 503, error);
-    return;
-  }
-
-  const exchange: RegistryEgressExchange = { clientRes, context, lease, settled: false };
-  exchange.deadline = armDeadline(exchange, authorized);
-  clientRes.once('close', () => finalizeExchange(exchange));
-
-  fetchAuthorized(exchange, authorized);
-}
-
-/** Absolute per-request wall-clock ceiling: tear down both sides and fail closed. */
-function armDeadline(exchange: RegistryEgressExchange, authorized: AuthorizedRegistryEgressRequest): NodeJS.Timeout {
-  const timer = setTimeout(() => {
-    logger.info(`[registry-egress] ${authorized.originId} exceeded ${authorized.maxDurationMs}ms; aborting`);
-    if (exchange.upstreamReq !== undefined) exchange.upstreamReq.destroy();
-    if (!exchange.clientRes.headersSent) {
-      rejectRegistryEgressResponse(exchange.clientRes, 504, 'registry pull exceeded the time ceiling');
-    } else {
-      exchange.clientRes.destroy();
-    }
-  }, authorized.maxDurationMs);
-  timer.unref();
-  return timer;
-}
-
-/** Idempotent teardown: clear the deadline and release the session concurrency slot. */
-function finalizeExchange(exchange: RegistryEgressExchange): void {
-  if (exchange.settled) return;
-  exchange.settled = true;
-  if (exchange.deadline !== undefined) clearTimeout(exchange.deadline);
-  exchange.lease.release();
-}
-
-function fetchAuthorized(exchange: RegistryEgressExchange, authorized: AuthorizedRegistryEgressRequest): void {
-  const { clientRes, context } = exchange;
-  const destination: OutboundDestination = {
-    protocol: authorized.destination.protocol,
-    hostname: authorized.destination.hostname,
-    port: authorized.destination.port,
-  };
-
-  let upstreamReq: http.ClientRequest;
-  try {
-    upstreamReq = context.transport.request(
-      {
-        destination,
-        method: authorized.method,
-        path: authorized.path,
-        headers: toOutgoingHeaders(authorized.headers),
-      },
-      (upstreamRes) => onUpstreamResponse(exchange, upstreamRes, authorized),
-    );
-  } catch (error) {
-    if (!clientRes.headersSent)
-      rejectRegistryEgressResponse(clientRes, 502, error instanceof Error ? error.message : 'upstream request failed');
-    else clientRes.destroy();
-    return;
-  }
-
-  exchange.upstreamReq = upstreamReq;
-  upstreamReq.on('error', (error) => {
-    // A superseded hop's stale connection must not tear down the current one (F5).
-    if (exchange.upstreamReq !== upstreamReq) return;
-    if (!clientRes.headersSent) rejectRegistryEgressResponse(clientRes, 502, error.message);
-    else clientRes.destroy();
-  });
-  upstreamReq.end();
-}
-
-function onUpstreamResponse(
-  exchange: RegistryEgressExchange,
-  upstreamRes: http.IncomingMessage,
-  authorized: AuthorizedRegistryEgressRequest,
-): void {
-  if (exchange.settled || exchange.clientRes.writableEnded || exchange.clientRes.destroyed) {
-    upstreamRes.resume(); // the exchange already failed closed (e.g. the deadline fired)
-    return;
-  }
-  const status = upstreamRes.statusCode ?? 502;
-
-  if (REDIRECT_STATUS_CODES.has(status)) {
-    followRedirect(exchange, upstreamRes, authorized);
-    return;
-  }
-
-  streamToClient(exchange, upstreamRes, authorized, status);
-}
-
-function followRedirect(
-  exchange: RegistryEgressExchange,
-  upstreamRes: http.IncomingMessage,
-  authorized: AuthorizedRegistryEgressRequest,
-): void {
-  const location = firstHeader(upstreamRes.headers.location);
-  if (location === undefined) {
-    upstreamRes.destroy(); // fail closed without draining an unusable response
-    rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect is missing a Location header');
-    return;
-  }
-  // Authorize the redirect target before consuming its body: an unauthorized
-  // target is rejected without spending bandwidth draining the 3xx response.
-  let next: AuthorizedRegistryEgressRequest;
-  try {
-    next = exchange.context.guard.authorizeRedirect(authorized, location);
-  } catch (error) {
-    upstreamRes.destroy();
-    rejectRegistryEgress(exchange.clientRes, exchange.context, 403, error);
-    return;
-  }
-  // Drain the redirect body under the byte ceilings before following (F1): the body
-  // is never delivered but still consumes bandwidth, so it counts against a tight
-  // redirect cap, the per-request cap, and the cumulative session ledger. Overflow
-  // fails the whole exchange closed; the per-request wall-clock deadline bounds a
-  // slow body.
-  const ledger = exchange.context.guard.session;
-  const bodyCap = Math.min(MAX_REDIRECT_BODY_BYTES, authorized.maxBytes);
-  let drained = 0;
-  let aborted = false;
-  upstreamRes.on('data', (chunk: Buffer) => {
-    if (aborted) return;
-    drained += chunk.length;
-    if (drained > bodyCap || !ledger.addBytes(chunk.length)) {
-      aborted = true;
-      upstreamRes.destroy();
-      rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect body exceeds a byte ceiling');
-    }
-  });
-  upstreamRes.on('error', () => {
-    if (aborted) return;
-    aborted = true;
-    rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect body transfer failed');
-  });
-  upstreamRes.on('end', () => {
-    if (aborted || exchange.settled) return;
-    fetchAuthorized(exchange, next);
+  forwardMediatedEgress<AuthorizedRegistryEgressRequest>(clientRes, {
+    transport: context.transport,
+    initial: authorized,
+    label: 'registry-egress',
+    describe: describeRegistryRequest,
+    session: context.guard.session,
+    followRedirect: (current, location) => context.guard.authorizeRedirect(current, location),
+    onComplete: (request, streamedBytes, responseHeaders) =>
+      recordProvenance(request, context, reportedDigest(responseHeaders), streamedBytes),
   });
 }
 
-/**
- * Pipe the upstream response to the daemon with backpressure, enforcing the
- * per-request and per-session byte ceilings as bytes flow. A declared
- * `content-length` that already overshoots a ceiling is rejected before any body is
- * streamed; a chunked body that overshoots mid-stream tears down both sides. Content
- * pulls record provenance (requested + registry-reported digest, streamed size) on
- * successful completion.
- */
-function streamToClient(
-  exchange: RegistryEgressExchange,
-  upstreamRes: http.IncomingMessage,
-  authorized: AuthorizedRegistryEgressRequest,
-  status: number,
-): void {
-  const { clientRes, context } = exchange;
-  const ledger = context.guard.session;
-
-  const declared = declaredContentLength(upstreamRes.headers);
-  if (declared !== undefined && (declared > authorized.maxBytes || !ledger.wouldFit(declared))) {
-    upstreamRes.resume();
-    rejectRegistryEgressResponse(clientRes, 502, 'registry response exceeds a byte ceiling');
-    return;
-  }
-
-  const resolvedDigest = reportedDigest(upstreamRes.headers);
-  const limiter = createByteCeilingTransform(authorized.originId, authorized.maxBytes, ledger);
-  let streamedBytes = 0;
-  limiter.on('data', (chunk: Buffer) => {
-    streamedBytes += chunk.length;
-  });
-
-  clientRes.writeHead(status, sanitizeResponseHeaders(upstreamRes.headers));
-  pipeline(upstreamRes, limiter, clientRes, (error) => {
-    if (error) {
-      logger.info(`[registry-egress] ${authorized.originId} transfer failed: ${error.message}`);
-      if (exchange.upstreamReq !== undefined) exchange.upstreamReq.destroy();
-      clientRes.destroy();
-      return;
-    }
-    recordProvenance(authorized, context, resolvedDigest, streamedBytes);
-  });
-}
-
-/**
- * A pass-through Transform that fails closed once a stream exceeds the per-request
- * or cumulative per-session byte ceiling. `pipeline` propagates the error to destroy
- * both the upstream response and the client response.
- */
-function createByteCeilingTransform(
-  originId: string,
-  maxRequestBytes: number,
-  ledger: RegistryEgressSessionLedger,
-): Transform {
-  let requestBytes = 0;
-  return new Transform({
-    transform(chunk: Buffer, _encoding, callback): void {
-      requestBytes += chunk.length;
-      if (requestBytes > maxRequestBytes) {
-        callback(new Error(`registry-egress ${originId} exceeded the per-request byte ceiling (${maxRequestBytes})`));
-        return;
-      }
-      if (!ledger.addBytes(chunk.length)) {
-        callback(
-          new Error(`registry-egress ${originId} exceeded the per-session byte ceiling (${ledger.maxTotalBytes})`),
-        );
-        return;
-      }
-      callback(null, chunk);
+/** Map an authorized pull onto the shared forwarder's destination-bound fetch spec. */
+function describeRegistryRequest(authorized: AuthorizedRegistryEgressRequest): MediatedEgressRequestSpec {
+  return {
+    destination: {
+      protocol: authorized.destination.protocol,
+      hostname: authorized.destination.hostname,
+      port: authorized.destination.port,
     },
-  });
+    method: authorized.method,
+    path: authorized.path,
+    headers: authorized.headers,
+    maxBytes: authorized.maxBytes,
+    maxDurationMs: authorized.maxDurationMs,
+  };
 }
 
 function recordProvenance(
@@ -518,23 +311,11 @@ function recordProvenance(
   });
 }
 
-function declaredContentLength(headers: http.IncomingHttpHeaders): number | undefined {
-  const raw = firstHeader(headers['content-length']);
-  if (raw === undefined) return undefined;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-}
-
 /** Registry-reported content digest recorded as provenance only (never verified). */
 function reportedDigest(headers: http.IncomingHttpHeaders): string | undefined {
   const raw = firstHeader(headers['docker-content-digest']);
   if (raw === undefined) return undefined;
   return parseOciDigest(raw) !== undefined ? raw : undefined;
-}
-
-function firstHeader(value: string | readonly string[] | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  return typeof value === 'string' ? value : value[0];
 }
 
 function rejectRegistryEgress(
@@ -545,14 +326,5 @@ function rejectRegistryEgress(
 ): void {
   const message = error instanceof Error ? error.message : 'registry egress denied';
   logger.info(`[registry-egress] DENIED ${context.scheme}//${context.targetHost}:${context.targetPort} — ${message}`);
-  rejectRegistryEgressResponse(clientRes, status, message);
-}
-
-function rejectRegistryEgressResponse(clientRes: http.ServerResponse, status: number, message: string): void {
-  if (!clientRes.headersSent) {
-    clientRes.writeHead(status, { 'content-type': 'text/plain' });
-    clientRes.end(`registry egress denied: ${message}\n`);
-  } else {
-    clientRes.destroy();
-  }
+  rejectMediatedEgress(clientRes, status, `registry egress denied: ${message}`);
 }

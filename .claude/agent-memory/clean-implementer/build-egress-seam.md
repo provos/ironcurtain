@@ -19,6 +19,19 @@ Governing design: `docs/designs/secure-nested-runtime-implementation-plan.md` §
   hop-by-hop/`set-cookie` from the response. Extra defense: a `fixed-parent-only` rule refuses to
   egress over a non-`fixed-parent-proxy` transport (502) — reviewed origins can't leak to direct.
 
+## Shared forward lifecycle: `src/docker/mediated-egress.ts` (unified with registry-egress)
+The build+registry forwarders were unified into one leaf `forwardMediatedEgress<A>(clientRes, config)`
++ `rejectMediatedEgress(clientRes,status,message)`. Config is parameterized: `assertReady?`(build's
+fixed-parent-binding → 502), `session?`(registry ledger; build passes none), `followRedirect?`(present
+= follow 3xx INTERNALLY per registry; ABSENT = pass 3xx through per build), `onComplete?`(provenance).
+Build now streams with real `stream.pipeline`+backpressure (was unbounded `on('data')+write`) and an
+ABSOLUTE deadline (was idle `setTimeout`) — both permitted upgrades, fail-closed outcome unchanged.
+Build's proxy is now a thin caller: `handleBuildEgressRequest` authorizes then calls
+`forwardMediatedEgress` with `describeBuildRequest` (maxBytes=responseBytes, maxDurationMs=timeoutMs).
+`firstHeader` moved to `egress-forwarding.ts`. mediated-egress is a leaf (node+outbound-transport+
+egress-forwarding+logger only; `check:cycles` clean). Internal-reject bodies now `${label}: ...`
+(dropped the old `build egress denied:` prefix except on the authorize-403 path). See [[registry-egress-seam]].
+
 ## Wiring seam in mitm-proxy.ts
 Build egress is a WHOLE-PROXY MODE, not a per-request tag on a shared socket (you cannot distinguish
 build vs agent HTTP on one tunnel). `MitmProxyOptions.buildEgress?: {guard, seam}`. When set: the

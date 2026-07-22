@@ -56,6 +56,20 @@ manifest with matching blobs. So blob content is untrusted and flows through UNV
   `onUpstreamResponse` guards `settled/writableEnded/destroyed` (drain+return) so a late upstream
   response after a deadline/abort can't writeHead-after-end.
 
+## Shared forward lifecycle: `src/docker/mediated-egress.ts` (registry+build unified)
+The streaming/redirect/ceiling/deadline/lease machinery was EXTRACTED from `registry-egress-proxy.ts`
+into leaf `forwardMediatedEgress<A>(clientRes, config)` (armDeadline/finalizeExchange/fetch/onResponse/
+followRedirect/streamToClient/ByteCeilingTransform + `MAX_REDIRECT_BODY_BYTES`/`declaredContentLength`
+all live there now). Registry proxy KEEPS: guard/ledger/manifest, `RegistryPullProvenance`,
+`recordProvenance`, `reportedDigest`. `handleRegistryEgressRequest` authorizes then calls
+`forwardMediatedEgress` with `session: guard.session`, `followRedirect: guard.authorizeRedirect`,
+`onComplete`. F1 (redirect-body ceiling), F5 (stale-upstream guard), all status codes (403/502/503/504),
+and the exact provenance record are preserved (green tests). DEVIATION from the literal spec: `onComplete`
+signature is `(authorized, streamedBytes, responseHeaders)` — the 3rd param (terminal response headers) is
+REQUIRED because `resolvedDigest` reads `Docker-Content-Digest` off the terminal response, which the
+2-arg form couldn't reach. Efficiency #3: the ByteCeilingTransform exposes `byteCount()` (no second
+`on('data')` counter). `firstHeader` now in `egress-forwarding.ts`. See [[build-egress-seam]].
+
 ## MITM wiring (WHOLE-PROXY mode; comment-only updates this pass)
 `MitmProxyOptions.registryEgress?:{guard}`, mutually exclusive with `buildEgress`. Context shape
 UNCHANGED (guard/transport/scheme/targetHost/targetPort/requestTarget). Only doc-comment + inline

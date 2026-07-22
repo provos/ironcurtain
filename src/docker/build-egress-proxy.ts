@@ -59,8 +59,9 @@ import {
   type BuildEgressRequest,
   type BuildEgressRule,
 } from '../docker-workload/build-egress-policy.js';
-import type { OutboundDestination, OutboundTransport } from './outbound-transport.js';
-import { buildRequestUrl, sanitizeResponseHeaders, toOutgoingHeaders } from './egress-forwarding.js';
+import type { OutboundTransport } from './outbound-transport.js';
+import { buildRequestUrl } from './egress-forwarding.js';
+import { forwardMediatedEgress, rejectMediatedEgress, type MediatedEgressRequestSpec } from './mediated-egress.js';
 import * as logger from '../logger.js';
 
 export type BuildEgressMode = 'disabled' | 'ironcurtain-dockerfiles';
@@ -148,10 +149,12 @@ export interface BuildEgressForwardContext {
 }
 
 /**
- * Authorize one build-originated request against the frozen manifest and forward
- * the sanitized result through the destination-bound transport. Any rejection is
- * a fail-closed `403` with no upstream contact; the request body is drained but
- * never forwarded (only GET/HEAD are authorizable).
+ * Authorize one build-originated request against the frozen manifest, then hand it
+ * to the shared mediated forwarder. Build has no session ledger and does not follow
+ * 3xx internally (the build client drives its own redirects, so a 3xx streams
+ * straight through); it does add a pre-flight transport-binding check that a
+ * `fixed-parent-only` rule never egresses over anything but the fixed parent proxy.
+ * Any authorization rejection is a fail-closed `403` with no upstream contact.
  */
 export function handleBuildEgressRequest(
   clientReq: http.IncomingMessage,
@@ -173,76 +176,40 @@ export function handleBuildEgressRequest(
     return;
   }
 
-  forwardAuthorizedBuildEgress(clientRes, authorized, context.transport);
+  forwardMediatedEgress<AuthorizedBuildEgressRequest>(clientRes, {
+    transport: context.transport,
+    initial: authorized,
+    label: 'build-egress',
+    describe: describeBuildRequest,
+    assertReady: (request) => assertFixedParentBinding(request, context.transport),
+  });
 }
 
-function forwardAuthorizedBuildEgress(
-  clientRes: http.ServerResponse,
-  authorized: AuthorizedBuildEgressRequest,
-  transport: OutboundTransport,
-): void {
+/** A direct transport must never carry a reviewed fixed-parent origin. */
+function assertFixedParentBinding(authorized: AuthorizedBuildEgressRequest, transport: OutboundTransport): void {
   if (authorized.destination.addressPolicy === 'fixed-parent-only' && transport.kind !== 'fixed-parent-proxy') {
-    rejectBuildEgressResponse(clientRes, 502, 'fixed-parent-only rule requires the fixed parent proxy transport');
-    return;
+    throw new Error('fixed-parent-only rule requires the fixed parent proxy transport');
   }
+}
 
-  const destination: OutboundDestination = {
-    protocol: authorized.destination.protocol,
-    hostname: authorized.destination.hostname,
-    port: authorized.destination.port,
+/** Map an authorized build fetch onto the shared forwarder's destination-bound spec. */
+function describeBuildRequest(authorized: AuthorizedBuildEgressRequest): MediatedEgressRequestSpec {
+  return {
+    destination: {
+      protocol: authorized.destination.protocol,
+      hostname: authorized.destination.hostname,
+      port: authorized.destination.port,
+    },
+    method: authorized.method,
+    path: authorized.path,
+    headers: authorized.headers,
+    maxBytes: authorized.responseBytes,
+    maxDurationMs: authorized.timeoutMs,
   };
-
-  let forwardedBytes = 0;
-  let upstreamReq: http.ClientRequest;
-  try {
-    upstreamReq = transport.request(
-      { destination, method: authorized.method, path: authorized.path, headers: toOutgoingHeaders(authorized.headers) },
-      (upstreamRes) => {
-        clientRes.writeHead(upstreamRes.statusCode ?? 502, sanitizeResponseHeaders(upstreamRes.headers));
-        upstreamRes.on('data', (chunk: Buffer) => {
-          forwardedBytes += chunk.length;
-          if (forwardedBytes > authorized.responseBytes) {
-            logger.info(`[build-egress] ${authorized.ruleId} exceeded ${authorized.responseBytes} response bytes`);
-            upstreamReq.destroy();
-            upstreamRes.destroy();
-            clientRes.destroy();
-            return;
-          }
-          clientRes.write(chunk);
-        });
-        upstreamRes.on('end', () => clientRes.end());
-        upstreamRes.on('error', () => clientRes.destroy());
-      },
-    );
-  } catch (error) {
-    rejectBuildEgressResponse(clientRes, 502, error instanceof Error ? error.message : 'upstream request failed');
-    return;
-  }
-
-  upstreamReq.setTimeout(authorized.timeoutMs, () => {
-    upstreamReq.destroy(new Error(`build egress timed out after ${authorized.timeoutMs}ms`));
-  });
-  upstreamReq.on('error', (error) => {
-    if (!clientRes.headersSent) {
-      rejectBuildEgressResponse(clientRes, 502, error.message);
-    } else {
-      clientRes.destroy();
-    }
-  });
-  upstreamReq.end();
 }
 
 function rejectBuildEgress(clientRes: http.ServerResponse, context: BuildEgressForwardContext, error: unknown): void {
   const message = error instanceof Error ? error.message : 'build egress denied';
   logger.info(`[build-egress] DENIED ${context.scheme}//${context.targetHost}:${context.targetPort} — ${message}`);
-  rejectBuildEgressResponse(clientRes, 403, message);
-}
-
-function rejectBuildEgressResponse(clientRes: http.ServerResponse, status: number, message: string): void {
-  if (!clientRes.headersSent) {
-    clientRes.writeHead(status, { 'content-type': 'text/plain' });
-    clientRes.end(`build egress denied: ${message}\n`);
-  } else {
-    clientRes.destroy();
-  }
+  rejectMediatedEgress(clientRes, 403, `build egress denied: ${message}`);
 }

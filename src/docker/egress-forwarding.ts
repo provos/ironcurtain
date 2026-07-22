@@ -59,6 +59,12 @@ export function sanitizeResponseHeaders(headers: http.IncomingHttpHeaders): http
   return result;
 }
 
+/** First value of a possibly-array header, or `undefined` when the header is absent. */
+export function firstHeader(value: string | readonly string[] | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === 'string' ? value : value[0];
+}
+
 function formatAuthority(hostname: string, port: number, scheme: 'http:' | 'https:'): string {
   const host = hostname.includes(':') ? `[${hostname}]` : hostname;
   const standard = (scheme === 'https:' && port === 443) || (scheme === 'http:' && port === 80);
