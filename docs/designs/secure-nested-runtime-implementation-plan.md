@@ -649,8 +649,11 @@ workflow. An all-or-nothing catalog builder now requires every named role, stage
 archive per role for both backends, verifies the shared archive tuple, publishes neither backend
 catalog until all roles succeed, and removes partial artifacts on failure. The §16.5 amendment
 narrows the required role set to infrastructure images; fixture images move to the qualification
-harness. The actual production
-images and catalogs remain unstaged. Operator configuration resolves absence/empty/false to exactly
+harness. The production infrastructure catalog is now frozen: a live `build-preloaded-catalog` run
+built all eight roles on Docker Desktop 29.2.1 and Apple `container` 1.1.0 (arm64), staged one sealed
+sha256-bound archive per role for both backends, and checked in
+`config/docker-workload/preloaded-catalog.{docker,apple-container}.json` (generation
+`ironcurtain-preloaded-arm64-v1`). Operator configuration resolves absence/empty/false to exactly
 `{enabled:false}` and rejects raw images, mounts, capabilities, profiles, relay targets, and runtime
 arguments. Production metadata plumbing, narrow build egress, contracts, and end-to-end product
 plumbing remain open, so 0F has not exited. Implemented foundations
@@ -661,19 +664,26 @@ self-adjudicates stable file/name/occurrence test IDs; a version-scoped performa
 evaluator; and a fail-closed watchdog state machine with exact root identity, stale-sample detection,
 one-shot revocation, and two-inventory shutdown. A host-only atomic lease, exact generation-bound
 revoker, normalized Docker/Apple inventory, and detached supervisor now implement the
-coordinator-independent foundation. A process-level test proves the supervisor survives coordinator
-exit and later closes a tripped lease; actual daemon admission/teardown still must wire this lifecycle.
-The narrow build-egress authorization layer now binds reviewed Dockerfile hashes to exact seams,
-destinations, methods, path/query shapes, finite redirect graphs, credential-free headers, and
-byte/time ceilings. The actual manifest and proxy/BuildKit wiring remain unfrozen until a cold-cache
-capture identifies the complete current-Dockerfile endpoint set.
+coordinator-independent foundation. A cross-process test now proves the supervisor survives a coordinator **SIGKILL** (not a graceful
+exit) and, orphaned, detects a post-mortem hard-state breach and performs exact revocation with the
+two-empty-inventory cleanup proof and lease closure; actual daemon admission/teardown still must wire
+this lifecycle. The narrow build-egress authorization layer binds reviewed Dockerfile hashes to exact
+seams, destinations, methods, path/query shapes, finite redirect graphs, credential-free headers, and
+byte/time ceilings. The cold-cache endpoint capture is now done: a full eight-Dockerfile tunnel-mode
+capture through the recording proxy (all builds exit 0, zero unmediated fetches) recorded 13 unique
+endpoints, documented in `docs/designs/evidence/build-egress-capture-arm64.md`. The manifest freeze
+awaits two non-mechanical decisions recorded there (HTTPS path-gating vs host-only, and the
+daemon-layer `base-image` seam) and the proxy/BuildKit wiring.
 
-A draft workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind
-the admission fuse. Origin/operation/header/redirect policy and destination-bound forwarding have
-hermetic foundation tests, but the implementation still contains the blob hashing and trusted
-response buffering superseded by §16.6. The anonymous bearer flow, streaming and session ceilings,
-frozen manifest, live protocol gates, and production lifecycle wiring remain open; this path is not
-yet a 0F exit artifact.
+A workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind the
+admission fuse, now conformed to §16.6: the superseded blob hashing and trusted response buffering
+are removed, and the binding controls are implemented and hermetically tested — genuinely
+backpressured streaming with per-request byte/time and per-session total-byte/concurrency ceilings
+(guard-owned ledger), digest-independent exact derived-redirect authorization with credential
+stripping and literal-IP refusal atop the transport SSRF check, and the anonymous client-side bearer
+flow (single `Bearer` admitted to listed origins only). Digests are audit provenance only. The frozen
+manifest, live protocol gates, and production lifecycle wiring remain open; this path is not yet a 0F
+exit artifact.
 
 The checked-in Apple arm64 client matrix binds the locally inspected rootless Docker 29.2.1 image
 to exact CLI/daemon/API 1.44-1.53, Buildx 0.31.1, and Compose 5.1.0 values; live preflight compares
