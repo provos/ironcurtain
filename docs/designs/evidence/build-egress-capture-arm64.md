@@ -1,19 +1,17 @@
 # Build-egress cold-cache capture evidence — arm64
 
-**Purpose.** This is the captured endpoint evidence that gates freezing
+**Purpose.** This is the captured endpoint evidence behind the frozen
 `config/docker-workload/build-egress-manifest.json` (see the secure-nested-runtime
 implementation plan, build-egress sections). It is a durable record of what the
 current IronCurtain Dockerfiles actually fetch during a cold-cache
-(`--no-cache`) rebuild of every trusted infrastructure image. It is **evidence,
-not a frozen manifest** — freezing requires the two human decisions listed at
-the bottom.
+(`--no-cache`) rebuild of every trusted infrastructure image. The `run`-seam
+manifest is now frozen from this evidence; see "Freeze decisions" below.
 
-**Capture run.**
+**Capture runs (two passes).**
 
-- Harness: `scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build` (tunnel mode).
-- Backend: Docker Desktop 29.2.1, arm64, macOS. Proxy reached from build containers via `host.docker.internal`.
-- Method: each Dockerfile built cold-cache with the recording proxy as its **sole** egress route (`HTTP(S)_PROXY` → proxy; a tool that bypasses it fails to connect and is recorded as a failed attempt). All 8 builds exited `0`; `0` failed fetch attempts; `0` direct-connect-suspected.
-- Path visibility: HTTPS is **tunnel-recorded** (host:port only — the proxy blind-pipes bytes and does not terminate TLS, because production Dockerfiles do not trust a capture CA). Plain HTTP (apt) is fully path-visible.
+- Backend: Docker Desktop 29.2.1, arm64, macOS. Proxy reached from build containers via `host.docker.internal`. Each Dockerfile built cold-cache with the recording proxy as its **sole** egress route; all 8 builds exit `0`, `0` failed fetch attempts, `0` direct-connect-suspected in both passes.
+- **Pass 1 — tunnel** (`--build`): discovered the endpoint set. HTTPS is tunnel-recorded (host:port only — the proxy blind-pipes bytes without terminating TLS); plain HTTP (apt) is fully path-visible. This is the "Observed endpoints" table below.
+- **Pass 2 — terminate-TLS** (`--build --ca-inject`): the capture CA is trusted inside each build the way production wires trust, so the proxy terminates TLS and sees full HTTPS paths. All 13 hosts reached full path visibility with zero CA resistance. This resolved the path-gating decision and produced the frozen manifest.
 
 ## Dockerfiles covered
 
@@ -63,20 +61,33 @@ Each endpoint maps to a known toolchain step in the Dockerfiles:
   their digests pinned. Base images observed in the Dockerfiles: `node:22-trixie`
   (base), plus the golang builder image(s) in the Go Dockerfiles.
 
-## Freeze decisions still required (not mechanical)
+## Freeze decisions
 
-1. **HTTPS path gating vs host-only.** The frozen manifest schema requires
-   `paths: min(1)` per rule. Tunnel capture yields no HTTPS path shapes. Two
-   options: (a) production build-egress **terminates TLS** at the outer MITM
-   (build containers trust the session CA staged by `runtime-trust.ts`), in
-   which case a terminate-TLS re-capture would yield real per-host path prefixes
-   to gate on; or (b) freeze HTTPS rules as **host+port gating** with an
-   allow-all path rule, treating the reviewed-host allowlist as the control.
-   This is a security-posture decision, not a capture artifact.
-2. **`base-image` seam.** Decide how daemon-layer `FROM` pulls are mediated and
-   pin their digests (see "Not covered" above).
+1. **HTTPS path gating — RESOLVED (path-gated).** The operator chose the
+   terminate-TLS path. A follow-up capture (`build-egress-capture.mjs --build
+--ca-inject`) injects the capture CA into each build the way production wires
+   trust (`update-ca-certificates` + the full `buildRuntimeTrustEnv()` set +
+   `CARGO_HTTP_CAINFO` + apt `CaInfo`, via a transient BuildKit-heredoc overlay
+   that never edits the production Dockerfiles). All 13 hosts reached full path
+   visibility with zero CA resistance and zero unmediated fetches. The result is
+   frozen in `config/docker-workload/build-egress-manifest.json`
+   (`build-egress-current-dockerfiles-arm64-v1`): every HTTPS host is path-gated
+   on the observed prefixes; the sparse-index/npm namespaces (whose paths span
+   the whole host) are host-gated by a `/` prefix. The freeze surfaced that npm
+   requests scoped-package metadata as `/@scope%2fname`, which the global `%2f`
+   smuggling guard rejected — resolved with a narrow per-rule `allowEncodedSlash`
+   opt-in (npm registry only; `%5c`/`%25`/traversal stay globally rejected). An
+   offline gate authorizes every captured endpoint and rejects unlisted-host,
+   wrong-method, path-outside-prefix, credential-header, and encoded-smuggling
+   requests (34/34).
 
-Until both are decided, this path is not a build-egress freeze exit artifact.
+2. **`base-image` seam — still open.** The frozen manifest covers the `run` seam
+   only. Daemon-layer `FROM` pulls (`node:22-trixie`, the golang builder) bypass
+   the RUN-step proxy and must be inventoried from the `FROM` lines and their
+   digests pinned as `base-image`/`dockerfile-frontend` seam rules. This remains
+   the one open build-egress freeze sub-item.
+
 The raw per-group drafts (`build-egress-manifest.draft.json`, `capture-evidence.json`,
-`build-logs.json`) are produced under the operator's evidence dir by re-running
-the harness; they are intentionally not committed (large, host-specific).
+`build-logs.json`, and the per-build `overlays/`) are produced under the operator's
+evidence dir by re-running the harness; they are intentionally not committed (large,
+host-specific).

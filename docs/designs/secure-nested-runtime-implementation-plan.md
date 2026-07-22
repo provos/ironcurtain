@@ -669,11 +669,17 @@ exit) and, orphaned, detects a post-mortem hard-state breach and performs exact 
 two-empty-inventory cleanup proof and lease closure; actual daemon admission/teardown still must wire
 this lifecycle. The narrow build-egress authorization layer binds reviewed Dockerfile hashes to exact
 seams, destinations, methods, path/query shapes, finite redirect graphs, credential-free headers, and
-byte/time ceilings. The cold-cache endpoint capture is now done: a full eight-Dockerfile tunnel-mode
-capture through the recording proxy (all builds exit 0, zero unmediated fetches) recorded 13 unique
-endpoints, documented in `docs/designs/evidence/build-egress-capture-arm64.md`. The manifest freeze
-awaits two non-mechanical decisions recorded there (HTTPS path-gating vs host-only, and the
-daemon-layer `base-image` seam) and the proxy/BuildKit wiring.
+byte/time ceilings. The cold-cache endpoint capture and the
+`run`-seam manifest freeze are now done. A terminate-TLS CA-inject capture (the capture CA is trusted
+in each build the way production wires trust, via a transient BuildKit-heredoc overlay that never
+edits the production Dockerfiles) gave full per-host path visibility on all 13 endpoints with zero CA
+resistance and zero unmediated fetches. `config/docker-workload/build-egress-manifest.json`
+(`build-egress-current-dockerfiles-arm64-v1`) is frozen and path-gated, GET/HEAD-only, credential-
+stripped, with the four source Dockerfiles hash-pinned; an offline gate scores 34/34 authorizing every
+captured endpoint and rejecting unlisted-host/method/path/credential/encoded-smuggling violations. The
+freeze also added a narrow per-rule `allowEncodedSlash` opt-in (npm scoped-package metadata is
+`/@scope%2fname`; `%5c`/`%25`/traversal stay globally rejected). The one open build-egress sub-item is
+the daemon-layer `base-image` seam (pinning `FROM` digests) plus the production proxy/BuildKit wiring.
 
 A workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind the
 admission fuse, conformed to §16.6: the superseded blob hashing and trusted response buffering are
