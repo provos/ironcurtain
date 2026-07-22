@@ -285,6 +285,44 @@ export interface ProviderKeyMapping {
   readonly tokenManager?: OAuthTokenManager;
 }
 
+/**
+ * The single mode this proxy's listener operates in for its entire lifetime.
+ *
+ * `createMitmProxy` resolves exactly one of these once at construction (see
+ * `resolveListenerMode`) and reads it from the closure at every dispatch site.
+ * Connection metadata does not echo the mode — the listener-level mode is
+ * fixed, so per-connection routing only distinguishes hosts within `standard`.
+ *
+ * - `standard`: normal proxy; per-connection routing picks provider /
+ *   package-registry / dynamic-passthrough by host.
+ * - `build-egress`: serves ONLY the nested build path; TLS-terminates every
+ *   host and authorizes decrypted (and plain-HTTP) requests via `guard`/`seam`.
+ * - `registry-egress`: serves ONLY the `public-registry` image-pull path;
+ *   TLS-terminates every host and authorizes decrypted pulls via `guard`.
+ */
+type ListenerMode =
+  | { readonly kind: 'standard' }
+  | { readonly kind: 'build-egress'; readonly guard: BuildEgressGuard; readonly seam: BuildEgressSeam }
+  | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
+
+/**
+ * Resolve the single listener mode from the proxy options. `buildEgress` and
+ * `registryEgress` are mutually exclusive; a proxy configured for neither runs
+ * in standard provider / registry / passthrough routing mode.
+ */
+function resolveListenerMode(options: MitmProxyOptions): ListenerMode {
+  if (options.buildEgress && options.registryEgress) {
+    throw new Error('MitmProxyOptions: build-egress and registry-egress modes are mutually exclusive');
+  }
+  if (options.buildEgress) {
+    return { kind: 'build-egress', guard: options.buildEgress.guard, seam: options.buildEgress.seam };
+  }
+  if (options.registryEgress) {
+    return { kind: 'registry-egress', guard: options.registryEgress.guard };
+  }
+  return { kind: 'standard' };
+}
+
 /** Connection reset errors are routine during proxy shutdown or client disconnect. */
 function isConnectionReset(err: NodeJS.ErrnoException): boolean {
   return err.code === 'ECONNRESET' || err.code === 'EPIPE';
@@ -647,11 +685,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   let capturePersona: string | undefined;
 
   const agentKind: AgentKind | undefined = options.agentKind;
-  const buildEgress = options.buildEgress;
-  const registryEgress = options.registryEgress;
-  if (buildEgress && registryEgress) {
-    throw new Error('MitmProxyOptions: build-egress and registry-egress modes are mutually exclusive');
-  }
+  const listenerMode = resolveListenerMode(options);
   const captureWriter = options.capture;
   const captureRecordedAgentName = options.recordedAgentName;
   const captureWorkflowRunId = options.workflowRunId;
@@ -777,8 +811,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     readonly provider?: ProviderKeyMapping;
     readonly registry?: RegistryConfig;
     readonly passthrough: boolean;
-    readonly buildEgress?: boolean;
-    readonly registryEgress?: boolean;
     readonly host: string;
     readonly port: number;
   }
@@ -900,35 +932,43 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     const { host: targetHost, port: targetPort } = meta;
 
-    // Build-egress connections: authorize every decrypted request against the
-    // frozen manifest, then forward through the destination-bound transport.
-    if (meta.buildEgress && buildEgress) {
-      handleBuildEgressRequest(clientReq, clientRes, {
-        guard: buildEgress.guard,
-        seam: buildEgress.seam,
-        transport: outboundTransport,
-        scheme: 'https:',
-        targetHost,
-        targetPort,
-        requestTarget: clientReq.url ?? '/',
-      });
-      return;
-    }
-
-    // Registry-egress connections: authorize each decrypted pull against the frozen
-    // registry manifest and stream it through the destination-bound transport under
-    // the per-request / per-session ceilings (content is not hashed — §16.6).
-    // Registry v2 is https-only, so there is no plain-HTTP registry path.
-    if (meta.registryEgress && registryEgress) {
-      handleRegistryEgressRequest(clientReq, clientRes, {
-        guard: registryEgress.guard,
-        transport: outboundTransport,
-        scheme: 'https:',
-        targetHost,
-        targetPort,
-        requestTarget: clientReq.url ?? '/',
-      });
-      return;
+    // Listener-level egress modes short-circuit here; standard mode falls
+    // through to the per-host provider / registry / passthrough dispatch below.
+    // A future ListenerMode kind is a compile error at the `default` guard.
+    switch (listenerMode.kind) {
+      case 'build-egress':
+        // Authorize every decrypted request against the frozen manifest, then
+        // forward through the destination-bound transport.
+        handleBuildEgressRequest(clientReq, clientRes, {
+          guard: listenerMode.guard,
+          seam: listenerMode.seam,
+          transport: outboundTransport,
+          scheme: 'https:',
+          targetHost,
+          targetPort,
+          requestTarget: clientReq.url ?? '/',
+        });
+        return;
+      case 'registry-egress':
+        // Authorize each decrypted pull against the frozen registry manifest and
+        // stream it through the destination-bound transport under the per-request
+        // / per-session ceilings (content is not hashed — §16.6). Registry v2 is
+        // https-only, so there is no plain-HTTP registry path.
+        handleRegistryEgressRequest(clientReq, clientRes, {
+          guard: listenerMode.guard,
+          transport: outboundTransport,
+          scheme: 'https:',
+          targetHost,
+          targetPort,
+          requestTarget: clientReq.url ?? '/',
+        });
+        return;
+      case 'standard':
+        break;
+      default: {
+        const _exhaustive: never = listenerMode;
+        throw new Error(`Unknown listener mode: ${String(_exhaustive)}`);
+      }
     }
 
     // Dispatch: registry connections are handled separately from provider connections
@@ -1564,7 +1604,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // Build-egress mode: plain-HTTP proxy requests (apt speaks HTTP) are
     // authorized against the frozen manifest and forwarded, same as the
     // TLS-terminated HTTPS path. No registry/passthrough dispatch applies.
-    if (buildEgress) {
+    if (listenerMode.kind === 'build-egress') {
       const target = req.url ? tryParseProxyUrl(req.url) : null;
       if (!target) {
         res.writeHead(405, { 'Content-Type': 'text/plain' });
@@ -1572,8 +1612,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         return;
       }
       handleBuildEgressRequest(req, res, {
-        guard: buildEgress.guard,
-        seam: buildEgress.seam,
+        guard: listenerMode.guard,
+        seam: listenerMode.seam,
         transport: outboundTransport,
         scheme: 'http:',
         targetHost: target.hostname,
@@ -1650,14 +1690,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // Build-egress and registry-egress modes have none of these — every host is
     // TLS-terminated so the request layer can authorize it against the frozen
     // manifest (or 403 it).
-    const isBuildEgress = buildEgress !== undefined;
-    const isRegistryEgress = registryEgress !== undefined;
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
     const isDynamicPassthrough = passthroughHosts.has(host);
     const isWildcardEligible = allowAllHosts && !isKnownStaticHost(host);
     const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
-    if (!isBuildEgress && !isRegistryEgress && !provider && !registry && !isPassthrough) {
+    if (listenerMode.kind === 'standard' && !provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       clientSocket.destroy();
@@ -1665,15 +1703,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const passthroughKind = isDynamicPassthrough ? 'passthrough' : 'passthrough-wildcard';
-    const connType = isBuildEgress
-      ? 'build-egress'
-      : isRegistryEgress
-        ? 'registry-egress'
-        : provider
+    const connType =
+      listenerMode.kind === 'standard'
+        ? provider
           ? 'provider'
           : registry
             ? 'registry'
-            : passthroughKind;
+            : passthroughKind
+        : listenerMode.kind;
 
     // 2. Direct outer proxies may use a raw TCP tunnel for passthrough
     //    domains. Nested proxies must not expose a caller-selected CONNECT
@@ -1764,8 +1801,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       provider: provider ?? undefined,
       registry,
       passthrough: isPassthrough,
-      buildEgress: isBuildEgress,
-      registryEgress: isRegistryEgress,
       host,
       port,
     });
