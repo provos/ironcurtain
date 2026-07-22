@@ -26,6 +26,7 @@ import {
 import { createDirectOutboundTransport } from '../../../src/docker/outbound-transport.js';
 
 const REPO = 'library/hello-world';
+const GHCR_REPO = 'astral-sh/uv';
 const MANIFEST_ACCEPT = [
   'application/vnd.oci.image.index.v1+json',
   'application/vnd.oci.image.manifest.v1+json',
@@ -113,6 +114,66 @@ function check(name: string, ok: boolean, detail: string): void {
   process.stdout.write(`${ok ? 'PASS' : 'FAIL'}  ${name} — ${detail}\n`);
 }
 
+/** Full anonymous pull-by-digest with a derived CDN redirect, against one registry origin. */
+async function runPositivePull(label: string, registryHost: string, repo: string): Promise<void> {
+  // Tag pull -> anonymous token dance.
+  const index = await anonymousGet(registryHost, `/v2/${repo}/manifests/latest`, MANIFEST_ACCEPT, undefined);
+  check(`[${label}] anonymous tag manifest pull (token dance)`, index.res.status === 200, `status ${index.res.status}`);
+  const token = index.token;
+  const indexJson = JSON.parse(index.res.body.toString('utf8')) as {
+    manifests?: { digest: string; platform?: { os: string; architecture: string } }[];
+    config?: { digest: string };
+  };
+
+  // Resolve a concrete image manifest (multi-arch index -> linux/amd64).
+  let imageManifestDigest: string | undefined;
+  if (indexJson.manifests) {
+    const amd64 = indexJson.manifests.find((m) => m.platform?.os === 'linux' && m.platform.architecture === 'amd64');
+    imageManifestDigest = (amd64 ?? indexJson.manifests[0]).digest;
+  }
+  let configDigest: string | undefined;
+  if (imageManifestDigest) {
+    const mres = await anonymousGet(
+      registryHost,
+      `/v2/${repo}/manifests/${imageManifestDigest}`,
+      MANIFEST_ACCEPT,
+      token,
+    );
+    check(`[${label}] by-digest image manifest pull`, mres.res.status === 200, `status ${mres.res.status}`);
+    configDigest = (JSON.parse(mres.res.body.toString('utf8')) as { config?: { digest: string } }).config?.digest;
+  } else {
+    configDigest = indexJson.config?.digest;
+  }
+  if (configDigest === undefined) throw new Error(`[${label}] could not resolve a config blob digest`);
+
+  // Blob pull -> registry 307 -> derived CDN redirect followed by the proxy.
+  const blob = await proxyFetch(registryHost, `/v2/${repo}/blobs/${configDigest}`, {
+    headers: { accept: 'application/octet-stream', authorization: `Bearer ${token ?? ''}` },
+  });
+  check(
+    `[${label}] blob pull follows the derived CDN redirect`,
+    blob.status === 200,
+    `status ${blob.status}, ${blob.body.length} bytes`,
+  );
+
+  // Content-addressed digest matches (bundle-local verification, per §16.6).
+  const got = `sha256:${createHash('sha256').update(blob.body).digest('hex')}`;
+  check(
+    `[${label}] delivered blob is content-addressed correct`,
+    got === configDigest,
+    `${got.slice(0, 19)}… == requested`,
+  );
+
+  // The blob was pulled by-digest and redirected to a CDN; §16.6 requires the
+  // originally-requested digest to survive the redirect as provenance.
+  const blobProv = provenance.find((p) => p.requestedDigest === configDigest);
+  check(
+    `[${label}] blob provenance retains the requested digest across the CDN redirect`,
+    blobProv !== undefined && blobProv.originId.includes('cdn'),
+    `blob origin ${blobProv?.originId ?? 'none'}, ${blobProv?.sizeBytes ?? 0} bytes`,
+  );
+}
+
 async function main(): Promise<void> {
   // Freeze a copy of the checked-in draft manifest (origins/ceilings already
   // reviewed) so the guard exercises the production default (frozen-only) path.
@@ -144,77 +205,15 @@ async function main(): Promise<void> {
   innerPort = (server.address() as { port: number }).port;
 
   try {
-    // ---- POSITIVE: full anonymous pull-by-digest with derived CDN redirect ----
-    // 1) API version probe (anonymous 401 -> token -> 200 or 401 challenge only).
+    // ---- POSITIVES: full anonymous pull-by-digest against both frozen origins ----
     const v2 = await anonymousGet('registry-1.docker.io', '/v2/', 'application/json', undefined);
     check(
       'api-version probe reaches the registry',
       v2.res.status === 200 || v2.res.status === 401,
       `status ${v2.res.status}`,
     );
-
-    // 2) Manifest index (tag pull -> token dance).
-    const index = await anonymousGet(
-      'registry-1.docker.io',
-      `/v2/${REPO}/manifests/latest`,
-      MANIFEST_ACCEPT,
-      undefined,
-    );
-    check('anonymous tag manifest pull (token dance)', index.res.status === 200, `status ${index.res.status}`);
-    const token = index.token;
-    const indexJson = JSON.parse(index.res.body.toString('utf8')) as {
-      manifests?: { digest: string; platform?: { os: string; architecture: string } }[];
-      config?: { digest: string };
-    };
-
-    // 3) Resolve a concrete image manifest (multi-arch index -> linux/amd64).
-    let imageManifestDigest: string | undefined;
-    if (indexJson.manifests) {
-      const amd64 = indexJson.manifests.find((m) => m.platform?.os === 'linux' && m.platform.architecture === 'amd64');
-      imageManifestDigest = (amd64 ?? indexJson.manifests[0]).digest;
-    }
-    let configDigest: string | undefined;
-    if (imageManifestDigest) {
-      const mres = await anonymousGet(
-        'registry-1.docker.io',
-        `/v2/${REPO}/manifests/${imageManifestDigest}`,
-        MANIFEST_ACCEPT,
-        token,
-      );
-      check(
-        'by-digest image manifest pull',
-        mres.res.status === 200,
-        `status ${mres.res.status} (${imageManifestDigest.slice(0, 19)}…)`,
-      );
-      configDigest = (JSON.parse(mres.res.body.toString('utf8')) as { config?: { digest: string } }).config?.digest;
-    } else {
-      configDigest = indexJson.config?.digest;
-    }
-
-    // 4) Blob pull -> registry 307 -> derived CDN redirect followed by the proxy.
-    if (configDigest === undefined) throw new Error('could not resolve a config blob digest');
-    const blob = await proxyFetch('registry-1.docker.io', `/v2/${REPO}/blobs/${configDigest}`, {
-      headers: { accept: 'application/octet-stream', authorization: `Bearer ${token ?? ''}` },
-    });
-    check(
-      'blob pull follows the derived CDN redirect',
-      blob.status === 200,
-      `status ${blob.status}, ${blob.body.length} bytes`,
-    );
-
-    // 5) Content-addressed digest matches (bundle-local verification, per §16.6).
-    const got = `sha256:${createHash('sha256').update(blob.body).digest('hex')}`;
-    check('delivered blob is content-addressed correct', got === configDigest, `${got.slice(0, 19)}… == requested`);
-
-    // 6) Provenance recorded for the completed content pull.
-    // The blob was pulled by-digest and redirected to a CDN; §16.6 requires the
-    // originally-requested digest to survive the redirect as provenance.
-    const blobProv = provenance.find((p) => p.requestedDigest === configDigest);
-    check(
-      'blob provenance retains the requested digest across the CDN redirect',
-      blobProv !== undefined && blobProv.originId.includes('cdn'),
-      `${provenance.length} record(s); blob origin ${blobProv?.originId ?? 'none'}, ${blobProv?.sizeBytes ?? 0} bytes`,
-    );
+    await runPositivePull('docker-hub', 'registry-1.docker.io', REPO);
+    await runPositivePull('ghcr', 'ghcr.io', GHCR_REPO);
 
     // ---- NEGATIVES (live, fail-closed with no unmediated egress) ----
     const unlisted = await proxyFetch('evil.example.com', `/v2/${REPO}/manifests/latest`, {
