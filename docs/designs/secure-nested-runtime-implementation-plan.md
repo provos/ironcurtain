@@ -28,6 +28,9 @@ preview-ready.
 **Amendment (2026-07-21, user-approved):** workload-image registry egress is promoted from Phase 3
 into 0F/0C scope; the frozen preloaded catalog now covers only trusted infrastructure images. See
 §6.4, §7.1, and §16.5.
+**Amendment (2026-07-21, user-approved):** workload-registry mediation gates request and derived-
+redirect authority, not the contents of already-untrusted workload images. Host-side blob hashing
+and verify-before-release buffering are removed from the security design. See §6.4 and §16.6.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
@@ -335,12 +338,20 @@ Images are two classes. **Trusted infrastructure images** — base, agent (per h
 
 When `imageIngress: public-registry` is enabled, the nested daemon receives proxy environment plus the session public CA and reaches only the fixed proxy path; there is still no direct registry route. The outer MITM adds a registry-aware handler frozen by `registry-egress-manifest.json`:
 
-- reviewed registry and token-service origins only (e.g. `registry-1.docker.io`, `auth.docker.io`, `ghcr.io`); client-selected hosts fail closed;
+- client-initiated requests may target only reviewed registry and token-service origins (e.g. `registry-1.docker.io`, `auth.docker.io`, `ghcr.io`); client-selected registry, token, or CDN hosts fail closed;
 - anonymous public pulls only: no registry credential exists in the bundle or is injected by the proxy; authenticated and private registries remain Phase 3;
-- pull-by-digest preferred; a tag pull is resolved and its digest recorded in audit before any blob is fetched;
-- content-addressed verification: every manifest and blob is hash-verified against the requested digest, so dynamic CDN redirect hosts cannot substitute content; redirects are followed only as the immediate bounded response to an authorized manifest/blob request;
-- per-request and per-image byte/time ceilings; push, delete, catalog enumeration, and all non-pull registry operations are rejected;
-- fetched images are recorded (registry, repository, resolved digest) as provenance but remain untrusted bundle state — mediation and provenance are the claims, not content trust.
+- pull-by-digest is preferred; tag and digest references and any registry-reported or optionally computed manifest digest are recorded as audit provenance, not host attestation;
+- the trusted proxy may follow an unlisted CDN URL only when that exact `Location` is the immediate response to an authorized manifest/blob request. The derived request preserves `GET`/`HEAD`, stays on HTTPS, passes destination-bound public-address/SSRF checks, has finite hops, and carries no authorization, cookie, client-selected host, or other credential-bearing header. The bundle cannot directly select or reuse the CDN destination;
+- bodies stream with normal backpressure under per-request and per-session byte, absolute-time, and concurrency ceilings. No trusted blob buffer, spool, or content hash is required; interrupted transfers and ceiling failures fail closed and are audited;
+- push, delete, catalog/tag enumeration, and all non-pull registry operations are rejected;
+- fetched image references and final destinations are recorded as provenance but remain untrusted bundle state — mediated request authority and provenance are the claims, not content integrity or trust.
+
+Hashing remains mandatory for trusted infrastructure catalog artifacts under §7.1. It is deliberately
+not a workload-registry security control: the bundle can already build or import arbitrary bytes,
+a registry can choose a malicious manifest and matching blobs, and malformed or substituted
+workload bytes cannot expand the outer envelope. Docker may perform its normal digest validation,
+but that result is bundle-local evidence. Implementations may hash a small manifest for diagnostics;
+that optional observation must not gate redirects, delivery, or qualification.
 
 `preloaded-only` remains the default. Qualification runs use `preloaded-only` everywhere except the dedicated registry-path gates, so backend evidence never silently depends on live registry availability. The registry-aware handler joins the trusted network TCB and therefore requires its own frozen manifest, hermetic protocol fixtures, and 0C negatives before any preview.
 
@@ -657,6 +668,13 @@ destinations, methods, path/query shapes, finite redirect graphs, credential-fre
 byte/time ceilings. The actual manifest and proxy/BuildKit wiring remain unfrozen until a cold-cache
 capture identifies the complete current-Dockerfile endpoint set.
 
+A draft workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind
+the admission fuse. Origin/operation/header/redirect policy and destination-bound forwarding have
+hermetic foundation tests, but the implementation still contains the blob hashing and trusted
+response buffering superseded by §16.6. The anonymous bearer flow, streaming and session ceilings,
+frozen manifest, live protocol gates, and production lifecycle wiring remain open; this path is not
+yet a 0F exit artifact.
+
 The checked-in Apple arm64 client matrix binds the locally inspected rootless Docker 29.2.1 image
 to exact CLI/daemon/API 1.44-1.53, Buildx 0.31.1, and Compose 5.1.0 values; live preflight compares
 the connected tools and catalog tuple rather than trusting labels. The Apple rootless-vfs 1.1.0
@@ -702,7 +720,7 @@ npx vitest run test/uid-remap.integration.test.ts test/uid-remap.goose.integrati
 npx vitest run test/pty-entrypoint.integration.test.ts test/skills-end-to-end.integration.test.ts
 ```
 
-The 0F JSON reporter/verifier—not visual console output—adjudicates every required/adapted command at zero skip. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`, and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the frozen preloaded catalog, narrow current-Dockerfile build-egress profile, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus unlisted-registry, credentialed-endpoint, redirect-abuse, and oversize negatives, run only in its dedicated gates), watchdog, cgroup ancestry, relay, and performance/state-growth budgets.
+The 0F JSON reporter/verifier—not visual console output—adjudicates every required/adapted command at zero skip. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`, and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the frozen preloaded catalog, narrow current-Dockerfile build-egress profile, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus direct-CDN selection, unlisted-registry, credentialed-endpoint, redirect-to-private-address, redirect credential-leakage, hop/byte/time/concurrency ceiling, and non-pull negatives, run only in its dedicated gates), watchdog, cgroup ancestry, relay, and performance/state-growth budgets.
 
 The target/scanner acceptance fixture is mandatory even if no existing test covers it.
 
@@ -945,9 +963,16 @@ That review remains useful history but its broker requirements are not normative
 ### 16.5 Workload-registry promotion (user-approved, 2026-07-21)
 
 - **User direction:** the operator burden of staging every workload image through the frozen catalog is not justified by the threat model. A pulled workload image runs as the already-untrusted bundle, exactly like a package installed through the mediated package path; forcing workload images through TCB-image machinery added complexity without a matching security claim.
-- **Dispositions:** the preloaded catalog is retained unchanged for trusted infrastructure images (base, agent, nested-daemon, helper, fixed-relay, socat), whose identity is bound into qualification evidence. Target/scanner fixtures stay pinned sealed archives owned by the qualification harness so 0C evidence remains deterministic and offline. Workload images gain the §6.4 anonymous, manifest-frozen, digest-verified registry path, promoted from Phase 3; Phase 3 narrows to credentialed/private ingress. The /goal text is unchanged: G1 (infrastructure catalog integrity), G3 (fixed-proxy-only egress), and G5 (no credential provisioning) remain true under the amendment.
-- **New TCB surface acknowledged:** the registry-aware proxy handler joins the trusted network TCB and requires its own frozen `registry-egress-manifest.json`, hermetic protocol fixtures, and 0C negatives before any preview. Content-addressed digest verification is the control that neutralizes dynamic CDN redirect hosts; provenance recording, not content trust, is the claim for pulled images.
+- **Dispositions:** the preloaded catalog is retained unchanged for trusted infrastructure images (base, agent, nested-daemon, helper, fixed-relay, socat), whose identity is bound into qualification evidence. Target/scanner fixtures stay pinned sealed archives owned by the qualification harness so 0C evidence remains deterministic and offline. Workload images gain the §6.4 anonymous, manifest-frozen, URL/operation-gated registry path, promoted from Phase 3; Phase 3 narrows to credentialed/private ingress. The /goal text is unchanged: G1 (infrastructure catalog integrity), G3 (fixed-proxy-only egress), and G5 (no credential provisioning) remain true under the amendment.
+- **New TCB surface acknowledged:** the registry-aware proxy handler joins the trusted network TCB and requires its own frozen `registry-egress-manifest.json`, hermetic protocol fixtures, and 0C negatives before any preview. Client-origin URL gating plus exact derived-redirect authorization, credential stripping, destination-bound SSRF checks, finite hops, and transfer ceilings constrain authority; provenance recording, not content trust, is the claim for pulled images.
 - **Code follow-ups:** narrow the catalog builder's required role set to the infrastructure images; move the vulnerability-fixture archives to the qualification harness staging path; add `registry-egress-policy.ts` and the manifest; plumb `imageIngress: 'public-registry'` as strict opt-in.
+
+### 16.6 Workload-registry content-integrity correction (user-approved, 2026-07-21)
+
+- **Correction:** host-side hashing of workload manifests/blobs and verify-before-release buffering are not required security controls. Workload image bytes are already untrusted bundle input, the bundle can synthesize arbitrary images locally, and a registry can select a malicious manifest with matching content. Blob integrity therefore does not constrain outer authority.
+- **Binding redirect rule:** an unlisted CDN is reachable only through the trusted proxy's immediate handling of an exact redirect returned by an authorized registry pull. The derived request is HTTPS `GET`/`HEAD`, public-address checked, header/credential stripped, bounded, audited, and unavailable for direct bundle selection or later reuse. This is URL-derived authorization, not a general CDN allowlist.
+- **Evidence disposition:** requested references, final destinations, and registry-reported or optionally computed manifest digests are provenance only. Docker's own digest validation is bundle-local. Trusted infrastructure archives and catalog entries retain their independent mandatory hashes under §7.1.
+- **Implementation consequence:** remove trusted blob hashing, verify-before-release buffering/spooling, and digest-mismatch qualification gates. Preserve digest syntax parsing where needed for pull-path classification and audit, and replace those tests with derived-redirect, credential stripping, SSRF, streaming backpressure, and byte/time/concurrency ceiling gates.
 
 ## 17. Primary references
 
