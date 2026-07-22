@@ -15,6 +15,9 @@ export default tseslint.config(
       // Packaged workflow helper scripts (Python/JS) run in-container, not in
       // the TS build — exclude them from the typescript-eslint project parser.
       'src/workflow/workflows/*/scripts/',
+      // Test fixtures spawned as standalone subprocesses (.mjs) are not part of
+      // the tsconfig.eslint project, so the typed parser cannot resolve them.
+      'test/**/fixtures/**/*.mjs',
       'vitest.config.ts',
       'eslint.config.js',
     ],
