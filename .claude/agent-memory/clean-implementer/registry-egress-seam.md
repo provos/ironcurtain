@@ -1,71 +1,81 @@
 # Anonymous workload-registry egress path (Phase 0F, promoted from Phase 3)
 
 Governing design: `docs/designs/secure-nested-runtime-implementation-plan.md` §6.4 (full spec),
-§7.1, §16.5 (2026-07-21 user-approved promotion; "Code follow-ups"). Feature stays INERT behind
+§7.1, §16.5 (promotion), **§16.6 (2026-07-21 content-integrity correction — the current controlling
+amendment; overrides earlier digest/buffer framing)**. Feature stays INERT behind
 `assertDockerWorkloadImplementationAvailable` (`src/docker-workload/config.ts`) until 0C. Sibling of
 the build-egress seam — same layering discipline (see [[build-egress-seam]]).
 
-## Opt-in plumbing
-`imageIngress` widened from `z.literal('preloaded-only')` to `z.enum(['preloaded-only','public-registry'])`
-in `src/docker-workload/config.ts` (schema ~46, resolved type ~73, resolution ~97). Default stays
-`preloaded-only`; resolved type carries the union. Fuse behavior unchanged.
+## §16.6 CORRECTION (what changed vs the original build) — read this first
+Host-side blob hashing + verify-before-release buffering are NOT security controls for workload
+images: the bundle can already synthesize arbitrary bytes and a registry can serve a malicious
+manifest with matching blobs. So blob content is untrusted and flows through UNVERIFIED.
+- REMOVED: `RegistryContentHasher`/`createRegistryContentHasher`, `DigestVerification`/
+  `verifyContentDigest`, the `verifyAndDeliver` Buffer[]-accumulate + `Buffer.concat` + digest-mismatch
+  502, `resolvesDigest`, `allowDynamicRedirectHosts`, per-origin `redirects{maxHops,followDynamicHosts}`
+  + `limits{requestBytes,requestTimeoutMs}`, manifest-level `imageLimits{totalBytes,totalTimeoutMs}`.
+- `expectedDigest` RENAMED → `requestedDigest` (audit provenance only, from by-digest URL; gates NOTHING).
+- KEPT (§16.6 keepers): digest SYNTAX parsing (`parseOciDigest`, sha256-only) for URL classification +
+  audit; URL/repo/path/method/operation classification; `Set-Cookie` response strip
+  (`HOP_BY_HOP_RESPONSE_HEADERS`); destination-bound transport; bounded redirects; strict
+  `public-registry` opt-in.
 
-## Layering (pure policy vs I/O seam) — NOTE both live in src/docker/ (NOT docker-workload)
-- `src/docker/registry-egress-policy.ts` — PURE (node+zod+`hop-by-hop-headers.js` leaf only).
-  `loadRegistryEgressManifest` (strict schema, O_NOFOLLOW, non-group/world-writable, 2..1MB, sha256),
-  branded `ValidatedRegistryEgressManifest` via `validateRegistryEgressManifest` (validate once),
-  `authorizeValidatedRegistryEgressRequest` (hot path, no re-parse), `authorizeValidatedRegistryRedirect`
-  (bounded redirect closure). Pull ops: `api-version|token|manifest-pull|blob-pull`. Rejected set
-  (`push|delete|catalog-enumeration|tags-enumeration|unknown`) is NOT expressible in schema → fails
-  closed. Digest helpers: `parseOciDigest` (sha256 only), streaming `createRegistryContentHasher`
-  (update/bytesHashed/digestHex), `verifyContentDigest`.
-- `src/docker/registry-egress-proxy.ts` — I/O seam (imports pure policy + `outbound-transport.ts`).
-  `createRegistryEgressGuard({mode,manifestPath})` → fail-closed at construction for `public-registry`;
-  `disabled` guard authorizes nothing. `handleRegistryEgressRequest(clientReq,clientRes,ctx)`: authorize →
-  fetch via `OutboundTransport` → follow bounded redirects → BUFFER-bounded-then-verify → deliver only
-  verified content. `ctx.recordProvenance?` sink gets resolved digest (registry/repo/reference/
-  requested+resolved digest/size) AFTER verification, BEFORE delivery.
+## The binding controls now (replace digest verification)
+1. Client-origin URL/operation gating (unchanged: unlisted host / push / delete / catalog / tags fail closed).
+2. Exact derived-redirect authorization — an unlisted CDN URL is reachable ONLY as the immediate exact
+   `Location` of an authorized manifest/blob response. Now follows for ANY content pull (TAG or digest —
+   no longer digest-gated). Derived request: GET/HEAD preserved, HTTPS-only, headers `{}` (all creds
+   stripped), finite `maxRedirectHops`. Literal-IP redirect targets REFUSED in policy (`isIP` after
+   stripping IPv6 brackets `[]`); DNS-resolves-to-private is caught by the transport (OutboundTransport
+   guarded DNS lookup / `assertHostnameIsEligible`) — that transport IS the binding SSRF control.
+3. Anonymous bearer-token flow — `sanitizeHeaders` ADMITS a single `Authorization: Bearer <token>` on a
+   client-initiated request to a listed origin (bearer is STRUCTURAL, never in an origin allow-list;
+   `FORBIDDEN_CREDENTIAL_HEADERS` still lists `authorization` so the allow-list schema rejects it).
+   Rejects Basic/other schemes, Cookie, Proxy-Authorization everywhere; redirects always strip.
+4. Streaming ceilings (see below).
 
-## Key design decisions (don't re-litigate without a reason)
-- Classification is by `operations[]` + optional `tokenPaths[]`, NOT a strict `role` field. Real
-  registries differ: Docker Hub splits token onto auth.docker.io; ghcr.io serves `/token` AND `/v2/*` on
-  one host. Token path is matched BEFORE v2 path shapes so a combined host resolves both.
-- Content-addressed verification is THE control. By-digest pulls (blob, manifest-by-digest) carry the
-  sha256 in the URL → stream-hash, reject mismatch with 502 (substitution defense). Tag pulls have no
-  a-priori digest → `resolvesDigest:true`, digest computed from verified bytes and surfaced for audit.
-- Dynamic-host (CDN) redirects are followed by the PROXY internally (model A — client sees one response;
-  the CDN host is never a client CONNECT), ONLY when `allowDynamicRedirectHosts` (i.e. expectedDigest
-  present). Tag/token never follow a dynamic host. Redirect follows carry NO request headers.
-- Anonymous-only is STRUCTURAL: `FORBIDDEN_CREDENTIAL_HEADERS` (authorization/cookie/x-api-key/…) are a
-  fail-closed REJECTION on the request AND schema forbids them in an origin's `requestHeaders.allow`.
-  Connection-management headers (`host` + HOP_BY_HOP_HEADERS) are DROPPED silently (transport re-frames).
-- Forwarder BUFFERS bounded content before delivery (never streams unverified bytes). Documented as a
-  0F simplification; true streaming + per-image cumulative accounting + the anonymous bearer-token flow
-  (Docker Hub/ghcr 401→token→retry-with-Bearer) are 0C. The strict credential rejection currently makes
-  the end-to-end anon-bearer flow a 0C concern.
+## Layering (pure policy vs I/O seam) — both live in src/docker/ (NOT docker-workload)
+- `src/docker/registry-egress-policy.ts` — PURE (node crypto/fs/net-isIP/path + zod + hop-by-hop leaf;
+  `isIP` is pure, no sockets). `loadRegistryEgressManifest`, branded `validateRegistryEgressManifest`,
+  `authorizeValidatedRegistryEgressRequest` (hot path), `authorizeValidatedRegistryRedirect`
+  (content-op gate via `CONTENT_OPERATIONS`, https-only, literal-IP reject, matched-origin re-auth OR
+  CDN, headers `{}`). New schema: origin `perRequest{maxBytes,maxDurationMs,maxRedirectHops}` +
+  manifest `perSession{maxTotalBytes,maxConcurrentRequests}`. `AuthorizedRegistryEgressRequest` carries
+  `maxBytes/maxDurationMs/maxRedirectHops/redirectHop/requestedDigest?`.
+- `src/docker/registry-egress-proxy.ts` — I/O seam. Owns sockets/streams + the per-session LEDGER.
+  `createRegistryEgressSessionLedger(perSession)` → `acquire()`(throws at concurrency ceiling)/
+  `wouldFit`/`addBytes`; guard exposes it as `guard.session` (one guard == one session/bundle, shared in
+  workflow shared-container). `handleRegistryEgressRequest`: authorize (403) → acquire lease (503 on
+  concurrency) → arm absolute-deadline `setTimeout(maxDurationMs).unref()` (504) → `clientRes.once('close')`
+  = idempotent `finalizeExchange` (clearTimeout + lease.release). Body via `stream.pipeline(upstreamRes,
+  ByteCeilingTransform, clientRes)` — genuine backpressure, no buffer. `ByteCeilingTransform` fails the
+  pipeline (destroys both sides) on per-request `maxBytes` OR per-session `ledger.addBytes` overflow.
+  `content-length` pre-check gives a clean 502 before streaming (per-request + `!wouldFit` per-session).
+  `recordProvenance` on successful content-pull completion: `requestedDigest` (URL) + `resolvedDigest`
+  (registry `Docker-Content-Digest` header, validated syntax, may be absent) + streamed `sizeBytes`.
+  `onUpstreamResponse` guards `settled/writableEnded/destroyed` (drain+return) so a late upstream
+  response after a deadline/abort can't writeHead-after-end.
 
-## MITM wiring (WHOLE-PROXY mode, mirrors build-egress; I own mitm-proxy.ts here)
-`MitmProxyOptions.registryEgress?: {guard}`. Mutually exclusive with `buildEgress` (throws at
-construction). registry v2 is https-only → NO plain-HTTP branch (unlike build-egress apt). Minimal edits:
-`isRegistryEgress` bypasses the CONNECT allowlist DENY + tags `ConnectionMeta.registryEgress` + TLS-
-terminates every host; inner `request` handler early-dispatches to `handleRegistryEgressRequest` (scheme
-https). `preloaded-only` sets no guard → registry traffic has no route (fail closed).
+## MITM wiring (WHOLE-PROXY mode; comment-only updates this pass)
+`MitmProxyOptions.registryEgress?:{guard}`, mutually exclusive with `buildEgress`. Context shape
+UNCHANGED (guard/transport/scheme/targetHost/targetPort/requestTarget). Only doc-comment + inline
+comment updated to drop the digest-verification claim. `preloaded-only` → no guard → no route.
 
 ## Draft manifest & freeze
-`config/docker-workload/registry-egress-manifest.json` — DRAFT (in-band `status:"draft"`; strict schema
-allows NO comment fields, so `status` + policyId `...-draft-v1` are the markers). Origins:
-registry-1.docker.io + auth.docker.io(token) + ghcr.io(combined). Must load cleanly via
-`loadRegistryEgressManifest`. 0C must freeze reviewed origins, exact blob-byte ceilings, hermetic
-protocol fixtures, and negatives (§6.4/§16.5 name G3 registry negatives).
+`config/docker-workload/registry-egress-manifest.json` — DRAFT (`status:"draft"`, policyId
+`...-draft-v1`). Origins: registry-1.docker.io + auth.docker.io(token) + ghcr.io(combined), each with
+`perRequest`; manifest `perSession{maxTotalBytes,maxConcurrentRequests}`. 0C must freeze reviewed
+origins + real ceilings + hermetic fixtures + §6.4 negatives.
 
-## Testing pattern that worked (hermetic, NO live registry)
-- `test/docker/registry-egress-policy.test.ts`: temp-file manifests (0400/0666/symlink for load negatives);
-  `manifest()` typed fixture; synthesized sha256 bytes for digest verify; redirect authorized at policy
-  level with https CDN URLs.
-- `test/docker/registry-egress-proxy.test.ts`: real loopback front `http.createServer` → `handleRegistryEgressRequest`;
-  KEY SEAM = a `routingTransport(Map hostname→loopbackPort)` custom `OutboundTransport` (registry schema
-  FORCES `protocol:'https:'` so build-egress's http-loopback trick does NOT work — route by hostname to a
-  plain-http loopback instead, ignoring the https destination). `spyTransport` (request() throws) proves
-  rejected requests never touch upstream. Redirect test = two loopback servers (registry 307 → CDN 200).
-- Node http client auto-adds `host`/`connection` → the policy DROPS them silently (they're in
-  DROPPED_REQUEST_HEADERS), so no manifest `strip` list is needed (differs from build-egress).
+## Testing pattern (hermetic, NO live registry)
+- policy test: temp-file manifests (0400/0666/symlink negatives); `manifest()` typed fixture.
+- proxy test: real loopback front `http.createServer` → `handleRegistryEgressRequest`; KEY SEAM =
+  `routingTransport(Map hostname→loopbackPort)` custom OutboundTransport (registry schema FORCES https,
+  so route by hostname to a plain-http loopback). `spyTransport` proves rejects never touch upstream.
+  Streaming proof = gated upstream writes chunk1, blocks on a gate the client's `onData` resolves, then
+  writes chunk2 (a buffering proxy would deadlock/timeout). Time ceiling = upstream `setTimeout(400)` vs
+  `maxDurationMs:120` → 504. Concurrency = `maxConcurrentRequests:1`, first pull gated open (await
+  `firstRequest`), second → 503. Byte ceilings = content-length pre-check → clean 502; chunked
+  mid-stream overflow → aborted/truncated (tolerant assert). `driveThroughSeam` returns
+  `{statusCode,headers,body,aborted}`; async upstream handlers must be sync + `void gate.then(...)`
+  (eslint no-misused-promises).
