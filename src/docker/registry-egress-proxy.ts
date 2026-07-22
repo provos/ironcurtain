@@ -59,6 +59,13 @@ export type RegistryEgressMode = 'disabled' | 'public-registry';
 
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 
+/**
+ * A legitimate registry redirect (3xx) carries a tiny or empty body. It is drained,
+ * not delivered, but still consumes bandwidth, so it is bounded by this tight cap in
+ * addition to the per-request and per-session byte ceilings (F1).
+ */
+const MAX_REDIRECT_BODY_BYTES = 64 * 1024;
+
 /** Frozen manifest identity retained for audit and diagnostics. */
 export interface FrozenRegistryEgressManifest {
   readonly path: string;
@@ -124,6 +131,14 @@ export interface CreateRegistryEgressGuardOptions {
   readonly mode: RegistryEgressMode;
   /** Absolute manifest path. Required (and fail-closed) for `public-registry`. */
   readonly manifestPath?: string;
+  /**
+   * Serve a `status: "draft"` (unreviewed) manifest. Off by default: a
+   * `public-registry` guard fails closed on a non-frozen manifest so an
+   * unreviewed origin/ceiling set can never serve live traffic (F2). Only the
+   * hermetic tests and the pre-freeze live gate that deliberately exercise a
+   * draft manifest set this; the production admission path never does.
+   */
+  readonly allowUnfrozenManifest?: boolean;
 }
 
 /** Build a per-session cumulative ledger from the manifest's session ceilings. */
@@ -190,6 +205,11 @@ export function createRegistryEgressGuard(options: CreateRegistryEgressGuardOpti
 
   const loaded = loadRegistryEgressManifest(manifestPath);
   const manifest = loaded.manifest;
+  if (manifest.status !== 'frozen' && options.allowUnfrozenManifest !== true) {
+    throw new Error(
+      `registry egress requires a frozen manifest; ${loaded.path} has status "${manifest.status}" (set allowUnfrozenManifest only for tests or the pre-freeze gate)`,
+    );
+  }
   const session = createRegistryEgressSessionLedger(manifest.perSession);
 
   return {
@@ -336,6 +356,8 @@ function fetchAuthorized(exchange: RegistryEgressExchange, authorized: Authorize
 
   exchange.upstreamReq = upstreamReq;
   upstreamReq.on('error', (error) => {
+    // A superseded hop's stale connection must not tear down the current one (F5).
+    if (exchange.upstreamReq !== upstreamReq) return;
     if (!clientRes.headersSent) rejectRegistryEgressResponse(clientRes, 502, error.message);
     else clientRes.destroy();
   });
@@ -367,19 +389,48 @@ function followRedirect(
   authorized: AuthorizedRegistryEgressRequest,
 ): void {
   const location = firstHeader(upstreamRes.headers.location);
-  upstreamRes.resume(); // drain the redirect body before re-requesting
   if (location === undefined) {
+    upstreamRes.destroy(); // fail closed without draining an unusable response
     rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect is missing a Location header');
     return;
   }
+  // Authorize the redirect target before consuming its body: an unauthorized
+  // target is rejected without spending bandwidth draining the 3xx response.
   let next: AuthorizedRegistryEgressRequest;
   try {
     next = exchange.context.guard.authorizeRedirect(authorized, location);
   } catch (error) {
+    upstreamRes.destroy();
     rejectRegistryEgress(exchange.clientRes, exchange.context, 403, error);
     return;
   }
-  fetchAuthorized(exchange, next);
+  // Drain the redirect body under the byte ceilings before following (F1): the body
+  // is never delivered but still consumes bandwidth, so it counts against a tight
+  // redirect cap, the per-request cap, and the cumulative session ledger. Overflow
+  // fails the whole exchange closed; the per-request wall-clock deadline bounds a
+  // slow body.
+  const ledger = exchange.context.guard.session;
+  const bodyCap = Math.min(MAX_REDIRECT_BODY_BYTES, authorized.maxBytes);
+  let drained = 0;
+  let aborted = false;
+  upstreamRes.on('data', (chunk: Buffer) => {
+    if (aborted) return;
+    drained += chunk.length;
+    if (drained > bodyCap || !ledger.addBytes(chunk.length)) {
+      aborted = true;
+      upstreamRes.destroy();
+      rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect body exceeds a byte ceiling');
+    }
+  });
+  upstreamRes.on('error', () => {
+    if (aborted) return;
+    aborted = true;
+    rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect body transfer failed');
+  });
+  upstreamRes.on('end', () => {
+    if (aborted || exchange.settled) return;
+    fetchAuthorized(exchange, next);
+  });
 }
 
 /**

@@ -40,9 +40,30 @@ describe('registry-egress guard construction (fail-closed)', () => {
   it('reports the frozen manifest identity and session ceilings for audit once constructed', () => {
     const guard = fixtureGuard();
     expect(guard.mode).toBe('public-registry');
-    expect(guard.manifest?.status).toBe('draft');
+    expect(guard.manifest?.status).toBe('frozen');
     expect(guard.manifest?.origins.map((origin) => origin.hostname)).toEqual(['registry.test']);
     expect(guard.session.maxConcurrentRequests).toBe(4);
+  });
+
+  it('fails closed on a draft (unreviewed) manifest by default', () => {
+    const directory = tempDirectory();
+    const path = join(directory, 'draft.json');
+    writeFileSync(path, JSON.stringify({ ...manifest(), status: 'draft' }), { mode: 0o400 });
+    expect(() => createRegistryEgressGuard({ mode: 'public-registry', manifestPath: path })).toThrow(
+      /frozen manifest/u,
+    );
+  });
+
+  it('serves a draft manifest only with the explicit unfrozen opt-in', () => {
+    const directory = tempDirectory();
+    const path = join(directory, 'draft.json');
+    writeFileSync(path, JSON.stringify({ ...manifest(), status: 'draft' }), { mode: 0o400 });
+    const guard = createRegistryEgressGuard({
+      mode: 'public-registry',
+      manifestPath: path,
+      allowUnfrozenManifest: true,
+    });
+    expect(guard.manifest?.status).toBe('draft');
   });
 });
 
@@ -315,6 +336,30 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(cdnRequest.headers.authorization).toBeUndefined();
   });
 
+  it('fails closed when a redirect body exceeds the byte ceiling before following (F1)', async () => {
+    let cdnContacted = false;
+    const cdn = await startUpstream((_req, res) => {
+      cdnContacted = true;
+      res.writeHead(200);
+      res.end('cdn-delivered-layer');
+    });
+    const registry = await startUpstream((_req, res) => {
+      res.writeHead(307, { location: 'https://cdn.example.com/layers/real' });
+      // A 128 KiB 3xx body overshoots the 64 KiB redirect cap; the drain must
+      // abort the exchange rather than discard the bytes uncounted.
+      res.end(Buffer.alloc(128 * 1024, 0x61));
+    });
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: routingTransport({ 'registry.test': registry.port, 'cdn.example.com': cdn.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('redir')}`,
+    });
+    expect(result.statusCode).toBe(502);
+    expect(result.body).toMatch(/byte ceiling/u);
+    expect(cdnContacted).toBe(false);
+  });
+
   it('rejects a derived redirect to a literal private address before connecting', async () => {
     const registry = await startUpstream((_req, res) => {
       res.writeHead(307, { location: 'https://127.0.0.1:9/layers/real' });
@@ -389,7 +434,7 @@ function manifest(overrides: ManifestOverrides = {}): RegistryEgressManifest {
   return {
     schemaVersion: 1,
     policyId: 'registry-egress-proxy-test-v1',
-    status: 'draft',
+    status: 'frozen',
     origins: [
       {
         id: 'registry',
