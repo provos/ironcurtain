@@ -363,7 +363,7 @@ The catalog governs the §6.4 infrastructure class only; workload images arrive 
 
 `imageMode: preloaded-catalog` resolves a trusted read-only catalog outside the workspace. Each entry binds immutable manifest/config digests and a backend-specific runtime image ID, exact build-hash schema+hash, toolchain digest, architecture/API range, runtime-trust schema, catalog generation, and provenance. Docker's runtime ID is the config digest; Apple `container` deterministically synthesizes a top-level descriptor during import, so trusted staging records that Apple-specific ID after independently verifying the archive. Trusted bootstrap stages the selected archive, verifies it before load, loads it only if the logical ref is absent, inspects the immutable loaded ID/config, compares every field, and returns/records the catalog hash. Mismatch fails before any build; mutable tags and automatic `buildImage` fallback are forbidden. In `preloaded-only` ingress mode direct `docker pull` fails because the daemon has no registry route; in `public-registry` mode pulls traverse only the fixed proxy path under the frozen §6.4 manifest.
 
-Both image call paths branch once, early, on trusted resolved image mode: the [`src/index.ts`](../../src/index.ts) `ensureDockerImage` preflight and `prepareDockerInfrastructure`/`ensureImage`. The branch occurs before legacy label staleness or build decisions. In preloaded mode there are zero calls to `ensureImage`, `ensureBaseImage`, `buildImage`, or `pullImage`. Tests cover both call paths and assert those call counts.
+Both image call paths branch once, early, on trusted resolved image mode: the [`src/index.ts`](../../src/index.ts) `ensureDockerImage` preflight and `prepareDockerInfrastructure`/`resolveAgentImage`. The branch occurs before legacy label staleness or build decisions. In preloaded mode there are zero calls to `ensureImage`, `ensureBaseImage`, `buildImage`, or `pullImage`. Tests cover both call paths and assert those call counts.
 
 Implementation progress (not an exit claim): the shared resolver branch parses a bounded,
 non-symlink, non-group/world-writable catalog through one `O_NOFOLLOW` descriptor; validates unique
@@ -839,28 +839,31 @@ Each requires its own threat model and gates.
 - `src/docker-workload/build-egress-policy.ts` — frozen current-Dockerfile manifest resolution across BuildKit/frontend/worker/build/RUN seams.
 - `src/docker/registry-egress-policy.ts` — frozen workload-registry manifest resolution and pull-protocol authorization for the outer MITM registry path (§6.4).
 - `src/docker/outbound-transport.ts` — destination-bound parent-proxy transport shared by MITM and registry/package paths.
+- `src/docker/mediated-egress.ts` — the single credential-free forwarder (backpressured streaming, per-request byte/time ceilings, optional session ledger and internal redirect-following, fail-closed rejection) used by both egress proxies; deliberately separate from the credential-injecting provider path.
+- `src/docker/egress-forwarding.ts` — shared request/response shaping (`buildRequestUrl`/`toOutgoingHeaders`/`sanitizeResponseHeaders`) for both egress proxies.
 - `docker/nested-daemon/` — pinned purpose-built daemon image, entrypoint, health probe, and image manifest.
 - `scripts/spikes/secure-nested-docker/` — timeboxed 0A ledger/traps/recovery, 0B probes, 0F freeze inputs, and 0C qualification/evidence.
 - `test/docker-workload/qualification-contracts/<variant>.json` — one canonical, fully expanded, hash-pinned contract per concrete variant.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
 - `config/docker-workload/build-egress-manifest.json` — current-Dockerfile-only destination and BuildKit-seam authorization.
 - `config/docker-workload/registry-egress-manifest.json` — reviewed public-registry origins, pull-protocol rules, and ceilings for workload-image pulls.
-- `config/docker-workload/preloaded-catalog.json` — immutable IDs/digests, build/toolchain/trust generations, API/platform scope, and provenance.
+- `config/docker-workload/preloaded-catalog.docker.json` and `config/docker-workload/preloaded-catalog.apple-container.json` — per-backend frozen catalogs of immutable IDs/digests, build/toolchain/trust generations, API/platform scope, and provenance.
 - `test/docker-workload/performance-budget.json` — versioned backend/architecture time and state-growth ceilings.
 - `test/docker-workload/preloaded-catalog.test.ts` — mismatch failures and proof that both call paths invoke no legacy ensure/build/pull operation.
 - `test/docker-workload/` — boundary, target/scanner, fault, feature-off, and platform acceptance tests.
+- `src/hardened-fs.ts` and `src/zod-helpers.ts` — shared TCB leaves for hardened host-file reads, immutable-JSON load, atomic stable-JSON writes, and canonical-path guards (`hardened-fs`), plus header/identifier and duplicate-detection schema fragments (`zod-helpers`).
 
 Names are provisional; module ownership and security boundaries are normative.
 
 ### Existing integration points
 
 - [`src/docker/docker-infrastructure.ts`](../../src/docker/docker-infrastructure.ts) — create/cleanup daemon infrastructure with the existing bundle.
-- [`src/index.ts`](../../src/index.ts) and [`src/docker/docker-infrastructure.ts`](../../src/docker/docker-infrastructure.ts) — make one early resolved-image-mode branch in both `ensureDockerImage` preflight and `prepareDockerInfrastructure`/`ensureImage`; preloaded mode bypasses every legacy ensure/build/pull call.
+- [`src/index.ts`](../../src/index.ts) and [`src/docker/docker-infrastructure.ts`](../../src/docker/docker-infrastructure.ts) — make one early resolved-image-mode branch in both `ensureDockerImage` preflight and `prepareDockerInfrastructure`/`resolveAgentImage`; preloaded mode bypasses every legacy ensure/build/pull call.
 - [`src/docker/docker-manager.ts`](../../src/docker/docker-manager.ts) — retain as the inner real-Docker implementation; extend outer create rendering narrowly.
 - [`src/docker/types.ts`](../../src/docker/types.ts) and `parseDockerImageInfo` in [`src/docker/docker-manager.ts`](../../src/docker/docker-manager.ts) — extend normalized image inspection with immutable runtime ID, manifest/config digests, platform, build schema/hash, toolchain/trust/catalog generations, and provenance; also add trusted outer resource fields and frozen profile/mount references with safe defaults.
 - [`src/docker/network-topology.ts`](../../src/docker/network-topology.ts) — add DD-STRICT and Engine-28-preflighted DD-PROXY isolated-v4/v6 topology plus Apple relay capability evidence.
 - [`src/docker/apple-container-manager.ts`](../../src/docker/apple-container-manager.ts) — VM resource, init, lifecycle, and inspection support.
-- [`src/docker/mitm-proxy.ts`](../../src/docker/mitm-proxy.ts) and [`src/docker/registry-proxy.ts`](../../src/docker/registry-proxy.ts) — use destination-bound outbound transport.
+- [`src/docker/mitm-proxy.ts`](../../src/docker/mitm-proxy.ts) and [`src/docker/registry-proxy.ts`](../../src/docker/registry-proxy.ts) — use destination-bound outbound transport; the MITM resolves a single internal `ListenerMode` for its build-egress/registry-egress listener modes.
 - [`src/docker/docker-resource-lifecycle.ts`](../../src/docker/docker-resource-lifecycle.ts) — own/reconcile only authoritative outer objects; do not import inner inventory.
 - [`src/config/user-config.ts`](../../src/config/user-config.ts) and [`src/config/types.ts`](../../src/config/types.ts) — schema, safe defaults, opt-in resource/image/tier policy, and resolved configuration.
 - `src/config/config-command.ts`, start CLI parsing/help, and web launch request/validation — expose the same explicit session-creation capability without allowing raw outer arguments.
@@ -996,6 +999,17 @@ That review remains useful history but its broker requirements are not normative
 - **Binding redirect rule:** an unlisted CDN is reachable only through the trusted proxy's immediate handling of an exact redirect returned by an authorized registry pull. The derived request is HTTPS `GET`/`HEAD`, public-address checked, header/credential stripped, bounded, audited, and unavailable for direct bundle selection or later reuse. This is URL-derived authorization, not a general CDN allowlist.
 - **Evidence disposition:** requested references, final destinations, and registry-reported or optionally computed manifest digests are provenance only. Docker's own digest validation is bundle-local. Trusted infrastructure archives and catalog entries retain their independent mandatory hashes under §7.1.
 - **Implementation consequence:** remove trusted blob hashing, verify-before-release buffering/spooling, and digest-mismatch qualification gates. Preserve digest syntax parsing where needed for pull-path classification and audit, and replace those tests with derived-redirect, credential stripping, SSRF, streaming backpressure, and byte/time/concurrency ceiling gates.
+
+### 16.7 Post-freeze module consolidations (record, 2026-07-22)
+
+Four post-freeze `/simplify` refactors deduplicated security-critical code that had been copy-pasted across the nested-runtime TCB. Each was differential-audited to be behavior- and security-identical, and the full docker suites plus the egress gates (registry live 16/16, build offline) stayed green.
+
+- **Shared hardened-fs / hash / zod leaves** (`cd2a141`): extracted `src/hardened-fs.ts` (`readHardenedFile`, `loadImmutableHostJson`, `writeStableJsonAtomic`, `assertCanonicalHostPath`) and `src/zod-helpers.ts` (`HEADER_NAME_REGEX`, `addDuplicateIssues`, shared schema fragments), and added `sha256Hex`/`sha256HexSchema` to `src/hash.ts` — one copy of the hardened loader/atomic-writer/canonical-path-guard/sha256/zod primitives instead of the many that were pasted across the TCB. Also dropped the watchdog per-tick zod re-parse and swapped per-header `safeParse` for a `HEADER_NAME_REGEX` test on the egress hot paths.
+- **Shared egress forwarding helpers** (`01be37b`): extracted `src/docker/egress-forwarding.ts` (`buildRequestUrl`, `toOutgoingHeaders`, `sanitizeResponseHeaders`) shared by both egress proxies; collapsed a double-stored bundle handle to getters and deleted the dead `ensureImage` export (callers use `resolveAgentImage(...).buildHash`) plus two provably-dead defensive clauses.
+- **One mediated egress forwarder** (`c2d7b65`): the two near-duplicate credential-free forwarders became one `src/docker/mediated-egress.ts` (backpressured streaming, per-request byte/time ceilings, optional session ledger, optional internal redirect-following, fail-closed rejection); `registry-egress-proxy.ts` and `build-egress-proxy.ts` are now thin callers (registry passes session-ledger + follow-redirect + provenance; build passes only its fixed-parent transport-binding check, so 3xx passes through to the client). Build additionally gained backpressure and an absolute deadline it had lacked.
+- **One resolved MITM listener mode** (`1cade7d`): the per-instance build-egress/registry-egress flags, the mutual-exclusion throw, two redundant `ConnectionMeta` booleans, and the connType ternary collapsed into an internal `ListenerMode` union (`'standard' | 'build-egress' | 'registry-egress'`) resolved once by `resolveListenerMode` and dispatched by a switch with a compile-time `never` exhaustiveness guard. The public `MitmProxyOptions` shape is unchanged.
+
+The unified credential-free mediated forwarder is deliberately kept **separate** from the credential-injecting provider path (the fake→real key swap): real provider secrets never share the workload-egress code path. Two code-quality items remain deferred — a shared OCI tar-reader leaf, and merging the `revokeContainer`/`revokeNetwork` revocation strategies — and `canonicalJson` (in `preloaded-image-catalog.ts`) was deliberately **not** folded into `stableStringify` because it feeds the frozen catalog digest.
 
 ## 17. Primary references
 
