@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "policyId": "workload-registry-egress-draft-v1",
-  "status": "draft",
+  "policyId": "workload-registry-egress-v1",
+  "status": "frozen",
   "origins": [
     {
       "id": "docker-hub-registry",

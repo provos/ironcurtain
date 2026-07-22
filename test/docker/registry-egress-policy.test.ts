@@ -59,11 +59,11 @@ describe('anonymous registry-egress manifest loading (fail-closed)', () => {
     expect(loaded.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
   });
 
-  it('loads the checked-in draft manifest cleanly', () => {
+  it('loads the checked-in frozen manifest cleanly', () => {
     const loaded = loadRegistryEgressManifest(
       join(process.cwd(), 'config/docker-workload/registry-egress-manifest.json'),
     );
-    expect(loaded.manifest.status).toBe('draft');
+    expect(loaded.manifest.status).toBe('frozen');
     expect(loaded.manifest.origins.map((origin) => origin.destination.hostname)).toEqual([
       'registry-1.docker.io',
       'auth.docker.io',
