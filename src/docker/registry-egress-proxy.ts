@@ -1,7 +1,7 @@
 /**
  * Proxy-side enforcement seam for anonymous workload-image registry egress (§6.4).
  *
- * ## Wiring-seam design (Phase 0F, §6.4 / §16.5 of the plan)
+ * ## Wiring-seam design (Phase 0F, §6.4 / §16.5 / §16.6 of the plan)
  *
  * When a session enables `imageIngress: public-registry`, the nested daemon receives
  * proxy environment plus the session public CA and can reach only the fixed proxy
@@ -16,43 +16,40 @@
  * once at bundle startup; construction is fail-closed (a missing/invalid manifest
  * aborts before any request is served). Per request the guard resolves exactly one
  * reviewed origin and one pull operation, rejecting client-selected hosts, push /
- * delete / catalog / tags enumeration, any credential header (anonymous-only — the
- * bundle holds no registry credential and the proxy injects none), and encoded-path
+ * delete / catalog / tags enumeration, disallowed credential headers, and encoded-path
  * smuggling. The sanitized request is forwarded through the destination-bound
- * {@link OutboundTransport} — never a generic TCP relay, never with an injected
- * credential.
+ * {@link OutboundTransport} — never a generic TCP relay.
  *
- * **The load-bearing control — content-addressed verification.** A by-digest pull
- * (blob, or manifest by `sha256:…`) carries the requested digest in its URL. The
- * forwarder streams the response into {@link createRegistryContentHasher}, and only
- * a body whose sha256 matches is delivered; a mismatch is a fail-closed `502` with
- * the substituted content never handed to the daemon. This is what lets a blob
- * redirect follow a *dynamic* CDN host (not in the manifest) safely — the CDN cannot
- * substitute content. A tag pull has no a-priori digest, so its digest is resolved
- * from the verified bytes and recorded in provenance before any blob is fetched.
+ * **The binding controls (§16.6).** Workload image *content* is untrusted bundle
+ * state, so the proxy does not hash or verify blob bytes. Authority is constrained by:
+ * client-origin URL/operation gating (the guard), exact derived-redirect authorization
+ * (an unlisted CDN host is reachable only as the immediate `Location` of an authorized
+ * manifest/blob response — HTTPS, credential-stripped, SSRF-checked by the transport,
+ * finite hops), anonymous bearer-token handling, and per-request / per-session transfer
+ * ceilings. The body streams through with normal backpressure — never accumulated in
+ * trusted memory. A per-request byte or absolute-time ceiling, or the cumulative
+ * per-session byte or concurrency ceiling, fails closed (both sides destroyed) and is
+ * audited. Requested and registry-reported digests are recorded as provenance only.
  *
- * The pure policy (schema, load, single-origin resolution, digest helpers) lives in
- * `./registry-egress-policy.ts`; this module owns only the lifecycle (freeze) and the
- * I/O (forward, follow bounded redirects, verify, deliver), keeping the policy
- * independently testable.
+ * The pure policy (schema, load, single-origin resolution, digest syntax) lives in
+ * `./registry-egress-policy.ts`; this module owns the lifecycle (freeze), the
+ * per-session ledger, and the I/O (stream, follow bounded redirects, enforce
+ * ceilings), keeping the policy independently testable.
  *
- * Foundation-code scope: the forwarder buffers each bounded response before delivery
- * so unverified content is never streamed to the daemon — simple and strongly
- * fail-closed, but memory-bounded by the per-request ceiling rather than truly
- * streaming. True streaming delivery with a rolling hash, per-image cumulative
- * accounting across a full pull, and the anonymous bearer-token flow are Phase 0C
- * concerns and stay inert behind the docker-workload admission fuse until then.
+ * Foundation code — inert behind the docker-workload admission fuse until a later
+ * phase constructs a `public-registry` session.
  */
 
 import * as http from 'node:http';
+import { Transform, pipeline } from 'node:stream';
 import {
   authorizeValidatedRegistryEgressRequest,
   authorizeValidatedRegistryRedirect,
-  createRegistryContentHasher,
   loadRegistryEgressManifest,
-  verifyContentDigest,
+  parseOciDigest,
   type AuthorizedRegistryEgressRequest,
   type RegistryEgressRequest,
+  type RegistryEgressSessionLimits,
 } from './registry-egress-policy.js';
 import type { OutboundDestination, OutboundTransport } from './outbound-transport.js';
 import { HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
@@ -71,25 +68,53 @@ export interface FrozenRegistryEgressManifest {
   readonly origins: readonly { readonly id: string; readonly hostname: string; readonly port: number }[];
 }
 
-/** Resolved-digest provenance recorded for audit before content is delivered. */
+/** Digest provenance recorded for audit; never a security control (§16.6). */
 export interface RegistryPullProvenance {
   readonly originId: string;
   readonly repository?: string;
   readonly reference?: string;
+  /** Requested digest from a by-digest URL, if any. */
   readonly requestedDigest?: string;
-  readonly resolvedDigest: string;
+  /** Registry-reported `Docker-Content-Digest`, if the response carried one. */
+  readonly resolvedDigest?: string;
+  /** Bytes streamed to the daemon (observed, not a control input). */
   readonly sizeBytes: number;
+}
+
+/** A reserved concurrency slot in the per-session ledger; releasing is idempotent. */
+export interface RegistryEgressLease {
+  release(): void;
+}
+
+/**
+ * Per-session cumulative accounting threaded through the proxy seam. Created once by
+ * the guard factory and shared by every request in the session; the streaming
+ * forwarder consults it for the concurrent-request and total-byte ceilings.
+ */
+export interface RegistryEgressSessionLedger {
+  readonly maxTotalBytes: number;
+  readonly maxConcurrentRequests: number;
+  readonly totalBytes: number;
+  readonly activeRequests: number;
+  /** Reserve a concurrency slot; throws once the concurrency ceiling is reached. */
+  acquire(): RegistryEgressLease;
+  /** Would `additional` bytes still fit within the session total? (peek, no mutation) */
+  wouldFit(additional: number): boolean;
+  /** Account `count` streamed bytes; returns false once the session total is exceeded. */
+  addBytes(count: number): boolean;
 }
 
 /**
  * The narrow safe API the outer MITM calls. `authorize` is the single policy
  * decision point; it throws (fail-closed) for a disabled guard, a client-selected
- * host, a credential header, a non-pull operation, or any undeclared behavior.
+ * host, a disallowed credential header, a non-pull operation, or any undeclared
+ * behavior. `session` carries the shared per-session ceilings ledger.
  */
 export interface RegistryEgressGuard {
   readonly mode: RegistryEgressMode;
   /** Present only for an enabled guard. */
   readonly manifest?: FrozenRegistryEgressManifest;
+  readonly session: RegistryEgressSessionLedger;
   authorize(request: RegistryEgressRequest): AuthorizedRegistryEgressRequest;
   /** Authorize following one 3xx as the immediate bounded response to a content pull. */
   authorizeRedirect(current: AuthorizedRegistryEgressRequest, location: string): AuthorizedRegistryEgressRequest;
@@ -101,14 +126,56 @@ export interface CreateRegistryEgressGuardOptions {
   readonly manifestPath?: string;
 }
 
+/** Build a per-session cumulative ledger from the manifest's session ceilings. */
+export function createRegistryEgressSessionLedger(limits: RegistryEgressSessionLimits): RegistryEgressSessionLedger {
+  let totalBytes = 0;
+  let activeRequests = 0;
+  return {
+    maxTotalBytes: limits.maxTotalBytes,
+    maxConcurrentRequests: limits.maxConcurrentRequests,
+    get totalBytes(): number {
+      return totalBytes;
+    },
+    get activeRequests(): number {
+      return activeRequests;
+    },
+    acquire(): RegistryEgressLease {
+      if (activeRequests >= limits.maxConcurrentRequests) {
+        throw new Error(`registry-egress session concurrency ceiling reached (${limits.maxConcurrentRequests})`);
+      }
+      activeRequests += 1;
+      let released = false;
+      return {
+        release(): void {
+          if (released) return;
+          released = true;
+          activeRequests -= 1;
+        },
+      };
+    },
+    wouldFit(additional: number): boolean {
+      return totalBytes + additional <= limits.maxTotalBytes;
+    },
+    addBytes(count: number): boolean {
+      totalBytes += count;
+      return totalBytes <= limits.maxTotalBytes;
+    },
+  };
+}
+
 /**
  * Build the guard once at bundle startup. Fail-closed: an enabled guard that cannot
  * load/validate the frozen manifest throws here, before any request is served.
  */
 export function createRegistryEgressGuard(options: CreateRegistryEgressGuardOptions): RegistryEgressGuard {
   if (options.mode === 'disabled') {
+    const disabled: RegistryEgressSessionLedger = createRegistryEgressSessionLedger({
+      maxTotalBytes: 1,
+      maxConcurrentRequests: 1,
+    });
     return {
       mode: 'disabled',
+      session: disabled,
       authorize() {
         throw new Error('registry egress is disabled; no registry pull is authorized');
       },
@@ -123,9 +190,11 @@ export function createRegistryEgressGuard(options: CreateRegistryEgressGuardOpti
 
   const loaded = loadRegistryEgressManifest(manifestPath);
   const manifest = loaded.manifest;
+  const session = createRegistryEgressSessionLedger(manifest.perSession);
 
   return {
     mode: 'public-registry',
+    session,
     manifest: {
       path: loaded.path,
       sha256: loaded.sha256,
@@ -155,16 +224,27 @@ export interface RegistryEgressForwardContext {
   readonly targetPort: number;
   /** Origin-form request target (path + query) as seen after TLS termination. */
   readonly requestTarget: string;
-  /** Optional audit sink; receives the resolved digest before content is delivered. */
+  /** Optional audit sink; receives provenance once a content pull completes. */
   readonly recordProvenance?: (record: RegistryPullProvenance) => void;
 }
 
+/** Mutable per-request state: one logical pull, spanning any derived redirects. */
+interface RegistryEgressExchange {
+  readonly clientRes: http.ServerResponse;
+  readonly context: RegistryEgressForwardContext;
+  readonly lease: RegistryEgressLease;
+  deadline?: NodeJS.Timeout;
+  upstreamReq?: http.ClientRequest;
+  settled: boolean;
+}
+
 /**
- * Authorize one registry-originated request against the frozen manifest, forward it
- * through the destination-bound transport, follow bounded redirects, verify the
- * content digest, and deliver only verified content. Any rejection is a fail-closed
- * `403` with no upstream contact; the request body is drained but never forwarded
- * (only GET/HEAD are authorizable).
+ * Authorize one registry-originated request against the frozen manifest, reserve a
+ * session concurrency slot, forward it through the destination-bound transport,
+ * follow bounded derived redirects, and stream the response with backpressure under
+ * the per-request and per-session ceilings. Any rejection is a fail-closed response
+ * with no upstream contact; the request body is drained but never forwarded (only
+ * GET/HEAD are authorizable).
  */
 export function handleRegistryEgressRequest(
   clientReq: http.IncomingMessage,
@@ -181,11 +261,46 @@ export function handleRegistryEgressRequest(
       headers: clientReq.headers,
     });
   } catch (error) {
-    rejectRegistryEgress(clientRes, context, error);
+    rejectRegistryEgress(clientRes, context, 403, error);
     return;
   }
 
-  fetchAuthorized(clientRes, authorized, context);
+  let lease: RegistryEgressLease;
+  try {
+    lease = context.guard.session.acquire();
+  } catch (error) {
+    rejectRegistryEgress(clientRes, context, 503, error);
+    return;
+  }
+
+  const exchange: RegistryEgressExchange = { clientRes, context, lease, settled: false };
+  exchange.deadline = armDeadline(exchange, authorized);
+  clientRes.once('close', () => finalizeExchange(exchange));
+
+  fetchAuthorized(exchange, authorized);
+}
+
+/** Absolute per-request wall-clock ceiling: tear down both sides and fail closed. */
+function armDeadline(exchange: RegistryEgressExchange, authorized: AuthorizedRegistryEgressRequest): NodeJS.Timeout {
+  const timer = setTimeout(() => {
+    logger.info(`[registry-egress] ${authorized.originId} exceeded ${authorized.maxDurationMs}ms; aborting`);
+    if (exchange.upstreamReq !== undefined) exchange.upstreamReq.destroy();
+    if (!exchange.clientRes.headersSent) {
+      rejectRegistryEgressResponse(exchange.clientRes, 504, 'registry pull exceeded the time ceiling');
+    } else {
+      exchange.clientRes.destroy();
+    }
+  }, authorized.maxDurationMs);
+  timer.unref();
+  return timer;
+}
+
+/** Idempotent teardown: clear the deadline and release the session concurrency slot. */
+function finalizeExchange(exchange: RegistryEgressExchange): void {
+  if (exchange.settled) return;
+  exchange.settled = true;
+  if (exchange.deadline !== undefined) clearTimeout(exchange.deadline);
+  exchange.lease.release();
 }
 
 function buildRequestUrl(context: RegistryEgressForwardContext): string {
@@ -193,11 +308,8 @@ function buildRequestUrl(context: RegistryEgressForwardContext): string {
   return `${context.scheme}//${formatAuthority(context.targetHost, context.targetPort, context.scheme)}${target}`;
 }
 
-function fetchAuthorized(
-  clientRes: http.ServerResponse,
-  authorized: AuthorizedRegistryEgressRequest,
-  context: RegistryEgressForwardContext,
-): void {
+function fetchAuthorized(exchange: RegistryEgressExchange, authorized: AuthorizedRegistryEgressRequest): void {
+  const { clientRes, context } = exchange;
   const destination: OutboundDestination = {
     protocol: authorized.destination.protocol,
     hostname: authorized.destination.hostname,
@@ -213,16 +325,16 @@ function fetchAuthorized(
         path: authorized.path,
         headers: toOutgoingHeaders(authorized.headers),
       },
-      (upstreamRes) => onUpstreamResponse(clientRes, upstreamReq, upstreamRes, authorized, context),
+      (upstreamRes) => onUpstreamResponse(exchange, upstreamRes, authorized),
     );
   } catch (error) {
-    rejectRegistryEgressResponse(clientRes, 502, error instanceof Error ? error.message : 'upstream request failed');
+    if (!clientRes.headersSent)
+      rejectRegistryEgressResponse(clientRes, 502, error instanceof Error ? error.message : 'upstream request failed');
+    else clientRes.destroy();
     return;
   }
 
-  upstreamReq.setTimeout(authorized.requestTimeoutMs, () => {
-    upstreamReq.destroy(new Error(`registry egress timed out after ${authorized.requestTimeoutMs}ms`));
-  });
+  exchange.upstreamReq = upstreamReq;
   upstreamReq.on('error', (error) => {
     if (!clientRes.headersSent) rejectRegistryEgressResponse(clientRes, 502, error.message);
     else clientRes.destroy();
@@ -231,156 +343,156 @@ function fetchAuthorized(
 }
 
 function onUpstreamResponse(
-  clientRes: http.ServerResponse,
-  upstreamReq: http.ClientRequest,
+  exchange: RegistryEgressExchange,
   upstreamRes: http.IncomingMessage,
   authorized: AuthorizedRegistryEgressRequest,
-  context: RegistryEgressForwardContext,
 ): void {
+  if (exchange.settled || exchange.clientRes.writableEnded || exchange.clientRes.destroyed) {
+    upstreamRes.resume(); // the exchange already failed closed (e.g. the deadline fired)
+    return;
+  }
   const status = upstreamRes.statusCode ?? 502;
 
   if (REDIRECT_STATUS_CODES.has(status)) {
-    followRedirect(clientRes, upstreamRes, authorized, context);
+    followRedirect(exchange, upstreamRes, authorized);
     return;
   }
 
-  // HEAD and non-2xx bodies (e.g. a 401 that drives the token flow) are delivered
-  // verbatim under the byte ceiling; only 2xx GET content is digest-verified.
-  if (authorized.method === 'HEAD' || status < 200 || status >= 300) {
-    forwardBounded(clientRes, upstreamRes, upstreamReq, authorized, status);
-    return;
-  }
-
-  verifyAndDeliver(clientRes, upstreamRes, upstreamReq, authorized, context, status);
+  streamToClient(exchange, upstreamRes, authorized, status);
 }
 
 function followRedirect(
-  clientRes: http.ServerResponse,
+  exchange: RegistryEgressExchange,
   upstreamRes: http.IncomingMessage,
   authorized: AuthorizedRegistryEgressRequest,
-  context: RegistryEgressForwardContext,
 ): void {
   const location = firstHeader(upstreamRes.headers.location);
   upstreamRes.resume(); // drain the redirect body before re-requesting
   if (location === undefined) {
-    rejectRegistryEgressResponse(clientRes, 502, 'registry redirect is missing a Location header');
+    rejectRegistryEgressResponse(exchange.clientRes, 502, 'registry redirect is missing a Location header');
     return;
   }
   let next: AuthorizedRegistryEgressRequest;
   try {
-    next = context.guard.authorizeRedirect(authorized, location);
+    next = exchange.context.guard.authorizeRedirect(authorized, location);
   } catch (error) {
-    rejectRegistryEgress(clientRes, context, error);
+    rejectRegistryEgress(exchange.clientRes, exchange.context, 403, error);
     return;
   }
-  fetchAuthorized(clientRes, next, context);
+  fetchAuthorized(exchange, next);
 }
 
-function verifyAndDeliver(
-  clientRes: http.ServerResponse,
+/**
+ * Pipe the upstream response to the daemon with backpressure, enforcing the
+ * per-request and per-session byte ceilings as bytes flow. A declared
+ * `content-length` that already overshoots a ceiling is rejected before any body is
+ * streamed; a chunked body that overshoots mid-stream tears down both sides. Content
+ * pulls record provenance (requested + registry-reported digest, streamed size) on
+ * successful completion.
+ */
+function streamToClient(
+  exchange: RegistryEgressExchange,
   upstreamRes: http.IncomingMessage,
-  upstreamReq: http.ClientRequest,
   authorized: AuthorizedRegistryEgressRequest,
-  context: RegistryEgressForwardContext,
   status: number,
 ): void {
-  const hasher = createRegistryContentHasher();
-  const chunks: Buffer[] = [];
-  let overflowed = false;
+  const { clientRes, context } = exchange;
+  const ledger = context.guard.session;
 
-  upstreamRes.on('data', (chunk: Buffer) => {
-    if (overflowed) return;
-    if (hasher.bytesHashed + chunk.length > authorized.requestBytes) {
-      overflowed = true;
-      logger.info(`[registry-egress] ${authorized.originId} exceeded ${authorized.requestBytes} response bytes`);
-      upstreamReq.destroy();
-      upstreamRes.destroy();
-      rejectRegistryEgressResponse(clientRes, 502, 'registry response exceeded the byte ceiling');
+  const declared = declaredContentLength(upstreamRes.headers);
+  if (declared !== undefined && (declared > authorized.maxBytes || !ledger.wouldFit(declared))) {
+    upstreamRes.resume();
+    rejectRegistryEgressResponse(clientRes, 502, 'registry response exceeds a byte ceiling');
+    return;
+  }
+
+  const resolvedDigest = reportedDigest(upstreamRes.headers);
+  const limiter = createByteCeilingTransform(authorized.originId, authorized.maxBytes, ledger);
+  let streamedBytes = 0;
+  limiter.on('data', (chunk: Buffer) => {
+    streamedBytes += chunk.length;
+  });
+
+  clientRes.writeHead(status, deliveredHeaders(upstreamRes.headers));
+  pipeline(upstreamRes, limiter, clientRes, (error) => {
+    if (error) {
+      logger.info(`[registry-egress] ${authorized.originId} transfer failed: ${error.message}`);
+      if (exchange.upstreamReq !== undefined) exchange.upstreamReq.destroy();
+      clientRes.destroy();
       return;
     }
-    hasher.update(chunk);
-    chunks.push(chunk);
+    recordProvenance(authorized, context, resolvedDigest, streamedBytes);
   });
-  upstreamRes.on('error', () => {
-    if (!clientRes.headersSent) rejectRegistryEgressResponse(clientRes, 502, 'registry response stream error');
-    else clientRes.destroy();
-  });
-  upstreamRes.on('end', () => {
-    if (overflowed) return;
-    const computedHex = hasher.digestHex();
+}
 
-    if (authorized.expectedDigest !== undefined) {
-      const verification = verifyContentDigest(authorized.expectedDigest, computedHex);
-      if (!verification.verified) {
-        logger.info(
-          `[registry-egress] DIGEST MISMATCH ${authorized.originId} ${authorized.path}: ` +
-            `expected sha256:${verification.expectedHex} got sha256:${verification.computedHex}`,
-        );
-        rejectRegistryEgressResponse(clientRes, 502, 'registry content digest does not match the requested digest');
+/**
+ * A pass-through Transform that fails closed once a stream exceeds the per-request
+ * or cumulative per-session byte ceiling. `pipeline` propagates the error to destroy
+ * both the upstream response and the client response.
+ */
+function createByteCeilingTransform(
+  originId: string,
+  maxRequestBytes: number,
+  ledger: RegistryEgressSessionLedger,
+): Transform {
+  let requestBytes = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback): void {
+      requestBytes += chunk.length;
+      if (requestBytes > maxRequestBytes) {
+        callback(new Error(`registry-egress ${originId} exceeded the per-request byte ceiling (${maxRequestBytes})`));
         return;
       }
-    }
-
-    recordProvenance(authorized, context, computedHex, hasher.bytesHashed);
-
-    const body = Buffer.concat(chunks);
-    clientRes.writeHead(status, deliveredHeaders(upstreamRes.headers, body.length));
-    clientRes.end(body);
+      if (!ledger.addBytes(chunk.length)) {
+        callback(
+          new Error(`registry-egress ${originId} exceeded the per-session byte ceiling (${ledger.maxTotalBytes})`),
+        );
+        return;
+      }
+      callback(null, chunk);
+    },
   });
 }
 
 function recordProvenance(
   authorized: AuthorizedRegistryEgressRequest,
   context: RegistryEgressForwardContext,
-  computedHex: string,
+  resolvedDigest: string | undefined,
   sizeBytes: number,
 ): void {
   if (context.recordProvenance === undefined) return;
-  if (authorized.expectedDigest === undefined && !authorized.resolvesDigest) return;
+  if (authorized.operation !== 'manifest-pull' && authorized.operation !== 'blob-pull') return;
   context.recordProvenance({
     originId: authorized.originId,
     repository: authorized.repository,
     reference: authorized.reference,
-    requestedDigest: authorized.expectedDigest ? `sha256:${authorized.expectedDigest.hex}` : undefined,
-    resolvedDigest: `sha256:${computedHex}`,
+    requestedDigest: authorized.requestedDigest ? `sha256:${authorized.requestedDigest.hex}` : undefined,
+    resolvedDigest,
     sizeBytes,
   });
 }
 
-function forwardBounded(
-  clientRes: http.ServerResponse,
-  upstreamRes: http.IncomingMessage,
-  upstreamReq: http.ClientRequest,
-  authorized: AuthorizedRegistryEgressRequest,
-  status: number,
-): void {
-  let forwardedBytes = 0;
-  clientRes.writeHead(status, deliveredHeaders(upstreamRes.headers));
-  upstreamRes.on('data', (chunk: Buffer) => {
-    forwardedBytes += chunk.length;
-    if (forwardedBytes > authorized.requestBytes) {
-      logger.info(`[registry-egress] ${authorized.originId} exceeded ${authorized.requestBytes} response bytes`);
-      upstreamReq.destroy();
-      upstreamRes.destroy();
-      clientRes.destroy();
-      return;
-    }
-    clientRes.write(chunk);
-  });
-  upstreamRes.on('end', () => clientRes.end());
-  upstreamRes.on('error', () => clientRes.destroy());
+function declaredContentLength(headers: http.IncomingHttpHeaders): number | undefined {
+  const raw = firstHeader(headers['content-length']);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function deliveredHeaders(headers: http.IncomingHttpHeaders, contentLength?: number): http.OutgoingHttpHeaders {
+/** Registry-reported content digest recorded as provenance only (never verified). */
+function reportedDigest(headers: http.IncomingHttpHeaders): string | undefined {
+  const raw = firstHeader(headers['docker-content-digest']);
+  if (raw === undefined) return undefined;
+  return parseOciDigest(raw) !== undefined ? raw : undefined;
+}
+
+function deliveredHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
   const result: http.OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
     if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(lower)) continue;
-    // The buffered body is re-framed with an exact content-length below.
-    if (contentLength !== undefined && lower === 'content-length') continue;
     result[name] = value;
   }
-  if (contentLength !== undefined) result['content-length'] = contentLength;
   return result;
 }
 
@@ -400,11 +512,12 @@ function toOutgoingHeaders(headers: Readonly<Record<string, string | readonly st
 function rejectRegistryEgress(
   clientRes: http.ServerResponse,
   context: RegistryEgressForwardContext,
+  status: number,
   error: unknown,
 ): void {
   const message = error instanceof Error ? error.message : 'registry egress denied';
   logger.info(`[registry-egress] DENIED ${context.scheme}//${context.targetHost}:${context.targetPort} — ${message}`);
-  rejectRegistryEgressResponse(clientRes, 403, message);
+  rejectRegistryEgressResponse(clientRes, status, message);
 }
 
 function rejectRegistryEgressResponse(clientRes: http.ServerResponse, status: number, message: string): void {

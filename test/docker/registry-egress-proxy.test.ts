@@ -37,11 +37,12 @@ describe('registry-egress guard construction (fail-closed)', () => {
     ).toThrow(/readable regular non-symlink/u);
   });
 
-  it('reports the frozen manifest identity for audit once constructed', () => {
+  it('reports the frozen manifest identity and session ceilings for audit once constructed', () => {
     const guard = fixtureGuard();
     expect(guard.mode).toBe('public-registry');
     expect(guard.manifest?.status).toBe('draft');
     expect(guard.manifest?.origins.map((origin) => origin.hostname)).toEqual(['registry.test']);
+    expect(guard.session.maxConcurrentRequests).toBe(4);
   });
 });
 
@@ -69,10 +70,15 @@ describe('registry-egress disabled mode (preloaded-only refuses registry traffic
 });
 
 describe('registry-egress proxy seam (enabled)', () => {
-  it('forwards a by-digest pull whose bytes hash-match, with no credential to the registry', async () => {
-    const body = Buffer.from('verified-blob-bytes');
+  it('forwards a by-digest pull, stripping response cookies and injecting no credential', async () => {
+    const body = Buffer.from('delivered-blob-bytes');
+    const digest = digestOf(body);
     const upstream = await startUpstream((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/octet-stream', 'set-cookie': 'leak=1' });
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'set-cookie': 'leak=1',
+        'docker-content-digest': digest,
+      });
       res.end(body);
     });
     const observed = firstRequest(upstream);
@@ -82,13 +88,13 @@ describe('registry-egress proxy seam (enabled)', () => {
       guard: fixtureGuard(),
       transport: routingTransport({ 'registry.test': upstream.port }),
       targetHost: 'registry.test',
-      path: `/v2/library/app/blobs/${digestOf(body)}`,
+      path: `/v2/library/app/blobs/${digest}`,
       headers: { accept: 'application/octet-stream', 'user-agent': 'fixture/1' },
       recordProvenance: (record) => provenance.push(record),
     });
 
     expect(result.statusCode).toBe(200);
-    expect(result.body).toBe('verified-blob-bytes');
+    expect(result.body).toBe('delivered-blob-bytes');
     // Credential-bearing response headers never propagate back into the daemon.
     expect(result.headers['set-cookie']).toBeUndefined();
     const request = await observed;
@@ -98,34 +104,190 @@ describe('registry-egress proxy seam (enabled)', () => {
       {
         originId: 'registry',
         repository: 'library/app',
-        reference: `sha256:${createHash('sha256').update(body).digest('hex')}`,
-        requestedDigest: `sha256:${createHash('sha256').update(body).digest('hex')}`,
-        resolvedDigest: `sha256:${createHash('sha256').update(body).digest('hex')}`,
+        reference: digest,
+        requestedDigest: digest,
+        resolvedDigest: digest,
         sizeBytes: body.length,
       },
     ]);
   });
 
-  it('rejects a pull whose bytes do not match the requested digest (substitution defense)', async () => {
+  it('records tag-pull provenance with the registry-reported digest and no requested digest', async () => {
+    const body = Buffer.from('{"schemaVersion":2}');
+    const reported = digestOf(body);
     const upstream = await startUpstream((_req, res) => {
-      res.writeHead(200);
-      res.end('substituted-bytes'); // does not hash to the requested digest
+      res.writeHead(200, {
+        'content-type': 'application/vnd.oci.image.manifest.v1+json',
+        'docker-content-digest': reported,
+      });
+      res.end(body);
     });
     const provenance: RegistryPullProvenance[] = [];
     const result = await driveThroughSeam({
       guard: fixtureGuard(),
       transport: routingTransport({ 'registry.test': upstream.port }),
       targetHost: 'registry.test',
-      path: `/v2/library/app/blobs/${digestOf('the-real-bytes')}`,
+      path: '/v2/library/app/manifests/1.0',
       recordProvenance: (record) => provenance.push(record),
     });
-    expect(result.statusCode).toBe(502);
-    expect(result.body).toMatch(/digest does not match/u);
-    // Unverified content is never recorded as provenance.
-    expect(provenance).toEqual([]);
+    expect(result.statusCode).toBe(200);
+    expect(provenance).toEqual([
+      {
+        originId: 'registry',
+        repository: 'library/app',
+        reference: '1.0',
+        requestedDigest: undefined,
+        resolvedDigest: reported,
+        sizeBytes: body.length,
+      },
+    ]);
   });
 
-  it('follows a bounded dynamic-host redirect and verifies the digest at the CDN', async () => {
+  it('streams response chunks to the daemon before the upstream finishes (backpressure, not buffered)', async () => {
+    const firstDelivered = createGate();
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.write('first-chunk');
+      // A buffering proxy would withhold the body until end(), so this gate would
+      // never resolve and the test would time out. A streaming proxy flushes it.
+      void firstDelivered.promise.then(() => {
+        res.write('second-chunk');
+        res.end();
+      });
+    });
+
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('stream')}`,
+      onData: () => firstDelivered.resolve(),
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toBe('first-chunksecond-chunk');
+  });
+
+  it('streams a body far larger than any internal watermark intact under the byte ceiling', async () => {
+    const body = Buffer.alloc(1024 * 1024, 0x41);
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-length': String(body.length) });
+      res.end(body);
+    });
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('large')}`,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body.length).toBe(body.length);
+    expect(createHash('sha256').update(result.body).digest('hex')).toBe(
+      createHash('sha256').update(body).digest('hex'),
+    );
+  });
+
+  it('rejects a response whose declared content-length exceeds the per-request byte ceiling', async () => {
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-length': '4096' });
+      res.end(Buffer.alloc(4096));
+    });
+    const result = await driveThroughSeam({
+      guard: fixtureGuard({ perRequest: { maxBytes: 64, maxDurationMs: 30_000, maxRedirectHops: 2 } }),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('big')}`,
+    });
+    expect(result.statusCode).toBe(502);
+    expect(result.body).toMatch(/byte ceiling/u);
+  });
+
+  it('aborts a chunked response that exceeds the per-request byte ceiling mid-stream', async () => {
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200); // chunked: no content-length, so the pre-check cannot fire
+      res.write('AAAA');
+      res.write('BBBB');
+      res.end();
+    });
+    const result = await driveThroughSeam({
+      guard: fixtureGuard({ perRequest: { maxBytes: 4, maxDurationMs: 30_000, maxRedirectHops: 2 } }),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('chunked')}`,
+    });
+    // Headers were already sent, so the transfer fails closed by tearing the
+    // connection down: the daemon never receives the full oversized body.
+    expect(result.aborted || result.body.length < 8).toBe(true);
+    expect(result.body).not.toBe('AAAABBBB');
+  });
+
+  it('rejects a response that would exceed the per-session total-byte ceiling', async () => {
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-length': '4096' });
+      res.end(Buffer.alloc(4096));
+    });
+    const result = await driveThroughSeam({
+      guard: fixtureGuard({ perSession: { maxTotalBytes: 128, maxConcurrentRequests: 4 } }),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('session')}`,
+    });
+    expect(result.statusCode).toBe(502);
+    expect(result.body).toMatch(/byte ceiling/u);
+  });
+
+  it('aborts a pull that exceeds the absolute per-request time ceiling', async () => {
+    const upstream = await startUpstream((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200);
+        res.end('too-late');
+      }, 400);
+    });
+    const result = await driveThroughSeam({
+      guard: fixtureGuard({ perRequest: { maxBytes: 8 * 1024 * 1024, maxDurationMs: 120, maxRedirectHops: 2 } }),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('slow')}`,
+    });
+    expect(result.statusCode).toBe(504);
+    expect(result.body).toMatch(/time ceiling/u);
+  });
+
+  it('rejects a request once the per-session concurrency ceiling is reached', async () => {
+    const guard = fixtureGuard({ perSession: { maxTotalBytes: 512 * 1024 * 1024, maxConcurrentRequests: 1 } });
+    const gate = createGate();
+    const upstream = await startUpstream((_req, res) => {
+      void gate.promise.then(() => {
+        res.writeHead(200);
+        res.end('released');
+      });
+    });
+    const transport = routingTransport({ 'registry.test': upstream.port });
+    const inflightReceived = firstRequest(upstream);
+
+    const first = driveThroughSeam({
+      guard,
+      transport,
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('a')}`,
+    });
+    await inflightReceived; // the first pull now holds the only concurrency slot
+
+    const second = await driveThroughSeam({
+      guard,
+      transport,
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('b')}`,
+    });
+    expect(second.statusCode).toBe(503);
+    expect(second.body).toMatch(/concurrency ceiling/u);
+
+    gate.resolve();
+    const firstResult = await first;
+    expect(firstResult.statusCode).toBe(200);
+  });
+
+  it('follows a bounded derived redirect for a tag pull and strips credentials at the CDN', async () => {
     const body = Buffer.from('cdn-delivered-layer');
     const cdn = await startUpstream((_req, res) => {
       res.writeHead(200);
@@ -141,66 +303,73 @@ describe('registry-egress proxy seam (enabled)', () => {
       guard: fixtureGuard(),
       transport: routingTransport({ 'registry.test': registry.port, 'cdn.example.com': cdn.port }),
       targetHost: 'registry.test',
-      path: `/v2/library/app/blobs/${digestOf(body)}`,
+      // A tag pull (previously digest-gated) may now follow the derived redirect.
+      path: '/v2/library/app/manifests/1.0',
+      headers: { authorization: 'Bearer anon-token' },
     });
 
     expect(result.statusCode).toBe(200);
     expect(result.body).toBe('cdn-delivered-layer');
     const cdnRequest = await cdnObserved;
-    // No credential is forwarded to the dynamic CDN host.
+    // No credential is forwarded to the derived CDN destination.
     expect(cdnRequest.headers.authorization).toBeUndefined();
   });
 
-  it('surfaces the resolved digest for a tag pull before blobs are fetched', async () => {
-    const body = Buffer.from('{"schemaVersion":2}');
-    const upstream = await startUpstream((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/vnd.oci.image.manifest.v1+json' });
-      res.end(body);
+  it('rejects a derived redirect to a literal private address before connecting', async () => {
+    const registry = await startUpstream((_req, res) => {
+      res.writeHead(307, { location: 'https://127.0.0.1:9/layers/real' });
+      res.end();
     });
-    const provenance: RegistryPullProvenance[] = [];
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: routingTransport({ 'registry.test': registry.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('redir')}`,
+    });
+    expect(result.statusCode).toBe(403);
+    expect(result.body).toMatch(/literal address/u);
+  });
+
+  it('forwards an anonymous Bearer token to a listed origin', async () => {
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200);
+      res.end('ok');
+    });
+    const observed = firstRequest(upstream);
     const result = await driveThroughSeam({
       guard: fixtureGuard(),
       transport: routingTransport({ 'registry.test': upstream.port }),
       targetHost: 'registry.test',
-      path: '/v2/library/app/manifests/1.0',
-      recordProvenance: (record) => provenance.push(record),
+      path: `/v2/library/app/blobs/${digestOf('bearer')}`,
+      headers: { authorization: 'Bearer anon-token' },
     });
     expect(result.statusCode).toBe(200);
-    expect(provenance).toHaveLength(1);
-    expect(provenance[0].reference).toBe('1.0');
-    expect(provenance[0].requestedDigest).toBeUndefined();
-    expect(provenance[0].resolvedDigest).toBe(`sha256:${createHash('sha256').update(body).digest('hex')}`);
+    const request = await observed;
+    expect(request.headers.authorization).toBe('Bearer anon-token');
   });
 
   it.each([
-    ['an unlisted registry', 'evil.example', `/v2/library/app/blobs/${digestOf('x')}`, 'GET', /unlisted host/u],
-    ['a catalog enumeration', 'registry.test', '/v2/_catalog', 'GET', /catalog enumeration/u],
-    ['a tags enumeration', 'registry.test', '/v2/library/app/tags/list', 'GET', /tag enumeration/u],
-  ] as const)('rejects %s with no upstream contact', async (_label, targetHost, path, method, message) => {
+    ['an unlisted registry', 'evil.example', `/v2/library/app/blobs/${digestOf('x')}`, undefined, /unlisted host/u],
+    ['a catalog enumeration', 'registry.test', '/v2/_catalog', undefined, /catalog enumeration/u],
+    ['a tags enumeration', 'registry.test', '/v2/library/app/tags/list', undefined, /tag enumeration/u],
+    [
+      'a Basic Authorization scheme',
+      'registry.test',
+      `/v2/library/app/blobs/${digestOf('x')}`,
+      { authorization: 'Basic dXNlcjpwYXNz' },
+      /single anonymous Bearer token/u,
+    ],
+  ] as const)('rejects %s with no upstream contact', async (_label, targetHost, path, headers, message) => {
     const spy = spyTransport();
     const result = await driveThroughSeam({
       guard: fixtureGuard(),
       transport: spy.transport,
       targetHost,
       path,
-      method,
+      headers,
     });
     expect(result.statusCode).toBe(403);
     expect(result.body).toMatch(message);
-    expect(spy.state.calls).toBe(0);
-  });
-
-  it('rejects an injected credential header with no upstream contact', async () => {
-    const spy = spyTransport();
-    const result = await driveThroughSeam({
-      guard: fixtureGuard(),
-      transport: spy.transport,
-      targetHost: 'registry.test',
-      path: `/v2/library/app/blobs/${digestOf('x')}`,
-      headers: { authorization: 'Bearer real-secret' },
-    });
-    expect(result.statusCode).toBe(403);
-    expect(result.body).toMatch(/credential header is forbidden/u);
     expect(spy.state.calls).toBe(0);
   });
 });
@@ -211,7 +380,12 @@ function digestOf(value: string | Buffer): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
-function manifest(): RegistryEgressManifest {
+interface ManifestOverrides {
+  readonly perRequest?: RegistryEgressManifest['origins'][number]['perRequest'];
+  readonly perSession?: RegistryEgressManifest['perSession'];
+}
+
+function manifest(overrides: ManifestOverrides = {}): RegistryEgressManifest {
   return {
     schemaVersion: 1,
     policyId: 'registry-egress-proxy-test-v1',
@@ -221,12 +395,11 @@ function manifest(): RegistryEgressManifest {
         id: 'registry',
         destination: { protocol: 'https:', hostname: 'registry.test', port: 443 },
         operations: ['api-version', 'manifest-pull', 'blob-pull'],
-        redirects: { maxHops: 2, followDynamicHosts: true },
+        perRequest: overrides.perRequest ?? { maxBytes: 8 * 1024 * 1024, maxDurationMs: 30_000, maxRedirectHops: 2 },
         requestHeaders: { allow: ['accept', 'user-agent', 'range'] },
-        limits: { requestBytes: 8 * 1024 * 1024, requestTimeoutMs: 30_000 },
       },
     ],
-    imageLimits: { totalBytes: 512 * 1024 * 1024, totalTimeoutMs: 300_000 },
+    perSession: overrides.perSession ?? { maxTotalBytes: 512 * 1024 * 1024, maxConcurrentRequests: 4 },
     rejectedOperations: ['push', 'delete', 'catalog-enumeration', 'tags-enumeration'],
   };
 }
@@ -237,10 +410,10 @@ function tempDirectory(): string {
   return directory;
 }
 
-function fixtureGuard(): RegistryEgressGuard {
+function fixtureGuard(overrides: ManifestOverrides = {}): RegistryEgressGuard {
   const directory = tempDirectory();
   const path = join(directory, 'manifest.json');
-  writeFileSync(path, JSON.stringify(manifest()), { mode: 0o400 });
+  writeFileSync(path, JSON.stringify(manifest(overrides)), { mode: 0o400 });
   return createRegistryEgressGuard({ mode: 'public-registry', manifestPath: path });
 }
 
@@ -274,6 +447,19 @@ function spyTransport(): { transport: OutboundTransport; state: { calls: number 
   };
 }
 
+interface Gate {
+  readonly promise: Promise<void>;
+  resolve(): void;
+}
+
+function createGate(): Gate {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 interface UpstreamServer {
   readonly port: number;
   onRequest?: (req: http.IncomingMessage) => void;
@@ -284,6 +470,8 @@ function startUpstream(
 ): Promise<UpstreamServer> {
   const state: { port: number; onRequest?: (req: http.IncomingMessage) => void } = { port: 0 };
   const server = http.createServer((req, res) => {
+    req.on('error', () => undefined);
+    res.on('error', () => undefined);
     state.onRequest?.(req);
     handler(req, res);
   });
@@ -312,12 +500,14 @@ interface SeamDriveOptions {
   readonly method?: string;
   readonly headers?: Record<string, string>;
   readonly recordProvenance?: (record: RegistryPullProvenance) => void;
+  readonly onData?: (chunk: Buffer) => void;
 }
 
 interface SeamResult {
   readonly statusCode: number;
   readonly headers: http.IncomingHttpHeaders;
   readonly body: string;
+  readonly aborted: boolean;
 }
 
 /**
@@ -346,7 +536,12 @@ async function driveThroughSeam(options: SeamDriveOptions): Promise<SeamResult> 
     });
   });
 
-  return new Promise<SeamResult>((resolve, reject) => {
+  return new Promise<SeamResult>((resolve) => {
+    let statusCode = 0;
+    let headers: http.IncomingHttpHeaders = {};
+    let aborted = false;
+    const chunks: Buffer[] = [];
+    const settle = (): void => resolve({ statusCode, headers, body: Buffer.concat(chunks).toString('utf8'), aborted });
     const request = http.request(
       {
         host: '127.0.0.1',
@@ -357,18 +552,26 @@ async function driveThroughSeam(options: SeamDriveOptions): Promise<SeamResult> 
         agent: false,
       },
       (response) => {
-        const chunks: Buffer[] = [];
-        response.on('data', (chunk: Buffer) => chunks.push(chunk));
-        response.on('end', () =>
-          resolve({
-            statusCode: response.statusCode ?? 0,
-            headers: response.headers,
-            body: Buffer.concat(chunks).toString('utf8'),
-          }),
-        );
+        statusCode = response.statusCode ?? 0;
+        headers = response.headers;
+        response.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
+          options.onData?.(chunk);
+        });
+        response.on('aborted', () => {
+          aborted = true;
+        });
+        response.on('end', settle);
+        response.on('error', () => {
+          aborted = true;
+          settle();
+        });
       },
     );
-    request.on('error', reject);
+    request.on('error', () => {
+      aborted = true;
+      settle();
+    });
     request.end();
   });
 }

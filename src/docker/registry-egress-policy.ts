@@ -1,30 +1,39 @@
 /**
  * Frozen, anonymous-only authorization for workload-image registry egress (§6.4).
  *
- * Pure policy (node + zod only — no transport). Mirrors `build-egress-policy.ts`:
- * a strict manifest schema, validate-once → branded manifest, and a per-request
- * hot path that never re-parses. It resolves one registry pull request to exactly
- * one reviewed origin and a single pull operation, rejecting everything a pull
- * must not do (push, delete, catalog/tags enumeration), any credential header
- * (anonymous-only — the bundle holds no registry credential and the proxy injects
- * none), client-selected hosts, and encoded-path smuggling.
+ * Pure policy (node + zod only — no transport, no sockets). Mirrors
+ * `build-egress-policy.ts`: a strict manifest schema, validate-once → branded
+ * manifest, and a per-request hot path that never re-parses. It resolves one
+ * registry pull request to exactly one reviewed origin and a single pull
+ * operation, rejecting everything a pull must not do (push, delete, catalog/tags
+ * enumeration), client-selected hosts, and encoded-path smuggling.
  *
- * The load-bearing control is content-addressed digest verification: a by-digest
- * pull carries the requested sha256 in the URL, and {@link createRegistryContentHasher}
- * lets the forwarder stream-hash the response and reject any body whose digest does
- * not match before the content is delivered — so a dynamic CDN redirect host cannot
- * substitute content. A tag pull has no a-priori digest, so it resolves one from the
- * response bytes ({@link AuthorizedRegistryEgressRequest.resolvesDigest}) that the
- * caller records in provenance/audit before any blob is fetched.
+ * The binding controls are client-origin URL/operation gating, exact
+ * derived-redirect authorization, credential handling, and per-request /
+ * per-session transfer ceilings. Workload image *content* is untrusted bundle
+ * state — the bundle can already synthesize arbitrary images locally and a
+ * registry can serve a malicious manifest with matching blobs — so this policy
+ * never hashes or verifies blob content (§16.6). Digest *syntax* is parsed only
+ * to classify by-digest pulls and to record requested/reported digests as audit
+ * provenance; it gates nothing.
+ *
+ * Anonymous bearer-token flow (§6.4): the bundle holds no registry credential,
+ * so any `Authorization: Bearer <token>` the client presents was obtained
+ * anonymously through this mediated path (a `401` drives the client to the
+ * token-service origin and back). {@link sanitizeHeaders} therefore admits a
+ * single Bearer token on a client-initiated request to a listed origin and
+ * rejects every other credential scheme (Basic, Cookie, Proxy-Authorization,
+ * …). Derived redirect requests always carry no credential at all.
  *
  * Foundation code: stays inert behind the docker-workload admission fuse
- * (`assertDockerWorkloadImplementationAvailable`) until a later phase constructs a
- * `public-registry` session. The checked-in manifest is a DRAFT that Phase 0C must
- * freeze (reviewed origins, exact blob-byte ceilings, hermetic protocol fixtures).
+ * (`assertDockerWorkloadImplementationAvailable`) until a later phase constructs
+ * a `public-registry` session. The checked-in manifest is a DRAFT that Phase 0C
+ * must freeze (reviewed origins, exact ceilings, hermetic protocol fixtures).
  */
 
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
@@ -32,6 +41,13 @@ import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 export const REGISTRY_EGRESS_MANIFEST_SCHEMA_VERSION = 1;
 export const MAX_REGISTRY_EGRESS_MANIFEST_BYTES = 1024 * 1024;
 
+/**
+ * Credential headers that may never appear in an origin's allow list and are
+ * fail-closed rejected on a request. `authorization` is in the set for the
+ * allow-list schema check (bearer admission is structural, never allow-listed),
+ * but {@link sanitizeHeaders} handles `authorization` specially before this set
+ * is consulted so an anonymous Bearer token to a listed origin is admitted.
+ */
 const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
   'authorization',
   'proxy-authorization',
@@ -42,6 +58,9 @@ const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
   'anthropic-api-key',
 ]);
 
+/** A single anonymous Bearer token; every other Authorization scheme is refused. */
+const BEARER_TOKEN_PATTERN = /^Bearer [A-Za-z0-9._~+/=-]+$/u;
+
 /** Connection-management headers dropped silently (the transport re-frames them). */
 const DROPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set(['host', ...HOP_BY_HOP_HEADERS]);
 
@@ -50,6 +69,9 @@ export type RegistryPullOperation = 'api-version' | 'token' | 'manifest-pull' | 
 
 /** Registry operations that are always refused — never authorizable by any origin. */
 export type RejectedRegistryOperation = 'push' | 'delete' | 'catalog-enumeration' | 'tags-enumeration' | 'unknown';
+
+/** Content pulls whose immediate 3xx Location may be followed as a derived redirect. */
+const CONTENT_OPERATIONS: readonly RegistryPullOperation[] = ['manifest-pull', 'blob-pull'];
 
 const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
 const hostnameSchema = z
@@ -74,8 +96,6 @@ const headerNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,127}$/u);
 /** Pull operations only; the rejected set is intentionally not expressible. */
 const pullOperationSchema = z.enum(['api-version', 'token', 'manifest-pull', 'blob-pull']);
 
-const CONTENT_OPERATIONS: readonly RegistryPullOperation[] = ['manifest-pull', 'blob-pull'];
-
 const originSchema = z
   .object({
     id: identifierSchema,
@@ -98,30 +118,25 @@ const originSchema = z
       .array(z.object({ kind: z.enum(['exact', 'prefix']), value: originPathSchema }).strict())
       .max(16)
       .optional(),
-    redirects: z
+    /** Per-request transfer ceilings enforced by the proxy while streaming. */
+    perRequest: z
       .object({
-        maxHops: z.number().int().min(0).max(5),
-        /** Only meaningful for digest-verified content; a tag/token never follows a dynamic host. */
-        followDynamicHosts: z.boolean(),
+        maxBytes: z
+          .number()
+          .int()
+          .positive()
+          .max(8 * 1024 * 1024 * 1024),
+        maxDurationMs: z
+          .number()
+          .int()
+          .min(100)
+          .max(30 * 60_000),
+        maxRedirectHops: z.number().int().min(0).max(5),
       })
       .strict(),
     requestHeaders: z
       .object({
         allow: z.array(headerNameSchema).max(64),
-      })
-      .strict(),
-    limits: z
-      .object({
-        requestBytes: z
-          .number()
-          .int()
-          .positive()
-          .max(8 * 1024 * 1024 * 1024),
-        requestTimeoutMs: z
-          .number()
-          .int()
-          .min(100)
-          .max(30 * 60_000),
       })
       .strict(),
   })
@@ -142,13 +157,6 @@ const originSchema = z
     if (!authorizesToken && origin.tokenPaths !== undefined) {
       context.addIssue({ code: 'custom', message: 'token paths require the token operation' });
     }
-    const authorizesContent = origin.operations.some((operation) => CONTENT_OPERATIONS.includes(operation));
-    if (origin.redirects.followDynamicHosts && !authorizesContent) {
-      context.addIssue({ code: 'custom', message: 'only a content origin may follow dynamic redirect hosts' });
-    }
-    if (origin.redirects.maxHops === 0 && origin.redirects.followDynamicHosts) {
-      context.addIssue({ code: 'custom', message: 'zero-hop origin cannot follow dynamic redirect hosts' });
-    }
   });
 
 const registryEgressManifestSchema = z
@@ -158,19 +166,15 @@ const registryEgressManifestSchema = z
     /** Draft manifests are not frozen; 0C flips this once origins/ceilings are reviewed. */
     status: z.enum(['draft', 'frozen']),
     origins: z.array(originSchema).min(1).max(64),
-    /** Per-image cumulative ceilings across a single pull's manifests and blobs. */
-    imageLimits: z
+    /** Cumulative ceilings enforced across every request in one session. */
+    perSession: z
       .object({
-        totalBytes: z
+        maxTotalBytes: z
           .number()
           .int()
           .positive()
           .max(64 * 1024 * 1024 * 1024),
-        totalTimeoutMs: z
-          .number()
-          .int()
-          .min(100)
-          .max(60 * 60_000),
+        maxConcurrentRequests: z.number().int().min(1).max(64),
       })
       .strict(),
     /**
@@ -199,6 +203,7 @@ const registryEgressManifestSchema = z
 export type RegistryEgressManifest = z.infer<typeof registryEgressManifestSchema>;
 export type RegistryEgressOrigin = RegistryEgressManifest['origins'][number];
 export type RegistryDestination = RegistryEgressOrigin['destination'];
+export type RegistryEgressSessionLimits = RegistryEgressManifest['perSession'];
 
 declare const validatedRegistryEgressManifestBrand: unique symbol;
 
@@ -231,7 +236,7 @@ export interface RegistryEgressRequest {
   readonly headers?: Readonly<Record<string, string | readonly string[] | undefined>>;
 }
 
-/** A parsed `sha256:<hex>` content digest; the sole verification algorithm in 0F. */
+/** A parsed `sha256:<hex>` content digest; the sole digest syntax recorded in 0F. */
 export interface OciDigest {
   readonly algorithm: 'sha256';
   readonly hex: string;
@@ -249,15 +254,13 @@ export interface AuthorizedRegistryEgressRequest {
   readonly repository?: string;
   /** Requested reference (tag or digest string) for a manifest pull. */
   readonly reference?: string;
-  /** Present for a by-digest pull; the streamed body must hash to this. */
-  readonly expectedDigest?: OciDigest;
-  /** True for a by-tag manifest: the caller records the computed digest as resolved. */
-  readonly resolvesDigest: boolean;
-  /** Dynamic-host redirects are safe only when digest verification protects the content. */
-  readonly allowDynamicRedirectHosts: boolean;
+  /** Present for a by-digest pull; recorded as audit provenance, never verified. */
+  readonly requestedDigest?: OciDigest;
+  /** Per-request streamed-byte ceiling; the forwarder aborts once it is exceeded. */
+  readonly maxBytes: number;
+  /** Absolute per-request wall-clock ceiling in milliseconds. */
+  readonly maxDurationMs: number;
   readonly maxRedirectHops: number;
-  readonly requestBytes: number;
-  readonly requestTimeoutMs: number;
   /** 0 for the initial request; incremented by {@link authorizeValidatedRegistryRedirect}. */
   readonly redirectHop: number;
 }
@@ -323,7 +326,6 @@ export function authorizeValidatedRegistryEgressRequest(
   if (origin === undefined) throw new Error('registry-egress request targets an unlisted host; fail closed');
 
   const classification = classifyRegistryRequest(origin, request.method, url);
-  const method = classification.method;
   if (!origin.operations.includes(classification.operation)) {
     throw new Error(`registry-egress origin ${origin.id} does not authorize ${classification.operation}`);
   }
@@ -333,40 +335,44 @@ export function authorizeValidatedRegistryEgressRequest(
     originId: origin.id,
     operation: classification.operation,
     destination: origin.destination,
-    method,
+    method: classification.method,
     path: `${url.pathname}${url.search}`,
     headers,
     repository: classification.repository,
     reference: classification.reference,
-    expectedDigest: classification.expectedDigest,
-    resolvesDigest: classification.resolvesDigest,
-    allowDynamicRedirectHosts: origin.redirects.followDynamicHosts && classification.expectedDigest !== undefined,
-    maxRedirectHops: origin.redirects.maxHops,
-    requestBytes: origin.limits.requestBytes,
-    requestTimeoutMs: origin.limits.requestTimeoutMs,
+    requestedDigest: classification.requestedDigest,
+    maxBytes: origin.perRequest.maxBytes,
+    maxDurationMs: origin.perRequest.maxDurationMs,
+    maxRedirectHops: origin.perRequest.maxRedirectHops,
     redirectHop: 0,
   };
 }
 
 /**
  * Authorize following one 3xx redirect as the immediate bounded response to an
- * already-authorized manifest/blob request. A target that matches a reviewed origin
- * is re-authorized against it; an unlisted (dynamic CDN) host is followed only when
- * {@link AuthorizedRegistryEgressRequest.allowDynamicRedirectHosts} holds, and then
- * carries no headers — content-addressed digest verification is the sole control.
+ * already-authorized manifest/blob pull. The reference (tag or digest) does not
+ * matter — any content pull may be redirected. A target that matches a reviewed
+ * origin is re-authorized against it; an unlisted (dynamic CDN) host is reachable
+ * only here, stays on HTTPS, and carries NO credential header. The destination-bound
+ * transport resolves the host and rejects a private/loopback/link-local/ULA answer
+ * before connecting; a literal-address redirect is refused outright here.
  */
 export function authorizeValidatedRegistryRedirect(
   validated: ValidatedRegistryEgressManifest,
   current: AuthorizedRegistryEgressRequest,
   location: string,
 ): AuthorizedRegistryEgressRequest {
-  if (current.expectedDigest === undefined && !current.resolvesDigest) {
-    throw new Error('registry-egress redirect is only followed for manifest/blob content');
+  if (!CONTENT_OPERATIONS.includes(current.operation)) {
+    throw new Error('registry-egress redirect is only followed for an authorized manifest or blob pull');
   }
   const hop = current.redirectHop + 1;
   if (hop > current.maxRedirectHops)
     throw new Error(`registry-egress redirect exceeds the ${current.originId} hop limit`);
   const target = resolveRedirectUrl(current, location);
+  // `URL.hostname` brackets an IPv6 literal; strip them before classifying.
+  if (isIP(target.hostname.replace(/^\[|\]$/gu, '')) !== 0) {
+    throw new Error('registry-egress redirect must target a DNS name, not a literal address');
+  }
 
   const matchedOrigin = matchOrigin(validated, target);
   if (matchedOrigin !== undefined) {
@@ -383,21 +389,16 @@ export function authorizeValidatedRegistryRedirect(
       destination: matchedOrigin.destination,
       path: `${target.pathname}${target.search}`,
       headers: {},
-      allowDynamicRedirectHosts:
-        matchedOrigin.redirects.followDynamicHosts && classification.expectedDigest !== undefined,
-      maxRedirectHops: matchedOrigin.redirects.maxHops,
-      requestBytes: matchedOrigin.limits.requestBytes,
-      requestTimeoutMs: matchedOrigin.limits.requestTimeoutMs,
+      repository: classification.repository,
+      reference: classification.reference,
+      requestedDigest: classification.requestedDigest,
+      maxBytes: matchedOrigin.perRequest.maxBytes,
+      maxDurationMs: matchedOrigin.perRequest.maxDurationMs,
+      maxRedirectHops: matchedOrigin.perRequest.maxRedirectHops,
       redirectHop: hop,
     };
   }
 
-  if (!current.allowDynamicRedirectHosts || current.expectedDigest === undefined) {
-    throw new Error('registry-egress redirect to an unlisted host is refused without digest verification');
-  }
-  if (target.protocol !== 'https:') {
-    throw new Error('registry-egress dynamic redirect must stay on https');
-  }
   return {
     ...current,
     originId: `${current.originId}:cdn`,
@@ -412,8 +413,7 @@ interface RegistryPullClassification {
   readonly operation: RegistryPullOperation;
   readonly repository?: string;
   readonly reference?: string;
-  readonly expectedDigest?: OciDigest;
-  readonly resolvesDigest: boolean;
+  readonly requestedDigest?: OciDigest;
 }
 
 interface RegistryClassification extends RegistryPullClassification {
@@ -452,7 +452,7 @@ function classifyPull(origin: RegistryEgressOrigin, url: URL): RegistryPullClass
   const pathname = url.pathname;
   if (pathname === '/v2' || pathname === '/v2/') {
     requireNoQuery(url);
-    return { operation: 'api-version', resolvesDigest: false };
+    return { operation: 'api-version' };
   }
   if (pathname === '/v2/_catalog') throw refusal('catalog-enumeration', 'registry-egress refuses catalog enumeration');
   if (/^\/v2\/.+\/tags\/list$/u.test(pathname)) {
@@ -473,7 +473,7 @@ function classifyTokenIfMatched(origin: RegistryEgressOrigin, url: URL): Registr
   const matched = patterns.some((pattern) =>
     pattern.kind === 'exact' ? url.pathname === pattern.value : url.pathname.startsWith(pattern.value),
   );
-  return matched ? { operation: 'token', resolvesDigest: false } : undefined;
+  return matched ? { operation: 'token' } : undefined;
 }
 
 function classifyManifest(url: URL, rawName: string, reference: string): RegistryPullClassification {
@@ -481,12 +481,13 @@ function classifyManifest(url: URL, rawName: string, reference: string): Registr
   const repository = validateRepository(rawName);
   const digest = parseOciDigest(reference);
   if (digest !== undefined) {
-    return { operation: 'manifest-pull', repository, reference, expectedDigest: digest, resolvesDigest: false };
+    return { operation: 'manifest-pull', repository, reference, requestedDigest: digest };
   }
   if (!OCI_TAG_PATTERN.test(reference))
     throw new Error('registry-egress manifest reference is not a valid tag or digest');
-  // A tag pull has no a-priori digest; the caller records the computed digest.
-  return { operation: 'manifest-pull', repository, reference, resolvesDigest: true };
+  // A tag pull has no requested digest; the registry-reported digest (if any) is
+  // recorded from the response header as provenance, never computed from bytes.
+  return { operation: 'manifest-pull', repository, reference };
 }
 
 function classifyBlob(url: URL, rawName: string, reference: string): RegistryPullClassification {
@@ -494,7 +495,7 @@ function classifyBlob(url: URL, rawName: string, reference: string): RegistryPul
   const repository = validateRepository(rawName);
   const digest = parseOciDigest(reference);
   if (digest === undefined) throw new Error('registry-egress blob pulls must be addressed by sha256 digest');
-  return { operation: 'blob-pull', repository, reference, expectedDigest: digest, resolvesDigest: false };
+  return { operation: 'blob-pull', repository, reference, requestedDigest: digest };
 }
 
 function validateRepository(name: string): string {
@@ -565,8 +566,8 @@ function resolveRedirectUrl(current: AuthorizedRegistryEgressRequest, location: 
   if (/%(?:2f|5c|25)/iu.test(target.pathname)) {
     throw new Error('registry-egress redirect path contains an encoded separator or nested escape');
   }
-  if (target.protocol !== 'https:' && target.protocol !== 'http:') {
-    throw new Error('registry-egress redirect must use explicit HTTP semantics');
+  if (target.protocol !== 'https:') {
+    throw new Error('registry-egress redirect must stay on https');
   }
   return target;
 }
@@ -594,12 +595,20 @@ function sanitizeHeaders(
       throw new Error(`registry-egress header name is not canonical: ${rawName}`);
     }
     if (rawValue === undefined) continue;
-    // A credential header is a fail-closed rejection (an injected registry
-    // credential must never be forwarded), while connection-management headers the
+    // Anonymous bearer-token admission (§6.4): the bundle holds no registry
+    // credential, so a Bearer token here was obtained anonymously through this
+    // mediated path. Admit a single `Bearer <token>` to a listed origin; reject
+    // every other Authorization scheme (Basic, Digest, …).
+    if (name === 'authorization') {
+      result[name] = admitBearerAuthorization(rawValue);
+      continue;
+    }
+    // Any other credential header is a fail-closed rejection (cookie,
+    // proxy-authorization, x-api-key, …), while connection-management headers the
     // client stack auto-adds (host, keep-alive, …) are dropped silently — the
     // destination-bound transport re-frames the connection.
     if (FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
-      throw new Error(`registry-egress credential header is forbidden (anonymous-only): ${name}`);
+      throw new Error(`registry-egress credential header is forbidden: ${name}`);
     }
     if (DROPPED_REQUEST_HEADERS.has(name)) continue;
     const values = typeof rawValue === 'string' ? [rawValue] : [...rawValue];
@@ -614,50 +623,12 @@ function sanitizeHeaders(
   return result;
 }
 
-// ── Content-addressed digest verification ──────────────────────────────
-
-/**
- * A streaming sha256 hasher the forwarder feeds the response body so a body whose
- * digest does not match the requested digest is rejected before it is delivered.
- */
-export interface RegistryContentHasher {
-  update(chunk: Buffer): void;
-  /** Total bytes hashed so far — the forwarder compares this to the byte ceiling. */
-  readonly bytesHashed: number;
-  /** Finalize and return the computed sha256 hex; callable exactly once. */
-  digestHex(): string;
-}
-
-export function createRegistryContentHasher(): RegistryContentHasher {
-  const hash = createHash('sha256');
-  let bytes = 0;
-  let finalized = false;
-  return {
-    update(chunk: Buffer): void {
-      if (finalized) throw new Error('registry content hasher already finalized');
-      hash.update(chunk);
-      bytes += chunk.length;
-    },
-    get bytesHashed(): number {
-      return bytes;
-    },
-    digestHex(): string {
-      if (finalized) throw new Error('registry content hasher already finalized');
-      finalized = true;
-      return hash.digest('hex');
-    },
-  };
-}
-
-export interface DigestVerification {
-  readonly verified: boolean;
-  readonly expectedHex: string;
-  readonly computedHex: string;
-}
-
-/** Compare a computed sha256 hex against the requested digest (constant-shape result). */
-export function verifyContentDigest(expected: OciDigest, computedHex: string): DigestVerification {
-  return { verified: expected.hex === computedHex, expectedHex: expected.hex, computedHex };
+/** Admit exactly one anonymous `Bearer <token>`; reject arrays and other schemes. */
+function admitBearerAuthorization(value: string | readonly string[]): string {
+  if (typeof value !== 'string' || !BEARER_TOKEN_PATTERN.test(value)) {
+    throw new Error('registry-egress authorization must be a single anonymous Bearer token');
+  }
+  return value;
 }
 
 function addDuplicateIssues(values: readonly string[], label: string, context: z.RefinementCtx): void {

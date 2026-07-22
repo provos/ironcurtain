@@ -7,29 +7,26 @@
       "id": "docker-hub-registry",
       "destination": { "protocol": "https:", "hostname": "registry-1.docker.io", "port": 443 },
       "operations": ["api-version", "manifest-pull", "blob-pull"],
-      "redirects": { "maxHops": 3, "followDynamicHosts": true },
-      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent", "range"] },
-      "limits": { "requestBytes": 1073741824, "requestTimeoutMs": 300000 }
+      "perRequest": { "maxBytes": 1073741824, "maxDurationMs": 300000, "maxRedirectHops": 3 },
+      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent", "range"] }
     },
     {
       "id": "docker-hub-token",
       "destination": { "protocol": "https:", "hostname": "auth.docker.io", "port": 443 },
       "operations": ["token"],
       "tokenPaths": [{ "kind": "exact", "value": "/token" }],
-      "redirects": { "maxHops": 0, "followDynamicHosts": false },
-      "requestHeaders": { "allow": ["accept", "user-agent"] },
-      "limits": { "requestBytes": 1048576, "requestTimeoutMs": 30000 }
+      "perRequest": { "maxBytes": 1048576, "maxDurationMs": 30000, "maxRedirectHops": 0 },
+      "requestHeaders": { "allow": ["accept", "user-agent"] }
     },
     {
       "id": "ghcr-registry",
       "destination": { "protocol": "https:", "hostname": "ghcr.io", "port": 443 },
       "operations": ["api-version", "manifest-pull", "blob-pull", "token"],
       "tokenPaths": [{ "kind": "exact", "value": "/token" }],
-      "redirects": { "maxHops": 3, "followDynamicHosts": true },
-      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent", "range"] },
-      "limits": { "requestBytes": 1073741824, "requestTimeoutMs": 300000 }
+      "perRequest": { "maxBytes": 1073741824, "maxDurationMs": 300000, "maxRedirectHops": 3 },
+      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent", "range"] }
     }
   ],
-  "imageLimits": { "totalBytes": 17179869184, "totalTimeoutMs": 1800000 },
+  "perSession": { "maxTotalBytes": 17179869184, "maxConcurrentRequests": 8 },
   "rejectedOperations": ["push", "delete", "catalog-enumeration", "tags-enumeration"]
 }

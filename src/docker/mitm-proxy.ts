@@ -206,12 +206,14 @@ export interface MitmProxyOptions {
    * serves ONLY the nested bundle's `public-registry` image-pull path: it has no LLM
    * providers, package registries, or dynamic passthrough. Every CONNECT is
    * TLS-terminated and every decrypted request is authorized against the frozen
-   * registry manifest via the guard, then forwarded through `outboundTransport` with
-   * content-addressed digest verification. See `registry-egress-proxy.ts` for the
-   * seam design. Mutually exclusive with `buildEgress`. Foundation code — inert
-   * behind the docker-workload admission fuse until a later phase constructs a
-   * `public-registry` session; a `preloaded-only` session sets no guard, so registry
-   * traffic has no route.
+   * registry manifest via the guard, then streamed through `outboundTransport` under
+   * per-request / per-session transfer ceilings. Workload image content is untrusted
+   * bundle state and is never hashed or verified (§16.6); authority is constrained by
+   * URL/operation gating, exact derived-redirect authorization, credential handling,
+   * and the ceilings. See `registry-egress-proxy.ts` for the seam design. Mutually
+   * exclusive with `buildEgress`. Foundation code — inert behind the docker-workload
+   * admission fuse until a later phase constructs a `public-registry` session; a
+   * `preloaded-only` session sets no guard, so registry traffic has no route.
    */
   readonly registryEgress?: {
     readonly guard: RegistryEgressGuard;
@@ -914,9 +916,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     // Registry-egress connections: authorize each decrypted pull against the frozen
-    // registry manifest, forward through the destination-bound transport, and verify
-    // the content digest before delivery. Registry v2 is https-only, so there is no
-    // plain-HTTP registry path.
+    // registry manifest and stream it through the destination-bound transport under
+    // the per-request / per-session ceilings (content is not hashed — §16.6).
+    // Registry v2 is https-only, so there is no plain-HTTP registry path.
     if (meta.registryEgress && registryEgress) {
       handleRegistryEgressRequest(clientReq, clientRes, {
         guard: registryEgress.guard,
