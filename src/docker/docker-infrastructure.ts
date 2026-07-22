@@ -2268,12 +2268,6 @@ export async function resolveAgentImage(
   return { mode: 'build-if-stale', logicalName: image, imageRef: image, buildHash };
 }
 
-// `docker` is typed `ContainerRuntime` (the apple-container generalization of
-// the former `DockerManager`); exported because callers/tests import it.
-export async function ensureImage(image: string, docker: ContainerRuntime): Promise<string> {
-  return ensureImageFromSpec(image, docker, computeAgentImageBuildSpec(image));
-}
-
 function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const dockerDir = resolve(packageRoot, 'docker');

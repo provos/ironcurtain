@@ -308,17 +308,6 @@ interface DockerWorkloadBundleHandleContext {
 
 /** Live handle over one admitted bundle lease. Methods are the narrow calls the product wiring makes. */
 export class DockerWorkloadBundleHandle {
-  readonly leaseId: string;
-  readonly generation: string;
-  readonly leaseDir: string;
-  readonly leasePath: string;
-  readonly policyPath: string;
-  readonly statusPath: string;
-  readonly stopRequestPath: string;
-  readonly evidenceDir: string;
-  readonly loadedPolicy: LoadedResourceWatchdogPolicy;
-  readonly templateSha256: string;
-
   private readonly context: DockerWorkloadBundleHandleContext;
   private rejecting = false;
   private supervisorPid: number | undefined;
@@ -326,16 +315,39 @@ export class DockerWorkloadBundleHandle {
 
   constructor(context: DockerWorkloadBundleHandleContext) {
     this.context = context;
-    this.leaseId = context.leaseId;
-    this.generation = context.generation;
-    this.leaseDir = context.leaseDir;
-    this.leasePath = context.leasePath;
-    this.policyPath = context.policyPath;
-    this.statusPath = context.statusPath;
-    this.stopRequestPath = context.stopRequestPath;
-    this.evidenceDir = context.evidenceDir;
-    this.loadedPolicy = context.loadedPolicy;
-    this.templateSha256 = context.templateSha256;
+  }
+
+  // The lease identity fields live once on `this.context`; these getters expose
+  // them read-only without a second copy that could drift.
+  get leaseId(): string {
+    return this.context.leaseId;
+  }
+  get generation(): string {
+    return this.context.generation;
+  }
+  get leaseDir(): string {
+    return this.context.leaseDir;
+  }
+  get leasePath(): string {
+    return this.context.leasePath;
+  }
+  get policyPath(): string {
+    return this.context.policyPath;
+  }
+  get statusPath(): string {
+    return this.context.statusPath;
+  }
+  get stopRequestPath(): string {
+    return this.context.stopRequestPath;
+  }
+  get evidenceDir(): string {
+    return this.context.evidenceDir;
+  }
+  get loadedPolicy(): LoadedResourceWatchdogPolicy {
+    return this.context.loadedPolicy;
+  }
+  get templateSha256(): string {
+    return this.context.templateSha256;
   }
 
   /** Precommit one outer resource to the ledger BEFORE the caller creates it. */
@@ -512,17 +524,14 @@ export class DockerWorkloadBundleHandle {
   }
 
   private async withBusyRetry<T>(operation: () => Promise<T>): Promise<T> {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < BUSY_RETRY_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; ; attempt += 1) {
       try {
         return await operation();
       } catch (error) {
         if (!isLeaseBusyError(error) || attempt === BUSY_RETRY_ATTEMPTS - 1) throw error;
-        lastError = error;
         await this.context.sleep(BUSY_RETRY_BACKOFF_MS);
       }
     }
-    throw lastError;
   }
 
   private emit(payload: DockerWorkloadAuditEventPayload): void {

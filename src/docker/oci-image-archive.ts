@@ -265,7 +265,7 @@ function validateOciMetadata(
   const actualPaths = new Set(entries.keys());
   const unexpected = [...actualPaths].filter((path) => !exactPaths.has(path));
   const missing = [...exactPaths].filter((path) => !actualPaths.has(path));
-  if (unexpected.length > 0 || missing.length > 0 || actualPaths.size !== exactPaths.size) {
+  if (unexpected.length > 0 || missing.length > 0) {
     throw new Error(
       `OCI image archive path set mismatch: unexpected=${unexpected.sort().join(',') || '(none)'} ` +
         `missing=${missing.sort().join(',') || '(none)'}`,

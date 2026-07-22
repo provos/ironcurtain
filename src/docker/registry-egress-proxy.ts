@@ -52,7 +52,7 @@ import {
   type RegistryEgressSessionLimits,
 } from './registry-egress-policy.js';
 import type { OutboundDestination, OutboundTransport } from './outbound-transport.js';
-import { HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
+import { buildRequestUrl, sanitizeResponseHeaders, toOutgoingHeaders } from './egress-forwarding.js';
 import * as logger from '../logger.js';
 
 export type RegistryEgressMode = 'disabled' | 'public-registry';
@@ -323,11 +323,6 @@ function finalizeExchange(exchange: RegistryEgressExchange): void {
   exchange.lease.release();
 }
 
-function buildRequestUrl(context: RegistryEgressForwardContext): string {
-  const target = context.requestTarget.startsWith('/') ? context.requestTarget : `/${context.requestTarget}`;
-  return `${context.scheme}//${formatAuthority(context.targetHost, context.targetPort, context.scheme)}${target}`;
-}
-
 function fetchAuthorized(exchange: RegistryEgressExchange, authorized: AuthorizedRegistryEgressRequest): void {
   const { clientRes, context } = exchange;
   const destination: OutboundDestination = {
@@ -464,7 +459,7 @@ function streamToClient(
     streamedBytes += chunk.length;
   });
 
-  clientRes.writeHead(status, deliveredHeaders(upstreamRes.headers));
+  clientRes.writeHead(status, sanitizeResponseHeaders(upstreamRes.headers));
   pipeline(upstreamRes, limiter, clientRes, (error) => {
     if (error) {
       logger.info(`[registry-egress] ${authorized.originId} transfer failed: ${error.message}`);
@@ -537,27 +532,9 @@ function reportedDigest(headers: http.IncomingHttpHeaders): string | undefined {
   return parseOciDigest(raw) !== undefined ? raw : undefined;
 }
 
-function deliveredHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
-  const result: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    const lower = name.toLowerCase();
-    if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(lower)) continue;
-    result[name] = value;
-  }
-  return result;
-}
-
 function firstHeader(value: string | readonly string[] | undefined): string | undefined {
   if (value === undefined) return undefined;
   return typeof value === 'string' ? value : value[0];
-}
-
-function toOutgoingHeaders(headers: Readonly<Record<string, string | readonly string[]>>): http.OutgoingHttpHeaders {
-  const result: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    result[name] = typeof value === 'string' ? value : [...value];
-  }
-  return result;
 }
 
 function rejectRegistryEgress(
@@ -578,10 +555,4 @@ function rejectRegistryEgressResponse(clientRes: http.ServerResponse, status: nu
   } else {
     clientRes.destroy();
   }
-}
-
-function formatAuthority(hostname: string, port: number, scheme: 'http:' | 'https:'): string {
-  const host = hostname.includes(':') ? `[${hostname}]` : hostname;
-  const standard = (scheme === 'https:' && port === 443) || (scheme === 'http:' && port === 80);
-  return standard ? host : `${host}:${port}`;
 }

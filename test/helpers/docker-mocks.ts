@@ -72,7 +72,7 @@ export function createDockerCallTracker(): DockerCallTracker {
 export function createMockDocker(options: CreateMockDockerOptions = {}): ContainerRuntime {
   const { tracker, exec: execOverride, create: createOverride } = options;
 
-  // Track build-hash labels so ensureImage()'s staleness-detection path
+  // Track build-hash labels so resolveAgentImage()'s staleness-detection path
   // is testable: first build stamps a hash; subsequent calls see it.
   const labels = new Map<string, Record<string, string>>();
   const imageIds = new Map<string, string>();

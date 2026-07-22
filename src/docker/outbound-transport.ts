@@ -341,7 +341,7 @@ function formatConnectAuthority(hostname: string, port: number): string {
 }
 
 function normalizeProxyEndpoint(endpoint: FixedParentProxyEndpoint): http.RequestOptions {
-  if ('socketPath' in endpoint && endpoint.socketPath !== undefined) {
+  if (endpoint.socketPath !== undefined) {
     if (!endpoint.socketPath.startsWith('/') || /[\r\n\0]/u.test(endpoint.socketPath)) {
       throw new Error('fixed parent proxy socketPath must be absolute');
     }

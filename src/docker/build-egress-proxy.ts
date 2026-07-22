@@ -60,7 +60,7 @@ import {
   type BuildEgressRule,
 } from '../docker-workload/build-egress-policy.js';
 import type { OutboundDestination, OutboundTransport } from './outbound-transport.js';
-import { HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
+import { buildRequestUrl, sanitizeResponseHeaders, toOutgoingHeaders } from './egress-forwarding.js';
 import * as logger from '../logger.js';
 
 export type BuildEgressMode = 'disabled' | 'ironcurtain-dockerfiles';
@@ -176,11 +176,6 @@ export function handleBuildEgressRequest(
   forwardAuthorizedBuildEgress(clientRes, authorized, context.transport);
 }
 
-function buildRequestUrl(context: BuildEgressForwardContext): string {
-  const target = context.requestTarget.startsWith('/') ? context.requestTarget : `/${context.requestTarget}`;
-  return `${context.scheme}//${formatAuthority(context.targetHost, context.targetPort, context.scheme)}${target}`;
-}
-
 function forwardAuthorizedBuildEgress(
   clientRes: http.ServerResponse,
   authorized: AuthorizedBuildEgressRequest,
@@ -237,26 +232,6 @@ function forwardAuthorizedBuildEgress(
   upstreamReq.end();
 }
 
-function toOutgoingHeaders(headers: Readonly<Record<string, string | readonly string[]>>): http.OutgoingHttpHeaders {
-  const result: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    result[name] = typeof value === 'string' ? value : [...value];
-  }
-  return result;
-}
-
-function sanitizeResponseHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
-  // Hop-by-hop and credential (set-cookie) headers never propagate back into the
-  // build. The shared response set adds `trailer`/`te`/`proxy-authorization` over
-  // the previous inline list, closing a `trailer` leak on chunked responses.
-  const result: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(name.toLowerCase())) continue;
-    result[name] = value;
-  }
-  return result;
-}
-
 function rejectBuildEgress(clientRes: http.ServerResponse, context: BuildEgressForwardContext, error: unknown): void {
   const message = error instanceof Error ? error.message : 'build egress denied';
   logger.info(`[build-egress] DENIED ${context.scheme}//${context.targetHost}:${context.targetPort} — ${message}`);
@@ -270,10 +245,4 @@ function rejectBuildEgressResponse(clientRes: http.ServerResponse, status: numbe
   } else {
     clientRes.destroy();
   }
-}
-
-function formatAuthority(hostname: string, port: number, scheme: 'http:' | 'https:'): string {
-  const host = hostname.includes(':') ? `[${hostname}]` : hostname;
-  const standard = (scheme === 'https:' && port === 443) || (scheme === 'http:' && port === 80);
-  return standard ? host : `${host}:${port}`;
 }

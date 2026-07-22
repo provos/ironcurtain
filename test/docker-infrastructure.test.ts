@@ -14,7 +14,6 @@ import {
   computeWorkflowDependencyHash,
   buildWorkflowExecCommand,
   checkDockerContainerWritableStorage,
-  ensureImage,
   computeAgentImageBuildHash,
   resolveAgentImage,
 } from '../src/docker/docker-infrastructure.js';
@@ -1391,6 +1390,12 @@ describe('ensureImage builds no per-workflow image', () => {
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
+
+  // The shared agent-image materialization is `resolveAgentImage` in the default
+  // build-if-stale mode; the build hash it returns is what these tests assert on.
+  async function ensureImage(image: string, docker: ContainerRuntime): Promise<string> {
+    return (await resolveAgentImage(image, docker)).buildHash;
+  }
 
   // The mock Docker stamps build labels per tag; capture every built tag so we
   // can assert no per-workflow image tag (`ironcurtain-wf-*`) is produced.
