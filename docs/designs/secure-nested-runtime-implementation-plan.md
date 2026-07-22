@@ -339,7 +339,7 @@ Images are two classes. **Trusted infrastructure images** — base, agent (per h
 When `imageIngress: public-registry` is enabled, the nested daemon receives proxy environment plus the session public CA and reaches only the fixed proxy path; there is still no direct registry route. The outer MITM adds a registry-aware handler frozen by `registry-egress-manifest.json`:
 
 - client-initiated requests may target only reviewed registry and token-service origins (e.g. `registry-1.docker.io`, `auth.docker.io`, `ghcr.io`); client-selected registry, token, or CDN hosts fail closed;
-- anonymous public pulls only: no registry credential exists in the bundle or is injected by the proxy; authenticated and private registries remain Phase 3;
+- anonymous public pulls only: no registry credential exists in the bundle or is injected by the proxy; authenticated and private registries remain Phase 3. The `401`→token→retry dance is performed **client-side** by the bundle (the proxy performs no token dance of its own); the proxy admits a single `Bearer` token only on a client-initiated request to a listed registry/token origin, and always strips it from derived redirects. Because no credential exists in the bundle, any bearer it holds was necessarily obtained anonymously through this same mediated path;
 - pull-by-digest is preferred; tag and digest references and any registry-reported or optionally computed manifest digest are recorded as audit provenance, not host attestation;
 - the trusted proxy may follow an unlisted CDN URL only when that exact `Location` is the immediate response to an authorized manifest/blob request. The derived request preserves `GET`/`HEAD`, stays on HTTPS, passes destination-bound public-address/SSRF checks, has finite hops, and carries no authorization, cookie, client-selected host, or other credential-bearing header. The bundle cannot directly select or reuse the CDN destination;
 - bodies stream with normal backpressure under per-request and per-session byte, absolute-time, and concurrency ceilings. No trusted blob buffer, spool, or content hash is required; interrupted transfers and ceiling failures fail closed and are audited;
@@ -676,14 +676,21 @@ awaits two non-mechanical decisions recorded there (HTTPS path-gating vs host-on
 daemon-layer `base-image` seam) and the proxy/BuildKit wiring.
 
 A workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind the
-admission fuse, now conformed to §16.6: the superseded blob hashing and trusted response buffering
-are removed, and the binding controls are implemented and hermetically tested — genuinely
-backpressured streaming with per-request byte/time and per-session total-byte/concurrency ceilings
-(guard-owned ledger), digest-independent exact derived-redirect authorization with credential
-stripping and literal-IP refusal atop the transport SSRF check, and the anonymous client-side bearer
-flow (single `Bearer` admitted to listed origins only). Digests are audit provenance only. The frozen
-manifest, live protocol gates, and production lifecycle wiring remain open; this path is not yet a 0F
-exit artifact.
+admission fuse, conformed to §16.6: the superseded blob hashing and trusted response buffering are
+removed, and the binding controls are genuinely backpressured streaming with per-request byte/time
+and per-session total-byte/concurrency ceilings (guard-owned ledger), digest-independent exact
+derived-redirect authorization with credential stripping and literal-IP refusal atop the transport
+SSRF check, and the anonymous client-side bearer flow (single `Bearer` admitted to listed origins
+only). Digests are audit provenance only. This path has now cleared its 0C gates: an adversarial
+security review found no HIGH-severity bypass (its three actionable findings — redirect-body ceiling
+bypass, a serving-a-draft-manifest gap, and a stale redirect error handler — are fixed and regression-
+tested); 53 hermetic policy/proxy tests pass; and a live gate scores 16/16 against both frozen origins
+(`registry-1.docker.io` and `ghcr.io`), exercising the anonymous token dance, by-digest manifest, the
+`307`→CDN derived redirect, content-addressed match, digest-preserving provenance, and the fail-closed
+negatives (unlisted host, push, tags/catalog enumeration, `Basic` auth). The manifest is frozen
+(`workload-registry-egress-v1`) and the guard fails closed on any non-frozen manifest. Production
+lifecycle wiring (constructing the guard in a real `public-registry` session, and the nested-mode
+parent-proxy transport that must be a guarded resolver) remains the open Phase 1 item.
 
 The checked-in Apple arm64 client matrix binds the locally inspected rootless Docker 29.2.1 image
 to exact CLI/daemon/API 1.44-1.53, Buildx 0.31.1, and Compose 5.1.0 values; live preflight compares
