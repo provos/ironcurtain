@@ -54,7 +54,9 @@ describe('narrow current-Dockerfile build egress', () => {
     [{ seam: 'run', method: 'GET', url: 'https://evil.example/artifacts/tool.tar.gz' }, /not authorized/u],
     [{ seam: 'run', method: 'GET', url: 'https://downloads.example.com/private/tool.tar.gz' }, /not authorized/u],
     [
-      { seam: 'run', method: 'GET', url: 'https://downloads.example.com/artifacts%2Fprivate/tool.tar.gz' },
+      // An encoded slash inside an otherwise-matching prefix is rejected because
+      // the rule does not opt into it (matches the prefix, then fails post-match).
+      { seam: 'run', method: 'GET', url: 'https://downloads.example.com/artifacts/sub%2Fprivate' },
       /encoded separator/u,
     ],
     [
@@ -81,6 +83,35 @@ describe('narrow current-Dockerfile build egress', () => {
     ],
   ] as const)('rejects undeclared request behavior %#', (request, message) => {
     expect(() => authorizeBuildEgressRequest(manifest(), request)).toThrow(message);
+  });
+
+  it('authorizes an encoded slash only for a rule that opts in', () => {
+    // npm requests scoped-package metadata as `/@scope%2fname`; the opted-in rule allows it.
+    expect(
+      authorizeBuildEgressRequest(manifest(), {
+        seam: 'run',
+        method: 'GET',
+        url: 'https://registry.example.com/@anthropic-ai%2fclaude-code',
+      }).ruleId,
+    ).toBe('npm-registry');
+    // The same encoding on a rule that did not opt in is rejected.
+    expect(() =>
+      authorizeBuildEgressRequest(manifest(), {
+        seam: 'run',
+        method: 'GET',
+        url: 'https://downloads.example.com/artifacts/pkg%2fsub',
+      }),
+    ).toThrow(/encoded separator/u);
+    // Opting into `%2f` does not admit an encoded backslash or a double-encoding.
+    for (const smuggle of ['%5cwin', '%252e%252e/x']) {
+      expect(() =>
+        authorizeBuildEgressRequest(manifest(), {
+          seam: 'run',
+          method: 'GET',
+          url: `https://registry.example.com/pkg${smuggle}`,
+        }),
+      ).toThrow(/encoded separator|nested escape/u);
+    }
   });
 
   it('allows only an acyclic, declared redirect graph within the first rule hop ceiling', () => {
@@ -164,7 +195,7 @@ describe('narrow current-Dockerfile build egress', () => {
     const directory = tempDirectory();
     const path = join(directory, 'manifest.json');
     writeFileSync(path, JSON.stringify(manifest()), { mode: 0o400 });
-    expect(loadBuildEgressManifest(path).manifest.rules).toHaveLength(2);
+    expect(loadBuildEgressManifest(path).manifest.rules).toHaveLength(3);
     chmodSync(path, 0o666);
     expect(() => loadBuildEgressManifest(path)).toThrow(/group\/world writable/u);
     chmodSync(path, 0o400);
@@ -212,6 +243,23 @@ function manifest(): BuildEgressManifest {
         redirects: { maxHops: 0, allowedRuleIds: [] },
         requestHeaders: { allow: ['accept', 'user-agent'], strip: ['host', 'connection'] },
         limits: { responseBytes: 10 * 1024 * 1024, timeoutMs: 30_000 },
+      },
+      {
+        // npm-style host that opts into an encoded slash for scoped-package metadata.
+        id: 'npm-registry',
+        seams: ['run'],
+        destination: {
+          protocol: 'https:',
+          hostname: 'registry.example.com',
+          port: 443,
+          addressPolicy: 'fixed-parent-only',
+        },
+        methods: ['GET', 'HEAD'],
+        paths: [{ kind: 'prefix', value: '/', allowQuery: false }],
+        redirects: { maxHops: 0, allowedRuleIds: [] },
+        requestHeaders: { allow: ['accept', 'user-agent'], strip: ['host', 'connection'] },
+        limits: { responseBytes: 10 * 1024 * 1024, timeoutMs: 30_000 },
+        allowEncodedSlash: true,
       },
     ],
   };

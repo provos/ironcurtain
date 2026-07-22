@@ -96,6 +96,12 @@ const buildEgressRuleSchema = z
           .max(30 * 60_000),
       })
       .strict(),
+    // Permit a single encoded forward slash (`%2f`) in the request path. Off by
+    // default (encoded separators are smuggling); only hosts with a legitimate
+    // convention set this — npm requests scoped-package metadata as
+    // `/@scope%2fname`. Encoded backslash (`%5c`) and double-encoding (`%25`)
+    // remain rejected regardless.
+    allowEncodedSlash: z.boolean().default(false),
   })
   .strict()
   .superRefine((rule, context) => {
@@ -320,7 +326,10 @@ export function authorizeValidatedBuildEgressRequest(
   if (url.username !== '' || url.password !== '' || url.hash !== '') {
     throw new Error('build-egress request URL must not contain credentials or a fragment');
   }
-  if (/%(?:2f|5c|25)/iu.test(url.pathname)) {
+  // Encoded backslash and double-encoding are never legitimate; reject before
+  // rule matching. An encoded forward slash (`%2f`) is checked per matched rule
+  // below, since a rule may opt into it (npm scoped-package metadata).
+  if (/%(?:5c|25)/iu.test(url.pathname)) {
     throw new Error('build-egress request path contains an encoded separator or nested escape');
   }
   const port =
@@ -340,6 +349,12 @@ export function authorizeValidatedBuildEgressRequest(
   if (matches.length === 0) throw new Error('build-egress request is not authorized by the frozen manifest');
   if (matches.length !== 1) throw new Error('build-egress request ambiguously matches multiple frozen rules');
   const rule = matches[0];
+  // An encoded forward slash never helps a path satisfy a real-slash prefix
+  // boundary (matching is on the raw pathname), so a `%2f` request only reaches
+  // here via a rule it already matched; reject it unless that rule opted in.
+  if (/%2f/iu.test(url.pathname) && !rule.allowEncodedSlash) {
+    throw new Error('build-egress request path contains an encoded separator or nested escape');
+  }
   const redirectChain = [...(request.redirectChain ?? [])];
   validateRedirectChain(validated, redirectChain, rule.id);
   const headers = sanitizeHeaders(rule, request.headers ?? {});
