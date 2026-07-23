@@ -1,7 +1,9 @@
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { RUNTIME_TRUST_SCHEMA } from '../../src/docker/runtime-trust.js';
 import {
   loadQualificationContract,
   verifyQualificationRunSet,
@@ -272,6 +274,89 @@ function qualificationFixture() {
   const run = loaded('/evidence/run.json', 'c'.repeat(64), runValue);
   return { options: { contract, run, report, repositoryRoot: '/repo' } };
 }
+
+describe('frozen apple-container qualification contract', () => {
+  const CONTRACT_PATH = join(
+    process.cwd(),
+    'config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json',
+  );
+  const rawSha = (relativePath: string): string =>
+    createHash('sha256')
+      .update(readFileSync(join(process.cwd(), relativePath)))
+      .digest('hex');
+  const appleCatalog = (): { images: { logicalName: string; runtimeImageId: string; toolchainDigest: string }[] } =>
+    JSON.parse(
+      readFileSync(join(process.cwd(), 'config/docker-workload/preloaded-catalog.apple-container.json'), 'utf8'),
+    );
+
+  it('loads and validates the checked-in frozen contract', () => {
+    const { value } = loadQualificationContract(CONTRACT_PATH);
+    expect(value.contractId).toBe('apple-rootless-vfs-arm64-v1');
+    expect(value.platform).toBe('apple-container');
+    expect(value.architecture).toBe('arm64');
+    expect(value.variant).toBe('apple-rootless-vfs');
+    expect(value.commands).toHaveLength(12);
+  });
+
+  it('binds every committed frozen artifact by its exact content hash', () => {
+    const { bindings } = loadQualificationContract(CONTRACT_PATH).value;
+    expect(bindings.catalogSha256).toBe(rawSha('config/docker-workload/preloaded-catalog.apple-container.json'));
+    expect(bindings.profileSha256).toBe(rawSha('config/docker-workload/profile-ceiling.json'));
+    expect(bindings.performanceBudgetSha256).toBe(
+      rawSha('test/docker-workload/performance-budget.apple-rootless-vfs-arm64.json'),
+    );
+    expect(bindings.watchdogSha256).toBe(rawSha('config/docker-workload/resource-watchdog-policy.json'));
+    expect(bindings.buildEgressSha256).toBe(rawSha('config/docker-workload/build-egress-manifest.json'));
+  });
+
+  it('binds the runtime image id and toolchain digest of the base catalog role', () => {
+    const { bindings } = loadQualificationContract(CONTRACT_PATH).value;
+    const base = appleCatalog().images.find((image) => image.logicalName === 'ironcurtain-base:latest');
+    expect(base).toBeDefined();
+    expect(bindings.runtimeImageId).toBe(base?.runtimeImageId);
+    expect(bindings.toolchainDigest).toBe(base?.toolchainDigest);
+  });
+
+  it('carries the runtime-trust schema binding and a clean-tree source binding', () => {
+    const { bindings } = loadQualificationContract(CONTRACT_PATH).value;
+    expect(bindings.runtimeTrustSchema).toBe(RUNTIME_TRUST_SCHEMA);
+    expect(bindings.sourceCommit).toMatch(/^[a-f0-9]{40}$/u);
+    expect(bindings.dirtyPatchSha256).toBeNull();
+    expect(bindings.relaySha256).toBeNull();
+    // publicCaSha256 tracks the freeze-host runtime-trust public-root store, which is Node-version
+    // scoped, so assert only its shape here; a live cross-check would break across CI Node versions.
+    expect(bindings.publicCaSha256).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it('gives every executable command an expected test set and every N/A command a reviewed rationale', () => {
+    const { commands } = loadQualificationContract(CONTRACT_PATH).value;
+    for (const command of commands) {
+      const executable = command.disposition === 'required-pass' || command.disposition === 'backend-adapted-pass';
+      if (executable) {
+        expect(command.argv.length).toBeGreaterThanOrEqual(4);
+        expect(command.expectedTestFiles.length).toBeGreaterThan(0);
+        expect(command.expectedTests.length).toBeGreaterThan(0);
+      } else {
+        expect(command.disposition).toBe('not-applicable-with-reviewed-rationale');
+        expect(command.argv).toEqual([]);
+        expect(command.rationale).toBeTruthy();
+        expect(command.adjudication).toBeTruthy();
+      }
+    }
+    // The executable gates prove the apple-container topology invariants directly (backend-agnostic
+    // manager logic plus the apple --network none / --publish-socket / workspace-cooperation coverage);
+    // the Docker-oriented §9.6 inventory gates are N/A, each naming the apple gate that proves the
+    // equivalent invariant rather than silently skipping an executed gate.
+    const executableIds = commands
+      .filter((command) => command.disposition === 'required-pass' || command.disposition === 'backend-adapted-pass')
+      .map((command) => command.id);
+    expect(executableIds).toEqual(['docker-manager', 'apple-container-manager', 'apple-container-integration']);
+    // Each registered agent has an explicit disposition; Goose and Codex cannot vanish via auto-selection.
+    const ids = commands.map((command) => command.id);
+    expect(ids).toContain('uid-remap-goose');
+    expect(ids).toContain('codex-agent');
+  });
+});
 
 function loaded<T>(path: string, sha256: string, value: T): LoadedQualificationJson<T> {
   return { path, sha256, sizeBytes: 1234, value };

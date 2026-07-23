@@ -81,11 +81,24 @@ Each endpoint maps to a known toolchain step in the Dockerfiles:
    wrong-method, path-outside-prefix, credential-header, and encoded-smuggling
    requests (34/34).
 
-2. **`base-image` seam — still open.** The frozen manifest covers the `run` seam
-   only. Daemon-layer `FROM` pulls (`node:22-trixie`, the golang builder) bypass
-   the RUN-step proxy and must be inventoried from the `FROM` lines and their
-   digests pinned as `base-image`/`dockerfile-frontend` seam rules. This remains
-   the one open build-egress freeze sub-item.
+2. **`base-image` seam — RESOLVED (mediated by registry-egress, 2026-07-23).** The
+   original plan to pin daemon-layer `FROM` pulls as build-egress
+   `base-image`/`dockerfile-frontend` rules was corrected against the code: a `FROM`
+   pull never traverses the build-egress proxy (that proxy is `--build-arg`-wired into
+   `RUN` steps; the daemon resolves `FROM` out-of-band), and the build-egress schema
+   cannot carry a registry pull anyway because it unconditionally rejects an `authorization`
+   header fail-closed, breaking Docker Hub's anonymous `401`→token→`Bearer` retry. Base-image mediation is
+   the already-frozen registry-egress path (`registry-egress-manifest.json`, §6.4), which
+   is repo-agnostic within its listed origins and so authorizes the one external base
+   pull (`node:22-trixie`, repository `library/node`) with no manifest change — a
+   committed test asserts that manifest/blob/token path. The
+   `base-image`/`dockerfile-frontend` seam enums stay in the build-egress schema as
+   provenance/audit vocabulary only. Pinning the `FROM` digest is deferred to the next
+   catalog re-freeze (a rebuild is not byte-reproducible while `RUN`-step apt/npm stay
+   unpinned, and the runtime already runs the sha256-bound frozen catalog image). Routing
+   the daemon's `FROM` pull to the registry-egress listener is a Phase 1 wiring item. The
+   golang builder / nested-daemon `FROM`s are preloaded-catalog roles (built at freeze
+   time, already digest-pinned), not in the in-bundle rebuild scope.
 
 The raw per-group drafts (`build-egress-manifest.draft.json`, `capture-evidence.json`,
 `build-logs.json`, and the per-build `overlays/`) are produced under the operator's

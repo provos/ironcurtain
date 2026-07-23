@@ -678,8 +678,22 @@ resistance and zero unmediated fetches. `config/docker-workload/build-egress-man
 stripped, with the four source Dockerfiles hash-pinned; an offline gate scores 34/34 authorizing every
 captured endpoint and rejecting unlisted-host/method/path/credential/encoded-smuggling violations. The
 freeze also added a narrow per-rule `allowEncodedSlash` opt-in (npm scoped-package metadata is
-`/@scope%2fname`; `%5c`/`%25`/traversal stay globally rejected). The one open build-egress sub-item is
-the daemon-layer `base-image` seam (pinning `FROM` digests) plus the production proxy/BuildKit wiring.
+`/@scope%2fname`; `%5c`/`%25`/traversal stay globally rejected). The build-egress `base-image` sub-item was reassessed against the code (2026-07-23) and the plan's
+original framing corrected: a `FROM` base-image pull is a registry pull that never traverses the
+build-egress proxy — that proxy is `--build-arg`-wired into `RUN` steps only, while the daemon resolves
+`FROM` out-of-band — and the build-egress schema cannot even carry it (it unconditionally rejects an
+`authorization` header fail-closed, so it cannot carry Docker Hub's anonymous `401`→token→`Bearer`
+retry). Base-image mediation
+therefore belongs to the already-frozen registry-egress path (§6.4), which is repo-agnostic within its
+listed origins and so already authorizes the one external base pull (`node:22-trixie`, repository
+`library/node`) with no manifest change; a committed test now asserts that node manifest/blob/token path
+against the frozen registry-egress manifest. The build-egress `base-image`/`dockerfile-frontend` seam
+enums are retained as provenance/audit vocabulary only. Pinning the `FROM` digest is deferred to the
+next natural catalog re-freeze — pinning now would force a full catalog rebuild (the `RUN`-step apt/npm
+are unpinned, so a rebuild is not byte-reproducible anyway) for a rebuild-path-only gain that does not
+affect the runtime, which already runs the sha256-bound frozen catalog image. The production
+proxy/BuildKit wiring that routes the daemon's `FROM` pull to the registry-egress listener remains a
+Phase 1 item.
 
 A workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind the
 admission fuse, conformed to §16.6: the superseded blob hashing and trusted response buffering are
@@ -718,6 +732,30 @@ foundation evidence; it is not the complete post-attach G3 matrix or a 0C qualif
 Land the common CA-neutral image/bootstrap, ABI-keyed Linux dependency volume with `isolated-vm` and `node-pty` native-load probes, destination-bound parent `OutboundTransport`, hardened Desktop relay, pinned client compatibility matrix, host disk watchdog, preloaded catalog, feature-off plumbing, generalized JSON Vitest reporter, deterministic target/scanner fixtures, a registry-aware workload-egress handler with `registry-egress-manifest.json` (§6.4), and `performance-budget.json`. Each staged image records architecture, Docker API range, CLI/daemon/Buildx/Compose versions, and public-CA generation.
 
 Freeze one canonical, fully expanded, hash-pinned `qualification-contract.json` per concrete backend/variant after 0B and before 0C. A shared template may generate it, but runtime overlays/dynamic selection are forbidden. Every named gate has exactly one disposition: `required-pass`; `backend-adapted-pass` with named equivalent invariant/test; `not-applicable-with-reviewed-rationale` plus adjudication; or `compatibility-blocker`. A blocker is terminal and cannot be overridden by config/UI; clearing it requires a versioned adjudicated contract and full rerun. `expected-fail`, `xfail`, auto-skip, and known-failure are prohibited. 0C cannot rewrite its contract. Every executable required/adapted selection is preflighted and zero-skip; N/A is a contract decision, not a runtime skip. Broad `npm test` skips remain inventory only.
+
+Freeze progress (2026-07-23): the `apple-container`/`arm64` contract is frozen at
+`config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json` (`contractId:
+apple-rootless-vfs-arm64-v1`, sha256 `19052128…`). It carries twelve commands. Three are executable and
+green/zero-skip on the apple-container host, enumerated by the pinned Vitest reporter (146 exact
+`file::fullName#occurrence` IDs): `docker-manager` (required, backend-agnostic container-argument logic,
+79), `apple-container-manager` (required, the apple topology gate proving `--network none`,
+`--publish-socket`, and workspace-mount cooperation, 60), and `apple-container-integration`
+(backend-adapted, the apple runtime-lifecycle + per-file UDS/vsock topology gate, 7). The nine remaining
+§9.6-inventory gates are Docker-oriented and do not apply verbatim to apple-container, so each is
+`not-applicable-with-reviewed-rationale` whose rationale **names the executed apple gate that proves the
+equivalent invariant** (e.g. `network-isolation` → apple `--network none`;
+`docker-uds-mount`/`pty-entrypoint` → apple `--publish-socket`;
+`uid-remap-claude`/`uid-remap-goose` → apple writable-workspace mount + path-escape rejection), so no
+invariant is silently dropped
+and every registered agent — including Goose and Codex — has an explicit disposition. Enumeration uses
+the JSON reporter (the adjudicator's own source), not `vitest list`, so reporter-visible skipped/pending
+tests are not under-counted. Its bindings hash-pin the frozen apple catalog, profile ceiling,
+performance budget, watchdog policy, and build-egress manifest, plus the base runtime image id /
+toolchain digest and the runtime-trust public-root generation; a committed freeze-guard test cross-checks
+each file-hash and catalog-derived binding against the live artifact. The `docker-desktop`/`arm64`
+contracts (DD-STRICT and DD-PROXY) are deferred — they first need a frozen docker-desktop performance
+budget and the DD-PROXY relay-binary hash — and `linux-docker` is out of scope for the arm64 freeze (no
+Linux host).
 
 Initial mapping: `test/docker-manager.test.ts` and `test/docker-resource-lifecycle.integration.test.ts` are required; resource-limit coverage is required or backend-adapted when inner delegation differs, never N/A; network-isolation and UDS coverage are adapted to the final topology; UID/workspace coverage is adapted for rootless sidecars versus Apple and becomes a blocker if cooperation fails; PTY and skills are required or have named adapted equivalents. Claude Code, Codex, and Goose each receive an explicit disposition; Goose cannot disappear through agent auto-selection. UID adaptation proves writable workspace cooperation, no path escape, and no claimed equivalence between guest UID and host UID.
 
@@ -1010,6 +1048,22 @@ Four post-freeze `/simplify` refactors deduplicated security-critical code that 
 - **One resolved MITM listener mode** (`1cade7d`): the per-instance build-egress/registry-egress flags, the mutual-exclusion throw, two redundant `ConnectionMeta` booleans, and the connType ternary collapsed into an internal `ListenerMode` union (`'standard' | 'build-egress' | 'registry-egress'`) resolved once by `resolveListenerMode` and dispatched by a switch with a compile-time `never` exhaustiveness guard. The public `MitmProxyOptions` shape is unchanged.
 
 The unified credential-free mediated forwarder is deliberately kept **separate** from the credential-injecting provider path (the fake→real key swap): real provider secrets never share the workload-egress code path. Two code-quality items remain deferred — a shared OCI tar-reader leaf, and merging the `revokeContainer`/`revokeNetwork` revocation strategies — and `canonicalJson` (in `preloaded-image-catalog.ts`) was deliberately **not** folded into `stableStringify` because it feeds the frozen catalog digest.
+
+### 16.8 Base-image mediation correction and qualification-contract freeze (record, 2026-07-23)
+
+Two Phase-0F-exit items closed on the way to Phase 1. **Base-image seam correction:** the plan's
+original "daemon-layer `base-image` seam in the build-egress manifest" was verified against the code and
+corrected — a `FROM` pull bypasses the build-egress proxy entirely (that proxy is `--build-arg`-wired
+into `RUN` steps; the daemon resolves `FROM` out-of-band), and the build-egress schema cannot carry a
+registry pull because it unconditionally rejects an `authorization` header fail-closed, breaking Docker
+Hub's anonymous token dance. Base-image mediation is the already-frozen registry-egress path (§6.4), which is repo-agnostic
+within its origins and so authorizes `node:22-trixie` (`library/node`) with no manifest change; a
+committed registry-egress test now asserts that manifest/blob/token path; the `FROM` digest-pin is
+deferred to the next catalog re-freeze; no frozen artifact was touched. **Qualification-contract
+freeze:** the `apple-container`/`arm64` contract is frozen (see §9.5) with real artifact-hash bindings
+and a committed freeze-guard test; `docker-desktop` (needs a DD performance budget + relay hash) and
+`linux-docker` (no host) are deferred. The `placeholderAdmissionBindings` seam in
+`docker-infrastructure.ts` can now be wired to the real frozen contract hash in Phase 1.
 
 ## 17. Primary references
 

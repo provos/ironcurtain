@@ -20,6 +20,7 @@ afterEach(() => {
 });
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
+const FROZEN_MANIFEST_PATH = join(process.cwd(), 'config/docker-workload/registry-egress-manifest.json');
 
 describe('anonymous registry-egress manifest loading (fail-closed)', () => {
   it('fails closed when the manifest is missing', () => {
@@ -60,9 +61,7 @@ describe('anonymous registry-egress manifest loading (fail-closed)', () => {
   });
 
   it('loads the checked-in frozen manifest cleanly', () => {
-    const loaded = loadRegistryEgressManifest(
-      join(process.cwd(), 'config/docker-workload/registry-egress-manifest.json'),
-    );
+    const loaded = loadRegistryEgressManifest(FROZEN_MANIFEST_PATH);
     expect(loaded.manifest.status).toBe('frozen');
     expect(loaded.manifest.origins.map((origin) => origin.destination.hostname)).toEqual([
       'registry-1.docker.io',
@@ -71,6 +70,61 @@ describe('anonymous registry-egress manifest loading (fail-closed)', () => {
     ]);
     expect(loaded.manifest.perSession.maxConcurrentRequests).toBeGreaterThan(0);
     expect(loaded.manifest.origins[0].perRequest.maxRedirectHops).toBe(3);
+  });
+});
+
+describe('authorizes a Docker Hub library/node base-image pull (frozen manifest)', () => {
+  const frozen = loadRegistryEgressManifest(FROZEN_MANIFEST_PATH).manifest;
+  const nodeManifestDigest = `sha256:${'b'.repeat(64)}`;
+  const nodeBlobDigest = `sha256:${'c'.repeat(64)}`;
+
+  it('authorizes the by-tag FROM node:22-trixie manifest pull', () => {
+    const authorized = authorizeValidatedRegistryEgressRequest(frozen, {
+      method: 'GET',
+      url: 'https://registry-1.docker.io/v2/library/node/manifests/22-trixie',
+    });
+    expect(authorized.operation).toBe('manifest-pull');
+    expect(authorized.originId).toBe('docker-hub-registry');
+    expect(authorized.repository).toBe('library/node');
+    expect(authorized.reference).toBe('22-trixie');
+    expect(authorized.requestedDigest).toBeUndefined();
+  });
+
+  it('authorizes a by-digest manifest pull and records the requested digest as provenance', () => {
+    const authorized = authorizeValidatedRegistryEgressRequest(frozen, {
+      method: 'GET',
+      url: `https://registry-1.docker.io/v2/library/node/manifests/${nodeManifestDigest}`,
+    });
+    expect(authorized.operation).toBe('manifest-pull');
+    expect(authorized.repository).toBe('library/node');
+    expect(authorized.requestedDigest).toEqual({ algorithm: 'sha256', hex: 'b'.repeat(64) });
+  });
+
+  it('authorizes a by-digest blob (layer) pull', () => {
+    const authorized = authorizeValidatedRegistryEgressRequest(frozen, {
+      method: 'GET',
+      url: `https://registry-1.docker.io/v2/library/node/blobs/${nodeBlobDigest}`,
+    });
+    expect(authorized.operation).toBe('blob-pull');
+    expect(authorized.originId).toBe('docker-hub-registry');
+    expect(authorized.repository).toBe('library/node');
+    expect(authorized.requestedDigest).toEqual({ algorithm: 'sha256', hex: 'c'.repeat(64) });
+  });
+
+  it('authorizes the anonymous token fetch a 401 drives library/node to', () => {
+    const authorized = authorizeValidatedRegistryEgressRequest(frozen, {
+      method: 'GET',
+      url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull',
+    });
+    expect(authorized.operation).toBe('token');
+    expect(authorized.originId).toBe('docker-hub-token');
+  });
+
+  it.each([
+    [{ method: 'PUT', url: 'https://registry-1.docker.io/v2/library/node/blobs/uploads/' }, /push/u],
+    [{ method: 'GET', url: 'https://registry-1.docker.io/v2/_catalog' }, /catalog enumeration/u],
+  ] as const)('refuses a push or enumeration against library/node %#', (request, message) => {
+    expect(() => authorizeValidatedRegistryEgressRequest(frozen, request)).toThrow(message);
   });
 });
 
