@@ -22,7 +22,6 @@ describe('trusted Vitest qualification runner', () => {
     expect(result.verified).toEqual({
       commandId: 'scanner-fixture',
       testFiles: ['test/docker/scanner-fixture.test.ts'],
-      tests: ['test/docker/scanner-fixture.test.ts::vulnerability fixture exact verdict#1'],
       testCount: 1,
     });
     expect(execute).toHaveBeenCalledWith(
@@ -131,7 +130,7 @@ function runnerFixture() {
         disposition: 'required-pass',
         argv: ['node', 'node_modules/vitest/vitest.mjs', 'run', 'test/docker/scanner-fixture.test.ts'],
         expectedTestFiles: ['test/docker/scanner-fixture.test.ts'],
-        expectedTests: ['test/docker/scanner-fixture.test.ts::vulnerability fixture exact verdict#1'],
+        expectedTestCount: 1,
       },
     ],
   };

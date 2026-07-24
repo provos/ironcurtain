@@ -65,7 +65,6 @@ try {
       stagingRoot: join(stateRoot, 'staging'),
     },
     bindings: {
-      qualificationContractSha256: '1'.repeat(64),
       catalogSha256: '2'.repeat(64),
       profileSha256: '3'.repeat(64),
       performanceBudgetSha256: '4'.repeat(64),

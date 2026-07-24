@@ -107,7 +107,6 @@ const leaseSchema = z
       .strict(),
     bindings: z
       .object({
-        qualificationContractSha256: sha256Schema,
         catalogSha256: sha256Schema,
         profileSha256: sha256Schema,
         performanceBudgetSha256: sha256Schema,

@@ -41,6 +41,25 @@ undefined for real sessions. Where each step landed (src/docker/docker-infrastru
   throws at fuse, empty IRONCURTAIN_HOME). GOTCHA: mocks of '../src/docker/docker-infrastructure.js' (e.g.
   docker-session-factory.test.ts) must add `dockerWorkloadSessionMetadata` to the vi.mock factory.
 
+## Bindings taxonomy: RUNTIME controls vs RELEASE artifacts (corrected 2026-07-24)
+`DockerWorkloadAdmissionBindings` (infrastructure.ts) and the lease `bindings` z.object
+(bundle-lease.ts) bind ONLY OPERATIONAL inputs: catalogSha256, profileSha256,
+performanceBudgetSha256, toolchainDigest (+ watchdogPolicySha256, stamped at render time
+by admission — callers never pass it). A qualification contract is a RELEASE artifact (a
+frozen test plan), NOT a runtime security control: `qualificationContractSha256` was
+carried in both of those and NEVER verified at runtime — a provenance label wearing the
+costume of a control. It was removed from the whole admission/lease path.
+It legitimately survives in exactly ONE place: `qualification-evidence.ts` (the EVIDENCE
+record's pointer to the qualification that blessed a run) + its test + the harness's
+`EVIDENCE_BINDINGS` fixture. Grep-invariant worth re-checking: `qualificationContractSha256`
+must appear ONLY in those three spots — never in infrastructure.ts / bundle-lease.ts /
+docker-infrastructure.ts.
+Related defect removed at the same time: `configHash` was optional on
+`DockerWorkloadAdmissionOptions` and fell back to `bindings.qualificationContractSha256`
+(a test-plan hash standing in as a config identity). It is now REQUIRED; every caller
+passes a genuine hash (`dockerWorkloadConfigHash(...)` in product, `ADMISSION_CONFIG_HASH`
+in the harness). Keep it required — the fallback is the bug.
+
 ## Module map (src/docker-workload/ unless noted)
 - bundle-cleanup.ts — frozen helpers assertExactTargetIdentity, removeExactBundleState,
   assertSafeCleanupPath, captureCleanupProof, toWatchdogCleanupProof. EXTRACTED verbatim from

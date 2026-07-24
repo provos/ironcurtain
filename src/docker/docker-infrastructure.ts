@@ -1359,10 +1359,10 @@ interface DockerWorkloadAdmissionForSessionOptions {
  * fuse in tests and keeps the §8.2 ordering explicit.
  *
  * The attestation bindings are PLACEHOLDERS derived from the resolved
- * capability config hash: the real hash-bound qualification-admission record is
- * produced by Phase 0C and is not available at this pre-proxy admission point.
- * They are never treated as trusted evidence and are never exercised in
- * production (the fuse blocks this whole path).
+ * capability config hash: the real hash-bound operational inputs (catalog,
+ * profile, performance budget, toolchain) are not resolved at this pre-proxy
+ * admission point. They are never treated as trusted evidence and are never
+ * exercised in production (the fuse blocks this whole path).
  */
 async function admitDockerWorkloadForSession(
   options: DockerWorkloadAdmissionForSessionOptions,
@@ -1378,8 +1378,8 @@ async function admitDockerWorkloadForSession(
     runtimeKind: options.runtimeKind,
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
-    // Placeholder attestation bindings — see the function doc; 0C replaces this
-    // seam with the real qualification-admission record. The real config hash is
+    // Placeholder attestation bindings — see the function doc; Phase 1 replaces
+    // this seam with the real operational bindings. The real config hash is
     // passed separately so the admission audit trail keeps it, and
     // `bindingsProvenance: 'placeholder'` marks the bindings so a placeholder can
     // never be mistaken for real evidence.
@@ -1400,17 +1400,16 @@ async function admitDockerWorkloadForSession(
 /**
  * Phase 0F placeholder attestation bindings. Every field is a uniformly
  * namespaced derived hash (`sha256('ironcurtain-placeholder:'+field+':'+configHash)`)
- * that CANNOT collide with a real qualification-artifact hash — no field is the
+ * that CANNOT collide with a real operational-artifact hash — no field is the
  * bare config hash. These are never treated as trusted evidence (the admission
  * fuse blocks this whole path in production) and the admission audit event
- * records `bindingsProvenance: 'placeholder'`. Phase 0C MUST replace this seam
- * with the real hash-bound qualification-admission record.
+ * records `bindingsProvenance: 'placeholder'`. Phase 1 MUST replace this seam
+ * with the real hash-bound operational inputs.
  */
 function placeholderAdmissionBindings(configHash: string): DockerWorkloadAdmissionBindings {
   const placeholder = (field: string): string =>
     createHash('sha256').update(`ironcurtain-placeholder:${field}:${configHash}`).digest('hex');
   return {
-    qualificationContractSha256: placeholder('qualificationContractSha256'),
     catalogSha256: placeholder('catalogSha256'),
     profileSha256: placeholder('profileSha256'),
     performanceBudgetSha256: placeholder('performanceBudgetSha256'),

@@ -28,24 +28,19 @@ describe('qualification contract adjudication', () => {
     expect(verifyVitestQualificationRun(fixture.options)).toEqual({
       commandId: 'docker-manager',
       testFiles: ['test/docker-manager.test.ts'],
-      tests: ['test/docker-manager.test.ts::DockerManager rejects unsafe nested input#1'],
       testCount: 1,
     });
   });
 
-  it('assigns stable file/name/occurrence IDs to repeated parameterized test names', () => {
+  it('counts repeated parameterized test names individually rather than collapsing them', () => {
     const fixture = qualificationFixture();
     const duplicate = structuredClone(fixture.options.report.value.testResults[0].assertionResults[0]);
     fixture.options.report.value.testResults[0].assertionResults.push(duplicate);
     fixture.options.report.value.numTotalTests = 2;
     fixture.options.report.value.numPassedTests = 2;
-    fixture.options.contract.value.commands[0].expectedTests = [
-      'test/docker-manager.test.ts::DockerManager rejects unsafe nested input#1',
-      'test/docker-manager.test.ts::DockerManager rejects unsafe nested input#2',
-    ];
-    expect(verifyVitestQualificationRun(fixture.options).tests).toEqual(
-      fixture.options.contract.value.commands[0].expectedTests,
-    );
+    expect(() => verifyVitestQualificationRun(fixture.options)).toThrow(/test count drift.*expected 1, ran 2/u);
+    fixture.options.contract.value.commands[0].expectedTestCount = 2;
+    expect(verifyVitestQualificationRun(fixture.options).testCount).toBe(2);
   });
 
   it.each([
@@ -74,11 +69,11 @@ describe('qualification contract adjudication', () => {
       /skipped, pending, todo/u,
     ],
     [
-      'missing test name',
+      'a test count below the frozen count (a silently deleted test)',
       (fixture: ReturnType<typeof qualificationFixture>) => {
-        fixture.options.contract.value.commands[0].expectedTests = ['A different frozen test'];
+        fixture.options.contract.value.commands[0].expectedTestCount = 2;
       },
-      /test names.*frozen contract/u,
+      /test count drift.*expected 2, ran 1/u,
     ],
     [
       'wrong test file',
@@ -133,7 +128,6 @@ describe('qualification contract adjudication', () => {
     const run: VerifiedQualificationRun = {
       commandId: 'docker-manager',
       testFiles: ['test/docker-manager.test.ts'],
-      tests: ['test/docker-manager.test.ts::DockerManager rejects unsafe nested input#1'],
       testCount: 1,
     };
     expect(() => verifyQualificationRunSet(contract, [run])).not.toThrow();
@@ -145,7 +139,7 @@ describe('qualification contract adjudication', () => {
       disposition: 'compatibility-blocker',
       argv: [],
       expectedTestFiles: [],
-      expectedTests: [],
+      expectedTestCount: 0,
       blockerReason: 'Goose contract is unresolved',
     });
     expect(() => verifyQualificationRunSet(contract, [run])).toThrow(/compatibility blocker unsupported-goose/u);
@@ -161,7 +155,7 @@ describe('qualification contract adjudication', () => {
         disposition: 'backend-adapted-pass',
         argv: ['npx', 'vitest', 'run', 'test/adapted.test.ts'],
         expectedTestFiles: ['test/adapted.test.ts'],
-        expectedTests: ['test/adapted.test.ts::adapted invariant#1'],
+        expectedTestCount: 1,
         adaptedInvariant: 'Apple VM memory is host-authoritative.',
       },
       {
@@ -170,7 +164,7 @@ describe('qualification contract adjudication', () => {
         disposition: 'not-applicable-with-reviewed-rationale',
         argv: [],
         expectedTestFiles: [],
-        expectedTests: [],
+        expectedTestCount: 0,
         rationale: 'Apple guest PIDs are advisory by threat-model decision.',
         adjudication: 'review-apple-pids-v1',
       },
@@ -231,7 +225,7 @@ function qualificationFixture() {
         disposition: 'required-pass',
         argv: ['npx', 'vitest', 'run', 'test/docker-manager.test.ts'],
         expectedTestFiles: ['test/docker-manager.test.ts'],
-        expectedTests: ['test/docker-manager.test.ts::DockerManager rejects unsafe nested input#1'],
+        expectedTestCount: 1,
       },
     ],
   };
@@ -328,17 +322,19 @@ describe('frozen apple-container qualification contract', () => {
     expect(bindings.publicCaSha256).toMatch(/^[a-f0-9]{64}$/u);
   });
 
-  it('gives every executable command an expected test set and every N/A command a reviewed rationale', () => {
+  it('gives every executable command a bound test count and every N/A command a reviewed rationale', () => {
     const { commands } = loadQualificationContract(CONTRACT_PATH).value;
     for (const command of commands) {
       const executable = command.disposition === 'required-pass' || command.disposition === 'backend-adapted-pass';
       if (executable) {
         expect(command.argv.length).toBeGreaterThanOrEqual(4);
         expect(command.expectedTestFiles.length).toBeGreaterThan(0);
-        expect(command.expectedTests.length).toBeGreaterThan(0);
+        expect(command.expectedTestCount).toBeGreaterThan(0);
       } else {
         expect(command.disposition).toBe('not-applicable-with-reviewed-rationale');
         expect(command.argv).toEqual([]);
+        expect(command.expectedTestFiles).toEqual([]);
+        expect(command.expectedTestCount).toBe(0);
         expect(command.rationale).toBeTruthy();
         expect(command.adjudication).toBeTruthy();
       }

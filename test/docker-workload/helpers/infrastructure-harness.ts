@@ -25,12 +25,14 @@ export const WATCHDOG_TEMPLATE_PATH = resolve('config/docker-workload/resource-w
 export const WATCHDOG_ENTRYPOINT_PATH = resolve('dist/docker-workload/resource-watchdog-supervisor-main.js');
 
 export const ADMISSION_BINDINGS = {
-  qualificationContractSha256: '1'.repeat(64),
   catalogSha256: '2'.repeat(64),
   profileSha256: '3'.repeat(64),
   performanceBudgetSha256: '4'.repeat(64),
   toolchainDigest: '6'.repeat(64),
 } as const;
+
+/** The resolved capability config hash admission records in its audit event. */
+export const ADMISSION_CONFIG_HASH = '7'.repeat(64);
 
 /** Full canonical qualification-evidence bindings (fixture hashes) for evidence-sealing tests. */
 export const EVIDENCE_BINDINGS = {

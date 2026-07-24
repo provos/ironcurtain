@@ -92,7 +92,6 @@ export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'pro
 
 /** The sha256 attestation bindings the caller supplies; the watchdog policy hash is computed at render time. */
 export interface DockerWorkloadAdmissionBindings {
-  readonly qualificationContractSha256: string;
   readonly catalogSha256: string;
   readonly profileSha256: string;
   readonly performanceBudgetSha256: string;
@@ -133,13 +132,8 @@ export interface DockerWorkloadAdmissionOptions {
   readonly bundleId: string;
   readonly workspaceRoot: string;
   readonly bindings: DockerWorkloadAdmissionBindings;
-  /**
-   * The real resolved capability config hash recorded in the admission audit
-   * event. Defaults to `bindings.qualificationContractSha256` so callers with a
-   * real qualification record need not supply it; callers whose `bindings` are
-   * placeholders pass the genuine config hash here so the audit trail keeps it.
-   */
-  readonly configHash?: string;
+  /** The resolved capability config hash recorded in the admission audit event. */
+  readonly configHash: string;
   /** Provenance of `bindings` for the audit trail (default: 'placeholder'). */
   readonly bindingsProvenance?: 'placeholder' | 'qualified';
   readonly watchdogPolicyTemplatePath: string;
@@ -241,7 +235,7 @@ export async function admitDockerWorkloadBundle(
       decision: 'admitting',
       bundleId: options.bundleId,
       runtimeKind: options.runtimeKind,
-      configHash: options.configHash ?? options.bindings.qualificationContractSha256,
+      configHash: options.configHash,
       bindingsProvenance: options.bindingsProvenance ?? 'placeholder',
       watchdogPolicySha256: loadedPolicy.sha256,
       watchdogTemplateSha256: template.sha256,

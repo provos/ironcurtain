@@ -11,6 +11,7 @@ import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.
 import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
   ADMISSION_BINDINGS,
+  ADMISSION_CONFIG_HASH,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -36,6 +37,7 @@ function baseOptions(
     bundleId: 'bundle-admission-001',
     workspaceRoot: join(getHome(), 'workspace'),
     bindings: ADMISSION_BINDINGS,
+    configHash: ADMISSION_CONFIG_HASH,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     auditSink,

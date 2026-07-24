@@ -42,9 +42,7 @@ describe.skipIf(!enabled)('real local Vitest qualification runner', () => {
           disposition: 'required-pass',
           argv: ['node', 'node_modules/vitest/vitest.mjs', 'run', 'test/docker/preloaded-image-staging.test.ts'],
           expectedTestFiles: ['test/docker/preloaded-image-staging.test.ts'],
-          expectedTests: [
-            'test/docker/preloaded-image-staging.test.ts::preloaded image staging fails before Docker save when the source lacks a frozen label#1',
-          ],
+          expectedTestCount: 1,
         },
       ],
     };

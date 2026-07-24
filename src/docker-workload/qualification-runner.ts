@@ -55,7 +55,12 @@ export interface RunVitestQualificationCommandResult {
   readonly verified: VerifiedQualificationRun;
 }
 
-/** Execute the exact selection, bind its stock JSON report, then self-adjudicate it. */
+/**
+ * Execute the exact selection, bind its stock JSON report, then self-adjudicate it.
+ *
+ * The contract binds only the test files and the test count; the persisted Vitest JSON report is the
+ * artifact that carries the full per-test enumeration, and the run record hashes it byte-for-byte.
+ */
 export async function runVitestQualificationCommand(
   options: RunVitestQualificationCommandOptions,
 ): Promise<RunVitestQualificationCommandResult> {

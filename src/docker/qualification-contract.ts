@@ -1,4 +1,12 @@
-/** Frozen Phase 0F qualification contracts and Vitest result adjudication. */
+/**
+ * Frozen Phase 0F qualification contracts and Vitest result adjudication.
+ *
+ * A contract binds each executable command to its exact test files and to the exact number of tests
+ * that must run. Binding the count (rather than every test name) still fails closed on the real
+ * threat — deleting or silencing a test so the suite passes with fewer assertions — while leaving
+ * harmless renames to the source commit already pinned in `bindings`. The full per-test enumeration
+ * stays available in the hash-bound Vitest JSON report that every run persists.
+ */
 
 import { isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
@@ -44,7 +52,7 @@ const qualificationCommandSchema = z
     ]),
     argv: z.array(nonEmptySchema).max(256),
     expectedTestFiles: z.array(nonEmptySchema).max(512),
-    expectedTests: z.array(nonEmptySchema).max(20_000),
+    expectedTestCount: z.number().int().min(0).max(20_000),
     adaptedInvariant: nonEmptySchema.optional(),
     rationale: nonEmptySchema.optional(),
     adjudication: identifierSchema.optional(),
@@ -55,16 +63,16 @@ const qualificationCommandSchema = z
     const executable = executableDispositionSchema.safeParse(command.disposition).success;
     if (
       executable &&
-      (command.argv.length === 0 || command.expectedTestFiles.length === 0 || command.expectedTests.length === 0)
+      (command.argv.length === 0 || command.expectedTestFiles.length === 0 || command.expectedTestCount === 0)
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'executable qualification command requires argv, expectedTestFiles, and expectedTests',
+        message: 'executable qualification command requires argv, expectedTestFiles, and a positive expectedTestCount',
       });
     }
     if (
       !executable &&
-      (command.argv.length !== 0 || command.expectedTestFiles.length !== 0 || command.expectedTests.length !== 0)
+      (command.argv.length !== 0 || command.expectedTestFiles.length !== 0 || command.expectedTestCount !== 0)
     ) {
       context.addIssue({
         code: 'custom',
@@ -104,7 +112,6 @@ const qualificationContractSchema = z
     );
     for (const command of contract.commands) {
       addDuplicateIssues(command.expectedTestFiles, `test file in ${command.id}`, context);
-      addDuplicateIssues(command.expectedTests, `test name in ${command.id}`, context);
     }
   });
 
@@ -174,7 +181,6 @@ export interface LoadedQualificationJson<T> {
 export interface VerifiedQualificationRun {
   readonly commandId: string;
   readonly testFiles: readonly string[];
-  readonly tests: readonly string[];
   readonly testCount: number;
 }
 
@@ -190,7 +196,10 @@ export function loadVitestQualificationReport(path: string): LoadedQualification
   return loadStrictJson(path, 'Vitest qualification report', vitestReportSchema);
 }
 
-/** Adjudicate one required/adapted Vitest command. Any ambiguity fails closed. */
+/**
+ * Adjudicate one required/adapted Vitest command against its frozen test files and test count.
+ * Any ambiguity — a skip, a nonzero exit, binding drift, or a different number of tests — fails closed.
+ */
 export function verifyVitestQualificationRun(options: {
   readonly contract: LoadedQualificationJson<QualificationContract>;
   readonly run: LoadedQualificationJson<QualificationRun>;
@@ -261,23 +270,14 @@ export function verifyVitestQualificationRun(options: {
     }
     return path;
   });
-  const actualTests = value.testResults.flatMap((file, fileIndex) => {
-    const occurrences = new Map<string, number>();
-    return file.assertionResults.map((assertion) => {
-      const occurrence = (occurrences.get(assertion.fullName) ?? 0) + 1;
-      occurrences.set(assertion.fullName, occurrence);
-      return `${actualFiles[fileIndex]}::${assertion.fullName}#${occurrence}`;
-    });
-  });
   assertExactSet(actualFiles, command.expectedTestFiles, `test files for ${command.id}`);
-  assertExactSet(actualTests, command.expectedTests, `test names for ${command.id}`);
+  if (assertions.length !== command.expectedTestCount) {
+    throw new Error(
+      `qualification test count drift for ${command.id}: expected ${command.expectedTestCount}, ran ${assertions.length}`,
+    );
+  }
 
-  return {
-    commandId: command.id,
-    testFiles: [...actualFiles].sort(),
-    tests: [...actualTests].sort(),
-    testCount: assertions.length,
-  };
+  return { commandId: command.id, testFiles: [...actualFiles].sort(), testCount: assertions.length };
 }
 
 /** Every executable command must have exactly one verified run; blockers prevent qualification. */

@@ -733,11 +733,25 @@ Land the common CA-neutral image/bootstrap, ABI-keyed Linux dependency volume wi
 
 Freeze one canonical, fully expanded, hash-pinned `qualification-contract.json` per concrete backend/variant after 0B and before 0C. A shared template may generate it, but runtime overlays/dynamic selection are forbidden. Every named gate has exactly one disposition: `required-pass`; `backend-adapted-pass` with named equivalent invariant/test; `not-applicable-with-reviewed-rationale` plus adjudication; or `compatibility-blocker`. A blocker is terminal and cannot be overridden by config/UI; clearing it requires a versioned adjudicated contract and full rerun. `expected-fail`, `xfail`, auto-skip, and known-failure are prohibited. 0C cannot rewrite its contract. Every executable required/adapted selection is preflighted and zero-skip; N/A is a contract decision, not a runtime skip. Broad `npm test` skips remain inventory only.
 
+The contract is a **release control, not a session control**. Its purpose is pre-registration: the bar
+is fixed before 0C measures against it, so a failing gate cannot be answered by editing the bar. It is
+therefore executed by a release entrypoint (`npm run qualify:<backend>`, `scripts/qualify-backend.ts`)
+and recorded in generated evidence — never consulted during session admission. Session admission binds
+only operational inputs (catalog, profile, performance budget, watchdog policy, egress manifests, relay,
+toolchain, resolved config) plus live preflight; a qualification hash is not an admission binding and
+must not be reintroduced as one. Each executable command binds its exact test-file set and its exact
+test count (parameterized duplicates each count), not an enumeration of individual test names: the tree
+under test is already pinned by `bindings.sourceCommit`/`dirtyPatchSha256`, so a count is sufficient to
+catch a silently deleted or skipped test, while the hashed stock Vitest JSON report retains the full
+per-test enumeration as evidence. This trade depends on the source-commit binding; a variant that ever
+relaxed that binding would need a stronger per-test binding again.
+
 Freeze progress (2026-07-23): the `apple-container`/`arm64` contract is frozen at
 `config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json` (`contractId:
-apple-rootless-vfs-arm64-v1`, sha256 `19052128…`). It carries twelve commands. Three are executable and
-green/zero-skip on the apple-container host, enumerated by the pinned Vitest reporter (146 exact
-`file::fullName#occurrence` IDs): `docker-manager` (required, backend-agnostic container-argument logic,
+apple-rootless-vfs-arm64-v1`, sha256 `36a71e6e…`). It carries twelve commands. Three are executable and
+green/zero-skip on the apple-container host, each binding its test-file set and exact test count as
+measured by the pinned Vitest reporter (146 tests total): `docker-manager` (required, backend-agnostic
+container-argument logic,
 79), `apple-container-manager` (required, the apple topology gate proving `--network none`,
 `--publish-socket`, and workspace-mount cooperation, 60), and `apple-container-integration`
 (backend-adapted, the apple runtime-lifecycle + per-file UDS/vsock topology gate, 7). The nine remaining
@@ -747,9 +761,11 @@ equivalent invariant** (e.g. `network-isolation` → apple `--network none`;
 `docker-uds-mount`/`pty-entrypoint` → apple `--publish-socket`;
 `uid-remap-claude`/`uid-remap-goose` → apple writable-workspace mount + path-escape rejection), so no
 invariant is silently dropped
-and every registered agent — including Goose and Codex — has an explicit disposition. Enumeration uses
+and every registered agent — including Goose and Codex — has an explicit disposition. Counts come from
 the JSON reporter (the adjudicator's own source), not `vitest list`, so reporter-visible skipped/pending
-tests are not under-counted. Its bindings hash-pin the frozen apple catalog, profile ceiling,
+tests are not under-counted. A live `npm run qualify:apple` run adjudicates all three gates green
+(146 tests, zero skips) and writes per-command hash-bound run records plus stock Vitest reports as
+evidence. Its bindings hash-pin the frozen apple catalog, profile ceiling,
 performance budget, watchdog policy, and build-egress manifest, plus the base runtime image id /
 toolchain digest and the runtime-trust public-root generation; a committed freeze-guard test cross-checks
 each file-hash and catalog-derived binding against the live artifact. The `docker-desktop`/`arm64`
@@ -1064,6 +1080,35 @@ freeze:** the `apple-container`/`arm64` contract is frozen (see §9.5) with real
 and a committed freeze-guard test; `docker-desktop` (needs a DD performance budget + relay hash) and
 `linux-docker` (no host) are deferred. The `placeholderAdmissionBindings` seam in
 `docker-infrastructure.ts` can now be wired to the real frozen contract hash in Phase 1.
+
+### 16.9 Qualification scope correction — release control, not session control (record, 2026-07-23)
+
+Review of the freeze recorded in §16.8 found the qualification machinery had over-reached beyond its
+release-process purpose, and it was cut back the same day. The defect: `qualificationContractSha256` was
+a field of `DockerWorkloadAdmissionBindings` and of the bundle lease, and
+`admitDockerWorkload` used it as the fallback default for `configHash` — a frozen test-plan hash
+standing in as a runtime config identity. Nothing on the live path ever verified it (the contract is
+loaded only by the offline runner; `session/`, `workflow/`, and the agent session never reference
+qualification), so it was provenance wearing the costume of a control, and it risked being read as part
+of the isolation boundary. Corrections applied:
+
+- **Removed the contract hash from the runtime path.** It is gone from the admission bindings, the
+  lease, and the placeholder bindings; `configHash` is now required, so every caller states its config
+  identity explicitly. The one production caller already passed a genuine `dockerWorkloadConfigHash`, so
+  no production behavior changed — the fallback was exercised only by tests. The hash is retained where
+  it belongs, in the generated qualification **evidence** record.
+- **Bound counts, not names.** Each command now binds its test-file set plus an exact
+  `expectedTestCount` instead of enumerating every `file::fullName#occurrence` ID; the frozen apple
+  contract dropped from 287 to 138 lines (25.8 KB → 7.6 KB) and the adjudicator lost its one non-obvious
+  algorithm (an index-correlated per-file occurrence map). Rationale and the residual trade are recorded
+  normatively in §9.5.
+- **Made the release gate explicit.** `npm run qualify:apple` (`scripts/qualify-backend.ts`) drives a
+  frozen contract end to end — every executable command through the pinned Vitest entrypoint, each run
+  self-adjudicated, then `verifyQualificationRunSet` for set completeness — and writes hash-bound
+  evidence. It subsumed and replaced a zero-referrer spike verifier.
+
+Net effect: qualification proves a *build* met a pre-registered bar and is run at release time; sessions
+bind operational inputs and live preflight. The two are no longer conflated.
 
 ## 17. Primary references
 

@@ -23,6 +23,7 @@ import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workloa
 import type { DockerContainerInfo } from '../../src/docker/types.js';
 import {
   ADMISSION_BINDINGS,
+  ADMISSION_CONFIG_HASH,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -120,6 +121,7 @@ function admissionOptions(runtime: EventRuntime, clock: FakeClock): DockerWorklo
     bundleId: 'bundle-fresh-001',
     workspaceRoot: join(getHome(), 'workspace'),
     bindings: ADMISSION_BINDINGS,
+    configHash: ADMISSION_CONFIG_HASH,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
     clock: clock.clock,
