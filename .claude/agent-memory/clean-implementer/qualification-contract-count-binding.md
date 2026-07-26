@@ -22,6 +22,34 @@ Invariants the schema enforces (superRefine): executable disposition (`required-
 `backend-adapted-pass`) => non-empty argv + non-empty expectedTestFiles + `expectedTestCount > 0`;
 non-executable => empty argv + empty expectedTestFiles + `expectedTestCount === 0`.
 
+## `bindings` are verified against disk — keep it that way
+
+`verifyVitestQualificationRun` compares `run.bindings` to `contract.bindings`, and the runner writes
+the run record with `bindings: contract.value.bindings` (a straight copy). That check therefore only
+proves a run record was not tampered with — on its own it is a contract compared with a copy of
+itself. The missing half now lives in `src/docker-workload/qualification-artifacts.ts`:
+`verifyQualificationArtifactBindings(contract, repositoryRoot)` recomputes every disk-derivable
+binding and throws on the first mismatch. `scripts/qualify-backend.ts` calls it before running any
+command (fail fast, no evidence dir created on drift).
+
+- Verified: `catalogSha256` (raw-file sha256 of the platform's frozen catalog — `apple-container` →
+  `preloaded-catalog.apple-container.json`, `docker-desktop` → `preloaded-catalog.docker.json`,
+  `linux-docker` deliberately unmapped since no Linux-frozen catalog exists), `runtimeImageId` +
+  `toolchainDigest` (from the catalog's `ironcurtain-base:latest` role), `profileSha256`,
+  `watchdogSha256`, `buildEgressSha256`, `performanceBudgetSha256` (path derived as
+  `test/docker-workload/performance-budget.<variant>-<arch>.json`), `runtimeTrustSchema`.
+- NOT verified, on purpose: `publicCaSha256` (Node `rootCertificates`, version-scoped, not a repo
+  file), `sourceCommit`/`dirtyPatchSha256` (git state — the driver WARNS on HEAD drift to stderr and
+  keeps going, because the tree moves while the contract stays frozen), `relaySha256` (nullable, no
+  committed binary).
+- Raw-file sha256 == `sha256Hex(readHardenedFile(...))`, byte-identical to what
+  `loadImmutableHostJson` reports; never hand-roll `createHash` over `readFileSync`.
+- The artifact→binding mapping exists in ONE place. `test/docker/qualification-contract.test.ts`'s
+  freeze guard just asserts `verifyQualificationArtifactBindings(...)` does not throw; the drift
+  cases (each binding mutated on a deep clone) live in
+  `test/docker-workload/qualification-artifacts.test.ts`. If those stop failing, the check has gone
+  tautological again.
+
 Re-freezing `config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json`: compute
 the hash by loading it through `loadQualificationContract` with an **absolute** path (the hardened
 loader rejects relative paths and group/world-writable or symlinked files). Nothing else in the repo

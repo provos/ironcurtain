@@ -1,9 +1,9 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RUNTIME_TRUST_SCHEMA } from '../../src/docker/runtime-trust.js';
+import { verifyQualificationArtifactBindings } from '../../src/docker-workload/qualification-artifacts.js';
 import {
   loadQualificationContract,
   verifyQualificationRunSet,
@@ -274,14 +274,6 @@ describe('frozen apple-container qualification contract', () => {
     process.cwd(),
     'config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json',
   );
-  const rawSha = (relativePath: string): string =>
-    createHash('sha256')
-      .update(readFileSync(join(process.cwd(), relativePath)))
-      .digest('hex');
-  const appleCatalog = (): { images: { logicalName: string; runtimeImageId: string; toolchainDigest: string }[] } =>
-    JSON.parse(
-      readFileSync(join(process.cwd(), 'config/docker-workload/preloaded-catalog.apple-container.json'), 'utf8'),
-    );
 
   it('loads and validates the checked-in frozen contract', () => {
     const { value } = loadQualificationContract(CONTRACT_PATH);
@@ -292,23 +284,12 @@ describe('frozen apple-container qualification contract', () => {
     expect(value.commands).toHaveLength(12);
   });
 
+  // The artifact->binding mapping lives in exactly one place (the verifier the release gate runs);
+  // this test only asserts the committed contract still satisfies it. Drift cases are in
+  // test/docker-workload/qualification-artifacts.test.ts.
   it('binds every committed frozen artifact by its exact content hash', () => {
-    const { bindings } = loadQualificationContract(CONTRACT_PATH).value;
-    expect(bindings.catalogSha256).toBe(rawSha('config/docker-workload/preloaded-catalog.apple-container.json'));
-    expect(bindings.profileSha256).toBe(rawSha('config/docker-workload/profile-ceiling.json'));
-    expect(bindings.performanceBudgetSha256).toBe(
-      rawSha('test/docker-workload/performance-budget.apple-rootless-vfs-arm64.json'),
-    );
-    expect(bindings.watchdogSha256).toBe(rawSha('config/docker-workload/resource-watchdog-policy.json'));
-    expect(bindings.buildEgressSha256).toBe(rawSha('config/docker-workload/build-egress-manifest.json'));
-  });
-
-  it('binds the runtime image id and toolchain digest of the base catalog role', () => {
-    const { bindings } = loadQualificationContract(CONTRACT_PATH).value;
-    const base = appleCatalog().images.find((image) => image.logicalName === 'ironcurtain-base:latest');
-    expect(base).toBeDefined();
-    expect(bindings.runtimeImageId).toBe(base?.runtimeImageId);
-    expect(bindings.toolchainDigest).toBe(base?.toolchainDigest);
+    const { value } = loadQualificationContract(CONTRACT_PATH);
+    expect(() => verifyQualificationArtifactBindings(value, process.cwd())).not.toThrow();
   });
 
   it('carries the runtime-trust schema binding and a clean-tree source binding', () => {

@@ -24,6 +24,7 @@
  *                                  [--repository-root <path>] [--timeout-ms <n>]
  */
 
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
@@ -32,6 +33,7 @@ import {
   verifyQualificationRunSet,
   type VerifiedQualificationRun,
 } from '../src/docker/qualification-contract.js';
+import { verifyQualificationArtifactBindings } from '../src/docker-workload/qualification-artifacts.js';
 import { runVitestQualificationCommand } from '../src/docker-workload/qualification-runner.js';
 
 const { values } = parseArgs({
@@ -63,8 +65,16 @@ process.stdout.write(
   `qualifying ${contractId} (${platform}/${architecture}, variant ${variant})\n` +
     `  contract sha256 : ${contract.sha256}\n` +
     `  evidence        : ${evidenceDirectory}\n` +
-    `  executable gates: ${executable.length} of ${commands.length} commands\n\n`,
+    `  executable gates: ${executable.length} of ${commands.length} commands\n`,
 );
+
+// Fail fast: recompute every disk-derivable binding before burning test time, so a drifted TCB
+// artifact (catalog, profile, watchdog policy, build-egress manifest, performance budget) aborts
+// the gate instead of being blessed by a run that merely echoes the contract back at itself. The
+// commit warning goes first because "the tree moved past the freeze commit" usually explains drift.
+warnOnSourceCommitDrift(contract.value.bindings.sourceCommit, repositoryRoot);
+verifyQualificationArtifactBindings(contract.value, repositoryRoot);
+process.stdout.write(`  artifact bindings verified against ${repositoryRoot}\n\n`);
 
 // The runner requires an owner-only evidence directory (run records and reports are
 // qualification evidence); chmod explicitly so a permissive umask cannot relax it.
@@ -90,3 +100,34 @@ verifyQualificationRunSet(contract.value, verified);
 
 const total = verified.reduce((sum, run) => sum + run.testCount, 0);
 process.stdout.write(`\nQUALIFIED ${contractId}: ${verified.length} commands, ${total} tests, zero skips.\n`);
+
+/**
+ * Report, but never enforce, source-tree drift. The bound artifacts are verified byte-for-byte
+ * above; the commit is git state, and this tool has to stay runnable on a tree under active
+ * development. A drifted HEAD means the run measured a different tree than the one frozen.
+ */
+function warnOnSourceCommitDrift(frozenCommit: string, root: string): void {
+  const head = currentHeadCommit(root);
+  if (head === undefined) {
+    process.stderr.write('  WARNING: git is unavailable; cannot check the frozen source commit.\n');
+    return;
+  }
+  if (head === frozenCommit) return;
+  process.stderr.write(
+    `  WARNING: working tree HEAD ${head} differs from the contract's frozen source commit ${frozenCommit}.\n` +
+      '           This run measures a different tree and is NOT a qualifying run for the frozen contract.\n',
+  );
+}
+
+function currentHeadCommit(root: string): string | undefined {
+  try {
+    // execFileSync with an argument array: no shell, no string concatenation.
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
