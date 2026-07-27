@@ -13,6 +13,7 @@
  *   decrypted connections via emit('connection', tlsSocket)
  */
 
+import * as dns from 'node:dns';
 import * as http from 'node:http';
 import * as tls from 'node:tls';
 import * as net from 'node:net';
@@ -42,7 +43,7 @@ import { OPENROUTER_HOST } from '../config/user-config.js';
 import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
-import { createDirectOutboundTransport, type OutboundTransport } from './outbound-transport.js';
+import { createDirectOutboundTransport, createGuardedLookup, type OutboundTransport } from './outbound-transport.js';
 import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 import { handleBuildEgressRequest, type BuildEgressGuard, type BuildEgressSeam } from './build-egress-proxy.js';
 import { handleRegistryEgressRequest, type RegistryEgressGuard } from './registry-egress-proxy.js';
@@ -177,6 +178,10 @@ export interface MitmProxyOptions {
   /**
    * Custom DNS lookup function for outbound connections.
    * Used in tests to avoid real DNS resolution.
+   *
+   * Supplying a resolver does NOT relax the destination-address policy: the
+   * answers it returns are screened exactly like real ones. A fixture that
+   * resolves to loopback must also set `allowPrivateDestinationsForTests`.
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
   /**
@@ -690,16 +695,24 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const captureRecordedAgentName = options.recordedAgentName;
   const captureWorkflowRunId = options.workflowRunId;
   const captureBundleId = options.bundleId;
+  // The resolver seam and the address policy are independent options: a test
+  // may substitute a resolver without silently disabling the check that its
+  // answers are public. Relaxing the policy takes its own explicit opt-in.
+  const allowPrivateDestinations = options.allowPrivateDestinationsForTests === true;
+  const dnsLookup = options.dnsLookup as typeof dns.lookup | undefined;
   const outboundTransport =
     options.outboundTransport ??
     createDirectOutboundTransport({
-      lookup: options.dnsLookup as typeof import('node:dns').lookup | undefined,
-      // dnsLookup is an existing test seam used throughout the MITM suite to
-      // resolve public-looking fixture names to loopback. Production callers
-      // do not supply it.
-      allowPrivateDestinationsForTests:
-        options.allowPrivateDestinationsForTests === true || options.dnsLookup !== undefined,
+      lookup: dnsLookup,
+      allowPrivateDestinationsForTests: allowPrivateDestinations,
     });
+  /**
+   * Address screen for the raw passthrough tunnel, which bypasses the
+   * destination-bound transport entirely. Without it a passthrough host that
+   * resolves to a private or link-local address would be tunneled straight
+   * into the host network.
+   */
+  const passthroughLookup = createGuardedLookup(dnsLookup ?? dns.lookup, allowPrivateDestinations);
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -730,6 +743,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // egress filtering for unknown hosts; only use in trusted environments.
   const allowAllHosts =
     process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === '1' || process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === 'true';
+
+  /**
+   * Passthrough is a `standard`-mode-only mechanism, because it forwards
+   * without ever consulting a guard. The egress listener modes have no
+   * providers and no registries, so `isKnownStaticHost` is false for *every*
+   * host there: under `IRONCURTAIN_MITM_ALLOW_ALL_HOSTS` that would make every
+   * host wildcard-eligible and hand the nested daemon a raw tunnel around the
+   * frozen manifest. Those modes TLS-terminate instead, so an unlisted host
+   * reaches the guard and is refused there. No effect on standard mode.
+   */
+  const passthroughEligible = listenerMode.kind === 'standard';
 
   // DEBUG (issue #367): optional stream-delay injection config, parsed once.
   // Null (zero-cost) unless IRONCURTAIN_MITM_STREAM_DELAY_MS is set.
@@ -1636,7 +1660,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // content inspection (no package validation, no credential swap).
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const debianRegistry = parsed ? registriesByHost.get(parsed.hostname) : undefined;
-    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    const isWildcardEligible = passthroughEligible && !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
 
     // Debian registry: route through package validation and audit logging.
     // Rewrite absolute URL to origin-form path so registry handlers can read it.
@@ -1648,7 +1672,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
-    if (parsed && (passthroughHosts.has(parsed.hostname) || isWildcardEligible)) {
+    if (parsed && passthroughEligible && (passthroughHosts.has(parsed.hostname) || isWildcardEligible)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }
@@ -1692,8 +1716,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // manifest (or 403 it).
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
-    const isDynamicPassthrough = passthroughHosts.has(host);
-    const isWildcardEligible = allowAllHosts && !isKnownStaticHost(host);
+    const isDynamicPassthrough = passthroughEligible && passthroughHosts.has(host);
+    const isWildcardEligible = passthroughEligible && allowAllHosts && !isKnownStaticHost(host);
     const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
     if (listenerMode.kind === 'standard' && !provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
@@ -1713,22 +1737,24 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         : listenerMode.kind;
 
     // 2. Direct outer proxies may use a raw TCP tunnel for passthrough
-    //    domains. Nested proxies must not expose a caller-selected CONNECT
+    //    domains, and only in `standard` mode: the tunnel never consults a
+    //    guard, so an egress listener must never reach it (`passthroughEligible`).
+    //    Nested proxies must not expose a caller-selected CONNECT
     //    primitive through the fixed parent transport, so they terminate TLS
     //    below and re-originate HTTP(S) with the destination bound separately
     //    from request headers. WSS on that nested path is intentionally
     //    rejected by innerServer's upgrade handler.
-    if (isPassthrough && outboundTransport.kind === 'direct') {
+    if (listenerMode.kind === 'standard' && isPassthrough && outboundTransport.kind === 'direct') {
       logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → TUNNEL (${connType})`);
 
       // Acknowledge immediately per standard proxy behavior — the client
       // will discover upstream failures itself once it tries to send data.
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
-      const connectOpts: net.NetConnectOpts = { host, port };
-      if (options.dnsLookup) {
-        connectOpts.lookup = options.dnsLookup;
-      }
+      // The tunnel bypasses the destination-bound transport, so it carries its
+      // own copy of the address policy: a passthrough name resolving to a
+      // private or link-local address is refused, not relayed.
+      const connectOpts: net.NetConnectOpts = { host, port, lookup: passthroughLookup };
 
       const upstreamSocket = net.connect(connectOpts, () => {
         // Write any buffered data from the CONNECT request
@@ -1825,8 +1851,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
-    if (!parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
+    const isWildcardEligible = passthroughEligible && !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    if (!passthroughEligible || !parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }

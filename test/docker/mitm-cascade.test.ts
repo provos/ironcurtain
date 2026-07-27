@@ -7,7 +7,7 @@ import { loadOrCreateCA } from '../../src/docker/ca.js';
 import { createMitmProxy, type MitmProxy } from '../../src/docker/mitm-proxy.js';
 import { createParentProxyOutboundTransport } from '../../src/docker/outbound-transport.js';
 import type { ProviderConfig } from '../../src/docker/provider-config.js';
-import { makeHttpsRequest, sendConnect } from '../helpers/mitm-tls-harness.js';
+import { makeHttpsRequest, publicDnsLookup, sendConnect } from '../helpers/mitm-tls-harness.js';
 
 describe('nested MITM credential and policy cascade', () => {
   let temporaryDirectory = '';
@@ -78,6 +78,10 @@ describe('nested MITM credential and policy cascade', () => {
       outboundTransport: createParentProxyOutboundTransport({
         proxy: { socketPath: outerSocketPath },
         ca: outerCa.certPem,
+        // The child is the address authority even when the parent carries the
+        // connection, so it resolves the destination name itself. The answer is
+        // only screened — the CONNECT authority stays the name.
+        lookup: publicDnsLookup,
       }),
     });
     await innerProxy.start();

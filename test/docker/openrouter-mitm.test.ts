@@ -127,6 +127,7 @@ describe('OpenRouter through the real MITM (G3 / §12.2)', () => {
       ca,
       providers: [{ config, fakeKey: FAKE_KEY, realKey: REAL_KEY }],
       dnsLookup: localhostDnsLookup,
+      allowPrivateDestinationsForTests: true,
       ...(options.initialTokenSessionId ? { initialTokenSessionId: options.initialTokenSessionId } : {}),
     });
     await proxy.start();

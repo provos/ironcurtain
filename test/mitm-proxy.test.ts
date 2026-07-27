@@ -21,6 +21,7 @@ import type { RegistryConfig } from '../src/docker/package-types.js';
 import { DENY_ALL_VALIDATOR, createPackageValidator } from '../src/docker/package-validator.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
 import type { DestinationBoundRequest, OutboundTransport } from '../src/docker/outbound-transport.js';
+import { createRegistryEgressGuard } from '../src/docker/registry-egress-proxy.js';
 
 // Mock node:https so a single test can observe the upstream target of a
 // registry forward. The default wraps the real implementation (call-through),
@@ -886,6 +887,7 @@ describe('MitmProxy', () => {
         // Pass a custom lookup so the proxy resolves all hostnames to 127.0.0.1.
         // Must handle { all: true } (Node 24+) which expects an array result.
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 
@@ -914,6 +916,49 @@ describe('MitmProxy', () => {
       expect(parsed.ok).toBe(true);
       expect(parsed.path).toBe('/test/path');
       expect(parsed.method).toBe('GET');
+    } finally {
+      upstream.close();
+    }
+  });
+
+  it('still screens the resolved address when only the resolver seam is supplied', async () => {
+    // The negative twin of the test above: substituting the resolver must not
+    // silently disable the address policy, so the same loopback answer is now
+    // refused rather than forwarded.
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        resolve((upstream.address() as import('node:net').AddressInfo).port);
+      });
+    });
+
+    try {
+      proxy = createMitmProxy({ socketPath, ca, providers: [], dnsLookup: localhostDnsLookup });
+      await proxy.start();
+      proxy.hosts.addHost('test-passthrough.example.com');
+
+      const { statusCode, body } = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          {
+            socketPath,
+            method: 'GET',
+            path: `http://test-passthrough.example.com:${upstreamPort}/test/path`,
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+            res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      expect(statusCode).toBe(502);
+      expect(body).toMatch(/non-public address/u);
     } finally {
       upstream.close();
     }
@@ -1198,6 +1243,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: oauthProvider, fakeKey, realKey: 'old-real-token', tokenManager }],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 
@@ -1256,6 +1302,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: bearerProvider, fakeKey, realKey: 'old-real-token', tokenManager }],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 
@@ -1607,6 +1654,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: makeLocalRewriteProvider(port), fakeKey: rewriteFakeKey, realKey: rewriteRealKey }],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         agentKind,
       });
       await proxy.start();
@@ -1836,6 +1884,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-echo.example.com');
@@ -1936,6 +1985,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
       proxy.hosts.addHost('passthrough-http.example.com');
@@ -1972,6 +2022,58 @@ describe('MitmProxy', () => {
     }
   });
 
+  it('refuses a passthrough CONNECT whose host resolves to a private address instead of tunneling it', async () => {
+    // Same shape as the tunnel test above, minus the address-policy opt-in: a
+    // reachable loopback listener proves the refusal is the resolver's doing
+    // and not a dead upstream.
+    const httpServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+    });
+    const httpPort = await new Promise<number>((resolve) => {
+      httpServer.listen(0, '127.0.0.1', () => {
+        resolve((httpServer.address() as import('node:net').AddressInfo).port);
+      });
+    });
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        // A resolver seam without `allowPrivateDestinationsForTests`: the
+        // answers it returns are still screened.
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+      proxy.hosts.addHost('rebind-passthrough.example.com');
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'rebind-passthrough.example.com', httpPort);
+      // The CONNECT is acknowledged before the upstream dial, per standard
+      // proxy behavior; the refusal shows up as a tunnel that relays nothing.
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      const relayed = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('tunnel neither relayed nor closed')), 3000);
+        let data = '';
+        socket!.on('data', (chunk: Buffer) => {
+          data += chunk.toString();
+        });
+        socket!.on('error', () => undefined);
+        socket!.on('close', () => {
+          clearTimeout(timeout);
+          resolve(data);
+        });
+        socket!.write('GET /health HTTP/1.1\r\nHost: rebind-passthrough.example.com\r\nConnection: close\r\n\r\n');
+      });
+
+      expect(relayed).toBe('');
+    } finally {
+      httpServer.close();
+    }
+  });
+
   it('MITMs nested HTTPS passthrough and uses only the fixed parent transport', async () => {
     const received: DestinationBoundRequest[] = [];
     const upstream = http.createServer((req, res) => {
@@ -1986,6 +2088,7 @@ describe('MitmProxy', () => {
     });
     const fixedParentTransport: OutboundTransport = {
       kind: 'fixed-parent-proxy',
+      addressGuard: 'local-resolver',
       request(request, onResponse) {
         received.push(request);
         return http.request(
@@ -2042,6 +2145,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-tunnel.example.com');
@@ -2100,6 +2204,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-echo.example.com');
@@ -2206,6 +2311,46 @@ describe('MitmProxy', () => {
       socket?.destroy();
     });
 
+    it('never tunnels an unlisted host on a registry-egress listener, even when set', async () => {
+      // An egress listener has no providers and no registries, so *every* host
+      // would be wildcard-eligible. Passthrough must not exist in that mode:
+      // the tunnel never consults the guard, so a wildcard tunnel here would be
+      // an unmediated route around the frozen manifest.
+      process.env[ENV_KEY] = '1';
+      let upstreamCalls = 0;
+      const unreachableTransport: OutboundTransport = {
+        // `direct` is the kind that would have selected the raw tunnel branch.
+        kind: 'direct',
+        addressGuard: 'local-resolver',
+        request() {
+          upstreamCalls += 1;
+          throw new Error('an egress listener must not reach upstream for an unlisted host');
+        },
+      };
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        registryEgress: { guard: createRegistryEgressGuard({ mode: 'disabled' }) },
+        outboundTransport: unreachableTransport,
+      });
+      await proxy.start();
+
+      const { socket, statusCode } = await sendConnect(socketPath, 'random.example.com', 443);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // A raw tunnel would have no TLS peer behind it. The egress listener
+      // TLS-terminates instead and hands the decrypted request to the guard,
+      // which refuses it.
+      const response = await makeHttpsRequest(socket!, ca, 'random.example.com', {
+        path: '/v2/library/app/manifests/1.0',
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.body).toMatch(/registry egress denied/u);
+      expect(upstreamCalls).toBe(0);
+    });
+
     it('routes mixed-case provider CONNECT through MITM (case-insensitive allowlist)', async () => {
       // The provider is registered as `api.test.com`. A CONNECT request with
       // the host in mixed case must match the allowlist and go through MITM —
@@ -2274,6 +2419,7 @@ describe('MitmProxy', () => {
           ca,
           providers: [{ config: testProvider, fakeKey, realKey }],
           dnsLookup: localhostDnsLookup,
+          allowPrivateDestinationsForTests: true,
         });
         await proxy.start();
 
@@ -2309,6 +2455,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: testProvider, fakeKey, realKey }],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 
@@ -2342,6 +2489,7 @@ describe('MitmProxy', () => {
           ca,
           providers: [{ config: testProvider, fakeKey, realKey }],
           dnsLookup: localhostDnsLookup,
+          allowPrivateDestinationsForTests: true,
         });
         await proxy.start();
 
@@ -2361,6 +2509,7 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: testProvider, fakeKey, realKey }],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 

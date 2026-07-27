@@ -235,6 +235,7 @@ function spyTransport(): { transport: OutboundTransport; state: { calls: number 
     state,
     transport: {
       kind: 'direct',
+      addressGuard: 'local-resolver',
       request() {
         state.calls += 1;
         throw new Error('spy transport must not be reached for a rejected request');

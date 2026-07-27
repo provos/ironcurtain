@@ -26,8 +26,11 @@
  * (an unlisted CDN host is reachable only as the immediate `Location` of an authorized
  * manifest/blob response — HTTPS, credential-stripped, SSRF-checked by the transport,
  * finite hops), anonymous bearer-token handling, and per-request / per-session transfer
- * ceilings. The body streams through with normal backpressure — never accumulated in
- * trusted memory. A per-request byte or absolute-time ceiling, or the cumulative
+ * ceilings. Because a derived-redirect authority is chosen by the upstream response
+ * and no parent hop can re-derive it, the SSRF check must happen in this process:
+ * the forwarder refuses (502, before upstream contact) any transport that does not
+ * declare `addressGuard: 'local-resolver'`. The body streams through with normal
+ * backpressure — never accumulated in trusted memory. A per-request byte or absolute-time ceiling, or the cumulative
  * per-session byte or concurrency ceiling, fails closed (both sides destroyed) and is
  * audited. Requested and registry-reported digests are recorded as provenance only.
  *
@@ -270,11 +273,27 @@ export function handleRegistryEgressRequest(
     initial: authorized,
     label: 'registry-egress',
     describe: describeRegistryRequest,
+    assertReady: () => assertLocalAddressAuthority(context.transport),
     session: context.guard.session,
     followRedirect: (current, location) => context.guard.authorizeRedirect(current, location),
     onComplete: (request, streamedBytes, responseHeaders) =>
       recordProvenance(request, context, reportedDigest(responseHeaders), streamedBytes),
   });
+}
+
+/**
+ * Registry egress follows *derived* redirects: an unlisted CDN authority chosen
+ * by the upstream response, i.e. an attacker-influenceable destination. That is
+ * only safe when the address policy is applied in this process — no parent hop
+ * can re-derive such an authority, so a `delegated` transport would leave the
+ * SSRF check to nobody. Refuse before any upstream contact rather than assume.
+ */
+function assertLocalAddressAuthority(transport: OutboundTransport): void {
+  if (transport.addressGuard !== 'local-resolver') {
+    throw new Error(
+      'registry egress follows derived redirects and requires a transport that resolves and screens destination addresses locally',
+    );
+  }
 }
 
 /** Map an authorized pull onto the shared forwarder's destination-bound fetch spec. */

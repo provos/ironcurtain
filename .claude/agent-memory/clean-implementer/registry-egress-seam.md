@@ -28,6 +28,10 @@ manifest with matching blobs. So blob content is untrusted and flows through UNV
    stripped), finite `maxRedirectHops`. Literal-IP redirect targets REFUSED in policy (`isIP` after
    stripping IPv6 brackets `[]`); DNS-resolves-to-private is caught by the transport (OutboundTransport
    guarded DNS lookup / `assertHostnameIsEligible`) — that transport IS the binding SSRF control.
+   As of the F3 fix that is CHECKED, not assumed: both transports resolve locally and declare
+   `addressGuard:'local-resolver'`, and `handleRegistryEgressRequest`'s `assertReady`
+   (`assertLocalAddressAuthority`) 502s a `'delegated'` transport before upstream contact.
+   See [[outbound-transport-address-authority]].
 3. Anonymous bearer-token flow — `sanitizeHeaders` ADMITS a single `Authorization: Bearer <token>` on a
    client-initiated request to a listed origin (bearer is STRUCTURAL, never in an origin allow-list;
    `FORBIDDEN_CREDENTIAL_HEADERS` still lists `authorization` so the allow-list schema rejects it).

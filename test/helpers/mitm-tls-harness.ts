@@ -8,13 +8,20 @@
  * canonical host (`openrouter.ai`) reaches a local fake upstream.
  */
 
+import * as dns from 'node:dns';
 import * as http from 'node:http';
 import * as tls from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import type { CertificateAuthority } from '../../src/docker/ca.js';
 import type { MitmProxyOptions } from '../../src/docker/mitm-proxy.js';
 
-/** DNS lookup that resolves all hostnames to 127.0.0.1 for testing. */
+/**
+ * DNS lookup that resolves all hostnames to 127.0.0.1 for testing.
+ *
+ * A loopback answer fails the transport's address policy, so a proxy using this
+ * seam must also set `allowPrivateDestinationsForTests` — supplying a resolver
+ * does not itself relax the policy.
+ */
 export const localhostDnsLookup: MitmProxyOptions['dnsLookup'] = (_hostname, opts, cb) => {
   if ((opts as { all?: boolean }).all) {
     cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
@@ -22,6 +29,21 @@ export const localhostDnsLookup: MitmProxyOptions['dnsLookup'] = (_hostname, opt
     cb(null, '127.0.0.1', 4);
   }
 };
+
+/**
+ * DNS lookup that resolves every hostname to one public documentation address.
+ * Used where a transport must *screen* a destination name without the answer
+ * ever being dialed (the fixed-parent path connects to its parent instead), so
+ * a fixture stays hermetic without opting out of the address policy.
+ */
+export const publicDnsLookup: typeof dns.lookup = ((
+  _hostname: string,
+  options: dns.LookupOptions,
+  cb: (error: NodeJS.ErrnoException | null, address: string | dns.LookupAddress[], family?: number) => void,
+) => {
+  if (options.all) cb(null, [{ address: '93.184.216.34', family: 4 }]);
+  else cb(null, '93.184.216.34', 4);
+}) as typeof dns.lookup;
 
 /** Sends a CONNECT request to the proxy via UDS, returns client socket + status. */
 export function sendConnect(

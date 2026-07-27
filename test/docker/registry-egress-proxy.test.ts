@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import * as dns from 'node:dns';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { tmpdir } from 'node:os';
@@ -11,12 +12,24 @@ import {
   type RegistryPullProvenance,
 } from '../../src/docker/registry-egress-proxy.js';
 import type { RegistryEgressManifest } from '../../src/docker/registry-egress-policy.js';
-import type { DestinationBoundRequest, OutboundTransport } from '../../src/docker/outbound-transport.js';
+import {
+  createParentProxyOutboundTransport,
+  type DestinationBoundRequest,
+  type OutboundTransport,
+} from '../../src/docker/outbound-transport.js';
+import {
+  createTlsIdentity,
+  startFakeParentProxy,
+  type FakeParentProxy,
+  type TlsIdentity,
+} from '../helpers/fake-parent-proxy.js';
 
 const temporaryDirectories: string[] = [];
 const servers: http.Server[] = [];
+const parents: FakeParentProxy[] = [];
 
 afterEach(async () => {
+  await Promise.all(parents.splice(0).map((parent) => parent.close()));
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -393,6 +406,19 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(request.headers.authorization).toBe('Bearer anon-token');
   });
 
+  it('refuses a transport that delegates the address policy, before any upstream contact', async () => {
+    const spy = spyTransport('delegated');
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: spy.transport,
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('delegated')}`,
+    });
+    expect(result.statusCode).toBe(502);
+    expect(result.body).toMatch(/resolves and screens destination addresses locally/u);
+    expect(spy.state.calls).toBe(0);
+  });
+
   it.each([
     ['an unlisted registry', 'evil.example', `/v2/library/app/blobs/${digestOf('x')}`, undefined, /unlisted host/u],
     ['a catalog enumeration', 'registry.test', '/v2/_catalog', undefined, /catalog enumeration/u],
@@ -419,7 +445,75 @@ describe('registry-egress proxy seam (enabled)', () => {
   });
 });
 
+describe('registry-egress over a real fixed-parent transport (nested mode)', () => {
+  it('refuses a derived redirect that resolves to a non-public address, and never asks the parent for it', async () => {
+    const identity = fixtureTlsIdentity();
+    const socketPath = join(tempDirectory(), 'parent.sock');
+    const parent = await startFakeParentProxy({
+      socketPath,
+      identity,
+      // `cdn.evil.test` is deliberately unrouted: the parent reaching it at all
+      // would already be the bug this guards.
+      routes: {
+        'registry.test': (_request, response) => {
+          response.writeHead(307, { location: 'https://cdn.evil.test/layer' });
+          response.end();
+        },
+      },
+    });
+    parents.push(parent);
+
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: createParentProxyOutboundTransport({
+        proxy: { socketPath },
+        ca: identity.certPem,
+        lookup: nestedLookup,
+      }),
+      targetHost: 'registry.test',
+      path: '/v2/library/app/manifests/1.0',
+    });
+
+    expect(result.statusCode).toBe(502);
+    expect(result.body).toMatch(/non-public address/u);
+    // The child is the address authority: it refuses before the redirect target
+    // can become a CONNECT authority the parent would be asked to open.
+    expect(parent.connectAuthorities).toEqual(['registry.test:443']);
+  });
+});
+
 // ── Fixtures ──────────────────────────────────────────────────────────
+
+/**
+ * Resolver for the nested fixture: the reviewed origin is public, the derived
+ * CDN target rebinds onto the cloud metadata service.
+ */
+const nestedLookup = ((
+  hostname: string,
+  options: dns.LookupOptions,
+  callback: (error: NodeJS.ErrnoException | null, address: string | dns.LookupAddress[], family?: number) => void,
+): void => {
+  const answers: Record<string, string | undefined> = {
+    'registry.test': '93.184.216.34',
+    'cdn.evil.test': '169.254.169.254',
+  };
+  const address = answers[hostname];
+  if (address === undefined) {
+    const error: NodeJS.ErrnoException = new Error(`no stub DNS answer for ${hostname}`);
+    error.code = 'ENOTFOUND';
+    callback(error, []);
+    return;
+  }
+  if (options.all) callback(null, [{ address, family: 4 }]);
+  else callback(null, address, 4);
+}) as typeof dns.lookup;
+
+/** RSA keygen is slow, so the fixture identity is generated once per file. */
+let tlsIdentity: TlsIdentity | undefined;
+function fixtureTlsIdentity(): TlsIdentity {
+  tlsIdentity ??= createTlsIdentity(['registry.test', 'cdn.evil.test']);
+  return tlsIdentity;
+}
 
 function digestOf(value: string | Buffer): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -467,6 +561,7 @@ function routingTransport(routes: Record<string, number>): OutboundTransport {
   const table = new Map(Object.entries(routes));
   return {
     kind: 'direct',
+    addressGuard: 'local-resolver',
     request(request: DestinationBoundRequest, onResponse) {
       const port = table.get(request.destination.hostname);
       if (port === undefined) throw new Error(`no test route for ${request.destination.hostname}`);
@@ -478,12 +573,16 @@ function routingTransport(routes: Record<string, number>): OutboundTransport {
   };
 }
 
-function spyTransport(): { transport: OutboundTransport; state: { calls: number } } {
+function spyTransport(addressGuard: OutboundTransport['addressGuard'] = 'local-resolver'): {
+  transport: OutboundTransport;
+  state: { calls: number };
+} {
   const state = { calls: 0 };
   return {
     state,
     transport: {
       kind: 'direct',
+      addressGuard,
       request() {
         state.calls += 1;
         throw new Error('spy transport must not be reached for a rejected request');

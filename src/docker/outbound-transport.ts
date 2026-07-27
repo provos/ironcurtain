@@ -2,9 +2,43 @@
  * Destination-bound HTTP(S) transport for MITM and registry upstreams.
  *
  * Callers supply a trusted destination separately from request headers. The
- * transport owns Host/SNI, blocks local/private destinations, pins DNS lookup
- * results, never follows redirects, and can route through one fixed parent
- * HTTP proxy without exposing a caller-selected CONNECT primitive.
+ * transport owns Host/SNI, blocks local/private destinations, resolves and
+ * screens every destination name locally, never follows redirects, and can
+ * route through one fixed parent HTTP proxy without exposing a caller-selected
+ * CONNECT primitive.
+ *
+ * ## The child is the address authority
+ *
+ * Both transports enforce the same destination-address policy in *this*
+ * process, before any byte reaches the network: a literal destination is
+ * screened by {@link isPublicAddress}, and a destination *name* is resolved
+ * through a guarded resolver that rejects the entire answer set if any address
+ * is loopback, private, link-local, or otherwise non-routable.
+ *
+ * The parent-proxy transport cannot delegate that check upward. A parent cannot
+ * re-derive a derived-CDN authority: such a host is authorized only as the
+ * immediate `Location` of one specific authorized response, so a parent
+ * registry-egress listener would see a *client-initiated* request to an unlisted
+ * host and fail closed, and a standard-mode parent would simply 403 the CONNECT.
+ * The child is therefore the only place the address policy can be enforced, and
+ * {@link OutboundTransport.addressGuard} publishes that property so a caller
+ * whose destination is attacker-influenced (registry-egress redirect following)
+ * can *require* it instead of assuming it.
+ *
+ * ## Accepted residual: no address pinning through the parent
+ *
+ * On the direct path the screened answer set is also the answer set used to
+ * connect, so the check and the connection cannot diverge. Through the parent,
+ * the child screens the name and the parent then re-resolves it, so the guarded
+ * resolver restores the *policy* check but not direct mode's *pinning*
+ * property: a TTL-0 DNS rebind landing between the two resolutions can still
+ * reach a private address. Pinning by sending the resolved literal as the
+ * CONNECT authority is not an option — that authority is also the SNI and
+ * certificate-validation identity, and the provider/registry paths require the
+ * real name (see `servername` below). The residual is accepted under this
+ * project's trusted-host model (an IronCurtain-owned parent on a trusted host,
+ * reaching a reviewed frozen set of origins) and is recorded here rather than
+ * left implied.
  */
 
 import * as dns from 'node:dns';
@@ -30,8 +64,21 @@ export interface DestinationBoundRequest {
   readonly headers?: http.OutgoingHttpHeaders;
 }
 
+/**
+ * Where the destination-address policy is enforced for this transport.
+ *
+ * - `local-resolver`: this process resolves the destination name and refuses a
+ *   non-public answer before any I/O — the guarantee callers can rely on.
+ * - `delegated`: some other hop is assumed to apply the policy. A caller that
+ *   forwards an attacker-influenced destination (e.g. a derived redirect) must
+ *   refuse such a transport rather than assume the assumption holds.
+ */
+export type OutboundAddressGuard = 'local-resolver' | 'delegated';
+
 export interface OutboundTransport {
   readonly kind: 'direct' | 'fixed-parent-proxy';
+  /** Checked capability, not an assumption; see {@link OutboundAddressGuard}. */
+  readonly addressGuard: OutboundAddressGuard;
   request(request: DestinationBoundRequest, onResponse?: (response: http.IncomingMessage) => void): http.ClientRequest;
 }
 
@@ -50,12 +97,17 @@ export interface ParentProxyOutboundTransportOptions {
   readonly proxy: FixedParentProxyEndpoint;
   /** Extra public CA material for the TLS connection inside CONNECT. */
   readonly ca?: string | readonly string[];
+  /** Test seam. Production uses node:dns.lookup. */
+  readonly lookup?: typeof dns.lookup;
+  /** Test-only escape hatch for loopback fake upstreams. */
+  readonly allowPrivateDestinationsForTests?: boolean;
 }
 
 export function createDirectOutboundTransport(options: DirectOutboundTransportOptions = {}): OutboundTransport {
   const lookup = createGuardedLookup(options.lookup ?? dns.lookup, options.allowPrivateDestinationsForTests === true);
   return {
     kind: 'direct',
+    addressGuard: 'local-resolver',
     request(request, onResponse) {
       const normalized = normalizeRequest(request, options.allowPrivateDestinationsForTests === true);
       const requestOptions: http.RequestOptions = {
@@ -75,24 +127,32 @@ export function createDirectOutboundTransport(options: DirectOutboundTransportOp
 
 export function createParentProxyOutboundTransport(options: ParentProxyOutboundTransportOptions): OutboundTransport {
   const proxy = normalizeProxyEndpoint(options.proxy);
-  const agent = new FixedParentProxyHttpsAgent(proxy, options.ca);
+  const allowPrivate = options.allowPrivateDestinationsForTests === true;
+  const screenDestination = createDestinationScreen(options.lookup ?? dns.lookup, allowPrivate);
+  const httpsAgent = new FixedParentProxyHttpsAgent(proxy, options.ca, screenDestination);
+  const httpAgent = new FixedParentProxyHttpAgent(proxy, screenDestination);
   return {
     kind: 'fixed-parent-proxy',
+    addressGuard: 'local-resolver',
     request(request, onResponse) {
-      // The parent proxy is the network boundary; it resolves and applies the
-      // same direct-transport address policy. Still reject literal/private
-      // destination names locally so they never become CONNECT authorities.
-      const normalized = normalizeRequest(request, false);
+      // This child is the address authority: the parent cannot re-derive a
+      // derived-CDN authority, so it cannot be the place the address policy is
+      // applied. Literal/local destinations are refused here, and both agents
+      // screen the destination *name* against the guarded resolver before any
+      // CONNECT authority or absolute-form target is written to the parent.
+      const normalized = normalizeRequest(request, allowPrivate);
       if (normalized.destination.protocol === 'http:') {
         const absolutePath =
           `http://${formatAuthority(normalized.destination.hostname, normalized.destination.port, 'http:')}` +
           normalized.path;
         return http.request(
           {
-            ...proxy,
+            hostname: normalized.destination.hostname,
+            port: normalized.destination.port,
             method: normalized.method,
             path: absolutePath,
             headers: normalized.headers,
+            agent: httpAgent,
           },
           onResponse,
         );
@@ -104,7 +164,7 @@ export function createParentProxyOutboundTransport(options: ParentProxyOutboundT
           method: normalized.method,
           path: normalized.path,
           headers: normalized.headers,
-          agent,
+          agent: httpsAgent,
         },
         onResponse,
       );
@@ -112,10 +172,63 @@ export function createParentProxyOutboundTransport(options: ParentProxyOutboundT
   };
 }
 
+/**
+ * Screen one destination *name* by resolving it through the shared guarded
+ * resolver and discarding the answer. A literal destination has already been
+ * screened by {@link assertHostnameIsEligible}, so it needs no resolution (and
+ * `net.connect` would not resolve it either).
+ */
+type DestinationScreen = (hostname: string, done: (error: Error | null) => void) => void;
+
+function createDestinationScreen(lookup: typeof dns.lookup, allowPrivate: boolean): DestinationScreen {
+  const guarded = createGuardedLookup(lookup, allowPrivate);
+  return (hostname, done) => {
+    if (net.isIP(hostname) !== 0) {
+      done(null);
+      return;
+    }
+    guarded(hostname, { all: true }, (error) => done(error ?? null));
+  };
+}
+
+/**
+ * Reaches the fixed parent proxy for a plain-HTTP (absolute-form) request.
+ *
+ * The destination screen lives in `createConnection` — the same place the HTTPS
+ * agent screens before writing its CONNECT authority — so both branches share
+ * one control, an asynchronous check never makes `request()` asynchronous, and
+ * no absolute-form target for a rejected destination is ever written to the
+ * parent.
+ */
+class FixedParentProxyHttpAgent extends http.Agent {
+  constructor(
+    private readonly proxy: http.RequestOptions,
+    private readonly screenDestination: DestinationScreen,
+  ) {
+    super({ keepAlive: false });
+  }
+
+  override createConnection(
+    options: http.ClientRequestArgs,
+    callback: (error: Error | null, stream?: Duplex) => void,
+  ): Duplex | null | undefined {
+    const hostname = normalizeHostname(options.hostname ?? options.host ?? '');
+    this.screenDestination(hostname, (error) => {
+      if (error) {
+        callback(error);
+        return;
+      }
+      callback(null, net.connect(parentConnectOptions(this.proxy)));
+    });
+    return undefined;
+  }
+}
+
 class FixedParentProxyHttpsAgent extends https.Agent {
   constructor(
     private readonly proxy: http.RequestOptions,
     private readonly extraCa: string | readonly string[] | undefined,
+    private readonly screenDestination: DestinationScreen,
   ) {
     super({ keepAlive: false });
   }
@@ -136,32 +249,42 @@ class FixedParentProxyHttpsAgent extends https.Agent {
       settled = true;
       callback(error, stream);
     };
-    const connectRequest = http.request({
-      ...this.proxy,
-      method: 'CONNECT',
-      path: authority,
-      headers: { host: authority },
-    });
-    connectRequest.once('connect', (response, socket, head) => {
-      if (response.statusCode !== 200) {
-        socket.destroy();
-        done(new Error(`fixed parent proxy refused ${authority} with status ${response.statusCode ?? 'unknown'}`));
+    // Screen before the CONNECT authority reaches the parent: a name resolving
+    // to a non-public address must fail here, not become a parent request.
+    this.screenDestination(hostname, (screenError) => {
+      if (screenError) {
+        done(screenError);
         return;
       }
-      if (head.length > 0) socket.unshift(head);
-      const connectionOptions: tls.ConnectionOptions = {
-        socket,
-        servername: net.isIP(hostname) === 0 ? hostname : undefined,
-      };
-      if (this.extraCa !== undefined) {
-        connectionOptions.ca = typeof this.extraCa === 'string' ? this.extraCa : [...this.extraCa];
-      }
-      const secureSocket = tls.connect(connectionOptions);
-      secureSocket.once('secureConnect', () => done(null, secureSocket));
-      secureSocket.once('error', (error) => done(error));
+      const connectRequest = http.request({
+        ...this.proxy,
+        method: 'CONNECT',
+        path: authority,
+        headers: { host: authority },
+      });
+      connectRequest.once('connect', (response, socket, head) => {
+        if (response.statusCode !== 200) {
+          socket.destroy();
+          done(new Error(`fixed parent proxy refused ${authority} with status ${response.statusCode ?? 'unknown'}`));
+          return;
+        }
+        if (head.length > 0) socket.unshift(head);
+        const connectionOptions: tls.ConnectionOptions = {
+          socket,
+          // SNI and certificate validation bind to the NAME, never to a
+          // resolved literal — that is why the parent path cannot pin.
+          servername: net.isIP(hostname) === 0 ? hostname : undefined,
+        };
+        if (this.extraCa !== undefined) {
+          connectionOptions.ca = typeof this.extraCa === 'string' ? this.extraCa : [...this.extraCa];
+        }
+        const secureSocket = tls.connect(connectionOptions);
+        secureSocket.once('secureConnect', () => done(null, secureSocket));
+        secureSocket.once('error', (error) => done(error));
+      });
+      connectRequest.once('error', (error) => done(error));
+      connectRequest.end();
     });
-    connectRequest.once('error', (error) => done(error));
-    connectRequest.end();
     return undefined;
   }
 }
@@ -251,7 +374,14 @@ function assertHostnameIsEligible(hostname: string, allowPrivate: boolean): void
   }
 }
 
-function createGuardedLookup(lookup: typeof dns.lookup, allowPrivate: boolean): typeof dns.lookup {
+/**
+ * Wrap a resolver so it fails the whole lookup when *any* returned address is
+ * non-public. This is the single implementation of the address policy for name
+ * destinations; it is shared by the direct transport (as `RequestOptions.lookup`),
+ * by the fixed-parent transport's destination screen, and by the MITM proxy's
+ * raw passthrough tunnel, so none of them can drift from the others.
+ */
+export function createGuardedLookup(lookup: typeof dns.lookup, allowPrivate: boolean): typeof dns.lookup {
   type LookupResult = string | dns.LookupAddress[];
   type LookupCallback = (error: NodeJS.ErrnoException | null, result: LookupResult, family?: number) => void;
   const invokeLookup = lookup as unknown as (
@@ -350,4 +480,10 @@ function normalizeProxyEndpoint(endpoint: FixedParentProxyEndpoint): http.Reques
   const hostname = normalizeHostname(endpoint.hostname);
   const port = normalizePort(endpoint.port);
   return { hostname, port };
+}
+
+/** The already-normalized fixed parent endpoint as raw socket options. */
+function parentConnectOptions(proxy: http.RequestOptions): net.NetConnectOpts {
+  if (proxy.socketPath !== undefined) return { path: proxy.socketPath };
+  return { host: proxy.hostname ?? undefined, port: Number(proxy.port) };
 }
