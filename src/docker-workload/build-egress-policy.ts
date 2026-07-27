@@ -5,6 +5,7 @@ import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { sha256Hex, sha256HexSchema } from '../hash.js';
 import { assertCanonicalHostPath } from '../hardened-fs.js';
+import { HOP_BY_HOP_HEADERS } from '../docker/hop-by-hop-headers.js';
 import {
   addDuplicateIssues,
   HEADER_NAME_REGEX,
@@ -215,6 +216,22 @@ const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
   'anthropic-api-key',
 ]);
 
+/**
+ * Connection-scoped headers that are dropped before the manifest's
+ * allow/strip lists are consulted, mirroring the registry-egress path.
+ *
+ * `Host` is mandatory in HTTP/1.1, so without this every real client (apt,
+ * curl, npm, BuildKit) would be refused by a manifest that cannot reasonably
+ * enumerate it per rule. Dropping is also the *correct* handling rather than a
+ * concession: the destination-bound transport owns Host/SNI for the authorized
+ * destination, so relaying a client-supplied `Host` would be a request-smuggling
+ * vector, not a feature. Hop-by-hop headers must not cross a proxy boundary at
+ * all. The credential check above runs first, so a forbidden header is still a
+ * hard failure and is never silently dropped here (`proxy-authorization` is both
+ * forbidden and hop-by-hop).
+ */
+const DROPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set(['host', ...HOP_BY_HOP_HEADERS]);
+
 export function loadBuildEgressManifest(path: string): LoadedBuildEgressManifest {
   if (!isAbsolute(path)) throw new Error('build-egress manifest path must be absolute');
   let descriptor: number;
@@ -407,6 +424,7 @@ function sanitizeHeaders(
     if (values.some((value) => /[\r\n]/u.test(value))) {
       throw new Error(`build-egress header value contains a line break: ${name}`);
     }
+    if (DROPPED_REQUEST_HEADERS.has(name)) continue;
     if (rule.requestHeaders.strip.includes(name)) continue;
     if (!rule.requestHeaders.allow.includes(name)) {
       throw new Error(`build-egress header is not allowed by ${rule.id}: ${name}`);

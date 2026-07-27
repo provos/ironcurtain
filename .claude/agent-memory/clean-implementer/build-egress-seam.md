@@ -50,6 +50,18 @@ scheme/host/port/method/path + redirect Location hops; `--build` drives `docker 
 human review/artifact-pinning/seam-placement) + `capture-evidence.json`. The frozen
 `config/docker-workload/build-egress-manifest.json` does NOT exist yet; freeze is a later supervised step.
 
+## OPEN BUG: the frozen manifest cannot admit any real HTTP/1.1 client (found 2026-07-27)
+No rule in `config/docker-workload/build-egress-manifest.json` lists `host` (or `connection`) in
+`requestHeaders.allow` OR `.strip`, and build's `sanitizeHeaders` THROWS on any header in neither
+(`build-egress header is not allowed by <rule>: host`). `Host` is mandatory in HTTP/1.1, so apt /
+curl / BuildKit all 403. Registry-egress does NOT have this problem: `registry-egress-policy.ts`
+has `DROPPED_REQUEST_HEADERS = new Set(['host', ...HOP_BY_HOP_HEADERS])` and drops them silently
+(the destination-bound transport re-frames Host/SNI anyway). Fix is EITHER mirror
+`DROPPED_REQUEST_HEADERS` into `build-egress-policy.ts` (module change only — manifest sha256
+unchanged, so the `buildEgressSha256` qualification binding is unaffected) OR re-freeze the
+manifest with `host`/`connection` in every rule's `strip`. Pinned by a test in
+`test/docker/docker-workload-egress.test.ts` ("known frozen-manifest gap").
+
 ## Testing pattern that worked
 `test/docker/build-egress-proxy.test.ts`: temp repo dir with `docker/Dockerfile.fixture` (0600) +
 `manifest.json` (0400) → real `createBuildEgressGuard`. For "forwards"/"rejected" e2e: a real
@@ -58,4 +70,12 @@ loopback front `http.createServer` calls `handleBuildEgressRequest`; a real loop
 `spyTransport` (request() throws) proves rejected requests never touch the transport. Manifest
 `destination.hostname` may be a literal IP like `127.0.0.1` (hostnameSchema regex accepts it). Node
 http client auto-adds `host`+`connection` headers → the manifest rule's `requestHeaders.strip` MUST
-list them or `sanitizeHeaders` throws "not allowed".
+list them or `sanitizeHeaders` throws "not allowed" (see the OPEN BUG above — the FROZEN manifest
+does not).
+
+## Driving raw requests through a real MITM listener in tests
+Node's http SERVER 400s an HTTP/1.1 request with no `Host`, so you cannot just omit it. Use
+**HTTP/1.0 absolute-form** instead: `GET http://deb.debian.org/... HTTP/1.0\r\n\r\n` parses fine and
+`req.url` is the absolute URL — today the only way to exercise the frozen build rules end-to-end.
+Raw-response parsing must decode `Transfer-Encoding: chunked` (the mediated forwarder streams, so a
+length-less upstream response arrives chunked).

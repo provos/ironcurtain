@@ -18,6 +18,60 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
+describe('checked-in frozen build-egress manifest', () => {
+  // The fixture manifest below declares `strip: ['host', 'connection']` on every rule, but the
+  // frozen production manifest declares neither — and nothing used to load the frozen file, so
+  // the module looked correct while the shipped artifact refused every real HTTP/1.1 client
+  // (`Host` is mandatory, and an undeclared header is a hard failure). These tests bind the
+  // frozen artifact itself so fixture/artifact divergence cannot hide that again.
+  const FROZEN_MANIFEST_PATH = join(process.cwd(), 'config/docker-workload/build-egress-manifest.json');
+  const frozen = (): BuildEgressManifest => loadBuildEgressManifest(FROZEN_MANIFEST_PATH).manifest;
+
+  it('authorizes a realistic HTTP/1.1 apt request carrying Host and Connection', () => {
+    const authorized = authorizeValidatedBuildEgressRequest(frozen(), {
+      seam: 'run',
+      method: 'GET',
+      url: 'http://deb.debian.org/debian/dists/bookworm/InRelease',
+      headers: { host: 'deb.debian.org', connection: 'keep-alive', 'user-agent': 'Debian APT-HTTP/1.3' },
+    });
+    expect(authorized.destination.hostname).toBe('deb.debian.org');
+    // Connection-scoped headers are dropped; the destination-bound transport owns Host/SNI.
+    expect(authorized.headers).toEqual({ 'user-agent': 'Debian APT-HTTP/1.3' });
+  });
+
+  it('still hard-fails a credential header rather than silently dropping it', () => {
+    for (const header of ['authorization', 'proxy-authorization', 'cookie']) {
+      expect(() =>
+        authorizeValidatedBuildEgressRequest(frozen(), {
+          seam: 'run',
+          method: 'GET',
+          url: 'http://deb.debian.org/debian/dists/bookworm/InRelease',
+          headers: { host: 'deb.debian.org', [header]: 'secret' },
+        }),
+      ).toThrow(/credential header is forbidden/u);
+    }
+  });
+
+  it('still refuses an undeclared header and an unlisted host', () => {
+    expect(() =>
+      authorizeValidatedBuildEgressRequest(frozen(), {
+        seam: 'run',
+        method: 'GET',
+        url: 'http://deb.debian.org/debian/dists/bookworm/InRelease',
+        headers: { host: 'deb.debian.org', 'x-unreviewed': 'value' },
+      }),
+    ).toThrow(/not allowed by/u);
+    expect(() =>
+      authorizeValidatedBuildEgressRequest(frozen(), {
+        seam: 'run',
+        method: 'GET',
+        url: 'https://evil.example/payload',
+        headers: { host: 'evil.example' },
+      }),
+    ).toThrow();
+  });
+});
+
 describe('narrow current-Dockerfile build egress', () => {
   it('authorizes one exact parent-proxied rule and owns its limits/header surface', () => {
     expect(

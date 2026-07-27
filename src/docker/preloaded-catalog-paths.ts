@@ -18,23 +18,19 @@
  * so the two locations can never drift apart.
  */
 
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
 import type { ContainerRuntimeKind } from './container-runtime.js';
+import { getFrozenDockerWorkloadDir } from './docker-workload-paths.js';
 
 /** Basename of a backend-bound catalog file, e.g. `preloaded-catalog.docker.json`. */
 export function preloadedCatalogFileName(runtimeKind: ContainerRuntimeKind): string {
   return `preloaded-catalog.${runtimeKind}.json`;
 }
 
-function packageRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-}
-
 /** Committed frozen-record directory (`<package>/config/docker-workload`). */
 export function getFrozenCatalogDir(): string {
-  return resolve(packageRoot(), 'config', 'docker-workload');
+  return getFrozenDockerWorkloadDir();
 }
 
 /** Path of the committed frozen catalog record for a backend. */
