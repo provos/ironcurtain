@@ -12,7 +12,6 @@
     "catalogSha256": "df95781e4d95bcd7b410fc7e248b8773a8570f50386f4101a5fa1f4d8c9f1139",
     "profileSha256": "10b1d6bb4b432d06ff508bef5450d0252db1204637f651c95900b0f6b3f1824d",
     "toolchainDigest": "890e6d80721c8508f3d7214bf194075a87395e2faa5304f0ea0012d86d2634b2",
-    "performanceBudgetSha256": "194bafe175d97e4575dbeb1ba4caedce00695b9422616696b965730cbedb5ddb",
     "runtimeTrustSchema": "runtime-trust-v1",
     "relaySha256": null,
     "watchdogSha256": "48fbd77425ae04f089f1f09cad0849bd473f8c4d309ebaf7bee9f81dd02e71e0",

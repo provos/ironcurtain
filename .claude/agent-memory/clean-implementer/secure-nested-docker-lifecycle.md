@@ -44,7 +44,7 @@ undefined for real sessions. Where each step landed (src/docker/docker-infrastru
 ## Bindings taxonomy: RUNTIME controls vs RELEASE artifacts (corrected 2026-07-24)
 `DockerWorkloadAdmissionBindings` (infrastructure.ts) and the lease `bindings` z.object
 (bundle-lease.ts) bind ONLY OPERATIONAL inputs: catalogSha256, profileSha256,
-performanceBudgetSha256, toolchainDigest (+ watchdogPolicySha256, stamped at render time
+toolchainDigest (+ watchdogPolicySha256, stamped at render time
 by admission — callers never pass it). A qualification contract is a RELEASE artifact (a
 frozen test plan), NOT a runtime security control: `qualificationContractSha256` was
 carried in both of those and NEVER verified at runtime — a provenance label wearing the
@@ -88,7 +88,7 @@ in the harness). Keep it required — the fallback is the bug.
   watchdogPolicySha256,backend}; applyResumeMetadata throws SessionError when present (ephemeral daemonState = not resumable).
 
 ## Frozen watchdog template values
-hardSafetyBytes 8 GiB (== performance-budget peakOwnedStateBytes), soft 4 GiB, hostReserve 2 GiB,
+hardSafetyBytes 8 GiB, soft 4 GiB, hostReserve 2 GiB,
 maxOvershoot 1 GiB, sampleInterval/Timeout 5s, staleAfter 30s, cleanupInventoryGapMs 500, stateClasses
 daemon/api/exchange/staging all required:false (avoids teardown-race trip on a transiently-absent subdir).
 
@@ -176,7 +176,8 @@ install line, and NEGATIVELY that the only non-comment lines naming new[ug]idmap
 - `--data-root=/home/codespace/.local/share/docker` is EXPLICIT in the frozen dockerd command (it is
   also what rootless dockerd would derive from the exported HOME, so runtime behavior is unchanged) —
   §8.2.1/§8.3.4 want an exact ledgerable/removable state path. Exported as APPLE_VM_DAEMON_DATA_ROOT.
-- Timeout source: caller passes the frozen performance-budget `daemonReadinessMs` (90000).
+- Timeout source: caller passes `APPLE_VM_DAEMON_READINESS_TIMEOUT_MS` (90000, session-daemon.ts) —
+  a plain reviewed constant since the performance budget was deleted (2026-07-30, plan §16.11).
 
 ## Base-image Docker toolchain layer (hardened 2026-07-29)
 - `COPY --from` PRESERVES SOURCE OWNERSHIP. In the pinned `docker@sha256:67c4114…` stage

@@ -61,12 +61,6 @@ const DRIFT_CASES: readonly (readonly [string, BindingMutation])[] = [
     },
   ],
   [
-    'performanceBudgetSha256',
-    (bindings) => {
-      bindings.performanceBudgetSha256 = '9'.repeat(64);
-    },
-  ],
-  [
     'runtimeTrustSchema',
     (bindings) => {
       bindings.runtimeTrustSchema = 'runtime-trust-v99';
@@ -103,14 +97,6 @@ describe('qualification artifact binding verification', () => {
     temporaryDirectories.push(empty);
     expect(() => verifyQualificationArtifactBindings(frozenContract(), empty)).toThrow(
       /preloaded image catalog must be a readable regular non-symlink file/u,
-    );
-  });
-
-  it('derives the performance budget from the contract variant and architecture', () => {
-    const contract = frozenContract();
-    contract.variant = 'linux-rootful-overlay';
-    expect(() => verifyQualificationArtifactBindings(contract, process.cwd())).toThrow(
-      /qualification artifact for performanceBudgetSha256 must be a readable regular non-symlink file/u,
     );
   });
 

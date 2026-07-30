@@ -205,7 +205,7 @@ export interface AppleVmDaemonReadiness {
 }
 
 export interface WaitForAppleVmDaemonReadyOptions {
-  /** Frozen performance-budget `daemonReadinessMs`; supplied by the wiring layer. */
+  /** Readiness ceiling; supplied by the wiring layer (`APPLE_VM_DAEMON_READINESS_TIMEOUT_MS`). */
   readonly timeoutMs: number;
   readonly pollIntervalMs?: number;
   readonly now?: () => number;

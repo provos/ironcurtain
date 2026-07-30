@@ -196,7 +196,6 @@ function supervisorFixture(label: string) {
     bindings: {
       catalogSha256: '2'.repeat(64),
       profileSha256: '3'.repeat(64),
-      performanceBudgetSha256: '4'.repeat(64),
       watchdogPolicySha256: '0'.repeat(64),
       toolchainDigest: '6'.repeat(64),
     },

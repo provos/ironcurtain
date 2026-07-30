@@ -9,10 +9,9 @@
  * is held to), rather than copied out of a frozen record that merely claims
  * them. A missing or malformed artifact fails admission closed.
  *
- * One field is still honestly a placeholder — see
- * {@link PLACEHOLDER_ADMISSION_BINDING_FIELDS} — so the whole set is reported
- * as `'placeholder'` provenance. Provenance describes the weakest field, never
- * the strongest.
+ * Every field is currently a real operational hash, so the set reports
+ * `'qualified'` provenance. Provenance describes the weakest field, never the
+ * strongest — see {@link PLACEHOLDER_ADMISSION_BINDING_FIELDS}.
  */
 
 import { createHash } from 'node:crypto';
@@ -35,23 +34,19 @@ const BASE_IMAGE_LOGICAL_NAME = 'ironcurtain-base:latest';
 const MAX_PROFILE_CEILING_BYTES = 1024 * 1024;
 
 /**
- * Bindings that cannot be sourced honestly yet.
+ * Bindings that cannot be sourced honestly yet — currently none.
  *
- * `performanceBudgetSha256`: the only frozen budget
- * (`test/docker-workload/performance-budget.<variant>-<arch>.json`) lives in
- * the test tree, which the published package does not ship (`package.json`
- * `files`). Hashing it from session code would ENOENT in an installed copy,
- * and relocating a frozen artifact is a re-freeze, not a wiring change. Left
- * as a namespaced derived placeholder until the budget is published as a
- * runtime-readable artifact.
+ * Every remaining field is hashed from the bytes the session really uses. A
+ * future binding that can only be namespaced (see {@link placeholderBinding})
+ * is listed here, which downgrades the whole set's provenance.
  */
-export const PLACEHOLDER_ADMISSION_BINDING_FIELDS = ['performanceBudgetSha256'] as const;
+export const PLACEHOLDER_ADMISSION_BINDING_FIELDS: readonly (keyof DockerWorkloadAdmissionBindings)[] = [];
+
+export type AdmissionBindingsProvenance = 'placeholder' | 'qualified';
 
 export interface ResolveAdmissionBindingsOptions {
   /** Staged catalog the session resolves its agent image from. */
   readonly catalogPath: string;
-  /** Resolved capability config hash; namespaces the remaining placeholder. */
-  readonly configHash: string;
 }
 
 export interface ResolvedAdmissionBindings {
@@ -61,7 +56,18 @@ export interface ResolvedAdmissionBindings {
    * field is a placeholder the set as a whole is `'placeholder'` — a partially
    * real set must never present itself as evidence.
    */
-  readonly provenance: 'placeholder' | 'qualified';
+  readonly provenance: AdmissionBindingsProvenance;
+}
+
+/**
+ * Provenance describes the weakest field: one placeholder demotes the whole
+ * set. Kept as a function of the field list so reintroducing a placeholder is
+ * a one-line change that cannot forget to demote the provenance.
+ */
+export function admissionBindingsProvenance(
+  placeholderFields: readonly string[] = PLACEHOLDER_ADMISSION_BINDING_FIELDS,
+): AdmissionBindingsProvenance {
+  return placeholderFields.length === 0 ? 'qualified' : 'placeholder';
 }
 
 /** Read the real operational inputs and assemble the admission bindings. */
@@ -80,19 +86,18 @@ export function resolveDockerWorkloadAdmissionBindings(
       catalogSha256: catalog.sha256,
       toolchainDigest: base.toolchainDigest,
       profileSha256: frozenProfileCeilingSha256(),
-      performanceBudgetSha256: placeholderBinding('performanceBudgetSha256', options.configHash),
     },
-    // Not 'qualified': PLACEHOLDER_ADMISSION_BINDING_FIELDS is non-empty. Flip
-    // this only when that list is empty — the last placeholder decides.
-    provenance: 'placeholder',
+    provenance: admissionBindingsProvenance(),
   };
 }
 
 /**
  * A uniformly namespaced derived hash that CANNOT collide with a real
  * operational-artifact hash — it is never the bare config hash and never the
- * hash of any artifact. The admission audit event records
- * `bindingsProvenance: 'placeholder'` alongside it.
+ * hash of any artifact. Unused while
+ * {@link PLACEHOLDER_ADMISSION_BINDING_FIELDS} is empty; it is the mechanism a
+ * future not-yet-sourceable binding uses, alongside the
+ * `bindingsProvenance: 'placeholder'` the admission audit event then records.
  */
 export function placeholderBinding(field: string, configHash: string): string {
   return createHash('sha256').update(`ironcurtain-placeholder:${field}:${configHash}`).digest('hex');

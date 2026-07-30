@@ -98,7 +98,6 @@ export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'pro
 export interface DockerWorkloadAdmissionBindings {
   readonly catalogSha256: string;
   readonly profileSha256: string;
-  readonly performanceBudgetSha256: string;
   readonly toolchainDigest: string;
 }
 

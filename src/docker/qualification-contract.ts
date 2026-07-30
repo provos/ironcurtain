@@ -31,7 +31,6 @@ const qualificationBindingsSchema = z
     catalogSha256: sha256Schema,
     profileSha256: sha256Schema,
     toolchainDigest: sha256Schema,
-    performanceBudgetSha256: sha256Schema,
     runtimeTrustSchema: identifierSchema,
     relaySha256: sha256Schema.nullable(),
     watchdogSha256: sha256Schema.nullable(),

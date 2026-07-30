@@ -15,7 +15,7 @@
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -23,13 +23,10 @@ import {
   ledgerOuterResourceCreate,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
-import {
-  APPLE_VM_DAEMON_READINESS_TIMEOUT_MS,
-  nestedDaemonAgentEnv,
-  resolveNestedDaemonBundle,
-} from '../../src/docker-workload/session-daemon.js';
+import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../../src/docker-workload/session-daemon.js';
 import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
 import {
+  admissionBindingsProvenance,
   PLACEHOLDER_ADMISSION_BINDING_FIELDS,
   placeholderBinding,
   resolveDockerWorkloadAdmissionBindings,
@@ -438,7 +435,7 @@ describe('nested daemon — admission bindings are the real operational inputs',
     const catalog = loadPreloadedImageCatalog(catalogPath);
     const base = catalog.catalog.images.find((image) => image.logicalName === 'ironcurtain-base:latest');
 
-    const { bindings } = resolveDockerWorkloadAdmissionBindings({ catalogPath, configHash: ADMISSION_CONFIG_HASH });
+    const { bindings } = resolveDockerWorkloadAdmissionBindings({ catalogPath });
 
     expect(bindings.catalogSha256).toBe(sha256Hex(readFileSync(catalogPath)));
     expect(bindings.toolchainDigest).toBe(base?.toolchainDigest);
@@ -447,23 +444,23 @@ describe('nested daemon — admission bindings are the real operational inputs',
   it('binds the frozen profile ceiling by its exact bytes', () => {
     const { bindings } = resolveDockerWorkloadAdmissionBindings({
       catalogPath: getFrozenCatalogPath('apple-container'),
-      configHash: ADMISSION_CONFIG_HASH,
     });
 
     expect(bindings.profileSha256).toBe(sha256Hex(readFileSync(getFrozenProfileCeilingPath())));
   });
 
-  it('keeps the performance budget a namespaced placeholder and reports placeholder provenance', () => {
-    const { bindings, provenance } = resolveDockerWorkloadAdmissionBindings({
+  it('reports qualified provenance now that no binding is a placeholder', () => {
+    const { provenance } = resolveDockerWorkloadAdmissionBindings({
       catalogPath: getFrozenCatalogPath('apple-container'),
-      configHash: ADMISSION_CONFIG_HASH,
     });
 
-    expect(PLACEHOLDER_ADMISSION_BINDING_FIELDS).toEqual(['performanceBudgetSha256']);
-    expect(bindings.performanceBudgetSha256).toBe(placeholderBinding('performanceBudgetSha256', ADMISSION_CONFIG_HASH));
-    // One placeholder makes the whole set a placeholder — a partially real set
-    // must never present itself as qualified evidence.
-    expect(provenance).toBe('placeholder');
+    expect(PLACEHOLDER_ADMISSION_BINDING_FIELDS).toEqual([]);
+    expect(provenance).toBe('qualified');
+    // The mechanism is retained, not removed: one placeholder field would
+    // demote the whole set again, since a partially real set must never
+    // present itself as qualified evidence.
+    expect(admissionBindingsProvenance(['catalogSha256'])).toBe('placeholder');
+    expect(placeholderBinding('catalogSha256', ADMISSION_CONFIG_HASH)).not.toBe(ADMISSION_CONFIG_HASH);
   });
 
   it('fails closed when the catalog lacks the base role it binds', () => {
@@ -474,21 +471,8 @@ describe('nested daemon — admission bindings are the real operational inputs',
     catalog.images = catalog.images.filter((image) => image.logicalName !== 'ironcurtain-base:latest');
     writeFileSync(truncated, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600 });
 
-    expect(() =>
-      resolveDockerWorkloadAdmissionBindings({ catalogPath: truncated, configHash: ADMISSION_CONFIG_HASH }),
-    ).toThrow(/missing the ironcurtain-base:latest role/u);
-  });
-});
-
-describe('nested daemon — readiness ceiling tracks the frozen performance budget', () => {
-  it('equals the frozen apple-rootless-vfs arm64 daemonReadinessMs', () => {
-    // The budget lives in the test tree (the package does not ship it), so the
-    // wiring layer duplicates the value as a constant. This is the guard that
-    // keeps the duplicate honest.
-    const budget = JSON.parse(
-      readFileSync(resolve('test/docker-workload/performance-budget.apple-rootless-vfs-arm64.json'), 'utf8'),
-    ) as { maxima: { daemonReadinessMs: number } };
-
-    expect(APPLE_VM_DAEMON_READINESS_TIMEOUT_MS).toBe(budget.maxima.daemonReadinessMs);
+    expect(() => resolveDockerWorkloadAdmissionBindings({ catalogPath: truncated })).toThrow(
+      /missing the ironcurtain-base:latest role/u,
+    );
   });
 });

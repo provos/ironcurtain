@@ -69,7 +69,7 @@ process.stdout.write(
 );
 
 // Fail fast: recompute every disk-derivable binding before burning test time, so a drifted TCB
-// artifact (catalog, profile, watchdog policy, build-egress manifest, performance budget) aborts
+// artifact (catalog, profile, watchdog policy, build-egress manifest) aborts
 // the gate instead of being blessed by a run that merely echoes the contract back at itself. The
 // commit warning goes first because "the tree moved past the freeze commit" usually explains drift.
 warnOnSourceCommitDrift(contract.value.bindings.sourceCommit, repositoryRoot);

@@ -30,14 +30,13 @@ import {
 import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 
 /**
- * Readiness ceiling for the in-VM daemon.
+ * Readiness ceiling for the in-VM daemon: a generous upper bound on how long
+ * rootless dockerd inside a fresh session VM may take to answer `docker info`.
+ * Measured boot on the qualified host is a few seconds, so 90s is slack for a
+ * cold or loaded machine, not a target. Exceeding it means the daemon is not
+ * coming up and admission fails closed rather than waiting forever.
  *
- * Mirrors `maxima.daemonReadinessMs` in the frozen performance budget
- * `test/docker-workload/performance-budget.apple-rootless-vfs-arm64.json`.
- * That artifact is deliberately NOT read here: it lives in the test tree, which
- * the published package does not ship (`package.json` `files`), so a runtime
- * read would ENOENT in an installed copy. A freeze-guard test asserts this
- * constant still equals the frozen budget's value.
+ * An ordinary reviewed constant — change it by ordinary review.
  */
 export const APPLE_VM_DAEMON_READINESS_TIMEOUT_MS = 90_000;
 
@@ -93,7 +92,7 @@ export interface StartAppleVmNestedDaemonOptions {
   /** The already-started agent container, i.e. the VM the daemon runs inside. */
   readonly containerId: string;
   readonly nestedDaemon: DockerWorkloadBundleHandle;
-  /** Defaults to the frozen {@link APPLE_VM_DAEMON_READINESS_TIMEOUT_MS}. */
+  /** Defaults to {@link APPLE_VM_DAEMON_READINESS_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
 }

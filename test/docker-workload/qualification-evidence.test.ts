@@ -187,7 +187,6 @@ function evidenceFixture(): {
         profileCeilingSha256: hash,
         generatedProfileSha256: hash,
         preloadedCatalogSha256: hash,
-        performanceBudgetSha256: hash,
         clientToolchainSha256: hash,
         relayBinarySha256: hash,
         relayConfigSha256: hash,

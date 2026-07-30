@@ -43,12 +43,13 @@ When a Docker sibling-container variant is ever qualified, change the ASSERT, an
   contract binds — see qualification-artifacts.ts)
 - `profileSha256` = sha256 of `config/docker-workload/profile-ceiling.json` via `readHardenedFile`
   (REAL; new `getFrozenProfileCeilingPath()` in docker/docker-workload-paths.ts)
-- `performanceBudgetSha256` = STILL a namespaced placeholder. WHY: the only frozen budget is
-  `test/docker-workload/performance-budget.<variant>-<arch>.json` and `package.json` `files` does
-  NOT ship `test/` — a runtime read would ENOENT in an installed package. Listed in the exported
-  `PLACEHOLDER_ADMISSION_BINDING_FIELDS`.
-- `bindingsProvenance` therefore stays `'placeholder'` (the enum has no third value, and the
-  weakest field decides). Flip to `'qualified'` only when that list is empty.
+- `performanceBudgetSha256` = DELETED (2026-07-30, plan §16.11). It was the LAST placeholder.
+- `bindingsProvenance` is therefore now `'qualified'`: `PLACEHOLDER_ADMISSION_BINDING_FIELDS` is an
+  empty `readonly (keyof DockerWorkloadAdmissionBindings)[]` and provenance is DERIVED from it via
+  `admissionBindingsProvenance(fields = PLACEHOLDER_ADMISSION_BINDING_FIELDS)` — the weakest field
+  still decides, so re-listing a field demotes the whole set again. `placeholderBinding()` is kept,
+  unused, as the mechanism. `resolveDockerWorkloadAdmissionBindings` no longer takes `configHash`
+  (it only ever namespaced the placeholder); `admitDockerWorkloadBundle` still does.
 Catalog path comes from `imageProvisioningForConfig(...).catalogPath` — the SAME mapping that
 later picks the image, so lease hash and loaded archive cannot diverge.
 

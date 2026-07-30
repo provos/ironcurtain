@@ -117,7 +117,6 @@ function runnerFixture() {
       catalogSha256: '4'.repeat(64),
       profileSha256: '5'.repeat(64),
       toolchainDigest: '6'.repeat(64),
-      performanceBudgetSha256: '7'.repeat(64),
       runtimeTrustSchema: 'runtime-trust-v1',
       relaySha256: null,
       watchdogSha256: '8'.repeat(64),

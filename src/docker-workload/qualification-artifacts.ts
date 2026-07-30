@@ -33,7 +33,14 @@ const CATALOG_RUNTIME_KIND: Partial<Record<QualificationContract['platform'], Co
   'docker-desktop': 'docker',
 };
 
-type FileHashBinding = 'profileSha256' | 'watchdogSha256' | 'buildEgressSha256' | 'performanceBudgetSha256';
+type FileHashBinding = 'profileSha256' | 'watchdogSha256' | 'buildEgressSha256';
+
+/** Repository-relative artifact backing each raw-file-hash binding. */
+const FILE_HASH_BINDINGS: readonly (readonly [FileHashBinding, string])[] = [
+  ['profileSha256', 'config/docker-workload/profile-ceiling.json'],
+  ['watchdogSha256', 'config/docker-workload/resource-watchdog-policy.json'],
+  ['buildEgressSha256', 'config/docker-workload/build-egress-manifest.json'],
+];
 
 /**
  * Verify every disk-derivable binding of a frozen contract against the repository artifacts.
@@ -63,7 +70,7 @@ export function verifyQualificationArtifactBindings(contract: QualificationContr
   assertBinding('runtimeImageId', bindings.runtimeImageId, base.runtimeImageId, baseSource);
   assertBinding('toolchainDigest', bindings.toolchainDigest, base.toolchainDigest, baseSource);
 
-  for (const [binding, relativePath] of fileHashBindings(contract)) {
+  for (const [binding, relativePath] of FILE_HASH_BINDINGS) {
     const path = join(root, relativePath);
     assertBinding(binding, bindings[binding], artifactSha256(path, binding), path);
   }
@@ -74,20 +81,6 @@ export function verifyQualificationArtifactBindings(contract: QualificationContr
     RUNTIME_TRUST_SCHEMA,
     'src/docker/runtime-trust.ts RUNTIME_TRUST_SCHEMA',
   );
-}
-
-/** Repository-relative artifact for each raw-file-hash binding, keyed off the contract's identity. */
-function fileHashBindings(contract: QualificationContract): readonly (readonly [FileHashBinding, string])[] {
-  return [
-    ['profileSha256', 'config/docker-workload/profile-ceiling.json'],
-    ['watchdogSha256', 'config/docker-workload/resource-watchdog-policy.json'],
-    ['buildEgressSha256', 'config/docker-workload/build-egress-manifest.json'],
-    // A future variant resolves its own budget rather than inheriting the apple one.
-    [
-      'performanceBudgetSha256',
-      `test/docker-workload/performance-budget.${contract.variant}-${contract.architecture}.json`,
-    ],
-  ];
 }
 
 function resolveCatalogPath(contract: QualificationContract, root: string): string {

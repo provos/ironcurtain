@@ -1405,8 +1405,8 @@ interface DockerWorkloadAdmissionForSessionOptions {
  * nothing behind: the backend must be one the same-VM nested daemon is
  * qualified on, and the operational bindings must resolve from the real staged
  * catalog and frozen profile ceiling. `bindingsProvenance` is whatever the
- * binding resolver reports — it stays `'placeholder'` while any single field
- * still is one, so a partially real set can never present itself as evidence.
+ * binding resolver reports — it drops to `'placeholder'` if any single field
+ * ever is one, so a partially real set can never present itself as evidence.
  */
 async function admitDockerWorkloadForSession(
   options: DockerWorkloadAdmissionForSessionOptions,
@@ -1421,7 +1421,6 @@ async function admitDockerWorkloadForSession(
   const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
   const { bindings, provenance } = resolveDockerWorkloadAdmissionBindings({
     catalogPath: admissionCatalogPath(options.dockerWorkload, options.runtimeKind),
-    configHash,
   });
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   return admitDockerWorkloadBundle({

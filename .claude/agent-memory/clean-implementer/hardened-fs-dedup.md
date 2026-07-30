@@ -17,7 +17,7 @@ frozen digests). Families:
   `must not be group/world writable: ${path}` (0o022) / `size is outside the allowed range: ${stats.size}` /
   `is not valid JSON` / `is invalid: ${issue}`. Returns `{path,sha256,sizeBytes,value}`, safeParse.
   Sites: qualification-contract loadStrictJson (3 labels), resource-watchdog policy, watchdog-policy template,
-  performance-budget, linux-dependency-abi, client-toolchain. preloaded-image-catalog uses `readHardenedFile`
+  linux-dependency-abi, client-toolchain. preloaded-image-catalog uses `readHardenedFile`
   for bytes only (keeps its own `startsWith('/')` + custom JSON msgs).
 - **Family B** (egress load, LEFT): identical to A EXCEPT `must be a regular file` / `must not be group/world
   writable` have NO `: ${path}` suffix. Migrating would need a single-use path-suffix toggle. Left; egress still

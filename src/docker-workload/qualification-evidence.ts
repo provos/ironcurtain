@@ -49,7 +49,6 @@ const evidenceBindingsSchema = z
     profileCeilingSha256: sha256Schema,
     generatedProfileSha256: sha256Schema,
     preloadedCatalogSha256: sha256Schema,
-    performanceBudgetSha256: sha256Schema,
     clientToolchainSha256: sha256Schema,
     relayBinarySha256: sha256Schema.nullable(),
     relayConfigSha256: sha256Schema.nullable(),

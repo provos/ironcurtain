@@ -32,7 +32,6 @@ export const WATCHDOG_ENTRYPOINT_PATH = resolve('dist/docker-workload/resource-w
 export const ADMISSION_BINDINGS = {
   catalogSha256: '2'.repeat(64),
   profileSha256: '3'.repeat(64),
-  performanceBudgetSha256: '4'.repeat(64),
   toolchainDigest: '6'.repeat(64),
 } as const;
 
@@ -47,7 +46,6 @@ export const EVIDENCE_BINDINGS = {
   profileCeilingSha256: 'a'.repeat(64),
   generatedProfileSha256: 'a'.repeat(64),
   preloadedCatalogSha256: 'a'.repeat(64),
-  performanceBudgetSha256: 'a'.repeat(64),
   clientToolchainSha256: 'a'.repeat(64),
   relayBinarySha256: null,
   relayConfigSha256: null,

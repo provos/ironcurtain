@@ -36,8 +36,10 @@ command (fail fast, no evidence dir created on drift).
   `preloaded-catalog.apple-container.json`, `docker-desktop` → `preloaded-catalog.docker.json`,
   `linux-docker` deliberately unmapped since no Linux-frozen catalog exists), `runtimeImageId` +
   `toolchainDigest` (from the catalog's `ironcurtain-base:latest` role), `profileSha256`,
-  `watchdogSha256`, `buildEgressSha256`, `performanceBudgetSha256` (path derived as
-  `test/docker-workload/performance-budget.<variant>-<arch>.json`), `runtimeTrustSchema`.
+  `watchdogSha256`, `buildEgressSha256`, `runtimeTrustSchema`. (The `performanceBudgetSha256`
+  binding and the whole performance-budget artifact were DELETED 2026-07-30, plan §16.11 — a file of
+  timeouts is not a security property under a trusted single-operator host. `FILE_HASH_BINDINGS` is
+  now a module constant, not a function of the contract's variant/architecture.)
 - NOT verified, on purpose: `publicCaSha256` (Node `rootCertificates`, version-scoped, not a repo
   file), `sourceCommit`/`dirtyPatchSha256` (git state — the driver WARNS on HEAD drift to stderr and
   keeps going, because the tree moves while the contract stays frozen), `relaySha256` (nullable, no
