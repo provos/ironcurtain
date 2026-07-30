@@ -4,7 +4,7 @@
   "sourceDockerfiles": [
     {
       "path": "docker/Dockerfile.base.arm64",
-      "sha256": "c96da5f72c39ad1ba6d4e8241b7e116d862402f56ccb7a94ab21be9049489caf"
+      "sha256": "f7de54019dc15d907b852131d0332facdf79761111b7a4f87b7ecf9557b3e661"
     },
     {
       "path": "docker/Dockerfile.claude-code",

@@ -5,18 +5,18 @@
   "platform": "apple-container",
   "architecture": "arm64",
   "bindings": {
-    "sourceCommit": "97d8842311ed64452282b39e9c7ef28f2ce70ed1",
+    "sourceCommit": "7b86484c3e52eb6c46c106c96ca55a0fba38db21",
     "dirtyPatchSha256": null,
-    "runtimeImageId": "sha256:420fd9c20966eafaf1a95019374670173fc409e51200db935626b45aa93cdb88",
+    "runtimeImageId": "sha256:ad1aa58ec0c14477998ece0ec09ecc94babda905042135ddac7a524d9c33cf4e",
     "publicCaSha256": "703a92a89a405b71e7d5480d9af648e5db912f44fb1b6ba73cd83aa010fa1726",
-    "catalogSha256": "a1e0adcbe8b312b724f13d7181096bca7789415d6b9999acdccfee163112c294",
+    "catalogSha256": "df95781e4d95bcd7b410fc7e248b8773a8570f50386f4101a5fa1f4d8c9f1139",
     "profileSha256": "10b1d6bb4b432d06ff508bef5450d0252db1204637f651c95900b0f6b3f1824d",
-    "toolchainDigest": "7d3de9785cdd561390ea4f1b23e3635c1cfd6f4c51eb0ca0a985488737a5e328",
+    "toolchainDigest": "890e6d80721c8508f3d7214bf194075a87395e2faa5304f0ea0012d86d2634b2",
     "performanceBudgetSha256": "194bafe175d97e4575dbeb1ba4caedce00695b9422616696b965730cbedb5ddb",
     "runtimeTrustSchema": "runtime-trust-v1",
     "relaySha256": null,
     "watchdogSha256": "48fbd77425ae04f089f1f09cad0849bd473f8c4d309ebaf7bee9f81dd02e71e0",
-    "buildEgressSha256": "054d6062b0f1dfc39ae268ab7aa9a790b74f7fbbff1fd344705cb376c4b67214"
+    "buildEgressSha256": "8639e460feaa4e87370d26306e3d0cb3914e021f34adc000c188677057d47d47"
   },
   "commands": [
     {
