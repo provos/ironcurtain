@@ -754,7 +754,7 @@ relaxed that binding would need a stronger per-test binding again.
 Freeze progress (2026-07-23; bindings re-frozen 2026-07-29 for catalog generation
 `ironcurtain-preloaded-arm64-v2`, see §16.10): the `apple-container`/`arm64` contract is frozen at
 `config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json` (`contractId:
-apple-rootless-vfs-arm64-v1`, sha256 `d054bc8d…`). It carries twelve commands. Three are executable and
+apple-rootless-vfs-arm64-v1`, sha256 `81340a86…`). It carries twelve commands. Three are executable and
 green/zero-skip on the apple-container host, each binding its test-file set and exact test count as
 measured by the pinned Vitest reporter (146 tests total): `docker-manager` (required, backend-agnostic
 container-argument logic,

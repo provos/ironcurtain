@@ -5,7 +5,7 @@
   "platform": "apple-container",
   "architecture": "arm64",
   "bindings": {
-    "sourceCommit": "7b86484c3e52eb6c46c106c96ca55a0fba38db21",
+    "sourceCommit": "aed5d38e98658b6497e05c5e09fec73a4c2acf9e",
     "dirtyPatchSha256": null,
     "runtimeImageId": "sha256:ad1aa58ec0c14477998ece0ec09ecc94babda905042135ddac7a524d9c33cf4e",
     "publicCaSha256": "703a92a89a405b71e7d5480d9af648e5db912f44fb1b6ba73cd83aa010fa1726",
