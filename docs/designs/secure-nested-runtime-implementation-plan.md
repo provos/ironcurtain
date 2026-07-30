@@ -116,7 +116,7 @@ Profile discovery is cumulative, finite, and reruns in a fresh bundle at every l
 | Level         | Only permitted addition                                                                                                        |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | P0 STRICT     | Existing hardened outer defaults, `cap-drop=ALL`, no devices, default enforcing LSM/seccomp/mount masks                        |
-| P1 ID-MAP     | Exact subordinate UID/GID files/helpers, `NoNewPrivs=false`, and only outer `SETUID`/`SETGID` for rootless ID mapping          |
+| P1 ID-MAP     | Exact subordinate UID/GID files and id-mapping helpers, `NoNewPrivs=false`, and only outer `SETUID`/`SETGID` for rootless ID mapping (see §16.10: on Apple the helpers must carry file capabilities and **not** the setuid bit) |
 | P2 SECCOMP    | One deny-by-default, hash-pinned seccomp artifact adding only denial-proven namespace/OCI-lifecycle syscalls                   |
 | P3 APPARMOR   | One named enforcing, hash-pinned AppArmor artifact adding only denial-proven user/mount-namespace and exact private-path rules |
 | P4 MOUNT-MASK | One finite exact mount-mask manifest for bundle-private `/run`/data and enumerated nonsensitive guest proc/sys entries         |
@@ -235,6 +235,10 @@ Docker Desktop Enhanced Container Isolation or Sysbox is an optional administrat
 ### 4.4 macOS Apple `container`: Docker inside one VM
 
 Apple assigns each outer container its own lightweight VM. Run Docker inside the agent's existing per-session VM; a sibling Apple container would be a different VM and would complicate path, socket, and lifecycle sharing.
+
+**Variant 1 is the implemented topology** (decided 2026-07-29; see §16.10 for the live evidence and its
+consequences). The daemon is bootstrapped inside the agent's own VM from a toolchain staged by the agent
+base image, and the Docker API is a VM-local UDS that is never published to the host.
 
 Try in order:
 
@@ -746,9 +750,10 @@ catch a silently deleted or skipped test, while the hashed stock Vitest JSON rep
 per-test enumeration as evidence. This trade depends on the source-commit binding; a variant that ever
 relaxed that binding would need a stronger per-test binding again.
 
-Freeze progress (2026-07-23): the `apple-container`/`arm64` contract is frozen at
+Freeze progress (2026-07-23; bindings re-frozen 2026-07-29 for catalog generation
+`ironcurtain-preloaded-arm64-v2`, see §16.10): the `apple-container`/`arm64` contract is frozen at
 `config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json` (`contractId:
-apple-rootless-vfs-arm64-v1`, sha256 `36a71e6e…`). It carries twelve commands. Three are executable and
+apple-rootless-vfs-arm64-v1`, sha256 `4e3a1a10…`). It carries twelve commands. Three are executable and
 green/zero-skip on the apple-container host, each binding its test-file set and exact test count as
 measured by the pinned Vitest reporter (146 tests total): `docker-manager` (required, backend-agnostic
 container-argument logic,
@@ -882,9 +887,11 @@ Each requires its own threat model and gates.
 
 - `src/docker-workload/config.ts` — requested and resolved capability types.
 - `src/docker-workload/infrastructure.ts` — common bundle lifecycle and budget partition.
-- `src/docker-workload/rootless-sidecar.ts` — Linux/Desktop bootstrap, health, profile record, and UDS paths.
+- `src/docker-workload/rootless-sidecar.ts` — Linux/Desktop bootstrap, health, profile record, and UDS paths. Not built: no Linux/Desktop backend is qualified, and §9.3 classifies baseline Desktop as infeasible under the frozen topology.
 - `src/docker-workload/client-toolchain.ts` — pinned client-only Docker CLI/Buildx/Compose installation manifest and API compatibility preflight.
-- `src/docker-workload/apple-vm-daemon.ts` — Apple rootless/rootful/custom-init bootstrap variants.
+- [`src/docker-workload/apple-vm-daemon.ts`](../../src/docker-workload/apple-vm-daemon.ts) — frozen same-VM rootless bootstrap argv and the fail-closed readiness adjudication (§4.4 variant 1). Pure logic over an injected exec seam; variants 2 and 3 are unbuilt.
+- [`src/docker-workload/session-daemon.ts`](../../src/docker-workload/session-daemon.ts) — backend qualification assert and the per-session decision of whether a create launches the nested daemon component.
+- [`src/docker-workload/admission-bindings.ts`](../../src/docker-workload/admission-bindings.ts) — real hash-bound operational inputs for the lease, replacing the placeholder seam.
 - `src/docker-workload/image-staging.ts` — sealed archive metadata and later OCI ingress.
 - [`src/docker/preloaded-image-catalog.ts`](../../src/docker/preloaded-image-catalog.ts) and [`src/docker/oci-image-archive.ts`](../../src/docker/oci-image-archive.ts) — trusted catalog resolution, streaming sealed-archive verification/loading, backend-specific immutable ID/config comparison, catalog hash, and no-build fallback.
 - `src/docker-workload/effective-capabilities.ts` — per-resource/platform `enforced`/`observed`/`unsupported` record.
@@ -895,7 +902,7 @@ Each requires its own threat model and gates.
 - `src/docker/outbound-transport.ts` — destination-bound parent-proxy transport shared by MITM and registry/package paths.
 - `src/docker/mediated-egress.ts` — the single credential-free forwarder (backpressured streaming, per-request byte/time ceilings, optional session ledger and internal redirect-following, fail-closed rejection) used by both egress proxies; deliberately separate from the credential-injecting provider path.
 - `src/docker/egress-forwarding.ts` — shared request/response shaping (`buildRequestUrl`/`toOutgoingHeaders`/`sanitizeResponseHeaders`) for both egress proxies.
-- `docker/nested-daemon/` — pinned purpose-built daemon image, entrypoint, health probe, and image manifest.
+- [`docker/nested-daemon/`](../../docker/nested-daemon/) — pinned purpose-built daemon image. Under the same-VM topology (§16.10) it is not run as a container; it is the pinned upstream source whose digest the agent base image copies its toolchain from, and it remains the image a future sibling-daemon backend would launch. The separate entrypoint and health probe are unbuilt: the bootstrap argv and the readiness adjudication live host-side in `apple-vm-daemon.ts`, where they are testable and not agent-writable.
 - `scripts/spikes/secure-nested-docker/` — timeboxed 0A ledger/traps/recovery, 0B probes, 0F freeze inputs, and 0C qualification/evidence.
 - `test/docker-workload/qualification-contracts/<variant>.json` — one canonical, fully expanded, hash-pinned contract per concrete variant.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
@@ -1109,6 +1116,47 @@ of the isolation boundary. Corrections applied:
 
 Net effect: qualification proves a *build* met a pre-registered bar and is run at release time; sessions
 bind operational inputs and live preflight. The two are no longer conflated.
+
+### 16.10 Same-VM daemon topology — implemented, with live corrections (record, 2026-07-29)
+
+Phase 1 implemented the nested daemon lifecycle on the only backend with qualification evidence, Apple
+`container`, using §4.4 **variant 1**: rootless dockerd inside the agent's own per-session VM. A sibling
+daemon VM was considered and rejected: it would have required relaying the Docker API out of the daemon
+VM and back into the agent VM, which §5.3 forbids ("never publish it outside the VM"). Because there is
+no separate daemon container, the *agent* create is the §8.2 step-4 daemon-component create; the
+watchdog-freshness gate was therefore generalized from a role-name set to a per-create predicate that
+`createLedgeredAgentContainer` derives, so an ordinary session stays ungated and a same-VM session
+cannot forget the gate.
+
+Two live-gate findings corrected assumptions that unit tests could not reach. Both were found by booting
+the real rebuilt image in a real VM under the product capability set.
+
+- **The id-map helpers must carry file capabilities, not the setuid bit.** Writing a multi-range
+  `uid_map` requires `CAP_SYS_ADMIN` *in the target user namespace*. The kernel grants all capabilities
+  in a namespace to a process whose euid owns that namespace, and rootlesskit creates it as the runtime
+  user — so an euid-1000 helper is privileged there for free. Debian's `uidmap` package ships
+  `newuidmap`/`newgidmap` **setuid-root**, which forfeits that grant and then demands real
+  `CAP_SYS_ADMIN`, absent from the VM's clamped bounding set (`CapBnd 0xc0`). Adding `CAP_DAC_OVERRIDE`
+  only moves the failure from `open` to `write`, and adding `CAP_SYS_ADMIN` would breach the frozen P1
+  ceiling. The base image therefore applies `cap_setuid+ep`/`cap_setgid+ep` and **removes** the setuid
+  bit, matching what the frozen `nested-daemon` image already shipped. This is strictly less privilege,
+  not more; §2.3's P1 row should be read as "id-mapping helpers", not specifically "setuid helpers".
+- **No step of the bootstrap can run as root.** The VM's bounding set has no `CAP_CHOWN`, so a runtime
+  `install -d -o 1000` is impossible. Since `/run` is ext4 in the VM rather than a tmpfs, the API root is
+  created by the image (as `/run/ironcurtain` already is) and the bootstrap only verifies it. Per §5.3 the
+  verification is a real mode-check that does not follow symlinks — a tampered writable layer, which
+  snapshot resume would persist, must not be able to redirect the API root onto a host-backed mount.
+
+**Accepted consequence — the toolchain ships to every arm64 agent image.** `Dockerfile.base.arm64` is
+selected by architecture alone, not by backend or by the `dockerWorkload` flag, so all arm64 agent
+containers now carry the Docker client, plugins, and daemon binaries (about +400 MB) plus the subordinate
+range and id-map helpers. On Docker Desktop this is inert (default seccomp denies `unshare`). On Apple it
+means an untrusted agent can start a rootless daemon in a session that never opted in — bounded by its
+own disposable `--network none` VM, and not a new resource channel, since that agent can already consume
+VM disk directly. Conditional host-side staging was considered and rejected as complexity that does not
+buy a proportionate guarantee. Consequently the `base` catalog role no longer declares an empty toolchain
+tuple, and §9.2's "client-only agent layer" holds only for the sibling-daemon topologies: same-VM
+necessarily places the daemon binaries in the agent image.
 
 ## 17. Primary references
 

@@ -62,6 +62,20 @@ unchanged, so the `buildEgressSha256` qualification binding is unaffected) OR re
 manifest with `host`/`connection` in every rule's `strip`. Pinned by a test in
 `test/docker/docker-workload-egress.test.ts` ("known frozen-manifest gap").
 
+## TRAP: editing ANY reviewed Dockerfile reds 22 tests until the manifest is re-frozen
+`config/docker-workload/build-egress-manifest.json` → `sourceDockerfiles[]` byte-binds
+`docker/Dockerfile.base.arm64`, `.claude-code`, `.codex`, `.goose` by sha256, and
+`verifyBuildEgressDockerfileSources` fails CLOSED at guard CONSTRUCTION
+(`build-egress Dockerfile hash mismatch: <path>`). So a one-line Dockerfile edit takes out
+~22/33 of `test/docker/docker-workload-egress.test.ts` (every case that builds a
+`buildEgress:'ironcurtain-dockerfiles'` listener) — nothing else in test/docker or
+test/docker-workload breaks. In particular `qualification-artifacts.ts` binds
+`buildEgressSha256` to the MANIFEST JSON bytes, not the Dockerfile bytes, so the
+qualification freeze guard stays GREEN. Re-freeze = update that one `sha256` field, but it
+is a REVIEW binding ("these exact bytes were reviewed"), so it belongs to a supervised
+re-freeze step, not to the Dockerfile edit. Check the manifest before touching
+`docker/Dockerfile.*` and tell the requester the blast radius up front.
+
 ## Testing pattern that worked
 `test/docker/build-egress-proxy.test.ts`: temp repo dir with `docker/Dockerfile.fixture` (0600) +
 `manifest.json` (0400) → real `createBuildEgressGuard`. For "forwards"/"rejected" e2e: a real

@@ -13,8 +13,9 @@
  *   - destroyDockerInfrastructure runs teardown first and skips cleanupContainers
  *     for the ledgered resources.
  *   - ledgerOuterResourceCreate proves the watchdog is fresh before a
- *     nested-daemon-role create (the §8.2 step-4 gate; no production nested
- *     daemon exists in 0F, so a fake one exercises the seam).
+ *     nested-daemon-role create and leaves an undeclared agent-role create
+ *     ungated (the §8.2 step-4 gate by role; the same-VM topology's declared
+ *     agent create is covered in nested-daemon-wiring.test.ts).
  *   - dockerWorkloadSessionMetadata carries the lease tuple.
  */
 
@@ -80,7 +81,9 @@ async function admit(
 ): Promise<DockerWorkloadBundleHandle> {
   const handle = await admitDockerWorkloadBundle({
     runtime: runtime.runtime,
-    runtimeKind: 'docker',
+    // apple-container is the only backend the nested daemon is qualified on, so
+    // it is the only backend on which a bundle handle can exist at all.
+    runtimeKind: 'apple-container',
     bundleId: BUNDLE_ID,
     workspaceRoot: join(getHome(), 'workspace'),
     bindings: ADMISSION_BINDINGS,
@@ -98,7 +101,7 @@ async function admit(
   return handle;
 }
 
-/** Scripted uds/docker PreContainerInfrastructure carrying an admitted handle. */
+/** Scripted uds/apple-container PreContainerInfrastructure carrying an admitted handle. */
 function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle): PreContainerInfrastructure {
   const bundleDir = join(tempDir, 'bundle');
   const workspaceDir = join(tempDir, 'workspace');
@@ -124,7 +127,7 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
-    runtimeKind: 'docker',
+    runtimeKind: 'apple-container',
     topology: 'uds',
     useTcp: false,
     socketsDir,

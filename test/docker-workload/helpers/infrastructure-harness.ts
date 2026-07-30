@@ -11,6 +11,10 @@ import { tmpdir } from 'node:os';
 import { afterEach, beforeEach } from 'vitest';
 import { loadResourceWatchdogPolicy } from '../../../src/docker/resource-watchdog.js';
 import { closeDockerWorkloadLease, loadDockerWorkloadLease } from '../../../src/docker-workload/bundle-lease.js';
+import {
+  APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT,
+  APPLE_VM_DAEMON_API_DIR_STAT_ARGV,
+} from '../../../src/docker-workload/apple-vm-daemon.js';
 import type { WatchdogSupervisorController } from '../../../src/docker-workload/infrastructure.js';
 import type { ResourceWatchdogSupervisorStatus } from '../../../src/docker-workload/resource-watchdog-supervisor.js';
 import { createMockDocker } from '../../helpers/docker-mocks.js';
@@ -18,6 +22,7 @@ import type {
   ContainerRuntime,
   DockerContainerConfig,
   DockerContainerInfo,
+  DockerExecResult,
   DockerNetworkInfo,
 } from '../../../src/docker/types.js';
 
@@ -93,30 +98,64 @@ export function createFakeClock(baseIso = '2026-07-20T12:00:00.000Z', jumpPerSle
   };
 }
 
+/** `docker info` of a daemon in the one qualified configuration (rootless + vfs). */
+export const QUALIFIED_DOCKER_INFO = {
+  Driver: 'vfs',
+  SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'],
+  ServerVersion: '29.2.1',
+} as const;
+
+/**
+ * Default in-container exec responder: every bootstrap command succeeds and the
+ * readiness probe reports the qualified daemon. Recognises each command by its
+ * verb rather than its full argv, so it stays correct if a frozen argv gains
+ * flags. The stat reply is the module's own expected string, so a change to the
+ * API-directory contract cannot leave this harness silently asserting the old one.
+ */
+export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExecResult {
+  if (argv.includes('info')) return { exitCode: 0, stdout: JSON.stringify(QUALIFIED_DOCKER_INFO), stderr: '' };
+  if (argv[0] === APPLE_VM_DAEMON_API_DIR_STAT_ARGV[0]) {
+    return { exitCode: 0, stdout: `${APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT}\n`, stderr: '' };
+  }
+  return { exitCode: 0, stdout: '', stderr: '' };
+}
+
 export interface EventRuntime {
   readonly runtime: ContainerRuntime;
   readonly events: string[];
+  /** Every exec argv in order, kept out of `events` so lifecycle assertions stay stable. */
+  readonly execs: (readonly string[])[];
   readonly containers: DockerContainerInfo[];
   readonly networks: DockerNetworkInfo[];
   setLeasePath(path: string): void;
+}
+
+export interface CreateEventRuntimeOptions {
+  readonly containers?: readonly DockerContainerInfo[];
+  readonly networks?: readonly DockerNetworkInfo[];
+  /** Override the in-container exec responder to script a daemon failure. */
+  readonly exec?: (argv: readonly string[]) => DockerExecResult | Promise<DockerExecResult>;
 }
 
 /**
  * Fake ContainerRuntime that records lifecycle calls and, when given the lease
  * path, proves that every `create()` was preceded by its ledger append.
  */
-export function createEventRuntime(initial?: {
-  readonly containers?: readonly DockerContainerInfo[];
-  readonly networks?: readonly DockerNetworkInfo[];
-}): EventRuntime {
+export function createEventRuntime(initial?: CreateEventRuntimeOptions): EventRuntime {
   const containers: DockerContainerInfo[] = structuredClone((initial?.containers ?? []) as DockerContainerInfo[]);
   const networks: DockerNetworkInfo[] = structuredClone((initial?.networks ?? []) as DockerNetworkInfo[]);
   const events: string[] = [];
+  const execs: (readonly string[])[] = [];
+  const respond = initial?.exec ?? respondHealthyAppleVmDaemon;
   let leasePath: string | undefined;
   let sequence = 0;
 
   const runtime: ContainerRuntime = {
     ...createMockDocker(),
+    async exec(_container: string, argv: readonly string[]) {
+      execs.push([...argv]);
+      return respond(argv);
+    },
     async create(config: DockerContainerConfig) {
       events.push(`create:${config.name}`);
       if (leasePath !== undefined) {
@@ -175,7 +214,7 @@ export function createEventRuntime(initial?: {
       if (index !== -1) networks.splice(index, 1);
     },
   };
-  return { runtime, events, containers, networks, setLeasePath: (path) => (leasePath = path) };
+  return { runtime, events, execs, containers, networks, setLeasePath: (path) => (leasePath = path) };
 }
 
 export interface FakeSupervisorOptions {

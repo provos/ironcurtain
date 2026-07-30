@@ -38,3 +38,8 @@ export function getFrozenBuildEgressManifestPath(): string {
 export function getFrozenRegistryEgressManifestPath(): string {
   return resolve(getFrozenDockerWorkloadDir(), 'registry-egress-manifest.json');
 }
+
+/** Frozen host-authoritative outer profile ceiling bound at Docker-workload admission. */
+export function getFrozenProfileCeilingPath(): string {
+  return resolve(getFrozenDockerWorkloadDir(), 'profile-ceiling.json');
+}

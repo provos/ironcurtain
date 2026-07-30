@@ -36,6 +36,11 @@ import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
 import { buildAgentUidRemap, buildUdsSocketMounts, createLedgeredAgentContainer } from './docker-infrastructure.js';
+import {
+  nestedDaemonAgentEnv,
+  resolveNestedDaemonBundle,
+  startAppleVmNestedDaemon,
+} from '../docker-workload/session-daemon.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import {
@@ -664,6 +669,13 @@ async function runPtySessionAttempt(
       mounts.push({ source: skillsMount.hostDir, target: skillsMount.target, readonly: true });
     }
 
+    // Same-VM nested daemon (§4.4 variant 1) — mirrors the batch branch in
+    // docker-infrastructure.ts::createSessionContainersAttempt. Present only
+    // for an admitted Docker-workload bundle; §8.2 step 6 gives the agent the
+    // VM-local `DOCKER_HOST`, and the bootstrap runs after `docker.start`.
+    const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
+    Object.assign(env, nestedDaemonAgentEnv(nestedDaemon));
+
     // Pass initial terminal size so start-claude.sh can set PTY dimensions
     // before Claude starts, eliminating the resize race condition.
     const { columns, rows } = process.stdout;
@@ -733,6 +745,7 @@ async function runPtySessionAttempt(
     // Shared with createSessionContainers in the batch path.
     containerId = await createLedgeredAgentContainer({
       dockerWorkload,
+      runtimeKind: infra.runtimeKind,
       deterministicName: mainContainerName,
       baseLabels: resourceLabels,
       mounts,
@@ -769,6 +782,17 @@ async function runPtySessionAttempt(
         }
         throw error;
       }
+    }
+
+    // §8.2 steps 4-5 (same-VM topology): bootstrap the rootless in-VM daemon and
+    // adjudicate it before the user is attached. Unlike the batch path, a PTY
+    // container's command IS the agent launcher, so the agent process is already
+    // running here — it just cannot reach anything, since the VM-local socket
+    // does not exist until the bootstrap creates it. Fail-closed all the same: a
+    // rejected daemon throws before `attachPty`, and the finally block's
+    // Docker-workload teardown removes the container and revokes the lease.
+    if (nestedDaemon !== undefined) {
+      await startAppleVmNestedDaemon({ runtime: docker, containerId, nestedDaemon });
     }
 
     // Write session registration for the escalation listener

@@ -9,6 +9,7 @@ import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { sha256HexSchema as sha256Schema } from '../hash.js';
+import { APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS as READINESS_TEXT_BOUNDS } from './apple-vm-daemon.js';
 import {
   QUALIFICATION_EVIDENCE_SCHEMA_VERSION,
   writeQualificationEvidenceManifest,
@@ -34,6 +35,12 @@ const sampleSchema = z
 const inventorySchema = z
   .object({ capturedAt: timestampSchema, ownedResourceIds: z.array(runtimeIdentitySchema).max(4096) })
   .strict();
+
+/**
+ * Provenance marker for `daemon-ready`: the readiness values are attested by
+ * the bundle's own in-VM daemon, never observed by the host.
+ */
+export const DAEMON_READY_ATTESTATION = 'bundle-local-advisory';
 
 const leaseStatusSchema = z.enum(['admitting', 'active', 'revoking', 'closed', 'incident']);
 const enforcementStatusSchema = z.enum(['enforced', 'observed', 'unsupported']);
@@ -90,6 +97,29 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
       policySha256: sha256Schema,
       templateSha256: sha256Schema,
       firstSample: sampleSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...baseEventShape,
+      kind: z.literal('daemon-ready'),
+      // The adjudicated in-VM daemon configuration. Recorded verbatim so the
+      // evidence trail shows WHICH configuration was admitted, not merely that
+      // some daemon answered.
+      //
+      // Unlike `watchdog-attested` and `cleanup-proof`, which the host observes
+      // directly, every value below is ATTESTED BY THE BUNDLE: the readiness
+      // probe talks to a bundle-local UDS, and plan §4.2 accepts that an in-VM
+      // party can answer it. The discriminator keeps that provenance on the
+      // record itself, the same way `bindingsProvenance` does for admission, so
+      // a reader can never mistake an advisory value for a host observation.
+      attestation: z.literal(DAEMON_READY_ATTESTATION),
+      driver: z.string().min(1).max(READINESS_TEXT_BOUNDS.driverLength),
+      securityOptions: z
+        .array(z.string().min(1).max(READINESS_TEXT_BOUNDS.securityOptionLength))
+        .max(READINESS_TEXT_BOUNDS.securityOptionCount),
+      serverVersion: z.string().min(1).max(READINESS_TEXT_BOUNDS.serverVersionLength),
+      readinessMs: z.number().int().nonnegative(),
     })
     .strict(),
   z

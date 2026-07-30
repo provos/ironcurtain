@@ -77,11 +77,15 @@ import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-
 import { getStagedCatalogPath } from './preloaded-catalog-paths.js';
 import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
 import type {
-  DockerWorkloadAdmissionBindings,
   DockerWorkloadBundleHandle,
   OuterResourceKind,
   OuterResourceRole,
 } from '../docker-workload/infrastructure.js';
+import {
+  nestedDaemonAgentEnv,
+  resolveNestedDaemonBundle,
+  startAppleVmNestedDaemon,
+} from '../docker-workload/session-daemon.js';
 import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
 import * as logger from '../logger.js';
 
@@ -1235,11 +1239,15 @@ export function buildBundleLabels(
 // ---------------------------------------------------------------------------
 
 /**
- * Roles whose outer create is the nested daemon/VM component (§8.2 step 4):
- * the watchdog must be proven fresh immediately before such a create. Phase 0F
- * ships no production nested-daemon container, so no production create matches;
- * the gate is exercised by a fake nested-daemon-role create in tests and the
- * real daemon sidecar plugs in unchanged later.
+ * Roles that are ALWAYS the nested daemon/VM component by definition, whatever
+ * the topology: a dedicated daemon container exists for no other purpose.
+ *
+ * Role alone is not the criterion, though — see
+ * {@link launchesNestedDaemonComponent}. In the same-VM topology (plan §4.4
+ * variant 1, the only qualified one) the daemon lives inside the agent's own
+ * VM, so the `agent`-role create IS the daemon-component create and the gate
+ * must fire for it — while the identical `agent` create in an ordinary session
+ * must stay ungated.
  */
 const WATCHDOG_GATED_OUTER_ROLES: ReadonlySet<OuterResourceRole> = new Set<OuterResourceRole>(['nested-daemon']);
 
@@ -1247,10 +1255,27 @@ export interface LedgeredOuterCreateSpec {
   readonly kind: OuterResourceKind;
   readonly role: OuterResourceRole;
   /**
+   * True when THIS create is the one that brings the nested Docker daemon into
+   * existence, even though its role says otherwise. Set by the same-VM
+   * topology, where the daemon is bootstrapped inside the agent container the
+   * create produces. Absent for every ordinary session.
+   */
+  readonly launchesNestedDaemon?: boolean;
+  /**
    * Labels the create would carry anyway (e.g. `buildBundleLabels().labels`).
    * The generation ownership label is merged on top before the create runs.
    */
   readonly baseLabels?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Whether §8.2 step 4 applies to this create — i.e. whether the watchdog must
+ * be proven fresh immediately before it runs. Either the role is intrinsically
+ * the daemon component, or the caller declared that this particular create
+ * launches it.
+ */
+function launchesNestedDaemonComponent(spec: LedgeredOuterCreateSpec): boolean {
+  return spec.launchesNestedDaemon === true || WATCHDOG_GATED_OUTER_ROLES.has(spec.role);
 }
 
 /**
@@ -1271,7 +1296,7 @@ export async function ledgerOuterResourceCreate(
     ownershipLabels: Readonly<Record<string, string>>,
   ) => Promise<{ readonly id: string; readonly expanded?: ExpandedOuterCreate }>,
 ): Promise<{ readonly id: string; readonly requestedName: string }> {
-  if (WATCHDOG_GATED_OUTER_ROLES.has(spec.role)) handle.assertWatchdogFresh();
+  if (launchesNestedDaemonComponent(spec)) handle.assertWatchdogFresh();
   const grant = handle.requestOuterResource(spec.kind, spec.role);
   const labels = spec.baseLabels ? { ...spec.baseLabels, ...grant.labels } : grant.labels;
   const { id, expanded } = await create(grant.requestedName, labels);
@@ -1282,6 +1307,13 @@ export async function ledgerOuterResourceCreate(
 export interface CreateAgentContainerOptions {
   /** Present only for an admitted secure nested Docker-workload bundle. */
   readonly dockerWorkload: DockerWorkloadBundleHandle | undefined;
+  /**
+   * Backend this bundle runs on. Decides — via `resolveNestedDaemonBundle` —
+   * whether this agent create is also the §8.2 step-4 daemon-component create,
+   * so neither session mode can forget the watchdog gate or apply it to an
+   * ordinary session.
+   */
+  readonly runtimeKind: ContainerRuntimeKind;
   /** Deterministic name used when the bundle is not ledgered. */
   readonly deterministicName: string;
   /**
@@ -1307,14 +1339,25 @@ export interface CreateAgentContainerOptions {
  * otherwise the container is created directly with the deterministic name. Label
  * merging lives entirely in `ledgerOuterResourceCreate` via `baseLabels`, so
  * neither call site re-merges the ownership label.
+ *
+ * In the same-VM topology this create also launches the nested daemon, so it is
+ * declared as such and `ledgerOuterResourceCreate` proves the watchdog fresh
+ * first (§8.2 step 4). The declaration is derived here, from the handle and the
+ * backend, rather than passed in — a caller cannot forget it.
  */
 export async function createLedgeredAgentContainer(options: CreateAgentContainerOptions): Promise<string> {
   if (!options.dockerWorkload) {
     return options.create(options.deterministicName, options.baseLabels);
   }
+  const nestedDaemon = resolveNestedDaemonBundle(options.dockerWorkload, options.runtimeKind);
   const { id } = await ledgerOuterResourceCreate(
     options.dockerWorkload,
-    { kind: 'container', role: 'agent', baseLabels: options.baseLabels },
+    {
+      kind: 'container',
+      role: 'agent',
+      launchesNestedDaemon: nestedDaemon !== undefined,
+      baseLabels: options.baseLabels,
+    },
     async (name, labels) => ({ id: await options.create(name, labels), expanded: { mounts: [...options.mounts] } }),
   );
   return id;
@@ -1358,11 +1401,12 @@ interface DockerWorkloadAdmissionForSessionOptions {
  * throws whenever the capability is enabled. This runs only behind a bypassed
  * fuse in tests and keeps the §8.2 ordering explicit.
  *
- * The attestation bindings are PLACEHOLDERS derived from the resolved
- * capability config hash: the real hash-bound operational inputs (catalog,
- * profile, performance budget, toolchain) are not resolved at this pre-proxy
- * admission point. They are never treated as trusted evidence and are never
- * exercised in production (the fuse blocks this whole path).
+ * Two gates run before any lease exists, so an unsupported request leaves
+ * nothing behind: the backend must be one the same-VM nested daemon is
+ * qualified on, and the operational bindings must resolve from the real staged
+ * catalog and frozen profile ceiling. `bindingsProvenance` is whatever the
+ * binding resolver reports — it stays `'placeholder'` while any single field
+ * still is one, so a partially real set can never present itself as evidence.
  */
 async function admitDockerWorkloadForSession(
   options: DockerWorkloadAdmissionForSessionOptions,
@@ -1370,22 +1414,26 @@ async function admitDockerWorkloadForSession(
   const { admitDockerWorkloadBundle } = await import('../docker-workload/infrastructure.js');
   const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
   const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
+  const { resolveDockerWorkloadAdmissionBindings } = await import('../docker-workload/admission-bindings.js');
+  const { assertNestedDaemonBackendQualified } = await import('../docker-workload/session-daemon.js');
 
+  assertNestedDaemonBackendQualified(options.runtimeKind);
   const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
+  const { bindings, provenance } = resolveDockerWorkloadAdmissionBindings({
+    catalogPath: admissionCatalogPath(options.dockerWorkload, options.runtimeKind),
+    configHash,
+  });
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   return admitDockerWorkloadBundle({
     runtime: options.runtime,
     runtimeKind: options.runtimeKind,
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
-    // Placeholder attestation bindings — see the function doc; Phase 1 replaces
-    // this seam with the real operational bindings. The real config hash is
-    // passed separately so the admission audit trail keeps it, and
-    // `bindingsProvenance: 'placeholder'` marks the bindings so a placeholder can
-    // never be mistaken for real evidence.
+    // The config hash is passed separately from the bindings so the admission
+    // audit trail keeps the capability identity as well as the artifact set.
     configHash,
-    bindings: placeholderAdmissionBindings(configHash),
-    bindingsProvenance: 'placeholder',
+    bindings,
+    bindingsProvenance: provenance,
     watchdogPolicyTemplatePath: resolve(packageRoot, 'config', 'docker-workload', 'resource-watchdog-policy.json'),
     watchdogSupervisorEntrypointPath: resolve(
       packageRoot,
@@ -1398,23 +1446,19 @@ async function admitDockerWorkloadForSession(
 }
 
 /**
- * Phase 0F placeholder attestation bindings. Every field is a uniformly
- * namespaced derived hash (`sha256('ironcurtain-placeholder:'+field+':'+configHash)`)
- * that CANNOT collide with a real operational-artifact hash — no field is the
- * bare config hash. These are never treated as trusted evidence (the admission
- * fuse blocks this whole path in production) and the admission audit event
- * records `bindingsProvenance: 'placeholder'`. Phase 1 MUST replace this seam
- * with the real hash-bound operational inputs.
+ * The staged catalog the admission binds — resolved through the SAME mapping
+ * that later selects the session's image, so the hash recorded on the lease and
+ * the archive the session actually loads can never come from different files.
  */
-function placeholderAdmissionBindings(configHash: string): DockerWorkloadAdmissionBindings {
-  const placeholder = (field: string): string =>
-    createHash('sha256').update(`ironcurtain-placeholder:${field}:${configHash}`).digest('hex');
-  return {
-    catalogSha256: placeholder('catalogSha256'),
-    profileSha256: placeholder('profileSha256'),
-    performanceBudgetSha256: placeholder('performanceBudgetSha256'),
-    toolchainDigest: placeholder('toolchainDigest'),
-  };
+function admissionCatalogPath(
+  dockerWorkload: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>,
+  runtimeKind: ContainerRuntimeKind,
+): string {
+  const provisioning = imageProvisioningForConfig(dockerWorkload, runtimeKind);
+  if (provisioning?.imageMode !== 'preloaded-catalog') {
+    throw new Error('Docker-workload admission requires a preloaded-catalog image mode');
+  }
+  return provisioning.catalogPath;
 }
 
 /**
@@ -1571,9 +1615,15 @@ async function createSessionContainersAttempt(
       { source: core.workspaceDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
       { source: core.orientationDir, target: '/etc/ironcurtain', readonly: true },
     ];
+    // Same-VM nested daemon (§4.4 variant 1): present only for an admitted
+    // Docker-workload bundle, in which case this agent container both hosts the
+    // daemon and reaches it at the VM-local socket. Resolved once here and
+    // reused for the env, the ledgered create, and the post-start bootstrap.
+    const nestedDaemon = resolveNestedDaemonBundle(core.dockerWorkload, core.runtimeKind);
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
       ...buildRuntimeTrustEnv(),
+      ...nestedDaemonAgentEnv(nestedDaemon),
     };
     let network: string | null;
     let extraHosts: string[] | undefined;
@@ -1804,6 +1854,7 @@ async function createSessionContainersAttempt(
     // deterministic name and create directly. Shared with the PTY path.
     mainContainerId = await createLedgeredAgentContainer({
       dockerWorkload: core.dockerWorkload,
+      runtimeKind: core.runtimeKind,
       deterministicName: mainContainerName,
       baseLabels: bundleLabels.labels,
       mounts,
@@ -1841,6 +1892,16 @@ async function createSessionContainersAttempt(
         }
         throw error;
       }
+    }
+
+    // §8.2 steps 4-5 (same-VM topology): the container that just started IS the
+    // daemon component, so bootstrap the rootless in-VM daemon and adjudicate
+    // its `docker info` here — after the container is up, and before any agent
+    // process is exec'd into it. Fail-closed: a rejected or unreachable daemon
+    // throws into the catch below, which removes the partial container, and the
+    // caller's §8.3 Docker-workload teardown then revokes the lease.
+    if (nestedDaemon !== undefined) {
+      await startAppleVmNestedDaemon({ runtime: core.docker, containerId: mainContainerId, nestedDaemon });
     }
 
     return {

@@ -30,10 +30,16 @@ type Toolchain = PreloadedImageCatalogEntry['toolchain'];
  */
 export const CATALOG_DOCKER_API_RANGE = { min: '1.44', max: '1.53' } as const;
 
-// Pinned toolchain versions (see the committed client-toolchain record). Client
-// images carry the Docker CLI/Buildx/Compose; the daemon additionally carries
-// dockerd; pure-runtime images carry no Docker toolchain.
-const CLIENT_TOOLCHAIN: Toolchain = { dockerCli: '29.2.1', dockerDaemon: null, buildx: '0.31.1', compose: '5.1.0' };
+// Pinned toolchain versions (see the committed client-toolchain record). Images
+// that carry dockerd declare `DAEMON_TOOLCHAIN`; pure-runtime images carry no
+// Docker toolchain at all.
+//
+// Under the same-VM daemon topology (plan §16.10) the base image stages the full
+// daemon toolchain and every agent image inherits it via `FROM ironcurtain-base`,
+// so those roles declare `DAEMON_TOOLCHAIN` too. A client-only tuple — the shape
+// plan §9.2 describes for an agent layer beside a sibling daemon — has no role
+// while Apple is the only qualified backend, so it is not carried here as dead
+// configuration; reintroduce it with the backend that needs it.
 const DAEMON_TOOLCHAIN: Toolchain = { dockerCli: '29.2.1', dockerDaemon: '29.2.1', buildx: '0.31.1', compose: '5.1.0' };
 const NO_TOOLCHAIN: Toolchain = { dockerCli: null, dockerDaemon: null, buildx: null, compose: null };
 
@@ -85,7 +91,13 @@ export function catalogImageSources(): readonly CatalogImageSource[] {
   const baseDockerfile = baseDockerfileName(dockerDir);
 
   const sources: readonly CatalogImageSource[] = [
-    agentless('base', 'ironcurtain-base:latest', join(dockerDir, baseDockerfile), dockerDir, NO_TOOLCHAIN, root),
+    // The base image copies the pinned toolchain stage's `/usr/local/bin` and
+    // CLI plugins verbatim, so it ships the same client AND daemon binaries the
+    // nested-daemon role does. The tuple feeds `toolchainDigest`, which
+    // admission binds from this role and `preflightClientToolchain` recomputes
+    // from the live client/daemon versions — a null tuple here is a binding
+    // that can never match what the running image reports.
+    agentless('base', 'ironcurtain-base:latest', join(dockerDir, baseDockerfile), dockerDir, DAEMON_TOOLCHAIN, root),
     agent(
       'agent-claude-code',
       'ironcurtain-claude-code:latest',
@@ -145,7 +157,10 @@ function agent(
     logicalName,
     dockerfile,
     contextDir,
-    toolchain: CLIENT_TOOLCHAIN,
+    // Agent images are `FROM ironcurtain-base:latest`, so they inherit the base
+    // image's staged daemon toolchain verbatim — and under the same-VM topology
+    // the agent image is where the nested daemon actually runs.
+    toolchain: DAEMON_TOOLCHAIN,
     hashKind: 'agent',
     provenanceSource: posixRelative(root, dockerfile),
   };

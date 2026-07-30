@@ -35,6 +35,9 @@ import {
 } from '../config/paths.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import { loadResourceWatchdogPolicy, type LoadedResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
+// Type-only: the readiness record is deliberately field-compatible with the
+// `daemon-ready` evidence payload, and a type import adds no runtime edge.
+import type { AppleVmDaemonReadiness } from './apple-vm-daemon.js';
 import {
   activateDockerWorkloadLease,
   closeDockerWorkloadLease,
@@ -65,10 +68,11 @@ import {
   type LaunchDetachedResourceWatchdogSupervisorOptions,
   type ResourceWatchdogSupervisorStatus,
 } from './resource-watchdog-supervisor.js';
-import type {
-  DockerWorkloadAuditEventPayload,
-  DockerWorkloadAuditSink,
-  ExpandedOuterCreate,
+import {
+  DAEMON_READY_ATTESTATION,
+  type DockerWorkloadAuditEventPayload,
+  type DockerWorkloadAuditSink,
+  type ExpandedOuterCreate,
 } from './lifecycle-evidence.js';
 
 export const DOCKER_WORKLOAD_OWNERSHIP_LABEL_KEY = 'com.ironcurtain.docker-workload.generation';
@@ -408,6 +412,26 @@ export class DockerWorkloadBundleHandle {
       firstSample,
     });
     return launched.status;
+  }
+
+  /**
+   * Record the adjudicated nested-daemon configuration (§8.2 step 4/5 evidence).
+   *
+   * Called only after readiness ACCEPTED the daemon, so the event states which
+   * configuration was admitted rather than merely that something answered. The
+   * attestation marker is stamped here, not carried by the readiness record:
+   * these values reach the host through a bundle-local socket, so the evidence
+   * must say so beside the host-observed events it sits next to.
+   */
+  recordDaemonReady(readiness: AppleVmDaemonReadiness): void {
+    this.emit({
+      kind: 'daemon-ready',
+      attestation: DAEMON_READY_ATTESTATION,
+      driver: readiness.driver,
+      securityOptions: [...readiness.securityOptions],
+      serverVersion: readiness.serverVersion,
+      readinessMs: readiness.readinessMs,
+    });
   }
 
   /** Prove the watchdog supervisor is still fresh immediately before daemon/VM create. */

@@ -102,6 +102,119 @@ daemon/api/exchange/staging all required:false (avoids teardown-race trip on a t
   bound starts after listContainers() answers; exceeding it fences (status 'incident') and BLOCKS new admission.
   Networks ledgered only for runtimeKind 'docker'.
 
+## Same-VM nested daemon (plan §4.4 variant 1) — src/docker-workload/apple-vm-daemon.ts
+Decision 2026-07-29 (user-approved): on Apple `container` the rootless dockerd runs INSIDE the
+agent's per-session VM; API is a VM-local UDS, never published outside the VM (§5.3). Sibling-VM
+rejected. Module = pure logic + injected `AppleVmDaemonExec` (argv, {user, timeoutMs}) which the
+wiring layer adapts from `ContainerRuntime.exec`; NO direct spawn, no pipeline import, no fuse
+import (guard test scans the source, same idiom as infrastructure-fuse-guard.test.ts).
+- Exports: bootstrapAppleVmDaemon(exec) [API-dir MODE CHECK then start, BOTH as codespace —
+  NO root exec anywhere in the daemon lifecycle], waitForAppleVmDaemonReady(exec,{timeoutMs,
+  pollIntervalMs?,now?,sleep?}) -> {driver,securityOptions,serverVersion,readinessMs}. Frozen argv
+  constants APPLE_VM_DAEMON_{API_DIR,SOCKET,DOCKER_HOST,TOOLCHAIN_DIR,LOG_PATH,DATA_ROOT,
+  DOCKERD_COMMAND,API_DIR_STAT_ARGV,API_DIR_EXPECTED_STAT,START_ARGV,INFO_ARGV,LOG_TAIL_ARGV,
+  READINESS_TEXT_BOUNDS}.
+- Live-proven constraints baked in (do NOT "simplify"): no dockerd-rootless.sh in docker 29.x — the
+  direct `rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run dockerd …
+  --storage-driver=vfs --iptables=false --bridge=none` form is the only one; the start script's PATH
+  puts /usr/bin BEFORE the toolchain dir so the base image's privileged newuidmap beats the
+  toolchain's unprivileged copy; `--net=none` still needs iproute2 for loopback.
+
+### The clamped bounding set dictates the base image (live gate, 2026-07-29)
+The agent VM is created `--cap-drop ALL --cap-add CAP_SETUID --cap-add CAP_SETGID` (CapBnd 0xc0).
+Two consequences that are NOT negotiable and that the base image — not the runtime — must satisfy:
+1. **newuidmap/newgidmap must be file-capped, NOT setuid-root.** Writing a multi-range
+   /proc/PID/uid_map needs CAP_SYS_ADMIN *in the target userns*; the kernel grants ALL caps in a
+   userns to a process whose euid owns it (`cap_capable`). rootlesskit makes the ns as uid 1000, so
+   a helper at euid 1000 inherits the grant. Debian's `uidmap` package ships them 4755 → euid 0 →
+   grant forfeited → needs real CAP_SYS_ADMIN → `newuidmap: write to uid_map failed: Operation not
+   permitted`. CAP_DAC_OVERRIDE does NOT fix it; CAP_SYS_ADMIN is off-limits (blows the frozen P1
+   ceiling). Fix in Dockerfile.base.arm64: install `libcap2-bin`, `setcap cap_setuid+ep`/
+   `cap_setgid+ep`, and `chmod u-s` — dropping setuid is REQUIRED, with both present the setuid bit
+   still raises euid and re-breaks it. Matches the frozen nested-daemon alpine image (755 + file
+   caps, verified via layer xattrs); file caps survive `docker save` → `container image load`.
+2. **No CAP_CHOWN ⇒ the API dir cannot be created at runtime.** `install -d -o 1000 -g 1000 -m 0700
+   /run/ironcurtain-docker` fails `Operation not permitted`. `/run` is ext4 in the VM (NOT tmpfs),
+   so an image-time dir persists — the image already relies on this for /run/ironcurtain. Base
+   image pre-creates it 0700 codespace; bootstrap MODE-CHECKS it (see below).
+Guard: test/docker/base-image.test.ts asserts libcap2-bin + the setcap/chmod-u-s trio + the 0700
+install line, and NEGATIVELY that the only non-comment lines naming new[ug]idmap are those three
+(so setuid can never be re-added). Mutation-checked.
+- Detach idiom: `exec </dev/null >…/dockerd.log 2>&1` replaces the SHELL's fds before forking so the
+  daemon never inherits the exec pipes — otherwise `docker exec`/`container exec` blocks on EOF.
+- **API-dir precondition is a no-follow MODE CHECK, never `test -w`** (§5.3 "mode-checked"; hardened
+  2026-07-29 after an adversarial review). `test -w` FOLLOWS SYMLINKS: the agent is root in its own
+  container (NOPASSWD sudo) and workflow snapshot-resume commits that layer, so it can `rm` the
+  root-owned dir out of `/run` (uid 0 owns `/run`, no capability needed) and plant a symlink to a
+  host-backed VirtioFS mount like `/workspace` — dockerd then writes docker.sock/dockerd.log onto
+  the host. It CANNOT forge the real thing: mkdir gives 0:0 and chown needs the absent CAP_CHOWN.
+  Frozen argv `['/usr/bin/stat','-c','%F:%u:%g:%a','/run/ironcurtain-docker']`, expected stdout
+  EXACTLY `directory:1000:1000:700`. Verified on debian trixie: correct dir → that string; planted
+  symlink → `symbolic link:0:0:777` with EXIT 0 (so compare stdout, never the exit code alone);
+  missing → exit 1, empty stdout. `stat` DEFAULTS to not dereferencing (`-L` opts in). Error is
+  "API directory … failed its mode check: expected \"…\", observed \"…\"".
+- Readiness is an ADJUDICATION, but the retry discriminator is **"did the DAEMON answer"**, not the
+  exit code. `docker info --format '{{json .}}'` can exit 0 with a client-only skeleton (empty
+  Driver/ServerVersion + `ServerErrors`) — that is liveness, so it RETRIES to the deadline. Only a
+  populated server block is adjudicated, once (Driver!=='vfs', SecurityOptions missing
+  'name=rootless' — fail closed immediately). Unparseable JSON stays permanent. Consequence: a
+  payload missing ServerVersion now RETRIES; the "malformed fields" test must use a payload with a
+  populated server block and a bad SecurityOptions element.
+- **All in-VM text is bounded at this seam.** `APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS` (driver 128,
+  serverVersion 128, securityOption 256, count 64) is EXPORTED and `lifecycle-evidence.ts` builds
+  the `daemon-ready` zod `.max()` from it — so the runtime edge is lifecycle-evidence →
+  apple-vm-daemon (NOT the reverse; apple-vm-daemon still imports only zod, and madge is clean).
+  Without this an oversized serverVersion passed adjudication and threw at the audit emit later.
+  Log tail is truncated to a 4096-BYTE budget with control chars stripped (`tail -n 80` bounds
+  lines, not bytes, and the exec adapter's maxBuffer is 50 MB).
+- lifecycle-evidence `daemon-ready` = {attestation, driver, securityOptions[], serverVersion,
+  readinessMs} + envelope. `attestation: z.literal('bundle-local-advisory')` (exported as
+  `DAEMON_READY_ATTESTATION`) is REQUIRED and stamped by `recordDaemonReady`, mirroring the
+  `bindingsProvenance` idiom: the readiness probe talks to a bundle-local UDS an in-VM party can
+  answer (§4.2), so this record must not read like the host-OBSERVED watchdog-attested/cleanup-proof
+  events it sits beside. The readiness return type stays field-compatible with the rest of the payload.
+- `--data-root=/home/codespace/.local/share/docker` is EXPLICIT in the frozen dockerd command (it is
+  also what rootless dockerd would derive from the exported HOME, so runtime behavior is unchanged) —
+  §8.2.1/§8.3.4 want an exact ledgerable/removable state path. Exported as APPLE_VM_DAEMON_DATA_ROOT.
+- Timeout source: caller passes the frozen performance-budget `daemonReadinessMs` (90000).
+
+## Base-image Docker toolchain layer (hardened 2026-07-29)
+- `COPY --from` PRESERVES SOURCE OWNERSHIP. In the pinned `docker@sha256:67c4114…` stage
+  `rootlesskit` and `vpnkit` are owned **1001:1001** (verified by `ls -ln`); without
+  `--chown=root:root` a Linux host that uid-remaps the agent to 1001 hands the runtime user
+  ownership of shipped toolchain binaries. Both COPY lines now carry it.
+- CLI plugins go to `/usr/local/libexec/docker/cli-plugins/`, NOT `/usr/local/lib/docker/cli-plugins/`:
+  the copied `/usr/local/bin/docker-compose` is a symlink INTO the libexec path, so the lib path left
+  it dangling. Both dirs are default CLI plugin search paths (both string-literals present in the
+  29.2.1 `docker` binary; empirically `docker compose version` + `docker buildx version` resolve with
+  plugins ONLY in libexec). Copying to libexec fixes the symlink AND keeps discovery.
+- Catalog toolchain tuples: `base` AND all three agent roles declare `DAEMON_TOOLCHAIN` (agents are
+  `FROM ironcurtain-base:latest`, so they inherit dockerd). `CLIENT_TOOLCHAIN` was DELETED as dead
+  config. This matters because `admission-bindings.ts` binds `base.toolchainDigest` and
+  `preflightClientToolchain` recomputes a digest from the LIVE client+daemon versions — a null
+  `dockerDaemon` was a binding that could never match.
+- Test hardening in test/docker/base-image.test.ts (all mutation-checked): `lnInvocations()` splits
+  non-comment lines on `&&`/`||`/`;` and pins every `ln` command verbatim (the old `/\bln -s\s+/`
+  missed `ln -sf`/`ln --symbolic` and could not see an ADDED symlink); `copyInstructions()` pins every
+  COPY line (the old `^COPY\s+(--from=\S+)` skipped plain COPY entirely); and `declaredPathValues()`
+  asserts the ENV PATH **value** excludes the toolchain bin dir (the ENV test collected names only).
+
+## Re-freeze CASCADES: catalog → qualification contract
+Re-freezing the preloaded catalogs changes `catalogSha256` (and, if a toolchain tuple moved,
+`toolchainDigest`), which the FROZEN qualification contract binds. Symptom after a catalog-only
+re-freeze: ~11 failures in test/docker-workload/qualification-artifacts.test.ts +
+test/docker/qualification-contract.test.ts, all `qualification binding drift: catalogSha256`.
+The contract must be re-frozen in the same supervised step — a catalog re-freeze is never complete
+on its own.
+
+## GOTCHA: editing docker/Dockerfile.base.arm64 breaks test/docker/docker-workload-egress.test.ts
+config/docker-workload/build-egress-manifest.json hash-binds `docker/Dockerfile.base.arm64` (and the
+preloaded catalogs record its sourceDigest). Any edit to that Dockerfile fails ~22 tests in
+test/docker/docker-workload-egress.test.ts with `build-egress Dockerfile hash mismatch:
+docker/Dockerfile.base.arm64` until the manifest (and catalog) are re-frozen. Diagnose by comparing
+`git show HEAD:docker/Dockerfile.base.arm64 | shasum -a 256` against the manifest entry — do NOT
+assume the failure came from whatever you were editing.
+
 ## Test harness (test/docker-workload/helpers/infrastructure-harness.ts)
 useDockerWorkloadHome() sets IRONCURTAIN_HOME to per-test 0o700 tmpdir (paths.ts reads it live).
 createFakeClock(baseIso, jumpPerSleepMs?): sleep ADVANCES time — required so the two cleanup inventories differ

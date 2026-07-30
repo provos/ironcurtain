@@ -2,11 +2,13 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS } from '../../src/docker-workload/apple-vm-daemon.js';
 import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastructure.js';
 import {
   createJsonlDockerWorkloadAuditSink,
   createRecordingDockerWorkloadAuditSink,
   sealLifecycleEvidence,
+  DAEMON_READY_ATTESTATION,
   type SealLifecycleEvidenceOptions,
 } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
@@ -164,6 +166,96 @@ describe('Docker-workload lifecycle evidence', () => {
       files: EVIDENCE_PLAN_FILES,
     };
     expect(() => verifyQualificationEvidence(directory, plan)).toThrow();
+  });
+
+  it('round-trips a daemon-ready event and rejects an unadjudicated one', () => {
+    const sink = createRecordingDockerWorkloadAuditSink();
+    sink.emit({
+      at: '2026-07-29T12:00:00.000Z',
+      leaseId: 'dw-daemon-ready',
+      generation: 'gen-dw-daemon-ready',
+      kind: 'daemon-ready',
+      attestation: DAEMON_READY_ATTESTATION,
+      driver: 'vfs',
+      securityOptions: ['name=seccomp,profile=builtin', 'name=rootless'],
+      serverVersion: '29.2.1',
+      readinessMs: 4_200,
+    });
+    expect(sink.events).toEqual([
+      {
+        at: '2026-07-29T12:00:00.000Z',
+        leaseId: 'dw-daemon-ready',
+        generation: 'gen-dw-daemon-ready',
+        kind: 'daemon-ready',
+        attestation: DAEMON_READY_ATTESTATION,
+        driver: 'vfs',
+        securityOptions: ['name=seccomp,profile=builtin', 'name=rootless'],
+        serverVersion: '29.2.1',
+        readinessMs: 4_200,
+      },
+    ]);
+    expect(() =>
+      sink.emit({
+        at: '2026-07-29T12:00:00.000Z',
+        leaseId: 'dw-daemon-ready',
+        generation: 'gen-dw-daemon-ready',
+        kind: 'daemon-ready',
+        attestation: DAEMON_READY_ATTESTATION,
+        driver: '',
+        securityOptions: ['name=rootless'],
+        serverVersion: '29.2.1',
+        readinessMs: 4_200,
+      } as never),
+    ).toThrow();
+  });
+
+  it('rejects a daemon-ready event that omits the bundle-local provenance marker', () => {
+    // These values reach the host over a socket an in-VM party can answer
+    // (plan §4.2), so the record sits beside genuinely host-observed events
+    // (watchdog-attested, cleanup-proof) and must declare that it is advisory.
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const base = {
+      at: '2026-07-29T12:00:00.000Z',
+      leaseId: 'dw-daemon-ready',
+      generation: 'gen-dw-daemon-ready',
+      kind: 'daemon-ready',
+      driver: 'vfs',
+      securityOptions: ['name=rootless'],
+      serverVersion: '29.2.1',
+      readinessMs: 4_200,
+    };
+    expect(DAEMON_READY_ATTESTATION).toBe('bundle-local-advisory');
+    expect(() => sink.emit(base as never)).toThrow();
+    expect(() => sink.emit({ ...base, attestation: 'host-observed' } as never)).toThrow();
+  });
+
+  it('bounds daemon-ready text at exactly the values the readiness probe enforces', () => {
+    // Same numbers on both sides. If they drifted, a value the probe accepted
+    // would fail here — turning a successful readiness into what reads as a
+    // host bug rather than the fail-closed decision it should have been.
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const bounds = APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS;
+    const atBound = {
+      at: '2026-07-29T12:00:00.000Z',
+      leaseId: 'dw-daemon-ready',
+      generation: 'gen-dw-daemon-ready',
+      kind: 'daemon-ready' as const,
+      attestation: DAEMON_READY_ATTESTATION,
+      driver: 'v'.repeat(bounds.driverLength),
+      securityOptions: ['o'.repeat(bounds.securityOptionLength)],
+      serverVersion: 's'.repeat(bounds.serverVersionLength),
+      readinessMs: 4_200,
+    };
+    expect(() => sink.emit(atBound)).not.toThrow();
+    expect(() => sink.emit({ ...atBound, driver: 'v'.repeat(bounds.driverLength + 1) })).toThrow();
+    expect(() => sink.emit({ ...atBound, serverVersion: 's'.repeat(bounds.serverVersionLength + 1) })).toThrow();
+    expect(() => sink.emit({ ...atBound, securityOptions: ['o'.repeat(bounds.securityOptionLength + 1)] })).toThrow();
+    expect(() =>
+      sink.emit({
+        ...atBound,
+        securityOptions: Array.from({ length: bounds.securityOptionCount + 1 }, () => 'name=rootless'),
+      }),
+    ).toThrow();
   });
 
   it('appends valid JSONL and rejects a malformed lifecycle event fail-closed', () => {
