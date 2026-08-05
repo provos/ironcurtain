@@ -631,3 +631,17 @@ export const googleProvider: ProviderConfig = {
   keyInjection: { type: 'header', headerName: 'x-goog-api-key' },
   fakeKeyPrefix: 'AIzaSy-ironcurtain-',
 };
+
+export const azureOpenAIProvider: ProviderConfig = {
+  host: '*.openai.azure.com',
+  displayName: 'Azure OpenAI',
+  allowedEndpoints: [
+    { method: 'POST', path: '/openai/deployments/*/chat/completions' },
+    { method: 'POST', path: '/openai/deployments/*/completions' },
+    { method: 'GET', path: '/openai/deployments' },
+    { method: 'GET', path: '/openai/models' },
+  ],
+  captureEndpoints: [],
+  keyInjection: { type: 'header', headerName: 'api-key' },
+  fakeKeyPrefix: 'azure-ironcurtain-',
+};

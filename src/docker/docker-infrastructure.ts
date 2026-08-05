@@ -1687,6 +1687,11 @@ export function resolveRealKey(host: string, config: IronCurtainConfig, oauthAcc
       break;
     }
     default:
+      // Check if it's an Azure OpenAI host (*.openai.azure.com)
+      if (host.endsWith('.openai.azure.com')) {
+        key = config.userConfig.azureOpenAIApiKey;
+        break;
+      }
       logger.warn(`No API key mapping for unknown provider host: ${host}`);
       return '';
   }

@@ -246,7 +246,7 @@ const signalSchema = z
  * Validates types and constraints without applying defaults --
  * defaults are merged separately so we can distinguish "missing" from "present".
  */
-export const GOOSE_PROVIDERS = ['anthropic', 'openai', 'google'] as const;
+export const GOOSE_PROVIDERS = ['anthropic', 'openai', 'google', 'azure_openai'] as const;
 /** Goose provider — structurally identical to ProviderId from model-provider.ts. */
 export type GooseProvider = (typeof GOOSE_PROVIDERS)[number];
 
@@ -371,9 +371,13 @@ export const userConfigSchema = z.object({
   anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
   googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
   openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
+  azureOpenAIApiKey: z.string().min(1, 'azureOpenAIApiKey must be non-empty').optional(),
   anthropicBaseUrl: z.url().optional(),
   openaiBaseUrl: z.url().optional(),
   googleBaseUrl: z.url().optional(),
+  azureOpenAIEndpoint: z.url().optional(),
+  azureOpenAIDeploymentName: z.string().min(1, 'azureOpenAIDeploymentName must be non-empty').optional(),
+  azureOpenAIApiVersion: z.string().min(1, 'azureOpenAIApiVersion must be non-empty').optional(),
   escalationTimeoutSeconds: z
     .number()
     .int('escalationTimeoutSeconds must be an integer')
@@ -527,9 +531,13 @@ export interface ResolvedUserConfig {
   readonly anthropicApiKey: string;
   readonly googleApiKey: string;
   readonly openaiApiKey: string;
+  readonly azureOpenAIApiKey: string;
   readonly anthropicBaseUrl: string;
   readonly openaiBaseUrl: string;
   readonly googleBaseUrl: string;
+  readonly azureOpenAIEndpoint: string;
+  readonly azureOpenAIDeploymentName: string;
+  readonly azureOpenAIApiVersion: string;
   readonly escalationTimeoutSeconds: number;
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
@@ -853,9 +861,13 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     anthropicApiKey: config.anthropicApiKey ?? '',
     googleApiKey: config.googleApiKey ?? '',
     openaiApiKey: config.openaiApiKey ?? '',
+    azureOpenAIApiKey: config.azureOpenAIApiKey ?? '',
     anthropicBaseUrl: config.anthropicBaseUrl ?? '',
     openaiBaseUrl: config.openaiBaseUrl ?? '',
     googleBaseUrl: config.googleBaseUrl ?? '',
+    azureOpenAIEndpoint: config.azureOpenAIEndpoint ?? '',
+    azureOpenAIDeploymentName: config.azureOpenAIDeploymentName ?? '',
+    azureOpenAIApiVersion: config.azureOpenAIApiVersion ?? '',
     escalationTimeoutSeconds: config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
     resourceBudget: {
       // Nullable fields: null means "disabled", undefined means "use default".
@@ -1066,9 +1078,15 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || config.anthropicApiKey,
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
+    azureOpenAIApiKey: process.env.AZURE_OPENAI_API_KEY || config.azureOpenAIApiKey,
     anthropicBaseUrl: validateBaseUrlEnv('ANTHROPIC_BASE_URL') ?? config.anthropicBaseUrl,
     openaiBaseUrl: validateBaseUrlEnv('OPENAI_BASE_URL') ?? config.openaiBaseUrl,
     googleBaseUrl: validateBaseUrlEnv('GOOGLE_API_BASE_URL') ?? config.googleBaseUrl,
+    azureOpenAIEndpoint: validateBaseUrlEnv('AZURE_OPENAI_ENDPOINT') ?? config.azureOpenAIEndpoint,
+    azureOpenAIDeploymentName: process.env.AZURE_OPENAI_DEPLOYMENT_NAME || config.azureOpenAIDeploymentName,
+    azureOpenAIApiVersion: process.env.AZURE_OPENAI_API_VERSION || config.azureOpenAIApiVersion,
+    gooseProvider: (process.env.GOOSE_PROVIDER as GooseProvider | undefined) || config.gooseProvider,
+    gooseModel: process.env.GOOSE_MODEL || config.gooseModel,
     modelProviders: applyOpenrouterKeyEnv(config.modelProviders),
   };
 }

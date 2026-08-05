@@ -1511,6 +1511,7 @@ const GOOSE_PROVIDER_LABELS: Readonly<Record<GooseProvider, string>> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
   google: 'Google',
+  azure_openai: 'Azure OpenAI',
 };
 
 /** Human-readable labels for Docker agents. */
