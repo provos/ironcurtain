@@ -320,6 +320,12 @@ export interface DockerInfrastructure extends PreContainerInfrastructure {
   readonly sidecarContainerId?: string;
   /** Per-session `--internal` Docker network name (TCP mode only, macOS). */
   readonly internalNetwork?: string;
+  /**
+   * Complete container environment (adapter env + proxy env + UID remap env).
+   * Includes HTTPS_PROXY/HTTP_PROXY for the active topology. Used for
+   * docker exec env propagation so batch mode matches container creation env.
+   */
+  readonly containerEnv: Readonly<Record<string, string>>;
 }
 
 /** Hosts that use Anthropic OAuth credentials when available. */
@@ -1127,6 +1133,7 @@ export interface ContainerResources {
   readonly containerName: string;
   readonly sidecarContainerId?: string;
   readonly internalNetwork?: string;
+  readonly containerEnv: Readonly<Record<string, string>>;
 }
 
 export interface CreateDockerInfrastructureOptions {
@@ -1468,6 +1475,7 @@ async function createSessionContainersAttempt(
       containerName: mainContainerName,
       sidecarContainerId,
       internalNetwork,
+      containerEnv: env,
     };
   } catch (err) {
     // Best-effort cleanup of any resources created before the failure.

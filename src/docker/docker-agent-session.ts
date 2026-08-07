@@ -322,8 +322,23 @@ export class DockerAgentSession implements Session {
       const command = this.infra.skillsMount && batchArgs?.length ? [...baseCommand, ...batchArgs] : baseCommand;
       logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
+      // Use full container env (adapter env + proxy env + UID remap) for
+      // exec-time propagation. PTY mode doesn't use this path — the agent
+      // runs as the container's main process and inherits env at creation.
+      const execEnv = this.infra.containerEnv;
+      logger.info(`[docker-agent] exec env keys: ${Object.keys(execEnv).join(', ')}`);
+      logger.info(`[docker-agent] HTTPS_PROXY=${execEnv.HTTPS_PROXY || 'NOT SET'}`);
+      logger.info(`[docker-agent] HTTP_PROXY=${execEnv.HTTP_PROXY || 'NOT SET'}`);
+
       const execStartMs = Date.now();
-      const { exitCode, stdout, stderr } = await this.infra.docker.exec(this.infra.containerId, command, execTimeout);
+      const { exitCode, stdout, stderr } = await this.infra.docker.exec(
+        this.infra.containerId,
+        command,
+        execTimeout,
+        undefined, // execUser: use default (codespace)
+        undefined, // workdir: use container default
+        execEnv,   // env: pass full container env including proxy vars
+      );
       const execDurationMs = Date.now() - execStartMs;
       const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
       logger.info(

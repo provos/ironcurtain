@@ -442,6 +442,7 @@ export function createDockerManager(
       timeoutMs?: number,
       execUser?: string | null,
       workdir?: string,
+      env?: Readonly<Record<string, string>>,
     ): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
       // Resolve the `--user` flag (see ContainerRuntime.exec JSDoc):
@@ -459,11 +460,16 @@ export function createDockerManager(
       const resolvedUser = execUser === undefined ? 'codespace' : execUser;
       const userArgs = resolvedUser === null ? [] : (['--user', resolvedUser] as const);
       const workdirArgs = workdir === undefined ? [] : (['--workdir', workdir] as const);
+      const envArgs = env === undefined ? [] : Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`] as const);
       try {
-        const { stdout, stderr } = await exec('docker', ['exec', ...userArgs, ...workdirArgs, nameOrId, ...command], {
-          timeout,
-          maxBuffer: 50 * 1024 * 1024,
-        });
+        const { stdout, stderr } = await exec(
+          'docker',
+          ['exec', ...userArgs, ...workdirArgs, ...envArgs, nameOrId, ...command],
+          {
+            timeout,
+            maxBuffer: 50 * 1024 * 1024,
+          },
+        );
         return { exitCode: 0, stdout, stderr };
       } catch (err: unknown) {
         if (isExecError(err)) {

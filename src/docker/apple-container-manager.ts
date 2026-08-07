@@ -338,17 +338,24 @@ export function createAppleContainerManager(
       command: readonly string[],
       timeoutMs?: number,
       execUser?: string | null,
+      workdir?: string,
+      env?: Readonly<Record<string, string>>,
     ): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
       // Same --user resolution contract as the Docker implementation (see
       // ContainerRuntime.exec JSDoc): undefined → 'codespace', null → omit.
       const resolvedUser = execUser === undefined ? 'codespace' : execUser;
       const userArgs = resolvedUser === null ? [] : (['--user', resolvedUser] as const);
+      const envArgs = env === undefined ? [] : Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`] as const);
       try {
-        const { stdout, stderr } = await exec('container', ['exec', ...userArgs, nameOrId, ...command], {
-          timeout,
-          maxBuffer: 50 * 1024 * 1024,
-        });
+        const { stdout, stderr } = await exec(
+          'container',
+          ['exec', ...userArgs, ...envArgs, nameOrId, ...command],
+          {
+            timeout,
+            maxBuffer: 50 * 1024 * 1024,
+          },
+        );
         return { exitCode: 0, stdout, stderr };
       } catch (err: unknown) {
         if (isExecError(err)) {

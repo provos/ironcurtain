@@ -246,6 +246,9 @@ export interface ContainerRuntime {
    *     `bbernhard/signal-cli-rest-api` image).
    * @param workdir - optional working directory passed via
    *   `docker exec --workdir <dir>`.
+   * @param env - optional environment variables passed via
+   *   `docker exec -e KEY=VALUE`. When provided, each entry is forwarded
+   *   as a separate `-e` flag to docker exec.
    */
   exec(
     nameOrId: string,
@@ -253,6 +256,7 @@ export interface ContainerRuntime {
     timeoutMs?: number,
     execUser?: string | null,
     workdir?: string,
+    env?: Readonly<Record<string, string>>,
   ): Promise<DockerExecResult>;
 
   /** Stop a running container (SIGTERM, then SIGKILL after grace period). */
