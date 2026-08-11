@@ -81,6 +81,17 @@ in the harness). Keep it required — the fallback is the bug.
   resource-enforcement), JSONL+recording sinks, sealLifecycleEvidence(dir,opts) writes artifacts + two empty
   cleanup inventories then calls UNCHANGED writeQualificationEvidenceManifest. Exports DockerWorkloadAuditEventPayload
   (distributive Omit of at/leaseId/generation envelope).
+- Cleanup-inventory gap rule has ONE owner: `bundle-lease.ts` exports `cleanupInventoryGapMsSchema`
+  (the min(100)/max(60_000) bound, used by the lease schema) and `assertCleanupInventoryGap(inventories,
+  gapMs, label)`; `closeDockerWorkloadLease` and `writeLifecycleEvidence` both call it (labels
+  'Docker-workload lease' / 'lifecycle evidence'). Do not restate the numbers or the Date.parse subtraction.
+  The separate `min(100).max(60_000)` in watchdog-policy.ts + src/docker/resource-watchdog.ts belong to the
+  POLICY FILE schema, not the lease — deliberately left alone.
+- lifecycle-evidence writer trims (reviewed 2026-08): the hand-rolled `assertJsonValue` tree walker and the
+  per-ancestor `assertCanonicalEvidenceRoot` symlink walk were DELETED as host-adversary complexity.
+  `assertCanonicalHostPath` (hardened-fs) does the absolute/canonical string check;
+  `createOrValidatePrivateDirectory`'s `realpathSync(path) !== path` already covers ancestor symlinks for an
+  existing dir. Kept: O_EXCL/O_NOFOLLOW writes, the absent-check per output leaf, 0o700+uid checks.
 - src/config/paths.ts — added getDockerWorkloadRoot/LeasesRoot/LeaseDir(leaseId)/StateRoot(leaseId).
   INVARIANT: control tree docker-workload/leases/<id>/ and revocable state tree docker-workload/state/<id>/
   are SIBLINGS (supervisor refuses control files inside deletable state root). leaseId validated path-safe.
@@ -222,5 +233,15 @@ createFakeClock(baseIso, jumpPerSleepMs?): sleep ADVANCES time — required so t
 by >= gapMs (fixed clock => closeDockerWorkloadLease throws 'not sufficiently separated'). Recovery-bound test
 uses jumpPerSleepMs=130_000 to cross frozen 120s during captureCleanupProof sleep. createEventRuntime proves
 ledger-append precedes create via setLeasePath. createFakeSupervisor({launch,statusMode,alive,closeLeaseOnStop});
-reconcile-stale tests use statusMode:'absent'. Busy-retry test pre-creates ${leasePath}.lock via holdLeaseLock;
-injected sleep removes it on first call.
+reconcile-stale tests use statusMode:'absent'. Busy-retry test takes ${leasePath}.lock via holdLeaseLock;
+injected sleep releases it on first call.
+- `holdLeaseLock` now CALLS the production `acquireProcessLock` and returns the real `ProcessLockHandle`
+  (release it; do NOT rmSync the path). It used to hand-craft the pre-process-lock `{pid,startedAt}` owner
+  record, which `parseOwner` rejects as MALFORMED — so the busy report came from the 5s `malformedGraceMs`
+  compatibility window and a slow runner would silently reclaim the "held" lock mid-test. General rule:
+  a test helper that hand-writes a production on-disk format decays into a compatibility path the moment
+  the format moves; call the production acquire instead.
+- The busy assertion is now decisive: the injected sleep records `loadDockerWorkloadLease(leasePath).status`
+  before releasing and the test asserts `'active'`. Teardown's FIRST act is a lease mutation, so a lease still
+  `active` at the first sleep proves that sleep is the busy backoff and not the later cleanup-inventory gap
+  (both go through the same injected `sleep`). Mutation-checked: a stale malformed record yields `'revoking'`.
