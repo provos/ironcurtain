@@ -97,3 +97,14 @@ origins + real ceilings + hermetic fixtures + §6.4 negatives.
   mid-stream overflow → aborted/truncated (tolerant assert). `driveThroughSeam` returns
   `{statusCode,headers,body,aborted}`; async upstream handlers must be sync + `void gate.then(...)`
   (eslint no-misused-promises).
+
+## Per-request byte budget spans redirect hops (mediated-egress.ts)
+- `MediatedExchange.consumedBytes` is the one cumulative counter for a logical request: each followed
+  redirect adds its drained body on `'end'`, the next hop's drain cap is
+  `min(MAX_REDIRECT_BODY_BYTES, maxBytes - consumedBytes)`, and the terminal stream passes it as
+  `alreadyConsumed` to `createMediatedByteCeiling` (both the declared-content-length pre-check and the
+  Transform compare `consumed + n > maxBytes`). Do NOT seed the Transform's `total` with it —
+  `byteCount()` must stay the TERMINAL streamed size because `onComplete` records it as provenance.
+- Regression-test shape: two hops that each fit their own cap but overflow together (24-byte 3xx drain +
+  16-byte terminal body vs `maxBytes:32`) → 502 `/byte ceiling/` with `cdnContacted === true` (proves the
+  hop itself passed). Control case sums to exactly `maxBytes` and succeeds.
