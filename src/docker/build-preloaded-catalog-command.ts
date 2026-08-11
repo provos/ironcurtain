@@ -11,9 +11,13 @@
  * the runtime admission fuse. Running a real build is a supervised validation
  * step; the core orchestration takes injected runtimes/build/stage functions so
  * it is exercisable without Docker.
+ *
+ * The core never touches the live staging tree: it fills whatever directory it
+ * is handed, and `publishCatalogGeneration` replaces the live generation only
+ * after a fully successful build (see `preloaded-catalog-builder.ts`).
  */
 
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
@@ -21,6 +25,7 @@ import type { ContainerRuntime } from './types.js';
 import { defaultExecFile, type ExecFileFn } from './docker-manager.js';
 import {
   buildPreloadedCatalogs,
+  publishCatalogGeneration,
   type BuildPreloadedCatalogsOptions,
   type PreloadedCatalogBuilderImage,
 } from './preloaded-catalog-builder.js';
@@ -69,6 +74,11 @@ export interface RunBuildPreloadedCatalogOptions {
   readonly onProgress?: (message: string) => void;
 }
 
+/**
+ * Staged paths are inside the caller-supplied `stagingDir`, which the CLI
+ * publishes by renaming the whole directory into place afterwards; callers must
+ * therefore report the live location via `getStagedCatalogPath()`, not these.
+ */
 export interface FrozenCatalogResult {
   readonly docker: LoadedPreloadedImageCatalog;
   readonly appleContainer?: LoadedPreloadedImageCatalog;
@@ -220,19 +230,23 @@ export async function runBuildPreloadedCatalogCommand(argv: readonly string[]): 
   const dockerRuntime = createDockerManager();
   const appleRuntime = values['docker-only'] === true ? undefined : await resolveAppleRuntime();
 
-  const stagingDir = getPreloadedCatalogStagingDir();
-  prepareStagingDir(stagingDir);
-
-  const result = await runBuildPreloadedCatalog({
-    runtimes: { dockerRuntime, ...(appleRuntime === undefined ? {} : { appleRuntime }), exec: defaultExecFile },
-    sources: catalogImageSources(),
-    stagingDir,
-    frozenCatalogDir: getFrozenCatalogDir(),
-    generation,
-    createdAt: new Date().toISOString(),
-    architecture,
-    agentBuildHash: computeAgentImageBuildHash,
-    onProgress: (message) => process.stderr.write(`[build-preloaded-catalog] ${message}\n`),
+  // The whole build runs in a private sibling of the live staging tree, which
+  // is replaced only once every role has staged: a failed rebuild must never
+  // cost the host its usable catalog generation.
+  const result = await publishCatalogGeneration({
+    liveDirectory: getPreloadedCatalogStagingDir(),
+    build: (stagingDir) =>
+      runBuildPreloadedCatalog({
+        runtimes: { dockerRuntime, ...(appleRuntime === undefined ? {} : { appleRuntime }), exec: defaultExecFile },
+        sources: catalogImageSources(),
+        stagingDir,
+        frozenCatalogDir: getFrozenCatalogDir(),
+        generation,
+        createdAt: new Date().toISOString(),
+        architecture,
+        agentBuildHash: computeAgentImageBuildHash,
+        onProgress: (message) => process.stderr.write(`[build-preloaded-catalog] ${message}\n`),
+      }),
   });
 
   process.stdout.write(
@@ -262,10 +276,4 @@ async function resolveAppleRuntime(): Promise<
     return undefined;
   }
   return createAppleContainerManager();
-}
-
-function prepareStagingDir(stagingDir: string): void {
-  rmSync(stagingDir, { recursive: true, force: true });
-  mkdirSync(stagingDir, { recursive: true });
-  chmodSync(stagingDir, 0o700);
 }

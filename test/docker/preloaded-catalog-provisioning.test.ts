@@ -79,15 +79,32 @@ describe('imageProvisioningForConfig mapping', () => {
     });
   });
 
-  it('honors an explicit backend over the resolved runtime', async () => {
+  it('accepts a concrete backend that agrees with the resolved runtime', async () => {
     process.env.IRONCURTAIN_HOME = '/trusted/home';
     const { imageProvisioningForConfig } = await import('../../src/docker/docker-infrastructure.js');
     const provisioning = imageProvisioningForConfig(
       resolveDockerWorkloadConfig({ enabled: true, backend: 'docker' }),
-      'apple-container',
+      'docker',
     );
-    expect(provisioning?.runtimeKind).toBe('docker');
-    expect(provisioning?.catalogPath).toBe(getStagedCatalogPath('docker'));
+    expect(provisioning).toEqual({
+      imageMode: 'preloaded-catalog',
+      runtimeKind: 'docker',
+      catalogPath: getStagedCatalogPath('docker'),
+    });
+  });
+
+  it('rejects a concrete backend that disagrees with the resolved runtime', async () => {
+    // The live ContainerRuntime is built from the RESOLVED kind, so honoring the
+    // configured backend here would bind a catalog (and admission bindings) for
+    // a backend the session never talks to. Reject instead of reconciling.
+    process.env.IRONCURTAIN_HOME = '/trusted/home';
+    const { imageProvisioningForConfig } = await import('../../src/docker/docker-infrastructure.js');
+    expect(() =>
+      imageProvisioningForConfig(resolveDockerWorkloadConfig({ enabled: true, backend: 'docker' }), 'apple-container'),
+    ).toThrow(/dockerWorkload\.backend is "docker" but the resolved container runtime is "apple-container"/u);
+    expect(() =>
+      imageProvisioningForConfig(resolveDockerWorkloadConfig({ enabled: true, backend: 'apple-container' }), 'docker'),
+    ).toThrow(/IRONCURTAIN_CONTAINER_RUNTIME/u);
   });
 });
 

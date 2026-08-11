@@ -373,6 +373,52 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(cdnContacted).toBe(false);
   });
 
+  it('carries a drained redirect body into the terminal response ceiling (one budget per request)', async () => {
+    let cdnContacted = false;
+    const cdn = await startUpstream((_req, res) => {
+      cdnContacted = true;
+      const body = Buffer.alloc(16, 0x62);
+      res.writeHead(200, { 'content-length': String(body.length) });
+      res.end(body);
+    });
+    const registry = await startUpstream((_req, res) => {
+      res.writeHead(307, { location: 'https://cdn.example.com/layers/real' });
+      res.end(Buffer.alloc(24, 0x61)); // fits the hop cap on its own
+    });
+    const result = await driveThroughSeam({
+      // 24 drained + 16 delivered = 40 > 32: neither hop overshoots alone, so
+      // only a budget carried across hops can catch this.
+      guard: fixtureGuard({ perRequest: { maxBytes: 32, maxDurationMs: 30_000, maxRedirectHops: 2 } }),
+      transport: routingTransport({ 'registry.test': registry.port, 'cdn.example.com': cdn.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('redir-aggregate')}`,
+    });
+    expect(cdnContacted).toBe(true); // the hop itself was within its own cap
+    expect(result.statusCode).toBe(502);
+    expect(result.body).toMatch(/byte ceiling/u);
+  });
+
+  it('delivers a redirected pull whose drained hop and terminal body fit the per-request ceiling together', async () => {
+    const cdn = await startUpstream((_req, res) => {
+      res.writeHead(200); // chunked: the carried budget is enforced by the stream ceiling
+      res.write('cdn-layer-12');
+      res.end();
+    });
+    const registry = await startUpstream((_req, res) => {
+      res.writeHead(307, { location: 'https://cdn.example.com/layers/real' });
+      res.end(Buffer.alloc(20, 0x61));
+    });
+    const result = await driveThroughSeam({
+      // 20 drained + 12 delivered = 32, exactly the ceiling: still allowed.
+      guard: fixtureGuard({ perRequest: { maxBytes: 32, maxDurationMs: 30_000, maxRedirectHops: 2 } }),
+      transport: routingTransport({ 'registry.test': registry.port, 'cdn.example.com': cdn.port }),
+      targetHost: 'registry.test',
+      path: `/v2/library/app/blobs/${digestOf('redir-fits')}`,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toBe('cdn-layer-12');
+  });
+
   it('rejects a derived redirect to a literal private address before connecting', async () => {
     const registry = await startUpstream((_req, res) => {
       res.writeHead(307, { location: 'https://127.0.0.1:9/layers/real' });

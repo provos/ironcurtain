@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   runBuildPreloadedCatalog,
   type RunBuildPreloadedCatalogOptions,
 } from '../../src/docker/build-preloaded-catalog-command.js';
+import { publishCatalogGeneration } from '../../src/docker/preloaded-catalog-builder.js';
 import { catalogImageSources, type CatalogImageSource } from '../../src/docker/preloaded-catalog-sources.js';
 import {
   createPreloadedImageCatalogEntry,
@@ -29,7 +39,6 @@ function privateDir(prefix: string): string {
 async function stageFixture(options: Parameters<NonNullable<BuildPreloadedCatalogsOptions['stage']>>[0]) {
   const role = basename(options.image.outputArchivePath, '.tar');
   const bytes = Buffer.from(`archive:${role}`);
-  const { writeFileSync } = await import('node:fs');
   writeFileSync(options.image.outputArchivePath, bytes, { mode: 0o400 });
   const common = {
     logicalName: options.image.logicalName,
@@ -62,6 +71,11 @@ async function stageFixture(options: Parameters<NonNullable<BuildPreloadedCatalo
 
 function roleDigest(value: string): string {
   return Buffer.from(value).toString('hex').slice(0, 64).padEnd(64, '0');
+}
+
+/** A live staging path inside a private parent, mirroring the real layout. */
+function liveStagingPath(): string {
+  return join(privateDir('preloaded-live-'), 'preloaded-catalog');
 }
 
 function baseOptions(overrides: Partial<RunBuildPreloadedCatalogOptions>): RunBuildPreloadedCatalogOptions {
@@ -129,6 +143,45 @@ describe('runBuildPreloadedCatalog', () => {
     expect(result.frozenApplePath).toBeUndefined();
     expect(existsSync(join(options.frozenCatalogDir, 'preloaded-catalog.apple-container.json'))).toBe(false);
     expect(existsSync(join(options.frozenCatalogDir, 'preloaded-catalog.docker.json'))).toBe(true);
+  });
+
+  it('swaps a completed freeze into the live staging path', async () => {
+    const live = liveStagingPath();
+    mkdirSync(live, { mode: 0o700 });
+    writeFileSync(join(live, 'preloaded-catalog.docker.json'), '{"generation":"previous"}');
+
+    const result = await publishCatalogGeneration({
+      liveDirectory: live,
+      build: (stagingDir) => runBuildPreloadedCatalog(baseOptions({ stagingDir })),
+    });
+
+    // Readers resolve archives relative to the live catalog's own directory, so
+    // the rename must have carried both the catalog and its sealed archives.
+    expect(readFileSync(join(live, 'preloaded-catalog.docker.json'), 'utf8')).toBe(
+      readFileSync(result.frozenDockerPath, 'utf8'),
+    );
+    expect(existsSync(join(live, 'base.tar'))).toBe(true);
+    expect(readdirSync(dirname(live))).toEqual(['preloaded-catalog']);
+  });
+
+  it('preserves the previous live generation when the freeze build fails', async () => {
+    const live = liveStagingPath();
+    mkdirSync(live, { mode: 0o700 });
+    writeFileSync(join(live, 'preloaded-catalog.docker.json'), '{"generation":"previous"}');
+    const buildImage = vi.fn(async (source: CatalogImageSource) => {
+      if (source.role !== 'base') throw new Error('injected docker build failure');
+    });
+
+    await expect(
+      publishCatalogGeneration({
+        liveDirectory: live,
+        build: (stagingDir) => runBuildPreloadedCatalog(baseOptions({ stagingDir, buildImage })),
+      }),
+    ).rejects.toThrow(/injected docker build failure/u);
+
+    expect(readdirSync(live)).toEqual(['preloaded-catalog.docker.json']);
+    expect(readFileSync(join(live, 'preloaded-catalog.docker.json'), 'utf8')).toBe('{"generation":"previous"}');
+    expect(readdirSync(dirname(live))).toEqual(['preloaded-catalog']);
   });
 
   it('rejects a non-hex agent build hash before staging', async () => {

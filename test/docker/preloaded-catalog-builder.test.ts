@@ -1,9 +1,10 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildPreloadedCatalogs,
+  publishCatalogGeneration,
   REQUIRED_PRELOADED_IMAGE_ROLES,
   type BuildPreloadedCatalogsOptions,
 } from '../../src/docker/preloaded-catalog-builder.js';
@@ -80,6 +81,90 @@ describe('complete preloaded catalog builder', () => {
     expect(readDirectoryFiles(fixture.directory)).toEqual([]);
   });
 });
+
+describe('live staging generation publication', () => {
+  it('replaces the previous generation and leaves no retired sibling behind', async () => {
+    const parent = privateParent();
+    const live = join(parent, 'preloaded-catalog');
+    mkdirSync(live, { mode: 0o700 });
+    writeFileSync(join(live, 'base.tar'), 'old-generation');
+
+    const built = await publishCatalogGeneration({
+      liveDirectory: live,
+      build: async (pending) => {
+        expect(pending).not.toBe(live);
+        expect(readFileSync(join(live, 'base.tar'), 'utf8')).toBe('old-generation');
+        writeFileSync(join(pending, 'base.tar'), 'new-generation');
+        return 'published';
+      },
+    });
+
+    expect(built).toBe('published');
+    expect(readFileSync(join(live, 'base.tar'), 'utf8')).toBe('new-generation');
+    expect(readDirectoryFiles(parent)).toEqual(['preloaded-catalog']);
+  });
+
+  it('leaves the live generation untouched when the build throws', async () => {
+    const parent = privateParent();
+    const live = join(parent, 'preloaded-catalog');
+    mkdirSync(live, { mode: 0o700 });
+    writeFileSync(join(live, 'base.tar'), 'old-generation');
+    writeFileSync(join(live, 'preloaded-catalog.docker.json'), '{"generation":"old"}');
+
+    await expect(
+      publishCatalogGeneration({
+        liveDirectory: live,
+        build: async (pending) => {
+          writeFileSync(join(pending, 'base.tar'), 'half-built');
+          throw new Error('injected build failure');
+        },
+      }),
+    ).rejects.toThrow(/injected build failure/u);
+
+    expect(readDirectoryFiles(live)).toEqual(['base.tar', 'preloaded-catalog.docker.json']);
+    expect(readFileSync(join(live, 'base.tar'), 'utf8')).toBe('old-generation');
+    // The half-built tree is gone: no pending sibling survives a failed build.
+    expect(readDirectoryFiles(parent)).toEqual(['preloaded-catalog']);
+  });
+
+  it('provisions the first generation when no live directory exists yet', async () => {
+    const parent = privateParent();
+    const live = join(parent, 'nested', 'preloaded-catalog');
+
+    await publishCatalogGeneration({
+      liveDirectory: live,
+      build: async (pending) => {
+        writeFileSync(join(pending, 'base.tar'), 'first-generation');
+      },
+    });
+
+    expect(readFileSync(join(live, 'base.tar'), 'utf8')).toBe('first-generation');
+    expect(readDirectoryFiles(dirname(live))).toEqual(['preloaded-catalog']);
+  });
+
+  it('hands the build a private directory the catalog builder accepts', async () => {
+    const parent = privateParent();
+    const live = join(parent, 'preloaded-catalog');
+
+    const result = await publishCatalogGeneration({
+      liveDirectory: live,
+      build: async (pending) => {
+        const fixture = builderFixture();
+        return buildPreloadedCatalogs({ ...fixture.options, outputDirectory: pending, stage: stageFixture });
+      },
+    });
+
+    expect(result.docker.catalog.images).toHaveLength(REQUIRED_PRELOADED_IMAGE_ROLES.length);
+    expect(readDirectoryFiles(live)).toContain('preloaded-catalog.docker.json');
+    expect(existsSync(join(live, 'base.tar'))).toBe(true);
+  });
+});
+
+function privateParent(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'preloaded-catalog-live-'));
+  temporaryDirectories.push(directory);
+  return directory;
+}
 
 function builderFixture(): { readonly directory: string; readonly options: BuildPreloadedCatalogsOptions } {
   const directory = mkdtempSync(join(tmpdir(), 'preloaded-catalog-builder-'));

@@ -99,6 +99,13 @@ interface MediatedExchange<A> {
   readonly lease: MediatedEgressLease | undefined;
   deadline?: NodeJS.Timeout;
   upstreamReq?: http.ClientRequest;
+  /**
+   * Bytes this logical request has already consumed on *earlier* hops (drained
+   * redirect bodies). The per-request byte ceiling is a property of the logical
+   * request, not of a single hop, so every later hop — including the terminal
+   * stream — is bounded by `maxBytes - consumedBytes`.
+   */
+  consumedBytes: number;
   settled: boolean;
 }
 
@@ -145,7 +152,7 @@ export function forwardMediatedEgress<A>(clientRes: http.ServerResponse, config:
     }
   }
 
-  const exchange: MediatedExchange<A> = { clientRes, config, lease, settled: false };
+  const exchange: MediatedExchange<A> = { clientRes, config, lease, consumedBytes: 0, settled: false };
   exchange.deadline = armMediatedDeadline(exchange, config.describe(authorized).maxDurationMs);
   clientRes.once('close', () => finalizeMediatedExchange(exchange));
   fetchMediated(exchange, authorized);
@@ -244,11 +251,12 @@ function followMediatedRedirect<A>(
   }
   // Drain the redirect body under the byte ceilings before following (F1): the body
   // is never delivered but still consumes bandwidth, so it counts against a tight
-  // redirect cap, the per-request cap, and (when present) the cumulative session
-  // ledger. Overflow fails the whole exchange closed; the wall-clock deadline bounds
-  // a slow body.
+  // per-hop redirect cap, the per-request cap *shared with every later hop*, and
+  // (when present) the cumulative session ledger. Overflow fails the whole exchange
+  // closed; the wall-clock deadline bounds a slow body.
   const session = config.session;
-  const bodyCap = Math.min(MAX_REDIRECT_BODY_BYTES, config.describe(authorized).maxBytes);
+  const remaining = config.describe(authorized).maxBytes - exchange.consumedBytes;
+  const bodyCap = Math.min(MAX_REDIRECT_BODY_BYTES, remaining);
   let drained = 0;
   let aborted = false;
   upstreamRes.on('data', (chunk: Buffer) => {
@@ -267,16 +275,19 @@ function followMediatedRedirect<A>(
   });
   upstreamRes.on('end', () => {
     if (aborted || exchange.settled) return;
+    exchange.consumedBytes += drained;
     fetchMediated(exchange, next);
   });
 }
 
 /**
  * Pipe the upstream response to the client with backpressure, enforcing the
- * per-request (and, when present, per-session) byte ceilings as bytes flow. A
- * declared `content-length` that already overshoots a ceiling is rejected before
- * any body is streamed; a chunked body that overshoots mid-stream tears down both
- * sides. On successful completion the provenance sink is invoked once.
+ * per-request (and, when present, per-session) byte ceilings as bytes flow. Bytes
+ * already consumed by drained redirect hops count against the per-request ceiling,
+ * so it holds across the whole logical request. A declared `content-length` that
+ * already overshoots a ceiling is rejected before any body is streamed; a chunked
+ * body that overshoots mid-stream tears down both sides. On successful completion
+ * the provenance sink is invoked once.
  */
 function streamMediatedToClient<A>(
   exchange: MediatedExchange<A>,
@@ -287,15 +298,19 @@ function streamMediatedToClient<A>(
   const { clientRes, config } = exchange;
   const session = config.session;
   const maxBytes = config.describe(authorized).maxBytes;
+  const consumed = exchange.consumedBytes;
 
   const declared = declaredContentLength(upstreamRes.headers);
-  if (declared !== undefined && (declared > maxBytes || (session !== undefined && !session.wouldFit(declared)))) {
+  if (
+    declared !== undefined &&
+    (consumed + declared > maxBytes || (session !== undefined && !session.wouldFit(declared)))
+  ) {
     upstreamRes.resume();
     rejectMediatedEgress(clientRes, 502, `${config.label}: response exceeds a byte ceiling`);
     return;
   }
 
-  const ceiling = createMediatedByteCeiling(config.label, maxBytes, session);
+  const ceiling = createMediatedByteCeiling(config.label, maxBytes, session, consumed);
   clientRes.writeHead(status, sanitizeResponseHeaders(upstreamRes.headers));
   pipeline(upstreamRes, ceiling.transform, clientRes, (error) => {
     if (error) {
@@ -319,17 +334,22 @@ interface MediatedByteCeiling {
  * or cumulative per-session byte ceiling, exposing its running byte total so the
  * caller never needs a second `data` counter. `pipeline` propagates the error to
  * destroy both the upstream response and the client response.
+ *
+ * `alreadyConsumed` seeds the per-request ceiling with the bytes earlier hops of the
+ * same logical request already spent; `byteCount()` still reports only the bytes
+ * streamed here, which is what the provenance sink records.
  */
 function createMediatedByteCeiling(
   label: string,
   maxBytes: number,
   session: MediatedEgressSession | undefined,
+  alreadyConsumed: number,
 ): MediatedByteCeiling {
   let total = 0;
   const transform = new Transform({
     transform(chunk: Buffer, _encoding, callback): void {
       total += chunk.length;
-      if (total > maxBytes) {
+      if (alreadyConsumed + total > maxBytes) {
         callback(new Error(`${label} exceeded the per-request byte ceiling (${maxBytes})`));
         return;
       }

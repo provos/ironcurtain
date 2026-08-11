@@ -212,6 +212,36 @@ function hasConversationState(stateDir: string): boolean {
   }
 }
 
+/** The resume verdict for an ended PTY session, with the reason when it is refused. */
+export interface SnapshotResumability {
+  readonly resumable: boolean;
+  /** Why resume is refused; `undefined` when `resumable` is true. */
+  readonly reason: string | undefined;
+}
+
+/**
+ * Single decision point for whether an ended PTY session may be resumed.
+ *
+ * A session that ran with an admitted secure nested Docker-workload bundle is
+ * never resumable: the nested daemon, its state root, and its lease are torn
+ * down with the bundle, so a resumed conversation would reference daemon state
+ * that no longer exists. Forcing `resumable: false` here is what keeps PTY mode
+ * in sync with the batch path, which rejects a resume whose session metadata
+ * records a Docker workload (`applyResumeMetadata` in `src/session/index.ts`).
+ */
+export function resolveSnapshotResumability(input: {
+  readonly conversationStateDir: string | undefined;
+  readonly dockerWorkloadAdmitted: boolean;
+}): SnapshotResumability {
+  if (input.dockerWorkloadAdmitted) {
+    return { resumable: false, reason: 'nested Docker-workload daemon state is ephemeral' };
+  }
+  if (input.conversationStateDir === undefined || !hasConversationState(input.conversationStateDir)) {
+    return { resumable: false, reason: 'no conversation state was recorded' };
+  }
+  return { resumable: true, reason: undefined };
+}
+
 /**
  * Writes a session state snapshot to the session directory.
  */
@@ -944,7 +974,10 @@ async function runPtySessionAttempt(
       try {
         const status: SessionSnapshot['status'] = userExited ? 'user-exit' : classifyExitStatus(ptyExitCode);
 
-        const canResume = !!conversationStateDirForSnapshot && hasConversationState(conversationStateDirForSnapshot);
+        const resumability = resolveSnapshotResumability({
+          conversationStateDir: conversationStateDirForSnapshot,
+          dockerWorkloadAdmitted: dockerWorkload !== undefined,
+        });
 
         const snapshot: SessionSnapshot = {
           sessionId: effectiveSessionId,
@@ -955,11 +988,12 @@ async function runPtySessionAttempt(
           providerProfileName: resolvedProviderProfileName,
           agent: adapterIdForSnapshot,
           label: `${adapterDisplayNameForSnapshot ?? adapterIdForSnapshot} (interactive)`,
-          resumable: canResume,
+          resumable: resumability.resumable,
         };
 
         writeSessionSnapshot(sessionDir, snapshot);
-        logger.info(`Session snapshot written (status: ${status}, resumable: ${canResume})`);
+        const why = resumability.reason === undefined ? '' : ` (${resumability.reason})`;
+        logger.info(`Session snapshot written (status: ${status}, resumable: ${resumability.resumable})${why}`);
       } catch (snapshotErr) {
         logger.warn(
           `Failed to write session snapshot: ${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`,

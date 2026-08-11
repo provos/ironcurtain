@@ -460,10 +460,15 @@ export type AgentImageResolution =
  *   `buildImage`/`pullImage`.
  *
  * `resolvedRuntimeKind` is the runtime the caller already resolved (env
- * override > config > auto probe); the workload `backend` field selects the
- * catalog only when it names a concrete backend, otherwise the resolved
- * runtime wins. The mapping is pure so both call paths and tests can exercise
- * it without a container runtime.
+ * override > config > auto probe), and the catalog is ALWAYS bound to it. A
+ * concrete workload `backend` is a CONSTRAINT on that resolution, never an
+ * override of it: the live `ContainerRuntime` is constructed from
+ * `resolvedRuntimeKind` upstream, so honoring a disagreeing `backend` here
+ * would hand that runtime another backend's immutable image IDs and hash the
+ * admission bindings from a catalog the session never loads. A disagreement is
+ * therefore rejected rather than silently reconciled — one check covers both
+ * image call paths and `admissionCatalogPath`. The mapping is pure so both call
+ * paths and tests can exercise it without a container runtime.
  */
 export function imageProvisioningForConfig(
   dockerWorkload: ResolvedDockerWorkloadConfig | undefined,
@@ -472,11 +477,18 @@ export function imageProvisioningForConfig(
   // The enabled config always carries `imageMode: 'preloaded-catalog'` today;
   // feature-off is the only other state and maps to the legacy build path.
   if (dockerWorkload?.enabled !== true) return undefined;
-  const runtimeKind = dockerWorkload.backend === 'auto' ? resolvedRuntimeKind : dockerWorkload.backend;
+  const { backend } = dockerWorkload;
+  if (backend !== 'auto' && backend !== resolvedRuntimeKind) {
+    throw new Error(
+      `dockerWorkload.backend is "${backend}" but the resolved container runtime is "${resolvedRuntimeKind}". ` +
+        `Set containerRuntime (or IRONCURTAIN_CONTAINER_RUNTIME) to "${backend}", ` +
+        'or set dockerWorkload.backend to "auto" to follow the resolved runtime.',
+    );
+  }
   return {
     imageMode: 'preloaded-catalog',
-    catalogPath: getStagedCatalogPath(runtimeKind),
-    runtimeKind,
+    catalogPath: getStagedCatalogPath(resolvedRuntimeKind),
+    runtimeKind: resolvedRuntimeKind,
   };
 }
 
@@ -852,10 +864,9 @@ export async function prepareDockerInfrastructure(
   try {
     // §8.2 step 3: attest the host watchdog now that the outer proxies are up.
     // No-op unless a Docker-workload bundle was admitted above (unreachable
-    // behind the fuse). A failed attestation aborts admission and leaves a
-    // reconcilable `admitting` lease; the proxy cleanup in the catch below
-    // still runs, but the lease is intentionally NOT torn down here (crash
-    // reconciliation reclaims it) — see §8.3.
+    // behind the fuse). Everything from here on is covered by the catch below,
+    // which tears the admitted lease down — see the note there for why crash
+    // reconciliation cannot be relied on for a post-attestation failure.
     await dockerWorkload?.attestWatchdog();
 
     // Build orientation
@@ -1003,6 +1014,25 @@ export async function prepareDockerInfrastructure(
       captureWriter,
     };
   } catch (error) {
+    // §8.3: an admitted Docker-workload lease must not outlive the failed
+    // preparation, and crash reconciliation only reclaims SOME of these
+    // failures. Attestation failure itself is reclaimable — the supervisor
+    // launcher kills the child it rejected, so the lease goes stale and
+    // `reconcileDockerWorkloadLeases` collects it. A failure AFTER a successful
+    // attestation is not: the detached supervisor survives coordinator exit by
+    // design and never exits on its own, so its status stays fresh, the lease
+    // stays "live", and reconciliation PRESERVES it forever (one leaked
+    // supervisor + lease + state tree per failed attempt). So tear it down
+    // here, before the proxies, mirroring the teardown-first ordering of
+    // `destroyBundleOuterResources`. Safe on the attestation-failure path too:
+    // teardown is idempotent and, with the supervisor already gone, closes the
+    // lease as coordinator and audits the incident. Best-effort — a teardown
+    // fault must not mask the original error.
+    await dockerWorkload
+      ?.teardown()
+      .catch((err: unknown) =>
+        logger.warn(`prepareDockerInfrastructure: dockerWorkload.teardown() failed: ${errorMessage(err)}`),
+      );
     // Best-effort cleanup of proxies started above
     await mitmProxy.stop().catch(() => {});
     await proxy.stop().catch(() => {});

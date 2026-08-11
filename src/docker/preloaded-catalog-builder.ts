@@ -1,7 +1,8 @@
 /** Trusted all-or-nothing builder for complete backend-bound image catalogs. */
 
-import { existsSync, lstatSync, rmSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
 import type { ExecFileFn } from './docker-manager.js';
 import {
@@ -175,4 +176,83 @@ function validateBuilderOptions(options: BuildPreloadedCatalogsOptions): void {
 
 function writeCatalogAtomic(path: string, catalog: PreloadedImageCatalog): void {
   writeStableJsonAtomic(path, catalog, { mode: 0o400 });
+}
+
+export interface PublishCatalogGenerationOptions<T> {
+  /**
+   * Live staging directory every consumer resolves through
+   * (`getPreloadedCatalogStagingDir()`). It is only ever replaced wholesale.
+   */
+  readonly liveDirectory: string;
+  /** Builds one complete generation into the private directory it is handed. */
+  readonly build: (stagingDirectory: string) => Promise<T>;
+}
+
+/**
+ * Extend the builder's all-or-nothing guarantee to the *live* staging tree:
+ * build the new generation into a private sibling directory and only replace
+ * the live one once the build has fully succeeded.
+ *
+ * Consumers resolve archives relative to their catalog's own directory (see
+ * `resolvePreloadedImage`) and re-derive the live path per session, so no
+ * published artifact records the temporary path — swapping directories cannot
+ * invalidate a catalog.
+ */
+export async function publishCatalogGeneration<T>(options: PublishCatalogGenerationOptions<T>): Promise<T> {
+  assertCanonicalHostPath(options.liveDirectory, 'preloaded catalog staging directory');
+  mkdirSync(dirname(options.liveDirectory), { recursive: true });
+  // `mkdtemp` claims a unique sibling atomically, so concurrent runs (and any
+  // abandoned tree from an earlier crash) can never collide on the build path.
+  const pendingDirectory = mkdtempSync(`${options.liveDirectory}.pending-`);
+  chmodSync(pendingDirectory, 0o700);
+  let built: T;
+  try {
+    built = await options.build(pendingDirectory);
+  } catch (error) {
+    rmSync(pendingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+  swapGenerationIntoPlace(pendingDirectory, options.liveDirectory);
+  return built;
+}
+
+/**
+ * Two renames inside one parent directory, so the live path never names a
+ * half-populated tree. A crash *between* the renames leaves the live path
+ * absent but the previous generation intact under its `.retired-*` sibling: an
+ * operator recovers the old generation with a single rename instead of paying
+ * for a full rebuild.
+ */
+function swapGenerationIntoPlace(pendingDirectory: string, liveDirectory: string): void {
+  const retiredDirectory = existsSync(liveDirectory)
+    ? `${liveDirectory}.retired-${randomBytes(6).toString('hex')}`
+    : undefined;
+  if (retiredDirectory !== undefined) renameSync(liveDirectory, retiredDirectory);
+  try {
+    renameSync(pendingDirectory, liveDirectory);
+  } catch (error) {
+    rmSync(pendingDirectory, { recursive: true, force: true });
+    if (retiredDirectory !== undefined) restoreRetiredGeneration(retiredDirectory, liveDirectory);
+    throw error;
+  }
+  if (retiredDirectory === undefined) return;
+  try {
+    rmSync(retiredDirectory, { recursive: true, force: true });
+  } catch {
+    // Best effort only. The new generation is already live, so failing the
+    // publication here would misreport a successful freeze; what is left behind
+    // is a complete previous generation the operator can delete.
+  }
+}
+
+function restoreRetiredGeneration(retiredDirectory: string, liveDirectory: string): void {
+  try {
+    renameSync(retiredDirectory, liveDirectory);
+  } catch (error) {
+    throw new Error(
+      `preloaded catalog publication failed and the previous generation is parked at ${retiredDirectory}; ` +
+        `restore it by renaming that directory back to ${liveDirectory}`,
+      { cause: error },
+    );
+  }
 }
