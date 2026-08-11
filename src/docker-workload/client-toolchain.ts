@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { loadImmutableHostJson } from '../hardened-fs.js';
 import { catalogTupleDigest } from '../docker/preloaded-image-catalog.js';
 import type { ContainerRuntime } from '../docker/types.js';
+import { compareDockerApiVersions } from '../docker/docker-api-version.js';
 
 export const CLIENT_TOOLCHAIN_SCHEMA_VERSION = 1;
 export const MAX_CLIENT_TOOLCHAIN_MANIFEST_BYTES = 64 * 1024;
@@ -40,7 +41,7 @@ const clientToolchainManifestSchema = z
   .strict()
   .superRefine((manifest, context) => {
     const { min, max } = manifest.docker.compatibleApiRange;
-    if (compareApiVersions(min, max) > 0) {
+    if (compareDockerApiVersions(min, max) > 0) {
       context.addIssue({ code: 'custom', message: 'compatible Docker API range is reversed' });
     }
     for (const [name, value] of [
@@ -51,7 +52,7 @@ const clientToolchainManifestSchema = z
         context.addIssue({ code: 'custom', message: `${name} Docker API is outside the compatible range` });
       }
     }
-    if (compareApiVersions(manifest.docker.minimumDaemonApiVersion, manifest.docker.daemonApiVersion) > 0) {
+    if (compareDockerApiVersions(manifest.docker.minimumDaemonApiVersion, manifest.docker.daemonApiVersion) > 0) {
       context.addIssue({ code: 'custom', message: 'minimum daemon Docker API exceeds the daemon API' });
     }
   });
@@ -215,11 +216,5 @@ function compareField(mismatches: string[], label: string, actual: string, expec
 }
 
 function apiVersionInRange(value: string, minimum: string, maximum: string): boolean {
-  return compareApiVersions(value, minimum) >= 0 && compareApiVersions(value, maximum) <= 0;
-}
-
-function compareApiVersions(left: string, right: string): number {
-  const [leftMajor = 0, leftMinor = 0] = left.split('.').map(Number);
-  const [rightMajor = 0, rightMinor = 0] = right.split('.').map(Number);
-  return leftMajor - rightMajor || leftMinor - rightMinor;
+  return compareDockerApiVersions(value, minimum) >= 0 && compareDockerApiVersions(value, maximum) <= 0;
 }

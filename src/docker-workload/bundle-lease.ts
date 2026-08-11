@@ -1,25 +1,22 @@
 /** Durable host-only lease for one secure nested Docker authority bundle. */
 
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
 import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
+import {
+  lifecycleIdentifierSchema as identifierSchema,
+  dockerWorkloadCleanupProofSchema as cleanupSchema,
+  resourceNameSchema,
+  runtimeIdentitySchema,
+  timestampSchema,
+} from '../zod-helpers.js';
+import { acquireProcessLock, ProcessLockBusyError } from './process-lock.js';
 
 export const DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION = 1;
 export const MAX_DOCKER_WORKLOAD_LEASE_BYTES = 1024 * 1024;
 
-const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._:-]{2,127}$/u);
 const absolutePathSchema = z
   .string()
   .min(1)
@@ -27,10 +24,14 @@ const absolutePathSchema = z
   .refine((value) => isAbsolute(value) && resolve(value) === value, {
     message: 'lease path must be canonical and absolute',
   });
-const timestampSchema = z.iso.datetime({ offset: true });
-const runtimeIdentitySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u);
-const resourceNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u);
 const labelKeySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u);
+
+/**
+ * Bounds for the separation between the two cleanup inventories. The lease owns
+ * this rule: it stores the value, enforces it on close, and exports both halves
+ * so downstream readers (lifecycle evidence) never restate the numbers.
+ */
+export const cleanupInventoryGapMsSchema = z.number().int().min(100).max(60_000);
 
 const outerResourceSchema = z
   .object({
@@ -71,21 +72,6 @@ const outerResourceSchema = z
     }
   });
 
-const inventorySchema = z
-  .object({
-    capturedAt: timestampSchema,
-    ownedResourceIds: z.array(runtimeIdentitySchema).max(4096),
-  })
-  .strict();
-
-const cleanupSchema = z
-  .object({
-    exactOuterResourcesAbsent: z.literal(true),
-    stateRootAbsent: z.literal(true),
-    inventories: z.tuple([inventorySchema, inventorySchema]),
-  })
-  .strict();
-
 const leaseSchema = z
   .object({
     schemaVersion: z.literal(DOCKER_WORKLOAD_LEASE_SCHEMA_VERSION),
@@ -120,7 +106,7 @@ const leaseSchema = z
         heartbeatAt: timestampSchema,
       })
       .strict(),
-    cleanupInventoryGapMs: z.number().int().min(100).max(60_000),
+    cleanupInventoryGapMs: cleanupInventoryGapMsSchema,
     resources: z.array(outerResourceSchema).max(64),
     cleanup: cleanupSchema.nullable(),
     incident: z
@@ -176,6 +162,18 @@ export type DockerWorkloadLeasePaths = DockerWorkloadLease['paths'];
 export type DockerWorkloadLeaseBindings = DockerWorkloadLease['bindings'];
 export type DockerWorkloadOuterResource = DockerWorkloadLease['resources'][number];
 export type DockerWorkloadCleanupProof = z.infer<typeof cleanupSchema>;
+
+/** Throw unless the two cleanup inventories are at least `gapMs` apart. */
+export function assertCleanupInventoryGap(
+  inventories: DockerWorkloadCleanupProof['inventories'],
+  gapMs: number,
+  label: string,
+): void {
+  const [first, second] = inventories;
+  if (Date.parse(second.capturedAt) - Date.parse(first.capturedAt) < gapMs) {
+    throw new Error(`${label} cleanup inventories are not sufficiently separated`);
+  }
+}
 
 export interface CreateDockerWorkloadLeaseOptions {
   readonly leaseId: string;
@@ -370,10 +368,7 @@ export function closeDockerWorkloadLease(
     if (first.ownedResourceIds.length !== 0 || second.ownedResourceIds.length !== 0) {
       throw new Error('Docker-workload lease cleanup inventories must both be empty');
     }
-    const gap = Date.parse(second.capturedAt) - Date.parse(first.capturedAt);
-    if (gap < lease.cleanupInventoryGapMs) {
-      throw new Error('Docker-workload lease cleanup inventories are not sufficiently separated');
-    }
+    assertCleanupInventoryGap(validatedProof.inventories, lease.cleanupInventoryGapMs, 'Docker-workload lease');
     lease.status = 'closed';
     lease.cleanup = validatedProof;
   });
@@ -426,53 +421,21 @@ function writeLeaseAtomic(path: string, lease: DockerWorkloadLease): void {
 
 function withLeaseLock<T>(path: string, operation: () => T): T {
   const lockPath = `${path}.lock`;
-  let descriptor: number | undefined;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      descriptor = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-      writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, startedAt: processStartTime() })}\n`);
-      fsyncSync(descriptor);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const owner = readLockOwner(lockPath);
-      if (owner !== undefined && processIsAlive(owner.pid)) {
-        throw new Error(`Docker-workload lease is busy (owner pid ${owner.pid})`, { cause: error });
-      }
-      rmSync(lockPath, { force: true });
+  let lock;
+  try {
+    lock = acquireProcessLock(lockPath, { attempts: 2 });
+  } catch (error) {
+    if (error instanceof ProcessLockBusyError) {
+      const owner = error.ownerPid === undefined ? '' : ` (owner pid ${error.ownerPid})`;
+      throw new Error(`Docker-workload lease is busy${owner}`, { cause: error });
     }
+    throw error;
   }
-  if (descriptor === undefined) throw new Error('could not acquire Docker-workload lease lock');
   try {
     return operation();
   } finally {
-    closeSync(descriptor);
-    rmSync(lockPath, { force: true });
+    lock.release();
   }
-}
-
-function readLockOwner(path: string): { readonly pid: number } | undefined {
-  try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as { readonly pid?: unknown };
-    return typeof value.pid === 'number' && Number.isSafeInteger(value.pid) && value.pid > 0
-      ? { pid: value.pid }
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-function processStartTime(): string {
-  return new Date(Date.now() - Math.floor(process.uptime() * 1000)).toISOString();
 }
 
 function assertCanonicalLeasePath(path: string): void {

@@ -1,8 +1,7 @@
 /** Operator-requested and trusted-resolved secure nested Docker capability. */
 
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { stableStringify } from '../hash.js';
+import { computeHash } from '../hash.js';
 
 export const DOCKER_WORKLOAD_BACKENDS = ['auto', 'docker', 'apple-container'] as const;
 
@@ -112,16 +111,15 @@ export function resolveDockerWorkloadConfig(
 }
 
 export function dockerWorkloadConfigHash(config: ResolvedDockerWorkloadConfig): string {
-  const serialized = stableStringify(config);
-  if (serialized === undefined) throw new Error('resolved Docker workload configuration is not serializable');
-  return createHash('sha256').update(serialized, 'utf8').digest('hex');
+  return computeHash(config);
 }
 
 /**
  * Temporary admission fuse while Phase 0C has qualified no concrete variant.
  * Keeping it at the first image/runtime boundary makes opt-in fail closed
- * without changing ordinary disabled sessions. Product integration replaces
- * this only with a hash-bound passing qualification admission record.
+ * without changing ordinary disabled sessions. Remove it only after the
+ * backend's product-acceptance gates pass; session admission then verifies the
+ * operational bindings it consumes plus live preflight, never a release report.
  */
 export function assertDockerWorkloadImplementationAvailable(config: ResolvedDockerWorkloadConfig | undefined): void {
   if (config?.enabled === true) {

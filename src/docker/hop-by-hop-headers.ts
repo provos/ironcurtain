@@ -37,3 +37,20 @@ export const HOP_BY_HOP_HEADERS: ReadonlySet<string> = new Set([
  * hop-by-hop header plus `set-cookie`.
  */
 export const HOP_BY_HOP_RESPONSE_HEADERS: ReadonlySet<string> = new Set([...HOP_BY_HOP_HEADERS, 'set-cookie']);
+
+/**
+ * Parse the additional hop-by-hop names nominated by an HTTP `Connection`
+ * header. Node represents duplicate headers as either a comma-joined string or
+ * an array, so both shapes are accepted.
+ */
+export function connectionNominatedHeaderNames(value: string | readonly string[] | undefined): ReadonlySet<string> {
+  const result = new Set<string>();
+  const values = value === undefined ? [] : typeof value === 'string' ? [value] : value;
+  for (const item of values) {
+    for (const token of item.split(',')) {
+      const name = token.trim().toLowerCase();
+      if (name !== '') result.add(name);
+    }
+  }
+  return result;
+}

@@ -133,7 +133,13 @@ describe('anonymous registry-egress authorization', () => {
     const authorized = authorizeRegistryEgressRequest(manifest(), {
       method: 'GET',
       url: `https://registry.test/v2/library/app/blobs/${DIGEST}`,
-      headers: { host: 'attacker.invalid', accept: 'application/octet-stream', 'user-agent': 'fixture/1' },
+      headers: {
+        host: 'attacker.invalid',
+        connection: 'x-internal',
+        'x-internal': 'must-not-cross-the-hop',
+        accept: 'application/octet-stream',
+        'user-agent': 'fixture/1',
+      },
     });
     expect(authorized.operation).toBe('blob-pull');
     expect(authorized.requestedDigest).toEqual({ algorithm: 'sha256', hex: 'a'.repeat(64) });

@@ -1243,7 +1243,6 @@ describe('MitmProxy', () => {
         ca,
         providers: [{ config: oauthProvider, fakeKey, realKey: 'old-real-token', tokenManager }],
         dnsLookup: localhostDnsLookup,
-        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 

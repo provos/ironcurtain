@@ -14,18 +14,7 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import {
-  closeSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   getDockerWorkloadLeaseDir,
@@ -34,6 +23,7 @@ import {
   getDockerWorkloadStateRoot,
 } from '../config/paths.js';
 import type { ContainerRuntime } from '../docker/types.js';
+import type { ContainerRuntimeKind } from '../docker/container-runtime.js';
 import { loadResourceWatchdogPolicy, type LoadedResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
 // Type-only: the readiness record is deliberately field-compatible with the
 // `daemon-ready` evidence payload, and a type import adds no runtime edge.
@@ -74,6 +64,7 @@ import {
   type DockerWorkloadAuditSink,
   type ExpandedOuterCreate,
 } from './lifecycle-evidence.js';
+import { acquireProcessLock, ProcessLockBusyError, type ProcessIdentityResolver } from './process-lock.js';
 
 export const DOCKER_WORKLOAD_OWNERSHIP_LABEL_KEY = 'com.ironcurtain.docker-workload.generation';
 
@@ -90,7 +81,7 @@ const BUSY_RETRY_ATTEMPTS = 4;
 const BUSY_RETRY_BACKOFF_MS = 50;
 const ADMISSION_LOCK_ACQUIRE_ATTEMPTS = 16;
 
-export type DockerWorkloadRuntimeKind = 'docker' | 'apple-container';
+export type DockerWorkloadRuntimeKind = ContainerRuntimeKind;
 export type OuterResourceKind = 'container' | 'network';
 export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'proxy' | 'network';
 
@@ -137,8 +128,6 @@ export interface DockerWorkloadAdmissionOptions {
   readonly bindings: DockerWorkloadAdmissionBindings;
   /** The resolved capability config hash recorded in the admission audit event. */
   readonly configHash: string;
-  /** Provenance of `bindings` for the audit trail (default: 'placeholder'). */
-  readonly bindingsProvenance?: 'placeholder' | 'qualified';
   readonly watchdogPolicyTemplatePath: string;
   readonly watchdogSupervisorEntrypointPath: string;
   readonly leaseId?: string;
@@ -148,6 +137,10 @@ export interface DockerWorkloadAdmissionOptions {
   readonly clock?: () => Date;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly pidAlive?: (pid: number) => boolean;
+  /** Test seam for cross-process lock identity; production reads the host process table. */
+  readonly processIdentityForPid?: ProcessIdentityResolver;
+  /** Resolve the runtime recorded by an older lease when backend selection changed. */
+  readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind) => ContainerRuntime;
   readonly randomName?: (role: OuterResourceRole, kind: OuterResourceKind) => string;
   readonly supervisor?: WatchdogSupervisorController;
   /** Off for tests that must not leave a real host heartbeat interval running. */
@@ -161,6 +154,10 @@ export interface ReconcileDockerWorkloadOptions {
   readonly clock?: () => Date;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly pidAlive?: (pid: number) => boolean;
+  /** Test seam for cross-process lock identity; production reads the host process table. */
+  readonly processIdentityForPid?: ProcessIdentityResolver;
+  /** Resolve the runtime recorded by an older lease when backend selection changed. */
+  readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind) => ContainerRuntime;
   readonly supervisor?: WatchdogSupervisorController;
   readonly recoveryBoundMs?: number;
   readonly staleHeartbeatMs?: number;
@@ -201,7 +198,7 @@ export async function admitDockerWorkloadBundle(
   const ownershipLabelKey = options.ownershipLabelKey ?? DOCKER_WORKLOAD_OWNERSHIP_LABEL_KEY;
   const root = getDockerWorkloadRoot();
 
-  return withDockerWorkloadAdmissionLock(root, pidAlive, async () => {
+  return withDockerWorkloadAdmissionLock(root, options.processIdentityForPid, async () => {
     const reconciliation = await reconcileHeld({ ...options, clock, sleep, pidAlive, supervisor });
     if (reconciliation.fenced.length > 0) {
       throw new Error(
@@ -239,7 +236,6 @@ export async function admitDockerWorkloadBundle(
       bundleId: options.bundleId,
       runtimeKind: options.runtimeKind,
       configHash: options.configHash,
-      bindingsProvenance: options.bindingsProvenance ?? 'placeholder',
       watchdogPolicySha256: loadedPolicy.sha256,
       watchdogTemplateSha256: template.sha256,
       detail: 'reconciled outstanding leases and created a fresh admitting lease',
@@ -251,12 +247,10 @@ export async function admitDockerWorkloadBundle(
       bundleId: options.bundleId,
       leaseId,
       generation,
-      leaseDir,
       leasePath,
       policyPath,
       statusPath: join(leaseDir, STATUS_FILE),
       stopRequestPath: join(leaseDir, STOP_REQUEST_FILE),
-      evidenceDir,
       loadedPolicy,
       templateSha256: template.sha256,
       ownershipLabelKey,
@@ -275,8 +269,9 @@ export async function admitDockerWorkloadBundle(
 export async function reconcileDockerWorkloadLeases(
   options: ReconcileDockerWorkloadOptions,
 ): Promise<ReconcileDockerWorkloadResult> {
-  const pidAlive = options.pidAlive ?? defaultPidAlive;
-  return withDockerWorkloadAdmissionLock(getDockerWorkloadRoot(), pidAlive, () => reconcileHeld(options));
+  return withDockerWorkloadAdmissionLock(getDockerWorkloadRoot(), options.processIdentityForPid, () =>
+    reconcileHeld(options),
+  );
 }
 
 interface DockerWorkloadBundleHandleContext {
@@ -285,12 +280,10 @@ interface DockerWorkloadBundleHandleContext {
   readonly bundleId: string;
   readonly leaseId: string;
   readonly generation: string;
-  readonly leaseDir: string;
   readonly leasePath: string;
   readonly policyPath: string;
   readonly statusPath: string;
   readonly stopRequestPath: string;
-  readonly evidenceDir: string;
   readonly loadedPolicy: LoadedResourceWatchdogPolicy;
   readonly templateSha256: string;
   readonly ownershipLabelKey: string;
@@ -322,29 +315,11 @@ export class DockerWorkloadBundleHandle {
   get generation(): string {
     return this.context.generation;
   }
-  get leaseDir(): string {
-    return this.context.leaseDir;
-  }
   get leasePath(): string {
     return this.context.leasePath;
   }
-  get policyPath(): string {
-    return this.context.policyPath;
-  }
-  get statusPath(): string {
-    return this.context.statusPath;
-  }
-  get stopRequestPath(): string {
-    return this.context.stopRequestPath;
-  }
-  get evidenceDir(): string {
-    return this.context.evidenceDir;
-  }
   get loadedPolicy(): LoadedResourceWatchdogPolicy {
     return this.context.loadedPolicy;
-  }
-  get templateSha256(): string {
-    return this.context.templateSha256;
   }
 
   /** Precommit one outer resource to the ledger BEFORE the caller creates it. */
@@ -391,9 +366,9 @@ export class DockerWorkloadBundleHandle {
   async attestWatchdog(): Promise<ResourceWatchdogSupervisorStatus> {
     const launched = await this.context.supervisor.launch({
       leasePath: this.leasePath,
-      policyPath: this.policyPath,
-      statusPath: this.statusPath,
-      stopRequestPath: this.stopRequestPath,
+      policyPath: this.context.policyPath,
+      statusPath: this.context.statusPath,
+      stopRequestPath: this.context.stopRequestPath,
       entrypointPath: this.context.supervisorEntrypointPath,
       startupTimeoutMs: DOCKER_WORKLOAD_WATCHDOG_STARTUP_TIMEOUT_MS,
     });
@@ -407,7 +382,7 @@ export class DockerWorkloadBundleHandle {
       kind: 'watchdog-attested',
       supervisorPid: launched.pid,
       policySha256: this.loadedPolicy.sha256,
-      templateSha256: this.templateSha256,
+      templateSha256: this.context.templateSha256,
       firstSample,
     });
     return launched.status;
@@ -435,7 +410,7 @@ export class DockerWorkloadBundleHandle {
 
   /** Prove the watchdog supervisor is still fresh immediately before daemon/VM create. */
   assertWatchdogFresh(): void {
-    const status = this.context.supervisor.readStatus(this.statusPath);
+    const status = this.context.supervisor.readStatus(this.context.statusPath);
     if (status === undefined) throw new Error('watchdog supervisor status is missing');
     assertResourceWatchdogSupervisorFresh(
       status,
@@ -487,7 +462,7 @@ export class DockerWorkloadBundleHandle {
   private async stopWatchdogAndClose(cleanup: DockerWorkloadCleanupProof): Promise<boolean> {
     const lease = loadDockerWorkloadLease(this.leasePath);
     this.context.supervisor.requestStop(
-      this.stopRequestPath,
+      this.context.stopRequestPath,
       { leaseId: lease.leaseId, generation: lease.generation },
       cleanup,
       this.context.clock(),
@@ -575,7 +550,12 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
     try {
       lease = loadDockerWorkloadLease(leasePath);
     } catch {
-      continue; // Not a valid lease directory.
+      // Unrelated directories are ignored, but once a lease marker exists its
+      // contents are authoritative lifecycle state. Corruption, permissions,
+      // symlinks, or an older unsupported schema must fence admission rather
+      // than making possibly-running outer resources disappear from recovery.
+      if (pathEntryExistsWithoutFollowing(leasePath)) fenced.push(leaseId);
+      continue;
     }
     if (lease.status === 'closed') continue;
     if (lease.status === 'incident') {
@@ -650,10 +630,17 @@ async function recoverStaleLease(context: {
   readonly recoveryBoundMs: number;
 }): Promise<void> {
   const { leaseDir, leasePath, lease, options, clock, sleep, supervisor, recoveryBoundMs } = context;
-  if (options.runtime.listContainers === undefined) {
-    throw new Error('selected outer runtime cannot inventory containers for reconciliation');
+  const runtime =
+    lease.runtimeKind === options.runtimeKind ? options.runtime : options.runtimeForKind?.(lease.runtimeKind);
+  if (runtime === undefined) {
+    throw new Error(
+      `cannot reconcile ${lease.runtimeKind} lease through selected ${options.runtimeKind} runtime; recorded runtime is unavailable`,
+    );
   }
-  await options.runtime.listContainers();
+  if (runtime.listContainers === undefined) {
+    throw new Error(`recorded ${lease.runtimeKind} runtime cannot inventory containers for reconciliation`);
+  }
+  await runtime.listContainers();
   const recoveryStartMs = clock().getTime();
 
   const loadedPolicy = loadResourceWatchdogPolicy(join(leaseDir, POLICY_FILE));
@@ -661,7 +648,7 @@ async function recoverStaleLease(context: {
     throw new Error('reconciliation policy hash does not match the lease binding');
   }
   const { revocation, cleanup } = await performExactRevocationAndCleanup({
-    runtime: options.runtime,
+    runtime,
     leasePath,
     generation: lease.generation,
     targetDevice: loadedPolicy.policy.targetDevice,
@@ -774,92 +761,38 @@ function listLeaseIds(leasesRoot: string): readonly string[] {
 
 async function withDockerWorkloadAdmissionLock<T>(
   root: string,
-  pidAlive: (pid: number) => boolean,
+  processIdentityForPid: ProcessIdentityResolver | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const lockPath = join(root, ADMISSION_LOCK_FILE);
-  const descriptor = acquireAdmissionLock(lockPath, pidAlive);
+  let lock;
+  try {
+    lock = acquireProcessLock(lockPath, {
+      attempts: ADMISSION_LOCK_ACQUIRE_ATTEMPTS,
+      processIdentityForPid,
+    });
+  } catch (error) {
+    if (error instanceof ProcessLockBusyError) {
+      const owner = error.ownerPid === undefined ? '' : ` (owner pid ${error.ownerPid})`;
+      throw new Error(`Docker-workload admission is busy${owner}`, { cause: error });
+    }
+    throw error;
+  }
   try {
     return await operation();
   } finally {
-    closeSync(descriptor);
-    rmSync(lockPath, { force: true });
+    lock.release();
   }
 }
 
-/**
- * Acquire the cross-process admission lock via an O_EXCL create, reclaiming a
- * stale lock left by a crashed coordinator.
- *
- * Bounded retry loop so a lost race re-checks ownership instead of throwing a raw
- * EEXIST, and so reclaiming and re-creating the lock is arbitrated by the atomic
- * O_EXCL create rather than an unconditional re-create. A live owner is reported
- * busy; a dead/unreadable owner's lock is reclaimed atomically
- * ({@link reclaimStaleAdmissionLock}) without ever deleting a racer's freshly
- * installed live lock. If the lock stays contended across every attempt the
- * caller sees the mapped "is busy" error, never a raw EEXIST.
- */
-function acquireAdmissionLock(lockPath: string, pidAlive: (pid: number) => boolean): number {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < ADMISSION_LOCK_ACQUIRE_ATTEMPTS; attempt += 1) {
-    try {
-      return writeLockFile(lockPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      lastError = error;
-      const owner = readAdmissionLockOwner(lockPath);
-      if (owner !== undefined && pidAlive(owner.pid)) {
-        throw new Error(`Docker-workload admission is busy (owner pid ${owner.pid})`, { cause: error });
-      }
-      reclaimStaleAdmissionLock(lockPath, pidAlive);
-    }
-  }
-  throw new Error('Docker-workload admission is busy (lock remained contended after retries)', { cause: lastError });
-}
-
-/**
- * Atomically move a stale admission lock aside and discard it. `renameSync`
- * guarantees exactly one racer captures a given lock file; the loser sees ENOENT
- * and retries the O_EXCL create. A racer that installed a fresh LIVE lock between
- * our owner read and the rename is detected after capture and restored intact —
- * we never delete a live owner's lock.
- */
-function reclaimStaleAdmissionLock(lockPath: string, pidAlive: (pid: number) => boolean): void {
-  const captured = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+function pathEntryExistsWithoutFollowing(path: string): boolean {
   try {
-    renameSync(lockPath, captured);
+    lstatSync(path);
+    return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-  const owner = readAdmissionLockOwner(captured);
-  if (owner !== undefined && pidAlive(owner.pid)) {
-    // We captured a live lock a racer installed after our read — put it back.
-    try {
-      renameSync(captured, lockPath);
-    } catch {
-      rmSync(captured, { force: true });
-    }
-    return;
-  }
-  rmSync(captured, { force: true });
-}
-
-function writeLockFile(lockPath: string): number {
-  const descriptor = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-  writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid })}\n`);
-  return descriptor;
-}
-
-function readAdmissionLockOwner(lockPath: string): { readonly pid: number } | undefined {
-  try {
-    const value = JSON.parse(readFileSync(lockPath, 'utf8')) as { readonly pid?: unknown };
-    return typeof value.pid === 'number' && Number.isSafeInteger(value.pid) && value.pid > 0
-      ? { pid: value.pid }
-      : undefined;
-  } catch {
-    return undefined;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    return true;
   }
 }
 
@@ -875,7 +808,9 @@ function emitAudit(
 }
 
 function isLeaseBusyError(error: unknown): boolean {
-  return error instanceof Error && /is busy/u.test(error.message);
+  return (
+    error instanceof ProcessLockBusyError || (error instanceof Error && error.cause instanceof ProcessLockBusyError)
+  );
 }
 
 function defaultClock(): Date {

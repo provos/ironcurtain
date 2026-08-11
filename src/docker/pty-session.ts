@@ -37,6 +37,8 @@ import { destroyBundleOuterResources } from './container-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
 import { buildAgentUidRemap, buildUdsSocketMounts, createLedgeredAgentContainer } from './docker-infrastructure.js';
 import {
+  APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME,
+  gateAppleVmNestedDaemonAgentCommand,
   nestedDaemonAgentEnv,
   resolveNestedDaemonBundle,
   startAppleVmNestedDaemon,
@@ -476,6 +478,18 @@ async function runPtySessionAttempt(
 
     // Build the PTY command
     const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
+    const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
+    const nestedDaemonReadyMarkerPath =
+      nestedDaemon === undefined ? undefined : resolve(orientationDir, APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME);
+    if (nestedDaemonReadyMarkerPath !== undefined) {
+      try {
+        unlinkSync(nestedDaemonReadyMarkerPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    const effectivePtyCommand =
+      nestedDaemon === undefined ? ptyCommand : gateAppleVmNestedDaemonAgentCommand(ptyCommand);
 
     // Build container configuration
     const shortId = getBundleShortId(bundleId);
@@ -673,7 +687,6 @@ async function runPtySessionAttempt(
     // docker-infrastructure.ts::createSessionContainersAttempt. Present only
     // for an admitted Docker-workload bundle; §8.2 step 6 gives the agent the
     // VM-local `DOCKER_HOST`, and the bootstrap runs after `docker.start`.
-    const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
     Object.assign(env, nestedDaemonAgentEnv(nestedDaemon));
 
     // Pass initial terminal size so start-claude.sh can set PTY dimensions
@@ -721,7 +734,7 @@ async function runPtySessionAttempt(
         mounts,
         env: { ...env, ...uidRemap.env },
         user: uidRemap.user,
-        command: ptyCommand,
+        command: effectivePtyCommand,
         // PTY sessions are standalone (no workflow/scope), so only the
         // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
         bundleLabel: bundleId,
@@ -784,15 +797,17 @@ async function runPtySessionAttempt(
       }
     }
 
-    // §8.2 steps 4-5 (same-VM topology): bootstrap the rootless in-VM daemon and
-    // adjudicate it before the user is attached. Unlike the batch path, a PTY
-    // container's command IS the agent launcher, so the agent process is already
-    // running here — it just cannot reach anything, since the VM-local socket
-    // does not exist until the bootstrap creates it. Fail-closed all the same: a
-    // rejected daemon throws before `attachPty`, and the finally block's
-    // Docker-workload teardown removes the container and revokes the lease.
+    // §8.2 steps 4-6 (same-VM topology): the container command is a trusted
+    // wrapper waiting on a marker under the read-only orientation mount. Start
+    // and adjudicate dockerd, durably record daemon-ready, and only then publish
+    // the marker that lets the untrusted PTY agent process exec. A rejected
+    // daemon never releases the agent and falls into exact teardown below.
     if (nestedDaemon !== undefined) {
       await startAppleVmNestedDaemon({ runtime: docker, containerId, nestedDaemon });
+      if (nestedDaemonReadyMarkerPath === undefined) {
+        throw new Error('nested-daemon PTY gate is missing its host readiness marker path');
+      }
+      writeFileSync(nestedDaemonReadyMarkerPath, 'ready\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     }
 
     // Write session registration for the escalation listener

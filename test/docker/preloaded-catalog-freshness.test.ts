@@ -3,9 +3,9 @@
  *
  * The repository has twice shipped a frozen artifact that had silently diverged
  * from the source it claims to describe, because every test loaded a fixture
- * instead of the artifact. `verifyQualificationArtifactBindings` does not close
- * this particular gap: it checks contract-against-catalog, and both sides stay
- * self-consistent when a Dockerfile changes underneath them.
+ * instead of the artifact. Loading and validating the committed catalog alone
+ * does not close this gap: its metadata stays internally self-consistent when a
+ * Dockerfile changes underneath it.
  *
  * So these tests recompute from the source tree and compare against the
  * committed JSON. A red test here means the catalog needs re-freezing
@@ -83,9 +83,9 @@ describe.skipIf(!architectureMatches())('committed preloaded catalogs match the 
       });
 
       it('records the declared toolchain tuple for every role', () => {
-        // The tuple is hand-maintained and feeds `toolchainDigest`, which the
-        // qualification contract binds — so a stale declaration would survive a
-        // re-freeze and keep attesting something the image does not carry.
+        // The tuple is hand-maintained and feeds the runtime-operational
+        // `toolchainDigest`, so a stale declaration would survive a re-freeze and
+        // keep attesting something the image does not carry.
         const entries = loadCatalog(kind);
         const drifted = catalogImageSources().flatMap((source) => {
           const entry = entries.find((candidate) => candidate.logicalName === source.logicalName);

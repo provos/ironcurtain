@@ -1,8 +1,9 @@
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastructure.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
+import type { ProcessLockHandle } from '../../src/docker-workload/process-lock.js';
 import {
   createRecordingDockerWorkloadAuditSink,
   type DockerWorkloadAuditSink,
@@ -115,13 +116,18 @@ describe('Docker-workload teardown (§8.3 order)', () => {
 
   it('retries teardown through transient lease-lock contention', async () => {
     let currentMs = Date.parse('2026-07-20T12:00:00.000Z');
-    const lock = { path: undefined as string | undefined, released: false };
+    const contention = {
+      lock: undefined as ProcessLockHandle | undefined,
+      leasePath: undefined as string | undefined,
+      leaseStatusAtRelease: undefined as string | undefined,
+    };
     const timing: Timing = {
       clock: () => new Date(currentMs),
       sleep: async (milliseconds: number) => {
-        if (!lock.released && lock.path !== undefined) {
-          rmSync(lock.path, { force: true });
-          lock.released = true;
+        if (contention.lock !== undefined && contention.leasePath !== undefined) {
+          contention.leaseStatusAtRelease = loadDockerWorkloadLease(contention.leasePath).status;
+          contention.lock.release();
+          contention.lock = undefined;
         }
         currentMs += milliseconds;
       },
@@ -130,9 +136,14 @@ describe('Docker-workload teardown (§8.3 order)', () => {
     const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
     const { handle } = await bringUp(timing, runtime, supervisor);
 
-    lock.path = holdLeaseLock(handle.leasePath);
+    contention.leasePath = handle.leasePath;
+    contention.lock = holdLeaseLock(handle.leasePath);
     const result = await handle.teardown();
-    expect(lock.released).toBe(true);
+    expect(contention.lock).toBeUndefined();
+    // Teardown's first act is a lease mutation, so a lease still `active` at the
+    // first sleep proves this sleep is the busy backoff — the live lock really
+    // blocked the mutation rather than being reclaimed as a stale record.
+    expect(contention.leaseStatusAtRelease).toBe('active');
     expect(result.alreadyClosed).toBe(false);
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
   });

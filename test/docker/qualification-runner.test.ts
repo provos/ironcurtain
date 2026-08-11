@@ -1,12 +1,11 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  runVitestQualificationCommand,
+  runVitestQualificationSuite,
   type QualificationCommandExecutor,
 } from '../../src/docker-workload/qualification-runner.js';
-import type { QualificationContract, VitestQualificationReport } from '../../src/docker/qualification-contract.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -14,159 +13,241 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-describe('trusted Vitest qualification runner', () => {
-  it('runs one frozen local selection, binds its report, and self-adjudicates the run record', async () => {
+describe('trusted Vitest release-suite runner', () => {
+  it.each([1, 2, 17])('accepts any positive passing assertion count (%i)', async (testCount) => {
     const fixture = runnerFixture();
-    const execute = reportExecutor(fixture, report());
-    const result = await runVitestQualificationCommand({ ...fixture.options, execute });
-    expect(result.verified).toEqual({
-      commandId: 'scanner-fixture',
-      testFiles: ['test/docker/scanner-fixture.test.ts'],
-      testCount: 1,
+    const execute = reportExecutor(fixture, report(testCount));
+    const result = await runVitestQualificationSuite({ ...fixture.options, execute });
+    expect(result).toMatchObject({
+      testCount,
     });
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
         executable: process.execPath,
-        args: expect.arrayContaining([
+        args: [
           'node_modules/vitest/vitest.mjs',
           'run',
+          'test/docker/scanner-fixture.test.ts',
           '--reporter=json',
-          expect.stringMatching(/^--outputFile=.*scanner-fixture\.vitest\.json$/u),
-        ]),
+          expect.stringMatching(/^--outputFile=.*apple\.vitest\.json$/u),
+          '--no-color',
+        ],
       }),
     );
-    expect(JSON.parse(readFileSync(result.runPath, 'utf8'))).toMatchObject({
-      commandId: 'scanner-fixture',
-      exitCode: 0,
-      bindings: { runtimeImageId: `sha256:${'2'.repeat(64)}` },
-    });
   });
 
-  it.each(['--watch', '--passWithNoTests', '--reporter=json', '--outputFile=attacker.json'])(
-    'rejects runner-owned or qualification-weakening flag %s before execution',
-    async (flag) => {
-      const fixture = runnerFixture();
-      fixture.contract.commands[0].argv.push(flag);
-      rewriteContract(fixture);
-      const execute = vi.fn<QualificationCommandExecutor>();
-      await expect(runVitestQualificationCommand({ ...fixture.options, execute })).rejects.toThrow(
-        /runner-owned|non-hermetic/u,
-      );
-      expect(execute).not.toHaveBeenCalled();
-    },
-  );
-
-  it('persists a nonzero exit binding and then rejects the run', async () => {
+  it('does not inspect assertion names', async () => {
     const fixture = runnerFixture();
-    const execute = reportExecutor(fixture, { ...report(), success: false, numFailedTests: 1, numPassedTests: 0 }, 1);
-    await expect(runVitestQualificationCommand({ ...fixture.options, execute })).rejects.toThrow(/exited nonzero/u);
-    expect(JSON.parse(readFileSync(join(fixture.evidenceDirectory, 'scanner-fixture.run.json'), 'utf8'))).toMatchObject(
-      {
-        exitCode: 1,
-      },
+    const value = report(2);
+    value.testResults[0].assertionResults = [
+      { status: 'passed', title: 'renamed test one' },
+      { status: 'passed', title: 'entirely new test two' },
+    ];
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, value) }),
+    ).resolves.toMatchObject({ testCount: 2 });
+  });
+
+  it('rejects a nonzero child exit without treating its report as a pass', async () => {
+    const fixture = runnerFixture();
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, report(), 1) }),
+    ).rejects.toThrow(/exited nonzero/u);
+  });
+
+  it.each([
+    ['zero tests', report(0), /zero tests/u],
+    ['missing aggregate field', { ...report(), numTotalTests: undefined }, /numTotalTests is invalid/u],
+    ['todo aggregate', { ...report(), numTodoTests: 1 }, /skipped, pending, or todo/u],
+    ['failed suite aggregate', { ...report(), success: false, numFailedTestSuites: 1 }, /contains failures/u],
+    ['failed assertion aggregate', { ...report(), success: false, numFailedTests: 1 }, /contains failures/u],
+    ['snapshot failure', { ...report(), snapshot: { failure: true, unchecked: 0, unmatched: 0 } }, /snapshot/u],
+    ['unchecked snapshot', { ...report(), snapshot: { failure: false, unchecked: 1, unmatched: 0 } }, /snapshot/u],
+    ['unmatched snapshot', { ...report(), snapshot: { failure: false, unchecked: 0, unmatched: 1 } }, /snapshot/u],
+  ])('rejects %s even when the child exits zero', async (_label, value, expected) => {
+    const fixture = runnerFixture();
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, value) }),
+    ).rejects.toThrow(expected);
+  });
+
+  it('rejects an assertion-level nonpass even when aggregate fields claim success', async () => {
+    const fixture = runnerFixture();
+    const value = report();
+    value.testResults[0].assertionResults[0].status = 'todo';
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, value) }),
+    ).rejects.toThrow(/skipped, pending, todo, or failed test/u);
+  });
+
+  it('rejects aggregate counts that disagree with the assertion results', async () => {
+    const fixture = runnerFixture();
+    const value = report(2);
+    value.testResults[0].assertionResults.pop();
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, value) }),
+    ).rejects.toThrow(/aggregate counts/u);
+  });
+
+  it('rejects a failed suite or failed assertion result even with clean aggregates', async () => {
+    const fixture = runnerFixture();
+    const failedSuite = report();
+    failedSuite.testResults[0].status = 'failed';
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, execute: reportExecutor(fixture, failedSuite) }),
+    ).rejects.toThrow(/suite did not pass/u);
+
+    const assertionFixture = runnerFixture();
+    const failedAssertion = report();
+    failedAssertion.testResults[0].assertionResults[0].status = 'failed';
+    await expect(
+      runVitestQualificationSuite({
+        ...assertionFixture.options,
+        execute: reportExecutor(assertionFixture, failedAssertion),
+      }),
+    ).rejects.toThrow(/failed test/u);
+  });
+
+  it('rejects missing, extra, and duplicate suites', async () => {
+    const fixture = runnerFixture();
+    const second = 'test/docker/second-fixture.test.ts';
+    writeFileSync(join(fixture.repositoryRoot, second), 'export {};\n');
+    await expect(
+      runVitestQualificationSuite({
+        ...fixture.options,
+        testFiles: [...fixture.options.testFiles, second],
+        execute: reportExecutor(fixture, report()),
+      }),
+    ).rejects.toThrow(/missing required suite/u);
+
+    const extraFixture = runnerFixture();
+    const extra = report(2);
+    extra.testResults.push({ name: second, status: 'passed', assertionResults: [{ status: 'passed' }] });
+    await expect(
+      runVitestQualificationSuite({ ...extraFixture.options, execute: reportExecutor(extraFixture, extra) }),
+    ).rejects.toThrow(/unselected suite/u);
+
+    const duplicateFixture = runnerFixture();
+    const duplicate = report(2);
+    duplicate.testResults.push({ name: '', status: 'passed', assertionResults: [{ status: 'passed' }] });
+    await expect(
+      runVitestQualificationSuite({
+        ...duplicateFixture.options,
+        execute: reportExecutor(duplicateFixture, duplicate),
+      }),
+    ).rejects.toThrow(/duplicate suite/u);
+  });
+
+  it('rejects a missing, malformed, or non-regular report', async () => {
+    const fixture = runnerFixture();
+    await expect(runVitestQualificationSuite({ ...fixture.options, execute: successfulExecutor() })).rejects.toThrow(
+      /did not produce a readable regular report/u,
     );
+    await expect(runVitestQualificationSuite({ ...fixture.options, execute: rawReportExecutor('{{') })).rejects.toThrow(
+      /not valid JSON/u,
+    );
+
+    const nonregularFixture = runnerFixture();
+    await expect(
+      runVitestQualificationSuite({
+        ...nonregularFixture.options,
+        execute: outputExecutor((path) => mkdirSync(path)),
+      }),
+    ).rejects.toThrow(/regular file/u);
   });
 
-  it('rejects a zero/skip report even when the child exits zero', async () => {
+  it('rejects a preexisting broken report symlink before execution without creating its target', async () => {
     const fixture = runnerFixture();
-    const skipped: VitestQualificationReport = {
-      ...report(),
-      success: false,
-      numPassedTests: 0,
-      numPendingTests: 1,
-      testResults: [{ ...report().testResults[0], status: 'pending' }],
-    };
-    await expect(
-      runVitestQualificationCommand({ ...fixture.options, execute: reportExecutor(fixture, skipped) }),
-    ).rejects.toThrow(/skipped, pending, todo/u);
+    const outside = join(fixture.repositoryRoot, 'outside.json');
+    symlinkSync(outside, join(fixture.reportDirectory, 'apple.vitest.json'));
+    const execute = vi.fn<QualificationCommandExecutor>();
+    await expect(runVitestQualificationSuite({ ...fixture.options, execute })).rejects.toThrow(/already exists/u);
+    expect(execute).not.toHaveBeenCalled();
+    expect(existsSync(outside)).toBe(false);
   });
 
-  it('requires a fresh owner-only evidence directory', async () => {
+  it('requires an absolute, canonical, existing report directory', async () => {
     const fixture = runnerFixture();
-    chmodSync(fixture.evidenceDirectory, 0o755);
     await expect(
-      runVitestQualificationCommand({ ...fixture.options, execute: reportExecutor(fixture, report()) }),
-    ).rejects.toThrow(/owner-only/u);
-    chmodSync(fixture.evidenceDirectory, 0o700);
-    writeFileSync(join(fixture.evidenceDirectory, 'scanner-fixture.vitest.json'), '{}');
+      runVitestQualificationSuite({
+        ...fixture.options,
+        reportDirectory: 'relative-report',
+        execute: reportExecutor(fixture, report()),
+      }),
+    ).rejects.toThrow(/canonical and absolute/u);
     await expect(
-      runVitestQualificationCommand({ ...fixture.options, execute: reportExecutor(fixture, report()) }),
-    ).rejects.toThrow(/evidence already exists/u);
+      runVitestQualificationSuite({
+        ...fixture.options,
+        reportDirectory: join(fixture.repositoryRoot, 'absent-report'),
+        execute: reportExecutor(fixture, report()),
+      }),
+    ).rejects.toThrow(/existing directory/u);
+  });
+
+  it('rejects a missing required source file before execution', async () => {
+    const fixture = runnerFixture();
+    const execute = vi.fn<QualificationCommandExecutor>();
+    await expect(
+      runVitestQualificationSuite({ ...fixture.options, testFiles: ['test/docker/missing.test.ts'], execute }),
+    ).rejects.toThrow(/must be an existing file/u);
+    expect(execute).not.toHaveBeenCalled();
   });
 });
 
 function runnerFixture() {
-  const directory = mkdtempSync(join(tmpdir(), 'qualification-runner-'));
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'qualification-runner-')));
   temporaryDirectories.push(directory);
   const repositoryRoot = join(directory, 'repository');
-  const evidenceDirectory = join(directory, 'evidence');
+  const reportDirectory = join(directory, 'report');
+  const testFile = 'test/docker/scanner-fixture.test.ts';
   mkdirSync(join(repositoryRoot, 'test', 'docker'), { recursive: true });
-  mkdirSync(evidenceDirectory, { mode: 0o700 });
-  chmodSync(evidenceDirectory, 0o700);
-  const contract: QualificationContract = {
-    schemaVersion: 1,
-    contractId: 'apple-rootless-runner-v1',
-    variant: 'apple-rootless-vfs',
-    platform: 'apple-container',
-    architecture: 'arm64',
-    bindings: {
-      sourceCommit: '1'.repeat(40),
-      dirtyPatchSha256: null,
-      runtimeImageId: `sha256:${'2'.repeat(64)}`,
-      publicCaSha256: '3'.repeat(64),
-      catalogSha256: '4'.repeat(64),
-      profileSha256: '5'.repeat(64),
-      toolchainDigest: '6'.repeat(64),
-      runtimeTrustSchema: 'runtime-trust-v1',
-      relaySha256: null,
-      watchdogSha256: '8'.repeat(64),
-      buildEgressSha256: null,
-    },
-    commands: [
-      {
-        id: 'scanner-fixture',
-        kind: 'vitest',
-        disposition: 'required-pass',
-        argv: ['node', 'node_modules/vitest/vitest.mjs', 'run', 'test/docker/scanner-fixture.test.ts'],
-        expectedTestFiles: ['test/docker/scanner-fixture.test.ts'],
-        expectedTestCount: 1,
-      },
-    ],
-  };
-  const contractPath = join(directory, 'contract.json');
-  writeFileSync(contractPath, JSON.stringify(contract), { mode: 0o400 });
-  chmodSync(contractPath, 0o400);
+  writeFileSync(join(repositoryRoot, testFile), 'export {};\n');
+  mkdirSync(reportDirectory, { mode: 0o700 });
   return {
-    directory,
     repositoryRoot,
-    evidenceDirectory,
-    contractPath,
-    contract,
-    options: { contractPath, commandId: 'scanner-fixture', repositoryRoot, evidenceDirectory, timeoutMs: 5000 },
+    reportDirectory,
+    options: {
+      suiteId: 'apple',
+      testFiles: [testFile],
+      repositoryRoot,
+      reportDirectory,
+      timeoutMs: 5000,
+    },
   };
 }
 
-function rewriteContract(fixture: ReturnType<typeof runnerFixture>): void {
-  chmodSync(fixture.contractPath, 0o600);
-  writeFileSync(fixture.contractPath, JSON.stringify(fixture.contract));
-  chmodSync(fixture.contractPath, 0o400);
+function reportExecutor(fixture: ReturnType<typeof runnerFixture>, value: ReturnType<typeof report>, exitCode = 0) {
+  return outputExecutor((path) => {
+    const boundReport = structuredClone(value);
+    for (const result of boundReport.testResults) {
+      if (result.name === '') result.name = join(fixture.repositoryRoot, 'test/docker/scanner-fixture.test.ts');
+    }
+    writeFileSync(path, JSON.stringify(boundReport), { mode: 0o600 });
+  }, exitCode);
 }
 
-function reportExecutor(fixture: ReturnType<typeof runnerFixture>, value: VitestQualificationReport, exitCode = 0) {
-  return vi.fn<QualificationCommandExecutor>(async (options) => {
+function rawReportExecutor(contents: string): QualificationCommandExecutor {
+  return outputExecutor((path) => writeFileSync(path, contents, { mode: 0o600 }));
+}
+
+function successfulExecutor(): QualificationCommandExecutor {
+  return vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' }));
+}
+
+function outputExecutor(write: (path: string) => void, exitCode = 0): QualificationCommandExecutor {
+  const executor: QualificationCommandExecutor = async (options) => {
     const outputArgument = options.args.find((argument) => argument.startsWith('--outputFile='));
     if (outputArgument === undefined) throw new Error('runner did not provide output file');
-    const boundReport = structuredClone(value);
-    boundReport.testResults[0].name = join(fixture.repositoryRoot, 'test/docker/scanner-fixture.test.ts');
-    writeFileSync(outputArgument.slice('--outputFile='.length), JSON.stringify(boundReport), { mode: 0o600 });
+    write(outputArgument.slice('--outputFile='.length));
     return { exitCode, stdout: '', stderr: '' };
-  });
+  };
+  return vi.fn(executor);
 }
 
-function report(): VitestQualificationReport {
+function report(testCount = 1) {
   return {
-    numTotalTests: 1,
-    numPassedTests: 1,
+    numTotalTests: testCount,
+    numPassedTests: testCount,
     numFailedTests: 0,
     numPendingTests: 0,
     numTodoTests: 0,
@@ -178,7 +259,7 @@ function report(): VitestQualificationReport {
       {
         name: '',
         status: 'passed',
-        assertionResults: [{ fullName: 'vulnerability fixture exact verdict', status: 'passed', failureMessages: [] }],
+        assertionResults: Array.from({ length: testCount }, () => ({ status: 'passed', title: '' })),
       },
     ],
   };

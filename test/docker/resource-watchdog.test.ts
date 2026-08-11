@@ -16,13 +16,13 @@ afterEach(() => {
 });
 
 describe('resource watchdog', () => {
-  it('measures exact non-overlapping state classes without following symlinks', () => {
+  it('measures exact non-overlapping state classes without following symlinks', async () => {
     const root = tempRoot();
     mkdirSync(join(root, 'bundle'));
     writeFileSync(join(root, 'bundle', 'state.bin'), Buffer.alloc(4096, 1));
     symlinkSync('/private/tmp', join(root, 'bundle', 'outside-link'));
     const policy = makePolicy(root);
-    const sample = sampleResourceState(policy, () => 1234);
+    const sample = await sampleResourceState(policy, () => 1234);
     expect(sample.sampledAtMs).toBe(1234);
     expect(sample.classes).toHaveLength(2);
     expect(sample.classes.find((value) => value.id === 'bundle-state')?.allocatedBytes).toBeGreaterThan(0);
@@ -30,6 +30,16 @@ describe('resource watchdog', () => {
       exists: false,
       allocatedBytes: 0,
     });
+  });
+
+  it('refuses to measure once the caller has aborted', async () => {
+    const root = tempRoot();
+    mkdirSync(join(root, 'bundle'));
+    const controller = new AbortController();
+    controller.abort(new Error('supervisor stopped'));
+    await expect(sampleResourceState(makePolicy(root), () => 1234, controller.signal)).rejects.toThrow(
+      /supervisor stopped/u,
+    );
   });
 
   it('attests a healthy first sample and records soft evidence without revocation', async () => {
@@ -103,6 +113,30 @@ describe('resource watchdog', () => {
       schedule: false,
     });
     await expect(watchdog.start()).rejects.toThrow(/measurement failed/u);
+    expect(watchdog.trip?.code).toBe('sample-error');
+  });
+
+  it('aborts a timed-out sampler instead of leaving background work running', async () => {
+    const policy = syntheticPolicy();
+    let aborted = false;
+    const watchdog = new ResourceWatchdog(policy, {
+      sample: (signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              reject(signal.reason instanceof Error ? signal.reason : new Error('sample aborted'));
+            },
+            { once: true },
+          );
+        }),
+      onTrip: async () => {},
+      schedule: false,
+    });
+
+    await expect(watchdog.start()).rejects.toThrow(/timed out/u);
+    expect(aborted).toBe(true);
     expect(watchdog.trip?.code).toBe('sample-error');
   });
 

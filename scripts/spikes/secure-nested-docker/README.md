@@ -234,7 +234,7 @@ host-connects.
 
 Verified evidence currently exists for `ac-rootless-path-0002` and
 `ac-rootless-relay-0005`. These modes still do not prove exhaustive vsock listeners, the real
-two-MITM/provider protocol, product watchdog, product entrypoint, the Phase 0F frozen contract, or
+two-MITM/provider protocol, product watchdog, product entrypoint, the Phase 0F backend release suite, or
 0C qualification.
 
 ## Phase 0F narrow build-egress cold-cache capture

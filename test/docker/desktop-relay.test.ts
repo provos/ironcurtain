@@ -223,8 +223,37 @@ describe('Desktop fixed relay lifecycle', () => {
     const networkInspectIndex = calls.findIndex((args) => args[0] === 'network' && args[1] === 'inspect');
     expect(containerInspectIndex).toBeLessThan(start);
     expect(networkInspectIndex).toBeLessThan(start);
+    expect(calls).toContainEqual(['container', 'logs', '--tail', '50', containerId]);
     expect(calls).toContainEqual(['container', 'rm', '--force', containerId]);
     expect(calls).toContainEqual(['network', 'rm', networkId]);
+  });
+
+  it('detects readiness when the relay keeps logging after the marker', async () => {
+    const networkId = 'c'.repeat(64);
+    const containerId = 'b'.repeat(64);
+    const relayLog = ['relay ready version=ironcurtain-fixed-relay-v1', 'accepted conn 1', 'accepted conn 2'];
+    let logCalls = 0;
+    const exec: ExecFileFn = async (_command, args) => {
+      if (args[0] === 'network' && args[1] === 'create') return { stdout: `${networkId}\n`, stderr: '' };
+      if (args[0] === 'container' && args[1] === 'create') return { stdout: `${containerId}\n`, stderr: '' };
+      if (args[0] === 'container' && args[1] === 'inspect') {
+        return { stdout: JSON.stringify([{ ...containerInspect(), Id: containerId }]), stderr: '' };
+      }
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return { stdout: JSON.stringify([{ ...networkInspect(), Id: networkId }]), stderr: '' };
+      }
+      if (args[0] === 'container' && args[1] === 'logs') {
+        logCalls += 1;
+        // Honour --tail the way Docker does, so a window too narrow to reach
+        // back past the later lines really does hide the marker.
+        const tail = Number(args[args.indexOf('--tail') + 1]);
+        return { stdout: '', stderr: `${relayLog.slice(-tail).join('\n')}\n` };
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    await expect(createDesktopRelay(exec, config)).resolves.toMatchObject({ containerId, networkId });
+    expect(logCalls).toBe(1);
   });
 
   it('rolls back exact IDs if inspection fails', async () => {

@@ -1,11 +1,17 @@
 /** Coordinator-independent process wrapper for the host resource watchdog. */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
 import { assertCanonicalHostPath, writeStableJsonAtomic } from '../hardened-fs.js';
+import {
+  dockerWorkloadCleanupProofSchema,
+  lifecycleIdentifierSchema as identifierSchema,
+  timestampSchema,
+  watchdogSampleSummarySchema as sampleSchema,
+} from '../zod-helpers.js';
 import { createContainerRuntime } from '../docker/container-runtime.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import { inventoryOwnedResourceIds, revokeDockerWorkloadOuterResources } from './bundle-revocation.js';
@@ -33,34 +39,13 @@ import {
 export const RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION = 1;
 export const MAX_RESOURCE_WATCHDOG_SUPERVISOR_JSON_BYTES = 1024 * 1024;
 
-const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._:-]{2,127}$/u);
-const timestampSchema = z.iso.datetime({ offset: true });
-const runtimeIdentitySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/u);
-
-const inventorySchema = z
-  .object({ capturedAt: timestampSchema, ownedResourceIds: z.array(runtimeIdentitySchema).max(4096) })
-  .strict();
 const stopRequestSchema = z
   .object({
     schemaVersion: z.literal(RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION),
     leaseId: identifierSchema,
     generation: identifierSchema,
     requestedAt: timestampSchema,
-    cleanup: z
-      .object({
-        exactOuterResourcesAbsent: z.literal(true),
-        stateRootAbsent: z.literal(true),
-        inventories: z.tuple([inventorySchema, inventorySchema]),
-      })
-      .strict(),
-  })
-  .strict();
-
-const sampleSchema = z
-  .object({
-    sampledAtMs: z.number().int().nonnegative(),
-    availableBytes: z.number().int().nonnegative(),
-    allocatedBytes: z.number().int().nonnegative(),
+    cleanup: dockerWorkloadCleanupProofSchema,
   })
   .strict();
 const tripSchema = z
@@ -298,28 +283,76 @@ export async function launchDetachedResourceWatchdogSupervisor(
     ],
     { detached: true, stdio: 'ignore', env: process.env },
   );
+  let startupError: Error | undefined;
+  child.once('error', (error) => {
+    startupError = error;
+  });
   const pid = child.pid;
-  if (pid === undefined) throw new Error('watchdog supervisor child has no process ID');
-  child.unref();
-  const deadline = Date.now() + options.startupTimeoutMs;
-  for (;;) {
-    let status: ResourceWatchdogSupervisorStatus | undefined;
-    try {
-      status = loadResourceWatchdogSupervisorStatus(options.statusPath);
-    } catch (error) {
-      if (Date.now() >= deadline) {
-        throw new Error('watchdog supervisor did not attest before the startup deadline', { cause: error });
+  try {
+    if (pid === undefined) throw new Error('watchdog supervisor child has no process ID');
+    const deadline = Date.now() + options.startupTimeoutMs;
+    for (;;) {
+      if (startupError !== undefined) throw new Error('watchdog supervisor failed to start', { cause: startupError });
+      let status: ResourceWatchdogSupervisorStatus | undefined;
+      try {
+        status = loadResourceWatchdogSupervisorStatus(options.statusPath);
+      } catch (error) {
+        if (Date.now() >= deadline) {
+          throw new Error('watchdog supervisor did not attest before the startup deadline', { cause: error });
+        }
       }
-    }
-    if (status !== undefined) {
-      if (status.supervisorPid !== pid) throw new Error('watchdog supervisor status process ID mismatch');
-      if (status.state === 'ready' || status.state === 'closed') return { pid, status };
-      if (status.state === 'incident') {
-        throw new Error(`watchdog supervisor startup incident: ${status.detail ?? 'unknown'}`);
+      if (status !== undefined) {
+        if (status.supervisorPid !== pid) throw new Error('watchdog supervisor status process ID mismatch');
+        if (status.state === 'ready' || status.state === 'closed') {
+          child.unref();
+          return { pid, status };
+        }
+        if (status.state === 'incident') {
+          throw new Error(`watchdog supervisor startup incident: ${status.detail ?? 'unknown'}`);
+        }
       }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  } catch (error) {
+    await terminateChild(child);
+    throw error;
   }
+}
+
+/** Do not orphan a detached supervisor whose startup attestation was rejected. */
+async function terminateChild(child: ChildProcess): Promise<void> {
+  if (childHasExited(child)) return;
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    return;
+  }
+  await waitForChildExit(child, 500);
+  if (childHasExited(child)) return;
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    return;
+  }
+  await waitForChildExit(child, 500);
+}
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      child.off('exit', done);
+      child.off('error', done);
+      resolvePromise();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    child.once('exit', done);
+    child.once('error', done);
+  });
 }
 
 export function requestResourceWatchdogSupervisorStop(

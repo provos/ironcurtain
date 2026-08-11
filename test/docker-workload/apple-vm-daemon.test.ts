@@ -43,13 +43,13 @@ function recordingExec(responses: (call: RecordedExec) => AppleVmDaemonExecResul
 const isStatCall = (call: RecordedExec): boolean => call.argv[0] === '/usr/bin/stat';
 
 /** The stat output a correctly provisioned base image produces, as the shell emits it. */
-function qualifiedStat(): AppleVmDaemonExecResult {
+function expectedStat(): AppleVmDaemonExecResult {
   return { stdout: `${APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT}\n`, exitCode: 0 };
 }
 
 /** Bootstrap responses for a healthy VM: the API directory passes, everything else succeeds. */
 function healthyBootstrap(call: RecordedExec): AppleVmDaemonExecResult {
-  return isStatCall(call) ? qualifiedStat() : { stdout: '', exitCode: 0 };
+  return isStatCall(call) ? expectedStat() : { stdout: '', exitCode: 0 };
 }
 
 function infoJson(overrides: Record<string, unknown> = {}): string {
@@ -222,7 +222,7 @@ describe('Apple VM nested-daemon bootstrap', () => {
 
   it('fails closed when the daemon start command fails', async () => {
     const { exec } = recordingExec((call) =>
-      isStatCall(call) ? qualifiedStat() : { stdout: '', exitCode: call.argv[0] === 'sh' ? 127 : 0 },
+      isStatCall(call) ? expectedStat() : { stdout: '', exitCode: call.argv[0] === 'sh' ? 127 : 0 },
     );
     await expect(bootstrapAppleVmDaemon(exec)).rejects.toThrow(/apple-vm daemon start failed with exit code 127/u);
   });
@@ -254,10 +254,10 @@ describe('Apple VM nested-daemon readiness', () => {
     expect(calls.every((call) => call.argv[0] === '/usr/local/lib/ironcurtain-docker/bin/docker')).toBe(true);
   });
 
-  it('rejects an unqualified storage driver without retrying', async () => {
+  it('rejects an unsupported storage driver without retrying', async () => {
     const { exec, calls } = recordingExec(() => ({ stdout: infoJson({ Driver: 'overlay2' }), exitCode: 0 }));
     await expect(waitForAppleVmDaemonReady(exec, { timeoutMs: 90_000 })).rejects.toThrow(
-      /rejected an unqualified storage driver: expected vfs, received overlay2/u,
+      /rejected an unsupported storage driver: expected vfs, received overlay2/u,
     );
     expect(calls).toHaveLength(1);
   });
@@ -308,7 +308,7 @@ describe('Apple VM nested-daemon readiness — a silent daemon is retried, a wro
 
   it('retries the client-only skeleton response instead of adjudicating it', async () => {
     // `docker info` can exit 0 while reporting only the client's own view. That
-    // is a liveness signal — the daemon has not answered — not an unqualified
+    // is a liveness signal — the daemon has not answered — not an unsupported
     // configuration, so it must not fail the session on the first poll.
     const timeline = fakeTimeline(0);
     let attempts = 0;
@@ -367,13 +367,13 @@ describe('Apple VM nested-daemon readiness — a silent daemon is retried, a wro
 
   it('still adjudicates a populated-but-wrong configuration exactly once', async () => {
     // The retry relaxation must not swallow a daemon that DID answer with an
-    // unqualified configuration; that stays an immediate fail-closed.
+    // unsupported configuration; that stays an immediate fail-closed.
     const { exec, calls } = recordingExec(() => ({
       stdout: infoJson({ Driver: 'overlayfs', SecurityOptions: ['name=seccomp,profile=builtin'] }),
       exitCode: 0,
     }));
     await expect(waitForAppleVmDaemonReady(exec, { timeoutMs: 90_000 })).rejects.toThrow(
-      /rejected an unqualified storage driver: expected vfs, received overlayfs/u,
+      /rejected an unsupported storage driver: expected vfs, received overlayfs/u,
     );
     expect(calls).toHaveLength(1);
   });
@@ -407,7 +407,7 @@ describe('Apple VM nested-daemon readiness — in-VM text is bounded at the seam
     const { exec } = recordingExec(() => ({ stdout: infoJson({ Driver: 'd'.repeat(bound + 1) }), exitCode: 0 }));
     const error = await waitForAppleVmDaemonReady(exec, { timeoutMs: 90_000 }).catch((cause: unknown) => cause);
     expect((error as Error).message).toMatch(/rejected oversized docker info text: Driver is 129 characters/u);
-    // The unqualified-driver message would otherwise have embedded all 129.
+    // The unsupported-driver message would otherwise have embedded all 129.
     expect((error as Error).message).not.toContain('d'.repeat(bound + 1));
   });
 

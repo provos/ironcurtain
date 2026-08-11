@@ -8,7 +8,7 @@
  * module owns the three consequences of that topology so neither session mode
  * has to re-derive them:
  *
- *  - which backend the topology is qualified on (Apple `container` only),
+ *  - which backend currently implements the topology (Apple `container` only),
  *  - the `ContainerRuntime.exec` -> {@link AppleVmDaemonExec} adaptation plus
  *    the bootstrap/adjudicate/record sequence,
  *  - the one environment variable the agent process gets as a result.
@@ -32,7 +32,7 @@ import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 /**
  * Readiness ceiling for the in-VM daemon: a generous upper bound on how long
  * rootless dockerd inside a fresh session VM may take to answer `docker info`.
- * Measured boot on the qualified host is a few seconds, so 90s is slack for a
+ * Measured boot on the development host is a few seconds, so 90s is slack for a
  * cold or loaded machine, not a target. Exceeding it means the daemon is not
  * coming up and admission fails closed rather than waiting forever.
  *
@@ -41,14 +41,30 @@ import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 export const APPLE_VM_DAEMON_READINESS_TIMEOUT_MS = 90_000;
 
 /**
- * The same-VM topology is implementation-qualified on Apple `container` only:
- * the daemon needs a per-session VM to live in. Fail closed rather than run an
- * agent that believes it has a nested daemon it does not have.
+ * Host-created readiness marker mounted read-only at the guest orientation
+ * root. A PTY command waits for this marker so the untrusted agent process does
+ * not start while dockerd is booting or before its profile is adjudicated.
  */
-export function assertNestedDaemonBackendQualified(runtimeKind: ContainerRuntimeKind): void {
+export const APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME = 'nested-daemon-ready';
+export const APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH = `/etc/ironcurtain/${APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME}`;
+
+const APPLE_VM_DAEMON_AGENT_GATE_SCRIPT = `while [ ! -f ${APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH} ]; do sleep 0.05; done\nexec "$@"`;
+
+/** Wrap an Apple PTY agent command behind the host-owned daemon-ready marker. */
+export function gateAppleVmNestedDaemonAgentCommand(command: readonly string[]): readonly string[] {
+  if (command.length === 0) throw new Error('cannot gate an empty nested-daemon agent command');
+  return ['/bin/sh', '-c', APPLE_VM_DAEMON_AGENT_GATE_SCRIPT, 'ironcurtain-nested-daemon-agent-gate', ...command];
+}
+
+/**
+ * The same-VM topology is implemented beneath the admission fuse on Apple
+ * `container` only: the daemon needs a per-session VM to live in. This is an
+ * implementation check, not a qualification or enablement claim.
+ */
+export function assertNestedDaemonBackendImplemented(runtimeKind: ContainerRuntimeKind): void {
   if (runtimeKind === 'apple-container') return;
   throw new Error(
-    `secure nested Docker is not implementation-qualified on the ${runtimeKind} backend: ` +
+    `secure nested Docker is not implemented on the ${runtimeKind} backend: ` +
       'the nested Docker daemon runs inside the agent VM, which only the apple-container runtime provides',
   );
 }
@@ -59,15 +75,15 @@ export function assertNestedDaemonBackendQualified(runtimeKind: ContainerRuntime
  * boolean keeps the "daemon wiring applies" decision and the handle the wiring
  * needs from ever disagreeing.
  *
- * @throws when a bundle was admitted on a backend the topology is not qualified
- * on — a create that silently produced no daemon would be the worse outcome.
+ * @throws when a bundle was admitted on a backend where the topology is not
+ * implemented — a create that silently produced no daemon would be worse.
  */
 export function resolveNestedDaemonBundle(
   dockerWorkload: DockerWorkloadBundleHandle | undefined,
   runtimeKind: ContainerRuntimeKind,
 ): DockerWorkloadBundleHandle | undefined {
   if (dockerWorkload === undefined) return undefined;
-  assertNestedDaemonBackendQualified(runtimeKind);
+  assertNestedDaemonBackendImplemented(runtimeKind);
   return dockerWorkload;
 }
 

@@ -16,6 +16,7 @@ import { lstatSync } from 'node:fs';
 import { posix } from 'node:path';
 import { z } from 'zod';
 import { assertCanonicalHostPath, loadImmutableHostJson, writeStableJsonAtomic } from '../hardened-fs.js';
+import { identifierSchema } from '../zod-helpers.js';
 import {
   loadResourceWatchdogPolicy,
   RESOURCE_WATCHDOG_POLICY_SCHEMA_VERSION,
@@ -36,7 +37,6 @@ export const DOCKER_WORKLOAD_STALE_HEARTBEAT_MS = 30_000;
 export const DOCKER_WORKLOAD_RECOVERY_BOUND_MS = 120_000;
 export const DOCKER_WORKLOAD_WATCHDOG_STARTUP_TIMEOUT_MS = 30_000;
 
-const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
 const positiveBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const templateStateClassSchema = z
   .object({

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -48,6 +48,7 @@ interface SeedResource {
 function seedLease(options: {
   readonly leaseId: string;
   readonly heartbeatIso: string;
+  readonly runtimeKind?: 'docker' | 'apple-container';
   readonly resources?: readonly SeedResource[];
   readonly activate?: boolean;
 }): { readonly leaseId: string; readonly leasePath: string; readonly generation: string } {
@@ -68,7 +69,7 @@ function seedLease(options: {
     leaseId,
     bundleId: `bundle-${leaseId}`,
     generation,
-    runtimeKind: 'docker',
+    runtimeKind: options.runtimeKind ?? 'docker',
     paths: {
       workspaceRoot: join(getHome(), 'workspace'),
       stateRoot,
@@ -145,6 +146,100 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     );
     expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('closed');
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+  });
+
+  it('reconciles a stale lease through its recorded runtime after backend selection changes', async () => {
+    const recordedRuntime = createEventRuntime({
+      containers: [container('recorded-id', 'ic-recorded', 'gen-dw-recorded-runtime')],
+    });
+    const selectedRuntime = createEventRuntime({
+      containers: [{ ...container('foreign-apple-id', 'foreign-apple', 'foreign-generation'), labels: {} }],
+    });
+    const stale = seedLease({
+      leaseId: 'dw-recorded-runtime',
+      heartbeatIso: '2026-07-20T09:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-recorded',
+          kind: 'container',
+          role: 'agent',
+          name: 'ic-recorded',
+          observedId: 'recorded-id',
+        },
+      ],
+      activate: true,
+    });
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: selectedRuntime.runtime,
+      runtimeKind: 'apple-container',
+      runtimeForKind: (kind) => (kind === 'docker' ? recordedRuntime.runtime : selectedRuntime.runtime),
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => false,
+      supervisor: createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }),
+    });
+
+    expect(result).toEqual({ reconciled: ['dw-recorded-runtime'], preserved: [], fenced: [] });
+    expect(recordedRuntime.containers).toHaveLength(0);
+    expect(selectedRuntime.containers.map((item) => item.id)).toEqual(['foreign-apple-id']);
+    expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('closed');
+  });
+
+  it('fences rather than inventorying the wrong runtime when the recorded backend is unavailable', async () => {
+    const recordedRuntime = createEventRuntime({
+      containers: [container('still-running-id', 'ic-still-running', 'gen-dw-runtime-mismatch')],
+    });
+    const selectedRuntime = createEventRuntime();
+    const stale = seedLease({
+      leaseId: 'dw-runtime-mismatch',
+      heartbeatIso: '2026-07-20T09:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-mismatch',
+          kind: 'container',
+          role: 'agent',
+          name: 'ic-still-running',
+          observedId: 'still-running-id',
+        },
+      ],
+      activate: true,
+    });
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: selectedRuntime.runtime,
+      runtimeKind: 'apple-container',
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => false,
+      supervisor: createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }),
+    });
+
+    expect(result.fenced).toEqual(['dw-runtime-mismatch']);
+    expect(recordedRuntime.containers.map((item) => item.id)).toEqual(['still-running-id']);
+    expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('incident');
+  });
+
+  it.each(['corrupt', 'symlink'] as const)('fences a %s lease marker and blocks new admission', async (kind) => {
+    const leaseId = `dw-unreadable-${kind}`;
+    const leaseDir = getDockerWorkloadLeaseDir(leaseId);
+    mkdirSync(leaseDir, { recursive: true, mode: 0o700 });
+    const leasePath = join(leaseDir, 'lease.json');
+    if (kind === 'corrupt') {
+      writeFileSync(leasePath, '{not-json}\n', { mode: 0o600 });
+    } else {
+      const target = join(leaseDir, 'foreign.json');
+      writeFileSync(target, '{}\n', { mode: 0o600 });
+      symlinkSync(target, leasePath);
+    }
+    const runtime = createEventRuntime();
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+
+    const result = await reconcileDockerWorkloadLeases(reconcileOptions(runtime, clock));
+    expect(result.fenced).toEqual([leaseId]);
+    await expect(admitDockerWorkloadBundle(admissionOptions(runtime, clock))).rejects.toThrow(/fenced leases block/u);
   });
 
   it('preserves a live lease whose coordinator heartbeat is fresh', async () => {

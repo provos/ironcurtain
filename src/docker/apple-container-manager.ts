@@ -323,6 +323,9 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   if (config.scopeLabel !== undefined) {
     args.push('--label', `${IRONCURTAIN_LABEL_SCOPE}=${config.scopeLabel}`);
   }
+  for (const [key, value] of Object.entries(config.labels ?? {})) {
+    args.push('--label', `${key}=${value}`);
+  }
 
   if (config.resources?.memoryMb) {
     args.push('--memory', `${config.resources.memoryMb}M`);

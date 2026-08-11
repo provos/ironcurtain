@@ -66,7 +66,7 @@
     "prepublishOnly": "npm run build",
     "test": "bash scripts/test.sh",
     "openrouter-live-check": "node scripts/openrouter-live-check.mjs",
-    "qualify:apple": "tsx scripts/qualify-backend.ts --contract config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json",
+    "qualify:apple": "tsx scripts/qualify-backend.ts --backend apple",
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",

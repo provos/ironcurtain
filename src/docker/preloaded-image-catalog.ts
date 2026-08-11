@@ -12,10 +12,12 @@ import { arch } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { readHardenedFile } from '../hardened-fs.js';
-import { sha256Hex, sha256HexSchema } from '../hash.js';
+import { computeHash, sha256Hex, sha256HexSchema } from '../hash.js';
 import type { ContainerRuntime, DockerImageInfo } from './types.js';
 import { RUNTIME_TRUST_SCHEMA } from './runtime-trust.js';
 import { verifyOciImageArchive } from './oci-image-archive.js';
+import type { ContainerRuntimeKind } from './container-runtime.js';
+import { compareDockerApiVersions } from './docker-api-version.js';
 
 export { RUNTIME_TRUST_SCHEMA } from './runtime-trust.js';
 
@@ -89,7 +91,7 @@ export interface LoadedPreloadedImageCatalog {
 
 export interface ResolvePreloadedImageOptions {
   readonly catalogPath: string;
-  readonly runtimeKind: 'docker' | 'apple-container';
+  readonly runtimeKind: ContainerRuntimeKind;
   readonly logicalName: string;
   readonly expectedBuildHash: string;
   readonly architecture?: 'amd64' | 'arm64';
@@ -99,7 +101,7 @@ export interface ResolvePreloadedImageOptions {
 
 export interface ResolvedPreloadedImage {
   readonly mode: 'preloaded-catalog';
-  readonly runtimeKind: 'docker' | 'apple-container';
+  readonly runtimeKind: ContainerRuntimeKind;
   readonly logicalName: string;
   readonly immutableImageId: string;
   readonly buildHash: string;
@@ -114,7 +116,7 @@ export interface ResolvedPreloadedImage {
 }
 
 export interface CreatePreloadedImageCatalogEntryOptions {
-  readonly runtimeKind: 'docker' | 'apple-container';
+  readonly runtimeKind: ContainerRuntimeKind;
   readonly logicalName: string;
   readonly runtimeImageId: string;
   readonly manifestDigest: string;
@@ -231,19 +233,18 @@ export async function resolvePreloadedImage(
 
   const archivePath = resolve(dirname(loaded.path), entry.archive.fileName);
   const expectedLabels = buildPreloadedImageLabels(entry, loaded.catalog.generation);
-  await verifyOciImageArchive({
-    archivePath,
-    expectedArchiveSha256: entry.archive.sha256,
-    expectedSizeBytes: entry.archive.sizeBytes,
-    manifestDigest: entry.manifestDigest,
-    configDigest: entry.configDigest,
-    logicalName: entry.logicalName,
-    architecture: entry.architecture,
-    expectedLabels,
-  });
-
   let inspected = await runtime.inspectImage(options.logicalName);
   if (!inspected) {
+    await verifyOciImageArchive({
+      archivePath,
+      expectedArchiveSha256: entry.archive.sha256,
+      expectedSizeBytes: entry.archive.sizeBytes,
+      manifestDigest: entry.manifestDigest,
+      configDigest: entry.configDigest,
+      logicalName: entry.logicalName,
+      architecture: entry.architecture,
+      expectedLabels,
+    });
     await runtime.loadImageArchive(archivePath);
     inspected = await runtime.inspectImage(options.logicalName);
     if (!inspected) {
@@ -270,7 +271,7 @@ export async function resolvePreloadedImage(
 }
 
 export function catalogTupleDigest(value: unknown): string {
-  return sha256Hex(Buffer.from(canonicalJson(value), 'utf8'));
+  return computeHash(value);
 }
 
 /** Build one fully self-consistent catalog tuple; staging never hand-writes digests. */
@@ -338,20 +339,14 @@ function assertDigestMatches(label: string, expected: string, value: unknown, im
 }
 
 function assertVersionRange(minimum: string, maximum: string, image: string): void {
-  if (compareApiVersions(minimum, maximum) > 0) {
+  if (compareDockerApiVersions(minimum, maximum) > 0) {
     throw new Error(`invalid Docker API range in preloaded image entry: ${image}`);
   }
 }
 
 function versionInRange(value: string, minimum: string, maximum: string): boolean {
   if (!apiVersionSchema.safeParse(value).success) throw new Error(`invalid Docker API version: ${value}`);
-  return compareApiVersions(value, minimum) >= 0 && compareApiVersions(value, maximum) <= 0;
-}
-
-function compareApiVersions(left: string, right: string): number {
-  const [leftMajor, leftMinor] = left.split('.').map(Number);
-  const [rightMajor, rightMinor] = right.split('.').map(Number);
-  return leftMajor - rightMajor || leftMinor - rightMinor;
+  return compareDockerApiVersions(value, minimum) >= 0 && compareDockerApiVersions(value, maximum) <= 0;
 }
 
 function hostArchitecture(): 'amd64' | 'arm64' {
@@ -359,14 +354,4 @@ function hostArchitecture(): 'amd64' | 'arm64' {
   if (value === 'x64') return 'amd64';
   if (value === 'arm64') return 'arm64';
   throw new Error(`unsupported host architecture for preloaded image catalog: ${value}`);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-    .join(',')}}`;
 }

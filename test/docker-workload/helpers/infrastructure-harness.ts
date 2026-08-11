@@ -5,12 +5,13 @@
  * without a real container runtime, real daemon, or the implementation fuse.
  */
 
-import { chmodSync, closeSync, constants, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach } from 'vitest';
 import { loadResourceWatchdogPolicy } from '../../../src/docker/resource-watchdog.js';
 import { closeDockerWorkloadLease, loadDockerWorkloadLease } from '../../../src/docker-workload/bundle-lease.js';
+import { acquireProcessLock, type ProcessLockHandle } from '../../../src/docker-workload/process-lock.js';
 import {
   APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT,
   APPLE_VM_DAEMON_API_DIR_STAT_ARGV,
@@ -37,22 +38,6 @@ export const ADMISSION_BINDINGS = {
 
 /** The resolved capability config hash admission records in its audit event. */
 export const ADMISSION_CONFIG_HASH = '7'.repeat(64);
-
-/** Full canonical qualification-evidence bindings (fixture hashes) for evidence-sealing tests. */
-export const EVIDENCE_BINDINGS = {
-  sourceCommit: '1'.repeat(40),
-  dirtyPatchSha256: null,
-  qualificationContractSha256: 'a'.repeat(64),
-  profileCeilingSha256: 'a'.repeat(64),
-  generatedProfileSha256: 'a'.repeat(64),
-  preloadedCatalogSha256: 'a'.repeat(64),
-  clientToolchainSha256: 'a'.repeat(64),
-  relayBinarySha256: null,
-  relayConfigSha256: null,
-  relayEndpointSha256: null,
-  watchdogPolicySha256: 'a'.repeat(64),
-  buildEgressManifestSha256: 'a'.repeat(64),
-} as const;
 
 /** Registers before/after hooks that point `IRONCURTAIN_HOME` at a fresh owner-only temp dir. */
 export function useDockerWorkloadHome(): () => string {
@@ -96,7 +81,7 @@ export function createFakeClock(baseIso = '2026-07-20T12:00:00.000Z', jumpPerSle
   };
 }
 
-/** `docker info` of a daemon in the one qualified configuration (rootless + vfs). */
+/** `docker info` of a daemon in the required configuration (rootless + vfs). */
 export const QUALIFIED_DOCKER_INFO = {
   Driver: 'vfs',
   SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'],
@@ -105,7 +90,7 @@ export const QUALIFIED_DOCKER_INFO = {
 
 /**
  * Default in-container exec responder: every bootstrap command succeeds and the
- * readiness probe reports the qualified daemon. Recognises each command by its
+ * readiness probe reports the required daemon configuration. Recognises each command by its
  * verb rather than its full argv, so it stays correct if a frozen argv gains
  * flags. The stat reply is the module's own expected string, so a change to the
  * API-directory contract cannot leave this harness silently asserting the old one.
@@ -280,11 +265,12 @@ function buildReadyStatus(leaseDir: string, now: Date, pid: number): ResourceWat
   };
 }
 
-/** Create a `${leasePath}.lock` held by the live current process so the next lease mutation reports busy. */
-export function holdLeaseLock(leasePath: string): string {
-  const lockPath = `${leasePath}.lock`;
-  const descriptor = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-  writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`);
-  closeSync(descriptor);
-  return lockPath;
+/**
+ * Take the real `${leasePath}.lock` as the live current process so the next
+ * lease mutation reports busy. Uses the production lock so contention is
+ * adjudicated by live ownership, never by the malformed-record grace window.
+ * Release the returned handle to let the contending mutation through.
+ */
+export function holdLeaseLock(leasePath: string): ProcessLockHandle {
+  return acquireProcessLock(`${leasePath}.lock`);
 }

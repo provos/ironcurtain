@@ -24,6 +24,7 @@ import {
   type RegistryPullProvenance,
 } from '../../../src/docker/registry-egress-proxy.js';
 import { createDirectOutboundTransport } from '../../../src/docker/outbound-transport.js';
+import { getFrozenRegistryEgressManifestPath } from '../../../src/docker/docker-workload-paths.js';
 
 const REPO = 'library/hello-world';
 const GHCR_REPO = 'astral-sh/uv';
@@ -178,9 +179,7 @@ async function main(): Promise<void> {
   // Freeze a copy of the checked-in draft manifest (origins/ceilings already
   // reviewed) so the guard exercises the production default (frozen-only) path.
   const dir = mkdtempSync(join(tmpdir(), 'registry-live-gate-'));
-  const draft = JSON.parse(
-    readFileSync('/Users/provos/src/ironcurtain/config/docker-workload/registry-egress-manifest.json', 'utf8'),
-  ) as Record<string, unknown>;
+  const draft = JSON.parse(readFileSync(getFrozenRegistryEgressManifestPath(), 'utf8')) as Record<string, unknown>;
   draft.status = 'frozen';
   draft.policyId = 'workload-registry-egress-live-gate-v1';
   const manifestPath = join(dir, 'frozen.json');

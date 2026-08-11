@@ -81,7 +81,7 @@ async function admit(
 ): Promise<DockerWorkloadBundleHandle> {
   const handle = await admitDockerWorkloadBundle({
     runtime: runtime.runtime,
-    // apple-container is the only backend the nested daemon is qualified on, so
+    // apple-container is the only backend where the nested daemon is implemented, so
     // it is the only backend on which a bundle handle can exist at all.
     runtimeKind: 'apple-container',
     bundleId: BUNDLE_ID,

@@ -14,7 +14,7 @@
  */
 
 import type * as http from 'node:http';
-import { HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
+import { connectionNominatedHeaderNames, HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
 
 /**
  * The forward-target fields both proxies' per-request contexts expose. Structural
@@ -51,9 +51,12 @@ export function toOutgoingHeaders(
  * compared case-insensitively against {@link HOP_BY_HOP_RESPONSE_HEADERS}.
  */
 export function sanitizeResponseHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  const hopByHop = new Set(HOP_BY_HOP_RESPONSE_HEADERS);
+  for (const name of connectionNominatedHeaderNames(headers.connection)) hopByHop.add(name);
+
   const result: http.OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) {
-    if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(name.toLowerCase())) continue;
+    if (value === undefined || hopByHop.has(name.toLowerCase())) continue;
     result[name] = value;
   }
   return result;

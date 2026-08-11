@@ -31,11 +31,9 @@
  * must freeze (reviewed origins, exact ceilings, hermetic protocol fixtures).
  */
 
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
-import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { sha256Hex } from '../hash.js';
+import { loadImmutableHostJson } from '../hardened-fs.js';
 import {
   addDuplicateIssues,
   HEADER_NAME_REGEX,
@@ -43,7 +41,8 @@ import {
   hostnameSchema,
   identifierSchema,
 } from '../zod-helpers.js';
-import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
+import { EGRESS_DROPPED_REQUEST_HEADERS, EGRESS_FORBIDDEN_CREDENTIAL_HEADERS } from './egress-header-policy.js';
+import { connectionNominatedHeaderNames } from './hop-by-hop-headers.js';
 
 export const REGISTRY_EGRESS_MANIFEST_SCHEMA_VERSION = 1;
 export const MAX_REGISTRY_EGRESS_MANIFEST_BYTES = 1024 * 1024;
@@ -55,22 +54,10 @@ export const MAX_REGISTRY_EGRESS_MANIFEST_BYTES = 1024 * 1024;
  * but {@link sanitizeHeaders} handles `authorization` specially before this set
  * is consulted so an anonymous Bearer token to a listed origin is admitted.
  */
-const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'x-goog-api-key',
-  'anthropic-api-key',
-]);
-
 /** A single anonymous Bearer token; every other Authorization scheme is refused. */
 const BEARER_TOKEN_PATTERN = /^Bearer [A-Za-z0-9._~+/=-]+$/u;
 
 /** Connection-management headers dropped silently (the transport re-frames them). */
-const DROPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set(['host', ...HOP_BY_HOP_HEADERS]);
-
 /** Pull operations the mediated path may authorize. */
 export type RegistryPullOperation = 'api-version' | 'token' | 'manifest-pull' | 'blob-pull';
 
@@ -140,7 +127,7 @@ const originSchema = z
     addDuplicateIssues(origin.operations, 'operation', context);
     addDuplicateIssues(origin.requestHeaders.allow, 'allowed header', context);
     for (const name of origin.requestHeaders.allow) {
-      if (FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
+      if (EGRESS_FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
         context.addIssue({ code: 'custom', message: `credential header cannot be allowed: ${name}` });
       }
     }
@@ -262,40 +249,16 @@ export interface AuthorizedRegistryEgressRequest {
 
 /** Load a strict, non-writable, non-symlink manifest once, hash it for audit. */
 export function loadRegistryEgressManifest(path: string): LoadedRegistryEgressManifest {
-  if (!isAbsolute(path)) throw new Error('registry-egress manifest path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`registry-egress manifest must be a readable regular non-symlink file: ${path}`, { cause: error });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error('registry-egress manifest must be a regular file');
-    if ((stats.mode & 0o022) !== 0) throw new Error('registry-egress manifest must not be group/world writable');
-    if (stats.size < 2 || stats.size > MAX_REGISTRY_EGRESS_MANIFEST_BYTES) {
-      throw new Error(`registry-egress manifest size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('registry-egress manifest is not valid JSON', { cause: error });
-  }
-  const validated = registryEgressManifestSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`registry-egress manifest is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
+  const loaded = loadImmutableHostJson(path, {
+    label: 'registry-egress manifest',
+    schema: registryEgressManifestSchema,
+    maxBytes: MAX_REGISTRY_EGRESS_MANIFEST_BYTES,
+  });
   return {
-    path,
-    sha256: sha256Hex(bytes),
-    sizeBytes: bytes.length,
-    manifest: validated.data as ValidatedRegistryEgressManifest,
+    path: loaded.path,
+    sha256: loaded.sha256,
+    sizeBytes: loaded.sizeBytes,
+    manifest: loaded.value as ValidatedRegistryEgressManifest,
   };
 }
 
@@ -584,6 +547,8 @@ function sanitizeHeaders(
   headers: Readonly<Record<string, string | readonly string[] | undefined>>,
 ): Readonly<Record<string, string | readonly string[]>> {
   const result: Record<string, string | readonly string[]> = {};
+  const dropped = new Set(EGRESS_DROPPED_REQUEST_HEADERS);
+  for (const name of connectionNominatedHeaderNames(headers.connection)) dropped.add(name);
   for (const [rawName, rawValue] of Object.entries(headers)) {
     const name = rawName.toLowerCase();
     if (name !== rawName || !HEADER_NAME_REGEX.test(name)) {
@@ -602,10 +567,10 @@ function sanitizeHeaders(
     // proxy-authorization, x-api-key, …), while connection-management headers the
     // client stack auto-adds (host, keep-alive, …) are dropped silently — the
     // destination-bound transport re-frames the connection.
-    if (FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
+    if (EGRESS_FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
       throw new Error(`registry-egress credential header is forbidden: ${name}`);
     }
-    if (DROPPED_REQUEST_HEADERS.has(name)) continue;
+    if (dropped.has(name)) continue;
     const values = typeof rawValue === 'string' ? [rawValue] : [...rawValue];
     if (values.some((value) => /[\r\n]/u.test(value))) {
       throw new Error(`registry-egress header value contains a line break: ${name}`);

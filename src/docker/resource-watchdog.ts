@@ -1,15 +1,15 @@
 /** Host-only observed-state watchdog for secure nested Docker bundles. */
 
-import { lstatSync, readdirSync, statfsSync } from 'node:fs';
+import { lstat, readdir, statfs } from 'node:fs/promises';
 import { isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { computeHash } from '../hash.js';
 import { loadImmutableHostJson } from '../hardened-fs.js';
+import { identifierSchema } from '../zod-helpers.js';
 
 export const RESOURCE_WATCHDOG_POLICY_SCHEMA_VERSION = 1;
 export const MAX_RESOURCE_WATCHDOG_POLICY_BYTES = 256 * 1024;
 
-const identifierSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{2,127}$/u);
 const positiveBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const stateClassSchema = z
   .object({
@@ -136,7 +136,7 @@ export interface ResourceWatchdogAttestation {
 class ResourceWatchdogRevocationError extends Error {}
 
 interface ResourceWatchdogOptions {
-  readonly sample?: () => Promise<ResourceWatchdogSample>;
+  readonly sample?: (signal: AbortSignal) => Promise<ResourceWatchdogSample>;
   readonly onTrip: (trip: ResourceWatchdogTrip) => Promise<void>;
   readonly onSoftEvidence?: (sample: ResourceWatchdogSample) => void;
   readonly now?: () => number;
@@ -151,7 +151,7 @@ interface ResourceWatchdogOptions {
 export class ResourceWatchdog {
   private readonly policy: ResourceWatchdogPolicy;
   private readonly expectedStateClassIdsJson: string;
-  private readonly sampleState: () => Promise<ResourceWatchdogSample>;
+  private readonly sampleState: (signal: AbortSignal) => Promise<ResourceWatchdogSample>;
   private readonly onTrip: (trip: ResourceWatchdogTrip) => Promise<void>;
   private readonly onSoftEvidence: ((sample: ResourceWatchdogSample) => void) | undefined;
   private readonly now: () => number;
@@ -166,7 +166,7 @@ export class ResourceWatchdog {
   constructor(policy: ResourceWatchdogPolicy, options: ResourceWatchdogOptions) {
     this.policy = resourceWatchdogPolicySchema.parse(policy);
     this.expectedStateClassIdsJson = JSON.stringify(this.policy.stateClasses.map((stateClass) => stateClass.id).sort());
-    this.sampleState = options.sample ?? (() => Promise.resolve(sampleValidatedResourceState(this.policy, Date.now)));
+    this.sampleState = options.sample ?? ((signal) => sampleValidatedResourceStateAsync(this.policy, Date.now, signal));
     this.onTrip = options.onTrip;
     this.onSoftEvidence = options.onSoftEvidence;
     this.now = options.now ?? Date.now;
@@ -202,8 +202,14 @@ export class ResourceWatchdog {
     }
 
     this.samplingStartedAtMs = now;
+    const abortController = new AbortController();
     try {
-      const sample = await withTimeout(this.sampleState(), this.policy.sampleTimeoutMs, 'resource sample timed out');
+      const sample = await withTimeout(
+        this.sampleState(abortController.signal),
+        this.policy.sampleTimeoutMs,
+        'resource sample timed out',
+        () => abortController.abort(new Error('resource sample timed out')),
+      );
       this.assertSampleIdentity(sample);
       this.lastCompletedAtMs = this.now();
       if (sample.availableBytes < this.policy.hostReserveBytes) {
@@ -318,40 +324,68 @@ export function loadResourceWatchdogPolicy(path: string): LoadedResourceWatchdog
   return { path: loaded.path, sha256: loaded.sha256, sizeBytes: loaded.sizeBytes, policy: loaded.value };
 }
 
-/** Measure allocated host blocks for non-overlapping exact state classes. */
-export function sampleResourceState(policy: ResourceWatchdogPolicy, now = Date.now): ResourceWatchdogSample {
-  return sampleValidatedResourceState(resourceWatchdogPolicySchema.parse(policy), now);
+/**
+ * Measure allocated host blocks for non-overlapping exact state classes. The
+ * signal is the caller's cancellation seam; an unaborted default keeps one-shot
+ * measurements outside the watchdog's timeout machinery simple.
+ */
+export function sampleResourceState(
+  policy: ResourceWatchdogPolicy,
+  now = Date.now,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<ResourceWatchdogSample> {
+  return sampleValidatedResourceStateAsync(resourceWatchdogPolicySchema.parse(policy), now, signal);
 }
 
-/** Sample using an already-validated policy; the ResourceWatchdog hot path skips the per-tick re-parse. */
-function sampleValidatedResourceState(validated: ResourceWatchdogPolicy, now: () => number): ResourceWatchdogSample {
-  const root = lstatSync(validated.targetRoot);
+/**
+ * Sample using an already-validated policy; the ResourceWatchdog hot path skips
+ * the per-tick re-parse. Async so timeout and supervisor signals remain
+ * observable during large walks.
+ */
+async function sampleValidatedResourceStateAsync(
+  validated: ResourceWatchdogPolicy,
+  now: () => number,
+  signal: AbortSignal,
+): Promise<ResourceWatchdogSample> {
+  throwIfAborted(signal);
+  const root = await lstat(validated.targetRoot);
   if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('watchdog target identity is not a real directory');
   if (root.dev !== validated.targetDevice || root.ino !== validated.targetInode) {
     throw new Error('watchdog target identity changed before measurement');
   }
-  const filesystem = statfsSync(validated.targetRoot);
-  const classes = validated.stateClasses.map((stateClass): ResourceStateClassSample => {
+  const filesystem = await statfs(validated.targetRoot);
+  const classes: ResourceStateClassSample[] = [];
+  for (const stateClass of validated.stateClasses) {
+    throwIfAborted(signal);
     const path = join(validated.targetRoot, stateClass.relativePath);
     const escaped = relative(validated.targetRoot, path);
-    if (escaped.startsWith('..') || isAbsolute(escaped))
+    if (escaped.startsWith('..') || isAbsolute(escaped)) {
       throw new Error(`watchdog state class escapes root: ${stateClass.id}`);
-    let stats: ReturnType<typeof lstatSync>;
+    }
+    let stats;
     try {
-      stats = lstatSync(path);
+      stats = await lstat(path);
     } catch (error) {
       if (isMissingError(error) && !stateClass.required) {
-        return { id: stateClass.id, path, exists: false, allocatedBytes: 0 };
+        classes.push({ id: stateClass.id, path, exists: false, allocatedBytes: 0 });
+        continue;
       }
       throw error;
     }
-    if (stateClass.kind === 'file' && !stats.isFile())
+    if (stateClass.kind === 'file' && !stats.isFile()) {
       throw new Error(`watchdog state class is not a file: ${stateClass.id}`);
+    }
     if (stateClass.kind === 'directory' && !stats.isDirectory()) {
       throw new Error(`watchdog state class is not a directory: ${stateClass.id}`);
     }
-    return { id: stateClass.id, path, exists: true, allocatedBytes: allocatedTreeBytes(path) };
-  });
+    classes.push({
+      id: stateClass.id,
+      path,
+      exists: true,
+      allocatedBytes: await allocatedTreeBytesAsync(path, signal),
+    });
+  }
+  throwIfAborted(signal);
   return {
     sampledAtMs: now(),
     targetDevice: root.dev,
@@ -362,30 +396,42 @@ function sampleValidatedResourceState(validated: ResourceWatchdogPolicy, now: ()
   };
 }
 
-function allocatedTreeBytes(path: string): number {
+async function allocatedTreeBytesAsync(path: string, signal: AbortSignal): Promise<number> {
   const seen = new Set<string>();
-  const visit = (entryPath: string): number => {
-    const stats = lstatSync(entryPath);
+  const pending = [path];
+  let bytes = 0;
+  while (pending.length > 0) {
+    throwIfAborted(signal);
+    const entryPath = pending.pop();
+    if (entryPath === undefined) break;
+    const stats = await lstat(entryPath);
     const identity = `${stats.dev}:${stats.ino}`;
-    if (seen.has(identity)) return 0;
+    if (seen.has(identity)) continue;
     seen.add(identity);
-    let bytes = stats.blocks * 512;
+    bytes += stats.blocks * 512;
     // Never follow symlinks. Their inode blocks count, their target does not.
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
-      for (const entry of readdirSync(entryPath)) bytes += visit(join(entryPath, entry));
+      for (const entry of await readdir(entryPath)) pending.push(join(entryPath, entry));
     }
-    return bytes;
-  };
-  return visit(path);
+  }
+  return bytes;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error('resource sample aborted');
 }
 
 function isMissingError(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string, onTimeout: () => void): Promise<T> {
   return new Promise<T>((resolvePromise, rejectPromise) => {
-    const timeout = setTimeout(() => rejectPromise(new Error(message)), timeoutMs);
+    const timeout = setTimeout(() => {
+      onTimeout();
+      rejectPromise(new Error(message));
+    }, timeoutMs);
     promise.then(
       (value) => {
         clearTimeout(timeout);

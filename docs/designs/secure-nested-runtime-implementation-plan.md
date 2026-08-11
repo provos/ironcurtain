@@ -12,8 +12,8 @@ credential cascade and parent-loss failure, and both image call paths use a fail
 preloaded-catalog resolver. Trusted staging converts Docker-save output into one strict shared-blob
 OCI/Docker archive, records backend-specific immutable IDs in backend-bound catalogs, and has loaded,
 resolved, and exactly removed a staged relay through both Docker Desktop and Apple `container`.
-This is focused foundation evidence, not nested-runtime qualification. Strict Linux dependency-ABI probes, Vitest
-qualification-contract adjudication and the host watchdog state machine now have tested foundations. The host-only bundle lease records pre-create names and
+This is focused foundation evidence, not nested-runtime qualification. Strict Linux dependency-ABI probes,
+current-tree Apple release-suite execution, and the host watchdog state machine now have tested foundations. The host-only bundle lease records pre-create names and
 post-create immutable IDs; exact revocation preserves foreign resources. A detached supervisor
 survived coordinator exit in a live Docker Desktop check, detected a later state threshold breach,
 revoked, produced two empty inventories, removed its exact state, closed the lease, and exited. A
@@ -21,9 +21,9 @@ deterministic Compose target/scanner fixture also passes vulnerable/patched verd
 readiness and egress negatives, immutable-image checks, and exact cleanup on Docker Desktop. A static scratch-image Desktop relay has a trusted lifecycle
 that verifies its stopped and running effective profiles; a live Engine-28 check proved fixed-target
 forwarding, uplink-peer exclusion, relay-loss failure, and exact cleanup on an isolated dual-stack
-network. Production staged images/contracts, the narrow
-build-egress profile, and 0C remain incomplete. No backend is implementation-qualified or
-preview-ready.
+network. The Apple same-VM rootless daemon lifecycle is implemented behind the global admission
+fuse. Production egress wiring, complete product-entrypoint acceptance, and 0C remain incomplete.
+No backend is enabled, implementation-qualified, or preview-ready.
 **Amendment (2026-07-21, user-approved):** workload-image registry egress is promoted from Phase 3
 into 0F/0C scope; the frozen preloaded catalog now covers only trusted infrastructure images. See
 §6.4, §7.1, and §16.5.
@@ -39,17 +39,17 @@ Deliver an opt-in real Docker API for untrusted IronCurtain workloads. The agent
 
 The implementation is complete only when all outcome gates pass:
 
-0. **G0 - staged evidence:** 0A records mutations and exact recovery within two days; 0B falsifies primitives; 0F freezes foundations and canonical variant contracts; 0C produces an implementation-qualified candidate for Desktop and Apple independently. A canonical root manifest hashes all evidence and two cleanup inventories. Mac never proves Linux.
-1. **G1 - Docker compatibility:** each concrete variant satisfies its frozen contract with zero executable-gate skips, pinned CLI/Buildx/Compose and API range, real `DockerManager`, immutable preloaded-catalog IDs, offline workflows, and deterministic Compose target/scanner results.
+0. **G0 - staged evidence:** 0A records mutations and exact recovery within two days; 0B falsifies primitives; 0F freezes operational artifacts and defines backend release suites; 0C produces an implementation-qualified candidate for Desktop and Apple independently. Generated reports identify the current checkout and environment, record actual results, and include two cleanup inventories. Mac never proves Linux.
+1. **G1 - Docker compatibility:** each concrete variant passes its current-tree backend release suite with zero executable-gate skips, pinned CLI/Buildx/Compose and API range, real `DockerManager`, immutable preloaded-catalog IDs, offline workflows, and deterministic Compose target/scanner results.
 2. **G2 - outer boundary:** the daemon sees only exact workspace, private runtime/state, staged catalog artifacts, fixed proxy paths, and public trust; no host runtime socket/namespace/cgroup write/device, unrelated path, real credential, or CA private key is present.
 3. **G3 - confined network:** direct public, DNS, LAN, metadata, host, and runtime access fails from agent, daemon, build, and child. DD-PROXY requires Engine 28 isolated IPv4/IPv6 and one trusted byte relay to the exact outer MITM. Relay loss fails closed; nested ports are not host-reachable.
 4. **G4 - bounded privilege:** Desktop/Linux rootless Docker stays inside the frozen P0-P4 subset and immutable sidecar cgroup, without outer privilege, sensitive host surfaces, or broad/unconfined profiles. Apple rootful is eligible only inside a proven disposable per-session VM. ECI/Sysbox qualifies only its named environment.
 5. **G5 - non-provisioning:** no real provider/OAuth/MCP/SSH/registry credential or host CA key enters the bundle. Supported bootstrap may use two fake-key MITMs, but colluders may use the outer fake key/proxy directly; only outer-MITM egress is authoritative.
-6. **G6 - resources:** proven Desktop/Linux outer cgroups enforce aggregate CPU, memory, and required PIDs. Apple hypervisor CPU/memory and exact deletion are authoritative; guest PIDs are advisory. Hard disk claims require enforcement; observed-disk preview requires the pre-daemon host watchdog. Frozen performance/state budgets pass.
+6. **G6 - resources:** proven Desktop/Linux outer cgroups enforce aggregate CPU, memory, and required PIDs. Apple hypervisor CPU/memory and exact deletion are authoritative; guest PIDs are advisory. Hard disk claims require enforcement; observed-disk preview requires the pre-daemon host watchdog. Frozen watchdog state thresholds pass.
 7. **G7 - teardown:** normal and injected-failure teardown kills descendants, removes API/relay/runtime/ephemeral state, preserves foreign/live resources, stops heartbeat, and yields two empty host inventories without trusting inner Docker.
-8. **G8 - unchanged default:** disabled sessions perform no daemon/image action or exposure and gain no API/state, mount, privilege, profile, relay, or nested authority; inert cached images are allowed.
-9. **G9 - independent proofs:** each advertised Desktop, Apple, and Linux variant reruns G1-G10 through its actual CLI/UI/session entrypoint and frozen contract before preview. No platform or rootless/rootful result proves another.
-10. **G10 - fail closed:** contract/catalog/profile/budget/toolchain/relay/watchdog/limit/cleanup/evidence failure is a terminal compatibility blocker. Clearing it requires versioned adjudication and a full rerun; no unsafe or broker fallback exists.
+8. **G8 - unchanged provisioned authority:** disabled sessions receive no IronCurtain-provisioned daemon, API/state, mount, privilege/profile change, relay, or outer resource. Static tooling and self-launched processes inside the unchanged disposable VM envelope are not provisioned authority.
+9. **G9 - independent proofs:** each advertised Desktop, Apple, and Linux variant reruns its backend release suite and G1-G10 through its actual CLI/UI/session entrypoint before preview. No platform or rootless/rootful result proves another.
+10. **G10 - fail closed:** release-suite, product-acceptance, catalog, profile, toolchain, relay, watchdog, limit, or cleanup failure is a terminal compatibility blocker. Clearing it requires fixing the implementation or an explicit reviewed design change followed by a full rerun; no unsafe or broker fallback exists.
 
 Later features do not count toward these gates unless explicitly promoted into scope. See `docs/designs/secure-nested-runtime-implementation-plan.md` for details.
 
@@ -136,7 +136,7 @@ Docker Desktop ECI and Sysbox may be tested only as optional administrator-provi
 - Outer MITM and any trusted image-ingress service.
 - DD-PROXY relay binary, hash-pinned configuration, and coordinator-resolved exact outer-MITM endpoint; arbitrary relay compromise breaks G3.
 - Host resource watchdog/supervisor and its frozen measurement/kill configuration.
-- Preloaded-catalog and qualification-contract resolver, including trusted resolved session configuration.
+- Preloaded-catalog resolver and trusted resolved session configuration.
 - Docker Engine/Docker Desktop as the outer runtime, or Apple `container` and its per-container VM boundary.
 - Host-side bundle ownership, resource, effective-profile, and teardown observations.
 
@@ -322,9 +322,11 @@ nested agent uses inner fake key
 The inner bundle receives only fake sentinels and the public outer CA certificate. The CA private key and real provider/OAuth/MCP/SSH/registry credentials remain trusted-host material. The two-MITM cascade is the supported bootstrap path, not an enforceable traversal claim: the colluding agent/daemon/descendants can share and use the outer fake key and fixed outer proxy directly. Only the outer MITM is authoritative for aggregate provider egress/accounting. The bundle may deliberately exfiltrate secrets it obtains independently; credential non-provisioning is the claim, not magical non-circumvention.
 
 `mitm-proxy.ts` and `registry-proxy.ts` now route provider, registry, and HTTP(S) passthrough requests
-through a destination-bound `OutboundTransport`. Direct mode rejects loopback, link-local, metadata,
+through a destination-bound `OutboundTransport`. Public-only mode rejects loopback, link-local, metadata,
 LAN, private DNS answers, mixed public/private rebinding answers, absolute-form caller paths, and
-proxy credentials. Nested mode targets one fixed parent UDS/TCP endpoint, preserves provider
+proxy credentials. A separate trusted-provider policy admits a host-configured loopback/RFC1918/ULA
+provider gateway such as LiteLLM while still rejecting metadata/link-local destinations; agent-selected
+passthrough, redirects, build egress, and registry egress cannot select that policy. Nested mode targets one fixed parent UDS/TCP endpoint, preserves provider
 Host/SNI, and exposes no caller-selected CONNECT operation. HTTPS passthrough is inner-MITM'd and
 re-originated through that transport; nested WSS passthrough is explicitly unsupported. A hermetic
 test proves inner-sentinel -> outer-sentinel -> real-credential substitution and proves that outer
@@ -429,8 +431,8 @@ For any `vfs` or `disk=observed` candidate, the host watchdog/supervisor starts 
 0F freezes the measurement target and scope, included state classes, sampling interval, soft evidence threshold, hard safety threshold, host-reserve floor, maximum overshoot, stale timeout, error behavior, and stop/kill/delete order. The bundle cannot mount or mutate any of them. Bounded tests prove coverage of every state class, sampling/kill latency, and overshoot without crossing host reserve. If bounded coverage is unavailable, observed-disk preview is prohibited. The watchdog remains explicitly not a hard quota.
 
 **Withdrawn (2026-07-30, see §16.11):** this section previously required freezing a checked-in
-`performance-budget.json` of duration and state-growth ceilings before 0C, hash-bound into the
-qualification contract, the lease, and the evidence manifest. Timeouts and CI durations are not a
+`performance-budget.json` of duration and state-growth ceilings before 0C, hash-bound into release
+bookkeeping, the lease, and the evidence manifest. Timeouts and CI durations are not a
 security property, and hash-binding them protects against nobody under a trusted single-operator
 host. The state ceilings that _are_ enforcement — peak owned state, host reserve, retained state
 after teardown — live in the frozen `resource-watchdog-policy.json` and are unaffected. Timeouts are
@@ -444,7 +446,7 @@ judgement, not a gate.
 3. Start and attest the host watchdog against the exact state target, scope, thresholds, reserve, and expected identity. Failure aborts admission; later loss invokes the frozen revoke/delete order.
 4. Only after watchdog health is proven, create/start the daemon sidecar or Apple VM and bootstrap its in-VM daemon.
 5. Verify effective outer profile, API-root handoff/socket mode, exchange-root path equivalence, `docker info`, storage driver, outer network confinement, and resource placement.
-6. Start/orient the agent with `DOCKER_HOST`, forced workspace, dependency volume, public CA, fake sentinels, and backend metadata.
+6. Start/orient the agent with `DOCKER_HOST`, forced workspace, dependency volume, public CA, fake sentinels, and backend metadata. PTY containers start with a trusted wrapper blocked on a host-created marker under the read-only orientation mount; publish that marker only after step 5 and the durable daemon-ready record complete.
 
 An agent cannot supply create arguments for the outer daemon component.
 
@@ -458,7 +460,7 @@ An agent cannot supply create arguments for the outer daemon component.
 6. Take two host-authoritative inventories separated by a bounded grace interval.
 7. Stop the watchdog only after exact state removal and both inventories prove cleanup.
 
-Crash reconciliation starts before any new Docker-workload lease is admitted and scans every nonclosed lease. Labels are discovery indexes only: deletion requires recorded exact outer IDs plus lease generation and state roots. A lease is stale after coordinator death/restart or a bounded missed host-owned heartbeat; the heartbeat is not writable from the bundle. A nested heartbeat fixture proves daemon/descendant activity stops after exact outer deletion. Fault tests cover coordinator `SIGKILL`, restart reconciliation, a live newer lease, and unrelated/foreign object preservation. The recovery bound begins when the selected outer runtime API becomes available; exceeding it leaves the lease fenced and raises an incident. This does not need a per-operation WAL or exact inner container inventory.
+Crash reconciliation starts before any new Docker-workload lease is admitted and scans every nonclosed lease. It opens each lease through its recorded runtime kind, even if automatic backend selection changed; an unavailable recorded runtime fences rather than proving absence through the wrong inventory. A present but unreadable/symlinked/unsupported lease marker also fences admission. Labels are discovery indexes only: deletion requires recorded exact outer IDs plus lease generation and state roots. A lease is stale after coordinator death/restart or a bounded missed host-owned heartbeat; the heartbeat is not writable from the bundle. Admission and per-lease locks atomically publish a complete owner record bound to PID start identity and a random token, and reclaim/release only the exact observed file instance. A nested heartbeat fixture proves daemon/descendant activity stops after exact outer deletion. Fault tests cover coordinator `SIGKILL`, restart reconciliation, backend-selection change, corrupt lease markers, lock publication/reuse races, a live newer lease, and unrelated/foreign object preservation. The recovery bound begins when the recorded outer runtime API becomes available; exceeding it leaves the lease fenced and raises an incident. This does not need a per-operation WAL or exact inner container inventory.
 
 ### 8.4 Audit
 
@@ -483,7 +485,7 @@ Timebox 0A to at most two developer-days and spike-quality code. If it exceeds t
 
 0A self-tests are exactly: one benign fake mutation, one interrupt/trap cleanup, one kill then recovery-command cleanup, one redaction fixture, and one schema/tamper verification. The small schema/verifier rejects missing/unmanifested files, secret fixtures, altered hashes, or wrong run IDs.
 
-**0A exit:** all five self-tests pass inside the timebox and cleanup evidence contains two empty inventories. Generalized Vitest reporting, qualification contracts, performance budgets, and target/scanner orchestration belong to 0F.
+**0A exit:** all five self-tests pass inside the timebox and cleanup evidence contains two empty inventories. Backend release-suite reporting and target/scanner orchestration belong to 0F.
 
 Implementation: [`scripts/spikes/secure-nested-docker/`](../../scripts/spikes/secure-nested-docker/).
 The checked-in self-test exercises all five required cases, including `SIGKILL` after the fake runtime
@@ -633,16 +635,21 @@ advisory—but Phase 0F must freeze backend-adapted resource semantics and Phase
 It also reports IPv4 forwarding disabled. Same-bridge target/scanner traffic passes; routed inner
 topologies are not yet supported evidence and must be separately classified. These runs do not
 prove exhaustive host-vsock/dynamic-listener negatives, the real two-MITM/provider protocol,
-product watchdog, full performance budget, frozen qualification contract, or product entrypoint,
+product watchdog, backend release suite, or product entrypoint,
 and therefore do not qualify Apple.
 
 #### Track AC stop gates
 
 Stop a variant if it requires a macOS/host runtime socket or device, host network, broad Mac directory, host-published Docker API, undocumented host control service, or unbounded/unremovable state. A rootful variant passes only after the product accepts the VM boundary and every VM-specific gate succeeds.
 
-### 9.5 Phase 0F — freeze common foundations and qualification contracts
+### 9.5 Phase 0F — freeze common foundations and define backend release suites
 
 Phase 0B classifies each primitive hypothesis as `supported`, `falsified`, or `blocked by named evidence`; it does not classify a backend as feasible. It used the then-current CA-baked images only to test runtime primitives, so no 0B TLS/provider result proves the later CA-neutral image/bootstrap work and none is claimed.
+
+Implementation slices may land behind the global admission fuse before their phase exit. That makes
+the topology testable without claiming support. The ordering of phase exits, backend qualification,
+product-entrypoint reruns, and enablement remains normative; landed code beneath the fuse satisfies
+none of those later gates by itself.
 
 Implementation progress (not an exit claim): the checked-in Dockerfiles no longer copy a session
 CA; bootstrap stages hash-bound public certificate/bundle files under the read-only orientation
@@ -663,12 +670,11 @@ sha256-bound archive per role for both backends, and checked in
 `config/docker-workload/preloaded-catalog.{docker,apple-container}.json` (generation
 `ironcurtain-preloaded-arm64-v1`). Operator configuration resolves absence/empty/false to exactly
 `{enabled:false}` and rejects raw images, mounts, capabilities, profiles, relay targets, and runtime
-arguments. Production metadata plumbing, narrow build egress, contracts, and end-to-end product
+arguments. Production metadata plumbing, narrow build egress, backend release-suite coverage, and end-to-end product
 plumbing remain open, so 0F has not exited. Implemented foundations
-include a strict Node/native-module dependency ABI manifest and disposable runtime probe; a verifier
-for frozen per-variant contracts and stock Vitest JSON reports; a trusted runner that invokes only
-the pinned local Vitest entrypoint, owns reporter/output flags, persists the bound run record, and
-self-adjudicates stable file/name/occurrence test IDs; and a fail-closed watchdog state machine with
+include a strict Node/native-module dependency ABI manifest and disposable runtime probe; a trusted
+release runner that invokes only the pinned local Vitest entrypoint, owns reporter/output flags, and
+rejects failed, skipped, pending, todo, zero-test, or missing required suites; and a fail-closed watchdog state machine with
 exact root identity, stale-sample detection, one-shot revocation, and two-inventory shutdown. A host-only atomic lease, exact generation-bound
 revoker, normalized Docker/Apple inventory, and detached supervisor now implement the
 coordinator-independent foundation. A cross-process test now proves the supervisor survives a coordinator **SIGKILL** (not a graceful
@@ -724,7 +730,7 @@ to exact CLI/daemon/API 1.44-1.53, Buildx 0.31.1, and Compose 5.1.0 values; live
 the connected tools and catalog tuple rather than trusting labels. Effective-capability resolution
 accepts only outer-cgroup Docker/Linux claims or Apple hypervisor CPU/memory claims, keeps Apple PIDs unsupported, and permits observed disk only with
 explicit risk acceptance and a pre-daemon watchdog attestation. These artifacts still require 0C
-measurements and contract binding before they are qualification evidence.
+measurements and product-entrypoint acceptance before the backend is implementation-qualified.
 
 The Desktop relay is a static Go binary in a non-root scratch image. Trusted lifecycle code renders
 only an immutable image ID, exact fixed target/listener, isolated Engine-28 IPv4/IPv6 network, and a
@@ -736,61 +742,46 @@ foundation evidence; it is not the complete post-attach G3 matrix or a 0C qualif
 
 Land the common CA-neutral image/bootstrap, ABI-keyed Linux dependency volume with `isolated-vm` and `node-pty` native-load probes, destination-bound parent `OutboundTransport`, hardened Desktop relay, pinned client compatibility matrix, host disk watchdog, preloaded catalog, feature-off plumbing, generalized JSON Vitest reporter, deterministic target/scanner fixtures, and a registry-aware workload-egress handler with `registry-egress-manifest.json` (§6.4). Each staged image records architecture, Docker API range, CLI/daemon/Buildx/Compose versions, and public-CA generation.
 
-Freeze one canonical, fully expanded, hash-pinned `qualification-contract.json` per concrete backend/variant after 0B and before 0C. A shared template may generate it, but runtime overlays/dynamic selection are forbidden. Every named gate has exactly one disposition: `required-pass`; `backend-adapted-pass` with named equivalent invariant/test; `not-applicable-with-reviewed-rationale` plus adjudication; or `compatibility-blocker`. A blocker is terminal and cannot be overridden by config/UI; clearing it requires a versioned adjudicated contract and full rerun. `expected-fail`, `xfail`, auto-skip, and known-failure are prohibited. 0C cannot rewrite its contract. Every executable required/adapted selection is preflighted and zero-skip; N/A is a contract decision, not a runtime skip. Broad `npm test` skips remain inventory only.
+Qualification is a **release control, not a session control or a commit-bound contract**. Each backend
+has a small, source-controlled release command such as `npm run qualify:apple`. It runs stable test
+files from the current checkout through the pinned local Vitest entrypoint. The command owns its
+reporter flags and fails on a nonzero test result, zero tests, a missing required suite, or any
+skip/pending/todo in those suites. It does not predeclare a Git commit, dirty-patch hash, contract hash,
+test-name inventory, exact test count, or machine-readable N/A list. A source edit and its tests can be
+run together without first updating bookkeeping that purports to authorize the source tree.
 
-The contract is a **release control, not a session control**. Its purpose is pre-registration: the bar
-is fixed before 0C measures against it, so a failing gate cannot be answered by editing the bar. It is
-therefore executed by a release entrypoint (`npm run qualify:<backend>`, `scripts/qualify-backend.ts`)
-and recorded in generated evidence — never consulted during session admission. Session admission binds
-only operational inputs (catalog, profile, watchdog policy, egress manifests, relay,
-toolchain, resolved config) plus live preflight; a qualification hash is not an admission binding and
-must not be reintroduced as one. Each executable command binds its exact test-file set and its exact
-test count (parameterized duplicates each count), not an enumeration of individual test names: the tree
-under test is already pinned by `bindings.sourceCommit`/`dirtyPatchSha256`, so a count is sufficient to
-catch a silently deleted or skipped test, while the hashed stock Vitest JSON report retains the full
-per-test enumeration as evidence. This trade depends on the source-commit binding; a variant that ever
-relaxed that binding would need a stronger per-test binding again.
+The Apple release suite currently comprises `test/docker-manager.test.ts`,
+`test/apple-container-manager.test.ts`, and `test/apple-container.integration.test.ts`. The set changes
+through normal reviewed source changes when backend behavior changes; the release command rejects every
+reporter-visible skip/pending/todo result. Normal code review remains responsible for deleted tests or
+coverage that no longer reaches an assertion. Docker Desktop and Linux define their own suites when their
+implementations exist. Cross-backend differences and unsupported behavior remain explicit in this design
+and the support matrix, not duplicated into a generated contract. Broad `npm test` skips remain inventory
+only and do not substitute for a backend release suite.
 
-Freeze progress (2026-07-23; bindings re-frozen 2026-07-29 for catalog generation
-`ironcurtain-preloaded-arm64-v2`, see §16.10): the `apple-container`/`arm64` contract is frozen at
-`config/docker-workload/qualification-contract.apple-rootless-vfs.arm64.json` (`contractId:
-apple-rootless-vfs-arm64-v1`, sha256 `81340a86…`). It carries twelve commands. Three are executable and
-green/zero-skip on the apple-container host, each binding its test-file set and exact test count as
-measured by the pinned Vitest reporter (146 tests total): `docker-manager` (required, backend-agnostic
-container-argument logic,
-79), `apple-container-manager` (required, the apple topology gate proving `--network none`,
-`--publish-socket`, and workspace-mount cooperation, 60), and `apple-container-integration`
-(backend-adapted, the apple runtime-lifecycle + per-file UDS/vsock topology gate, 7). The nine remaining
-§9.6-inventory gates are Docker-oriented and do not apply verbatim to apple-container, so each is
-`not-applicable-with-reviewed-rationale` whose rationale **names the executed apple gate that proves the
-equivalent invariant** (e.g. `network-isolation` → apple `--network none`;
-`docker-uds-mount`/`pty-entrypoint` → apple `--publish-socket`;
-`uid-remap-claude`/`uid-remap-goose` → apple writable-workspace mount + path-escape rejection), so no
-invariant is silently dropped
-and every registered agent — including Goose and Codex — has an explicit disposition. Counts come from
-the JSON reporter (the adjudicator's own source), not `vitest list`, so reporter-visible skipped/pending
-tests are not under-counted. A live `npm run qualify:apple` run adjudicates all three gates green
-(146 tests, zero skips) and writes per-command hash-bound run records plus stock Vitest reports as
-evidence. Its bindings hash-pin the frozen apple catalog, profile ceiling,
-watchdog policy, and build-egress manifest, plus the base runtime image id /
-toolchain digest and the runtime-trust public-root generation; a committed freeze-guard test cross-checks
-each file-hash and catalog-derived binding against the live artifact. The `docker-desktop`/`arm64`
-contracts (DD-STRICT and DD-PROXY) are deferred — they first need the DD-PROXY relay-binary hash — and
-`linux-docker` is out of scope for the arm64 freeze (no Linux host).
-
-Initial mapping: `test/docker-manager.test.ts` and `test/docker-resource-lifecycle.integration.test.ts` are required; resource-limit coverage is required or backend-adapted when inner delegation differs, never N/A; network-isolation and UDS coverage are adapted to the final topology; UID/workspace coverage is adapted for rootless sidecars versus Apple and becomes a blocker if cooperation fails; PTY and skills are required or have named adapted equivalents. Claude Code, Codex, and Goose each receive an explicit disposition; Goose cannot disappear through agent auto-selection. UID adaptation proves writable workspace cooperation, no path escape, and no claimed equivalence between guest UID and host UID.
+After a run, tooling may emit a simple diagnostic report containing backend/variant, current Git revision
+and dirty status, runtime/tool versions, hashes of operational artifacts actually used, the stock test
+report, actual pass/fail/skip counts, timestamp, and cleanup inventories. These are observations for
+debugging and review, not authorization inputs. The report is not read by session admission, does not
+need to be committed, and does not become invalid merely because its own generation changes the tree.
+Session admission binds only operational inputs (catalog, profile, watchdog policy, egress manifests,
+relay, toolchain, and resolved config) plus live preflight.
 
 Add `imageMode: preloaded-catalog`. Trusted code resolves a read-only catalog outside the workspace containing immutable manifest digest/runtime image ID, exact build-hash schema+hash, toolchain digest, architecture/API range, CA/runtime-trust generation, catalog generation, and provenance. After load, inspect immutable ID and compare every field; mismatch fails before build. Never trust a mutable tag or automatically call `buildImage`; return/record the catalog hash. Tests assert `buildImage` is never called in preloaded mode.
 
 Current IronCurtain Dockerfiles use apt/curl/npm and other online fetches; a warm cache is not offline proof. Preloaded mode supports source/tests and explicitly hermetic Dockerfiles only. 0F freezes `build-egress-manifest.json` solely for current checked-in IronCurtain Dockerfiles. Each rule fixes scheme/host/port, methods/paths, redirect closure and hop limit, DNS/address policy, allowed/stripped headers, byte/time limits, and the BuildKit/frontend/worker/build/RUN seam where it applies. Reviewed apt/npm/GitHub/toolchain origins traverse the outer MITM; arbitrary client targets, credentials, and layer secrets are forbidden. Cold-cache/direct-connect traps prove all fetches are mediated; image history/config/layers are scanned for proxy credentials. The result is network-mediated and recorded, not reproducible unless every fetched artifact is also pinned. Disabled narrow egress fails fast; generic workload/package egress remains Phase 4.
 
-**0F exit:** foundations pass hermetic tests; contracts, catalog, and relay/profile hashes are frozen; the workload-registry manifest is frozen and its hermetic protocol/negative fixtures pass; the reporter rejects skip/pending/todo/zero/missing/wrong-image/wrong-CA cases; watchdog loss fails closed; offline Compose and narrowly scoped current-Dockerfile rebuild fixtures pass their respective modes.
+**0F exit:** foundations pass hermetic tests; backend release commands and operational catalog/relay/profile hashes are reviewed; the workload-registry manifest is frozen and its hermetic protocol/negative fixtures pass; the runner rejects skip/pending/todo/zero/missing-suite cases; live preflight rejects wrong image or trust generation; watchdog loss fails closed; offline Compose and narrowly scoped current-Dockerfile rebuild fixtures pass their respective modes.
 
 ### 9.6 Phase 0C — backend qualification and repository gates
 
 0C repeats the successful primitive sequence with release-candidate common foundations. Docker Desktop evaluates DD-STRICT and then DD-PROXY separately; Apple evaluates only the specific rootless or explicitly approved rootful/custom-init candidate. Passing produces an implementation-qualified candidate, not preview support. Provider positives use the supported bootstrap path, while direct use of the outer fake key/proxy is an acknowledged bundle behavior. Full negative, resource, lifecycle, and manifest gates run after every final topology attachment.
 
-Primitive probes precede repository tests. The frozen per-variant contract selects required or named adapted forms from this initial inventory; it never silently executes a skipped incompatible test:
+Primitive probes precede repository tests. For the Docker Desktop/Linux tracks, the initial
+repository-test inventory is below. Each of those backend release commands selects its applicable
+files from this inventory and adds backend-specific tests where needed. Apple defines its own
+backend-specific release suite rather than inheriting Docker-host assumptions. Every selected test
+that the reporter can see must execute without a skip/pending/todo result:
 
 ```sh
 npx vitest run test/docker-manager.test.ts
@@ -802,15 +793,17 @@ npx vitest run test/uid-remap.integration.test.ts test/uid-remap.goose.integrati
 npx vitest run test/pty-entrypoint.integration.test.ts test/skills-end-to-end.integration.test.ts
 ```
 
-The 0F JSON reporter/verifier—not visual console output—adjudicates every required/adapted command at zero skip. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`, and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the frozen preloaded catalog, narrow current-Dockerfile build-egress profile, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus direct-CDN selection, unlisted-registry, credentialed-endpoint, redirect-to-private-address, redirect credential-leakage, hop/byte/time/concurrency ceiling, and non-pull negatives, run only in its dedicated gates), watchdog, cgroup ancestry, relay, and the watchdog's state-growth ceilings.
+The 0F runner—not visual console inspection—requires every backend-suite file to run and rejects every
+reporter-visible skip/pending/todo result while recording the actual results. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`,
+and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the frozen preloaded catalog, narrow current-Dockerfile build-egress profile, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus direct-CDN selection, unlisted-registry, credentialed-endpoint, redirect-to-private-address, redirect credential-leakage, hop/byte/time/concurrency ceiling, and non-pull negatives, run only in its dedicated gates), watchdog, cgroup ancestry, relay, and the watchdog's state-growth ceilings.
 
 The target/scanner acceptance fixture is mandatory even if no existing test covers it.
 
 ### 9.7 Evidence bundle and Phase 0 exit
 
-Each track produces a redacted, SHA-256-manifested evidence directory containing:
+Each track produces a redacted diagnostic report containing:
 
-- one canonical root manifest naming and hashing every expected file, with verification rejecting missing, unexpected, duplicate-path, duplicate-ID, or hash-mismatched entries; its transitive inputs include source commit/dirty patch, test selection/reporter, frozen qualification contract, `profile-ceiling.json` and generated artifacts, preloaded catalog, toolchain, relay binary/config/endpoint, watchdog configuration, and build-egress manifest;
+- current source revision and dirty status as observational provenance, plus hashes of the operational artifacts actually used (`profile-ceiling.json` and generated artifacts, preloaded catalog, toolchain, relay binary/config/endpoint, watchdog configuration, and egress manifests);
 - host/runtime baseline and exact commands;
 - daemon image sources/digests and staged archive digests;
 - fully expanded outer create/network arguments, allowlisted/redacted environment, profile hashes, and trusted inspect;
@@ -823,7 +816,7 @@ Each track produces a redacted, SHA-256-manifested evidence directory containing
 - fault point, exact cleanup IDs, and two empty inventories;
 - explicit unsupported/unknown findings and the next eligible P0-P4 level or stop reason.
 
-A hard 0B stop may classify a track as `not feasible under baseline` or `blocked by named evidence`; only 0C may classify it as an `implementation-qualified candidate` (including the explicit Apple rootful-in-VM variant). This is not preview enablement. Each product slice must later rerun the full frozen contract through its actual entrypoint; neither Mac track may borrow evidence.
+A hard 0B stop may classify a track as `not feasible under baseline` or `blocked by named evidence`; only 0C may classify it as an `implementation-qualified candidate` (including the explicit Apple rootful-in-VM variant). This is not preview enablement. Each product slice must later rerun its backend release suite and G1-G10 through its actual entrypoint; neither Mac track may borrow evidence.
 
 ### 9.8 What Phase 0 cannot prove
 
@@ -835,7 +828,9 @@ Normative order is `0A -> 0B -> 0F -> 0C -> Phase 1`, followed by independent `P
 
 ### Phase 1 — Shared Docker-workload lifecycle
 
-Integrate the 0F-frozen and 0C implementation-qualified catalog resolver, relay, watchdog, contracts, budgets, toolchain, proxy, and evidence components into `DockerWorkloadConfig`, bundle partitioning, exact paths, ephemeral state, audit, and common startup/teardown orchestration. Add production daemon/relay lifecycle and health wiring; do not recharacterize catalog resolution as a new Phase 1 loader. Outer rendering may reference only frozen P0-P4 artifacts, exact mount masks, and trusted resource fields; it exposes no generic capability/device/security options, and default sessions emit none.
+Integrate the 0F-reviewed and 0C implementation-qualified catalog resolver, relay, watchdog, toolchain,
+proxy, operational-artifact bindings, and release-suite coverage into `DockerWorkloadConfig`, bundle
+partitioning, exact paths, ephemeral state, audit, and common startup/teardown orchestration. Add production daemon/relay lifecycle and health wiring; do not recharacterize catalog resolution as a new Phase 1 loader. Outer rendering may reference only frozen P0-P4 artifacts, exact mount masks, and trusted resource fields; it exposes no generic capability/device/security options, and default sessions emit none.
 
 **Exit:** deterministic contracts cover creation/rollback/kill/reconcile; feature-off equivalence holds; untrusted config cannot set outer daemon arguments; exact-ID teardown and state-root cleanup pass fault tests.
 
@@ -843,17 +838,17 @@ Integrate the 0F-frozen and 0C implementation-qualified catalog resolver, relay,
 
 Proceed only if Track DD becomes an implementation-qualified candidate in 0C. Implement its minimal recorded profile, separate named-volume API/exchange roots, identical workspace paths, DD-STRICT `network=none`, evidence-gated DD-PROXY isolated-gateway network plus fixed relay, preloaded images, and resource declarations.
 
-**Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the full frozen contract and G1-G10 before Desktop preview. Every Phase 0 stop condition is a regression test. Failed preflight disables the capability without fallback.
+**Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the Desktop release suite and G1-G10 before Desktop preview. Every Phase 0 stop condition is a regression test. Failed preflight disables the capability without fallback.
 
 ### Phase 2-AC — Apple `container` product slice (independent sibling)
 
 Implement every Apple variant that passed and is approved. Rootless and rootful-in-VM are distinct backend capabilities and evidence records. Version-pin custom init/kernel artifacts if used.
 
-**Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the full frozen contract and G1-G10 independently for each advertised Apple variant before preview. Documentation names the VM boundary, advisory PIDs, resource/disk policy, and no result inherited from Desktop.
+**Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the Apple release suite and G1-G10 independently for each advertised Apple variant before preview. Documentation names the VM boundary, advisory PIDs, resource/disk policy, and no result inherited from Desktop.
 
 ### Phase 2-LX — Native Linux Docker proof and product slice (independent sibling)
 
-Linux repeats the evidence DAG independently: **LX-B** falsifies primitives on each supported distribution/kernel; **LX-F** freezes its concrete contract/profile/catalog/budget/toolchain; **LX-C** produces an implementation-qualified candidate. Only then integrate the product slice and rerun through actual CLI/UI/session/entrypoint/resume paths. Mac 0B/0F/0C artifacts are templates, never proof. A mandatory release job fails rather than skips when Linux support is advertised.
+Linux repeats the evidence DAG independently: **LX-B** falsifies primitives on each supported distribution/kernel; **LX-F** defines its release suite and freezes its operational profile/catalog/toolchain artifacts; **LX-C** produces an implementation-qualified candidate. Only then integrate the product slice and rerun through actual CLI/UI/session/entrypoint/resume paths. Mac 0B/0F/0C artifacts are templates, never proof. A mandatory release job fails rather than skips when Linux support is advertised.
 
 **Exit:** G1-G10 pass on native Linux; security profiles are distribution/kernel-version scoped; no Mac evidence is cited as proof. A failure does not enable privileged DinD or host-socket fallback.
 
@@ -890,7 +885,7 @@ Each requires its own threat model and gates.
 - `src/docker-workload/rootless-sidecar.ts` — Linux/Desktop bootstrap, health, profile record, and UDS paths. Not built: no Linux/Desktop backend is qualified, and §9.3 classifies baseline Desktop as infeasible under the frozen topology.
 - `src/docker-workload/client-toolchain.ts` — pinned client-only Docker CLI/Buildx/Compose installation manifest and API compatibility preflight.
 - [`src/docker-workload/apple-vm-daemon.ts`](../../src/docker-workload/apple-vm-daemon.ts) — frozen same-VM rootless bootstrap argv and the fail-closed readiness adjudication (§4.4 variant 1). Pure logic over an injected exec seam; variants 2 and 3 are unbuilt.
-- [`src/docker-workload/session-daemon.ts`](../../src/docker-workload/session-daemon.ts) — backend qualification assert and the per-session decision of whether a create launches the nested daemon component.
+- [`src/docker-workload/session-daemon.ts`](../../src/docker-workload/session-daemon.ts) — backend implementation assert (`assertNestedDaemonBackendImplemented`) and the per-session decision of whether a create launches the nested daemon component.
 - [`src/docker-workload/admission-bindings.ts`](../../src/docker-workload/admission-bindings.ts) — real hash-bound operational inputs for the lease, replacing the placeholder seam.
 - `src/docker-workload/image-staging.ts` — sealed archive metadata and later OCI ingress.
 - [`src/docker/preloaded-image-catalog.ts`](../../src/docker/preloaded-image-catalog.ts) and [`src/docker/oci-image-archive.ts`](../../src/docker/oci-image-archive.ts) — trusted catalog resolution, streaming sealed-archive verification/loading, backend-specific immutable ID/config comparison, catalog hash, and no-build fallback.
@@ -904,7 +899,7 @@ Each requires its own threat model and gates.
 - `src/docker/egress-forwarding.ts` — shared request/response shaping (`buildRequestUrl`/`toOutgoingHeaders`/`sanitizeResponseHeaders`) for both egress proxies.
 - [`docker/nested-daemon/`](../../docker/nested-daemon/) — pinned purpose-built daemon image. Under the same-VM topology (§16.10) it is not run as a container; it is the pinned upstream source whose digest the agent base image copies its toolchain from, and it remains the image a future sibling-daemon backend would launch. The separate entrypoint and health probe are unbuilt: the bootstrap argv and the readiness adjudication live host-side in `apple-vm-daemon.ts`, where they are testable and not agent-writable.
 - `scripts/spikes/secure-nested-docker/` — timeboxed 0A ledger/traps/recovery, 0B probes, 0F freeze inputs, and 0C qualification/evidence.
-- `test/docker-workload/qualification-contracts/<variant>.json` — one canonical, fully expanded, hash-pinned contract per concrete variant.
+- `scripts/qualify-backend.ts` and package release commands — current-tree backend suites with zero-skip enforcement and optional generated diagnostic reports; no frozen contract or commit binding.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
 - `config/docker-workload/build-egress-manifest.json` — current-Dockerfile-only destination and BuildKit-seam authorization.
 - `config/docker-workload/registry-egress-manifest.json` — reviewed public-registry origins, pull-protocol rules, and ceilings for workload-image pulls.
@@ -954,9 +949,14 @@ dockerWorkload:
     diskMb: 8192
 ```
 
-These values are non-normative suggested defaults, not guaranteed minima or frozen qualification budgets. `imageIngress: public-registry` enables §6.4 anonymous workload pulls; the default remains `preloaded-only`, and the untrusted agent cannot edit the registry manifest or switch the mode. `pids.desired` requests an operational ceiling; `pids.required=true` makes authoritative enforcement mandatory and therefore rejects Apple. With `required=false`, Apple records `unsupported` and may apply only advisory guest tuning; Desktop/Linux still report whether the desired value was enforced. No inner setting upgrades status. The coordinator clamps enforceable values while preserving host and trusted-relay/watchdog reserves, records requested versus effective, and never drops a required limit. Preview may set `diskMb: null` only with explicit `acceptObservedDiskRisk: true` and §8.1 watchdog evidence. `auto` prefers Apple for concurrent mutually-untrusted Mac sessions when qualified; explicit choice is honored or rejected. The untrusted agent cannot choose rootful Apple, profiles, mounts, network, relay targets, daemon image, catalog, watchdog, or contracts.
+These values are non-normative suggested defaults, not guaranteed minima. `imageIngress: public-registry` enables §6.4 anonymous workload pulls; the default remains `preloaded-only`, and the untrusted agent cannot edit the registry manifest or switch the mode. `pids.desired` requests an operational ceiling; `pids.required=true` makes authoritative enforcement mandatory and therefore rejects Apple. With `required=false`, Apple records `unsupported` and may apply only advisory guest tuning; Desktop/Linux still report whether the desired value was enforced. No inner setting upgrades status. The coordinator clamps enforceable values while preserving host and trusted-relay/watchdog reserves, records requested versus effective, and never drops a required limit. Preview may set `diskMb: null` only with explicit `acceptObservedDiskRisk: true` and §8.1 watchdog evidence. `auto` prefers Apple for concurrent mutually-untrusted Mac sessions when qualified; explicit choice is honored or rejected. The untrusted agent cannot choose rootful Apple, profiles, mounts, network, relay targets, daemon image, catalog, watchdog, or release-suite selection.
 
-Feature/runtime/backend versions, exact resolved config hash, concrete qualification-contract hash, full profile tuple, workspace/runtime ABI, complete catalog image tuple/hash, toolchain, relay binary/config/endpoint, watchdog/egress manifests, resource status, and proxy protocol are written to session metadata. Resume requires exact compatible tuples. A recorded `compatibility-blocker` is terminal with no config/UI override; only a versioned adjudicated contract plus full rerun clears it.
+Feature/runtime/backend versions, exact resolved config hash, full profile tuple, workspace/runtime ABI,
+complete catalog image tuple/hash, toolchain, relay binary/config/endpoint, watchdog/egress manifests,
+resource status, and proxy protocol are written to session metadata. Resume requires exact compatible
+operational tuples. Qualification reports and source revisions are not session-admission inputs. A
+recorded `compatibility-blocker` is terminal with no config/UI override; clearing it requires an
+implementation fix or explicit reviewed design change and a full backend rerun.
 
 Rollout order is developer-only explicit opt-in, evidence-gated Mac backend preview, independently gated Linux preview, then stable per backend. Backend support is a matrix, not a single global boolean. Telemetry/audit must distinguish unsupported preflight from runtime failure and never auto-retry with broader authority.
 
@@ -964,17 +964,17 @@ Rollout order is developer-only explicit opt-in, evidence-gated Mac backend prev
 
 | Gate | Mandatory evidence                                                                                                                                                                                                                                                                                                                                  |
 | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G0   | Two-day 0A ledger/trap/recovery passes; 0B precedes frozen 0F contracts/catalog/budgets; both 0C Mac tracks have schema-valid manifests and Linux non-inference.                                                                                                                                                                                    |
-| G1   | Canonical expanded contract; zero-skip required/adapted selections including Goose; pinned toolchain/API; pre/post-load catalog tuple proof across all images and both call paths; real primitives/e2e/Compose/scanner.                                                                                                                             |
+| G0   | Two-day 0A ledger/trap/recovery passes; 0B precedes reviewed 0F release suites and operational artifacts; both 0C Mac tracks record actual reports and two cleanup inventories; Linux non-inference is explicit.                                                                                                                                    |
+| G1   | Current-tree backend release suite with zero skips; pinned toolchain/API; pre/post-load catalog tuple proof across all images and both call paths; real primitives/e2e/Compose/scanner.                                                                                                                                                             |
 | G2   | Trusted outer inspect plus host/sibling/Mac canaries; no host runtime/control socket, secret, broad path, namespace, or device.                                                                                                                                                                                                                     |
 | G3   | DD-STRICT first; DD-PROXY Engine 28 isolated-v4/v6 preflight then post-attach matrix; trusted byte-relay mutation/malformed/exhaustion/death tests and exact outer-MITM endpoint evidence; Apple repeats its topology. Registry-egress negatives (unlisted registry, credentialed endpoint, redirect abuse, oversize) run wherever §6.4 is enabled. |
 | G4   | `profile-ceiling.json` subset proof, denial/reviewer evidence, fresh cumulative P0-P4 runs and full frozen tuple; immutable outer cgroup; absolute stops; ECI/Sysbox never qualifies baseline.                                                                                                                                                      |
 | G5   | Provisioning/env/filesystem/image scans and supported two-MITM bootstrap tests; direct outer-fake/proxy use is an accepted collusion fixture; outer MITM alone is authoritative and holds real secrets/CA key. Workload-registry pulls are anonymous-only with resolved digests audited.                                                            |
-| G6   | Desktop/Linux immutable ancestor/migration negatives including relay reserve; Apple CPU/memory/fork pressure; desired/required PID behavior; watchdog pre-start/post-inventory lifecycle, death/recovery/coverage/overshoot tests; frozen budgets.                                                                                                  |
+| G6   | Desktop/Linux immutable ancestor/migration negatives including relay reserve; Apple CPU/memory/fork pressure; desired/required PID behavior; watchdog pre-start/post-inventory lifecycle, death/recovery/coverage/overshoot tests; frozen watchdog state thresholds.                                                                                |
 | G7   | Host-only lease, `SIGKILL`/restart/API-loss/live-newer/foreign-preservation faults, nested heartbeat cessation, exact outer deletion, state/relay removal, recovery bound, and two empty inventories. Apple faults never kill the shared apiserver.                                                                                                 |
-| G8   | Feature-off create-argument/effective-plan snapshots and targeted Docker/Apple/builtin/workflow e2e; no disabled-session image action/exposure, while inert cache presence is harmless.                                                                                                                                                             |
-| G9   | Independent frozen contract evidence plus complete G1-G10 rerun through actual CLI/UI/session/entrypoint/resume before each advertised variant preview; Linux runs LX-B/LX-F/LX-C first.                                                                                                                                                            |
-| G10  | Every blocker is terminal/no-override and clears only by versioned adjudication/full rerun; fallback tests exclude host sockets, outer privilege, direct registry/network, and broker fallback.                                                                                                                                                     |
+| G8   | Feature-off create-argument/effective-plan snapshots and targeted Docker/Apple/builtin/workflow e2e; no IronCurtain-provisioned daemon/API/state/mount/relay/profile/resource action. Static image tooling and self-launched processes inside the unchanged VM envelope are allowed.                                                                |
+| G9   | Independent backend release-suite results plus complete G1-G10 rerun through actual CLI/UI/session/entrypoint/resume before each advertised variant preview; Linux runs LX-B/LX-F/LX-C first.                                                                                                                                                       |
+| G10  | Every blocker is terminal/no-override and clears only after an implementation fix or reviewed design change and a full rerun; fallback tests exclude host sockets, outer privilege, direct registry/network, and broker fallback.                                                                                                                   |
 
 ## 14. Transition from the broker-first design
 
@@ -1081,13 +1081,12 @@ registry pull because it unconditionally rejects an `authorization` header fail-
 Hub's anonymous token dance. Base-image mediation is the already-frozen registry-egress path (§6.4), which is repo-agnostic
 within its origins and so authorizes `node:22-trixie` (`library/node`) with no manifest change; a
 committed registry-egress test now asserts that manifest/blob/token path; the `FROM` digest-pin is
-deferred to the next catalog re-freeze; no frozen artifact was touched. **Qualification-contract
-freeze:** the `apple-container`/`arm64` contract is frozen (see §9.5) with real artifact-hash bindings
-and a committed freeze-guard test; `docker-desktop` (needs a DD performance budget + relay hash) and
-`linux-docker` (no host) are deferred. The `placeholderAdmissionBindings` seam in
-`docker-infrastructure.ts` can now be wired to the real frozen contract hash in Phase 1.
+deferred to the next catalog re-freeze; no frozen artifact was touched. **Historical qualification-
+contract freeze (superseded by §16.12):** the `apple-container`/`arm64` contract was frozen with
+artifact-hash bindings and a freeze-guard test. It was never a runtime control and is removed by the
+later bookkeeping simplification.
 
-### 16.9 Qualification scope correction — release control, not session control (record, 2026-07-23)
+### 16.9 Qualification scope correction — release control, not session control (historical record, superseded by §16.12)
 
 Review of the freeze recorded in §16.8 found the qualification machinery had over-reached beyond its
 release-process purpose, and it was cut back the same day. The defect: `qualificationContractSha256` was
@@ -1101,8 +1100,9 @@ of the isolation boundary. Corrections applied:
 - **Removed the contract hash from the runtime path.** It is gone from the admission bindings, the
   lease, and the placeholder bindings; `configHash` is now required, so every caller states its config
   identity explicitly. The one production caller already passed a genuine `dockerWorkloadConfigHash`, so
-  no production behavior changed — the fallback was exercised only by tests. The hash is retained where
-  it belongs, in the generated qualification **evidence** record.
+  no production behavior changed — the fallback was exercised only by tests. It was then retained in
+  the generated qualification **evidence** record. Section 16.12 removes that
+  remaining binding.
 - **Bound counts, not names.** Each command now binds its test-file set plus an exact
   `expectedTestCount` instead of enumerating every `file::fullName#occurrence` ID; the frozen apple
   contract dropped from 287 to 138 lines (25.8 KB → 7.6 KB) and the adjudicator lost its one non-obvious
@@ -1113,8 +1113,8 @@ of the isolation boundary. Corrections applied:
   self-adjudicated, then `verifyQualificationRunSet` for set completeness — and writes hash-bound
   evidence. It subsumed and replaced a zero-referrer spike verifier.
 
-Net effect: qualification proves a _build_ met a pre-registered bar and is run at release time; sessions
-bind operational inputs and live preflight. The two are no longer conflated.
+This was an intermediate correction. Section 16.12 keeps the release/session separation but removes
+the pre-registered, commit-bound contract itself.
 
 ### 16.10 Same-VM daemon topology — implemented, with live corrections (record, 2026-07-29)
 
@@ -1155,7 +1155,9 @@ own disposable `--network none` VM, and not a new resource channel, since that a
 VM disk directly. Conditional host-side staging was considered and rejected as complexity that does not
 buy a proportionate guarantee. Consequently the `base` catalog role no longer declares an empty toolchain
 tuple, and §9.2's "client-only agent layer" holds only for the sibling-daemon topologies: same-VM
-necessarily places the daemon binaries in the agent image.
+necessarily places the daemon binaries in the agent image. G8 therefore constrains only authority and
+resources IronCurtain provisions when the capability is enabled; it does not attempt to prohibit arbitrary
+self-launched processes inside an otherwise unchanged disposable VM.
 
 ### 16.11 Performance-budget machinery removed (record, 2026-07-30)
 
@@ -1175,22 +1177,80 @@ recorded nothing real.
 
 Consequences:
 
-- **Admission bindings are now honestly `'qualified'`.** The budget was the last entry in
-  `PLACEHOLDER_ADMISSION_BINDING_FIELDS`; the remaining three (catalog, profile ceiling, toolchain digest)
-  are all hashes of the bytes the session really uses. The list is now empty and provenance is derived from
-  it (`admissionBindingsProvenance`), so reintroducing a placeholder demotes the whole set again. The
-  placeholder mechanism itself is retained, unused.
+- **Admission bindings now contain only real operational values.** The remaining three (catalog, profile
+  ceiling, toolchain digest) are all derived from inputs the session actually uses. The unused placeholder
+  mechanism and its provenance field were removed; a future binding must not be added until it can be
+  sourced honestly.
 - **`APPLE_VM_DAEMON_READINESS_TIMEOUT_MS = 90_000` is retained as a plain reviewed constant** in
   `session-daemon.ts`. It no longer mirrors a frozen artifact and its freeze-guard test is gone.
 - **State-growth enforcement is untouched.** Peak owned state, host reserve, and post-teardown retained
   state live in the frozen `resource-watchdog-policy.json` and are enforced by the supervisor. Only the
   duration ceilings and their duplicate copy of the state numbers went away.
-- **The contract's purpose is unchanged**: naming which suites must pass green and zero-skip for a backend
-  to be declared supported. Its remaining bindings still hash-pin the artifacts that decide _what_ ran.
+- **Historical note, superseded by §16.12:** the contract was retained at this point to name suites and
+  hash-pin release inputs. The later review found that bookkeeping too fragile for development and not a
+  meaningful security boundary.
 
-Wherever the text above still lists a frozen performance budget among 0F artifacts, 0C measurements,
+Wherever the historical text above still lists a frozen performance budget among 0F artifacts, 0C measurements,
 evidence inputs, or gate criteria (§3 G6/G10, §9.1 0A exit, §9.4, §9.6, §9.7, §10 Phase 1 and LX-F, §13
 G0/G6, §15 open question 5), that obligation is withdrawn on the same reasoning.
+
+### 16.12 Commit-bound qualification contracts removed (record, 2026-08-11)
+
+The user rejected the remaining commit-bound qualification contract as fragile bookkeeping without a
+meaningful security benefit. That assessment is accepted. A trusted single-operator release process can
+edit the contract, runner, and source together; hashing one of those files does not constrain an attacker
+or establish the runtime isolation boundary. Binding `sourceCommit` also creates a self-referential
+workflow: changing qualification bookkeeping changes the commit being qualified, and ordinary source/test
+development requires repeated contract churn before the tests can run.
+
+The replacement is deliberately conventional:
+
+- `npm run qualify:<backend>` runs a reviewed set of test files from the current checkout using the
+  repository-pinned test runner.
+- The command fails on failed tests, missing suites, zero tests, or skip/pending/todo in the backend
+  suite. It does not freeze an exact count or test-name inventory.
+- Git revision and dirty status, platform/tool versions, operational artifact hashes, actual test output,
+  and cleanup inventories may be written after the run as diagnostic provenance. They are observations,
+  not credentials, and no generated report is required to admit a session.
+- Backend differences live in reviewed release commands, tests, this design, and the support matrix. A
+  machine-readable N/A adjudication database is not required.
+- Runtime admission continues to hash-bind inputs that directly determine behavior: resolved config,
+  infrastructure catalog, profile ceiling, toolchain, relay, watchdog policy, and egress manifests.
+
+Consequently the frozen qualification-contract JSON, contract parser/adjudicator, run-set verifier,
+freeze-guard, and hash-bound qualification-evidence machinery are deleted. The global admission fuse
+remains until the Apple product entrypoint, egress construction, lifecycle, negative, and cleanup gates
+pass end to end. Removing bookkeeping does not qualify or enable a backend.
+
+### 16.13 Pre-enablement lifecycle and compatibility corrections (record, 2026-08-11)
+
+An adversarial branch review found one ordinary-session regression and six fail-closed defects in the
+fuse-blocked workload path. The corrections are normative:
+
+- **Feature-off means no IronCurtain-provisioned authority.** Separate arm64 images remain rejected as
+  disproportionate complexity. Static Docker tooling and an agent's self-launched processes inside its
+  unchanged disposable VM are allowed; IronCurtain must not provision a daemon, API/state, mount, relay,
+  profile change, or outer resource unless the capability is admitted. G8 and maintainer guidance now use
+  this definition.
+- **Trusted provider gateways are a distinct address policy.** A provider override resolved from trusted
+  host configuration may target loopback, RFC1918/CGNAT, or ULA addresses. Metadata and link-local remain
+  denied. Passthrough, redirects, builds, and registries stay public-only and cannot select the exception.
+- **The PTY agent is gated, not merely unattached.** Its container command waits for a host-created marker
+  under the read-only orientation mount. The host publishes it only after daemon bootstrap, profile
+  adjudication, and the durable daemon-ready record.
+- **Exact Apple ownership is emitted.** Generic create labels, including the lease generation, are rendered
+  by the Apple manager just as they are by the Docker manager.
+- **Recovery follows recorded state.** A stale lease is inventoried and revoked through `lease.runtimeKind`,
+  with a trusted runtime resolver when selection changed. An unavailable recorded runtime or a present but
+  unreadable lease marker fences admission; neither can be converted into an absence proof.
+- **One process lock protects both admission and lease updates.** It atomically publishes a complete
+  owner record, binds PID to an OS process-start identity plus a random token, and verifies the exact file
+  instance before reclaim or release. Fresh malformed records are busy, not stale.
+- **Response hop semantics are complete.** Egress relays remove both the static hop-by-hop set and every
+  field nominated by an upstream `Connection` header.
+
+These fixes are prerequisites for the Apple product-entrypoint and lifecycle gates. They do not change
+the global fuse or claim that 0C has completed.
 
 ## 17. Primary references
 

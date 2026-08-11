@@ -192,6 +192,14 @@ describe('buildAppleCreateArgs', () => {
     expect(without.join(' ')).not.toContain('ironcurtain.scope');
   });
 
+  it('emits generic ownership labels used by exact Docker-workload revocation', () => {
+    const args = buildAppleCreateArgs({
+      ...sampleConfig,
+      labels: { 'com.ironcurtain.docker-workload.generation': 'gen-apple-fixture' },
+    });
+    expect(args.join(' ')).toContain('--label com.ironcurtain.docker-workload.generation=gen-apple-fixture');
+  });
+
   it('emits capability re-adds, ports, entrypoint, tty, and user', () => {
     const args = buildAppleCreateArgs({
       ...sampleConfig,

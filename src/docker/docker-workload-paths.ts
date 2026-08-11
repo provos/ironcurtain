@@ -43,3 +43,8 @@ export function getFrozenRegistryEgressManifestPath(): string {
 export function getFrozenProfileCeilingPath(): string {
   return resolve(getFrozenDockerWorkloadDir(), 'profile-ceiling.json');
 }
+
+/** Frozen host-authoritative resource-watchdog policy template. */
+export function getFrozenWatchdogPolicyTemplatePath(): string {
+  return resolve(getFrozenDockerWorkloadDir(), 'resource-watchdog-policy.json');
+}

@@ -123,7 +123,13 @@ describe('Docker resource crash reconciliation', () => {
     mkdirSync(lockRoot, { recursive: true });
     writeFileSync(
       resolve(lockRoot, 'reconcile.lock'),
-      JSON.stringify({ pid: process.pid, identity: { bootId: 'old-boot', startedAt: 'old-process' } }),
+      JSON.stringify({
+        schemaVersion: 1,
+        pid: process.pid,
+        processIdentity: 'old-boot:old-process',
+        token: '00000000-0000-4000-8000-000000000001',
+        createdAtMs: Date.now(),
+      }),
     );
     const docker = runtimeWithInventory({});
 

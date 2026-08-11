@@ -4,8 +4,9 @@ import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs
 import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { sha256Hex, sha256HexSchema } from '../hash.js';
-import { assertCanonicalHostPath } from '../hardened-fs.js';
-import { HOP_BY_HOP_HEADERS } from '../docker/hop-by-hop-headers.js';
+import { assertCanonicalHostPath, loadImmutableHostJson } from '../hardened-fs.js';
+import { EGRESS_DROPPED_REQUEST_HEADERS, EGRESS_FORBIDDEN_CREDENTIAL_HEADERS } from '../docker/egress-header-policy.js';
+import { connectionNominatedHeaderNames } from '../docker/hop-by-hop-headers.js';
 import {
   addDuplicateIssues,
   HEADER_NAME_REGEX,
@@ -206,16 +207,6 @@ export interface AuthorizedBuildEgressRequest {
   readonly redirectChain: readonly string[];
 }
 
-const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-  'x-goog-api-key',
-  'anthropic-api-key',
-]);
-
 /**
  * Connection-scoped headers that are dropped before the manifest's
  * allow/strip lists are consulted, mirroring the registry-egress path.
@@ -230,43 +221,17 @@ const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
  * hard failure and is never silently dropped here (`proxy-authorization` is both
  * forbidden and hop-by-hop).
  */
-const DROPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set(['host', ...HOP_BY_HOP_HEADERS]);
-
 export function loadBuildEgressManifest(path: string): LoadedBuildEgressManifest {
-  if (!isAbsolute(path)) throw new Error('build-egress manifest path must be absolute');
-  let descriptor: number;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    throw new Error(`build-egress manifest must be a readable regular non-symlink file: ${path}`, { cause: error });
-  }
-  let bytes: Buffer;
-  try {
-    const stats = fstatSync(descriptor);
-    if (!stats.isFile()) throw new Error('build-egress manifest must be a regular file');
-    if ((stats.mode & 0o022) !== 0) throw new Error('build-egress manifest must not be group/world writable');
-    if (stats.size < 2 || stats.size > MAX_BUILD_EGRESS_MANIFEST_BYTES) {
-      throw new Error(`build-egress manifest size is outside the allowed range: ${stats.size}`);
-    }
-    bytes = readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-  } catch (error) {
-    throw new Error('build-egress manifest is not valid JSON', { cause: error });
-  }
-  const validated = buildEgressManifestSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error(`build-egress manifest is invalid: ${validated.error.issues[0]?.message ?? 'schema mismatch'}`);
-  }
+  const loaded = loadImmutableHostJson(path, {
+    label: 'build-egress manifest',
+    schema: buildEgressManifestSchema,
+    maxBytes: MAX_BUILD_EGRESS_MANIFEST_BYTES,
+  });
   return {
-    path,
-    sha256: sha256Hex(bytes),
-    sizeBytes: bytes.length,
-    manifest: validated.data as ValidatedBuildEgressManifest,
+    path: loaded.path,
+    sha256: loaded.sha256,
+    sizeBytes: loaded.sizeBytes,
+    manifest: loaded.value as ValidatedBuildEgressManifest,
   };
 }
 
@@ -411,20 +376,22 @@ function sanitizeHeaders(
   headers: Readonly<Record<string, string | readonly string[] | undefined>>,
 ): Readonly<Record<string, string | readonly string[]>> {
   const result: Record<string, string | readonly string[]> = {};
+  const dropped = new Set(EGRESS_DROPPED_REQUEST_HEADERS);
+  for (const name of connectionNominatedHeaderNames(headers.connection)) dropped.add(name);
   for (const [rawName, rawValue] of Object.entries(headers)) {
     const name = rawName.toLowerCase();
     if (name !== rawName || !HEADER_NAME_REGEX.test(name)) {
       throw new Error(`build-egress header name is not canonical: ${rawName}`);
     }
     if (rawValue === undefined) continue;
-    if (FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
+    if (EGRESS_FORBIDDEN_CREDENTIAL_HEADERS.has(name)) {
       throw new Error(`build-egress credential header is forbidden: ${name}`);
     }
     const values = typeof rawValue === 'string' ? [rawValue] : [...rawValue];
     if (values.some((value) => /[\r\n]/u.test(value))) {
       throw new Error(`build-egress header value contains a line break: ${name}`);
     }
-    if (DROPPED_REQUEST_HEADERS.has(name)) continue;
+    if (dropped.has(name)) continue;
     if (rule.requestHeaders.strip.includes(name)) continue;
     if (!rule.requestHeaders.allow.includes(name)) {
       throw new Error(`build-egress header is not allowed by ${rule.id}: ${name}`);

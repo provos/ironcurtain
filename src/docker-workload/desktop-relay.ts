@@ -399,27 +399,44 @@ async function removeBestEffort(exec: ExecFileFn, kind: 'container' | 'network',
   }
 }
 
+/** Single line the frozen relay image prints once it is serving. */
+const DESKTOP_RELAY_READY_MARKER = 'relay ready version=ironcurtain-fixed-relay-v1';
+
+/**
+ * Bounded log window scanned for the readiness marker. The marker is not
+ * necessarily the last line — the relay keeps logging once it is up — so a
+ * single-line tail would make readiness depend on the relay staying silent.
+ */
+const DESKTOP_RELAY_LOG_TAIL_LINES = '50';
+
+function hasDesktopRelayReadyMarker(logs: { readonly stdout: string; readonly stderr: string }): boolean {
+  return `${logs.stdout}\n${logs.stderr}`.split('\n').some((line) => line.includes(DESKTOP_RELAY_READY_MARKER));
+}
+
 async function waitForDesktopRelayReady(
   exec: ExecFileFn,
   config: DesktopRelayConfig,
   containerId: string,
 ): Promise<void> {
   const deadline = Date.now() + 5_000;
-  do {
+  let pollDelayMs = 50;
+  for (;;) {
     const inspected = await inspectExact(exec, 'container', containerId);
     const state = objectAt(inspected, 'State');
     if (state.Running !== true) throw new Error('relay exited before readiness');
-    const logs = await exec('docker', ['container', 'logs', containerId], {
+    const logs = await exec('docker', ['container', 'logs', '--tail', DESKTOP_RELAY_LOG_TAIL_LINES, containerId], {
       timeout: 10_000,
       maxBuffer: 1024 * 1024,
     });
-    if (`${logs.stdout}\n${logs.stderr}`.includes('relay ready version=ironcurtain-fixed-relay-v1')) {
+    if (hasDesktopRelayReadyMarker(logs)) {
       assertDesktopRelayContainerInspect(inspected, config, containerId, true);
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  } while (Date.now() < deadline);
-  throw new Error('relay readiness deadline expired');
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error('relay readiness deadline expired');
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollDelayMs, remainingMs)));
+    pollDelayMs = Math.min(pollDelayMs * 2, 500);
+  }
 }
 
 export async function createDesktopRelay(exec: ExecFileFn, config: DesktopRelayConfig): Promise<DesktopRelayResources> {

@@ -15,9 +15,9 @@
  * is impossible — and the bootstrap mode-checks that it arrived (§5.3).
  *
  * Readiness is an adjudication, not a liveness check: a daemon that ANSWERS
- * `docker info` with anything but the qualified rootless/vfs configuration is
+ * `docker info` with anything but the required rootless/vfs configuration is
  * rejected fail-closed rather than retried, because a rootful or overlayfs
- * daemon is an unqualified configuration, not a slow one. An answer that did
+ * daemon is an unsupported configuration, not a slow one. An answer that did
  * not come from a daemon at all is the one retryable outcome.
  *
  * Every value `docker info` and the dockerd log report is written by a party
@@ -36,10 +36,10 @@ import { z } from 'zod';
 export const APPLE_VM_DAEMON_API_DIR = '/run/ironcurtain-docker';
 
 /** VM-local Docker API socket. Never bound to TCP and never published out of the VM. */
-export const APPLE_VM_DAEMON_SOCKET = '/run/ironcurtain-docker/docker.sock';
+export const APPLE_VM_DAEMON_SOCKET = `${APPLE_VM_DAEMON_API_DIR}/docker.sock`;
 
 /** The `DOCKER_HOST` value the in-VM agent process receives. */
-export const APPLE_VM_DAEMON_DOCKER_HOST = 'unix:///run/ironcurtain-docker/docker.sock';
+export const APPLE_VM_DAEMON_DOCKER_HOST = `unix://${APPLE_VM_DAEMON_SOCKET}`;
 
 /**
  * Pinned daemon toolchain staged by the base image. dockerd/rootlesskit/
@@ -49,7 +49,10 @@ export const APPLE_VM_DAEMON_DOCKER_HOST = 'unix:///run/ironcurtain-docker/docke
 export const APPLE_VM_DAEMON_TOOLCHAIN_DIR = '/usr/local/lib/ironcurtain-docker/bin';
 
 /** In-VM dockerd log — the only diagnostic surface a readiness timeout can quote. */
-export const APPLE_VM_DAEMON_LOG_PATH = '/run/ironcurtain-docker/dockerd.log';
+export const APPLE_VM_DAEMON_LOG_PATH = `${APPLE_VM_DAEMON_API_DIR}/dockerd.log`;
+
+const APPLE_VM_DAEMON_HOME = '/home/codespace';
+const APPLE_VM_DAEMON_PATH = `/usr/bin:/bin:${APPLE_VM_DAEMON_TOOLCHAIN_DIR}`;
 
 /**
  * VM-local dockerd state root, pinned explicitly rather than left to dockerd's
@@ -58,7 +61,7 @@ export const APPLE_VM_DAEMON_LOG_PATH = '/run/ironcurtain-docker/dockerd.log';
  * naming it changes nothing at runtime and makes the daemon's state an exact
  * path that teardown can ledger and remove deterministically.
  */
-export const APPLE_VM_DAEMON_DATA_ROOT = '/home/codespace/.local/share/docker';
+export const APPLE_VM_DAEMON_DATA_ROOT = `${APPLE_VM_DAEMON_HOME}/.local/share/docker`;
 
 /**
  * The frozen rootlesskit + dockerd invocation (live-proven against the real
@@ -67,7 +70,9 @@ export const APPLE_VM_DAEMON_DATA_ROOT = '/home/codespace/.local/share/docker';
  * needs iproute2 in the image for loopback setup.
  */
 export const APPLE_VM_DAEMON_DOCKERD_COMMAND =
-  'rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run dockerd --host=unix:///run/ironcurtain-docker/docker.sock --data-root=/home/codespace/.local/share/docker --storage-driver=vfs --iptables=false --bridge=none';
+  `rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run dockerd ` +
+  `--host=${APPLE_VM_DAEMON_DOCKER_HOST} --data-root=${APPLE_VM_DAEMON_DATA_ROOT} ` +
+  '--storage-driver=vfs --iptables=false --bridge=none';
 
 /**
  * Detach idiom: the shell replaces its own stdin/stdout/stderr with the log
@@ -84,8 +89,8 @@ export const APPLE_VM_DAEMON_DOCKERD_COMMAND =
  */
 const APPLE_VM_DAEMON_START_SCRIPT = [
   'set -e',
-  'exec </dev/null >/run/ironcurtain-docker/dockerd.log 2>&1',
-  'export XDG_RUNTIME_DIR=/run/ironcurtain-docker HOME=/home/codespace PATH=/usr/bin:/bin:/usr/local/lib/ironcurtain-docker/bin',
+  `exec </dev/null >${APPLE_VM_DAEMON_LOG_PATH} 2>&1`,
+  `export XDG_RUNTIME_DIR=${APPLE_VM_DAEMON_API_DIR} HOME=${APPLE_VM_DAEMON_HOME} PATH=${APPLE_VM_DAEMON_PATH}`,
   `exec nohup ${APPLE_VM_DAEMON_DOCKERD_COMMAND} &`,
 ].join('\n');
 
@@ -117,7 +122,7 @@ export const APPLE_VM_DAEMON_API_DIR_STAT_ARGV: readonly string[] = Object.freez
  * `<file type>:<uid>:<gid>:<octal mode>`. uid/gid 1000 is the base image's
  * `codespace`, which the agent VM cannot renumber (no CAP_CHOWN) and which the
  * Linux uid-remap entrypoint never touches — that path is Docker-on-Linux only,
- * and the same-VM daemon is qualified on the Apple backend alone.
+ * and the same-VM daemon is currently implemented on the Apple backend alone.
  */
 export const APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT = 'directory:1000:1000:700';
 
@@ -159,7 +164,7 @@ export const APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS = Object.freeze({
 });
 
 const RUNTIME_EXEC_USER = 'codespace';
-const QUALIFIED_STORAGE_DRIVER = 'vfs';
+const REQUIRED_STORAGE_DRIVER = 'vfs';
 const ROOTLESS_SECURITY_OPTION = 'name=rootless';
 const BOOTSTRAP_EXEC_TIMEOUT_MS = 30_000;
 const INFO_PROBE_EXEC_TIMEOUT_MS = 15_000;
@@ -327,7 +332,7 @@ function readDockerInfoAnswer(stdout: string): DockerInfoAnswer {
  *
  * `docker info` reports the client's own view when it cannot reach a daemon:
  * `ServerErrors` lists the connection failure and the server fields come back
- * empty. Treating that as an unqualified configuration would fail a session for
+ * empty. Treating that as an unsupported configuration would fail a session for
  * a daemon that simply had not finished starting.
  */
 function daemonAnswered(parsed: unknown): boolean {
@@ -345,9 +350,9 @@ function adjudicateDockerInfo(parsed: unknown): AdjudicatedReadiness {
   const info = validateDockerInfoShape(parsed);
   assertBoundedDockerInfoText(info);
   const securityOptions = info.SecurityOptions ?? [];
-  if (info.Driver !== QUALIFIED_STORAGE_DRIVER) {
+  if (info.Driver !== REQUIRED_STORAGE_DRIVER) {
     throw new Error(
-      `apple-vm daemon readiness rejected an unqualified storage driver: expected ${QUALIFIED_STORAGE_DRIVER}, received ${info.Driver}`,
+      `apple-vm daemon readiness rejected an unsupported storage driver: expected ${REQUIRED_STORAGE_DRIVER}, received ${info.Driver}`,
     );
   }
   if (!securityOptions.includes(ROOTLESS_SECURITY_OPTION)) {

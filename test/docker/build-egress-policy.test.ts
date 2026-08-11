@@ -32,7 +32,12 @@ describe('checked-in frozen build-egress manifest', () => {
       seam: 'run',
       method: 'GET',
       url: 'http://deb.debian.org/debian/dists/bookworm/InRelease',
-      headers: { host: 'deb.debian.org', connection: 'keep-alive', 'user-agent': 'Debian APT-HTTP/1.3' },
+      headers: {
+        host: 'deb.debian.org',
+        connection: 'keep-alive, x-internal',
+        'x-internal': 'must-not-cross-the-hop',
+        'user-agent': 'Debian APT-HTTP/1.3',
+      },
     });
     expect(authorized.destination.hostname).toBe('deb.debian.org');
     // Connection-scoped headers are dropped; the destination-bound transport owns Host/SNI.

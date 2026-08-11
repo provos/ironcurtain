@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -75,6 +75,28 @@ describe('preloaded image catalog', () => {
       catalogGeneration: fixture.catalog.generation,
     });
     expect(resolved.catalogSha256).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it('does not reread the archive when the exact catalog image is already loaded', async () => {
+    const fixture = writeCatalog();
+    const entry = fixture.catalog.images[0];
+    unlinkSync(join(fixture.directory, entry.archive.fileName));
+
+    await expect(
+      resolvePreloadedImage(
+        {
+          inspectImage: async () => matchingImage(entry, fixture.catalog.generation),
+          loadImageArchive: async () => {},
+        },
+        {
+          ...dockerRuntime,
+          catalogPath: fixture.path,
+          logicalName,
+          expectedBuildHash: buildHash,
+          architecture: 'arm64',
+        },
+      ),
+    ).resolves.toMatchObject({ immutableImageId: entry.runtimeImageId });
   });
 
   it('verifies and loads a missing archive before accepting the post-load immutable ID', async () => {

@@ -44,7 +44,7 @@ import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 import { createDirectOutboundTransport, createGuardedLookup, type OutboundTransport } from './outbound-transport.js';
-import { HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
+import { connectionNominatedHeaderNames, HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 import { handleBuildEgressRequest, type BuildEgressGuard, type BuildEgressSeam } from './build-egress-proxy.js';
 import { handleRegistryEgressRequest, type RegistryEgressGuard } from './registry-egress-proxy.js';
 
@@ -1125,6 +1125,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             hostname: upstreamHost,
             port: upstreamPort,
           },
+          // `upstream` is resolved exclusively from trusted host provider
+          // configuration (for example ANTHROPIC_BASE_URL). It may name a
+          // loopback/private LiteLLM gateway. Agent-selected passthrough and
+          // redirect destinations never receive this policy.
+          addressPolicy: upstream === undefined ? 'public-only' : 'trusted-provider-override',
           method,
           path: upstreamPath ?? '/',
           headers: finalHeaders,
@@ -1528,13 +1533,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // Strip proxy-only and hop-by-hop headers so they are not leaked upstream
     const hopByHop = new Set(HOP_BY_HOP_HEADERS);
     // Also strip any headers named in the Connection header
-    const connectionHeader = headers['connection'];
-    if (typeof connectionHeader === 'string') {
-      for (const token of connectionHeader.split(',')) {
-        const name = token.trim().toLowerCase();
-        if (name) hopByHop.add(name);
-      }
-    }
+    for (const name of connectionNominatedHeaderNames(headers.connection)) hopByHop.add(name);
     const forwardHeaders: Record<string, string | string[] | undefined> = {
       host: port === 80 ? host : `${host}:${port}`,
     };

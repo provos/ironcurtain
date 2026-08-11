@@ -7,7 +7,6 @@
  */
 
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   existsSync,
   readdirSync,
@@ -48,7 +47,7 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import type { CertificateAuthority } from './ca.js';
 import type { ContainerRuntime } from './types.js';
-import type { ContainerRuntimeKind } from './container-runtime.js';
+import { createContainerRuntime, type ContainerRuntimeKind } from './container-runtime.js';
 import type { HostOnlyNetwork, NetworkTopology } from './network-topology.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
 import { parseUpstreamBaseUrl, type AgentKind, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
@@ -75,6 +74,7 @@ import {
 } from './runtime-trust.js';
 import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-image-catalog.js';
 import { getStagedCatalogPath } from './preloaded-catalog-paths.js';
+import { getFrozenWatchdogPolicyTemplatePath, getIronCurtainPackageRoot } from './docker-workload-paths.js';
 import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
 import type {
   DockerWorkloadBundleHandle,
@@ -1244,7 +1244,7 @@ export function buildBundleLabels(
  *
  * Role alone is not the criterion, though — see
  * {@link launchesNestedDaemonComponent}. In the same-VM topology (plan §4.4
- * variant 1, the only qualified one) the daemon lives inside the agent's own
+ * variant 1, the one currently implemented beneath the fuse) the daemon lives inside the agent's own
  * VM, so the `agent`-role create IS the daemon-component create and the gate
  * must fire for it — while the identical `agent` create in an ordinary session
  * must stay ungated.
@@ -1402,11 +1402,9 @@ interface DockerWorkloadAdmissionForSessionOptions {
  * fuse in tests and keeps the §8.2 ordering explicit.
  *
  * Two gates run before any lease exists, so an unsupported request leaves
- * nothing behind: the backend must be one the same-VM nested daemon is
- * qualified on, and the operational bindings must resolve from the real staged
- * catalog and frozen profile ceiling. `bindingsProvenance` is whatever the
- * binding resolver reports — it drops to `'placeholder'` if any single field
- * ever is one, so a partially real set can never present itself as evidence.
+ * nothing behind: the backend must implement the same-VM nested daemon, and
+ * the operational bindings must resolve from the real staged catalog and
+ * frozen profile ceiling.
  */
 async function admitDockerWorkloadForSession(
   options: DockerWorkloadAdmissionForSessionOptions,
@@ -1415,25 +1413,25 @@ async function admitDockerWorkloadForSession(
   const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
   const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
   const { resolveDockerWorkloadAdmissionBindings } = await import('../docker-workload/admission-bindings.js');
-  const { assertNestedDaemonBackendQualified } = await import('../docker-workload/session-daemon.js');
+  const { assertNestedDaemonBackendImplemented } = await import('../docker-workload/session-daemon.js');
 
-  assertNestedDaemonBackendQualified(options.runtimeKind);
+  assertNestedDaemonBackendImplemented(options.runtimeKind);
   const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
-  const { bindings, provenance } = resolveDockerWorkloadAdmissionBindings({
+  const bindings = resolveDockerWorkloadAdmissionBindings({
     catalogPath: admissionCatalogPath(options.dockerWorkload, options.runtimeKind),
   });
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const packageRoot = getIronCurtainPackageRoot();
   return admitDockerWorkloadBundle({
     runtime: options.runtime,
     runtimeKind: options.runtimeKind,
+    runtimeForKind: (kind) => (kind === options.runtimeKind ? options.runtime : createContainerRuntime(kind)),
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
     // The config hash is passed separately from the bindings so the admission
     // audit trail keeps the capability identity as well as the artifact set.
     configHash,
     bindings,
-    bindingsProvenance: provenance,
-    watchdogPolicyTemplatePath: resolve(packageRoot, 'config', 'docker-workload', 'resource-watchdog-policy.json'),
+    watchdogPolicyTemplatePath: getFrozenWatchdogPolicyTemplatePath(),
     watchdogSupervisorEntrypointPath: resolve(
       packageRoot,
       'dist',
@@ -2328,7 +2326,7 @@ export async function resolveAgentImage(
 }
 
 function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const packageRoot = getIronCurtainPackageRoot();
   const dockerDir = resolve(packageRoot, 'docker');
 
   // On arm64 hosts (Apple Silicon), use the lightweight arm64-native Dockerfile

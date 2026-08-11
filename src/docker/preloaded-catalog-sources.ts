@@ -17,8 +17,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { arch } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, resolve } from 'node:path';
+import { getIronCurtainPackageRoot } from './docker-workload-paths.js';
 import { IMAGE_BUILD_HASH_SCHEMA, type PreloadedImageCatalogEntry } from './preloaded-image-catalog.js';
 import { REQUIRED_PRELOADED_IMAGE_ROLES, type PreloadedImageRole } from './preloaded-catalog-builder.js';
 
@@ -38,8 +38,9 @@ export const CATALOG_DOCKER_API_RANGE = { min: '1.44', max: '1.53' } as const;
 // daemon toolchain and every agent image inherits it via `FROM ironcurtain-base`,
 // so those roles declare `DAEMON_TOOLCHAIN` too. A client-only tuple — the shape
 // plan §9.2 describes for an agent layer beside a sibling daemon — has no role
-// while Apple is the only qualified backend, so it is not carried here as dead
-// configuration; reintroduce it with the backend that needs it.
+// while Apple is the only backend with an implementation beneath the fuse, so
+// it is not carried here as dead configuration; reintroduce it with the backend
+// that needs it.
 const DAEMON_TOOLCHAIN: Toolchain = { dockerCli: '29.2.1', dockerDaemon: '29.2.1', buildx: '0.31.1', compose: '5.1.0' };
 const NO_TOOLCHAIN: Toolchain = { dockerCli: null, dockerDaemon: null, buildx: null, compose: null };
 
@@ -58,10 +59,6 @@ export interface CatalogImageSource {
   readonly hashKind: BuildHashKind;
   /** Repository-relative Dockerfile path, recorded as image provenance. */
   readonly provenanceSource: string;
-}
-
-function packageRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
 /** amd64/arm64 for the host running the freeze, matching the catalog schema. */
@@ -85,7 +82,7 @@ function existsAt(dir: string, name: string): boolean {
 
 /** All eight infrastructure role sources, resolved to absolute paths for the current host. */
 export function catalogImageSources(): readonly CatalogImageSource[] {
-  const root = packageRoot();
+  const root = getIronCurtainPackageRoot();
   const dockerDir = resolve(root, 'docker');
   const workloadDir = resolve(dockerDir, 'docker-workload');
   const baseDockerfile = baseDockerfileName(dockerDir);

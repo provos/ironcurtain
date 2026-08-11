@@ -10,7 +10,7 @@
  * the watchdog gate fires for the create that actually launches the daemon, a
  * rejected daemon aborts and tears down, `DOCKER_HOST` appears only when the
  * feature is on, an ordinary session's container create is unchanged, an
- * unqualified backend fails closed, and the evidence event carries the
+ * unimplemented backend fails closed, and the evidence event carries the
  * adjudicated configuration rather than a "some daemon answered" flag.
  */
 
@@ -23,14 +23,14 @@ import {
   ledgerOuterResourceCreate,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
-import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../../src/docker-workload/session-daemon.js';
-import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
 import {
-  admissionBindingsProvenance,
-  PLACEHOLDER_ADMISSION_BINDING_FIELDS,
-  placeholderBinding,
-  resolveDockerWorkloadAdmissionBindings,
-} from '../../src/docker-workload/admission-bindings.js';
+  APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH,
+  gateAppleVmNestedDaemonAgentCommand,
+  nestedDaemonAgentEnv,
+  resolveNestedDaemonBundle,
+} from '../../src/docker-workload/session-daemon.js';
+import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
+import { resolveDockerWorkloadAdmissionBindings } from '../../src/docker-workload/admission-bindings.js';
 import { loadPreloadedImageCatalog } from '../../src/docker/preloaded-image-catalog.js';
 import { getFrozenProfileCeilingPath } from '../../src/docker/docker-workload-paths.js';
 import { getFrozenCatalogPath } from '../../src/docker/preloaded-catalog-paths.js';
@@ -265,9 +265,9 @@ describe('nested daemon — watchdog gate on the daemon-launching create (§8.2 
 });
 
 describe('nested daemon — readiness failure is fail-closed (§8.2 step 5)', () => {
-  it('aborts the create and removes the partial container when the daemon is unqualified', async () => {
+  it('aborts the create and removes the partial container when the daemon configuration is unsupported', async () => {
     // A daemon that ANSWERS with the wrong storage driver is rejected on the
-    // spot: an overlayfs daemon is an unqualified configuration, not a slow one.
+    // spot: an overlayfs daemon is an unsupported configuration, not a slow one.
     const { runtime, handle } = await admitBundle({
       exec: (argv) =>
         argv.includes('info')
@@ -276,7 +276,7 @@ describe('nested daemon — readiness failure is fail-closed (§8.2 step 5)', ()
     });
     const core = makeCore(runtime.runtime, { dockerWorkload: handle });
 
-    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/unqualified storage driver/u);
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/unsupported storage driver/u);
 
     // The agent container was created and then torn down by the create's own
     // rollback, so no VM is left running an unadjudicated daemon.
@@ -333,6 +333,18 @@ describe('nested daemon — DOCKER_HOST reaches the agent only when enabled (§8
   });
 });
 
+describe('nested daemon — PTY agent readiness gate (§8.2 steps 5-6)', () => {
+  it('execs the agent command only after the host-owned marker appears', () => {
+    const agentCommand = ['socat', 'UNIX-LISTEN:/tmp/pty.sock,fork', 'EXEC:/agent,pty'];
+    const gated = gateAppleVmNestedDaemonAgentCommand(agentCommand);
+
+    expect(gated.slice(0, 2)).toEqual(['/bin/sh', '-c']);
+    expect(gated[2]).toContain(`while [ ! -f ${APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH} ]`);
+    expect(gated[2]).toContain('exec "$@"');
+    expect(gated.slice(4)).toEqual(agentCommand);
+  });
+});
+
 describe('nested daemon — feature-off equivalence', () => {
   it('changes nothing but the ledgered name, ownership labels, and DOCKER_HOST', async () => {
     const { runtime: enabledRuntime, handle } = await admitBundle();
@@ -373,14 +385,12 @@ describe('nested daemon — feature-off equivalence', () => {
   });
 });
 
-describe('nested daemon — unqualified backend fails closed', () => {
+describe('nested daemon — unimplemented backend fails closed', () => {
   it('refuses an admitted bundle on the docker backend instead of skipping the daemon', async () => {
     const { runtime, handle } = await admitBundle();
     const core = makeCore(runtime.runtime, { dockerWorkload: handle, runtimeKind: 'docker' });
 
-    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(
-      /not implementation-qualified on the docker backend/u,
-    );
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/not implemented on the docker backend/u);
     expect(runtime.events).toEqual([]);
   });
 
@@ -435,32 +445,18 @@ describe('nested daemon — admission bindings are the real operational inputs',
     const catalog = loadPreloadedImageCatalog(catalogPath);
     const base = catalog.catalog.images.find((image) => image.logicalName === 'ironcurtain-base:latest');
 
-    const { bindings } = resolveDockerWorkloadAdmissionBindings({ catalogPath });
+    const bindings = resolveDockerWorkloadAdmissionBindings({ catalogPath });
 
     expect(bindings.catalogSha256).toBe(sha256Hex(readFileSync(catalogPath)));
     expect(bindings.toolchainDigest).toBe(base?.toolchainDigest);
   });
 
   it('binds the frozen profile ceiling by its exact bytes', () => {
-    const { bindings } = resolveDockerWorkloadAdmissionBindings({
+    const bindings = resolveDockerWorkloadAdmissionBindings({
       catalogPath: getFrozenCatalogPath('apple-container'),
     });
 
     expect(bindings.profileSha256).toBe(sha256Hex(readFileSync(getFrozenProfileCeilingPath())));
-  });
-
-  it('reports qualified provenance now that no binding is a placeholder', () => {
-    const { provenance } = resolveDockerWorkloadAdmissionBindings({
-      catalogPath: getFrozenCatalogPath('apple-container'),
-    });
-
-    expect(PLACEHOLDER_ADMISSION_BINDING_FIELDS).toEqual([]);
-    expect(provenance).toBe('qualified');
-    // The mechanism is retained, not removed: one placeholder field would
-    // demote the whole set again, since a partially real set must never
-    // present itself as qualified evidence.
-    expect(admissionBindingsProvenance(['catalogSha256'])).toBe('placeholder');
-    expect(placeholderBinding('catalogSha256', ADMISSION_CONFIG_HASH)).not.toBe(ADMISSION_CONFIG_HASH);
   });
 
   it('fails closed when the catalog lacks the base role it binds', () => {

@@ -1,8 +1,7 @@
 /** Host-authoritative resource claims for one concrete nested-Docker bundle. */
 
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { sha256HexSchema as sha256Schema, stableStringify } from '../hash.js';
+import { computeHash, sha256HexSchema as sha256Schema } from '../hash.js';
 import type { ResolvedDockerWorkloadConfig } from './config.js';
 
 export const EFFECTIVE_CAPABILITIES_SCHEMA_VERSION = 1;
@@ -122,9 +121,7 @@ export function resolveEffectiveCapabilities(options: {
 }
 
 export function effectiveCapabilitiesHash(capabilities: EffectiveCapabilities): string {
-  const serialized = stableStringify(capabilities);
-  if (serialized === undefined) throw new Error('effective capabilities are not serializable');
-  return createHash('sha256').update(serialized, 'utf8').digest('hex');
+  return computeHash(capabilities);
 }
 
 function requireMeasurement(

@@ -55,6 +55,52 @@ describe('direct destination-bound transport', () => {
     await expect(observed).resolves.toEqual({ url: '/provider?x=1', host: `127.0.0.1:${port}` });
   });
 
+  it('admits a trusted host-configured private provider gateway without relaxing ordinary requests', async () => {
+    const observed = new Promise<string | undefined>((resolve) => {
+      const server = http.createServer((request, response) => {
+        resolve(request.headers.host);
+        response.end('gateway-ok');
+      });
+      servers.push(server);
+    });
+    const port = await listenTcp(servers[0]);
+    const transport = createDirectOutboundTransport({
+      lookup: stubLookup({ 'litellm.internal': '127.0.0.1' }),
+    });
+
+    await expect(
+      requestBody(transport, {
+        destination: { protocol: 'http:', hostname: 'litellm.internal', port },
+        addressPolicy: 'trusted-provider-override',
+        method: 'POST',
+        path: '/v1/messages',
+      }),
+    ).resolves.toBe('gateway-ok');
+    await expect(observed).resolves.toBe(`litellm.internal:${port}`);
+
+    expect(() =>
+      transport.request({
+        destination: { protocol: 'http:', hostname: 'litellm.internal', port },
+        method: 'POST',
+        path: '/v1/messages',
+      }),
+    ).toThrow(/local|metadata/u);
+  });
+
+  it('keeps metadata destinations forbidden for trusted provider overrides', () => {
+    const transport = createDirectOutboundTransport();
+    for (const hostname of ['metadata.google.internal', '169.254.169.254']) {
+      expect(() =>
+        transport.request({
+          destination: { protocol: 'http:', hostname, port: 80 },
+          addressPolicy: 'trusted-provider-override',
+          method: 'GET',
+          path: '/',
+        }),
+      ).toThrow(/metadata|not allowed/u);
+    }
+  });
+
   it('rejects local, metadata, and private literal destinations before I/O', () => {
     const transport = createDirectOutboundTransport();
     for (const hostname of ['localhost', 'metadata.google.internal', '127.0.0.1', '169.254.169.254', '10.0.0.1']) {
@@ -158,6 +204,34 @@ describe('fixed parent proxy transport', () => {
       url: 'http://packages.example.com:8080/artifact?id=1',
       host: 'packages.example.com:8080',
     });
+  });
+
+  it('admits a trusted private provider gateway through a fixed parent without making it the default', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'outbound-private-parent-'));
+    temporaryDirectories.push(directory);
+    const socketPath = join(directory, 'parent.sock');
+    const observed = new Promise<string>((resolve) => {
+      const server = http.createServer((request, response) => {
+        resolve(request.url ?? '');
+        response.end('parent-private-ok');
+      });
+      servers.push(server);
+    });
+    await listenUds(servers[0], socketPath);
+    const transport = createParentProxyOutboundTransport({
+      proxy: { socketPath },
+      lookup: stubLookup({ 'litellm.internal': '10.20.30.40' }),
+    });
+
+    await expect(
+      requestBody(transport, {
+        destination: { protocol: 'http:', hostname: 'litellm.internal', port: 4000 },
+        addressPolicy: 'trusted-provider-override',
+        method: 'POST',
+        path: '/v1/messages',
+      }),
+    ).resolves.toBe('parent-private-ok');
+    await expect(observed).resolves.toBe('http://litellm.internal:4000/v1/messages');
   });
 
   it('reaches a TCP parent endpoint the same way as a UDS one', async () => {

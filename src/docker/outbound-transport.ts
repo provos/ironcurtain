@@ -2,18 +2,19 @@
  * Destination-bound HTTP(S) transport for MITM and registry upstreams.
  *
  * Callers supply a trusted destination separately from request headers. The
- * transport owns Host/SNI, blocks local/private destinations, resolves and
- * screens every destination name locally, never follows redirects, and can
- * route through one fixed parent HTTP proxy without exposing a caller-selected
- * CONNECT primitive.
+ * transport owns Host/SNI, applies a public-only policy by default, and permits
+ * private destinations only for an explicit trusted provider override. It
+ * resolves and screens every destination name locally, never follows redirects,
+ * and can route through one fixed parent HTTP proxy without exposing a
+ * caller-selected CONNECT primitive.
  *
  * ## The child is the address authority
  *
  * Both transports enforce the same destination-address policy in *this*
  * process, before any byte reaches the network: a literal destination is
- * screened by {@link isPublicAddress}, and a destination *name* is resolved
- * through a guarded resolver that rejects the entire answer set if any address
- * is loopback, private, link-local, or otherwise non-routable.
+ * screened against the request's address policy, and a destination *name* is
+ * resolved through a guarded resolver that rejects the entire answer set if
+ * any answer violates that policy.
  *
  * The parent-proxy transport cannot delegate that check upward. A parent cannot
  * re-derive a derived-CDN authority: such a host is authorized only as the
@@ -50,6 +51,7 @@ import { domainToASCII } from 'node:url';
 import type { Duplex } from 'node:stream';
 
 export type OutboundProtocol = 'http:' | 'https:';
+export type OutboundAddressPolicy = 'public-only' | 'trusted-provider-override';
 
 export interface OutboundDestination {
   readonly protocol: OutboundProtocol;
@@ -59,6 +61,12 @@ export interface OutboundDestination {
 
 export interface DestinationBoundRequest {
   readonly destination: OutboundDestination;
+  /**
+   * Public-only by default. The trusted provider-routing branch may opt into a
+   * host-configured private gateway; untrusted passthrough, redirects, build,
+   * and registry callers must never set this.
+   */
+  readonly addressPolicy?: OutboundAddressPolicy;
   readonly method: string | undefined;
   readonly path: string;
   readonly headers?: http.OutgoingHttpHeaders;
@@ -104,19 +112,23 @@ export interface ParentProxyOutboundTransportOptions {
 }
 
 export function createDirectOutboundTransport(options: DirectOutboundTransportOptions = {}): OutboundTransport {
-  const lookup = createGuardedLookup(options.lookup ?? dns.lookup, options.allowPrivateDestinationsForTests === true);
+  const resolver = options.lookup ?? dns.lookup;
+  const publicLookup = createGuardedLookup(resolver, false);
+  const trustedPrivateLookup = createGuardedLookup(resolver, true);
+  const allowPrivateForEveryRequest = options.allowPrivateDestinationsForTests === true;
   return {
     kind: 'direct',
     addressGuard: 'local-resolver',
     request(request, onResponse) {
-      const normalized = normalizeRequest(request, options.allowPrivateDestinationsForTests === true);
+      const allowPrivate = allowPrivateForEveryRequest || request.addressPolicy === 'trusted-provider-override';
+      const normalized = normalizeRequest(request, allowPrivate);
       const requestOptions: http.RequestOptions = {
         hostname: normalized.destination.hostname,
         port: normalized.destination.port,
         method: normalized.method,
         path: normalized.path,
         headers: normalized.headers,
-        lookup,
+        lookup: allowPrivate ? trustedPrivateLookup : publicLookup,
       };
       return normalized.destination.protocol === 'https:'
         ? https.request(requestOptions, onResponse)
@@ -127,10 +139,14 @@ export function createDirectOutboundTransport(options: DirectOutboundTransportOp
 
 export function createParentProxyOutboundTransport(options: ParentProxyOutboundTransportOptions): OutboundTransport {
   const proxy = normalizeProxyEndpoint(options.proxy);
-  const allowPrivate = options.allowPrivateDestinationsForTests === true;
-  const screenDestination = createDestinationScreen(options.lookup ?? dns.lookup, allowPrivate);
-  const httpsAgent = new FixedParentProxyHttpsAgent(proxy, options.ca, screenDestination);
-  const httpAgent = new FixedParentProxyHttpAgent(proxy, screenDestination);
+  const resolver = options.lookup ?? dns.lookup;
+  const publicScreen = createDestinationScreen(resolver, false);
+  const trustedPrivateScreen = createDestinationScreen(resolver, true);
+  const publicHttpsAgent = new FixedParentProxyHttpsAgent(proxy, options.ca, publicScreen);
+  const publicHttpAgent = new FixedParentProxyHttpAgent(proxy, publicScreen);
+  const trustedPrivateHttpsAgent = new FixedParentProxyHttpsAgent(proxy, options.ca, trustedPrivateScreen);
+  const trustedPrivateHttpAgent = new FixedParentProxyHttpAgent(proxy, trustedPrivateScreen);
+  const allowPrivateForEveryRequest = options.allowPrivateDestinationsForTests === true;
   return {
     kind: 'fixed-parent-proxy',
     addressGuard: 'local-resolver',
@@ -140,6 +156,7 @@ export function createParentProxyOutboundTransport(options: ParentProxyOutboundT
       // applied. Literal/local destinations are refused here, and both agents
       // screen the destination *name* against the guarded resolver before any
       // CONNECT authority or absolute-form target is written to the parent.
+      const allowPrivate = allowPrivateForEveryRequest || request.addressPolicy === 'trusted-provider-override';
       const normalized = normalizeRequest(request, allowPrivate);
       if (normalized.destination.protocol === 'http:') {
         const absolutePath =
@@ -152,7 +169,7 @@ export function createParentProxyOutboundTransport(options: ParentProxyOutboundT
             method: normalized.method,
             path: absolutePath,
             headers: normalized.headers,
-            agent: httpAgent,
+            agent: allowPrivate ? trustedPrivateHttpAgent : publicHttpAgent,
           },
           onResponse,
         );
@@ -164,7 +181,7 @@ export function createParentProxyOutboundTransport(options: ParentProxyOutboundT
           method: normalized.method,
           path: normalized.path,
           headers: normalized.headers,
-          agent: httpsAgent,
+          agent: allowPrivate ? trustedPrivateHttpsAgent : publicHttpsAgent,
         },
         onResponse,
       );
@@ -359,18 +376,25 @@ function normalizePort(port: number): number {
 
 function assertHostnameIsEligible(hostname: string, allowPrivate: boolean): void {
   const lower = hostname.toLowerCase();
+  if (lower === 'metadata.google.internal') {
+    throw new Error(`outbound destination is metadata-scoped: ${hostname}`);
+  }
   if (
-    lower === 'localhost' ||
-    lower.endsWith('.localhost') ||
-    lower.endsWith('.local') ||
-    lower.endsWith('.internal') ||
-    lower.endsWith('.docker.internal') ||
-    lower === 'metadata.google.internal'
+    !allowPrivate &&
+    (lower === 'localhost' ||
+      lower.endsWith('.localhost') ||
+      lower.endsWith('.local') ||
+      lower.endsWith('.internal') ||
+      lower.endsWith('.docker.internal'))
   ) {
     throw new Error(`outbound destination is local or metadata-scoped: ${hostname}`);
   }
-  if (net.isIP(hostname) !== 0 && !allowPrivate && !isPublicAddress(hostname)) {
-    throw new Error(`outbound destination address is not public: ${hostname}`);
+  if (net.isIP(hostname) !== 0 && !(allowPrivate ? isTrustedProviderAddress(hostname) : isPublicAddress(hostname))) {
+    throw new Error(
+      allowPrivate
+        ? `outbound destination address is not allowed by its address policy: ${hostname}`
+        : `outbound destination address is not public: ${hostname}`,
+    );
   }
 }
 
@@ -399,9 +423,13 @@ export function createGuardedLookup(lookup: typeof dns.lookup, allowPrivate: boo
       const addresses = Array.isArray(result) ? result : [{ address: result, family: family === 6 ? 6 : 4 }];
       if (
         addresses.length === 0 ||
-        addresses.some((entry) => net.isIP(entry.address) === 0 || (!allowPrivate && !isPublicAddress(entry.address)))
+        addresses.some(
+          (entry) =>
+            net.isIP(entry.address) === 0 ||
+            !(allowPrivate ? isTrustedProviderAddress(entry.address) : isPublicAddress(entry.address)),
+        )
       ) {
-        callback(new Error(`DNS resolution for ${hostname} included a non-public address`), []);
+        callback(new Error(`DNS resolution for ${hostname} included a non-public address or disallowed address`), []);
         return;
       }
       if (options.all) callback(null, addresses);
@@ -448,6 +476,33 @@ export function isPublicAddress(address: string): boolean {
       normalized.startsWith('ff') ||
       normalized.startsWith('2001:db8:')
     );
+  }
+  return false;
+}
+
+/**
+ * Private destinations intentionally supported for a trusted provider gateway.
+ * Link-local/metadata, unspecified, multicast, and documentation-only ranges
+ * remain denied even on this path.
+ */
+function isTrustedProviderAddress(address: string): boolean {
+  if (isPublicAddress(address)) return true;
+  const family = net.isIP(address);
+  if (family === 4) {
+    const octets = address.split('.').map(Number);
+    const value = (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
+    return [
+      ['10.0.0.0', 8],
+      ['100.64.0.0', 10],
+      ['127.0.0.0', 8],
+      ['172.16.0.0', 12],
+      ['192.168.0.0', 16],
+    ].some(([network, bits]) => ipv4InCidr(value, String(network), Number(bits)));
+  }
+  if (family === 6) {
+    const normalized = address.toLowerCase();
+    if (normalized.startsWith('::ffff:')) return isTrustedProviderAddress(normalized.slice('::ffff:'.length));
+    return normalized === '::1' || normalized.startsWith('fc') || normalized.startsWith('fd');
   }
   return false;
 }

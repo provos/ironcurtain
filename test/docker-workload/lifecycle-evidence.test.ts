@@ -1,4 +1,15 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,18 +18,13 @@ import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastruct
 import {
   createJsonlDockerWorkloadAuditSink,
   createRecordingDockerWorkloadAuditSink,
-  sealLifecycleEvidence,
+  writeLifecycleEvidence,
   DAEMON_READY_ATTESTATION,
-  type SealLifecycleEvidenceOptions,
+  type WriteLifecycleEvidenceOptions,
 } from '../../src/docker-workload/lifecycle-evidence.js';
-import {
-  verifyQualificationEvidence,
-  type QualificationEvidencePlan,
-} from '../../src/docker-workload/qualification-evidence.js';
 import {
   ADMISSION_BINDINGS,
   ADMISSION_CONFIG_HASH,
-  EVIDENCE_BINDINGS,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
@@ -34,16 +40,7 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-const EVIDENCE_PLAN_FILES: QualificationEvidencePlan['files'] = [
-  { id: 'lifecycle-lease', path: 'lease.json' },
-  { id: 'lifecycle-rendered-policy', path: 'policy.json' },
-  { id: 'lifecycle-supervisor-status-history', path: 'supervisor-status-history.json' },
-  { id: 'lifecycle-revocation-result', path: 'revocation-result.json' },
-  { id: 'lifecycle-cleanup-inventory-1', path: 'cleanup/inventory-1.json' },
-  { id: 'lifecycle-cleanup-inventory-2', path: 'cleanup/inventory-2.json' },
-];
-
-function sealOptions(): SealLifecycleEvidenceOptions {
+function evidenceOptions(): WriteLifecycleEvidenceOptions {
   return {
     runId: 'docker-workload-lifecycle-001',
     variant: 'apple-rootless-vfs',
@@ -51,9 +48,8 @@ function sealOptions(): SealLifecycleEvidenceOptions {
     architecture: 'arm64',
     startedAt: '2026-07-20T12:00:00.000Z',
     completedAt: '2026-07-20T12:01:00.000Z',
-    bindings: EVIDENCE_BINDINGS,
     contents: {
-      lease: { leaseId: 'dw-evidence', status: 'closed' },
+      lease: { leaseId: 'dw-evidence', status: 'closed', cleanupInventoryGapMs: 500 },
       renderedPolicy: { policyId: 'docker-workload-observed-state-v1' },
       supervisorStatusHistory: [{ state: 'ready' }, { state: 'closed' }],
       revocation: { removedResourceIds: ['owned-id'], finalOwnedResourceIds: [] },
@@ -70,7 +66,7 @@ function sealOptions(): SealLifecycleEvidenceOptions {
 }
 
 function evidenceDir(): string {
-  const directory = mkdtempSync(join(tmpdir(), 'docker-workload-evidence-'));
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'docker-workload-evidence-')));
   chmodSync(directory, 0o700);
   temporaryDirectories.push(directory);
   return directory;
@@ -127,45 +123,112 @@ describe('Docker-workload lifecycle evidence', () => {
 
   it('creates a not-yet-existing evidence directory before the first write', () => {
     const directory = join(evidenceDir(), 'nested', 'evidence');
-    const manifest = sealLifecycleEvidence(directory, sealOptions());
-    const plan: QualificationEvidencePlan = {
-      runId: 'docker-workload-lifecycle-001',
-      variant: 'apple-rootless-vfs',
-      platform: 'apple-container',
-      architecture: 'arm64',
-      bindings: EVIDENCE_BINDINGS,
-      files: EVIDENCE_PLAN_FILES,
-    };
-    expect(verifyQualificationEvidence(directory, plan).sha256).toBe(manifest.sha256);
+    const summary = writeLifecycleEvidence(directory, evidenceOptions());
+    expect(JSON.parse(readFileSync(join(directory, 'summary.json'), 'utf8'))).toEqual(summary);
   });
 
-  it('seals lifecycle evidence into a verifiable manifest', () => {
+  it('writes a simple summary and the actual two-inventory cleanup proof', () => {
     const directory = evidenceDir();
-    const manifest = sealLifecycleEvidence(directory, sealOptions());
-    const plan: QualificationEvidencePlan = {
+    const summary = writeLifecycleEvidence(directory, evidenceOptions());
+    expect(summary).toEqual({
+      schemaVersion: 1,
       runId: 'docker-workload-lifecycle-001',
-      variant: 'apple-rootless-vfs',
+      backend: 'apple-rootless-vfs',
       platform: 'apple-container',
       architecture: 'arm64',
-      bindings: EVIDENCE_BINDINGS,
-      files: EVIDENCE_PLAN_FILES,
-    };
-    expect(verifyQualificationEvidence(directory, plan).sha256).toBe(manifest.sha256);
+      startedAt: '2026-07-20T12:00:00.000Z',
+      completedAt: '2026-07-20T12:01:00.000Z',
+      files: [
+        'lease.json',
+        'policy.json',
+        'supervisor-status-history.json',
+        'revocation-result.json',
+        'cleanup/inventory-1.json',
+        'cleanup/inventory-2.json',
+      ],
+      cleanup: evidenceOptions().contents.cleanup,
+    });
+    expect(JSON.parse(readFileSync(join(directory, 'cleanup', 'inventory-1.json'), 'utf8'))).toEqual(
+      summary.cleanup.inventories[0],
+    );
+    expect(JSON.parse(readFileSync(join(directory, 'cleanup', 'inventory-2.json'), 'utf8'))).toEqual(
+      summary.cleanup.inventories[1],
+    );
+    expect(statSync(directory).mode & 0o077).toBe(0);
+    for (const path of [...summary.files, 'summary.json']) {
+      expect(statSync(join(directory, path)).mode & 0o077).toBe(0);
+    }
   });
 
-  it('rejects a missing cleanup inventory file on verification', () => {
+  it('rejects lifecycle evidence unless both cleanup inventories are empty', () => {
     const directory = evidenceDir();
-    sealLifecycleEvidence(directory, sealOptions());
-    rmSync(join(directory, 'cleanup', 'inventory-2.json'));
-    const plan: QualificationEvidencePlan = {
-      runId: 'docker-workload-lifecycle-001',
-      variant: 'apple-rootless-vfs',
-      platform: 'apple-container',
-      architecture: 'arm64',
-      bindings: EVIDENCE_BINDINGS,
-      files: EVIDENCE_PLAN_FILES,
-    };
-    expect(() => verifyQualificationEvidence(directory, plan)).toThrow();
+    const options = evidenceOptions();
+    options.contents.cleanup.inventories[1].ownedResourceIds.push('leaked-container');
+    expect(() => writeLifecycleEvidence(directory, options)).toThrow(/two empty cleanup inventories/u);
+    expect(() => statSync(join(directory, 'summary.json'))).toThrow();
+  });
+
+  it('requires a canonical absolute owner-only evidence root', () => {
+    const directory = evidenceDir();
+    expect(() => writeLifecycleEvidence('relative-evidence', evidenceOptions())).toThrow(/canonical and absolute/u);
+    chmodSync(directory, 0o755);
+    expect(() => writeLifecycleEvidence(directory, evidenceOptions())).toThrow(/owner-only/u);
+    expect(existsSync(join(directory, 'summary.json'))).toBe(false);
+  });
+
+  it('rejects an evidence or cleanup root that is itself a symlink', () => {
+    const parent = evidenceDir();
+    const target = join(parent, 'target');
+    mkdirSync(target, { mode: 0o700 });
+    const alias = join(parent, 'alias');
+    symlinkSync(target, alias);
+    expect(() => writeLifecycleEvidence(alias, evidenceOptions())).toThrow(/symlink|canonical/u);
+    expect(existsSync(join(target, 'summary.json'))).toBe(false);
+
+    const root = join(parent, 'root');
+    mkdirSync(root, { mode: 0o700 });
+    const cleanupTarget = join(parent, 'cleanup-target');
+    mkdirSync(cleanupTarget, { mode: 0o700 });
+    symlinkSync(cleanupTarget, join(root, 'cleanup'));
+    expect(() => writeLifecycleEvidence(root, evidenceOptions())).toThrow(/cleanup root.*real canonical/u);
+    expect(existsSync(join(root, 'summary.json'))).toBe(false);
+    expect(existsSync(join(cleanupTarget, 'inventory-1.json'))).toBe(false);
+  });
+
+  it('rejects every preexisting output leaf, including a broken symlink', () => {
+    const root = evidenceDir();
+    writeFileSync(join(root, 'policy.json'), '{}\n');
+    expect(() => writeLifecycleEvidence(root, evidenceOptions())).toThrow(/output already exists: policy\.json/u);
+    expect(existsSync(join(root, 'summary.json'))).toBe(false);
+
+    const secondRoot = evidenceDir();
+    symlinkSync(join(secondRoot, 'missing-target'), join(secondRoot, 'summary.json'));
+    expect(() => writeLifecycleEvidence(secondRoot, evidenceOptions())).toThrow(
+      /output already exists: summary\.json/u,
+    );
+    expect(existsSync(join(secondRoot, 'missing-target'))).toBe(false);
+  });
+
+  it('validates the lease cleanup gap before creating any output', () => {
+    const parent = evidenceDir();
+    const root = join(parent, 'not-created');
+    const base = evidenceOptions();
+    const options = { ...base, contents: { ...base.contents, lease: { cleanupInventoryGapMs: 1_000 } } };
+    expect(() => writeLifecycleEvidence(root, options)).toThrow(/not sufficiently separated/u);
+    expect(existsSync(root)).toBe(false);
+  });
+
+  it('serializes every payload before creating any output', () => {
+    // The ordering is the point: an unserializable payload must not leave a
+    // partial evidence set behind. `JSON.stringify` owns the rejection.
+    const parent = evidenceDir();
+    const root = join(parent, 'not-created');
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const base = evidenceOptions();
+    const options = { ...base, contents: { ...base.contents, renderedPolicy: cyclic } };
+    expect(() => writeLifecycleEvidence(root, options)).toThrow();
+    expect(existsSync(root)).toBe(false);
   });
 
   it('round-trips a daemon-ready event and rejects an unadjudicated one', () => {
