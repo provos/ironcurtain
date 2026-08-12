@@ -255,6 +255,21 @@ export class ResourceWatchdog {
     }
   }
 
+  /**
+   * Defer stale-sample adjudication while a trusted, process-bound lifecycle
+   * operation owns the resource boundary. The caller must demand a real tick
+   * as soon as that ownership becomes available again.
+   */
+  deferSamplingForTrustedLifecycleOperation(): void {
+    if (this.stopped || this.tripRecord !== undefined) {
+      throw new Error('resource watchdog cannot defer sampling after it stops or trips');
+    }
+    if (this.lastCompletedAtMs === undefined || this.samplingStartedAtMs !== undefined) {
+      throw new Error('resource watchdog can defer only after an attested sample and outside an active sample');
+    }
+    this.lastCompletedAtMs = this.now();
+  }
+
   stopAfterCleanup(proof: ResourceWatchdogCleanupProof): void {
     if (!proof.exactOuterResourceAbsent || !proof.stateRootAbsent) {
       throw new Error('resource watchdog cannot stop before exact outer/state removal');

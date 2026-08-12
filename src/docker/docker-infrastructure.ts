@@ -1355,12 +1355,14 @@ export async function ledgerOuterResourceCreate(
     ownershipLabels: Readonly<Record<string, string>>,
   ) => Promise<{ readonly id: string; readonly expanded?: ExpandedOuterCreate }>,
 ): Promise<{ readonly id: string; readonly requestedName: string }> {
-  if (launchesNestedDaemonComponent(spec)) handle.assertWatchdogFresh();
-  const grant = handle.requestOuterResource(spec.kind, spec.role);
-  const labels = spec.baseLabels ? { ...spec.baseLabels, ...grant.labels } : grant.labels;
-  const { id, expanded } = await create(grant.requestedName, labels);
-  grant.observed(id, expanded);
-  return { id, requestedName: grant.requestedName };
+  return handle.withOuterCreateClaim(async () => {
+    if (launchesNestedDaemonComponent(spec)) handle.assertWatchdogFresh();
+    const grant = handle.requestOuterResource(spec.kind, spec.role);
+    const labels = spec.baseLabels ? { ...spec.baseLabels, ...grant.labels } : grant.labels;
+    const { id, expanded } = await create(grant.requestedName, labels);
+    grant.observed(id, expanded);
+    return { id, requestedName: grant.requestedName };
+  });
 }
 
 export interface CreateAgentContainerOptions {

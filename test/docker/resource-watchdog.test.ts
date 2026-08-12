@@ -164,6 +164,31 @@ describe('resource watchdog', () => {
     expect(onTrip).toHaveBeenCalledTimes(1);
   });
 
+  it('demands a real sample after trusted lifecycle contention defers the stale clock', async () => {
+    const policy = syntheticPolicy();
+    let now = 1_000;
+    let samples = 0;
+    const onTrip = vi.fn(async () => {});
+    const watchdog = new ResourceWatchdog(policy, {
+      sample: async () => {
+        samples += 1;
+        return syntheticSample(policy, { sampledAtMs: now });
+      },
+      onTrip,
+      now: () => now,
+      schedule: false,
+    });
+    await watchdog.start();
+    now += policy.staleAfterMs * 2;
+
+    watchdog.deferSamplingForTrustedLifecycleOperation();
+    await watchdog.tick();
+
+    expect(samples).toBe(2);
+    expect(watchdog.trip).toBeUndefined();
+    expect(onTrip).not.toHaveBeenCalled();
+  });
+
   it('surfaces a failed revocation instead of treating a trip as handled', async () => {
     const policy = syntheticPolicy();
     const watchdog = new ResourceWatchdog(policy, {

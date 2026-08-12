@@ -15,10 +15,10 @@ import { join } from 'node:path';
 import {
   activateDockerWorkloadLease,
   createDockerWorkloadLease,
-  heartbeatDockerWorkloadLease,
   observeDockerWorkloadOuterResource,
   requestDockerWorkloadOuterResource,
 } from '../../../src/docker-workload/bundle-lease.js';
+import { tryHeartbeatDockerWorkloadLease } from '../../../src/docker-workload/cleanup-ownership.js';
 import { renderWatchdogPolicy, type WatchdogPolicyTemplate } from '../../../src/docker-workload/watchdog-policy.js';
 import { launchDetachedResourceWatchdogSupervisor } from '../../../src/docker-workload/resource-watchdog-supervisor.js';
 
@@ -98,7 +98,7 @@ try {
   // lease would make heartbeats throw, but by then this process is dead.
   setInterval(() => {
     try {
-      heartbeatDockerWorkloadLease(leasePath, config.generation);
+      tryHeartbeatDockerWorkloadLease({ leasePath, generation: config.generation, clock: () => new Date() });
     } catch {
       // Transient lock contention; the next interval retries.
     }

@@ -315,6 +315,7 @@ export interface FakeSupervisor extends WatchdogSupervisorController {
 export function createFakeSupervisor(options: FakeSupervisorOptions): FakeSupervisor {
   const pid = options.pid ?? 424242;
   const calls = { launched: 0, stopRequested: 0 };
+  let stopped = false;
   return {
     calls,
     async launch(launchOptions) {
@@ -322,12 +323,12 @@ export function createFakeSupervisor(options: FakeSupervisorOptions): FakeSuperv
       if (options.launch === 'throw') {
         throw new Error('watchdog supervisor startup incident: injected attestation failure');
       }
-      return { pid, status: buildReadyStatus(dirname(launchOptions.statusPath), options.clock(), pid) };
+      return { pid, status: buildReadyStatus(dirname(launchOptions.statusPath), options.clock(), pid, false) };
     },
     readStatus(statusPath) {
       if (options.statusMode === 'absent') return undefined;
       try {
-        return buildReadyStatus(dirname(statusPath), options.clock(), pid);
+        return buildReadyStatus(dirname(statusPath), options.clock(), pid, stopped);
       } catch {
         return undefined;
       }
@@ -336,7 +337,11 @@ export function createFakeSupervisor(options: FakeSupervisorOptions): FakeSuperv
       calls.stopRequested += 1;
       if (options.closeLeaseOnStop) {
         // Simulate the detached supervisor synchronously accepting the coordinator's proof.
-        closeDockerWorkloadLease(join(dirname(stopRequestPath), 'lease.json'), lease.generation, cleanup, now);
+        const leasePath = join(dirname(stopRequestPath), 'lease.json');
+        if (loadDockerWorkloadLease(leasePath).status === 'revoking') {
+          closeDockerWorkloadLease(leasePath, lease.generation, cleanup, now);
+        }
+        stopped = true;
       }
     },
     isAlive() {
@@ -345,7 +350,7 @@ export function createFakeSupervisor(options: FakeSupervisorOptions): FakeSuperv
   };
 }
 
-function buildReadyStatus(leaseDir: string, now: Date, pid: number): ResourceWatchdogSupervisorStatus {
+function buildReadyStatus(leaseDir: string, now: Date, pid: number, closed: boolean): ResourceWatchdogSupervisorStatus {
   const lease = loadDockerWorkloadLease(join(leaseDir, 'lease.json'));
   const policy = loadResourceWatchdogPolicy(join(leaseDir, 'policy.json'));
   return {
@@ -353,14 +358,14 @@ function buildReadyStatus(leaseDir: string, now: Date, pid: number): ResourceWat
     leaseId: lease.leaseId,
     generation: lease.generation,
     supervisorPid: pid,
-    state: 'ready',
+    state: closed ? 'closed' : 'ready',
     policySha256: policy.sha256,
     policyId: policy.policy.policyId,
     startedAt: now.toISOString(),
     updatedAt: now.toISOString(),
     lastSample: { sampledAtMs: now.getTime(), availableBytes: 100_000_000_000, allocatedBytes: 4096 },
     trip: null,
-    detail: 'watchdog ready',
+    detail: closed ? 'durable lease cleanup observed' : 'watchdog ready',
   };
 }
 

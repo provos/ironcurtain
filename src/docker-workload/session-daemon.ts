@@ -139,5 +139,5 @@ export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWork
     config: options.bootstrap,
   });
   options.nestedDaemon.recordPrivateDockerBootstrap(provisioning);
-  options.nestedDaemon.activate();
+  await options.nestedDaemon.activate();
 }

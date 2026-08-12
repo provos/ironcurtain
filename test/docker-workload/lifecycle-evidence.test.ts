@@ -107,7 +107,7 @@ describe('Docker-workload lifecycle evidence', () => {
       labels: grant.labels,
     });
     grant.observed(containerId);
-    handle.activate();
+    await handle.activate();
     await handle.teardown();
 
     expect(sink.events.map((event) => event.kind)).toEqual([

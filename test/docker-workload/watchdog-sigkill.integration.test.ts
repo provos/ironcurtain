@@ -17,7 +17,16 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -27,11 +36,12 @@ import {
   loadResourceWatchdogSupervisorStatus,
   type ResourceWatchdogSupervisorStatus,
 } from '../../src/docker-workload/resource-watchdog-supervisor.js';
+import { getProcessStartIdentity } from '../../src/docker-workload/process-lock.js';
 import type { WatchdogPolicyTemplate } from '../../src/docker-workload/watchdog-policy.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 const coordinatorPath = join(repoRoot, 'test', 'docker-workload', 'fixtures', 'watchdog-sigkill-coordinator.ts');
-const dockerStubPath = join(repoRoot, 'test', 'docker-workload', 'fixtures', 'watchdog-sigkill-docker-stub.ts');
+const dockerStubPath = join(repoRoot, 'test', 'docker-workload', 'fixtures', 'watchdog-sigkill-docker-stub.mjs');
 const entrypointPath = join(repoRoot, 'src', 'docker-workload', 'resource-watchdog-supervisor-main.ts');
 
 const GENERATION = 'generation-sigkill-cross-001';
@@ -57,18 +67,19 @@ const template: WatchdogPolicyTemplate = {
 };
 
 const temporaryDirectories: string[] = [];
-const spawnedPids: number[] = [];
+const spawnedChildren: ChildProcess[] = [];
+const detachedProcesses: TrackedProcess[] = [];
 
 afterEach(() => {
-  for (const pid of spawnedPids.splice(0)) {
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      // Already exited.
-    }
-  }
+  for (const child of spawnedChildren.splice(0)) killChildIfRunning(child);
+  for (const tracked of detachedProcesses.splice(0)) killTrackedProcessIfSameInstance(tracked);
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+interface TrackedProcess {
+  readonly pid: number;
+  readonly processIdentity: string;
+}
 
 describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
   it('outlives the coordinator and revokes a post-mortem hard-threshold breach', async () => {
@@ -104,19 +115,10 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
       { mode: 0o600 },
     );
     const dockerShim = join(binDir, 'docker');
-    writeFileSync(
-      dockerShim,
-      [
-        '#!/bin/bash',
-        // The stub is TypeScript; keep the tsx loader registration the test
-        // injects through NODE_OPTIONS so plain node can execute it.
-        `cd ${JSON.stringify(repoRoot)}`,
-        `export IRONCURTAIN_WATCHDOG_DOCKER_STUB_CONFIG=${JSON.stringify(configPath)}`,
-        `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(dockerStubPath)} "$@"`,
-        '',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
+    // Execute the plain-JavaScript stub through the native `env` shim in its
+    // shebang. It clears NODE_OPTIONS before Node starts, while the coordinator
+    // and detached supervisor retain the tsx loader they need.
+    symlinkSync(dockerStubPath, dockerShim);
 
     // IDE auto-attach instrumentation can delay each short-lived Docker stub
     // while it contends for a debugger port, eventually tripping DockerManager's
@@ -125,6 +127,7 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
     delete childEnv.VSCODE_INSPECTOR_OPTIONS;
     delete childEnv.VSCODE_INJECTION;
     childEnv.NODE_OPTIONS = '--import tsx';
+    childEnv.IRONCURTAIN_WATCHDOG_DOCKER_STUB_CONFIG = configPath;
     childEnv.PATH = `${binDir}:${process.env.PATH ?? ''}`;
 
     const coordinator = spawn(process.execPath, [coordinatorPath, configPath, entrypointPath, resultPath], {
@@ -132,9 +135,9 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
       env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    spawnedChildren.push(coordinator);
     const coordinatorPid = coordinator.pid;
     expect(coordinatorPid).toBeDefined();
-    if (coordinatorPid !== undefined) spawnedPids.push(coordinatorPid);
     let coordinatorStderr = '';
     coordinator.stderr.on('data', (chunk: Buffer) => {
       coordinatorStderr += chunk.toString('utf8');
@@ -143,6 +146,7 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
     const coordinatorExit = watchExit(coordinator);
 
     let supervisorPid: number | undefined;
+    let supervisorProcess: TrackedProcess | undefined;
     try {
       // Coordinator admits the bundle and launches the detached supervisor.
       await pollUntil(
@@ -163,7 +167,8 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
         );
       }
       supervisorPid = result.supervisorPid;
-      spawnedPids.push(supervisorPid);
+      supervisorProcess = trackDetachedProcess(supervisorPid);
+      detachedProcesses.push(supervisorProcess);
       expect(loadResourceWatchdogSupervisorStatus(statusPath)).toMatchObject({
         supervisorPid,
         state: 'ready',
@@ -185,20 +190,20 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
         () => Date.parse(loadDockerWorkloadLease(leasePath).coordinator.heartbeatAt) > Date.parse(heartbeatBefore),
         () => 'coordinator stub never advanced its lease heartbeat',
       );
-      expect(processAlive(coordinatorPid as number)).toBe(true);
+      expect(coordinatorExit.exited).toBe(false);
 
       // SIGKILL the coordinator (no graceful exit) and prove the detached
       // supervisor survives and still does not revoke without a trip.
-      process.kill(coordinatorPid as number, 'SIGKILL');
+      coordinator.kill('SIGKILL');
       await pollUntil(
         5000,
         () => coordinatorExit.exited,
         () => 'coordinator did not die from SIGKILL',
       );
-      expect(processAlive(supervisorPid)).toBe(true);
+      expect(processIsSameInstance(supervisorProcess)).toBe(true);
       const survivalDeadline = Date.now() + 500;
       while (Date.now() < survivalDeadline) {
-        expect(processAlive(supervisorPid)).toBe(true);
+        expect(processIsSameInstance(supervisorProcess)).toBe(true);
         expect(loadResourceWatchdogSupervisorStatus(statusPath).state).toBe('ready');
         await sleep(50);
       }
@@ -266,14 +271,17 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
       // The supervisor exits after completing its duty.
       await pollUntil(
         5000,
-        () => !processAlive(supervisorPid as number),
+        () => !processIsSameInstance(supervisorProcess as TrackedProcess),
         () => 'watchdog supervisor did not exit after closing its lease',
       );
+      // Cleanup is identity-fenced: an absent process or a future process that
+      // reuses this PID cannot be mistaken for the detached supervisor.
+      expect(processIsSameInstance(supervisorProcess)).toBe(false);
       expect(detectionLatencyMs).toBeLessThan(15_000);
       console.info(`watchdog SIGKILL cross-process detection-to-closed latency: ${detectionLatencyMs}ms`);
     } finally {
-      if (supervisorPid !== undefined && processAlive(supervisorPid)) process.kill(supervisorPid, 'SIGKILL');
-      if (coordinatorPid !== undefined && processAlive(coordinatorPid)) process.kill(coordinatorPid, 'SIGKILL');
+      if (supervisorProcess !== undefined) killTrackedProcessIfSameInstance(supervisorProcess);
+      killChildIfRunning(coordinator);
     }
   }, 60_000);
 });
@@ -286,12 +294,35 @@ function watchExit(child: ChildProcess): { exited: boolean } {
   return state;
 }
 
-function processAlive(pid: number): boolean {
+function trackDetachedProcess(pid: number): TrackedProcess {
+  const processIdentity = getProcessStartIdentity(pid);
+  if (processIdentity === undefined) throw new Error(`detached process ${pid} exited before its identity was captured`);
+  return { pid, processIdentity };
+}
+
+function processIsSameInstance(tracked: TrackedProcess): boolean {
   try {
-    process.kill(pid, 0);
-    return true;
+    return getProcessStartIdentity(tracked.pid) === tracked.processIdentity;
   } catch {
     return false;
+  }
+}
+
+function killTrackedProcessIfSameInstance(tracked: TrackedProcess): void {
+  if (!processIsSameInstance(tracked)) return;
+  try {
+    process.kill(tracked.pid, 'SIGKILL');
+  } catch {
+    // The exact process exited after the identity check.
+  }
+}
+
+function killChildIfRunning(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // The child exited after the handle state check.
   }
 }
 

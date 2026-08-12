@@ -1,11 +1,11 @@
+#!/usr/bin/env -S -u NODE_OPTIONS node
 /**
  * Stateful `docker` CLI stub for the watchdog SIGKILL cross-process test.
  *
- * The detached watchdog supervisor revokes bundle resources through the real
- * DockerManager, which spawns the `docker` binary found on PATH. This stub
- * impersonates exactly one leased container so the revocation path can be
- * proven end-to-end without a Docker daemon. Every invocation is appended to
- * a JSONL evidence log the test asserts against.
+ * This is deliberately plain JavaScript: the test's coordinator and detached
+ * supervisor need the tsx loader, but DockerManager launches this short-lived
+ * process repeatedly. Keeping the CLI stub loader-free prevents inherited
+ * Node instrumentation from delaying or intercepting exact-ID probes.
  *
  * Supported subcommands (everything else fails loudly):
  * - `container ls --all --no-trunc --quiet` -> container id while it "exists"
@@ -17,26 +17,17 @@
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
-interface DockerStubConfig {
-  readonly containerId: string;
-  readonly containerName: string;
-  readonly labelKey: string;
-  readonly labelValue: string;
-  readonly logPath: string;
-  readonly removedMarkerPath: string;
-}
-
 const configPath = process.env.IRONCURTAIN_WATCHDOG_DOCKER_STUB_CONFIG;
 if (configPath === undefined || configPath === '') {
   process.stderr.write('docker-stub: IRONCURTAIN_WATCHDOG_DOCKER_STUB_CONFIG is not set\n');
   process.exit(1);
 }
-const config = JSON.parse(readFileSync(configPath, 'utf8')) as DockerStubConfig;
+const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const args = process.argv.slice(2);
 appendFileSync(config.logPath, `${JSON.stringify(args)}\n`, { mode: 0o600 });
 
-const removed = (): boolean => existsSync(config.removedMarkerPath);
-const inspectPayload = (): string =>
+const removed = () => existsSync(config.removedMarkerPath);
+const inspectPayload = () =>
   JSON.stringify([
     {
       Id: config.containerId,

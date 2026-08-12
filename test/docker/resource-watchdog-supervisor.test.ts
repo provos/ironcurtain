@@ -10,11 +10,14 @@ import {
   runResourceWatchdogSupervisor,
 } from '../../src/docker-workload/resource-watchdog-supervisor.js';
 import {
+  closeDockerWorkloadLease,
   createDockerWorkloadLease,
+  heartbeatDockerWorkloadLease,
   loadDockerWorkloadLease,
   revokeDockerWorkloadLease,
   type CreateDockerWorkloadLeaseOptions,
 } from '../../src/docker-workload/bundle-lease.js';
+import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
 import type { ResourceWatchdogPolicy } from '../../src/docker/resource-watchdog.js';
 import { createMockDocker } from '../helpers/docker-mocks.js';
 
@@ -71,22 +74,140 @@ describe('detached resource-watchdog supervisor core', () => {
       new Date(ready.updatedAt),
     );
 
-    const revoking = revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation);
+    revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation);
     rmSync(fixture.stateRoot, { recursive: true, force: true });
-    requestResourceWatchdogSupervisorStop(fixture.paths.stopRequestPath, revoking, {
+    const cleanup = {
       exactOuterResourcesAbsent: true,
       stateRootAbsent: true,
       inventories: [
         { capturedAt: '2026-07-20T12:00:00.000Z', ownedResourceIds: [] },
         { capturedAt: '2026-07-20T12:00:00.200Z', ownedResourceIds: [] },
       ],
-    });
+    } as const;
+    const closed = closeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation, cleanup);
+    requestResourceWatchdogSupervisorStop(fixture.paths.stopRequestPath, closed, cleanup);
     await running;
     expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('closed');
     expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
       state: 'closed',
-      detail: 'coordinator cleanup proof accepted',
+      detail: 'durable lease cleanup observed',
     });
+  });
+
+  it('resumes a revoking lease after a prior cleanup owner disappears', async () => {
+    const fixture = supervisorFixture('stale-coordinator');
+    mkdirSync(join(fixture.stateRoot, 'daemon'));
+    const policy = writePolicy(fixture, {
+      softEvidenceBytes: 512 * 1024 * 1024,
+      hardSafetyBytes: 1024 * 1024 * 1024,
+    });
+    createLease(fixture, policy.sha256);
+    revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation);
+    let currentMs = Date.parse('2026-07-20T12:01:00.000Z');
+
+    await runResourceWatchdogSupervisor({
+      ...fixture.paths,
+      runtime: emptyRuntime(),
+      now: () => new Date(currentMs),
+      sleep: async (milliseconds) => {
+        currentMs += milliseconds;
+      },
+    });
+
+    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('closed');
+    expect(() => lstatSync(fixture.stateRoot)).toThrow();
+    expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+      state: 'closed',
+      detail: 'stale coordinator triggered exact cleanup',
+    });
+  });
+
+  it('cleans an active lease when its coordinator heartbeat crosses the stale bound', async () => {
+    const fixture = supervisorFixture('stale-active');
+    mkdirSync(join(fixture.stateRoot, 'daemon'));
+    const policy = writePolicy(fixture, {
+      softEvidenceBytes: 512 * 1024 * 1024,
+      hardSafetyBytes: 1024 * 1024 * 1024,
+    });
+    createLease(fixture, policy.sha256);
+    let currentMs = Date.parse('2026-07-20T12:00:00.000Z');
+
+    await runResourceWatchdogSupervisor({
+      ...fixture.paths,
+      runtime: emptyRuntime(),
+      now: () => new Date(currentMs),
+      sleep: async (milliseconds) => {
+        currentMs += Math.max(milliseconds, 31_000);
+      },
+    });
+
+    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('closed');
+    expect(() => lstatSync(fixture.stateRoot)).toThrow();
+    expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+      state: 'closed',
+      detail: 'stale coordinator triggered exact cleanup',
+    });
+  });
+
+  it('defers samples during a 30s claimed create and publishes a real sample immediately after release', async () => {
+    const fixture = supervisorFixture('long-create');
+    mkdirSync(join(fixture.stateRoot, 'daemon'));
+    const policy = writePolicy(fixture, {
+      softEvidenceBytes: 512 * 1024 * 1024,
+      hardSafetyBytes: 1024 * 1024 * 1024,
+      sampleIntervalMs: 5_000,
+      sampleTimeoutMs: 5_000,
+      staleAfterMs: 30_000,
+    });
+    createLease(fixture, policy.sha256);
+    let currentMs = Date.parse('2026-07-20T12:00:00.000Z');
+    let allowAdvance = false;
+    let createClaim: ReturnType<typeof tryAcquireDockerWorkloadLifecycleClaim> | undefined;
+    let nextHeartbeatMs = currentMs + 5_000;
+    let releaseAtMs = Number.POSITIVE_INFINITY;
+    const running = runResourceWatchdogSupervisor({
+      ...fixture.paths,
+      runtime: emptyRuntime(),
+      now: () => new Date(currentMs),
+      sleep: async (milliseconds) => {
+        while (!allowAdvance) await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+        currentMs += Math.max(milliseconds, 1_000);
+        while (createClaim !== undefined && currentMs >= nextHeartbeatMs) {
+          heartbeatDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation, new Date(currentMs));
+          nextHeartbeatMs += 5_000;
+        }
+        if (createClaim !== undefined && currentMs >= releaseAtMs) {
+          createClaim.release();
+          createClaim = undefined;
+        }
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      },
+    });
+    const ready = await waitForReady(fixture.paths.statusPath);
+    const initialStatusAt = Date.parse(ready.updatedAt);
+    createClaim = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: fixture.paths.leasePath });
+    releaseAtMs = currentMs + 31_000;
+    allowAdvance = true;
+
+    let fresh: ReturnType<typeof loadResourceWatchdogSupervisorStatus>;
+    try {
+      fresh = await waitForStatus(
+        fixture.paths.statusPath,
+        (status) =>
+          status.state === 'ready' && status.lastSample !== null && Date.parse(status.updatedAt) > initialStatusAt,
+      );
+    } catch (error) {
+      releaseOptionalClaim(createClaim);
+      createClaim = undefined;
+      throw new Error(`long-create test stalled at ${currentMs} (release ${releaseAtMs})`, { cause: error });
+    }
+    expect(currentMs).toBeGreaterThanOrEqual(releaseAtMs);
+    expect(fresh.trip).toBeNull();
+    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('admitting');
+
+    revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation);
+    await running;
+    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('closed');
   });
 
   it('rejects a stale heartbeat or a status bound to another policy', () => {
@@ -161,17 +282,23 @@ describe('detached resource-watchdog supervisor core', () => {
     createLease(fixture, policy.sha256);
     const running = runResourceWatchdogSupervisor({ ...fixture.paths, runtime: emptyRuntime() });
     await waitForReady(fixture.paths.statusPath);
-    const revoking = revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation);
-    requestResourceWatchdogSupervisorStop(fixture.paths.stopRequestPath, revoking, {
+    revokeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation);
+    const forgedCleanup = {
       exactOuterResourcesAbsent: true,
       stateRootAbsent: true,
       inventories: [
         { capturedAt: '2026-07-20T12:00:00.000Z', ownedResourceIds: [] },
         { capturedAt: '2026-07-20T12:00:00.200Z', ownedResourceIds: [] },
       ],
-    });
+    } as const;
+    const closed = closeDockerWorkloadLease(fixture.paths.leasePath, fixture.leaseOptions.generation, forgedCleanup);
+    requestResourceWatchdogSupervisorStop(fixture.paths.stopRequestPath, closed, forgedCleanup);
     await expect(running).rejects.toThrow(/state root still exists/u);
-    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('revoking');
+    expect(loadDockerWorkloadLease(fixture.paths.leasePath).status).toBe('closed');
+    expect(loadResourceWatchdogSupervisorStatus(fixture.paths.statusPath)).toMatchObject({
+      state: 'incident',
+      detail: expect.stringMatching(/state root still exists/u),
+    });
   });
 });
 
@@ -218,7 +345,8 @@ function supervisorFixture(label: string) {
 
 function writePolicy(
   fixture: ReturnType<typeof supervisorFixture>,
-  thresholds: Pick<ResourceWatchdogPolicy, 'softEvidenceBytes' | 'hardSafetyBytes'>,
+  thresholds: Pick<ResourceWatchdogPolicy, 'softEvidenceBytes' | 'hardSafetyBytes'> &
+    Partial<Pick<ResourceWatchdogPolicy, 'sampleIntervalMs' | 'sampleTimeoutMs' | 'staleAfterMs'>>,
 ): { readonly policy: ResourceWatchdogPolicy; readonly sha256: string } {
   const stats = lstatSync(fixture.stateRoot);
   const policy: ResourceWatchdogPolicy = {
@@ -273,4 +401,23 @@ async function waitForReady(path: string) {
     if (Date.now() >= deadline) throw new Error('watchdog supervisor did not become ready');
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
+}
+
+async function waitForStatus(
+  path: string,
+  predicate: (status: ReturnType<typeof loadResourceWatchdogSupervisorStatus>) => boolean,
+) {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    const status = loadResourceWatchdogSupervisorStatus(path);
+    if (predicate(status)) return status;
+    if (Date.now() >= deadline) {
+      throw new Error(`watchdog supervisor did not publish the expected status: ${JSON.stringify(status)}`);
+    }
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+  }
+}
+
+function releaseOptionalClaim(claim: { release(): void } | undefined): void {
+  claim?.release();
 }

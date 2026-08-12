@@ -96,10 +96,10 @@ export function acquireProcessLock(path: string, options: AcquireProcessLockOpti
     throw new Error('process-lock malformed grace must be nonnegative');
   }
   const now = options.now ?? Date.now;
-  const identityForPid = options.processIdentityForPid ?? defaultProcessIdentityForPid;
+  const identityForPid = options.processIdentityForPid ?? getProcessStartIdentity;
   const processIdentity =
     options.processIdentityForPid === undefined
-      ? (cachedSelfProcessIdentity ??= defaultProcessIdentityForPid(process.pid))
+      ? (cachedSelfProcessIdentity ??= getProcessStartIdentity(process.pid))
       : identityForPid(process.pid);
   if (processIdentity === undefined) {
     throw new Error('could not determine current process start identity for lock ownership');
@@ -345,7 +345,7 @@ function unlinkIfPresent(path: string): void {
  * kernel boot ID to `/proc/<pid>/stat` start ticks; macOS uses `/bin/ps` under a
  * fixed locale. A different identity for the same PID means PID reuse.
  */
-function defaultProcessIdentityForPid(pid: number): string | undefined {
+export function getProcessStartIdentity(pid: number): string | undefined {
   if (process.platform === 'linux') {
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');

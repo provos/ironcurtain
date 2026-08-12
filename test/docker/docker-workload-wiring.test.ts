@@ -20,9 +20,9 @@
  */
 
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assembleDockerInfrastructure,
   createSessionContainers,
@@ -220,7 +220,7 @@ describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 / §8.3
     const runtime = createEventRuntime();
     const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }));
 
-    expect(() => handle.activate()).toThrow(/watchdog supervisor status is missing/u);
+    await expect(handle.activate()).rejects.toThrow(/watchdog supervisor status is missing/u);
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
   });
 
@@ -241,7 +241,7 @@ describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 / §8.3
     const handle = await admit(clock, runtime, supervisor);
     clock.advance(handle.loadedPolicy.policy.staleAfterMs);
 
-    expect(() => handle.activate()).toThrow(/watchdog supervisor heartbeat is stale/u);
+    await expect(handle.activate()).rejects.toThrow(/watchdog supervisor heartbeat is stale/u);
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
   });
 });
@@ -386,6 +386,139 @@ describe('Docker-workload wiring — ledgerOuterResourceCreate watchdog gate (§
       role: 'agent',
       observedId: created.id,
     });
+  });
+
+  it('does not let teardown prove absence while an outer create is in flight', async () => {
+    const baseClock = createFakeClock();
+    const clock: FakeClock = {
+      ...baseClock,
+      sleep: async (milliseconds) => {
+        baseClock.advance(milliseconds);
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admit(clock, runtime, supervisor);
+    let releaseCreate!: () => void;
+    let markCreateEntered!: () => void;
+    const createEntered = new Promise<void>((resolvePromise) => {
+      markCreateEntered = resolvePromise;
+    });
+    const createBarrier = new Promise<void>((resolvePromise) => {
+      releaseCreate = resolvePromise;
+    });
+
+    const creating = ledgerOuterResourceCreate(
+      handle,
+      { kind: 'container', role: 'nested-daemon' },
+      async (name, labels) => {
+        markCreateEntered();
+        await createBarrier;
+        return {
+          id: await runtime.runtime.create({
+            name,
+            image: 'nested-daemon',
+            mounts: [],
+            network: 'none',
+            env: {},
+            command: [],
+            labels,
+          }),
+        };
+      },
+    );
+    await createEntered;
+    const tearingDown = handle.teardown();
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+
+    releaseCreate();
+    const created = await creating;
+    const teardown = await tearingDown;
+
+    expect(teardown.revocation?.removedResourceIds).toEqual([created.id]);
+    expect(runtime.events).toEqual(expect.arrayContaining([`stop:${created.id}`, `remove:${created.id}`]));
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+  });
+
+  it('keeps a valid long create live and requires a fresh post-create supervisor sample', async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAtMs = Date.parse('2026-07-20T12:00:00.000Z');
+      vi.setSystemTime(startedAtMs);
+      let publishFreshSample = false;
+      let sampleAtMs = startedAtMs;
+      const timing: FakeClock = {
+        clock: () => new Date(Date.now()),
+        sleep: (milliseconds) =>
+          new Promise((resolvePromise) => {
+            setTimeout(() => {
+              if (publishFreshSample) sampleAtMs = Date.now();
+              resolvePromise();
+            }, milliseconds);
+          }),
+        advance: (milliseconds) => vi.setSystemTime(Date.now() + milliseconds),
+      };
+      const runtime = createEventRuntime();
+      const supervisor = createFakeSupervisor({ clock: timing.clock });
+      const readStatus = supervisor.readStatus.bind(supervisor);
+      supervisor.readStatus = (path) => {
+        const status = readStatus(path);
+        if (status === undefined || status.lastSample === null) return status;
+        return {
+          ...status,
+          updatedAt: new Date(sampleAtMs).toISOString(),
+          lastSample: { ...status.lastSample, sampledAtMs: sampleAtMs },
+        };
+      };
+      const handle = await admit(timing, runtime, supervisor);
+      let createReadyToReturn!: () => void;
+      const readyToReturn = new Promise<void>((resolvePromise) => {
+        createReadyToReturn = resolvePromise;
+      });
+
+      const creating = ledgerOuterResourceCreate(
+        handle,
+        { kind: 'container', role: 'nested-daemon' },
+        async (name, labels) => {
+          await vi.advanceTimersByTimeAsync(31_000);
+          expect(Date.parse(loadDockerWorkloadLease(handle.leasePath).coordinator.heartbeatAt)).toBeGreaterThan(
+            startedAtMs,
+          );
+          await handle.pollSupervisorHealth();
+          expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+          publishFreshSample = true;
+          createReadyToReturn();
+          return {
+            id: await runtime.runtime.create({
+              name,
+              image: 'nested-daemon',
+              mounts: [],
+              network: 'none',
+              env: {},
+              command: [],
+              labels,
+            }),
+          };
+        },
+      );
+      await readyToReturn;
+      await vi.advanceTimersByTimeAsync(100);
+      const created = await creating;
+
+      expect(loadDockerWorkloadLease(handle.leasePath)).toMatchObject({
+        status: 'admitting',
+        resources: [{ observedId: created.id }],
+      });
+      expect(sampleAtMs).toBeGreaterThan(startedAtMs);
+      expect(supervisor.readStatus(join(dirname(handle.leasePath), 'status.json'))).toMatchObject({
+        state: 'ready',
+        trip: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

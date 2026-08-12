@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastructure.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import type { ProcessLockHandle } from '../../src/docker-workload/process-lock.js';
+import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
 import {
   createRecordingDockerWorkloadAuditSink,
   type DockerWorkloadAuditSink,
@@ -64,7 +65,7 @@ async function bringUp(
     labels: grant.labels,
   });
   grant.observed(containerId);
-  handle.activate();
+  await handle.activate();
   return { handle, containerId, requestedName: grant.requestedName };
 }
 
@@ -103,9 +104,12 @@ describe('Docker-workload teardown (§8.3 order)', () => {
   it('falls back to a coordinator close with a watchdog-supervisor-lost incident when the supervisor is gone', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
-    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: false, alive: false });
+    let alive = true;
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: false });
+    supervisor.isAlive = () => alive;
     const sink = createRecordingDockerWorkloadAuditSink();
     const { handle } = await bringUp(clock, runtime, supervisor, sink);
+    alive = false;
 
     const result = await handle.teardown();
     expect(result.supervisorLost).toBe(true);
@@ -146,5 +150,97 @@ describe('Docker-workload teardown (§8.3 order)', () => {
     expect(contention.leaseStatusAtRelease).toBe('active');
     expect(result.alreadyClosed).toBe(false);
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+  });
+
+  it('uses the serialized teardown when the exact bound supervisor disappears', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const { handle, containerId } = await bringUp(clock, runtime, supervisor);
+    supervisor.readStatus = () => undefined;
+
+    await handle.pollSupervisorHealth();
+
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+    expect(runtime.containers.some((container) => container.id === containerId)).toBe(false);
+    expect(runtime.events.filter((event) => event === `remove:${containerId}`)).toHaveLength(1);
+  });
+
+  it('defers teardown while a watchdog sample owns the lifecycle claim', async () => {
+    const baseClock = createFakeClock();
+    const timing: Timing = {
+      clock: baseClock.clock,
+      sleep: async (milliseconds) => {
+        baseClock.advance(milliseconds);
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+    const { handle, containerId, requestedName } = await bringUp(timing, runtime, supervisor);
+    const sampleClaim = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+
+    const teardown = handle.teardown();
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    expect(runtime.events).toEqual([`create:${requestedName}`]);
+
+    sampleClaim.release();
+    await teardown;
+    expect(runtime.events.filter((event) => event === `remove:${containerId}`)).toHaveLength(1);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+  });
+
+  it('retries one single-flight heartbeat after a sampling-claim collision', async () => {
+    const clock = createFakeClock();
+    let sampleClaim: ReturnType<typeof tryAcquireDockerWorkloadLifecycleClaim> | undefined;
+    let retrySleeps = 0;
+    const timing: Timing = {
+      clock: clock.clock,
+      sleep: async (milliseconds) => {
+        retrySleeps += 1;
+        clock.advance(milliseconds);
+        sampleClaim?.release();
+        sampleClaim = undefined;
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: timing.clock, closeLeaseOnStop: true });
+    const { handle } = await bringUp(timing, runtime, supervisor);
+    const before = loadDockerWorkloadLease(handle.leasePath).coordinator.heartbeatAt;
+    clock.advance(1_000);
+    sampleClaim = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+
+    const first = handle.refreshCoordinatorHeartbeat();
+    const overlapping = handle.refreshCoordinatorHeartbeat();
+    expect(overlapping).toBe(first);
+    await expect(first).resolves.toBe(true);
+
+    expect(retrySleeps).toBe(1);
+    const after = loadDockerWorkloadLease(handle.leasePath).coordinator.heartbeatAt;
+    expect(Date.parse(after)).toBeGreaterThan(Date.parse(before));
+    expect(Date.parse(after) - Date.parse(before)).toBeLessThan(30_000);
+  });
+
+  it('fences the lease as incident when exact runtime cleanup fails', async () => {
+    const clock = createFakeClock();
+    const baseRuntime = createEventRuntime();
+    const runtime: EventRuntime = {
+      ...baseRuntime,
+      runtime: {
+        ...baseRuntime.runtime,
+        remove: async () => {
+          throw new Error('injected exact removal failure');
+        },
+      },
+    };
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const { handle } = await bringUp(clock, runtime, supervisor);
+
+    await expect(handle.teardown()).rejects.toThrow(/injected exact removal failure/u);
+    expect(loadDockerWorkloadLease(handle.leasePath)).toMatchObject({
+      status: 'incident',
+      incident: { code: 'docker-workload-cleanup-failed' },
+    });
   });
 });

@@ -64,7 +64,7 @@ async function admitWithAgent(
     labels: grant.labels,
   });
   grant.observed(agentId);
-  handle.activate();
+  await handle.activate();
   return { handle, agentId };
 }
 

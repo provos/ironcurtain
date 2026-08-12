@@ -14,20 +14,21 @@ import {
 } from '../zod-helpers.js';
 import { createContainerRuntime } from '../docker/container-runtime.js';
 import type { ContainerRuntime } from '../docker/types.js';
-import { inventoryOwnedResourceIds, revokeDockerWorkloadOuterResources } from './bundle-revocation.js';
+import { inventoryOwnedResourceIds } from './bundle-revocation.js';
+import { toWatchdogCleanupProof } from './bundle-cleanup.js';
 import {
-  assertExactTargetIdentity,
-  captureCleanupProof,
-  removeExactBundleState,
-  toWatchdogCleanupProof,
-} from './bundle-cleanup.js';
-import {
-  closeDockerWorkloadLease,
   loadDockerWorkloadLease,
   recordDockerWorkloadLeaseIncident,
   type DockerWorkloadCleanupProof,
   type DockerWorkloadLease,
 } from './bundle-lease.js';
+import {
+  DockerWorkloadCleanupPreconditionError,
+  isDockerWorkloadLifecycleClaimBusy,
+  performSerializedDockerWorkloadCleanup,
+  tryAcquireDockerWorkloadLifecycleClaim,
+  type DockerWorkloadLifecycleClaimHandle,
+} from './cleanup-ownership.js';
 import {
   loadResourceWatchdogPolicy,
   ResourceWatchdog,
@@ -35,6 +36,7 @@ import {
   type ResourceWatchdogSample,
   type ResourceWatchdogTrip,
 } from '../docker/resource-watchdog.js';
+import { DOCKER_WORKLOAD_STALE_HEARTBEAT_MS } from './watchdog-policy.js';
 
 export const RESOURCE_WATCHDOG_SUPERVISOR_SCHEMA_VERSION = 1;
 export const MAX_RESOURCE_WATCHDOG_SUPERVISOR_JSON_BYTES = 1024 * 1024;
@@ -139,6 +141,7 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
 
   let attestation: ResourceWatchdogAttestation | undefined;
   let tripped: ResourceWatchdogTrip | undefined;
+  let sampleClaim: DockerWorkloadLifecycleClaimHandle | undefined;
   const watchdog = new ResourceWatchdog(loadedPolicy.policy, {
     schedule: false,
     now: () => now().getTime(),
@@ -151,19 +154,20 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
       });
       writeStrictJsonAtomic(options.statusPath, lastStatus);
       try {
-        await revokeDockerWorkloadOuterResources(runtime, options.leasePath, lease.generation, now);
-        lease = loadDockerWorkloadLease(options.leasePath);
-        assertExactTargetIdentity(lease, loadedPolicy.policy.targetDevice, loadedPolicy.policy.targetInode);
-        removeExactBundleState(lease, options.leasePath);
-        const cleanup = await captureCleanupProof(
+        sampleClaim?.release();
+        sampleClaim = undefined;
+        const result = await performSerializedDockerWorkloadCleanup({
           runtime,
-          lease,
-          loadedPolicy.policy.cleanupInventoryGapMs,
-          now,
+          leasePath: options.leasePath,
+          generation: lease.generation,
+          targetDevice: loadedPolicy.policy.targetDevice,
+          targetInode: loadedPolicy.policy.targetInode,
+          gapMs: loadedPolicy.policy.cleanupInventoryGapMs,
+          clock: now,
           sleep,
-        );
-        closeDockerWorkloadLease(options.leasePath, lease.generation, cleanup, now());
-        watchdog.stopAfterCleanup(toWatchdogCleanupProof(cleanup));
+          waitForOwner: true,
+        });
+        watchdog.stopAfterCleanup(toWatchdogCleanupProof(result.cleanup));
         lastStatus = statusUpdate(lastStatus, now(), {
           state: 'closed',
           trip: compactTrip(trip),
@@ -199,12 +203,39 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
       writeStrictJsonAtomic(options.statusPath, lastStatus);
     },
   });
+  const validateCleanupOrPublishIncident = async (candidate: DockerWorkloadLease) => {
+    try {
+      return await validateDurableCleanup(runtime, candidate);
+    } catch (error) {
+      lastStatus = statusUpdate(lastStatus, now(), {
+        state: 'incident',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+      throw error;
+    }
+  };
 
   try {
+    sampleClaim = await waitForSamplingClaim(options.leasePath, sleep);
+    lease = loadDockerWorkloadLease(options.leasePath);
+    if (lease.status === 'closed') {
+      const cleanup = await validateCleanupOrPublishIncident(lease);
+      watchdog.stopAfterCleanup(toWatchdogCleanupProof(cleanup));
+      lastStatus = statusUpdate(lastStatus, now(), { state: 'closed', detail: 'durable lease cleanup observed' });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+      return;
+    }
     attestation = await watchdog.start();
   } catch (error) {
-    if (loadDockerWorkloadLease(options.leasePath).status === 'closed') return;
+    // A startup resource trip closes through onTrip and then makes start()
+    // reject because no ready attestation exists. Only that proven terminal
+    // path is success; a forged/invalid closed proof remains an incident.
+    if (lastStatus.state === 'closed') return;
     throw error;
+  } finally {
+    sampleClaim?.release();
+    sampleClaim = undefined;
   }
   lastStatus = statusUpdate(lastStatus, now(), {
     state: 'ready',
@@ -215,30 +246,51 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
 
   for (;;) {
     await sleep(loadedPolicy.policy.sampleIntervalMs);
+    lease = loadDockerWorkloadLease(options.leasePath);
+    if (lease.status === 'closed') {
+      try {
+        sampleClaim = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: options.leasePath });
+      } catch (error) {
+        if (isDockerWorkloadLifecycleClaimBusy(error)) continue;
+        throw error;
+      }
+      try {
+        lease = loadDockerWorkloadLease(options.leasePath);
+        if (lease.status !== 'closed') continue;
+        const cleanup = await validateCleanupOrPublishIncident(lease);
+        watchdog.stopAfterCleanup(toWatchdogCleanupProof(cleanup));
+        lastStatus = statusUpdate(lastStatus, now(), { state: 'closed', detail: 'durable lease cleanup observed' });
+        writeStrictJsonAtomic(options.statusPath, lastStatus);
+        return;
+      } finally {
+        sampleClaim.release();
+        sampleClaim = undefined;
+      }
+    }
     const stopRequest = tryLoadStopRequest(options.stopRequestPath);
     if (stopRequest !== undefined) {
-      lease = loadDockerWorkloadLease(options.leasePath);
-      if (stopRequest.leaseId !== lease.leaseId || stopRequest.generation !== lease.generation) {
-        throw new Error('watchdog supervisor stop request lease identity mismatch');
+      try {
+        sampleClaim = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: options.leasePath });
+      } catch (error) {
+        if (isDockerWorkloadLifecycleClaimBusy(error)) continue;
+        throw error;
       }
-      if (lease.status === 'admitting' || lease.status === 'active') {
-        throw new Error('watchdog supervisor refuses to stop before lease revocation');
-      }
-      if (lease.resources.some((resource) => resource.removal === null)) {
-        throw new Error('watchdog supervisor refuses to stop before every outer-resource absence proof');
-      }
-      if (existsSync(lease.paths.stateRoot)) {
-        throw new Error('watchdog supervisor refuses to stop while the exact state root still exists');
-      }
-      const actuallyOwned = await inventoryOwnedResourceIds(runtime, lease);
-      if (actuallyOwned.length !== 0) {
-        throw new Error(`watchdog supervisor refuses to stop while owned resources remain: ${actuallyOwned.join(',')}`);
-      }
-      watchdog.stopAfterCleanup(toWatchdogCleanupProof(stopRequest.cleanup));
-      if (lease.status === 'revoking') {
-        closeDockerWorkloadLease(options.leasePath, lease.generation, stopRequest.cleanup, now());
-      } else if (lease.status !== 'closed') {
-        throw new Error(`watchdog supervisor refuses terminal stop from lease state ${lease.status}`);
+      try {
+        lease = loadDockerWorkloadLease(options.leasePath);
+        if (stopRequest.leaseId !== lease.leaseId || stopRequest.generation !== lease.generation) {
+          throw new Error('watchdog supervisor stop request lease identity mismatch');
+        }
+        if (lease.status !== 'closed') {
+          throw new Error(`watchdog supervisor refuses terminal stop from lease state ${lease.status}`);
+        }
+        const cleanup = await validateCleanupOrPublishIncident(lease);
+        if (stableStringify(cleanup) !== stableStringify(stopRequest.cleanup)) {
+          throw new Error('watchdog supervisor stop request cleanup proof does not match the durable lease proof');
+        }
+        watchdog.stopAfterCleanup(toWatchdogCleanupProof(cleanup));
+      } finally {
+        sampleClaim.release();
+        sampleClaim = undefined;
       }
       lastStatus = statusUpdate(lastStatus, now(), {
         state: 'closed',
@@ -247,7 +299,82 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
       writeStrictJsonAtomic(options.statusPath, lastStatus);
       return;
     }
-    const sample = await watchdog.tick();
+    if (lease.status === 'incident') {
+      lastStatus = statusUpdate(lastStatus, now(), {
+        state: 'incident',
+        detail: 'lease incident requires operator recovery',
+      });
+      writeStrictJsonAtomic(options.statusPath, lastStatus);
+      return;
+    }
+    if (
+      lease.status === 'revoking' ||
+      now().getTime() - Date.parse(lease.coordinator.heartbeatAt) >= DOCKER_WORKLOAD_STALE_HEARTBEAT_MS
+    ) {
+      try {
+        const result = await performSerializedDockerWorkloadCleanup({
+          runtime,
+          leasePath: options.leasePath,
+          generation: lease.generation,
+          targetDevice: loadedPolicy.policy.targetDevice,
+          targetInode: loadedPolicy.policy.targetInode,
+          gapMs: loadedPolicy.policy.cleanupInventoryGapMs,
+          clock: now,
+          sleep,
+          waitForOwner: false,
+          revalidate: (claimedLease) => {
+            if (claimedLease.status === 'revoking') return;
+            if (claimedLease.status !== 'admitting' && claimedLease.status !== 'active') {
+              throw new DockerWorkloadCleanupPreconditionError(
+                `lease state ${claimedLease.status} no longer permits supervisor cleanup`,
+              );
+            }
+            if (
+              now().getTime() - Date.parse(claimedLease.coordinator.heartbeatAt) <
+              DOCKER_WORKLOAD_STALE_HEARTBEAT_MS
+            ) {
+              throw new DockerWorkloadCleanupPreconditionError(
+                'coordinator heartbeat refreshed before cleanup ownership',
+              );
+            }
+          },
+        });
+        watchdog.stopAfterCleanup(toWatchdogCleanupProof(result.cleanup));
+        lastStatus = statusUpdate(lastStatus, now(), {
+          state: 'closed',
+          detail: 'stale coordinator triggered exact cleanup',
+        });
+        writeStrictJsonAtomic(options.statusPath, lastStatus);
+        return;
+      } catch (error) {
+        if (isDockerWorkloadLifecycleClaimBusy(error) || error instanceof DockerWorkloadCleanupPreconditionError) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    sampleClaim = await waitForSamplingClaim(options.leasePath, sleep, () => {
+      const busyLease = loadDockerWorkloadLease(options.leasePath);
+      if (busyLease.status !== 'admitting' && busyLease.status !== 'active') return false;
+      if (now().getTime() - Date.parse(busyLease.coordinator.heartbeatAt) >= DOCKER_WORKLOAD_STALE_HEARTBEAT_MS) {
+        return false;
+      }
+      watchdog.deferSamplingForTrustedLifecycleOperation();
+      return true;
+    });
+    if (sampleClaim === undefined) continue;
+    let sample: ResourceWatchdogSample | undefined;
+    const tickClaim = sampleClaim;
+    try {
+      lease = loadDockerWorkloadLease(options.leasePath);
+      if (lease.status !== 'admitting' && lease.status !== 'active') continue;
+      sample = await watchdog.tick();
+    } finally {
+      // onTrip may already release this handle before taking cleanup ownership;
+      // process-lock release is deliberately idempotent.
+      tickClaim.release();
+      sampleClaim = undefined;
+    }
     if (sample !== undefined) {
       lastStatus = statusUpdate(lastStatus, now(), { lastSample: compactSample(sample) });
       writeStrictJsonAtomic(options.statusPath, lastStatus);
@@ -395,6 +522,46 @@ export function assertResourceWatchdogSupervisorFresh(
   if (now.getTime() - Date.parse(validated.updatedAt) >= staleAfterMs) {
     throw new Error('watchdog supervisor heartbeat is stale');
   }
+}
+
+async function waitForSamplingClaim(
+  leasePath: string,
+  sleep: (milliseconds: number) => Promise<void>,
+  onBusy?: () => boolean,
+): Promise<DockerWorkloadLifecycleClaimHandle | undefined> {
+  for (;;) {
+    try {
+      return tryAcquireDockerWorkloadLifecycleClaim({ leasePath });
+    } catch (error) {
+      if (!isDockerWorkloadLifecycleClaimBusy(error)) throw error;
+      if (onBusy !== undefined && !onBusy()) return undefined;
+      const lease = loadDockerWorkloadLease(leasePath);
+      if (lease.status === 'closed') {
+        throw new Error('Docker-workload lease closed before watchdog sampling', { cause: error });
+      }
+      await sleep(50);
+    }
+  }
+}
+
+async function validateDurableCleanup(
+  runtime: ContainerRuntime,
+  lease: DockerWorkloadLease,
+): Promise<DockerWorkloadCleanupProof> {
+  if (lease.status !== 'closed' || lease.cleanup === null) {
+    throw new Error('watchdog supervisor requires a closed lease with durable cleanup proof');
+  }
+  if (lease.resources.some((resource) => resource.removal === null)) {
+    throw new Error('watchdog supervisor refuses to stop before every outer-resource absence proof');
+  }
+  if (existsSync(lease.paths.stateRoot)) {
+    throw new Error('watchdog supervisor refuses to stop while the exact state root still exists');
+  }
+  const actuallyOwned = await inventoryOwnedResourceIds(runtime, lease);
+  if (actuallyOwned.length !== 0) {
+    throw new Error(`watchdog supervisor refuses to stop while owned resources remain: ${actuallyOwned.join(',')}`);
+  }
+  return lease.cleanup;
 }
 
 function tryLoadStopRequest(path: string): ResourceWatchdogSupervisorStopRequest | undefined {

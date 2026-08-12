@@ -315,8 +315,8 @@ export function activateDockerWorkloadLease(path: string, generation: string, no
 
 export function heartbeatDockerWorkloadLease(path: string, generation: string, now = new Date()): DockerWorkloadLease {
   return updateLease(path, generation, now, (lease) => {
-    if (lease.status === 'closed' || lease.status === 'incident') {
-      throw new Error(`cannot heartbeat terminal Docker-workload lease: ${lease.status}`);
+    if (lease.status !== 'admitting' && lease.status !== 'active') {
+      throw new Error(`cannot heartbeat Docker-workload lease in state ${lease.status}`);
     }
     lease.coordinator.heartbeatAt = now.toISOString();
   });

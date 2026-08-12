@@ -7,7 +7,8 @@ import {
   type DockerWorkloadAdmissionOptions,
 } from '../../src/docker-workload/infrastructure.js';
 import { getDockerWorkloadRoot } from '../../src/config/paths.js';
-import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
+import { loadDockerWorkloadLease, revokeDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
+import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
 import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
   ADMISSION_BINDINGS,
@@ -82,7 +83,7 @@ describe('Docker-workload admission (§8.2 order)', () => {
     expect(loadDockerWorkloadLease(handle.leasePath).resources[0].observedId).toBe(containerId);
 
     await runtime.runtime.start(containerId);
-    handle.activate();
+    await handle.activate();
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
 
     expect(sink.events.map((event) => event.kind)).toEqual([
@@ -123,8 +124,58 @@ describe('Docker-workload admission (§8.2 order)', () => {
     const runtime = createEventRuntime();
     const supervisor = createFakeSupervisor({ clock: clock.clock });
     const handle = await admitDockerWorkloadBundle(baseOptions(clock, runtime, supervisor));
+    await handle.attestWatchdog();
     handle.requestOuterResource('container', 'nested-daemon');
-    expect(() => handle.activate()).toThrow(/before every requested outer resource is observed/u);
+    await expect(handle.activate()).rejects.toThrow(/before every requested outer resource is observed/u);
+  });
+
+  it('cannot release the agent when cleanup wins the activation lifecycle claim', async () => {
+    let currentMs = Date.parse('2026-07-20T12:00:00.000Z');
+    let releaseCleanupClaim: (() => void) | undefined;
+    const clock: FakeClock = {
+      clock: () => new Date(currentMs),
+      sleep: async (milliseconds) => {
+        currentMs += milliseconds;
+        releaseCleanupClaim?.();
+        releaseCleanupClaim = undefined;
+      },
+      advance: (milliseconds) => {
+        currentMs += milliseconds;
+      },
+    };
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admitDockerWorkloadBundle(baseOptions(clock, runtime, supervisor));
+    runtime.setLeasePath(handle.leasePath);
+    await handle.attestWatchdog();
+    const grant = handle.requestOuterResource('container', 'nested-daemon');
+    const id = await runtime.runtime.create({
+      name: grant.requestedName,
+      image: 'nested-daemon',
+      mounts: [],
+      network: 'none',
+      env: {},
+      command: [],
+      labels: grant.labels,
+    });
+    grant.observed(id);
+    const cleanupClaim = tryAcquireDockerWorkloadLifecycleClaim({ leasePath: handle.leasePath });
+    releaseCleanupClaim = () => {
+      revokeDockerWorkloadLease(handle.leasePath, handle.generation, clock.clock());
+      cleanupClaim.release();
+    };
+    let agentReleased = false;
+
+    await expect(
+      (async () => {
+        await handle.activate();
+        agentReleased = true;
+      })(),
+    ).rejects.toThrow(/revoking.*activation is rejected/u);
+
+    expect(agentReleased).toBe(false);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('revoking');
+    await handle.teardown();
   });
 });
 
