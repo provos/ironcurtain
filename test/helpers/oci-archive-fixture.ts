@@ -23,15 +23,24 @@ export interface OciArchiveFixtureOptions {
   readonly indexMediaType?: string;
   readonly descriptorMediaType?: string;
   readonly duplicateLayer?: boolean;
+  readonly toolchain?: {
+    readonly dockerCli: string;
+    readonly dockerDaemon: string;
+    readonly buildx: string;
+    readonly compose: string;
+  };
+  readonly dockerApi?: { readonly min: string; readonly max: string };
 }
 
 export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): PreloadedImageCatalogEntry {
-  const toolchain = {
-    dockerCli: '28.3.2',
-    dockerDaemon: '28.3.2',
-    buildx: '0.25.0',
-    compose: '2.38.2',
-  };
+  const toolchain =
+    options.toolchain ??
+    ({
+      dockerCli: '28.3.2',
+      dockerDaemon: '28.3.2',
+      buildx: '0.25.0',
+      compose: '2.38.2',
+    } as const);
   const provenance = {
     source: 'local qualification fixture',
     sourceDigest: `sha256:${'7'.repeat(64)}`,
@@ -46,7 +55,7 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): Prelo
     buildHashSchema: IMAGE_BUILD_HASH_SCHEMA,
     buildHash: options.buildHash,
     architecture: options.architecture,
-    dockerApi: { min: '1.44', max: '1.48' },
+    dockerApi: options.dockerApi ?? { min: '1.44', max: '1.48' },
     runtimeTrustSchema: RUNTIME_TRUST_SCHEMA,
     toolchain,
     toolchainDigest: catalogTupleDigest(toolchain),

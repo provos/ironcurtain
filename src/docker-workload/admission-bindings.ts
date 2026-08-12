@@ -14,43 +14,45 @@
  */
 
 import { getFrozenProfileCeilingPath } from '../docker/docker-workload-paths.js';
-import { loadPreloadedImageCatalog } from '../docker/preloaded-image-catalog.js';
 import { readHardenedFile } from '../hardened-fs.js';
 import { sha256Hex } from '../hash.js';
+import { assertIronCurtainAgentRuntimeImage, loadDockerWorkloadCatalogPair } from './catalog-pair.js';
 import type { DockerWorkloadAdmissionBindings } from './infrastructure.js';
-
-/**
- * Catalog role whose toolchain digest the admission binds. The nested daemon
- * toolchain (dockerd/rootlesskit/containerd/runc) is staged by the base image
- * and every agent image is built `FROM` it, so the base role's digest is the
- * one that describes the daemon the session can actually start. Admission
- * resolves this value directly from the same catalog entry used to select the
- * image, so the recorded toolchain identity cannot drift from image selection.
- */
-const BASE_IMAGE_LOGICAL_NAME = 'ironcurtain-base:latest';
 
 /** Generous ceiling; the frozen profile ceiling is a few kilobytes of JSON. */
 const MAX_PROFILE_CEILING_BYTES = 1024 * 1024;
 
 export interface ResolveAdmissionBindingsOptions {
-  /** Staged catalog the session resolves its agent image from. */
+  /** Apple-bound catalog the outer session resolves its agent image from. */
   readonly catalogPath: string;
+  /** Docker-bound catalog used to provision the VM-private Docker Engine. */
+  readonly innerDockerCatalogPath: string;
+  /** Exact outer agent image also made available to inner IronCurtain. */
+  readonly selectedImageLogicalName: string;
 }
 
 /** Read the real operational inputs and assemble the admission bindings. */
 export function resolveDockerWorkloadAdmissionBindings(
   options: ResolveAdmissionBindingsOptions,
 ): DockerWorkloadAdmissionBindings {
-  const catalog = loadPreloadedImageCatalog(options.catalogPath);
-  const base = catalog.catalog.images.find((image) => image.logicalName === BASE_IMAGE_LOGICAL_NAME);
-  if (base === undefined) {
+  assertIronCurtainAgentRuntimeImage(options.selectedImageLogicalName);
+  const catalogs = loadDockerWorkloadCatalogPair({
+    appleCatalogPath: options.catalogPath,
+    dockerCatalogPath: options.innerDockerCatalogPath,
+  });
+  const selectedImage = catalogs.docker.catalog.images.find(
+    (image) => image.logicalName === options.selectedImageLogicalName,
+  );
+  if (selectedImage === undefined) {
     throw new Error(
-      `Docker-workload admission catalog is missing the ${BASE_IMAGE_LOGICAL_NAME} role: ${options.catalogPath}`,
+      `Docker-workload admission catalog is missing the selected image ${options.selectedImageLogicalName}: ` +
+        options.innerDockerCatalogPath,
     );
   }
   return {
-    catalogSha256: catalog.sha256,
-    toolchainDigest: base.toolchainDigest,
+    catalogSha256: catalogs.apple.sha256,
+    innerDockerCatalogSha256: catalogs.docker.sha256,
+    toolchainDigest: selectedImage.toolchainDigest,
     profileSha256: frozenProfileCeilingSha256(),
   };
 }

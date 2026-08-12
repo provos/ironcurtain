@@ -108,6 +108,20 @@ vi.mock('../../src/docker-workload/admission-bindings.js', () => ({
   resolveDockerWorkloadAdmissionBindings: () => seam.bindings,
 }));
 
+// This test fails before container assembly; use a path-only immutable-view
+// double so it can focus on lease cleanup instead of catalog publication.
+vi.mock('../../src/docker-workload/apple-private-docker.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/docker-workload/apple-private-docker.js')>()),
+  stageAppleVmDockerWorkloadBootstrap: () => ({
+    hostCatalogDirectory: '/tmp/test-preloaded-catalog',
+    guestCatalogDirectory: '/opt/ironcurtain/preloaded-catalog',
+    outerAppleCatalogPath: '/tmp/test-preloaded-catalog/preloaded-catalog.apple-container.json',
+    innerDockerCatalogPath: '/tmp/test-preloaded-catalog/preloaded-catalog.docker.json',
+    selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+    clientToolchainManifestPath: '/tmp/test-client-toolchain.json',
+  }),
+}));
+
 // Real admission, real lease, real teardown — only the process-level injectables
 // (clock, sleep, watchdog supervisor) are swapped for the harness fakes.
 vi.mock('../../src/docker-workload/infrastructure.js', async (importOriginal) => {
@@ -221,6 +235,44 @@ async function prepare(): Promise<unknown> {
 }
 
 describe('prepareDockerInfrastructure — Docker-workload lease teardown on failure (§8.3)', () => {
+  it('tears down the staged lease when MITM startup fails before watchdog attestation', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    seam.makeMitm = (): MitmProxy => ({
+      ...createMockMitmProxy(),
+      async start() {
+        throw new Error('scripted MITM pre-start failure');
+      },
+      async stop() {
+        seam.stops.mitm += 1;
+      },
+    });
+
+    await expect(prepare()).rejects.toThrow(/scripted MITM pre-start failure/u);
+
+    expect(supervisor.calls.launched).toBe(0);
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1 });
+  });
+
+  it('stops the started MITM and tears down the lease when Code Mode proxy startup fails', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    seam.makeProxy = (socketPath: string): DockerProxy => ({
+      ...createMockProxy(socketPath),
+      async start() {
+        throw new Error('scripted Code Mode proxy startup failure');
+      },
+      async stop() {
+        seam.stops.proxy += 1;
+      },
+    });
+
+    await expect(prepare()).rejects.toThrow(/scripted Code Mode proxy startup failure/u);
+
+    expect(supervisor.calls.launched).toBe(0);
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1 });
+  });
+
   it('tears the admitted lease down when a step AFTER attestation throws', async () => {
     // closeLeaseOnStop mirrors the live supervisor accepting the coordinator's
     // stop proof: a supervisor that is still healthy is exactly the case crash

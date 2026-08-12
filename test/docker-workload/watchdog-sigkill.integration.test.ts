@@ -118,13 +118,18 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
       { mode: 0o755 },
     );
 
+    // IDE auto-attach instrumentation can delay each short-lived Docker stub
+    // while it contends for a debugger port, eventually tripping DockerManager's
+    // command timeout and violating this test's hermetic process boundary.
+    const childEnv = { ...process.env };
+    delete childEnv.VSCODE_INSPECTOR_OPTIONS;
+    delete childEnv.VSCODE_INJECTION;
+    childEnv.NODE_OPTIONS = '--import tsx';
+    childEnv.PATH = `${binDir}:${process.env.PATH ?? ''}`;
+
     const coordinator = spawn(process.execPath, [coordinatorPath, configPath, entrypointPath, resultPath], {
       cwd: repoRoot,
-      env: {
-        ...process.env,
-        NODE_OPTIONS: '--import tsx',
-        PATH: `${binDir}:${process.env.PATH ?? ''}`,
-      },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const coordinatorPid = coordinator.pid;

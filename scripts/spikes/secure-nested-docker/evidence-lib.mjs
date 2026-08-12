@@ -3,7 +3,6 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
-  existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -12,38 +11,13 @@ import {
   readdirSync,
   renameSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
 
 export const SCHEMA_VERSION = 1;
-export const ENV_ALLOWLIST = new Set([
-  'IRONCURTAIN_0A_REDACT',
-  'IRONCURTAIN_0A_SAFE',
-  'LANG',
-  'LC_ALL',
-  'PATH',
-  'SHELL',
-  'TERM',
-  'TMPDIR',
-]);
-export const SECRET_PATTERNS = [
-  /ic-0a-secret-fixture/i,
-  /sk-ant-[a-z0-9_-]+/i,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /AKIA[0-9A-Z]{16}/,
-];
-export const REQUIRED_EVIDENCE_PATHS = [
-  'cleanup-result.json',
-  'cleanup/inventory-1.json',
-  'cleanup/inventory-2.json',
-  'environment.json',
-  'ledger.jsonl',
-  'mutation-result.json',
-  'run.json',
-];
-
+export const ENV_ALLOWLIST = new Set(['LANG', 'LC_ALL', 'PATH', 'SHELL', 'TERM', 'TMPDIR']);
+export const SECRET_PATTERNS = [/sk-ant-[a-z0-9_-]+/i, /-----BEGIN [A-Z ]*PRIVATE KEY-----/, /AKIA[0-9A-Z]{16}/];
 export function parseArgs(argv, required) {
   const values = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -203,51 +177,6 @@ export function writeManifest(evidenceDir, runId) {
     runId,
     schemaVersion: SCHEMA_VERSION,
   });
-}
-
-export function createFakeResource(stateDir, identity) {
-  const resourceId = randomUUID();
-  const resourcesDir = path.join(stateDir, 'resources');
-  ensurePrivateDirectory(resourcesDir);
-  writeJsonAtomic(path.join(resourcesDir, `${resourceId}.json`), {
-    ...identity,
-    resourceId,
-    schemaVersion: SCHEMA_VERSION,
-  });
-  return resourceId;
-}
-
-export function inspectFakeResource(stateDir, resourceId) {
-  const filename = path.join(stateDir, 'resources', `${resourceId}.json`);
-  return existsSync(filename) ? readJson(filename) : undefined;
-}
-
-export function findFakeResources(stateDir, predicate = () => true) {
-  const resourcesDir = path.join(stateDir, 'resources');
-  if (!existsSync(resourcesDir)) return [];
-  return readdirSync(resourcesDir)
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => readJson(path.join(resourcesDir, name)))
-    .filter(predicate)
-    .sort((left, right) => left.resourceId.localeCompare(right.resourceId));
-}
-
-export function deleteInspectedResource(stateDir, expected, resourceId) {
-  const inspected = inspectFakeResource(stateDir, resourceId);
-  if (!inspected) return false;
-  for (const key of ['runId', 'generation', 'requestedName', 'resourceId']) {
-    const expectedValue = key === 'resourceId' ? resourceId : expected[key];
-    if (inspected[key] !== expectedValue) {
-      throw new Error(`refusing to delete ${resourceId}: ${key} ownership mismatch`);
-    }
-  }
-  unlinkSync(path.join(stateDir, 'resources', `${resourceId}.json`));
-  fsyncDirectory(path.join(stateDir, 'resources'));
-  return true;
-}
-
-export function inventoryOwned(stateDir, runId) {
-  return findFakeResources(stateDir, (resource) => resource.runId === runId).map((resource) => resource.resourceId);
 }
 
 export function assertPrivateOwner(filename) {

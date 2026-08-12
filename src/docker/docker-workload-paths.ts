@@ -48,3 +48,8 @@ export function getFrozenProfileCeilingPath(): string {
 export function getFrozenWatchdogPolicyTemplatePath(): string {
   return resolve(getFrozenDockerWorkloadDir(), 'resource-watchdog-policy.json');
 }
+
+/** Frozen Docker client/daemon/plugin compatibility manifest for Apple arm64 VMs. */
+export function getFrozenClientToolchainManifestPath(): string {
+  return resolve(getFrozenDockerWorkloadDir(), 'client-toolchain.arm64.json');
+}

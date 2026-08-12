@@ -252,9 +252,11 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
       ],
       activate: true,
     });
-    const result = await reconcileDockerWorkloadLeases(
-      reconcileOptions(runtime, createFakeClock('2026-07-20T12:00:05.000Z')),
-    );
+    const clock = createFakeClock('2026-07-20T12:00:05.000Z');
+    const result = await reconcileDockerWorkloadLeases({
+      ...reconcileOptions(runtime, clock),
+      supervisor: createFakeSupervisor({ clock: clock.clock }),
+    });
     expect(result).toMatchObject({ preserved: ['dw-live'], reconciled: [], fenced: [] });
     expect(loadDockerWorkloadLease(live.leasePath).status).toBe('active');
     expect(runtime.containers.map((value) => value.id)).toEqual(['live-id']);
@@ -300,9 +302,9 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     expect(closed.resources[0]).toMatchObject({ observedId: 'crashed-id' });
   });
 
-  it('preserves a lease with a stale coordinator heartbeat but a fresh detached supervisor', async () => {
+  it('fences an ownerless lease while its detached supervisor owns cleanup', async () => {
     const runtime = createEventRuntime({ containers: [container('sup-id', 'ic-sup', 'gen-dw-sup')] });
-    const live = seedLease({
+    const stale = seedLease({
       leaseId: 'dw-sup',
       heartbeatIso: '2026-07-20T09:00:00.000Z', // coordinator heartbeat 3h stale
       resources: [
@@ -316,20 +318,59 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
       runtimeKind: 'docker',
       clock: clock.clock,
       sleep: clock.sleep,
-      pidAlive: () => false, // coordinator process gone → exercise the supervisor-freshness branch
-      supervisor: createFakeSupervisor({ clock: clock.clock }), // fresh 'ready' status
+      pidAlive: () => false,
+      supervisor: createFakeSupervisor({ clock: clock.clock }),
     });
-    expect(result).toMatchObject({ preserved: ['dw-sup'], reconciled: [], fenced: [] });
-    expect(loadDockerWorkloadLease(live.leasePath).status).toBe('active');
+    expect(result).toMatchObject({ preserved: [], reconciled: [], fenced: ['dw-sup'] });
+    expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('active');
+    expect(runtime.containers.map((container) => container.id)).toEqual(['sup-id']);
+  });
+
+  it('fences recent coordinator death long enough for a starting supervisor to publish ownership', async () => {
+    const runtime = createEventRuntime();
+    const recent = seedLease({
+      leaseId: 'dw-starting',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      activate: false,
+    });
+    const clock = createFakeClock('2026-07-20T12:00:05.000Z');
+    const result = await reconcileDockerWorkloadLeases({
+      ...reconcileOptions(runtime, clock),
+      pidAlive: () => false,
+    });
+    expect(result).toMatchObject({ preserved: [], reconciled: [], fenced: ['dw-starting'] });
+    expect(loadDockerWorkloadLease(recent.leasePath).status).toBe('admitting');
+  });
+
+  it('recovers an ownerless lease after its detached supervisor is gone', async () => {
+    const runtime = createEventRuntime({ containers: [container('gone-id', 'ic-gone', 'gen-dw-gone')] });
+    const stale = seedLease({
+      leaseId: 'dw-gone',
+      heartbeatIso: '2026-07-20T09:00:00.000Z',
+      resources: [
+        { requestId: 'res-a', kind: 'container', role: 'nested-daemon', name: 'ic-gone', observedId: 'gone-id' },
+      ],
+      activate: true,
+    });
+    const clock = createFakeClock('2026-07-20T12:00:00.000Z');
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: runtime.runtime,
+      runtimeKind: 'docker',
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => false,
+      supervisor: createFakeSupervisor({ clock: clock.clock, alive: false }),
+    });
+    expect(result).toMatchObject({ preserved: [], reconciled: ['dw-gone'], fenced: [] });
+    expect(loadDockerWorkloadLease(stale.leasePath).status).toBe('closed');
+    expect(runtime.containers).toHaveLength(0);
   });
 
   it('fails closed (fences) when a supervisor status exists but the rendered policy is unreadable', async () => {
     const runtime = createEventRuntime();
     const seeded = seedLease({ leaseId: 'dw-nopolicy', heartbeatIso: '2026-07-20T09:00:00.000Z' });
-    // Delete the rendered policy: the supervisor-freshness check can no longer
-    // read its staleAfterMs, so the lease must be treated as stale (not blindly
-    // preserved on the coordinator-heartbeat constant) and then fenced by
-    // recovery, which also refuses to run without the policy.
+    // Delete the rendered policy: recovery must fence rather than reclaiming
+    // resources without the exact cleanup target and policy binding.
     rmSync(join(getDockerWorkloadLeaseDir('dw-nopolicy'), 'policy.json'), { force: true });
     const clock = createFakeClock('2026-07-20T12:00:00.000Z');
     const status: ResourceWatchdogSupervisorStatus = {
@@ -346,8 +387,7 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
       trip: null,
       detail: 'ready',
     };
-    // Status is reported present WITHOUT reading the (now-deleted) policy file,
-    // so isLeaseLive reaches the rendered-policy load and fails closed.
+    // A fresh supervisor cannot turn an ownerless bundle into a live lease.
     const supervisor: WatchdogSupervisorController = {
       ...createFakeSupervisor({ clock: clock.clock }),
       readStatus: () => status,
@@ -361,7 +401,9 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
       supervisor,
     });
     expect(result.fenced).toEqual(['dw-nopolicy']);
-    expect(loadDockerWorkloadLease(seeded.leasePath).status).toBe('incident');
+    // The bound supervisor is still alive, so reconciliation fences admission
+    // without mutating the lease underneath that cleanup owner.
+    expect(loadDockerWorkloadLease(seeded.leasePath).status).toBe('admitting');
   });
 
   it('fences a lease whose recovery exceeds the frozen bound and then blocks new admission', async () => {

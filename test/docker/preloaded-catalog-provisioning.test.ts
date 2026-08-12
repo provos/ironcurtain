@@ -187,3 +187,26 @@ describe('ensureDockerImage preloaded call path', () => {
     expect(pullImage).not.toHaveBeenCalled();
   });
 });
+
+describe('legacy image staleness order', () => {
+  it('accepts a current selected agent without inspecting or building the base tag', async () => {
+    const image = 'ironcurtain-claude-code:latest';
+    const { computeAgentImageBuildHash, resolveAgentImage } = await import('../../src/docker/docker-infrastructure.js');
+    const expectedHash = computeAgentImageBuildHash(image);
+    const imageExists = vi.fn(async (ref: string) => ref === image);
+    const getImageLabel = vi.fn(async (ref: string) => (ref === image ? expectedHash : undefined));
+    const buildImage = vi.fn(async () => {});
+    const runtime = { imageExists, getImageLabel, buildImage } as unknown as ContainerRuntime;
+
+    await expect(resolveAgentImage(image, runtime)).resolves.toMatchObject({
+      mode: 'build-if-stale',
+      logicalName: image,
+      buildHash: expectedHash,
+    });
+
+    expect(imageExists).not.toHaveBeenCalled();
+    expect(getImageLabel).toHaveBeenCalledTimes(1);
+    expect(getImageLabel).toHaveBeenCalledWith(image, 'ironcurtain.build-hash');
+    expect(buildImage).not.toHaveBeenCalled();
+  });
+});

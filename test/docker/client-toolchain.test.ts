@@ -63,7 +63,7 @@ describe('Docker client toolchain preflight', () => {
     });
     expect(result).toMatchObject({
       architecture: 'arm64',
-      dockerApi: { min: '1.44', max: '1.53', actual: '1.53' },
+      dockerApi: { actual: '1.53' },
       toolchain: tuple,
       toolchainDigest: catalogTupleDigest(tuple),
     });

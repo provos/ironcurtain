@@ -25,8 +25,8 @@ import {
   bootstrapAppleVmDaemon,
   waitForAppleVmDaemonReady,
   type AppleVmDaemonExec,
-  type AppleVmDaemonReadiness,
 } from './apple-vm-daemon.js';
+import { provisionAppleVmDockerWorkload, type AppleVmDockerWorkloadBootstrapConfig } from './apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 
 /**
@@ -103,28 +103,29 @@ export function appleVmDaemonExecFor(runtime: ContainerRuntime, containerId: str
   return (argv, options) => runtime.exec(containerId, argv, options.timeoutMs, options.user);
 }
 
-export interface StartAppleVmNestedDaemonOptions {
+export interface StartAppleVmDockerWorkloadOptions {
   readonly runtime: ContainerRuntime;
   /** The already-started agent container, i.e. the VM the daemon runs inside. */
   readonly containerId: string;
   readonly nestedDaemon: DockerWorkloadBundleHandle;
+  /** Immutable per-lease catalog view mounted into this VM. */
+  readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig;
   /** Defaults to {@link APPLE_VM_DAEMON_READINESS_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
 }
 
 /**
- * §8.2 steps 4–5 for the same-VM topology: bootstrap the rootless daemon inside
- * the started agent VM, adjudicate its `docker info`, and record the
- * `daemon-ready` evidence against the lease.
+ * Complete same-VM activation immediately before agent release: bootstrap and
+ * adjudicate the rootless daemon, preflight the pinned Docker client/plugin
+ * tuple, provision the selected catalog-authorized agent image, record the
+ * transparent observations, and activate the lease.
  *
  * Any failure propagates unchanged. There is no degraded mode in which the
- * agent runs against an unverified daemon, so the caller's abort-and-teardown
- * path is the only outcome of a rejected or unreachable daemon.
+ * agent runs against an incomplete bootstrap, so the caller's
+ * abort-and-teardown path is the only outcome of any failure.
  */
-export async function startAppleVmNestedDaemon(
-  options: StartAppleVmNestedDaemonOptions,
-): Promise<AppleVmDaemonReadiness> {
+export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWorkloadOptions): Promise<void> {
   const exec = appleVmDaemonExecFor(options.runtime, options.containerId);
   await bootstrapAppleVmDaemon(exec);
   const readiness = await waitForAppleVmDaemonReady(exec, {
@@ -132,5 +133,11 @@ export async function startAppleVmNestedDaemon(
     pollIntervalMs: options.pollIntervalMs,
   });
   options.nestedDaemon.recordDaemonReady(readiness);
-  return readiness;
+  const provisioning = await provisionAppleVmDockerWorkload({
+    outerRuntime: options.runtime,
+    containerId: options.containerId,
+    config: options.bootstrap,
+  });
+  options.nestedDaemon.recordPrivateDockerBootstrap(provisioning);
+  options.nestedDaemon.activate();
 }

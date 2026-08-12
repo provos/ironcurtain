@@ -67,6 +67,7 @@ describe.skipIf(!ready)('detached resource-watchdog supervisor process', () => {
         },
         bindings: {
           catalogSha256: '2'.repeat(64),
+          innerDockerCatalogSha256: '7'.repeat(64),
           profileSha256: '3'.repeat(64),
           watchdogPolicySha256,
           toolchainDigest: '6'.repeat(64),

@@ -21,6 +21,7 @@ import type {
   DockerNetworkCreateOptions,
   DockerNetworkInfo,
 } from './types.js';
+import { parseDockerImageInfo } from './docker-image-inspect.js';
 import * as logger from '../logger.js';
 import { checkDockerAvailable, type DockerAvailability } from './docker-probe.js';
 import { isExecError, isExecTimeout } from '../utils/exec-error.js';
@@ -113,26 +114,6 @@ async function inspectDockerObjects(
     const right = await inspectDockerObjects(exec, kind, ids.slice(middle));
     return [...left, ...right];
   }
-}
-
-function parseDockerImageInfo(raw: unknown): DockerImageInfo {
-  if (!isRecord(raw)) {
-    throw new Error('Unexpected docker image inspect result: expected object');
-  }
-  const config = isRecord(raw.Config) ? raw.Config : {};
-  const labelsRaw = isRecord(config.Labels) ? config.Labels : {};
-  const labels: Record<string, string> = {};
-  for (const [key, value] of Object.entries(labelsRaw)) {
-    if (typeof value === 'string') labels[key] = value;
-  }
-  const repoTagsRaw = Array.isArray(raw.RepoTags) ? raw.RepoTags : [];
-  const repoTags = repoTagsRaw.filter((tag): tag is string => typeof tag === 'string');
-  return {
-    id: typeof raw.Id === 'string' ? raw.Id : '',
-    repoTags,
-    labels,
-    created: typeof raw.Created === 'string' ? raw.Created : '',
-  };
 }
 
 function parseDockerImageId(stdout: string): string {

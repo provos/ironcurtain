@@ -84,8 +84,13 @@ import type {
 import {
   nestedDaemonAgentEnv,
   resolveNestedDaemonBundle,
-  startAppleVmNestedDaemon,
+  startAppleVmDockerWorkload,
 } from '../docker-workload/session-daemon.js';
+import {
+  appleVmDockerWorkloadCatalogMount,
+  stageAppleVmDockerWorkloadBootstrap,
+  type AppleVmDockerWorkloadBootstrapConfig,
+} from '../docker-workload/apple-private-docker.js';
 import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
 import * as logger from '../logger.js';
 
@@ -336,13 +341,15 @@ export interface PreContainerInfrastructure {
    * (docs/designs/secure-nested-runtime-implementation-plan.md §8.2–8.3).
    * The host-owned lease handle: `createSessionContainers` / the PTY path
    * ledger every outer resource through it before create and observe it
-   * after (§8.2 step 1); `createDockerInfrastructure` activates it once
-   * every resource is observed (§8.2 step 4); `destroyDockerInfrastructure`
-   * tears it down first (§8.3). Undefined for every ordinary session — the
+   * after (§8.2 step 1); the same-VM bootstrap activates it after private
+   * Docker is fully provisioned; `destroyDockerInfrastructure` tears it down
+   * first (§8.3). Undefined for every ordinary session — the
    * capability is gated behind the admission fuse in `docker-workload/
    * config.ts`, so this is inert until Phase 0C flips it.
    */
   readonly dockerWorkload?: DockerWorkloadBundleHandle;
+  /** Immutable per-lease catalog view used only by an admitted Apple Docker workload. */
+  readonly dockerWorkloadBootstrap?: AppleVmDockerWorkloadBootstrapConfig;
 }
 
 /**
@@ -626,242 +633,259 @@ export async function prepareDockerInfrastructure(
   // only runs behind a bypassed fuse in tests. `attestWatchdog()` (§8.2 step 3)
   // is driven after the proxies start, below.
   const dockerWorkloadConfig = config.userConfig.dockerWorkload;
-  const dockerWorkload =
-    dockerWorkloadConfig?.enabled === true
-      ? await admitDockerWorkloadForSession({
-          dockerWorkload: dockerWorkloadConfig,
-          runtime: docker,
-          runtimeKind,
-          bundleId,
-          workspaceRoot: workspaceDir,
-          auditLogPath,
-        })
-      : undefined;
-
-  // tcp-hostonly: create the per-bundle host-only network BEFORE the
-  // proxies are constructed. The gateway address feeds the container env,
-  // the orientation proxy address, and the connection-source guard both
-  // proxies use while listening on 0.0.0.0 (the vmnet gateway interface
-  // only materializes once the first container attaches, so binding the
-  // gateway address directly is not possible at this point).
-  let hostOnlyNetwork: HostOnlyNetwork | undefined;
-  let allowRemoteAddress: ((remoteAddress: string | undefined) => boolean) | undefined;
-  if (topology === 'tcp-hostonly') {
-    hostOnlyNetwork = await createHostOnlyNetwork(docker, getInternalNetworkName(getBundleShortId(bundleId)));
-    allowRemoteAddress = makeSourceAddressGuard(hostOnlyNetwork.subnet);
-    logger.info(
-      `Host-only network ${hostOnlyNetwork.name} (${hostOnlyNetwork.subnet}, gateway ${hostOnlyNetwork.gateway})`,
-    );
-  }
-
-  const proxy = createCodeModeProxy({
-    socketPath,
-    config,
-    listenMode: useTcp ? 'tcp' : 'uds',
-    bindHost: topology === 'tcp-hostonly' ? '0.0.0.0' : undefined,
-    allowRemoteAddress,
-  });
-
-  // Load or generate the IronCurtain CA for TLS termination
-  const caDir = resolve(getIronCurtainHome(), 'ca');
-  const ca = loadOrCreateCA(caDir);
-
-  // Generate fake keys and build provider key mappings.
-  // In OAuth mode, use bearer-based providers and the OAuth access token as the real key.
-  // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
-  // reuse the same fake key so a single container token authenticates against all hosts.
-  const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
-  // Re-reads and refresh write-backs must target the file the credentials
-  // were detected in — writing a rotated refresh token to the wrong file
-  // would strand the host's Claude Code login with an invalidated token.
-  const tokenManagerFileDeps =
-    authMethod.kind === 'oauth' && authMethod.source === 'file' && authMethod.filePath
-      ? { credentialsFilePath: authMethod.filePath }
-      : undefined;
-  const tokenManagerKeychainDeps =
-    authMethod.kind === 'oauth' && authMethod.source === 'keychain'
-      ? { writeToKeychain, keychainServiceName: authMethod.keychainServiceName }
-      : undefined;
-  const tokenManagerCodexDeps =
-    authMethod.kind === 'oauth' && adapter.id === 'codex'
-      ? {
-          loadCredentials: loadCodexOAuthCredentials,
-          refreshToken: async (rt: string) => refreshResultToCreds(await refreshCodexOAuthToken(rt)),
-          saveCredentials: saveCodexOAuthCredentials,
-          credentialsFilePath: getCodexAuthFilePath(),
-        }
-      : undefined;
-  const tokenManager =
-    authMethod.kind === 'oauth'
-      ? new OAuthTokenManager(
-          authMethod.credentials,
-          { canRefresh: canRefreshOAuth(authMethod.credentials.refreshToken) },
-          {
-            ...tokenManagerFileDeps,
-            ...tokenManagerKeychainDeps,
-            ...tokenManagerCodexDeps,
-          },
-        )
-      : undefined;
-  const providers = adapter.getProviders(config, authKind);
-
-  const resolvedProviders = applyUpstreamOverrides(providers, parseUpstreamBaseUrl, {
-    'api.anthropic.com': config.userConfig.anthropicBaseUrl,
-    'api.openai.com': config.userConfig.openaiBaseUrl,
-    'generativelanguage.googleapis.com': config.userConfig.googleBaseUrl,
-  });
-
-  const fakeKeys = new Map<string, string>();
-  const providerMappings: ProviderKeyMapping[] = [];
-  const fakeKeysByPrefix = new Map<string, string>();
-  for (const providerConfig of resolvedProviders) {
-    let fakeKey = fakeKeysByPrefix.get(providerConfig.fakeKeyPrefix);
-    if (!fakeKey) {
-      fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
-      fakeKeysByPrefix.set(providerConfig.fakeKeyPrefix, fakeKey);
-    }
-    fakeKeys.set(providerConfig.host, fakeKey);
-
-    const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);
-    const isManagedOAuthHost =
-      ANTHROPIC_HOSTS.has(providerConfig.host) ||
-      (adapter.id === 'codex' && CODEX_CHATGPT_HOSTS.has(providerConfig.host));
-    const hostTokenManager = tokenManager && isManagedOAuthHost ? tokenManager : undefined;
-    providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
-  }
-
-  // Build package installation proxy config if enabled
-  const pkgConfig = config.userConfig.packageInstall;
-  let registries: import('./package-types.js').RegistryConfig[] | undefined;
-  let packageValidation: { validator: import('./package-types.js').PackageValidator; auditLogPath: string } | undefined;
-
-  if (pkgConfig.enabled) {
-    const { npmRegistry, pypiRegistry, debianRegistry, cargoRegistry } = await import('./registry-proxy.js');
-    const { createPackageValidator } = await import('./package-validator.js');
-
-    registries = [npmRegistry, pypiRegistry, debianRegistry, cargoRegistry];
-    const validator = createPackageValidator({
-      allowedPackages: pkgConfig.allowedPackages,
-      deniedPackages: pkgConfig.deniedPackages,
-      quarantineDays: pkgConfig.quarantineDays,
+  let dockerWorkloadAgentImage: string | undefined;
+  let admittedDockerWorkload:
+    | { readonly handle: DockerWorkloadBundleHandle; readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig }
+    | undefined;
+  if (dockerWorkloadConfig?.enabled === true) {
+    dockerWorkloadAgentImage = await adapter.getImage();
+    admittedDockerWorkload = await admitDockerWorkloadForSession({
+      dockerWorkload: dockerWorkloadConfig,
+      runtime: docker,
+      runtimeKind,
+      bundleId,
+      workspaceRoot: workspaceDir,
+      auditLogPath,
+      selectedImageLogicalName: dockerWorkloadAgentImage,
     });
-    const packageAuditLogPath = resolve(bundleDir, 'package-audit.jsonl');
-    packageValidation = { validator, auditLogPath: packageAuditLogPath };
   }
+  const dockerWorkload = admittedDockerWorkload?.handle;
+  const dockerWorkloadBootstrap = admittedDockerWorkload?.bootstrap;
 
-  // Initial token-stream routing id. Single-session mode: bundleId is
-  // the session id, so the bridge subscribes under the same key.
-  // Workflow shared-container mode: the orchestrator overrides this
-  // per-agent via setTokenSessionId() around each executeAgentState,
-  // so the bundleId default is only an initial placeholder. Double-cast
-  // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
-  const routingId = bundleId as unknown as SessionId;
-  // A workflow bundle serves only workflow agents for its entire lifetime,
-  // so agentKind is fixed at construction time.
-  const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
-
-  // Single resolution point for trajectory-capture enablement. The raw
-  // CLI/RPC override wins; otherwise fall through to config; otherwise
-  // off. Consumers pass the raw override only — they never re-resolve
-  // against `userConfig.capture?.enabled`.
-  const captureEnabled = captureInput ? (captureInput.override ?? config.userConfig.capture?.enabled ?? false) : false;
-
-  // Construct the trajectory-capture writer when capture is enabled.
-  // When disabled, no writer is created, no taps are installed, and the
-  // forwarding path is byte-identical to today (per §10 "zero cost when
-  // disabled").
-  let captureWriter: TrajectoryCaptureWriter | undefined;
-  if (captureEnabled && captureInput) {
-    const { createTrajectoryCaptureWriter } = await import('./trajectory-capture.js');
-    captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureInput.capturesDir });
-  }
-
-  const captureProxyOptions = captureWriter
-    ? {
-        capture: captureWriter,
-        recordedAgentName: captureInput?.recordedAgentName,
-        workflowRunId: captureInput?.workflowRunId,
-        bundleId: String(bundleId),
-      }
-    : {};
-
-  const mitmProxy = useTcp
-    ? createMitmProxy({
-        listenPort: 0,
-        ca,
-        providers: providerMappings,
-        registries,
-        packageValidation,
-        controlPort: 0,
-        initialTokenSessionId: routingId,
-        agentKind,
-        allowRemoteAddress,
-        ...captureProxyOptions,
-      })
-    : createMitmProxy({
-        socketPath: getBundleMitmProxySocketPath(bundleId),
-        ca,
-        providers: providerMappings,
-        registries,
-        packageValidation,
-        controlSocketPath: getBundleMitmControlSocketPath(bundleId),
-        initialTokenSessionId: routingId,
-        agentKind,
-        ...captureProxyOptions,
-      });
-
-  // Start MITM proxy FIRST so config.mitmControlAddr is set before proxy.start().
-  // proxy.start() initializes the UTCP sandbox, which checks config.mitmControlAddr
-  // to decide whether to register the proxy virtual MCP server for domain management.
-  const mitmAddr = await mitmProxy.start();
-  if (mitmAddr.port !== undefined) {
-    logger.info(
-      hostOnlyNetwork
-        ? `MITM proxy listening on ${hostOnlyNetwork.gateway}:${mitmAddr.port} (0.0.0.0, subnet-guarded)`
-        : `MITM proxy listening on 127.0.0.1:${mitmAddr.port}`,
-    );
-  } else {
-    logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
-  }
-  // apple-container's `-v <sock>` vsock relay propagates the host
-  // socket's mode bits to the guest side (owner is always root there),
-  // so the non-root `codespace` user can only connect() when "other"
-  // has write. The parent `sockets/` dir is 0o700, so widening the
-  // socket mode does not expose it to other host users.
-  if (!useTcp && runtimeKind === 'apple-container' && mitmAddr.socketPath !== undefined) {
-    chmodSync(mitmAddr.socketPath, 0o666);
-  }
-
-  // Compute control address for the proxy tools MCP server instance
-  const controlAddr =
-    mitmAddr.controlPort !== undefined
-      ? `http://127.0.0.1:${mitmAddr.controlPort}`
-      : mitmAddr.controlSocketPath
-        ? `unix://${mitmAddr.controlSocketPath}`
-        : undefined;
-  if (controlAddr) {
-    config.mitmControlAddr = controlAddr;
-    logger.info(`MITM control API at ${controlAddr}`);
-  }
-
-  // Start Code Mode proxy AFTER mitmControlAddr is set so the sandbox
-  // registers the proxy virtual server for network domain management.
-  await proxy.start();
-  if (useTcp && proxy.port !== undefined) {
-    logger.info(
-      hostOnlyNetwork
-        ? `Code Mode proxy listening on ${hostOnlyNetwork.gateway}:${proxy.port} (0.0.0.0, subnet-guarded)`
-        : `Code Mode proxy listening on 127.0.0.1:${proxy.port}`,
-    );
-  } else {
-    logger.info(`Code Mode proxy listening on ${proxy.socketPath}`);
-  }
-  if (!useTcp && runtimeKind === 'apple-container') {
-    chmodSync(socketPath, 0o666);
-  }
-
-  // Remaining setup steps can fail -- clean up started proxies on error.
+  // From this point onward every failure must revoke the admitted lease and
+  // its immutable staging view. Keep the cleanup boundary outside network,
+  // credential, provider, and proxy setup so no pre-attestation error can
+  // strand a fresh lease.
+  let hostOnlyNetwork: HostOnlyNetwork | undefined;
+  let proxy: DockerProxy | undefined;
+  let mitmProxy: MitmProxy | undefined;
   try {
+    // tcp-hostonly: create the per-bundle host-only network BEFORE the
+    // proxies are constructed. The gateway address feeds the container env,
+    // the orientation proxy address, and the connection-source guard both
+    // proxies use while listening on 0.0.0.0 (the vmnet gateway interface
+    // only materializes once the first container attaches, so binding the
+    // gateway address directly is not possible at this point).
+    let allowRemoteAddress: ((remoteAddress: string | undefined) => boolean) | undefined;
+    if (topology === 'tcp-hostonly') {
+      hostOnlyNetwork = await createHostOnlyNetwork(docker, getInternalNetworkName(getBundleShortId(bundleId)));
+      allowRemoteAddress = makeSourceAddressGuard(hostOnlyNetwork.subnet);
+      logger.info(
+        `Host-only network ${hostOnlyNetwork.name} (${hostOnlyNetwork.subnet}, gateway ${hostOnlyNetwork.gateway})`,
+      );
+    }
+
+    proxy = createCodeModeProxy({
+      socketPath,
+      config,
+      listenMode: useTcp ? 'tcp' : 'uds',
+      bindHost: topology === 'tcp-hostonly' ? '0.0.0.0' : undefined,
+      allowRemoteAddress,
+    });
+
+    // Load or generate the IronCurtain CA for TLS termination
+    const caDir = resolve(getIronCurtainHome(), 'ca');
+    const ca = loadOrCreateCA(caDir);
+
+    // Generate fake keys and build provider key mappings.
+    // In OAuth mode, use bearer-based providers and the OAuth access token as the real key.
+    // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
+    // reuse the same fake key so a single container token authenticates against all hosts.
+    const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
+    // Re-reads and refresh write-backs must target the file the credentials
+    // were detected in — writing a rotated refresh token to the wrong file
+    // would strand the host's Claude Code login with an invalidated token.
+    const tokenManagerFileDeps =
+      authMethod.kind === 'oauth' && authMethod.source === 'file' && authMethod.filePath
+        ? { credentialsFilePath: authMethod.filePath }
+        : undefined;
+    const tokenManagerKeychainDeps =
+      authMethod.kind === 'oauth' && authMethod.source === 'keychain'
+        ? { writeToKeychain, keychainServiceName: authMethod.keychainServiceName }
+        : undefined;
+    const tokenManagerCodexDeps =
+      authMethod.kind === 'oauth' && adapter.id === 'codex'
+        ? {
+            loadCredentials: loadCodexOAuthCredentials,
+            refreshToken: async (rt: string) => refreshResultToCreds(await refreshCodexOAuthToken(rt)),
+            saveCredentials: saveCodexOAuthCredentials,
+            credentialsFilePath: getCodexAuthFilePath(),
+          }
+        : undefined;
+    const tokenManager =
+      authMethod.kind === 'oauth'
+        ? new OAuthTokenManager(
+            authMethod.credentials,
+            { canRefresh: canRefreshOAuth(authMethod.credentials.refreshToken) },
+            {
+              ...tokenManagerFileDeps,
+              ...tokenManagerKeychainDeps,
+              ...tokenManagerCodexDeps,
+            },
+          )
+        : undefined;
+    const providers = adapter.getProviders(config, authKind);
+
+    const resolvedProviders = applyUpstreamOverrides(providers, parseUpstreamBaseUrl, {
+      'api.anthropic.com': config.userConfig.anthropicBaseUrl,
+      'api.openai.com': config.userConfig.openaiBaseUrl,
+      'generativelanguage.googleapis.com': config.userConfig.googleBaseUrl,
+    });
+
+    const fakeKeys = new Map<string, string>();
+    const providerMappings: ProviderKeyMapping[] = [];
+    const fakeKeysByPrefix = new Map<string, string>();
+    for (const providerConfig of resolvedProviders) {
+      let fakeKey = fakeKeysByPrefix.get(providerConfig.fakeKeyPrefix);
+      if (!fakeKey) {
+        fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
+        fakeKeysByPrefix.set(providerConfig.fakeKeyPrefix, fakeKey);
+      }
+      fakeKeys.set(providerConfig.host, fakeKey);
+
+      const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);
+      const isManagedOAuthHost =
+        ANTHROPIC_HOSTS.has(providerConfig.host) ||
+        (adapter.id === 'codex' && CODEX_CHATGPT_HOSTS.has(providerConfig.host));
+      const hostTokenManager = tokenManager && isManagedOAuthHost ? tokenManager : undefined;
+      providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
+    }
+
+    // Build package installation proxy config if enabled
+    const pkgConfig = config.userConfig.packageInstall;
+    let registries: import('./package-types.js').RegistryConfig[] | undefined;
+    let packageValidation:
+      | { validator: import('./package-types.js').PackageValidator; auditLogPath: string }
+      | undefined;
+
+    if (pkgConfig.enabled) {
+      const { npmRegistry, pypiRegistry, debianRegistry, cargoRegistry } = await import('./registry-proxy.js');
+      const { createPackageValidator } = await import('./package-validator.js');
+
+      registries = [npmRegistry, pypiRegistry, debianRegistry, cargoRegistry];
+      const validator = createPackageValidator({
+        allowedPackages: pkgConfig.allowedPackages,
+        deniedPackages: pkgConfig.deniedPackages,
+        quarantineDays: pkgConfig.quarantineDays,
+      });
+      const packageAuditLogPath = resolve(bundleDir, 'package-audit.jsonl');
+      packageValidation = { validator, auditLogPath: packageAuditLogPath };
+    }
+
+    // Initial token-stream routing id. Single-session mode: bundleId is
+    // the session id, so the bridge subscribes under the same key.
+    // Workflow shared-container mode: the orchestrator overrides this
+    // per-agent via setTokenSessionId() around each executeAgentState,
+    // so the bundleId default is only an initial placeholder. Double-cast
+    // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
+    const routingId = bundleId as unknown as SessionId;
+    // A workflow bundle serves only workflow agents for its entire lifetime,
+    // so agentKind is fixed at construction time.
+    const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
+
+    // Single resolution point for trajectory-capture enablement. The raw
+    // CLI/RPC override wins; otherwise fall through to config; otherwise
+    // off. Consumers pass the raw override only — they never re-resolve
+    // against `userConfig.capture?.enabled`.
+    const captureEnabled = captureInput
+      ? (captureInput.override ?? config.userConfig.capture?.enabled ?? false)
+      : false;
+
+    // Construct the trajectory-capture writer when capture is enabled.
+    // When disabled, no writer is created, no taps are installed, and the
+    // forwarding path is byte-identical to today (per §10 "zero cost when
+    // disabled").
+    let captureWriter: TrajectoryCaptureWriter | undefined;
+    if (captureEnabled && captureInput) {
+      const { createTrajectoryCaptureWriter } = await import('./trajectory-capture.js');
+      captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureInput.capturesDir });
+    }
+
+    const captureProxyOptions = captureWriter
+      ? {
+          capture: captureWriter,
+          recordedAgentName: captureInput?.recordedAgentName,
+          workflowRunId: captureInput?.workflowRunId,
+          bundleId: String(bundleId),
+        }
+      : {};
+
+    const activeMitmProxy = useTcp
+      ? createMitmProxy({
+          listenPort: 0,
+          ca,
+          providers: providerMappings,
+          registries,
+          packageValidation,
+          controlPort: 0,
+          initialTokenSessionId: routingId,
+          agentKind,
+          allowRemoteAddress,
+          ...captureProxyOptions,
+        })
+      : createMitmProxy({
+          socketPath: getBundleMitmProxySocketPath(bundleId),
+          ca,
+          providers: providerMappings,
+          registries,
+          packageValidation,
+          controlSocketPath: getBundleMitmControlSocketPath(bundleId),
+          initialTokenSessionId: routingId,
+          agentKind,
+          ...captureProxyOptions,
+        });
+    mitmProxy = activeMitmProxy;
+
+    // Start MITM proxy FIRST so config.mitmControlAddr is set before proxy.start().
+    // proxy.start() initializes the UTCP sandbox, which checks config.mitmControlAddr
+    // to decide whether to register the proxy virtual MCP server for domain management.
+    const mitmAddr = await activeMitmProxy.start();
+    if (mitmAddr.port !== undefined) {
+      logger.info(
+        hostOnlyNetwork
+          ? `MITM proxy listening on ${hostOnlyNetwork.gateway}:${mitmAddr.port} (0.0.0.0, subnet-guarded)`
+          : `MITM proxy listening on 127.0.0.1:${mitmAddr.port}`,
+      );
+    } else {
+      logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
+    }
+    // apple-container's `-v <sock>` vsock relay propagates the host
+    // socket's mode bits to the guest side (owner is always root there),
+    // so the non-root `codespace` user can only connect() when "other"
+    // has write. The parent `sockets/` dir is 0o700, so widening the
+    // socket mode does not expose it to other host users.
+    if (!useTcp && runtimeKind === 'apple-container' && mitmAddr.socketPath !== undefined) {
+      chmodSync(mitmAddr.socketPath, 0o666);
+    }
+
+    // Compute control address for the proxy tools MCP server instance
+    const controlAddr =
+      mitmAddr.controlPort !== undefined
+        ? `http://127.0.0.1:${mitmAddr.controlPort}`
+        : mitmAddr.controlSocketPath
+          ? `unix://${mitmAddr.controlSocketPath}`
+          : undefined;
+    if (controlAddr) {
+      config.mitmControlAddr = controlAddr;
+      logger.info(`MITM control API at ${controlAddr}`);
+    }
+
+    // Start Code Mode proxy AFTER mitmControlAddr is set so the sandbox
+    // registers the proxy virtual server for network domain management.
+    await proxy.start();
+    if (useTcp && proxy.port !== undefined) {
+      logger.info(
+        hostOnlyNetwork
+          ? `Code Mode proxy listening on ${hostOnlyNetwork.gateway}:${proxy.port} (0.0.0.0, subnet-guarded)`
+          : `Code Mode proxy listening on 127.0.0.1:${proxy.port}`,
+      );
+    } else {
+      logger.info(`Code Mode proxy listening on ${proxy.socketPath}`);
+    }
+    if (!useTcp && runtimeKind === 'apple-container') {
+      chmodSync(socketPath, 0o666);
+    }
+
     // §8.2 step 3: attest the host watchdog now that the outer proxies are up.
     // No-op unless a Docker-workload bundle was admitted above (unreachable
     // behind the fuse). Everything from here on is covered by the catch below,
@@ -900,12 +924,21 @@ export async function prepareDockerInfrastructure(
     // to the legacy build path. Workflow dependencies are provisioned at
     // runtime into mounted caches below; they are no longer baked into
     // per-workflow Docker images.
-    const agentImage = await adapter.getImage();
+    const agentImage = dockerWorkloadAgentImage ?? (await adapter.getImage());
     // Explicit override wins (tests); otherwise derive from resolved config so
     // this path branches on the same trusted image mode as the `ensureDockerImage`
-    // preflight. Behind the admission fuse this is always `build-if-stale` today.
+    // preflight. An admitted Apple workload resolves the outer agent from the
+    // same per-lease immutable view later mounted for private-Docker bootstrap.
+    const configuredImageProvisioning = imageProvisioningForConfig(config.userConfig.dockerWorkload, runtimeKind);
     const resolvedImageProvisioning =
-      imageProvisioning ?? imageProvisioningForConfig(config.userConfig.dockerWorkload, runtimeKind);
+      imageProvisioning ??
+      (dockerWorkloadBootstrap === undefined
+        ? configuredImageProvisioning
+        : {
+            imageMode: 'preloaded-catalog',
+            catalogPath: dockerWorkloadBootstrap.outerAppleCatalogPath,
+            runtimeKind,
+          });
     const imageResolution = await resolveAgentImage(agentImage, docker, resolvedImageProvisioning);
     const agentBuildHash = imageResolution.buildHash;
     const image = imageResolution.imageRef;
@@ -960,7 +993,7 @@ export async function prepareDockerInfrastructure(
       escalationDir,
       auditLogPath,
       proxy,
-      mitmProxy,
+      mitmProxy: activeMitmProxy,
       docker,
       adapter,
       ca,
@@ -983,9 +1016,10 @@ export async function prepareDockerInfrastructure(
       scriptsMount,
       ...workflowDependencyMounts,
       dockerWorkload,
+      dockerWorkloadBootstrap,
       restageSkills,
       setTokenSessionId: (id) => {
-        mitmProxy.setTokenSessionId(id);
+        activeMitmProxy.setTokenSessionId(id);
       },
       // Trajectory-capture lifecycle. When captureWriter is undefined
       // (capture disabled, the common case), every method is a cheap
@@ -995,8 +1029,8 @@ export async function prepareDockerInfrastructure(
       // (writer.endSession → null out proxy attribution).
       beginCaptureSession: (opts) => {
         if (!captureWriter) return;
-        mitmProxy.setCaptureSessionId(opts.sessionId);
-        mitmProxy.setCapturePersona(opts.persona);
+        activeMitmProxy.setCaptureSessionId(opts.sessionId);
+        activeMitmProxy.setCapturePersona(opts.persona);
         captureWriter.beginSession(opts);
       },
       endCaptureSession: async (sessionId) => {
@@ -1007,8 +1041,8 @@ export async function prepareDockerInfrastructure(
           // Clear proxy attribution AFTER the drain settles so any
           // late-arriving response chunks already in flight are still
           // attributed to the correct session.
-          mitmProxy.setCaptureSessionId(undefined);
-          mitmProxy.setCapturePersona(undefined);
+          activeMitmProxy.setCaptureSessionId(undefined);
+          activeMitmProxy.setCapturePersona(undefined);
         }
       },
       captureWriter,
@@ -1034,8 +1068,8 @@ export async function prepareDockerInfrastructure(
         logger.warn(`prepareDockerInfrastructure: dockerWorkload.teardown() failed: ${errorMessage(err)}`),
       );
     // Best-effort cleanup of proxies started above
-    await mitmProxy.stop().catch(() => {});
-    await proxy.stop().catch(() => {});
+    await mitmProxy?.stop().catch(() => {});
+    await proxy?.stop().catch(() => {});
     // Host-only network was created before the proxies; remove it too.
     // (A leak through the narrow window before this catch is self-healing:
     // createHostOnlyNetwork removes the stale same-named network first.)
@@ -1091,10 +1125,9 @@ export async function createDockerInfrastructure(
 
 /**
  * Finalizes a prepared bundle into a running `DockerInfrastructure`: creates
- * the session containers, provisions workflow dependencies, and — for an
- * admitted secure nested Docker-workload bundle — activates the lease (§8.2
- * step 4) once every outer resource is observed, immediately before the infra
- * (and its agent) is handed to the caller.
+ * the session containers and provisions workflow dependencies. The shared
+ * Apple Docker-workload bootstrap activates an admitted lease immediately
+ * before returning from the agent-blocking bootstrap.
  *
  * On any failure an admitted Docker-workload bundle is torn down FIRST (§8.3):
  * `teardown()` removes the ledgered outer resources with absence proofs, so it
@@ -1102,7 +1135,7 @@ export async function createDockerInfrastructure(
  * non-workload bundles). The proxies are always stopped last.
  *
  * Split out from `createDockerInfrastructure` so the §8.2/§8.3
- * create -> activate -> teardown wiring is exercisable with a scripted
+ * create -> bootstrap -> teardown wiring is exercisable with a scripted
  * `PreContainerInfrastructure` without standing up real proxies.
  */
 export async function assembleDockerInfrastructure(
@@ -1115,10 +1148,6 @@ export async function assembleDockerInfrastructure(
     containerResources = await createSessionContainers(core, config, options);
     const infra = { ...core, ...containerResources };
     await provisionWorkflowDependencies(infra, config.userConfig.packageInstall.enabled);
-    // §8.2 step 4: every requested outer resource has now been observed, so
-    // activate the lease and start the host-owned heartbeat before the caller
-    // unblocks the agent. No-op for ordinary bundles (handle absent).
-    core.dockerWorkload?.activate();
     return infra;
   } catch (error) {
     // §8.3: tear the bundle's outer resources down (teardown-first for a
@@ -1420,6 +1449,7 @@ interface DockerWorkloadAdmissionForSessionOptions {
   readonly bundleId: BundleId;
   readonly workspaceRoot: string;
   readonly auditLogPath: string;
+  readonly selectedImageLogicalName: string;
 }
 
 /**
@@ -1436,9 +1466,10 @@ interface DockerWorkloadAdmissionForSessionOptions {
  * the operational bindings must resolve from the real staged catalog and
  * frozen profile ceiling.
  */
-async function admitDockerWorkloadForSession(
-  options: DockerWorkloadAdmissionForSessionOptions,
-): Promise<DockerWorkloadBundleHandle> {
+async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionForSessionOptions): Promise<{
+  readonly handle: DockerWorkloadBundleHandle;
+  readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig;
+}> {
   const { admitDockerWorkloadBundle } = await import('../docker-workload/infrastructure.js');
   const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
   const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
@@ -1449,9 +1480,11 @@ async function admitDockerWorkloadForSession(
   const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
   const bindings = resolveDockerWorkloadAdmissionBindings({
     catalogPath: admissionCatalogPath(options.dockerWorkload, options.runtimeKind),
+    innerDockerCatalogPath: getStagedCatalogPath('docker'),
+    selectedImageLogicalName: options.selectedImageLogicalName,
   });
   const packageRoot = getIronCurtainPackageRoot();
-  return admitDockerWorkloadBundle({
+  const handle = await admitDockerWorkloadBundle({
     runtime: options.runtime,
     runtimeKind: options.runtimeKind,
     runtimeForKind: (kind) => (kind === options.runtimeKind ? options.runtime : createContainerRuntime(kind)),
@@ -1470,6 +1503,17 @@ async function admitDockerWorkloadForSession(
     ),
     auditSink: createJsonlDockerWorkloadAuditSink(options.auditLogPath),
   });
+  try {
+    const bootstrap = stageAppleVmDockerWorkloadBootstrap({
+      leaseStagingRoot: handle.stagingRoot,
+      bindings,
+      selectedImageLogicalName: options.selectedImageLogicalName,
+    });
+    return { handle, bootstrap };
+  } catch (error) {
+    await handle.teardown();
+    throw error;
+  }
 }
 
 /**
@@ -1647,6 +1691,13 @@ async function createSessionContainersAttempt(
     // daemon and reaches it at the VM-local socket. Resolved once here and
     // reused for the env, the ledgered create, and the post-start bootstrap.
     const nestedDaemon = resolveNestedDaemonBundle(core.dockerWorkload, core.runtimeKind);
+    const dockerWorkloadBootstrap = core.dockerWorkloadBootstrap;
+    if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
+      throw new Error('Docker-workload lease and immutable catalog staging must be present together');
+    }
+    if (dockerWorkloadBootstrap !== undefined) {
+      mounts.push(appleVmDockerWorkloadCatalogMount(dockerWorkloadBootstrap));
+    }
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
       ...buildRuntimeTrustEnv(),
@@ -1921,14 +1972,17 @@ async function createSessionContainersAttempt(
       }
     }
 
-    // §8.2 steps 4-5 (same-VM topology): the container that just started IS the
-    // daemon component, so bootstrap the rootless in-VM daemon and adjudicate
-    // its `docker info` here — after the container is up, and before any agent
-    // process is exec'd into it. Fail-closed: a rejected or unreachable daemon
-    // throws into the catch below, which removes the partial container, and the
-    // caller's §8.3 Docker-workload teardown then revokes the lease.
-    if (nestedDaemon !== undefined) {
-      await startAppleVmNestedDaemon({ runtime: core.docker, containerId: mainContainerId, nestedDaemon });
+    // Same-VM activation: the container that just started IS the daemon
+    // component. Bootstrap/adjudicate dockerd, preflight the pinned client,
+    // provision the selected catalog-authorized inner image, record observations, and
+    // activate the lease before any agent process is exec'd into it.
+    if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
+      await startAppleVmDockerWorkload({
+        runtime: core.docker,
+        containerId: mainContainerId,
+        nestedDaemon,
+        bootstrap: dockerWorkloadBootstrap,
+      });
     }
 
     return {
@@ -2249,12 +2303,6 @@ export async function ensureDockerImage(
 }
 
 /**
- * Ensures the CA-neutral agent Docker image exists and is up-to-date. Builds
- * the base image first and then the agent-specific image. Content-hash labels
- * on each image drive staleness detection so repeated calls skip rebuilds
- * when source inputs have not changed. Per-session trust is staged at runtime.
- */
-/**
  * Builds `image` from a fresh temp directory populated with the contents of
  * `dockerDir`. Building from a clean
  * dir outside any git repo is REQUIRED for Apple `container build`, which
@@ -2390,23 +2438,17 @@ async function ensureImageFromSpec(
   docker: ContainerRuntime,
   spec: AgentImageBuildSpec,
 ): Promise<string> {
-  const baseRebuilt = await ensureBaseImage(
-    spec.baseImage,
-    docker,
-    spec.dockerDir,
-    spec.baseDockerfile,
-    spec.baseBuildHash,
-  );
+  // The agent hash incorporates the base hash. A current selected agent is
+  // therefore self-sufficient even when the base tag was not staged (the
+  // selected OCI archive already carries its base layers).
+  if (!(await isImageStale(image, docker, spec.agentBuildHash))) return spec.agentBuildHash;
 
-  const needsAgentBuild = baseRebuilt || (await isImageStale(image, docker, spec.agentBuildHash));
-
-  if (needsAgentBuild) {
-    logger.info(`Building Docker image ${image}...`);
-    await buildImageFromCleanContext(docker, image, spec.dockerDir, spec.agentDockerfile, {
-      'ironcurtain.build-hash': spec.agentBuildHash,
-    });
-    logger.info(`Docker image ${image} built successfully`);
-  }
+  await ensureBaseImage(spec.baseImage, docker, spec.dockerDir, spec.baseDockerfile, spec.baseBuildHash);
+  logger.info(`Building Docker image ${image}...`);
+  await buildImageFromCleanContext(docker, image, spec.dockerDir, spec.agentDockerfile, {
+    'ironcurtain.build-hash': spec.agentBuildHash,
+  });
+  logger.info(`Docker image ${image} built successfully`);
 
   return spec.agentBuildHash;
 }
@@ -2619,8 +2661,8 @@ async function ensureBaseImage(
   dockerDir: string,
   dockerfile: string,
   buildHash: string,
-): Promise<boolean> {
-  if (!(await isImageStale(baseImage, docker, buildHash))) return false;
+): Promise<void> {
+  if (!(await isImageStale(baseImage, docker, buildHash))) return;
 
   logger.info('Building base Docker image (this may take a while on first run)...');
 
@@ -2628,11 +2670,9 @@ async function ensureBaseImage(
     'ironcurtain.build-hash': buildHash,
   });
   logger.info('Base Docker image built successfully');
-  return true;
 }
 
 async function isImageStale(image: string, docker: ContainerRuntime, expectedHash: string): Promise<boolean> {
-  if (!(await docker.imageExists(image))) return true;
   const storedHash = await docker.getImageLabel(image, 'ironcurtain.build-hash');
   return storedHash !== expectedHash;
 }

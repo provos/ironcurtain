@@ -8,6 +8,14 @@ import { compareDockerApiVersions } from '../docker/docker-api-version.js';
 
 export const CLIENT_TOOLCHAIN_SCHEMA_VERSION = 1;
 export const MAX_CLIENT_TOOLCHAIN_MANIFEST_BYTES = 64 * 1024;
+export const DOCKER_VERSION_PREFLIGHT_ARGV = ['docker', 'version', '--format', '{{json .}}'] as const;
+export const DOCKER_BUILDX_VERSION_PREFLIGHT_ARGV = ['docker', 'buildx', 'version'] as const;
+export const DOCKER_COMPOSE_VERSION_PREFLIGHT_ARGV = ['docker', 'compose', 'version', '--short'] as const;
+export const CLIENT_TOOLCHAIN_PREFLIGHT_ARGVS = [
+  DOCKER_VERSION_PREFLIGHT_ARGV,
+  DOCKER_BUILDX_VERSION_PREFLIGHT_ARGV,
+  DOCKER_COMPOSE_VERSION_PREFLIGHT_ARGV,
+] as const;
 
 const versionSchema = z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u);
 const apiVersionSchema = z.string().regex(/^\d{1,3}\.\d{1,3}$/u);
@@ -88,10 +96,8 @@ export interface LoadedClientToolchainManifest {
 }
 
 export interface ClientToolchainPreflight {
-  readonly manifestSha256: string;
-  readonly generation: string;
   readonly architecture: 'amd64' | 'arm64';
-  readonly dockerApi: { readonly min: string; readonly max: string; readonly actual: string };
+  readonly dockerApi: { readonly actual: string };
   readonly toolchain: {
     readonly dockerCli: string;
     readonly dockerDaemon: string;
@@ -121,12 +127,7 @@ export async function preflightClientToolchain(options: {
   readonly manifest: LoadedClientToolchainManifest;
   readonly expectedToolchainDigest?: string;
 }): Promise<ClientToolchainPreflight> {
-  const dockerVersion = await execute(options.runtime, options.containerId, [
-    'docker',
-    'version',
-    '--format',
-    '{{json .}}',
-  ]);
+  const dockerVersion = await execute(options.runtime, options.containerId, DOCKER_VERSION_PREFLIGHT_ARGV);
   let dockerJson: unknown;
   try {
     dockerJson = JSON.parse(dockerVersion) as unknown;
@@ -140,15 +141,10 @@ export async function preflightClientToolchain(options: {
     );
   }
 
-  const buildxOutput = await execute(options.runtime, options.containerId, ['docker', 'buildx', 'version']);
+  const buildxOutput = await execute(options.runtime, options.containerId, DOCKER_BUILDX_VERSION_PREFLIGHT_ARGV);
   const buildxMatch = /\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/u.exec(buildxOutput);
   if (buildxMatch?.[1] === undefined) throw new Error('Docker Buildx version probe returned an unknown format');
-  const composeVersion = await execute(options.runtime, options.containerId, [
-    'docker',
-    'compose',
-    'version',
-    '--short',
-  ]);
+  const composeVersion = await execute(options.runtime, options.containerId, DOCKER_COMPOSE_VERSION_PREFLIGHT_ARGV);
   if (!versionSchema.safeParse(composeVersion).success) {
     throw new Error('Docker Compose version probe returned an unknown format');
   }
@@ -183,12 +179,8 @@ export async function preflightClientToolchain(options: {
     throw new Error('Docker client toolchain digest differs from the preloaded catalog');
   }
   return {
-    manifestSha256: options.manifest.sha256,
-    generation: expected.generation,
     architecture: expected.architecture,
     dockerApi: {
-      min: expected.docker.compatibleApiRange.min,
-      max: expected.docker.compatibleApiRange.max,
       actual: actual.Server.ApiVersion,
     },
     toolchain,

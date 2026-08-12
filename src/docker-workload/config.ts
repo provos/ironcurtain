@@ -82,7 +82,7 @@ export type ResolvedDockerWorkloadConfig =
       };
     };
 
-/** Feature-off is a one-field value carrying no latent nested authority. */
+/** Feature-off is a one-field value carrying no per-session provisioned authority. */
 export function resolveDockerWorkloadConfig(
   request: DockerWorkloadRequestedConfig | undefined,
 ): ResolvedDockerWorkloadConfig {

@@ -21,8 +21,10 @@ deterministic Compose target/scanner fixture also passes vulnerable/patched verd
 readiness and egress negatives, immutable-image checks, and exact cleanup on Docker Desktop. A static scratch-image Desktop relay has a trusted lifecycle
 that verifies its stopped and running effective profiles; a live Engine-28 check proved fixed-target
 forwarding, uplink-peer exclusion, relay-loss failure, and exact cleanup on an isolated dual-stack
-network. The Apple same-VM rootless daemon lifecycle is implemented behind the global admission
-fuse. Production egress wiring, complete product-entrypoint acceptance, and 0C remain incomplete.
+network. The Apple same-VM rootless daemon lifecycle and selected same-agent private-Docker image
+bootstrap are implemented behind the global admission fuse. Production egress wiring, serialized
+multi-process cleanup ownership, continuous watchdog-loss revocation, complete product-entrypoint
+acceptance, and 0C remain incomplete.
 No backend is enabled, implementation-qualified, or preview-ready.
 **Amendment (2026-07-21, user-approved):** workload-image registry egress is promoted from Phase 3
 into 0F/0C scope; the frozen preloaded catalog now covers only trusted infrastructure images. See
@@ -384,8 +386,14 @@ OCI graph. Apple selects only the local `linux/arm64` variant when normalizing l
 runtime test (`PRELOADED_IMAGE_INTEGRATION=1`) passes archive verification, load, immutable-ID/label
 inspection, and exact removal on both Mac runtimes. Missing images load only from that verified
 archive; mismatches fail with automatic build/pull disabled, and focused tests assert zero such
-calls. The complete production multi-image catalog, operator-facing option plumbing, persisted/resume
-tuple checks, and use through the private nested daemon remain open.
+calls. The first Apple production bootstrap now stages and loads the exact outer session's selected
+agent archive through the VM-private daemon, then retires the multi-gigabyte staging hard link before
+agent release. That archive already contains its base layers, so same-agent inner IronCurtain startup
+does not require a separately tagged base image. It intentionally does not yet support switching to a
+different inner agent, base-tag-dependent repair/build paths, or the two existing integration tests
+that name `ironcurtain-base:latest`; those require sequential on-demand staging or Apple-specific
+equivalent coverage. Complete persisted/resume tuple checks and live read-only VirtioFS archive-load
+qualification remain open.
 
 Before load, verify archive index, manifest, and config hashes against catalog content. After load, normalized evidence compares immutable runtime image ID, manifest/config digest, platform, build-hash schema/hash, toolchain/trust/catalog generations, and provenance. The catalog covers only the trusted infrastructure images: base, agent (per harness), nested-daemon, helper, fixed-relay, and socat. Target, patched-target, and scanner images are pinned test fixtures staged as sealed archives by the qualification harness, not production catalog roles. Persist the complete resolved tuple in session metadata; resume requires exact compatibility rather than tag lookup.
 
@@ -477,7 +485,7 @@ Do not claim per-inner-operation authorization, durable attribution, or trustwor
 
 ## 9. Phase 0: macOS falsification and qualification
 
-Phase 0 is the first work and is split so harness bugs, primitive feasibility, and product qualification cannot be conflated. Its checked-in evidence harness and initial Docker Desktop probes are runnable on the development Mac's installed Docker Desktop; the Apple probes and later qualification harness remain to be implemented. Run tracks independently; a stop in one does not stop the other. Phase 0C may produce only an implementation-qualified candidate, never a preview-ready backend; preview requires the Phase 2 product-entrypoint rerun.
+Phase 0 was split so harness bugs, primitive feasibility, and product qualification could not be conflated. The timeboxed 0A fake-runtime harness and completed Apple exploratory executors have since been retired: production lifecycle tests supersede the former, and this document preserves the latter's durable evidence and adjudication. The Docker Desktop stop-gate probes remain as exact replay tools for a future, explicitly reviewed profile-ceiling restart. Run tracks independently; a stop in one does not stop the other. Phase 0C may produce only an implementation-qualified candidate, never a preview-ready backend; preview requires the Phase 2 product-entrypoint rerun.
 
 ### 9.1 Phase 0A — implement and self-test the evidence harness
 
@@ -487,11 +495,13 @@ Timebox 0A to at most two developer-days and spike-quality code. If it exceeds t
 
 **0A exit:** all five self-tests pass inside the timebox and cleanup evidence contains two empty inventories. Backend release-suite reporting and target/scanner orchestration belong to 0F.
 
-Implementation: [`scripts/spikes/secure-nested-docker/`](../../scripts/spikes/secure-nested-docker/).
-The checked-in self-test exercises all five required cases, including `SIGKILL` after the fake runtime
-mutates but before it returns its immutable ID; recovery discovers by requested identity, verifies
-run/generation/name ownership, deletes by the inspected immutable ID, and produces two empty
-inventories. This closes only Phase 0A and is not backend feasibility evidence.
+Historical result: the five self-tests passed, including `SIGKILL` after the fake runtime mutated
+but before it returned its immutable ID; recovery discovered by requested identity, verified
+run/generation/name ownership, deleted by the inspected immutable ID, and produced two empty
+inventories. Once the equivalent real lease, process-lock, reconciliation, lifecycle-evidence, and
+watchdog paths had production tests—and §16.12 rejected frozen qualification bookkeeping—the fake
+executor no longer protected a live behavior and was deleted. Source control retains its
+implementation. This closes only the historical Phase 0A and is not backend feasibility evidence.
 
 ### 9.2 Phase 0B common preparation
 
@@ -637,6 +647,12 @@ topologies are not yet supported evidence and must be separately classified. The
 prove exhaustive host-vsock/dynamic-listener negatives, the real two-MITM/provider protocol,
 product watchdog, backend release suite, or product entrypoint,
 and therefore do not qualify Apple.
+
+The Apple 0B executors were retired after these findings were captured. They used the then-current
+CA-baked images and could not qualify the current product entrypoint or topology. Future Apple gaps
+belong in the current-tree product release suite (`npm run qualify:apple`), not a restored
+exploratory runner. The retained-script ledger and Docker Desktop replay commands are in
+[`scripts/spikes/secure-nested-docker/README.md`](../../scripts/spikes/secure-nested-docker/README.md).
 
 #### Track AC stop gates
 
@@ -832,6 +848,21 @@ Integrate the 0F-reviewed and 0C implementation-qualified catalog resolver, rela
 proxy, operational-artifact bindings, and release-suite coverage into `DockerWorkloadConfig`, bundle
 partitioning, exact paths, ephemeral state, audit, and common startup/teardown orchestration. Add production daemon/relay lifecycle and health wiring; do not recharacterize catalog resolution as a new Phase 1 loader. Outer rendering may reference only frozen P0-P4 artifacts, exact mount masks, and trusted resource fields; it exposes no generic capability/device/security options, and default sessions emit none.
 
+Implementation progress (not an exit claim): Apple batch and PTY paths share one post-start,
+pre-agent bootstrap that adjudicates rootless dockerd, preflights the pinned Docker client/plugins,
+loads and re-inspects the selected catalog image, records bounded observations, and only then activates
+the lease. Admission starts its coordinator heartbeat before multi-gigabyte verification; activation
+rechecks the exact bound watchdog; preparation failures revoke the lease and stop partially started
+proxies. Reconciliation never treats a detached watchdog as evidence that an orphaned bundle remains
+live; while a bound watchdog process could be cleaning, it fences new admission rather than racing
+that cleanup owner.
+
+Before the fuse may open, one reviewed cleanup-claim/handoff protocol must serialize exact runtime
+I/O among coordinator teardown, watchdog trips, and crash reconciliation, including an in-flight
+watchdog sample. The active coordinator must also monitor the bound watchdog and invoke that same
+serialized teardown when status is missing, stale, unbound, or non-ready. These are named blockers;
+the current code does not claim that reconciliation fencing alone cleans an ownerless live supervisor.
+
 **Exit:** deterministic contracts cover creation/rollback/kill/reconcile; feature-off equivalence holds; untrusted config cannot set outer daemon arguments; exact-ID teardown and state-root cleanup pass fault tests.
 
 ### Phase 2-DD — Docker Desktop product slice (independent)
@@ -898,7 +929,7 @@ Each requires its own threat model and gates.
 - `src/docker/mediated-egress.ts` — the single credential-free forwarder (backpressured streaming, per-request byte/time ceilings, optional session ledger and internal redirect-following, fail-closed rejection) used by both egress proxies; deliberately separate from the credential-injecting provider path.
 - `src/docker/egress-forwarding.ts` — shared request/response shaping (`buildRequestUrl`/`toOutgoingHeaders`/`sanitizeResponseHeaders`) for both egress proxies.
 - [`docker/nested-daemon/`](../../docker/nested-daemon/) — pinned purpose-built daemon image. Under the same-VM topology (§16.10) it is not run as a container; it is the pinned upstream source whose digest the agent base image copies its toolchain from, and it remains the image a future sibling-daemon backend would launch. The separate entrypoint and health probe are unbuilt: the bootstrap argv and the readiness adjudication live host-side in `apple-vm-daemon.ts`, where they are testable and not agent-writable.
-- `scripts/spikes/secure-nested-docker/` — timeboxed 0A ledger/traps/recovery, 0B probes, 0F freeze inputs, and 0C qualification/evidence.
+- [`scripts/spikes/secure-nested-docker/`](../../scripts/spikes/secure-nested-docker/) — retained Docker Desktop stop-gate replay tools, build-egress capture, and public-registry live gate. The superseded 0A fake harness and completed Apple exploratory executors are retired; the directory README records the deletion/retention rationale and exact future commands.
 - `scripts/qualify-backend.ts` and package release commands — current-tree backend suites with zero-skip enforcement and optional generated diagnostic reports; no frozen contract or commit binding.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
 - `config/docker-workload/build-egress-manifest.json` — current-Dockerfile-only destination and BuildKit-seam authorization.

@@ -28,6 +28,7 @@ import { loadResourceWatchdogPolicy, type LoadedResourceWatchdogPolicy } from '.
 // Type-only: the readiness record is deliberately field-compatible with the
 // `daemon-ready` evidence payload, and a type import adds no runtime edge.
 import type { AppleVmDaemonReadiness } from './apple-vm-daemon.js';
+import type { AppleVmDockerWorkloadProvisioning } from './apple-private-docker.js';
 import {
   activateDockerWorkloadLease,
   closeDockerWorkloadLease,
@@ -88,6 +89,7 @@ export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'pro
 /** The sha256 attestation bindings the caller supplies; the watchdog policy hash is computed at render time. */
 export interface DockerWorkloadAdmissionBindings {
   readonly catalogSha256: string;
+  readonly innerDockerCatalogSha256: string;
   readonly profileSha256: string;
   readonly toolchainDigest: string;
 }
@@ -305,6 +307,11 @@ export class DockerWorkloadBundleHandle {
 
   constructor(context: DockerWorkloadBundleHandleContext) {
     this.context = context;
+    // Admission can spend minutes hashing/loading a multi-gigabyte archive.
+    // Start ownership heartbeats as soon as the handle exists, not only after
+    // activation, so the detached supervisor never mistakes valid bootstrap
+    // work for a dead coordinator.
+    this.startHeartbeatTimer();
   }
 
   // The lease identity fields live once on `this.context`; these getters expose
@@ -320,6 +327,9 @@ export class DockerWorkloadBundleHandle {
   }
   get loadedPolicy(): LoadedResourceWatchdogPolicy {
     return this.context.loadedPolicy;
+  }
+  get stagingRoot(): string {
+    return loadDockerWorkloadLease(this.leasePath).paths.stagingRoot;
   }
 
   /** Precommit one outer resource to the ledger BEFORE the caller creates it. */
@@ -408,6 +418,22 @@ export class DockerWorkloadBundleHandle {
     });
   }
 
+  /** Record the exact private-Docker inputs and bundle-local observations before activation. */
+  recordPrivateDockerBootstrap(provisioning: AppleVmDockerWorkloadProvisioning): void {
+    this.emit({
+      kind: 'private-docker-bootstrap',
+      attestation: DAEMON_READY_ATTESTATION,
+      innerDockerCatalogSha256: provisioning.image.catalogSha256,
+      catalogGeneration: provisioning.image.catalogGeneration,
+      toolchainDigest: provisioning.preflight.toolchainDigest,
+      toolchain: provisioning.preflight.toolchain,
+      image: {
+        logicalName: provisioning.image.logicalName,
+        immutableImageId: provisioning.image.immutableImageId,
+      },
+    });
+  }
+
   /** Prove the watchdog supervisor is still fresh immediately before daemon/VM create. */
   assertWatchdogFresh(): void {
     const status = this.context.supervisor.readStatus(this.context.statusPath);
@@ -420,43 +446,52 @@ export class DockerWorkloadBundleHandle {
     );
   }
 
-  /** Activate the lease (every requested resource must be observed) and start the host-owned heartbeat. */
+  /** Activate the lease after every requested resource has been observed. */
   activate(): void {
+    // Image verification/loading can outlast the pre-create freshness check;
+    // re-adjudicate the independently owned supervisor at the final authority
+    // transition immediately before releasing the untrusted agent.
+    this.assertWatchdogFresh();
     activateDockerWorkloadLease(this.leasePath, this.generation, this.context.clock());
     this.emit({ kind: 'lease-transition', from: 'admitting', to: 'active' });
-    this.startHeartbeatTimer();
   }
 
   /** §8.3 teardown in the frozen order; idempotent and tolerant of transient lock contention. */
   async teardown(): Promise<DockerWorkloadTeardownResult> {
-    return this.withBusyRetry(async () => {
-      this.rejecting = true;
+    try {
+      return await this.withBusyRetry(async () => {
+        this.rejecting = true;
+        const startLease = loadDockerWorkloadLease(this.leasePath);
+        if (startLease.status === 'closed') return { alreadyClosed: true, supervisorLost: false };
+        if (startLease.status === 'admitting' || startLease.status === 'active') {
+          revokeDockerWorkloadLease(this.leasePath, this.generation, this.context.clock());
+          this.emit({ kind: 'lease-transition', from: startLease.status, to: 'revoking' });
+        }
+        const { revocation, cleanup } = await performExactRevocationAndCleanup({
+          runtime: this.context.runtime,
+          leasePath: this.leasePath,
+          generation: this.generation,
+          targetDevice: this.loadedPolicy.policy.targetDevice,
+          targetInode: this.loadedPolicy.policy.targetInode,
+          gapMs: this.loadedPolicy.policy.cleanupInventoryGapMs,
+          clock: this.context.clock,
+          sleep: this.context.sleep,
+        });
+        this.emit({
+          kind: 'revocation-result',
+          removedResourceIds: [...revocation.removedResourceIds],
+          finalOwnedResourceIds: [...revocation.finalOwnedResourceIds],
+        });
+        this.emit({ kind: 'cleanup-proof', inventories: cleanup.inventories });
+        const supervisorLost = await this.stopWatchdogAndClose(cleanup);
+        return { alreadyClosed: false, supervisorLost, revocation, cleanup };
+      });
+    } finally {
+      // Preserve ownership throughout cleanup, but never leave an errored
+      // coordinator heartbeating forever; the supervisor/reconciler must then
+      // be able to take over after the stale bound.
       this.clearHeartbeatTimer();
-      const startLease = loadDockerWorkloadLease(this.leasePath);
-      if (startLease.status === 'closed') return { alreadyClosed: true, supervisorLost: false };
-      if (startLease.status === 'admitting' || startLease.status === 'active') {
-        revokeDockerWorkloadLease(this.leasePath, this.generation, this.context.clock());
-        this.emit({ kind: 'lease-transition', from: startLease.status, to: 'revoking' });
-      }
-      const { revocation, cleanup } = await performExactRevocationAndCleanup({
-        runtime: this.context.runtime,
-        leasePath: this.leasePath,
-        generation: this.generation,
-        targetDevice: this.loadedPolicy.policy.targetDevice,
-        targetInode: this.loadedPolicy.policy.targetInode,
-        gapMs: this.loadedPolicy.policy.cleanupInventoryGapMs,
-        clock: this.context.clock,
-        sleep: this.context.sleep,
-      });
-      this.emit({
-        kind: 'revocation-result',
-        removedResourceIds: [...revocation.removedResourceIds],
-        finalOwnedResourceIds: [...revocation.finalOwnedResourceIds],
-      });
-      this.emit({ kind: 'cleanup-proof', inventories: cleanup.inventories });
-      const supervisorLost = await this.stopWatchdogAndClose(cleanup);
-      return { alreadyClosed: false, supervisorLost, revocation, cleanup };
-    });
+    }
   }
 
   private async stopWatchdogAndClose(cleanup: DockerWorkloadCleanupProof): Promise<boolean> {
@@ -562,8 +597,24 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
       fenced.push(leaseId);
       continue;
     }
-    if (isLeaseLive(lease, leaseDir, supervisor, pidAlive, clock(), staleHeartbeatMs)) {
+    const now = clock();
+    const heartbeatFresh = now.getTime() - Date.parse(lease.coordinator.heartbeatAt) < staleHeartbeatMs;
+    const coordinatorLive = heartbeatFresh && pidAlive(lease.coordinator.pid);
+    if (isLeaseLive(lease, leaseDir, supervisor, coordinatorLive, now)) {
       preserved.push(leaseId);
+      continue;
+    }
+    // Never race exact runtime I/O with a live owner. A fresh coordinator with
+    // an unhealthy active supervisor, or a detached supervisor completing
+    // cleanup after its coordinator died, fences new admission until that
+    // owner repairs or closes the lease.
+    try {
+      if (heartbeatFresh || hasLiveBoundSupervisor(lease, leaseDir, supervisor)) {
+        fenced.push(leaseId);
+        continue;
+      }
+    } catch {
+      fenced.push(leaseId);
       continue;
     }
     try {
@@ -581,31 +632,21 @@ function isLeaseLive(
   lease: ReturnType<typeof loadDockerWorkloadLease>,
   leaseDir: string,
   supervisor: WatchdogSupervisorController,
-  pidAlive: (pid: number) => boolean,
+  coordinatorFresh: boolean,
   now: Date,
-  staleHeartbeatMs: number,
 ): boolean {
-  // Coordinator-heartbeat freshness: the coordinator writes a heartbeat every
-  // DOCKER_WORKLOAD_HEARTBEAT_INTERVAL_MS, so staleHeartbeatMs is the right bound
-  // here — that is this constant's actual purpose.
-  if (pidAlive(lease.coordinator.pid) && now.getTime() - Date.parse(lease.coordinator.heartbeatAt) < staleHeartbeatMs) {
-    return true;
-  }
-  // Supervisor freshness: the detached supervisor survives coordinator exit and
-  // samples on its own rendered-policy cadence, so its staleness bound is the
-  // lease's rendered policy `staleAfterMs`, NOT the coordinator-heartbeat
-  // constant. Fail closed (treat as stale) when a supervisor status exists but
-  // the rendered policy is missing/unreadable: recoverStaleLease then fences on
-  // the same unreadable policy rather than the reconciler blindly reclaiming.
-  const status = supervisor.readStatus(join(leaseDir, STATUS_FILE));
-  if (status === undefined) return false;
-  let supervisorStaleAfterMs: number;
+  // A detached supervisor protects cleanup; it never inherits ownership of a
+  // bundle. A dead or stale coordinator therefore always makes the lease
+  // recoverable even when the supervisor continues sampling successfully.
+  if (!coordinatorFresh) return false;
+  // Admission before watchdog attestation and coordinator-driven revocation
+  // are live while their coordinator is fresh. Once active, both independent
+  // owners must be fresh and bound to this exact lease/policy.
+  if (lease.status !== 'active') return true;
   try {
-    supervisorStaleAfterMs = loadResourceWatchdogPolicy(join(leaseDir, POLICY_FILE)).policy.staleAfterMs;
-  } catch {
-    return false;
-  }
-  try {
+    const status = supervisor.readStatus(join(leaseDir, STATUS_FILE));
+    if (status === undefined) return false;
+    const supervisorStaleAfterMs = loadResourceWatchdogPolicy(join(leaseDir, POLICY_FILE)).policy.staleAfterMs;
     assertResourceWatchdogSupervisorFresh(
       status,
       { leaseId: lease.leaseId, generation: lease.generation, policySha256: lease.bindings.watchdogPolicySha256 },
@@ -614,9 +655,28 @@ function isLeaseLive(
     );
     return true;
   } catch {
-    // Supervisor status is not fresh; the lease is stale.
     return false;
   }
+}
+
+function hasLiveBoundSupervisor(
+  lease: ReturnType<typeof loadDockerWorkloadLease>,
+  leaseDir: string,
+  supervisor: WatchdogSupervisorController,
+): boolean {
+  const status = supervisor.readStatus(join(leaseDir, STATUS_FILE));
+  if (status === undefined) return false;
+  if (
+    status.leaseId !== lease.leaseId ||
+    status.generation !== lease.generation ||
+    status.policySha256 !== lease.bindings.watchdogPolicySha256
+  ) {
+    throw new Error('watchdog supervisor status binding mismatch');
+  }
+  return (
+    (status.state === 'starting' || status.state === 'ready' || status.state === 'revoking') &&
+    supervisor.isAlive(status.supervisorPid)
+  );
 }
 
 async function recoverStaleLease(context: {

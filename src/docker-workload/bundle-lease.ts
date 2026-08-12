@@ -94,6 +94,7 @@ const leaseSchema = z
     bindings: z
       .object({
         catalogSha256: sha256Schema,
+        innerDockerCatalogSha256: sha256Schema,
         profileSha256: sha256Schema,
         watchdogPolicySha256: sha256Schema,
         toolchainDigest: sha256Schema,

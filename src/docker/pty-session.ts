@@ -41,8 +41,9 @@ import {
   gateAppleVmNestedDaemonAgentCommand,
   nestedDaemonAgentEnv,
   resolveNestedDaemonBundle,
-  startAppleVmNestedDaemon,
+  startAppleVmDockerWorkload,
 } from '../docker-workload/session-daemon.js';
+import { appleVmDockerWorkloadCatalogMount } from '../docker-workload/apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import {
@@ -416,6 +417,12 @@ async function runPtySessionAttempt(
       undefined, // scriptsDir
       providerProfileName,
     );
+    // Publish every cleanup-owned resource before any subsequent callback can
+    // throw. In particular, capture hooks are extension points; a failure in
+    // either must still revoke the workload lease and stop both proxies.
+    ({ docker, proxy, mitmProxy, useTcp } = infra);
+    dockerWorkload = infra.dockerWorkload;
+
     // PTY sessions are standalone: pin the MITM proxy's token-stream
     // routing ID to this session's ID for the session's lifetime.
     const captureSessionId = effectiveSessionId as import('../session/types.js').SessionId;
@@ -443,8 +450,6 @@ async function runPtySessionAttempt(
       };
     }
 
-    ({ docker, proxy, mitmProxy, useTcp } = infra);
-    dockerWorkload = infra.dockerWorkload;
     onDockerReady(docker);
     const {
       adapter,
@@ -509,6 +514,10 @@ async function runPtySessionAttempt(
     // Build the PTY command
     const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
     const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
+    const dockerWorkloadBootstrap = infra.dockerWorkloadBootstrap;
+    if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
+      throw new Error('Docker-workload lease and immutable catalog staging must be present together');
+    }
     const nestedDaemonReadyMarkerPath =
       nestedDaemon === undefined ? undefined : resolve(orientationDir, APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME);
     if (nestedDaemonReadyMarkerPath !== undefined) {
@@ -697,6 +706,10 @@ async function runPtySessionAttempt(
       }
     }
 
+    if (dockerWorkloadBootstrap !== undefined) {
+      mounts.push(appleVmDockerWorkloadCatalogMount(dockerWorkloadBootstrap));
+    }
+
     // Mount conversation state directory if the adapter supports resume
     if (conversationStateDir && conversationStateConfig) {
       mounts.push({
@@ -794,12 +807,6 @@ async function runPtySessionAttempt(
       mounts,
       create: createPtyContainer,
     });
-    if (dockerWorkload) {
-      // §8.2 step 4: activate the lease once the agent container is observed,
-      // before `docker.start` unblocks the agent.
-      dockerWorkload.activate();
-    }
-
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
 
@@ -827,13 +834,18 @@ async function runPtySessionAttempt(
       }
     }
 
-    // §8.2 steps 4-6 (same-VM topology): the container command is a trusted
-    // wrapper waiting on a marker under the read-only orientation mount. Start
-    // and adjudicate dockerd, durably record daemon-ready, and only then publish
-    // the marker that lets the untrusted PTY agent process exec. A rejected
-    // daemon never releases the agent and falls into exact teardown below.
-    if (nestedDaemon !== undefined) {
-      await startAppleVmNestedDaemon({ runtime: docker, containerId, nestedDaemon });
+    // Same-VM activation: the container command is a trusted wrapper waiting
+    // on a marker under the read-only orientation mount. The shared bootstrap
+    // adjudicates dockerd, preflights the pinned client, provisions the trusted
+    // selected inner image, records observations, and activates the lease before this
+    // path publishes the marker that releases the untrusted PTY agent.
+    if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
+      await startAppleVmDockerWorkload({
+        runtime: docker,
+        containerId,
+        nestedDaemon,
+        bootstrap: dockerWorkloadBootstrap,
+      });
       if (nestedDaemonReadyMarkerPath === undefined) {
         throw new Error('nested-daemon PTY gate is missing its host readiness marker path');
       }

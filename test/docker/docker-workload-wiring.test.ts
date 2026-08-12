@@ -8,8 +8,8 @@
  * process, and never the fuse. Exercised:
  *   - createSessionContainers ledgers the agent container before create and
  *     observes the runtime-returned ID (harness runtime enforces the order).
- *   - assembleDockerInfrastructure activates the lease exactly once before
- *     returning, and tears it down first on a create failure.
+ *   - the shared same-VM bootstrap activates the lease exactly once before
+ *     assembly returns, and assembly tears it down first on a create failure.
  *   - destroyDockerInfrastructure runs teardown first and skips cleanupContainers
  *     for the ledgered resources.
  *   - ledgerOuterResourceCreate proves the watchdog is fresh before a
@@ -52,6 +52,7 @@ import {
   ADMISSION_CONFIG_HASH,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
+  createTestAppleVmDockerWorkloadBootstrap,
   createEventRuntime,
   createFakeClock,
   createFakeSupervisor,
@@ -138,6 +139,7 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
     beginCaptureSession: () => {},
     endCaptureSession: async () => {},
     dockerWorkload: handle,
+    dockerWorkloadBootstrap: createTestAppleVmDockerWorkloadBootstrap(tempDir),
   };
 }
 
@@ -176,14 +178,14 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
   });
 });
 
-describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 step 4 / §8.3)', () => {
-  it('activates the lease exactly once, after every resource is observed, before returning', async () => {
+describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 / §8.3)', () => {
+  it('returns the lease activated by the shared bootstrap after every resource is observed', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
     const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
     const core = makeCore(runtime.runtime, handle);
 
-    // Admitting until every requested resource is observed AND activate() runs.
+    // Admitting until the shared bootstrap succeeds and activates the lease.
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
 
     const infra = await assembleDockerInfrastructure(core, makeConfig());
@@ -211,6 +213,36 @@ describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 step 4 
 
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
     expect(supervisor.calls.stopRequested).toBe(1);
+  });
+
+  it('refuses activation when the watchdog status disappeared during bootstrap', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }));
+
+    expect(() => handle.activate()).toThrow(/watchdog supervisor status is missing/u);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+  });
+
+  it('refuses activation when the watchdog attestation expired during bootstrap', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const baseSupervisor = createFakeSupervisor({ clock: clock.clock });
+    let attestedStatus: ReturnType<typeof baseSupervisor.readStatus>;
+    const supervisor: FakeSupervisor = {
+      ...baseSupervisor,
+      async launch(options) {
+        const launched = await baseSupervisor.launch(options);
+        attestedStatus = launched.status;
+        return launched;
+      },
+      readStatus: () => attestedStatus,
+    };
+    const handle = await admit(clock, runtime, supervisor);
+    clock.advance(handle.loadedPolicy.policy.staleAfterMs);
+
+    expect(() => handle.activate()).toThrow(/watchdog supervisor heartbeat is stale/u);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
   });
 });
 

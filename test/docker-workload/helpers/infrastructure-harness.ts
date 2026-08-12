@@ -5,7 +5,7 @@
  * without a real container runtime, real daemon, or the implementation fuse.
  */
 
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach } from 'vitest';
@@ -16,6 +16,13 @@ import {
   APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT,
   APPLE_VM_DAEMON_API_DIR_STAT_ARGV,
 } from '../../../src/docker-workload/apple-vm-daemon.js';
+import {
+  APPLE_VM_INNER_DOCKER_CATALOG_DIR,
+  type AppleVmDockerWorkloadBootstrapConfig,
+} from '../../../src/docker-workload/apple-private-docker.js';
+import { loadClientToolchainManifest } from '../../../src/docker-workload/client-toolchain.js';
+import { buildPreloadedImageLabels, loadPreloadedImageCatalog } from '../../../src/docker/preloaded-image-catalog.js';
+import { getFrozenCatalogDir, getFrozenCatalogPath } from '../../../src/docker/preloaded-catalog-paths.js';
 import type { WatchdogSupervisorController } from '../../../src/docker-workload/infrastructure.js';
 import type { ResourceWatchdogSupervisorStatus } from '../../../src/docker-workload/resource-watchdog-supervisor.js';
 import { createMockDocker } from '../../helpers/docker-mocks.js';
@@ -30,8 +37,51 @@ import type {
 export const WATCHDOG_TEMPLATE_PATH = resolve('config/docker-workload/resource-watchdog-policy.json');
 export const WATCHDOG_ENTRYPOINT_PATH = resolve('dist/docker-workload/resource-watchdog-supervisor-main.js');
 
+const FROZEN_DOCKER_CATALOG = loadPreloadedImageCatalog(getFrozenCatalogPath('docker'));
+const FROZEN_CLIENT_TOOLCHAIN = loadClientToolchainManifest(
+  resolve('config/docker-workload/client-toolchain.arm64.json'),
+);
+
+export const TEST_APPLE_VM_DOCKER_WORKLOAD_BOOTSTRAP: AppleVmDockerWorkloadBootstrapConfig = {
+  hostCatalogDirectory: getFrozenCatalogDir(),
+  guestCatalogDirectory: APPLE_VM_INNER_DOCKER_CATALOG_DIR,
+  outerAppleCatalogPath: getFrozenCatalogPath('apple-container'),
+  innerDockerCatalogPath: getFrozenCatalogPath('docker'),
+  selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+  clientToolchainManifestPath: FROZEN_CLIENT_TOOLCHAIN.path,
+};
+
+/** Isolated per-test lease view whose selected archive can be safely retired. */
+export function createTestAppleVmDockerWorkloadBootstrap(
+  parentDirectory: string,
+): AppleVmDockerWorkloadBootstrapConfig {
+  const hostCatalogDirectory = mkdtempSync(join(parentDirectory, 'private-docker-catalog-'));
+  chmodSync(hostCatalogDirectory, 0o700);
+  const outerAppleCatalogPath = join(hostCatalogDirectory, 'preloaded-catalog.apple-container.json');
+  const innerDockerCatalogPath = join(hostCatalogDirectory, 'preloaded-catalog.docker.json');
+  copyFileSync(getFrozenCatalogPath('apple-container'), outerAppleCatalogPath);
+  copyFileSync(getFrozenCatalogPath('docker'), innerDockerCatalogPath);
+  chmodSync(outerAppleCatalogPath, 0o400);
+  chmodSync(innerDockerCatalogPath, 0o400);
+  const selectedImageLogicalName = 'ironcurtain-claude-code:latest';
+  const selected = FROZEN_DOCKER_CATALOG.catalog.images.find(
+    (candidate) => candidate.logicalName === selectedImageLogicalName,
+  );
+  if (selected === undefined) throw new Error(`test catalog is missing ${selectedImageLogicalName}`);
+  writeFileSync(join(hostCatalogDirectory, selected.archive.fileName), '', { mode: 0o400 });
+  return {
+    hostCatalogDirectory,
+    guestCatalogDirectory: APPLE_VM_INNER_DOCKER_CATALOG_DIR,
+    outerAppleCatalogPath,
+    innerDockerCatalogPath,
+    selectedImageLogicalName,
+    clientToolchainManifestPath: FROZEN_CLIENT_TOOLCHAIN.path,
+  };
+}
+
 export const ADMISSION_BINDINGS = {
   catalogSha256: '2'.repeat(64),
+  innerDockerCatalogSha256: '7'.repeat(64),
   profileSha256: '3'.repeat(64),
   toolchainDigest: '6'.repeat(64),
 } as const;
@@ -97,6 +147,55 @@ export const QUALIFIED_DOCKER_INFO = {
  */
 export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExecResult {
   if (argv.includes('info')) return { exitCode: 0, stdout: JSON.stringify(QUALIFIED_DOCKER_INFO), stderr: '' };
+  if (argv.includes('version') && argv.includes('{{json .}}')) {
+    const manifest = FROZEN_CLIENT_TOOLCHAIN.manifest;
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        Client: {
+          Version: manifest.docker.cliVersion,
+          ApiVersion: manifest.docker.clientApiVersion,
+          Os: 'linux',
+          Arch: manifest.architecture,
+        },
+        Server: {
+          Version: manifest.docker.daemonVersion,
+          ApiVersion: manifest.docker.daemonApiVersion,
+          MinAPIVersion: manifest.docker.minimumDaemonApiVersion,
+          Os: 'linux',
+          Arch: manifest.architecture,
+        },
+      }),
+      stderr: '',
+    };
+  }
+  if (argv.includes('buildx')) {
+    return {
+      exitCode: 0,
+      stdout: `github.com/docker/buildx v${FROZEN_CLIENT_TOOLCHAIN.manifest.buildxVersion}\n`,
+      stderr: '',
+    };
+  }
+  if (argv.includes('compose')) {
+    return { exitCode: 0, stdout: `${FROZEN_CLIENT_TOOLCHAIN.manifest.composeVersion}\n`, stderr: '' };
+  }
+  if (argv.includes('image') && argv.includes('inspect')) {
+    const logicalName = argv.at(-1);
+    const entry = FROZEN_DOCKER_CATALOG.catalog.images.find((candidate) => candidate.logicalName === logicalName);
+    if (entry === undefined) return { exitCode: 1, stdout: '', stderr: `No such image: ${logicalName}` };
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify([
+        {
+          Id: entry.runtimeImageId,
+          RepoTags: [entry.logicalName],
+          Config: { Labels: buildPreloadedImageLabels(entry, FROZEN_DOCKER_CATALOG.catalog.generation) },
+          Created: entry.provenance.createdAt,
+        },
+      ]),
+      stderr: '',
+    };
+  }
   if (argv[0] === APPLE_VM_DAEMON_API_DIR_STAT_ARGV[0]) {
     return { exitCode: 0, stdout: `${APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT}\n`, stderr: '' };
   }

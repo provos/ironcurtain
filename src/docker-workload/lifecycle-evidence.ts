@@ -48,6 +48,7 @@ export const DAEMON_READY_ATTESTATION = 'bundle-local-advisory';
 
 const leaseStatusSchema = z.enum(['admitting', 'active', 'revoking', 'closed', 'incident']);
 const enforcementStatusSchema = z.enum(['enforced', 'observed', 'unsupported']);
+const softwareVersionSchema = z.string().min(1).max(128);
 
 const expandedCreateSchema = z
   .object({
@@ -124,6 +125,30 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
     .strict(),
   z
     .object({ ...baseEventShape, kind: z.literal('lease-transition'), from: leaseStatusSchema, to: leaseStatusSchema })
+    .strict(),
+  z
+    .object({
+      ...baseEventShape,
+      kind: z.literal('private-docker-bootstrap'),
+      attestation: z.literal(DAEMON_READY_ATTESTATION),
+      innerDockerCatalogSha256: sha256Schema,
+      catalogGeneration: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u),
+      toolchainDigest: sha256Schema,
+      toolchain: z
+        .object({
+          dockerCli: softwareVersionSchema,
+          dockerDaemon: softwareVersionSchema,
+          buildx: softwareVersionSchema,
+          compose: softwareVersionSchema,
+        })
+        .strict(),
+      image: z
+        .object({
+          logicalName: z.string().min(1).max(255),
+          immutableImageId: runtimeIdentitySchema,
+        })
+        .strict(),
+    })
     .strict(),
   z
     .object({

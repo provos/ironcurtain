@@ -30,6 +30,7 @@ import {
   resolveNestedDaemonBundle,
 } from '../../src/docker-workload/session-daemon.js';
 import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
+import { APPLE_VM_INNER_DOCKER_CATALOG_DIR } from '../../src/docker-workload/apple-private-docker.js';
 import { resolveDockerWorkloadAdmissionBindings } from '../../src/docker-workload/admission-bindings.js';
 import { loadPreloadedImageCatalog } from '../../src/docker/preloaded-image-catalog.js';
 import { getFrozenProfileCeilingPath } from '../../src/docker/docker-workload-paths.js';
@@ -62,6 +63,7 @@ import {
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
   createEventRuntime,
+  createTestAppleVmDockerWorkloadBootstrap,
   createFakeClock,
   createFakeSupervisor,
   respondHealthyAppleVmDaemon,
@@ -169,6 +171,8 @@ function makeCore(
     beginCaptureSession: () => {},
     endCaptureSession: async () => {},
     dockerWorkload: overrides.dockerWorkload,
+    dockerWorkloadBootstrap:
+      overrides.dockerWorkload === undefined ? undefined : createTestAppleVmDockerWorkloadBootstrap(tempDir),
   };
 }
 
@@ -346,7 +350,7 @@ describe('nested daemon — PTY agent readiness gate (§8.2 steps 5-6)', () => {
 });
 
 describe('nested daemon — feature-off equivalence', () => {
-  it('changes nothing but the ledgered name, ownership labels, and DOCKER_HOST', async () => {
+  it('adds only the admitted resources while leaving the feature-off create unchanged', async () => {
     const { runtime: enabledRuntime, handle } = await admitBundle();
     const enabled = capturingRuntime(enabledRuntime);
     await createSessionContainers(makeCore(enabled.runtime, { dockerWorkload: handle }), makeConfig());
@@ -363,8 +367,16 @@ describe('nested daemon — feature-off equivalence', () => {
         JSON.stringify(enabled.config()[key as keyof DockerContainerConfig]) !==
         JSON.stringify(off.config()[key as keyof DockerContainerConfig]),
     );
-    expect(differing.sort()).toEqual(['env', 'labels', 'name']);
+    expect(differing.sort()).toEqual(['env', 'labels', 'mounts', 'name']);
     expect(Object.keys(off.config().env)).not.toContain('DOCKER_HOST');
+    expect(off.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_INNER_DOCKER_CATALOG_DIR }),
+    );
+    expect(enabled.config().mounts).toContainEqual({
+      source: expect.stringContaining('private-docker-catalog-'),
+      target: APPLE_VM_INNER_DOCKER_CATALOG_DIR,
+      readonly: true,
+    });
     // ...and DOCKER_HOST is the ONLY environment difference.
     const enabledEnvRest = Object.fromEntries(
       Object.entries(enabled.config().env).filter(([key]) => key !== 'DOCKER_HOST'),
@@ -421,6 +433,14 @@ describe('nested daemon — daemon-ready evidence (§8.4)', () => {
       securityOptions: [...QUALIFIED_DOCKER_INFO.SecurityOptions],
       serverVersion: QUALIFIED_DOCKER_INFO.ServerVersion,
     });
+    expect(audit.events).toContainEqual(
+      expect.objectContaining({
+        kind: 'private-docker-bootstrap',
+        innerDockerCatalogSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        image: { logicalName: 'ironcurtain-claude-code:latest', immutableImageId: expect.any(String) },
+      }),
+    );
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
   });
 
   it('emits nothing when the daemon is rejected', async () => {
@@ -443,32 +463,47 @@ describe('nested daemon — admission bindings are the real operational inputs',
   it('binds the catalog hash and base-role toolchain digest from the catalog the session will use', () => {
     const catalogPath = getFrozenCatalogPath('apple-container');
     const catalog = loadPreloadedImageCatalog(catalogPath);
-    const base = catalog.catalog.images.find((image) => image.logicalName === 'ironcurtain-base:latest');
+    const selected = catalog.catalog.images.find((image) => image.logicalName === 'ironcurtain-claude-code:latest');
 
-    const bindings = resolveDockerWorkloadAdmissionBindings({ catalogPath });
+    const innerDockerCatalogPath = getFrozenCatalogPath('docker');
+    const bindings = resolveDockerWorkloadAdmissionBindings({
+      catalogPath,
+      innerDockerCatalogPath,
+      selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+    });
 
     expect(bindings.catalogSha256).toBe(sha256Hex(readFileSync(catalogPath)));
-    expect(bindings.toolchainDigest).toBe(base?.toolchainDigest);
+    expect(bindings.innerDockerCatalogSha256).toBe(sha256Hex(readFileSync(innerDockerCatalogPath)));
+    expect(bindings.toolchainDigest).toBe(selected?.toolchainDigest);
   });
 
   it('binds the frozen profile ceiling by its exact bytes', () => {
     const bindings = resolveDockerWorkloadAdmissionBindings({
       catalogPath: getFrozenCatalogPath('apple-container'),
+      innerDockerCatalogPath: getFrozenCatalogPath('docker'),
+      selectedImageLogicalName: 'ironcurtain-claude-code:latest',
     });
 
     expect(bindings.profileSha256).toBe(sha256Hex(readFileSync(getFrozenProfileCeilingPath())));
   });
 
-  it('fails closed when the catalog lacks the base role it binds', () => {
-    const truncated = join(tempDir, 'catalog-without-base.json');
-    const catalog = JSON.parse(readFileSync(getFrozenCatalogPath('apple-container'), 'utf8')) as {
-      images: { logicalName: string }[];
+  it('fails closed when the catalog lacks the selected agent image', () => {
+    const withoutSelected = (runtimeKind: 'apple-container' | 'docker'): string => {
+      const truncated = join(tempDir, `catalog-without-selected.${runtimeKind}.json`);
+      const catalog = JSON.parse(readFileSync(getFrozenCatalogPath(runtimeKind), 'utf8')) as {
+        images: { logicalName: string }[];
+      };
+      catalog.images = catalog.images.filter((image) => image.logicalName !== 'ironcurtain-claude-code:latest');
+      writeFileSync(truncated, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600 });
+      return truncated;
     };
-    catalog.images = catalog.images.filter((image) => image.logicalName !== 'ironcurtain-base:latest');
-    writeFileSync(truncated, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600 });
 
-    expect(() => resolveDockerWorkloadAdmissionBindings({ catalogPath: truncated })).toThrow(
-      /missing the ironcurtain-base:latest role/u,
-    );
+    expect(() =>
+      resolveDockerWorkloadAdmissionBindings({
+        catalogPath: withoutSelected('apple-container'),
+        innerDockerCatalogPath: withoutSelected('docker'),
+        selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+      }),
+    ).toThrow(/missing the selected image ironcurtain-claude-code:latest/u);
   });
 });

@@ -1,296 +1,113 @@
-# Secure nested Docker evidence probes
+# Secure nested Docker retained probes
 
-This directory contains the timeboxed Phase 0A evidence protocol and exploratory Phase 0B runtime
-probes from `docs/designs/secure-nested-runtime-implementation-plan.md`. Phase 0A deliberately uses
-a fake file-backed runtime. Phase 0B tests individual Docker Desktop and Apple `container`
-primitives under hard stop gates. Passing any probe does not qualify a backend or prove native Linux
-or product feasibility.
+This directory contains only the platform probes and capture tools that still have a future use.
+It is not a second test suite and no result here qualifies a backend. Product behavior belongs in
+`src/docker-workload`, product tests, and `npm run qualify:apple`.
 
-Run all five required self-tests:
+## Retention ledger
 
-```sh
-node scripts/spikes/secure-nested-docker/self-test.mjs
-```
+| Area                                                                         | Status        | Why                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 0A fake-runtime ledger, recovery, redaction, and tamper harness        | Retired       | The real lease, lock, reconciliation, lifecycle-evidence, and watchdog paths now have production tests. The design also rejects commit/hash-bound qualification bookkeeping (§16.12).                      |
+| Apple 0B inventory, rootless, path, relay, resource, disk, and fault runners | Retired       | They were one-off executors for a completed primitive study, used superseded CA-baked images, and cannot qualify the current product topology. The durable results and evidence IDs remain in design §9.4. |
+| Docker Desktop P0/P2 and private-API/functional probes                       | Retained      | Baseline Desktop is unsupported at a documented stop gate. These are the exact replay tools required if a future decision explicitly reopens the profile ceiling.                                          |
+| Docker Desktop runtime shim                                                  | Retained      | The functional Desktop probe uses it to select runc's `--no-new-keyring` mode without admitting `keyctl`.                                                                                                  |
+| Profile-ceiling and probe-evidence verifiers                                 | Retained      | They validate the retained Desktop replay inputs and outputs.                                                                                                                                              |
+| Build-egress capture                                                         | Retained      | The frozen manifest is tied to the Dockerfiles' fetch behavior. A cold-cache recapture is still needed when those inputs change.                                                                           |
+| Public-registry live gate                                                    | Retained      | It is the only real-registry exercise of the anonymous token and CDN-redirect flow. Keep it until a product-entrypoint 0C integration test replaces it.                                                    |
+| Native Linux                                                                 | No runner yet | Docker Desktop evidence is not Linux evidence. A native-Linux runner must be added when a supported distro/kernel host becomes available.                                                                  |
 
-The command creates host-owned evidence beneath the operating system temporary directory, outside
-the repository, and prints that directory. It covers a benign mutation, interrupt cleanup,
-`SIGKILL` in the create/ID-record window followed by the checked-in recovery command, environment
-redaction, and schema/tamper rejection. Each valid run has a canonical SHA-256 manifest and two
-empty cleanup inventories.
+Deleted executors are intentionally not kept as historical code. The design is the record of their
+findings; source control is the record of their implementation.
 
-The standalone recovery command requires all identities explicitly:
+## Docker Desktop: retained stop-gate replay
 
-```sh
-node scripts/spikes/secure-nested-docker/recover.mjs \
-  --evidence-dir /absolute/outside-workspace/evidence \
-  --state-dir /absolute/outside-workspace/state \
-  --workspace-root /absolute/workspace \
-  --run-id phase0a-example-0001
-```
+Do not run these probes to make an unsupported backend appear supported. The existing result is:
 
-Never point the harness at production resources. Phase 0B must replace the fake runtime with the
-specific, stop-gated Docker Desktop and Apple probes defined in the design.
+- P0 denies unprivileged user-namespace creation.
+- P2 plus only outer `SETUID`/`SETGID` and `NoNewPrivs=false` boots the rootless daemon.
+- A named-volume UDS gives the authorized sibling private daemon access while excluding a sibling
+  without the volume.
+- The functional probe loads the staged image, then runc fails to mount procfs because the outer
+  Docker container's masked/read-only proc paths make the nested procfs too revealing.
+- Docker's `systempaths=unconfined` override is outside the frozen ceiling, so baseline Docker
+  Desktop stopped before DD-PROXY.
 
-The first Docker Desktop prerequisite probe is intentionally narrower than the full Phase 0B track:
+The detailed evidence IDs and adjudication are in design §9.3. Reopening this track requires an
+explicit review of the ceiling followed by a fresh P0-P4 sequence, not another ad hoc delta.
 
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-dd-p0.mjs
-node scripts/spikes/secure-nested-docker/verify-probe-evidence.mjs \
-  --evidence-dir /path/printed-by-the-probe
-```
-
-It uses the pinned arm64 `docker:29.2.1-dind-rootless` artifact only to test an unprivileged user
-namespace under P0-STRICT. It does not start `dockerd`, attach a proxy network, or qualify a backend.
-The container is created with no network, no capabilities, no devices or outer privilege, a
-read-only root, bounded tmpfs, and outer CPU/memory/PID limits. Cleanup validates the exact returned
-ID and ownership labels, removes its anonymous volumes, and records two empty inventories.
-
-After P0 produces a denial, the same recorder can run the cumulative one-artifact P2 probe:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-dd-p0.mjs --profile-level p2
-```
-
-The checked-in profile is hash-pinned by `config/docker-workload/profile-ceiling.json`, is derived
-from Moby's tagged `seccomp/v0.2.1` default, and currently adds only the denial-proven `clone`,
-`unshare`, `mount`, `setns`, `pivot_root`, and `umount2` syscalls. The subset verifier proves that removing those tagged
-entries produces the pinned canonical Moby profile and that every addition is declared, eligible,
-and evidence-bound:
+First verify the checked-in ceiling against its canonical Moby baseline:
 
 ```sh
 node scripts/spikes/secure-nested-docker/verify-profile-ceiling.mjs
 ```
 
-A hash or subset mismatch is terminal before container creation.
-
-Once the namespace prerequisite passes, daemon boot uses the identical cumulative profile and outer
-envelope:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-dd-p0.mjs --profile-level p2 --probe daemon
-```
-
-This boot probe explicitly selects RootlessKit `--net=none`, uses a private UDS, `vfs`, no
-bridge/iptables, and no registry or external network. It records readiness, daemon logs on failure,
-outer inspect, and exact cleanup; it still does not qualify Docker functionality or the DD-PROXY
-topology.
-
-P1 subordinate-ID helpers require a separately visible probe mode because `no-new-privileges`
-prevents their setuid transition:
+Then run each candidate with an explicit run ID and evidence directory outside the workspace:
 
 ```sh
 node scripts/spikes/secure-nested-docker/phase0b-dd-p0.mjs \
-  --profile-level p2 --idmap-mode setuid-helpers --probe daemon
-```
+  --profile-level p2 --idmap-mode cap-setid --probe daemon \
+  --run-id dd-daemon-review-0001 \
+  --evidence-dir /absolute/outside-workspace/dd-daemon-review-0001
 
-This mode still drops every outer capability. Evidence shows that it is insufficient: the ID-map
-helpers require `SETUID`/`SETGID` in the outer capability bounding set. The namespace probe
-inventories all setuid and file-capability binaries; a purpose-built daemon image must contain no
-unreviewed setuid executable.
-
-The next explicitly named P1 candidate grants only those two mapping capabilities:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-dd-p0.mjs \
-  --profile-level p2 --idmap-mode cap-setid --probe daemon
-```
-
-This is not a generic capability escape hatch: every other outer capability remains dropped and the
-profile ceiling forbids the listed hard-stop capabilities. The cumulative candidate successfully
-boots the daemon only with `NoNewPrivs=false`, those two capabilities, and the one P2 artifact. This
-is exploratory stock-image evidence, not approval of a release image or backend.
-
-The next checked-in probe exercises DD-H2 with a trusted one-shot API-volume initializer, the same
-rootless daemon profile, and two otherwise equivalent sibling clients:
-
-```sh
 node scripts/spikes/secure-nested-docker/phase0b-dd-private-api.mjs \
-  --run-id dd-h2-private-api-example \
-  --evidence-dir /absolute/outside-workspace/dd-h2-private-api-example
-```
+  --run-id dd-private-api-review-0001 \
+  --evidence-dir /absolute/outside-workspace/dd-private-api-review-0001
 
-The authorized sibling receives the named API volume read-only, must connect to the private UDS,
-and must fail to create a file beside it. The unauthorized sibling receives no API mount and must
-fail to find or connect to the socket. The probe also requires no TCP listener, inspects every
-identity before deletion, removes the exact named and anonymous volumes, and records two empty
-inventories. Passing DD-H2 still proves nothing about functional inner containers, paths, boundary
-negatives, DD-PROXY, Apple, 0F, 0C, or product integration.
-
-The functional mode continues the denial-led sequence through staged image load and the first inner
-container:
-
-```sh
 node scripts/spikes/secure-nested-docker/phase0b-dd-private-api.mjs \
   --probe functional \
-  --run-id dd-h3-functional-example \
-  --evidence-dir /absolute/outside-workspace/dd-h3-functional-example
-```
+  --run-id dd-functional-review-0001 \
+  --evidence-dir /absolute/outside-workspace/dd-functional-review-0001
 
-The current cumulative result is a deliberate hard stop, not a request for another seccomp rule.
-Image load succeeds, but Linux rejects the inner procfs mount because Docker's outer `/proc/*`
-masks make every visible procfs incomplete. Rootless runc requires at least one fully visible
-procfs; clearing only one mask cannot satisfy the kernel. Docker's broad
-`systempaths=unconfined`/empty proc-mask override and a host procfs bind are both outside the frozen
-ceiling. Do not use either as a diagnostic fallback. The verified `dd-h3-functional-0004` evidence
-therefore classifies baseline Docker Desktop as not feasible under the current topology; continue
-with the independent Apple track or restart profile review explicitly.
-
-The Apple track is independent. Its prerequisite inventory creates one disposable Apple VM with
-`--network none`, no DNS, no host mounts, a read-only root, no capabilities, and explicit VM
-CPU/memory. It tests unprivileged user and mount namespaces before deleting the exact VM:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-ac-inventory.mjs \
-  --run-id ac-h1-inventory-example \
-  --evidence-dir /absolute/outside-workspace/ac-h1-inventory-example
-```
-
-The rootless probe expects the pinned Docker 29.2.1 rootless artifact to be present in Apple
-`container`'s image store. Daemon mode proves only boot, identity, the VM-private UDS, `vfs`, and
-egress negatives:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --run-id ac-rootless-daemon-example \
-  --evidence-dir /absolute/outside-workspace/ac-rootless-daemon-example
-```
-
-Functional mode additionally stages one immutable Alpine archive through a read-only exact mount
-and exercises load, run/exec, bind, volume, offline BuildKit build, internal target/scanner traffic,
-negative registry/DNS/direct-IP access, and exact cleanup:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --probe functional \
-  --run-id ac-rootless-functional-example \
-  --evidence-dir /absolute/outside-workspace/ac-rootless-functional-example
 node scripts/spikes/secure-nested-docker/verify-probe-evidence.mjs \
-  --evidence-dir /absolute/outside-workspace/ac-rootless-functional-example
+  --evidence-dir /absolute/outside-workspace/dd-functional-review-0001
 ```
 
-The verified `ac-rootless-functional-0003` run supports this primitive matrix without adding a
-rootful bootstrap. Docker reports no rootless cgroup driver or functional inner resource limits,
-and warns that IPv4 forwarding is disabled; same-bridge traffic works, but routed inner networks
-remain unproven. This evidence does not qualify Apple or prove VM-boundary, resource, disk, fault,
-product-entrypoint, 0F, or 0C gates.
+Each probe owns only objects labeled with its run identity, inspects exact IDs before deletion,
+removes its volumes, and records two empty inventories. Passing it still proves nothing about
+DD-PROXY, native Linux, the product entrypoint, or backend qualification.
 
-Additional Apple modes reuse the same pinned functional baseline and add one bounded concern at a
-time:
+## Native Linux: future work
+
+There is deliberately no native-Linux executor in this directory. When a supported Linux host is
+available, build a new runner around the §9.7 LX-A/LX-B matrices and record the exact distro,
+kernel, Engine, cgroup delegation, LSM, seccomp, storage driver, and resource behavior. The retained
+Desktop scripts may inform its structure, but their VM kernel, proc masks, and Docker Desktop
+network behavior must not be copied as Linux assumptions.
+
+## Apple: durable results and current gate
+
+The retired Apple executors established the primitive findings recorded in design §9.4:
+
+| Evidence                                                 | Durable finding                                                                                                                                 |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ac-h1-inventory-0001`                                   | The guest supports unprivileged user/mount namespaces under `--network none`; direct DNS/IP egress is absent.                                   |
+| `ac-rootless-daemon-0001`, `ac-rootless-functional-0003` | Docker 29.2.1 rootless boots with `vfs` and supports offline load/run/exec/build, exact binds, volumes, and same-bridge target/scanner traffic. |
+| `ac-rootless-boundary-0002`                              | Inner privileged/host-namespace use remains inside the disposable VM; nested port publication reaches neither macOS nor another isolated VM.    |
+| `ac-rootless-resource-0001`, `ac-rootless-disk-0002`     | VM CPU/memory are aggregate enforcement; guest PID limits are advisory; sparse-disk growth requires the host watchdog and exact VM deletion.    |
+| Four fault runs                                          | Workload, client, daemon, and exact-VM failure cleanup preserve the unrelated VM and end with two empty inventories.                            |
+| `ac-rootless-path-0002`, `ac-rootless-relay-0005`        | Exact workspace/dependency mounts and host-listens/guest-connects per-file socket relay work with exact cleanup.                                |
+
+Those runs do not prove the current product entrypoint, two-MITM provider path, exhaustive vsock
+negatives, or watchdog integration. The current checkout's Apple release command covers only the
+manager/runtime suites implemented so far:
 
 ```sh
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --probe boundary --run-id ac-boundary-example \
-  --evidence-dir /absolute/outside-workspace/ac-boundary-example
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --probe resource --run-id ac-resource-example \
-  --evidence-dir /absolute/outside-workspace/ac-resource-example
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --probe disk --run-id ac-disk-example \
-  --evidence-dir /absolute/outside-workspace/ac-disk-example
+npm run qualify:apple
 ```
 
-`boundary` stages a pinned arm64 `alpine/socat` image, creates a separate network-isolated Apple VM,
-tests an inner privileged/host-namespace workload, samples macOS host-vsock ports, and proves a
-nested publication reaches neither macOS nor the peer VM. `resource` records Apple stats during
-bounded CPU, 512 MiB memory, and 128-process pressure while checking the peer VM. `disk` measures
-only the exact owned Apple bundle's sparse rootfs before/during/after a 256 MiB inner layer and after
-exact VM deletion; override a nondefault service root with `--container-app-root`.
+This command is not secure-nested-runtime Phase 0C qualification and does not open the admission
+fuse. Add the missing platform and product-entrypoint gates to the release suite instead of
+restoring an exploratory Apple runner; admission remains closed until those gates pass.
 
-Fault modes are separate fresh runs because daemon death and VM deletion are terminal:
+## Build-egress capture
 
-```sh
-for mode in workload client-disconnect daemon vm-delete; do
-  node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-    --probe fault --fault-mode "$mode" --run-id "ac-fault-$mode-example" \
-    --evidence-dir "/absolute/outside-workspace/ac-fault-$mode-example"
-done
-```
+`build-egress-capture.mjs` records the destinations and paths fetched by cold-cache builds of the
+current Dockerfiles. It is a policy-review input, not a backend probe. Recapture when a Dockerfile,
+base/frontend, package source, or build tool changes, or before qualifying the production
+build-egress path.
 
-Verified evidence currently exists for `ac-rootless-boundary-0002`,
-`ac-rootless-resource-0001`, `ac-rootless-disk-0002`, and the four fault runs recorded in the design.
-The 512 GiB logical sparse rootfs has no Apple CLI per-VM disk quota; allocated blocks persist after
-inner deletion, so observed-disk preview still requires the Phase 0F pre-daemon host watchdog.
-
-Path and relay probes exercise the remaining Apple sharing primitives independently:
-
-```sh
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --probe path --run-id ac-path-example \
-  --evidence-dir /absolute/outside-workspace/ac-path-example
-node scripts/spikes/secure-nested-docker/phase0b-ac-rootless.mjs \
-  --probe relay --run-id ac-relay-example \
-  --evidence-dir /absolute/outside-workspace/ac-relay-example
-```
-
-`path` mounts one exact temporary workspace and a separate Apple ext4 volume over
-`/workspace/node_modules`, then proves recursive inner-bind path equivalence, Linux dependency
-visibility, macOS dependency hiding, and exact cleanup. `relay` starts a metadata-only synthetic host
-service beneath a private short-path directory, mounts its exact socket file read-only so Apple
-converts it to a host-listens/guest-connects vsock relay, and makes a request from a network-disabled
-nested child. It then stops the exact relay and requires the application response to fail. The
-source socket is mode `0666` because rootless children use subordinate UIDs; its host parent is mode
-`0700`. Do not replace the mount with `--publish-socket`, whose direction is guest-listens and
-host-connects.
-
-Verified evidence currently exists for `ac-rootless-path-0002` and
-`ac-rootless-relay-0005`. These modes still do not prove exhaustive vsock listeners, the real
-two-MITM/provider protocol, product watchdog, product entrypoint, the Phase 0F backend release suite, or
-0C qualification.
-
-## Phase 0F narrow build-egress cold-cache capture
-
-`build-egress-capture.mjs` records the complete endpoint set that a cold-cache rebuild of the
-current IronCurtain Dockerfiles fetches, so a reviewer can freeze
-`config/docker-workload/build-egress-manifest.json`. It stands up a recording proxy that is the
-build's ONLY egress route, drives `docker build --no-cache` with a fresh builder, and emits a DRAFT
-`build-egress-manifest.draft.json` (top-level `draft: true`, deliberately NOT a loadable frozen
-manifest) and a `capture-evidence.json` summary. A tool that bypasses the proxy fails to connect;
-those failures land in the per-Dockerfile build logs and under `directConnectSuspected`, and any
-endpoint fetched but not recorded is by construction a direct connection — so the recorded set is
-the complete mediated set. Records are attributed to the Dockerfile under build (builds run
-sequentially).
-
-The recorder has three modes:
-
-- **tunnel (default for `--build`)** — CONNECT requests are recorded as
-  scheme/host/port/byte-counts/duration and then blind-piped to the real destination. No TLS
-  interception, so the production Dockerfiles need no capture CA (they must not be modified) and
-  HTTPS paths are invisible: the draft marks these endpoints `pathVisibility: 'connect-only'`,
-  telling the reviewer that path shapes must be decided at freeze time. Plain HTTP through the
-  proxy (apt via `http://deb.debian.org`) is still recorded with full method/host/path and redirect
-  hops (`pathVisibility: 'full'`). DNS stays host-side: the proxy resolves and connects to the real
-  host; the build container only ever names destinations. A CONNECT that fails to resolve/connect
-  is recorded under `failedFetchAttempts` (evidence), not a crash.
-- **terminate-tls (`--terminate-tls`; used by `--smoke`)** — the proxy MITMs TLS with an ephemeral
-  capture CA and records full HTTPS paths. Only usable against images that already trust the capture
-  CA; against the unmodified production Dockerfiles every handshake fails and every endpoint is
-  connect-only, so this bare mode is kept for future capture-CA-trusting images and the smoke path.
-- **terminate-tls + CA injection (`--ca-inject`; implies `--terminate-tls`)** — the way to get real
-  per-host HTTPS path prefixes from the current production Dockerfiles **without editing them**. For
-  each target the harness generates a per-target _capture overlay_ Dockerfile under
-  `<evidence-dir>/overlays`: the original text verbatim, with a CA-trust preamble injected after each
-  non-`scratch` `FROM` via BuildKit heredocs (`# syntax=docker/dockerfile:1`; no build-context file
-  needed). The preamble drops the ephemeral capture CA into the system trust store, runs
-  `update-ca-certificates`, and `ENV`s the full trust set (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
-  `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `PIP_CERT`, `REQUESTS_CA_BUNDLE`, `CARGO_HTTP_CAINFO`) plus the
-  proxy env and the apt proxy/CaInfo config. The build runs against the **original** context
-  (`docker build -f <overlay>`) so every `COPY` in the production Dockerfile still resolves. Tools
-  that honor the system CA (curl, apt, npm/node, cargo, pip, git, playwright) then complete the MITM
-  handshake and their full paths are recorded (`pathVisibility: 'full'`). A tool with a
-  statically-pinned trust store refuses the capture CA — its handshake fails, the endpoint is
-  recorded connect-only plus a `failedFetchAttempts` note naming the host, and the build continues.
-  Partial path visibility is an expected outcome, not an error.
-
-macOS Docker Desktop reachability: the proxy listens on `127.0.0.1` host-side, but RUN steps
-execute inside build containers where `127.0.0.1` is the container itself, so the proxy URL passed
-via build args uses `host.docker.internal` (Docker Desktop's alias for the host). Override with
-`--proxy-host` — on native Linux Docker Engine there is no `host.docker.internal` by default; pass
-the docker0 gateway, typically `--proxy-host 172.17.0.1`.
-
-Validate the recorder → synthesizer → evidence plumbing without Docker (`--smoke` exercises the
-terminate-TLS recorder; `--smoke-tunnel` exercises the blind CONNECT tunnel against a self-signed
-local HTTPS upstream — the client pins the upstream's own cert, so a successful handshake proves
-the proxy did not intercept — plus one plain-HTTP fetch and one recorded failed CONNECT):
+Validate its recorder and synthesizer without public network access:
 
 ```sh
 node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke \
@@ -299,75 +116,39 @@ node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke-tunnel
   --evidence-dir /absolute/outside-workspace/build-egress-smoke-tunnel
 ```
 
-The full cold-cache capture is a later operator-supervised validation step (a real build reaches the
-public internet through the proxy). Dockerfiles are grouped by their build **context** — the context
-is the directory containing the files each Dockerfile `COPY`s, exactly as the live build selects it
-(`src/docker/preloaded-catalog-sources.ts`): the base and agent Dockerfiles share `docker`, while the
-Go/scratch workload images each use their own subdirectory. Tunnel mode (host+port only for HTTPS):
+For a reviewed cold-cache run, group Dockerfiles by their real build context. Tunnel mode records
+HTTPS hosts/ports and full plain-HTTP paths:
 
 ```sh
 node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build \
   --evidence-dir /absolute/outside-workspace/build-egress-capture \
   --repo-root /absolute/path/to/ironcurtain \
-  --dockerfile docker/Dockerfile.base.arm64 --dockerfile docker/Dockerfile.goose --context docker
-```
-
-Terminate-TLS with CA injection (real per-host HTTPS **path prefixes**, one invocation per context
-group). Because `--pull=false` keeps base-image resolution off the RUN-step path, pre-pull the
-base images and BuildKit frontends the Dockerfiles reference first (this is the daemon-layer
-base-image/frontend seam, inventoried separately from RUN-step egress): `docker pull node:22-trixie`,
-the digest-pinned `golang:1.24-bookworm@sha256:…` and `docker@sha256:…` bases, and `docker pull
-docker/dockerfile:1` (plus the pinned `docker/dockerfile:1.7@sha256:…` the Go Dockerfiles pin). Then:
-
-```sh
-node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build --ca-inject \
-  --evidence-dir /absolute/outside-workspace/build-egress-capture-tls/context-docker \
-  --repo-root /absolute/path/to/ironcurtain --context docker \
+  --context docker \
   --dockerfile docker/Dockerfile.base.arm64 \
-  --dockerfile docker/Dockerfile.claude-code \
-  --dockerfile docker/Dockerfile.codex \
-  --dockerfile docker/Dockerfile.goose
-# ...then one invocation each for the Go/scratch images, e.g.:
-node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build --ca-inject \
-  --evidence-dir /absolute/outside-workspace/build-egress-capture-tls/helper \
-  --repo-root /absolute/path/to/ironcurtain --context docker/docker-workload/helper \
-  --dockerfile docker/docker-workload/helper/Dockerfile
+  --dockerfile docker/Dockerfile.claude-code
 ```
 
-The `--ca-inject` draft marks each endpoint `pathVisibility: 'full'` with the observed path prefixes
-where the tool trusted the capture CA, and `'connect-only'` (with a `failedFetchAttempts` note) where
-the tool pinned its own trust store. Overlays are written to `<evidence-dir>/overlays` for audit.
+Use `--ca-inject` to generate audit overlays and capture HTTPS path prefixes without modifying the
+production Dockerfiles. Pre-pull their base images and Dockerfile frontends because those daemon
+fetches are outside RUN-step proxy capture. On Docker Desktop the default proxy host is
+`host.docker.internal`; on native Linux pass the actual bridge gateway with `--proxy-host`.
 
-The draft is an input to review, not a frozen artifact. A human must pin every fetched artifact,
-choose each rule's BuildKit/frontend/base-image/RUN seam, decide path shapes for every
-`connect-only` endpoint, and transform the draft into the strict frozen manifest that
-`src/docker-workload/build-egress-policy.ts` loads. Capturing does not freeze, qualify a backend,
-or make a network-dependent build reproducible. Note that `FROM` base-image and Dockerfile-frontend
-pulls happen at the daemon layer and can bypass the proxy — those seams are inventoried separately,
-not by this recorder.
+The generated draft must still receive human review: pin fetched artifacts, classify every
+BuildKit/base/RUN seam, decide every connect-only path shape, and update
+`config/docker-workload/build-egress-manifest.json`. Capture does not freeze policy or make a
+network build reproducible.
 
-## Phase 0C workload-registry live gate
+## Public-registry live gate
 
-`registry-live-gate.ts` drives the production registry-egress proxy seam
-(`handleRegistryEgressRequest`, `src/docker/registry-egress-proxy.ts`) with a **frozen**
-manifest and a real `createDirectOutboundTransport` against Docker Hub's anonymous pull
-path. It plays the Docker daemon: it performs the anonymous `401 -> token -> retry` dance
-itself and follows the registry's derived CDN redirect through the proxy. No credential
-exists anywhere — the bearer token is obtained anonymously through the mediated path, per
-§6.4. Exit 0 = every positive and negative gate passed.
+`registry-live-gate.ts` drives the production registry-egress seam against anonymous Docker Hub and
+GHCR pulls. It covers the `401 -> anonymous token -> retry` flow, by-digest manifests, CDN-derived
+blob redirects, delivered-blob digest verification, provenance, and fail-closed negatives for an
+unlisted host, upload, enumeration, and Basic credentials.
 
 ```sh
 npx tsx scripts/spikes/secure-nested-docker/registry-live-gate.ts
 ```
 
-Positives (live): api-version probe, anonymous tag manifest pull (token dance), by-digest
-image manifest pull, blob pull that follows the registry `307` to an unlisted CDN as a
-derived redirect, content-addressed digest match on the delivered blob, and provenance that
-retains the requested digest across the redirect (`docker-hub-registry:cdn`). Negatives
-(live, fail-closed with zero unmediated egress): unlisted host, blob-upload (push), tags
-and catalog enumeration, and a `Basic` Authorization scheme — all `403`.
-
-This validates the §16.6 controls end-to-end against a real registry. It is not itself the
-manifest freeze: freezing the checked-in `config/docker-workload/registry-egress-manifest.json`
-(flipping `status` to `frozen`) remains a deliberate 0C step after the origin/ceiling review
-and the operator decision on the anonymous bearer flow.
+The last recorded run passed all 16 checks for both configured origins. Because it uses live public
+services, rerun it only when reviewing registry policy/protocol changes or replacing it with the
+product-entrypoint 0C test. It does not itself qualify a backend.
