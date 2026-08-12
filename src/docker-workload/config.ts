@@ -115,16 +115,40 @@ export function dockerWorkloadConfigHash(config: ResolvedDockerWorkloadConfig): 
 }
 
 /**
- * Temporary admission fuse while Phase 0C has qualified no concrete variant.
- * Keeping it at the first image/runtime boundary makes opt-in fail closed
- * without changing ordinary disabled sessions. Remove it only after the
- * backend's product-acceptance gates pass; session admission then verifies the
- * operational bindings it consumes plus live preflight, never a release report.
+ * Admit only the Mac developer slice whose complete runtime path is currently
+ * implemented. The caller resolves `auto` first, then invokes this guard before
+ * any feature-attributable runtime, image, catalog, proxy, lease, or filesystem
+ * provisioning. Operational artifacts are verified later by their owning
+ * seams; this guard deliberately contains no release/commit bookkeeping.
  */
-export function assertDockerWorkloadImplementationAvailable(config: ResolvedDockerWorkloadConfig | undefined): void {
-  if (config?.enabled === true) {
+export function assertDockerWorkloadVariantAdmitted(
+  config: ResolvedDockerWorkloadConfig | undefined,
+  resolvedRuntimeKind: 'docker' | 'apple-container',
+): void {
+  if (config?.enabled !== true) return;
+  const admitted =
+    resolvedRuntimeKind === 'apple-container' &&
+    (config.backend === 'auto' || config.backend === 'apple-container') &&
+    config.imageIngress === 'preloaded-only' &&
+    config.buildEgress === 'disabled' &&
+    !config.resources.pids.required &&
+    config.resources.diskMb === null &&
+    config.acceptObservedDiskRisk;
+  if (!admitted) {
     throw new Error(
-      'secure nested Docker is not implementation-qualified on any backend; no image, relay, or daemon action was performed',
+      'secure nested Docker currently admits only the Apple Container developer-only preloaded/offline ephemeral variant with host ports and build egress disabled, advisory PID limits, and explicit observed-disk risk acceptance; no image, relay, daemon, or lease action was performed',
+    );
+  }
+}
+
+/** Read-only platform preflight required after the supported variant is selected. */
+export async function assertAdmittedDockerWorkloadRuntimeAvailable(): Promise<void> {
+  const { checkAppleContainerAvailable } = await import('../docker/apple-container-manager.js');
+  const availability = await checkAppleContainerAvailable();
+  if (!availability.available) {
+    throw new Error(
+      `secure nested Docker Apple runtime is unavailable: ${availability.reason}` +
+        (availability.detailedMessage ? ` (${availability.detailedMessage})` : ''),
     );
   }
 }

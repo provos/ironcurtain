@@ -62,6 +62,7 @@ import {
   withInternalNetworkAllocationRetry,
 } from './docker-resource-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
+import type { HostResources } from './resource-limits.js';
 import { errorMessage } from '../utils/error-message.js';
 import { createCachedStager } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
@@ -343,9 +344,8 @@ export interface PreContainerInfrastructure {
    * ledger every outer resource through it before create and observe it
    * after (§8.2 step 1); the same-VM bootstrap activates it after private
    * Docker is fully provisioned; `destroyDockerInfrastructure` tears it down
-   * first (§8.3). Undefined for every ordinary session — the
-   * capability is gated behind the admission fuse in `docker-workload/
-   * config.ts`, so this is inert until Phase 0C flips it.
+   * first (§8.3). Undefined for every ordinary session. The resolved-variant
+   * guard currently admits only the explicit Apple developer slice.
    */
   readonly dockerWorkload?: DockerWorkloadBundleHandle;
   /** Immutable per-lease catalog view used only by an admitted Apple Docker workload. */
@@ -514,9 +514,23 @@ export async function prepareDockerInfrastructure(
   providerProfileName?: string,
   imageProvisioning?: ImageProvisioning,
 ): Promise<PreContainerInfrastructure> {
-  // Resolve and STAMP the active provider profile as the FIRST step (§9.7 F1),
-  // before any container-runtime probe, adapter registration, or auth
-  // detection. This ordering is load-bearing: Claude Code's
+  // Secure nested Docker resolves the effective runtime and rejects every
+  // unsupported variant before feature-attributable runtime, image, catalog,
+  // proxy, lease, or filesystem provisioning. Runtime resolution is a
+  // read-only probe; ordinary CLI credential preflight is outside this seam.
+  // Keep the feature-off path's historical profile/adapter/runtime ordering.
+  let admittedRuntimeKind: ContainerRuntimeKind | undefined;
+  if (config.userConfig.dockerWorkload?.enabled === true) {
+    const { resolveRuntimeKind } = await import('./container-runtime.js');
+    admittedRuntimeKind = await resolveRuntimeKind(config.userConfig.containerRuntime);
+    const { assertDockerWorkloadVariantAdmitted, assertAdmittedDockerWorkloadRuntimeAvailable } =
+      await import('../docker-workload/config.js');
+    assertDockerWorkloadVariantAdmitted(config.userConfig.dockerWorkload, admittedRuntimeKind);
+    await assertAdmittedDockerWorkloadRuntimeAvailable();
+  }
+
+  // Resolve and STAMP the active provider profile before adapter registration
+  // or auth detection (§9.7 F1). This ordering is load-bearing: Claude Code's
   // detectCredential(config) reads config.activeProviderProfile to return an
   // API-key AuthMethod for an OpenRouter-only user, so the stamp must already
   // be present when auth detection runs below. An unknown providerProfileName
@@ -526,8 +540,6 @@ export async function prepareDockerInfrastructure(
   // stamp below relies on).
   const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
   config.activeProviderProfile = activeProfile;
-  const { assertDockerWorkloadImplementationAvailable } = await import('../docker-workload/config.js');
-  assertDockerWorkloadImplementationAvailable(config.userConfig.dockerWorkload);
   if (activeProfile.type === 'openrouter' && activeProfile.apiKey === '') {
     const activeName = providerProfileName ?? config.userConfig.modelProviders.default;
     throw new Error(
@@ -573,7 +585,7 @@ export async function prepareDockerInfrastructure(
 
   await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
-  const runtimeKind = await resolveRuntimeKind(config.userConfig.containerRuntime);
+  const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(config.userConfig.containerRuntime));
   const topology = resolveNetworkTopology(runtimeKind);
   const useTcp = topology !== 'uds';
 
@@ -627,11 +639,10 @@ export async function prepareDockerInfrastructure(
   // §8.2 step 1: admit the secure nested Docker-workload bundle — create its
   // host-owned lease before any proxy or outer resource is created. Placed
   // here (after the runtime is resolved, before proxy startup) so the §8.2
-  // ordering "lease -> proxies -> watchdog attestation" holds. UNREACHABLE on
-  // the production path: the admission fuse (`assertDockerWorkloadImplement-
-  // ationAvailable`, above) throws whenever the capability is enabled, so this
-  // only runs behind a bypassed fuse in tests. `attestWatchdog()` (§8.2 step 3)
-  // is driven after the proxies start, below.
+  // ordering "lease -> proxies -> watchdog attestation" holds. The
+  // resolved-variant guard above limits this production path to the admitted
+  // Apple developer slice. `attestWatchdog()` (§8.2 step 3) is driven after
+  // the proxies start, below.
   const dockerWorkloadConfig = config.userConfig.dockerWorkload;
   let dockerWorkloadAgentImage: string | undefined;
   let admittedDockerWorkload:
@@ -887,8 +898,8 @@ export async function prepareDockerInfrastructure(
     }
 
     // §8.2 step 3: attest the host watchdog now that the outer proxies are up.
-    // No-op unless a Docker-workload bundle was admitted above (unreachable
-    // behind the fuse). Everything from here on is covered by the catch below,
+    // No-op unless a Docker-workload bundle was admitted above. Everything
+    // from here on is covered by the catch below,
     // which tears the admitted lease down — see the note there for why crash
     // reconciliation cannot be relied on for a post-attestation failure.
     await dockerWorkload?.attestWatchdog();
@@ -1243,14 +1254,19 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
   // only: a stale dir from a crashed run gets cleaned up on the next
   // bundle startup via `mkdirSync({recursive})`, and the contents
   // (empty once sockets are unlinked) carry no sensitive data.
-  const runtimeRoot = getBundleRuntimeRoot(infra.bundleId);
+  removeBundleRuntimeRoot(infra.bundleId, 'destroyDockerInfrastructure');
+
+  logger.info(`Destroyed Docker infrastructure (container=${infra.containerId.substring(0, 12)})`);
+}
+
+/** Best-effort removal of the host-only per-bundle socket directory tree. */
+export function removeBundleRuntimeRoot(bundleId: BundleId, context: string): void {
+  const runtimeRoot = getBundleRuntimeRoot(bundleId);
   try {
     rmSync(runtimeRoot, { recursive: true, force: true });
   } catch (err) {
-    logger.warn(`destroyDockerInfrastructure: rmSync(${runtimeRoot}) failed: ${errorMessage(err)}`);
+    logger.warn(`${context}: rmSync(${runtimeRoot}) failed: ${errorMessage(err)}`);
   }
-
-  logger.info(`Destroyed Docker infrastructure (container=${infra.containerId.substring(0, 12)})`);
 }
 
 /**
@@ -1291,10 +1307,10 @@ export function buildBundleLabels(
 // ---------------------------------------------------------------------------
 // Secure nested Docker-workload wiring (§8.2–8.3)
 //
-// Everything in this section is inert for ordinary sessions: the handle is
-// only ever present behind the admission fuse in `docker-workload/config.ts`,
-// which throws before a bundle can be admitted. It exists so the §8.2 startup
-// and §8.3 teardown ordering is explicit and testable end-to-end.
+// Everything in this section is inert for ordinary sessions: a handle exists
+// only for an enabled variant accepted by the resolved-variant guard. The
+// helpers keep the §8.2 startup and §8.3 teardown ordering explicit and
+// testable end-to-end.
 // ---------------------------------------------------------------------------
 
 /**
@@ -1325,6 +1341,12 @@ export interface LedgeredOuterCreateSpec {
    * The generation ownership label is merged on top before the create runs.
    */
   readonly baseLabels?: Readonly<Record<string, string>>;
+  /**
+   * Optional post-create adjudication that runs after the immutable runtime ID
+   * is durably observed, but before the lifecycle claim is released. A
+   * rejection aborts the caller before it can start the object.
+   */
+  readonly adjudicateObserved?: (immutableId: string) => Promise<void>;
 }
 
 /**
@@ -1361,6 +1383,7 @@ export async function ledgerOuterResourceCreate(
     const labels = spec.baseLabels ? { ...spec.baseLabels, ...grant.labels } : grant.labels;
     const { id, expanded } = await create(grant.requestedName, labels);
     grant.observed(id, expanded);
+    await spec.adjudicateObserved?.(id);
     return { id, requestedName: grant.requestedName };
   });
 }
@@ -1375,6 +1398,14 @@ export interface CreateAgentContainerOptions {
    * ordinary session.
    */
   readonly runtimeKind: ContainerRuntimeKind;
+  /** Runtime used to inspect and, on failed adjudication, remove the stopped create. */
+  readonly runtime: ContainerRuntime;
+  /**
+   * Catalog-bound immutable image ID expected in an Apple stopped create.
+   * Undefined for the legacy image path and for Docker, which creates by the
+   * immutable ID directly.
+   */
+  readonly expectedImageId?: string;
   /** Deterministic name used when the bundle is not ledgered. */
   readonly deterministicName: string;
   /**
@@ -1407,8 +1438,39 @@ export interface CreateAgentContainerOptions {
  * backend, rather than passed in — a caller cannot forget it.
  */
 export async function createLedgeredAgentContainer(options: CreateAgentContainerOptions): Promise<string> {
+  if (
+    options.dockerWorkload !== undefined &&
+    options.runtimeKind === 'apple-container' &&
+    options.expectedImageId === undefined
+  ) {
+    throw new Error('admitted Apple Docker workload is missing its catalog-bound immutable image ID');
+  }
+
+  const adjudicateObserved = async (containerId: string): Promise<void> => {
+    if (options.runtimeKind !== 'apple-container' || options.expectedImageId === undefined) return;
+    try {
+      await assertAppleStoppedCreateImage(options.runtime, containerId, options.expectedImageId);
+    } catch (error) {
+      try {
+        // The VM has not been started. Remove the exact runtime-returned ID
+        // while the lifecycle claim is still held, then let the normal lease
+        // teardown prove durable absence.
+        await options.runtime.remove(containerId);
+      } catch (removeError) {
+        throw new AggregateError(
+          [error, removeError],
+          `Apple stopped-create image adjudication failed and exact removal also failed for ${containerId}`,
+          { cause: removeError },
+        );
+      }
+      throw error;
+    }
+  };
+
   if (!options.dockerWorkload) {
-    return options.create(options.deterministicName, options.baseLabels);
+    const id = await options.create(options.deterministicName, options.baseLabels);
+    await adjudicateObserved(id);
+    return id;
   }
   const nestedDaemon = resolveNestedDaemonBundle(options.dockerWorkload, options.runtimeKind);
   const { id } = await ledgerOuterResourceCreate(
@@ -1418,10 +1480,35 @@ export async function createLedgeredAgentContainer(options: CreateAgentContainer
       role: 'agent',
       launchesNestedDaemon: nestedDaemon !== undefined,
       baseLabels: options.baseLabels,
+      adjudicateObserved,
     },
     async (name, labels) => ({ id: await options.create(name, labels), expanded: { mounts: [...options.mounts] } }),
   );
   return id;
+}
+
+const SHA256_IMAGE_ID = /^(?:sha256:)?([a-f0-9]{64})$/u;
+
+/**
+ * Apple Container 1.1 creates a local image by logical tag, not by its
+ * `sha256:` index ID. Close that tag lookup race by inspecting the exact
+ * stopped VM and comparing its captured descriptor with the catalog identity
+ * before start.
+ */
+async function assertAppleStoppedCreateImage(
+  runtime: ContainerRuntime,
+  containerId: string,
+  expectedImageId: string,
+): Promise<void> {
+  const actualImageId = await runtime.getImageId(containerId);
+  const expected = SHA256_IMAGE_ID.exec(expectedImageId)?.[1];
+  const actual = actualImageId === undefined ? undefined : SHA256_IMAGE_ID.exec(actualImageId)?.[1];
+  if (expected === undefined || actual === undefined || actual !== expected) {
+    throw new Error(
+      `Apple stopped-create image mismatch for ${containerId}: expected ${expectedImageId}, ` +
+        `observed ${actualImageId ?? 'missing'}; refusing to start the VM`,
+    );
+  }
 }
 
 /**
@@ -1444,6 +1531,25 @@ export function dockerWorkloadSessionMetadata(
   };
 }
 
+/**
+ * Select and clamp the aggregate outer-container envelope once for both batch
+ * and PTY assembly. An admitted Docker workload owns its explicit VM envelope;
+ * ordinary sessions retain the long-standing top-level dockerResources values.
+ */
+export function selectOuterContainerResources(
+  userConfig: Pick<ResolvedUserConfig, 'dockerResources' | 'dockerWorkload'>,
+  hostResources?: HostResources,
+): ReturnType<typeof clampDockerResources>['effective'] {
+  const configured =
+    userConfig.dockerWorkload?.enabled === true
+      ? {
+          memoryMb: userConfig.dockerWorkload.resources.memoryMb,
+          cpus: userConfig.dockerWorkload.resources.cpus,
+        }
+      : userConfig.dockerResources;
+  return clampDockerResources(configured, hostResources).effective;
+}
+
 interface DockerWorkloadAdmissionForSessionOptions {
   readonly dockerWorkload: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>;
   readonly runtime: ContainerRuntime;
@@ -1457,11 +1563,6 @@ interface DockerWorkloadAdmissionForSessionOptions {
 /**
  * Assemble and drive the §8.2-step-1 admission for a secure nested
  * Docker-workload bundle.
- *
- * UNREACHABLE on the production path: `prepareDockerInfrastructure` calls the
- * admission fuse (`assertDockerWorkloadImplementationAvailable`) earlier, which
- * throws whenever the capability is enabled. This runs only behind a bypassed
- * fuse in tests and keeps the §8.2 ordering explicit.
  *
  * Two gates run before any lease exists, so an unsupported request leaves
  * nothing behind: the backend must implement the same-VM nested daemon, and
@@ -1889,7 +1990,7 @@ async function createSessionContainersAttempt(
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as
     // "no flag emitted" (see clampDockerResources docs).
-    const { effective: containerResources } = clampDockerResources(config.userConfig.dockerResources);
+    const containerResources = selectOuterContainerResources(config.userConfig);
 
     // Build the agent container create args for a given name + resolved labels.
     // `labels` is the base bundle labels in the ordinary case and the base merged
@@ -1935,6 +2036,9 @@ async function createSessionContainersAttempt(
     mainContainerId = await createLedgeredAgentContainer({
       dockerWorkload: core.dockerWorkload,
       runtimeKind: core.runtimeKind,
+      runtime: core.docker,
+      expectedImageId:
+        core.imageResolution?.mode === 'preloaded-catalog' ? core.imageResolution.immutableImageId : undefined,
       deterministicName: mainContainerName,
       baseLabels: bundleLabels.labels,
       mounts,
@@ -2288,15 +2392,22 @@ export async function ensureDockerImage(
   userConfig: ResolvedUserConfig,
   imageProvisioning?: ImageProvisioning,
 ): Promise<void> {
-  const { assertDockerWorkloadImplementationAvailable } = await import('../docker-workload/config.js');
-  assertDockerWorkloadImplementationAvailable(userConfig.dockerWorkload);
+  let admittedRuntimeKind: ContainerRuntimeKind | undefined;
+  if (userConfig.dockerWorkload?.enabled === true) {
+    const { resolveRuntimeKind } = await import('./container-runtime.js');
+    admittedRuntimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
+    const { assertDockerWorkloadVariantAdmitted, assertAdmittedDockerWorkloadRuntimeAvailable } =
+      await import('../docker-workload/config.js');
+    assertDockerWorkloadVariantAdmitted(userConfig.dockerWorkload, admittedRuntimeKind);
+    await assertAdmittedDockerWorkloadRuntimeAvailable();
+  }
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
 
   await registerBuiltinAdapters(userConfig);
   const adapter = getAgent(agentId);
   const image = await adapter.getImage();
-  const runtimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
+  const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(userConfig.containerRuntime));
   const docker = createContainerRuntime(runtimeKind);
   // An explicit override wins (tests); otherwise derive from resolved config so
   // the preflight branches on the same trusted image mode as the session path.
@@ -2398,7 +2509,14 @@ export async function resolveAgentImage(
       architecture: provisioning.architecture,
       dockerApiVersion: provisioning.dockerApiVersion,
     });
-    return { ...resolved, imageRef: resolved.immutableImageId };
+    // Apple Container 1.1 treats a local `sha256:` ID passed to `container
+    // create` as a registry reference. The resolver has just proved that this
+    // catalog-authorized logical tag maps to the exact immutable ID and label
+    // tuple. Apple therefore creates by that verified logical name, followed
+    // by a stopped-create descriptor check before start; Docker can create by
+    // the immutable ID directly.
+    const imageRef = provisioning.runtimeKind === 'apple-container' ? resolved.logicalName : resolved.immutableImageId;
+    return { ...resolved, imageRef };
   }
 
   const buildHash = await ensureImageFromSpec(image, docker, spec);

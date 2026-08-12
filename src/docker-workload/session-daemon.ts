@@ -57,7 +57,7 @@ export function gateAppleVmNestedDaemonAgentCommand(command: readonly string[]):
 }
 
 /**
- * The same-VM topology is implemented beneath the admission fuse on Apple
+ * The same-VM topology is implemented behind the resolved-variant guard on Apple
  * `container` only: the daemon needs a per-session VM to live in. This is an
  * implementation check, not a qualification or enablement claim.
  */

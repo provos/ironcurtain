@@ -1,8 +1,8 @@
 /**
  * Product wiring for the secure nested Docker-workload lifecycle (§8.2–8.3).
  *
- * The admission fuse is bypassed here by driving the shipped seams directly
- * with a real bundle handle (admitted through the test harness with a fake
+ * The test drives the shipped seams directly with a real bundle handle
+ * (admitted through the test harness with a fake
  * runtime + fake watchdog supervisor) threaded onto a scripted
  * PreContainerInfrastructure — no real proxies, containers, or supervisor
  * process, and never the fuse. Exercised:
@@ -25,10 +25,12 @@ import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assembleDockerInfrastructure,
+  createLedgeredAgentContainer,
   createSessionContainers,
   destroyDockerInfrastructure,
   dockerWorkloadSessionMetadata,
   ledgerOuterResourceCreate,
+  selectOuterContainerResources,
   type DockerInfrastructure,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
@@ -64,6 +66,7 @@ import {
 
 const getHome = useDockerWorkloadHome();
 const BUNDLE_ID = 'bundle-wiring-0001';
+const TEST_APPLE_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
 
 let tempDir: string;
 
@@ -112,6 +115,7 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
   for (const dir of [bundleDir, workspaceDir, escalationDir, orientationDir, socketsDir]) {
     mkdirSync(dir, { recursive: true });
   }
+  docker.getImageId = async () => TEST_APPLE_IMAGE_ID;
   return {
     bundleId: BUNDLE_ID as BundleId,
     bundleDir,
@@ -128,6 +132,22 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
+    imageResolution: {
+      mode: 'preloaded-catalog',
+      runtimeKind: 'apple-container',
+      logicalName: 'ironcurtain-claude-code:latest',
+      imageRef: 'ironcurtain-claude-code:latest',
+      immutableImageId: TEST_APPLE_IMAGE_ID,
+      buildHash: '1'.repeat(64),
+      catalogGeneration: 'test-generation',
+      catalogSha256: '2'.repeat(64),
+      manifestDigest: `sha256:${'3'.repeat(64)}`,
+      configDigest: `sha256:${'4'.repeat(64)}`,
+      toolchainDigest: '5'.repeat(64),
+      provenanceDigest: '6'.repeat(64),
+      archivePath: join(tempDir, 'agent.tar'),
+      archiveSha256: '7'.repeat(64),
+    },
     runtimeKind: 'apple-container',
     topology: 'uds',
     useTcp: false,
@@ -175,6 +195,139 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
     expect(runtime.events).toEqual([`create:${lease.resources[0].requestedName}`, `start:${result.containerId}`]);
     // The created container carries the precommitted name, not the deterministic one.
     expect(lease.resources[0].requestedName).not.toBe(result.containerName);
+  });
+
+  it('observes the stopped Apple VM before accepting its catalog image descriptor', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
+    const expectedImageId = `sha256:${'a'.repeat(64)}`;
+    let observedBeforeInspect = false;
+    runtime.runtime.getImageId = async (containerId) => {
+      observedBeforeInspect = loadDockerWorkloadLease(handle.leasePath).resources[0]?.observedId === containerId;
+      return expectedImageId.slice('sha256:'.length);
+    };
+
+    const containerId = await createLedgeredAgentContainer({
+      dockerWorkload: handle,
+      runtimeKind: 'apple-container',
+      runtime: runtime.runtime,
+      expectedImageId,
+      deterministicName: 'unused',
+      baseLabels: undefined,
+      mounts: [],
+      create: (name, labels) =>
+        runtime.runtime.create({
+          image: 'catalog-logical:latest',
+          name,
+          mounts: [],
+          network: 'none',
+          env: {},
+          command: [],
+          labels,
+        }),
+    });
+
+    expect(observedBeforeInspect).toBe(true);
+    expect(runtime.events).toEqual([expect.stringMatching(/^create:/u)]);
+    expect(loadDockerWorkloadLease(handle.leasePath).resources[0]?.observedId).toBe(containerId);
+  });
+
+  it('rejects an admitted Apple create when its catalog-bound immutable image ID is missing', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
+
+    await expect(
+      createLedgeredAgentContainer({
+        dockerWorkload: handle,
+        runtimeKind: 'apple-container',
+        runtime: runtime.runtime,
+        deterministicName: 'unused',
+        baseLabels: undefined,
+        mounts: [],
+        create: (name, labels) =>
+          runtime.runtime.create({
+            image: 'catalog-logical:latest',
+            name,
+            mounts: [],
+            network: 'none',
+            env: {},
+            command: [],
+            labels,
+          }),
+      }),
+    ).rejects.toThrow(/missing its catalog-bound immutable image ID/u);
+
+    expect(runtime.events).toEqual([]);
+    expect(loadDockerWorkloadLease(handle.leasePath).resources).toEqual([]);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['mismatched', `sha256:${'b'.repeat(64)}`],
+  ] as const)('removes a stopped Apple VM with a %s image descriptor and never starts it', async (_case, actual) => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
+    runtime.runtime.getImageId = async () => actual;
+
+    await expect(
+      createLedgeredAgentContainer({
+        dockerWorkload: handle,
+        runtimeKind: 'apple-container',
+        runtime: runtime.runtime,
+        expectedImageId: `sha256:${'a'.repeat(64)}`,
+        deterministicName: 'unused',
+        baseLabels: undefined,
+        mounts: [],
+        create: (name, labels) =>
+          runtime.runtime.create({
+            image: 'catalog-logical:latest',
+            name,
+            mounts: [],
+            network: 'none',
+            env: {},
+            command: [],
+            labels,
+          }),
+      }),
+    ).rejects.toThrow(/Apple stopped-create image mismatch/u);
+
+    const resource = loadDockerWorkloadLease(handle.leasePath).resources[0];
+    expect(resource.observedId).toBe('container-id-1');
+    expect(runtime.events).toEqual([expect.stringMatching(/^create:/u), 'remove:container-id-1']);
+    expect(runtime.events.some((event) => event.startsWith('start:'))).toBe(false);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
+  it('keeps Docker on its immutable create ID without an Apple descriptor check', async () => {
+    const runtime = createEventRuntime();
+    let inspected = false;
+    runtime.runtime.getImageId = async () => {
+      inspected = true;
+      return undefined;
+    };
+    const immutableImageId = `sha256:${'a'.repeat(64)}`;
+    let createImage: string | undefined;
+
+    const containerId = await createLedgeredAgentContainer({
+      dockerWorkload: undefined,
+      runtimeKind: 'docker',
+      runtime: runtime.runtime,
+      expectedImageId: immutableImageId,
+      deterministicName: 'docker-agent',
+      baseLabels: undefined,
+      mounts: [],
+      create: () => {
+        createImage = immutableImageId;
+        return Promise.resolve('docker-container-id');
+      },
+    });
+
+    expect(containerId).toBe('docker-container-id');
+    expect(createImage).toBe(immutableImageId);
+    expect(inspected).toBe(false);
   });
 });
 
@@ -537,5 +690,42 @@ describe('Docker-workload wiring — session metadata (§8.4)', () => {
       watchdogPolicySha256: handle.loadedPolicy.sha256,
       backend: 'docker',
     });
+  });
+});
+
+describe('Docker-workload wiring — outer resource envelope', () => {
+  it('uses admitted workload CPU/memory instead of divergent ordinary defaults', () => {
+    const resources = selectOuterContainerResources(
+      {
+        dockerResources: { memoryMb: 7777, cpus: 7 },
+        dockerWorkload: {
+          enabled: true,
+          tier: 'developer-only',
+          backend: 'apple-container',
+          imageMode: 'preloaded-catalog',
+          imageIngress: 'preloaded-only',
+          daemonState: 'ephemeral',
+          hostPortPublishing: false,
+          buildEgress: 'disabled',
+          acceptObservedDiskRisk: true,
+          resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },
+        },
+      },
+      { cpus: 8, memoryMb: 16_384 },
+    );
+
+    expect(resources).toEqual({ memoryMb: 1536, cpus: 1.25 });
+  });
+
+  it('preserves dockerResources exactly when the capability is disabled', () => {
+    expect(
+      selectOuterContainerResources(
+        {
+          dockerResources: { memoryMb: 2048, cpus: 1.5 },
+          dockerWorkload: { enabled: false },
+        },
+        { cpus: 8, memoryMb: 16_384 },
+      ),
+    ).toEqual({ memoryMb: 2048, cpus: 1.5 });
   });
 });

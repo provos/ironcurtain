@@ -76,6 +76,7 @@ import {
 
 const getHome = useDockerWorkloadHome();
 const BUNDLE_ID = 'bundle-nested-daemon-1';
+const TEST_APPLE_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
 
 let tempDir: string;
 
@@ -136,6 +137,9 @@ function makeCore(
     readonly runtimeKind?: ContainerRuntimeKind;
   } = {},
 ): PreContainerInfrastructure {
+  const runtimeKind = overrides.runtimeKind ?? 'apple-container';
+  const admittedApple = overrides.dockerWorkload !== undefined && runtimeKind === 'apple-container';
+  if (admittedApple) docker.getImageId = async () => TEST_APPLE_IMAGE_ID;
   const bundleDir = join(tempDir, 'bundle');
   const workspaceDir = join(tempDir, 'workspace');
   const escalationDir = join(tempDir, 'escalations');
@@ -160,7 +164,25 @@ function makeCore(
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
-    runtimeKind: overrides.runtimeKind ?? 'apple-container',
+    imageResolution: admittedApple
+      ? {
+          mode: 'preloaded-catalog',
+          runtimeKind: 'apple-container',
+          logicalName: 'ironcurtain-claude-code:latest',
+          imageRef: 'ironcurtain-claude-code:latest',
+          immutableImageId: TEST_APPLE_IMAGE_ID,
+          buildHash: '1'.repeat(64),
+          catalogGeneration: 'test-generation',
+          catalogSha256: '2'.repeat(64),
+          manifestDigest: `sha256:${'3'.repeat(64)}`,
+          configDigest: `sha256:${'4'.repeat(64)}`,
+          toolchainDigest: '5'.repeat(64),
+          provenanceDigest: '6'.repeat(64),
+          archivePath: join(tempDir, 'agent.tar'),
+          archiveSha256: '7'.repeat(64),
+        }
+      : undefined,
+    runtimeKind,
     topology: 'uds',
     useTcp: false,
     socketsDir,

@@ -13,7 +13,7 @@
  * (with the harness's fake clock/supervisor/runtime injected) so the assertion
  * is the on-disk lease status, not a spy. Everything the prepare path would
  * otherwise touch — adapter, container runtime, CA, both proxies, and the
- * bindings resolver — is mocked; the admission fuse is mocked open exactly the
+ * bindings resolver — is mocked; the resolved-variant guard is mocked open exactly the
  * way the shipped seams are driven elsewhere (the fuse itself is covered by
  * test/docker/docker-workload-admission.test.ts and is untouched here).
  */
@@ -95,11 +95,11 @@ vi.mock('../../src/docker/mitm-proxy.js', () => ({
   createMitmProxy: (options: MitmProxyOptions) => seam.makeMitm(options),
 }));
 
-// The implementation fuse is mocked open (and only here): this test drives the
-// shipped post-admission seams, which are unreachable while the fuse is closed.
+// This test drives the post-admission seams with a qualifying Apple variant.
 vi.mock('../../src/docker-workload/config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/docker-workload/config.js')>()),
-  assertDockerWorkloadImplementationAvailable: () => {},
+  assertDockerWorkloadVariantAdmitted: () => {},
+  assertAdmittedDockerWorkloadRuntimeAvailable: async () => {},
 }));
 
 // The real resolver hashes the staged catalog + frozen profile ceiling, neither

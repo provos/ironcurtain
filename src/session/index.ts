@@ -43,7 +43,12 @@ import { createJobId } from '../cron/types.js';
 import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from '../types/errors.js';
-import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
+import {
+  saveSessionMetadata,
+  saveSessionMetadataTo,
+  loadSessionMetadata,
+  updateSessionMetadata,
+} from './session-metadata.js';
 import { bundleIdFromSessionId, createAgentConversationId, createSessionId } from './types.js';
 import type {
   AgentConversationId,
@@ -327,14 +332,12 @@ async function createDockerSession(
       // for audit/inspection. Merged into the metadata `buildSessionConfig`
       // already wrote — the lease tuple is only known after admission, which
       // runs inside `createDockerInfrastructure`. Inert for ordinary sessions
-      // (handle present only behind the admission fuse); a Docker-workload
+      // (handle present only for an admitted variant); a Docker-workload
       // bundle is ephemeral and never resumed, so overwriting here is safe.
       const resolvedDockerWorkload = sessionConfig.config.userConfig.dockerWorkload;
       if (infra.dockerWorkload && !options.resumeSessionId && resolvedDockerWorkload?.enabled === true) {
         const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
-        const existing = loadSessionMetadata(sessionId) ?? { createdAt: new Date().toISOString() };
-        saveSessionMetadata(sessionId, {
-          ...existing,
+        updateSessionMetadata(sessionId, {
           dockerWorkload: dockerWorkloadSessionMetadata(
             infra.dockerWorkload,
             dockerWorkloadConfigHash(resolvedDockerWorkload),

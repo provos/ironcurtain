@@ -506,7 +506,7 @@ describe('Apple VM nested-daemon readiness — in-VM text is bounded at the seam
 describe('Apple VM nested-daemon module boundaries', () => {
   it('does not consult the implementation fuse, pipeline tooling, or spawn processes itself', () => {
     const source = readFileSync(resolve('src/docker-workload/apple-vm-daemon.ts'), 'utf8');
-    expect(source).not.toContain('assertDockerWorkloadImplementationAvailable');
+    expect(source).not.toContain('assertDockerWorkloadVariantAdmitted');
     expect(source).not.toMatch(/from '\.\/config\.js'/u);
     expect(source).not.toMatch(/from '[^']*pipeline\//u);
     expect(source).not.toContain('node:child_process');

@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { arch, tmpdir } from 'node:os';
-import type { DockerInfrastructure, PreContainerInfrastructure } from '../src/docker/docker-infrastructure.js';
+import type {
+  AgentImageResolution,
+  DockerInfrastructure,
+  PreContainerInfrastructure,
+} from '../src/docker/docker-infrastructure.js';
 import {
   buildAgentUidRemap,
   prepareConversationStateDir,
@@ -670,6 +674,25 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
   };
 }
 
+function makeApplePreloadedResolution(logicalName: string, immutableImageId: string): AgentImageResolution {
+  return {
+    mode: 'preloaded-catalog',
+    runtimeKind: 'apple-container',
+    logicalName,
+    imageRef: logicalName,
+    immutableImageId,
+    buildHash: 'build-hash',
+    catalogGeneration: 'generation',
+    catalogSha256: 'catalog-sha256',
+    manifestDigest: `sha256:${'b'.repeat(64)}`,
+    configDigest: `sha256:${'c'.repeat(64)}`,
+    toolchainDigest: 'toolchain-digest',
+    provenanceDigest: 'provenance-digest',
+    archivePath: '/catalog/agent.tar',
+    archiveSha256: 'archive-sha256',
+  };
+}
+
 describe('createSessionContainers', () => {
   let tempDir: string;
   let originalHome: string | undefined;
@@ -759,6 +782,60 @@ describe('createSessionContainers', () => {
     // Security invariant carries over: bundle/escalation/audit never mounted.
     expect(mounts.some((m) => m.source === core.bundleDir)).toBe(false);
     expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
+  });
+
+  it('creates Apple by the catalog logical tag and verifies the stopped descriptor before start', async () => {
+    const tracker = createDockerCallTracker();
+    const events: string[] = [];
+    const immutableImageId = `sha256:${'a'.repeat(64)}`;
+    const docker = createMockDocker({
+      tracker,
+      create: async () => {
+        events.push('create');
+        return 'apple-vm-id';
+      },
+    });
+    docker.getImageId = async (id) => {
+      expect(id).toBe('apple-vm-id');
+      events.push('inspect-stopped');
+      return immutableImageId;
+    };
+    docker.start = async (id) => {
+      expect(id).toBe('apple-vm-id');
+      events.push('start');
+    };
+    const logicalName = 'ironcurtain-claude-code:latest';
+    const core = {
+      ...makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker }),
+      image: logicalName,
+      imageResolution: makeApplePreloadedResolution(logicalName, immutableImageId),
+    };
+
+    await createSessionContainers(core, makeMockConfig());
+
+    expect(tracker.createCalls[0].image).toBe(logicalName);
+    expect(events).toEqual(['create', 'inspect-stopped', 'start']);
+  });
+
+  it('removes a mismatched stopped Apple create and does not start it', async () => {
+    const tracker = createDockerCallTracker();
+    const immutableImageId = `sha256:${'a'.repeat(64)}`;
+    const docker = createMockDocker({ tracker, create: async () => 'apple-vm-id' });
+    docker.getImageId = async () => `sha256:${'f'.repeat(64)}`;
+    const logicalName = 'ironcurtain-claude-code:latest';
+    const core = {
+      ...makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker }),
+      image: logicalName,
+      imageResolution: makeApplePreloadedResolution(logicalName, immutableImageId),
+    };
+
+    await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(
+      /Apple stopped-create image mismatch/u,
+    );
+
+    expect(tracker.createCalls[0].image).toBe(logicalName);
+    expect(tracker.startCalls).toEqual([]);
+    expect(tracker.removedContainers).toEqual(['apple-vm-id']);
   });
 
   // --- Skills mount tests ---
@@ -1484,6 +1561,98 @@ describe('ensureImage builds no per-workflow image', () => {
     expect(resolved.imageRef).toBe(entry.runtimeImageId);
     expect(buildCalls).toBe(0);
     expect(pullCalls).toBe(0);
+  });
+
+  it('uses only the verified catalog logical name as Apple Container 1.1 create reference', async () => {
+    const image = 'ironcurtain-claude-code:latest';
+    const buildHash = computeAgentImageBuildHash(image);
+    const architecture = arch() === 'arm64' ? 'arm64' : 'amd64';
+    const generation = 'catalog-apple-test.1';
+    const entry = writeOciArchiveFixture({
+      directory: tempDir,
+      logicalName: image,
+      buildHash,
+      architecture,
+      catalogGeneration: generation,
+      runtimeImageIdKind: 'index',
+    });
+    const catalog: PreloadedImageCatalog = {
+      schemaVersion: 1,
+      runtimeKind: 'apple-container',
+      generation,
+      createdAt: '2026-07-20T12:00:00.000Z',
+      images: [entry],
+    };
+    const catalogPath = join(tempDir, 'catalog.apple-container.json');
+    writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o444 });
+    const docker = createMockDocker();
+    docker.inspectImage = async (ref) => {
+      expect(ref).toBe(image);
+      return {
+        id: entry.runtimeImageId,
+        repoTags: [image],
+        created: entry.provenance.createdAt,
+        labels: buildPreloadedImageLabels(entry, generation),
+      };
+    };
+
+    const resolved = await resolveAgentImage(image, docker, {
+      imageMode: 'preloaded-catalog',
+      catalogPath,
+      runtimeKind: 'apple-container',
+      architecture,
+    });
+
+    expect(resolved).toMatchObject({
+      mode: 'preloaded-catalog',
+      imageRef: image,
+      logicalName: image,
+      immutableImageId: entry.runtimeImageId,
+    });
+  });
+
+  it('rejects a stale Apple logical tag before returning any create reference', async () => {
+    const image = 'ironcurtain-claude-code:latest';
+    const buildHash = computeAgentImageBuildHash(image);
+    const architecture = arch() === 'arm64' ? 'arm64' : 'amd64';
+    const generation = 'catalog-apple-stale.1';
+    const entry = writeOciArchiveFixture({
+      directory: tempDir,
+      logicalName: image,
+      buildHash,
+      architecture,
+      catalogGeneration: generation,
+      runtimeImageIdKind: 'index',
+    });
+    const catalog: PreloadedImageCatalog = {
+      schemaVersion: 1,
+      runtimeKind: 'apple-container',
+      generation,
+      createdAt: '2026-07-20T12:00:00.000Z',
+      images: [entry],
+    };
+    const catalogPath = join(tempDir, 'catalog.apple-container.stale.json');
+    writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o444 });
+    const docker = createMockDocker();
+    docker.inspectImage = async () => ({
+      id: `sha256:${'f'.repeat(64)}`,
+      repoTags: [image],
+      created: entry.provenance.createdAt,
+      labels: buildPreloadedImageLabels(entry, generation),
+    });
+    let createRan = false;
+
+    await expect(
+      resolveAgentImage(image, docker, {
+        imageMode: 'preloaded-catalog',
+        catalogPath,
+        runtimeKind: 'apple-container',
+        architecture,
+      }).then(() => {
+        createRan = true;
+      }),
+    ).rejects.toThrow(/preloaded image ID mismatch/u);
+    expect(createRan).toBe(false);
   });
 });
 

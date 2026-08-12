@@ -22,6 +22,7 @@ import ora from 'ora';
 import type { IronCurtainConfig } from '../config/types.js';
 import { createSessionId, getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
 import { buildSessionConfig } from '../session/index.js';
+import { updateSessionMetadata } from '../session/session-metadata.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
@@ -34,8 +35,14 @@ import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
-import { clampDockerResources } from './resource-limits.js';
-import { buildAgentUidRemap, buildUdsSocketMounts, createLedgeredAgentContainer } from './docker-infrastructure.js';
+import {
+  buildAgentUidRemap,
+  buildUdsSocketMounts,
+  createLedgeredAgentContainer,
+  dockerWorkloadSessionMetadata,
+  removeBundleRuntimeRoot,
+  selectOuterContainerResources,
+} from './docker-infrastructure.js';
 import {
   APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME,
   gateAppleVmNestedDaemonAgentCommand,
@@ -46,6 +53,7 @@ import {
 import { appleVmDockerWorkloadCatalogMount } from '../docker-workload/apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
+import { errorMessage } from '../utils/error-message.js';
 import {
   createIronCurtainInternalNetwork,
   InternalNetworkConnectivityError,
@@ -366,7 +374,7 @@ async function runPtySessionAttempt(
   let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
   // Secure nested Docker-workload lease handle, captured in outer scope so the
   // finally block can tear it down first (§8.3). Undefined for ordinary PTY
-  // sessions — the capability is gated behind the admission fuse.
+  // sessions — the capability is gated by the resolved-variant predicate.
   let dockerWorkload: DockerWorkloadBundleHandle | undefined;
   let useTcp: boolean;
   let networkName: string | null = null;
@@ -382,7 +390,11 @@ async function runPtySessionAttempt(
   let adapterIdForSnapshot: string | null = null;
   let adapterDisplayNameForSnapshot: string | null = null;
   let conversationStateDirForSnapshot: string | undefined;
+  let nestedDaemonReadyMarkerPath: string | undefined;
   let userExited = false;
+  let primaryError: Error | undefined;
+  let flushError: Error | undefined;
+  let resourceCleanupError: Error | undefined;
 
   const claudeMdContent = buildDockerClaudeMd({
     personaName: options.persona,
@@ -422,6 +434,20 @@ async function runPtySessionAttempt(
     // either must still revoke the workload lease and stop both proxies.
     ({ docker, proxy, mitmProxy, useTcp } = infra);
     dockerWorkload = infra.dockerWorkload;
+
+    // Match standalone batch metadata: persist the admitted lease tuple as
+    // soon as preparation returns, before any PTY-specific callback can fail.
+    const resolvedDockerWorkload = sessionConfig.userConfig.dockerWorkload;
+    if (dockerWorkload && !isResume && resolvedDockerWorkload?.enabled === true) {
+      const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
+      updateSessionMetadata(effectiveSessionId, {
+        dockerWorkload: dockerWorkloadSessionMetadata(
+          dockerWorkload,
+          dockerWorkloadConfigHash(resolvedDockerWorkload),
+          infra.runtimeKind,
+        ),
+      });
+    }
 
     // PTY sessions are standalone: pin the MITM proxy's token-stream
     // routing ID to this session's ID for the session's lifetime.
@@ -518,7 +544,7 @@ async function runPtySessionAttempt(
     if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
       throw new Error('Docker-workload lease and immutable catalog staging must be present together');
     }
-    const nestedDaemonReadyMarkerPath =
+    nestedDaemonReadyMarkerPath =
       nestedDaemon === undefined ? undefined : resolve(orientationDir, APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME);
     if (nestedDaemonReadyMarkerPath !== undefined) {
       try {
@@ -763,7 +789,7 @@ async function runPtySessionAttempt(
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as
     // "no flag emitted" (see clampDockerResources docs).
-    const { effective: ptyResources } = clampDockerResources(options.config.userConfig.dockerResources);
+    const ptyResources = selectOuterContainerResources(sessionConfig.userConfig);
 
     // Build the PTY agent container create args for a given name + resolved
     // labels. `labels` is the base resource labels in the ordinary case and the
@@ -802,6 +828,9 @@ async function runPtySessionAttempt(
     containerId = await createLedgeredAgentContainer({
       dockerWorkload,
       runtimeKind: infra.runtimeKind,
+      runtime: docker,
+      expectedImageId:
+        infra.imageResolution?.mode === 'preloaded-catalog' ? infra.imageResolution.immutableImageId : undefined,
       deterministicName: mainContainerName,
       baseLabels: resourceLabels,
       mounts,
@@ -929,6 +958,8 @@ async function runPtySessionAttempt(
     if (exitCode !== 0) {
       process.stderr.write(chalk.yellow(`PTY session exited with code ${exitCode}\n`));
     }
+  } catch (error) {
+    primaryError = normalizePtyError(error);
   } finally {
     // Stop spinner if still running (e.g. error during setup)
     if (initSpinner.isSpinning) {
@@ -955,32 +986,43 @@ async function runPtySessionAttempt(
     // Flush trajectory capture before proxy teardown so the session-end
     // manifest entry is durable (§11). No-op when capture is disabled.
     if (flushCapture) {
-      await flushCapture();
+      try {
+        await flushCapture();
+      } catch (error) {
+        flushError = normalizePtyError(error);
+      }
     }
 
-    if (docker) {
-      // §8.3: teardown-first for a Docker-workload bundle, then the
-      // belt-and-braces sweep for the non-ledgered sidecar/network, then release
-      // the managed-resource lease. See destroyBundleOuterResources.
-      await destroyBundleOuterResources({
-        docker,
-        dockerWorkload,
-        containerId,
-        sidecarContainerId,
-        networkName,
-        bundleId: effectiveSessionId,
-        context: 'PTY session',
-      });
-    } else {
-      // Infrastructure never came up: no outer resources, but a managed lease
-      // may have been acquired before the failure (no-op if not).
-      releaseManagedResourceLease(effectiveSessionId);
+    try {
+      if (docker) {
+        // §8.3: teardown-first for a Docker-workload bundle, then the
+        // belt-and-braces sweep for the non-ledgered sidecar/network, then release
+        // the managed-resource lease. See destroyBundleOuterResources.
+        await destroyBundleOuterResources({
+          docker,
+          dockerWorkload,
+          containerId,
+          sidecarContainerId,
+          networkName,
+          bundleId: effectiveSessionId,
+          context: 'PTY session',
+        });
+      } else {
+        // Infrastructure never came up: no outer resources, but a managed lease
+        // may have been acquired before the failure (no-op if not).
+        releaseManagedResourceLease(effectiveSessionId);
+      }
+    } catch (error) {
+      resourceCleanupError = normalizePtyError(error);
+    } finally {
+      // These host-only authority surfaces must retire even when runtime
+      // cleanup verification fails. Keep their best-effort failures from
+      // masking the authoritative resource-cleanup error.
+      await mitmProxy?.stop().catch(() => {});
+      await proxy?.stop().catch(() => {});
+      removeNestedDaemonReadyMarker(nestedDaemonReadyMarkerPath);
+      removeBundleRuntimeRoot(effectiveSessionId as BundleId, 'PTY session');
     }
-
-    // Stop proxies
-    await mitmProxy?.stop().catch(() => {});
-    await proxy?.stop().catch(() => {});
-
     // Write session snapshot for resume support
     if (adapterIdForSnapshot) {
       try {
@@ -1019,6 +1061,35 @@ async function runPtySessionAttempt(
     // shutdownSpinner is declared inside try but accessible here via closure
     shutdownSpinner?.succeed(chalk.dim('PTY session ended'));
   }
+
+  // Authoritative resource-cleanup failure wins, then capture flush failure,
+  // then the body failure. Lower-priority failures remain attached as causes
+  // rather than being silently discarded.
+  if (resourceCleanupError !== undefined) {
+    resourceCleanupError.cause ??= flushError ?? primaryError;
+    throw resourceCleanupError;
+  }
+  if (flushError !== undefined) {
+    flushError.cause ??= primaryError;
+    throw flushError;
+  }
+  if (primaryError !== undefined) throw primaryError;
+}
+
+/** Best-effort retirement of host readiness evidence after PTY teardown. */
+export function removeNestedDaemonReadyMarker(path: string | undefined): void {
+  if (path === undefined) return;
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logger.warn(`PTY session: unlinkSync(${path}) failed: ${errorMessage(error)}`);
+    }
+  }
+}
+
+function normalizePtyError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(errorMessage(error));
 }
 
 // --- PTY proxy ---

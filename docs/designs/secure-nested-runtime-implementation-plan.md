@@ -22,10 +22,13 @@ readiness and egress negatives, immutable-image checks, and exact cleanup on Doc
 that verifies its stopped and running effective profiles; a live Engine-28 check proved fixed-target
 forwarding, uplink-peer exclusion, relay-loss failure, and exact cleanup on an isolated dual-stack
 network. The Apple same-VM rootless daemon lifecycle and selected same-agent private-Docker image
-bootstrap are implemented behind the global admission fuse. Production egress wiring, serialized
-multi-process cleanup ownership, continuous watchdog-loss revocation, complete product-entrypoint
-acceptance, and 0C remain incomplete.
-No backend is enabled, implementation-qualified, or preview-ready.
+bootstrap are implemented. A fail-closed resolved-variant guard now admits only the exact Apple
+developer-only, preloaded/offline, ephemeral slice defined in §12 after a live Apple-availability
+preflight. `npm run smoke:nested:apple` exercises the built CLI session/bootstrap/activation path,
+then an exact lease-bound private-Docker child and teardown; it is not an agent-turn/provider, PTY,
+full product-entrypoint, 0C, or preview qualification. Docker Desktop, native Linux, public-registry,
+build-egress, enforced-PID, bounded-disk, and preview variants remain rejected. No backend is
+implementation-qualified or preview-ready.
 **Amendment (2026-07-21, user-approved):** workload-image registry egress is promoted from Phase 3
 into 0F/0C scope; the frozen preloaded catalog now covers only trusted infrastructure images. See
 §6.4, §7.1, and §16.5.
@@ -368,7 +371,7 @@ that optional observation must not gate redirects, delivery, or qualification.
 
 The catalog governs the §6.4 infrastructure class only; workload images arrive through registry egress (§6.4), explicit archive staging, or bundle-local builds, and are never host-trusted.
 
-`imageMode: preloaded-catalog` resolves a trusted read-only catalog outside the workspace. Each entry binds immutable manifest/config digests and a backend-specific runtime image ID, exact build-hash schema+hash, toolchain digest, architecture/API range, runtime-trust schema, catalog generation, and provenance. Docker's runtime ID is the config digest; Apple `container` deterministically synthesizes a top-level descriptor during import, so trusted staging records that Apple-specific ID after independently verifying the archive. Trusted bootstrap stages the selected archive, verifies it before load, loads it only if the logical ref is absent, inspects the immutable loaded ID/config, compares every field, and returns/records the catalog hash. Mismatch fails before any build; mutable tags and automatic `buildImage` fallback are forbidden. In `preloaded-only` ingress mode direct `docker pull` fails because the daemon has no registry route; in `public-registry` mode pulls traverse only the fixed proxy path under the frozen §6.4 manifest.
+`imageMode: preloaded-catalog` resolves a trusted read-only catalog outside the workspace. Each entry binds immutable manifest/config digests and a backend-specific runtime image ID, exact build-hash schema+hash, toolchain digest, architecture/API range, runtime-trust schema, catalog generation, and provenance. Docker's runtime ID is the config digest; Apple `container` deterministically synthesizes a top-level descriptor during import, so trusted staging records that Apple-specific ID after independently verifying the archive. Trusted bootstrap stages the selected archive, verifies it before load, loads it only if the logical ref is absent, inspects the immutable loaded ID/config, compares every field, and returns/records the catalog hash. Mismatch fails before any build; automatic `buildImage` fallback and trusting a mutable tag as identity are forbidden. Apple Container 1.1 cannot create from its local `sha256:` image ID and offers no authoritative `--pull never`: after the resolver verifies the catalog logical tag, Apple uses that exact resolved tag only as the create address, then inspects the exact stopped VM and requires its captured image descriptor to equal the already-resolved catalog ID before start. A mismatch is removed by exact stopped-VM ID and never started. Docker continues to create by immutable ID. Catalog publication/retagging during admission is a trusted-host operational error and is forbidden; the stopped-create check closes untrusted substitution, while a future shared image-store lock is optional hardening for trusted concurrent operators. In `preloaded-only` ingress mode direct `docker pull` fails because the daemon has no registry route; in `public-registry` mode pulls traverse only the fixed proxy path under the frozen §6.4 manifest.
 
 Both image call paths branch once, early, on trusted resolved image mode: the [`src/index.ts`](../../src/index.ts) `ensureDockerImage` preflight and `prepareDockerInfrastructure`/`resolveAgentImage`. The branch occurs before legacy label staleness or build decisions. In preloaded mode there are zero calls to `ensureImage`, `ensureBaseImage`, `buildImage`, or `pullImage`. Tests cover both call paths and assert those call counts.
 
@@ -662,10 +665,10 @@ Stop a variant if it requires a macOS/host runtime socket or device, host networ
 
 Phase 0B classifies each primitive hypothesis as `supported`, `falsified`, or `blocked by named evidence`; it does not classify a backend as feasible. It used the then-current CA-baked images only to test runtime primitives, so no 0B TLS/provider result proves the later CA-neutral image/bootstrap work and none is claimed.
 
-Implementation slices may land behind the global admission fuse before their phase exit. That makes
-the topology testable without claiming support. The ordering of phase exits, backend qualification,
-product-entrypoint reruns, and enablement remains normative; landed code beneath the fuse satisfies
-none of those later gates by itself.
+Implementation slices may land behind a fail-closed resolved-variant guard before their phase exit.
+That makes one exact topology testable without claiming broader support. The ordering of phase exits,
+backend qualification, product-entrypoint reruns, and preview remains normative; admitting the narrow
+Apple developer slice satisfies none of those later gates by itself.
 
 Implementation progress (not an exit claim): the checked-in Dockerfiles no longer copy a session
 CA; bootstrap stages hash-bound public certificate/bundle files under the read-only orientation
@@ -724,8 +727,8 @@ affect the runtime, which already runs the sha256-bound frozen catalog image. Th
 proxy/BuildKit wiring that routes the daemon's `FROM` pull to the registry-egress listener remains a
 Phase 1 item.
 
-A workload-registry policy/proxy seam and strict `public-registry` opt-in have landed behind the
-admission fuse, conformed to §16.6: the superseded blob hashing and trusted response buffering are
+A workload-registry policy/proxy seam and strict `public-registry` opt-in have landed, but the
+resolved-variant guard rejects that mode. The seam conforms to §16.6: the superseded blob hashing and trusted response buffering are
 removed, and the binding controls are genuinely backpressured streaming with per-request byte/time
 and per-session total-byte/concurrency ceilings (guard-owned ledger), digest-independent exact
 derived-redirect authorization with credential stripping and literal-IP refusal atop the transport
@@ -965,22 +968,37 @@ Illustrative configuration:
 ```yaml
 dockerWorkload:
   enabled: true
-  tier: preview
+  tier: developer-only
+  backend: apple-container
   imageMode: preloaded-catalog
   imageIngress: preloaded-only
   daemonState: ephemeral
   hostPortPublishing: false
-  acceptObservedDiskRisk: false
+  buildEgress: disabled
+  acceptObservedDiskRisk: true
   resources:
     memoryMb: 4096
     cpus: 2
     pids:
       desired: 512
       required: false
-    diskMb: 8192
+    diskMb: null
 ```
 
-These values are non-normative suggested defaults, not guaranteed minima. `imageIngress: public-registry` enables §6.4 anonymous workload pulls; the default remains `preloaded-only`, and the untrusted agent cannot edit the registry manifest or switch the mode. `pids.desired` requests an operational ceiling; `pids.required=true` makes authoritative enforcement mandatory and therefore rejects Apple. With `required=false`, Apple records `unsupported` and may apply only advisory guest tuning; Desktop/Linux still report whether the desired value was enforced. No inner setting upgrades status. The coordinator clamps enforceable values while preserving host and trusted-relay/watchdog reserves, records requested versus effective, and never drops a required limit. Preview may set `diskMb: null` only with explicit `acceptObservedDiskRisk: true` and §8.1 watchdog evidence. `auto` prefers Apple for concurrent mutually-untrusted Mac sessions when qualified; explicit choice is honored or rejected. The untrusted agent cannot choose rootful Apple, profiles, mounts, network, relay targets, daemon image, catalog, watchdog, or release-suite selection.
+This is the only currently admitted configuration shape; `backend: auto` is also accepted when it
+resolves to Apple. CPU and memory values may vary and are clamped to the outer host/VM envelope.
+`pids.desired` remains advisory on Apple. The following are explicitly unsupported and rejected before
+feature-attributable runtime, image, catalog, proxy, lease, or filesystem provisioning:
+
+- Docker Desktop and native Linux outer runtimes;
+- `tier: preview`, public-registry ingress, current-Dockerfile build egress, persistent daemon state,
+  or host-port publishing;
+- `pids.required: true`, a numeric disk limit, or observed disk risk without explicit acceptance;
+- resume of a Docker-workload session.
+
+The untrusted agent cannot choose rootful Apple, profiles, mounts, network, relay targets, daemon image,
+catalog, watchdog, or release-suite selection. The ordinary CLI may perform its existing credential
+preflight before reaching the feature admission seam; that is not Docker-workload provisioning.
 
 Feature/runtime/backend versions, exact resolved config hash, full profile tuple, workspace/runtime ABI,
 complete catalog image tuple/hash, toolchain, relay binary/config/endpoint, watchdog/egress manifests,
@@ -1249,14 +1267,14 @@ The replacement is deliberately conventional:
   infrastructure catalog, profile ceiling, toolchain, relay, watchdog policy, and egress manifests.
 
 Consequently the frozen qualification-contract JSON, contract parser/adjudicator, run-set verifier,
-freeze-guard, and hash-bound qualification-evidence machinery are deleted. The global admission fuse
-remains until the Apple product entrypoint, egress construction, lifecycle, negative, and cleanup gates
-pass end to end. Removing bookkeeping does not qualify or enable a backend.
+freeze-guard, and hash-bound qualification-evidence machinery are deleted. Section 16.14 later replaces
+the global fuse with one explicit Apple developer-only admission predicate; removing bookkeeping itself
+did not qualify or enable a backend.
 
 ### 16.13 Pre-enablement lifecycle and compatibility corrections (record, 2026-08-11)
 
 An adversarial branch review found one ordinary-session regression and six fail-closed defects in the
-fuse-blocked workload path. The corrections are normative:
+then-blocked workload path. The corrections are normative:
 
 - **Feature-off means no IronCurtain-provisioned authority.** Separate arm64 images remain rejected as
   disproportionate complexity. Static Docker tooling and an agent's self-launched processes inside its
@@ -1280,8 +1298,42 @@ fuse-blocked workload path. The corrections are normative:
 - **Response hop semantics are complete.** Egress relays remove both the static hop-by-hop set and every
   field nominated by an upstream `Connection` header.
 
-These fixes are prerequisites for the Apple product-entrypoint and lifecycle gates. They do not change
-the global fuse or claim that 0C has completed.
+These fixes are prerequisites for the Apple product-entrypoint and lifecycle gates. Section 16.14 makes
+only the narrow Apple developer slice reachable; 0C remains incomplete.
+
+### 16.14 Apple developer-slice admission and built-CLI smoke (record, 2026-08-11)
+
+The global boolean fuse is replaced by a shared resolved-variant guard used at both image and
+infrastructure seams. Feature-off sessions retain their prior profile/adapter/runtime ordering. An
+enabled request resolves the effective runtime, matches the exact §12 predicate, and then performs a
+read-only Apple availability check before any feature-attributable runtime construction, image/catalog
+work, proxy, lease, or filesystem provisioning. Direct preparation callers receive the same check.
+
+The outer Apple VM takes CPU and memory from `dockerWorkload.resources` through one clamping helper used
+by batch and PTY paths; feature-off sessions continue to use `dockerResources`. Batch and PTY atomically
+merge the admitted lease tuple into the existing session metadata. PTY teardown retires the daemon-ready
+marker, proxies, and per-bundle runtime socket tree even when outer-resource cleanup verification throws.
+
+Apple Container 1.1 accepts only the local catalog logical tag for `container create`; passing its
+verified `sha256:` index ID is treated as a registry reference and can attempt a fetch. Resolution still
+retains that immutable ID as the identity/evidence. Immediately after the stopped create, the shared
+batch/PTY ledger path inspects the exact VM and compares `configuration.image.descriptor.digest` with
+the already-resolved catalog ID before start. A missing or mismatched descriptor causes exact-ID removal
+and the VM never starts. Apple 1.1 has no authoritative no-fetch create flag, so trusted operators must
+not rotate or retag the catalog image during admission; this residual trusted-host race is not an
+untrusted-workload bypass. Docker continues to create by immutable ID.
+
+`npm run smoke:nested:apple` builds and invokes the real `dist/cli.js start` entrypoint with a private
+temporary `IRONCURTAIN_HOME`, config, workspace, exact staged catalog pair, and only the selected agent
+archive. It holds the no-task interactive session open, derives the lease and immutable outer VM ID only
+from persisted metadata, invokes the absolute pinned Docker client against the VM-private UDS, proves
+rootless+`vfs`, verifies the selected image ID, and uses the production OCI verifier before loading and
+running the catalog helper image under no-network/read-only/cap-drop/no-new-privileges controls. Graceful
+`/quit` must then produce exact immutable-ID absence, a closed lease with two empty inventories and the
+required gap, absent state and runtime roots, and a closed/exited watchdog. Failure retains the private
+temp root for diagnosis but retires the isolated multi-gigabyte archive link. Success removes it. This is
+a mandatory built-CLI/session-initialization and nested-Docker smoke before opening the developer slice;
+it is not an agent turn, provider protocol, PTY gate, complete G1-G10/0C run, or preview qualification.
 
 ## 17. Primary references
 
