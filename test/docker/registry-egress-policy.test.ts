@@ -115,9 +115,28 @@ describe('authorizes a Docker Hub library/node base-image pull (frozen manifest)
     const authorized = authorizeValidatedRegistryEgressRequest(frozen, {
       method: 'GET',
       url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull',
+      headers: { 'accept-encoding': 'gzip' },
     });
     expect(authorized.operation).toBe('token');
     expect(authorized.originId).toBe('docker-hub-token');
+    expect(authorized.headers['accept-encoding']).toBe('gzip');
+  });
+
+  it('retains generic header-injection and unreviewed-header denial on token fetches', () => {
+    expect(() =>
+      authorizeValidatedRegistryEgressRequest(frozen, {
+        method: 'GET',
+        url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull',
+        headers: { 'accept-encoding': 'gzip\r\nx-smuggled: yes' },
+      }),
+    ).toThrow(/line break/u);
+    expect(() =>
+      authorizeValidatedRegistryEgressRequest(frozen, {
+        method: 'GET',
+        url: 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull',
+        headers: { 'x-unreviewed': 'value' },
+      }),
+    ).toThrow(/not allowed/u);
   });
 
   it.each([
@@ -209,8 +228,8 @@ describe('anonymous registry-egress authorization', () => {
   });
 });
 
-describe('anonymous bearer-token admission (§6.4)', () => {
-  it('admits a single anonymous Bearer token on a request to a listed origin', () => {
+describe('bearer-token admission (§6.4)', () => {
+  it('admits a single syntactically valid Bearer token on a request to a listed origin', () => {
     const authorized = authorizeRegistryEgressRequest(manifest(), {
       method: 'GET',
       url: `https://registry.test/v2/library/app/blobs/${DIGEST}`,
@@ -227,7 +246,7 @@ describe('anonymous bearer-token admission (§6.4)', () => {
         url: `https://registry.test/v2/library/app/blobs/${DIGEST}`,
         headers: { authorization: 'Basic dXNlcjpwYXNz' },
       }),
-    ).toThrow(/single anonymous Bearer token/u);
+    ).toThrow(/single Bearer token/u);
   });
 
   it('rejects Cookie and Proxy-Authorization credential headers', () => {

@@ -87,6 +87,7 @@ import {
   resolveNestedDaemonBundle,
   startAppleVmDockerWorkload,
 } from '../docker-workload/session-daemon.js';
+import { APPLE_VM_REGISTRY_EGRESS_SOCKET } from '../docker-workload/apple-vm-daemon.js';
 import {
   appleVmDockerWorkloadCatalogMount,
   stageAppleVmDockerWorkloadBootstrap,
@@ -350,6 +351,11 @@ export interface PreContainerInfrastructure {
   readonly dockerWorkload?: DockerWorkloadBundleHandle;
   /** Immutable per-lease catalog view used only by an admitted Apple Docker workload. */
   readonly dockerWorkloadBootstrap?: AppleVmDockerWorkloadBootstrapConfig;
+  /** Per-bundle host listener mounted only into the admitted public-registry Apple VM. */
+  readonly dockerWorkloadRegistryEgress?: {
+    readonly listener: MitmProxy;
+    readonly socketPath: string;
+  };
 }
 
 /**
@@ -581,6 +587,7 @@ export async function prepareDockerInfrastructure(
     getBundleProxySocketPath,
     getBundleMitmProxySocketPath,
     getBundleMitmControlSocketPath,
+    getBundleRegistryEgressSocketPath,
   } = await import('../config/paths.js');
 
   await registerBuiltinAdapters(config.userConfig);
@@ -670,6 +677,7 @@ export async function prepareDockerInfrastructure(
   let hostOnlyNetwork: HostOnlyNetwork | undefined;
   let proxy: DockerProxy | undefined;
   let mitmProxy: MitmProxy | undefined;
+  let dockerWorkloadRegistryEgress: PreContainerInfrastructure['dockerWorkloadRegistryEgress'];
   try {
     // tcp-hostonly: create the per-bundle host-only network BEFORE the
     // proxies are constructed. The gateway address feeds the container env,
@@ -697,6 +705,29 @@ export async function prepareDockerInfrastructure(
     // Load or generate the IronCurtain CA for TLS termination
     const caDir = resolve(getIronCurtainHome(), 'ca');
     const ca = loadOrCreateCA(caDir);
+
+    if (dockerWorkloadConfig?.enabled === true && dockerWorkloadConfig.imageIngress === 'public-registry') {
+      const { createDockerWorkloadEgressListeners } = await import('./docker-workload-egress.js');
+      const { createDirectOutboundTransport } = await import('./outbound-transport.js');
+      const registrySocketPath = getBundleRegistryEgressSocketPath(bundleId);
+      const listeners = createDockerWorkloadEgressListeners({
+        workload: dockerWorkloadConfig,
+        ca,
+        outboundTransport: createDirectOutboundTransport(),
+        registryListen: { socketPath: registrySocketPath },
+      });
+      if (listeners.registryEgress === undefined || listeners.buildEgress !== undefined) {
+        throw new Error('public-registry Docker workload must construct exactly one registry-egress listener');
+      }
+      dockerWorkloadRegistryEgress = { listener: listeners.registryEgress, socketPath: registrySocketPath };
+      const registryAddr = await listeners.registryEgress.start();
+      if (registryAddr.socketPath !== registrySocketPath) {
+        throw new Error('registry-egress listener did not bind its exact per-bundle socket');
+      }
+      // The host parent is 0700. Apple presents a root-owned guest socket, so
+      // the non-root runtime user needs the socket's "other" write bit.
+      chmodSync(registrySocketPath, 0o666);
+    }
 
     // Generate fake keys and build provider key mappings.
     // In OAuth mode, use bearer-based providers and the OAuth access token as the real key.
@@ -1028,6 +1059,7 @@ export async function prepareDockerInfrastructure(
       ...workflowDependencyMounts,
       dockerWorkload,
       dockerWorkloadBootstrap,
+      dockerWorkloadRegistryEgress,
       restageSkills,
       setTokenSessionId: (id) => {
         activeMitmProxy.setTokenSessionId(id);
@@ -1073,6 +1105,7 @@ export async function prepareDockerInfrastructure(
     // teardown is idempotent and, with the supervisor already gone, closes the
     // lease as coordinator and audits the incident. Best-effort — a teardown
     // fault must not mask the original error.
+    await dockerWorkloadRegistryEgress?.listener.stop().catch(() => {});
     await dockerWorkload
       ?.teardown()
       .catch((err: unknown) =>
@@ -1161,6 +1194,11 @@ export async function assembleDockerInfrastructure(
     await provisionWorkflowDependencies(infra, config.userConfig.packageInstall.enabled);
     return infra;
   } catch (error) {
+    await core.dockerWorkloadRegistryEgress?.listener
+      .stop()
+      .catch((err: unknown) =>
+        logger.warn(`assembleDockerInfrastructure: registry-egress stop failed: ${errorMessage(err)}`),
+      );
     // §8.3: tear the bundle's outer resources down (teardown-first for a
     // Docker-workload bundle, then the belt-and-braces sweep) and release the
     // managed-resource lease. A create that failed mid-flight already cleaned
@@ -1199,6 +1237,13 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
   // Proxy connections from the container terminate cleanly when the
   // container stops; inverting would leave the proxy with in-flight
   // connections that get ECONNRESET during its own shutdown.
+
+  // Revoke the optional nested-daemon egress authority before touching the VM.
+  await infra.dockerWorkloadRegistryEgress?.listener
+    .stop()
+    .catch((err: unknown) =>
+      logger.warn(`destroyDockerInfrastructure: registry-egress stop failed: ${errorMessage(err)}`),
+    );
 
   // Containers + sidecar + internal network + managed-resource lease. For an
   // admitted Docker-workload bundle this tears the ledgered resources down
@@ -1702,6 +1747,23 @@ export function buildUdsSocketMounts(
   return [{ source: socketsDir, target: CONTAINER_SOCKETS_DIR, readonly: false }];
 }
 
+/** Exact Apple-only mount for the per-bundle registry-egress capability. */
+export function buildDockerWorkloadRegistryEgressMount(
+  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'dockerWorkloadRegistryEgress'>,
+): { source: string; target: string; readonly: boolean }[] {
+  if (core.dockerWorkloadRegistryEgress === undefined) return [];
+  if (core.runtimeKind !== 'apple-container') {
+    throw new Error('registry-egress listener mounting is implemented only for Apple Container');
+  }
+  return [
+    {
+      source: core.dockerWorkloadRegistryEgress.socketPath,
+      target: APPLE_VM_REGISTRY_EGRESS_SOCKET,
+      readonly: false,
+    },
+  ];
+}
+
 /** Container-level resources layered on top of the pre-container bundle. */
 export interface ContainerResources {
   readonly containerId: string;
@@ -1943,6 +2005,10 @@ async function createSessionContainersAttempt(
       mounts.push(...buildUdsSocketMounts(core.runtimeKind, core.socketsDir));
     }
 
+    // This capability is independent of the outer provider-proxy topology:
+    // Apple mounts exactly one per-bundle socket only for public-registry.
+    mounts.push(...buildDockerWorkloadRegistryEgressMount(core));
+
     // Mount conversation state directory for session resume (e.g., claude --continue)
     if (core.conversationStateDir && core.conversationStateConfig) {
       mounts.push({
@@ -2088,6 +2154,7 @@ async function createSessionContainersAttempt(
         containerId: mainContainerId,
         nestedDaemon,
         bootstrap: dockerWorkloadBootstrap,
+        registryEgress: core.dockerWorkloadRegistryEgress !== undefined,
       });
     }
 

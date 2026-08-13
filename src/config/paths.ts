@@ -670,7 +670,7 @@ export function getBundleControlSocketPath(bundleId: BundleId): string {
 //
 // Three locations per bundle:
 //   run/<bid12>/ctrl.sock             → coordinator control socket
-//   run/<bid12>/sockets/              → bind-mounted as /run/ironcurtain/
+//   run/<bid12>/sockets/              → selected files mounted into the container
 //   run/<bid12>/host/                 → host-local only (MITM control)
 // The `sockets/` vs `host/` split keeps the bind-mounted endpoints
 // separate from host-only endpoints so `isEndpointAllowed` is not the
@@ -693,12 +693,13 @@ export function getBundleRuntimeRoot(bundleId: BundleId): string {
  * Returns the per-bundle container-visible sockets directory:
  *   {home}/run/{bundleId[0:12]}/sockets/
  *
- * Two UDS files live here:
+ * Up to three UDS files live here:
  *  - `proxy.sock`      (Code Mode proxy — bind-mounted into container)
  *  - `mitm-proxy.sock` (MITM proxy      — bind-mounted into container)
+ *  - `registry-egress.sock` (public workload-image pulls; strict opt-in)
  *
  * This directory is what `prepareDockerInfrastructure()` bind-mounts as
- * `/run/ironcurtain/` inside the container (read-write). Only these two
+ * `/run/ironcurtain/` inside the container (read-write). Only container-facing
  * socket files live here — no audit logs, escalation files, or other
  * session artifacts.
  */
@@ -739,6 +740,18 @@ export function getBundleProxySocketPath(bundleId: BundleId): string {
  */
 export function getBundleMitmProxySocketPath(bundleId: BundleId): string {
   return resolve(getBundleSocketsDir(bundleId), 'mitm-proxy.sock');
+}
+
+/**
+ * Public-registry egress UDS path for an admitted Docker-workload bundle.
+ *
+ * This is deliberately a third, exact per-bundle socket rather than another
+ * mode on the ordinary MITM listener. It is bound only for the explicit
+ * `public-registry` variant and Apple mounts only this file into that bundle's
+ * VM. `preloaded-only` therefore has no listener and no guest-visible path.
+ */
+export function getBundleRegistryEgressSocketPath(bundleId: BundleId): string {
+  return resolve(getBundleSocketsDir(bundleId), 'registry-egress.sock');
 }
 
 /**

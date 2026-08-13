@@ -24,7 +24,11 @@ import {
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
 import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../../src/docker-workload/session-daemon.js';
-import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
+import {
+  APPLE_VM_DAEMON_DOCKER_HOST,
+  APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV,
+  APPLE_VM_REGISTRY_EGRESS_SOCKET,
+} from '../../src/docker-workload/apple-vm-daemon.js';
 import { APPLE_VM_INNER_DOCKER_CATALOG_DIR } from '../../src/docker-workload/apple-private-docker.js';
 import { resolveDockerWorkloadAdmissionBindings } from '../../src/docker-workload/admission-bindings.js';
 import { loadPreloadedImageCatalog } from '../../src/docker/preloaded-image-catalog.js';
@@ -130,6 +134,7 @@ function makeCore(
   overrides: {
     readonly dockerWorkload?: DockerWorkloadBundleHandle;
     readonly runtimeKind?: ContainerRuntimeKind;
+    readonly publicRegistry?: boolean;
   } = {},
 ): PreContainerInfrastructure {
   const runtimeKind = overrides.runtimeKind ?? 'apple-container';
@@ -190,6 +195,9 @@ function makeCore(
     dockerWorkload: overrides.dockerWorkload,
     dockerWorkloadBootstrap:
       overrides.dockerWorkload === undefined ? undefined : createTestAppleVmDockerWorkloadBootstrap(tempDir),
+    dockerWorkloadRegistryEgress: overrides.publicRegistry
+      ? { listener: createMockMitmProxy(), socketPath: join(socketsDir, 'registry-egress.sock') }
+      : undefined,
   };
 }
 
@@ -399,6 +407,37 @@ describe('nested daemon — feature-off equivalence', () => {
     // The create used that deterministic name, not a ledgered random one.
     expect(runtime.events).toEqual([`create:${result.containerName}`, `start:${result.containerId}`]);
     expect(daemonInfoProbes(runtime)).toEqual([]);
+  });
+});
+
+describe('nested daemon — public-registry transport', () => {
+  it('adds one exact Apple socket mount and selects the proxy-aware daemon bootstrap', async () => {
+    const { runtime, handle } = await admitBundle();
+    const capturing = capturingRuntime(runtime);
+    const core = makeCore(capturing.runtime, { dockerWorkload: handle, publicRegistry: true });
+
+    await createSessionContainers(core, makeConfig());
+
+    expect(capturing.config().mounts).toContainEqual({
+      source: join(core.socketsDir, 'registry-egress.sock'),
+      target: APPLE_VM_REGISTRY_EGRESS_SOCKET,
+      readonly: false,
+    });
+    expect(runtime.execs).toContainEqual([...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV]);
+    expect(Object.values(capturing.config().env).join(' ')).not.toContain('18081');
+  });
+
+  it('adds no registry mount or daemon proxy configuration to preloaded-only', async () => {
+    const { runtime, handle } = await admitBundle();
+    const capturing = capturingRuntime(runtime);
+    const core = makeCore(capturing.runtime, { dockerWorkload: handle });
+
+    await createSessionContainers(core, makeConfig());
+
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_REGISTRY_EGRESS_SOCKET }),
+    );
+    expect(runtime.execs).not.toContainEqual([...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV]);
   });
 });
 

@@ -129,14 +129,13 @@ export function assertDockerWorkloadVariantAdmitted(
   const admitted =
     resolvedRuntimeKind === 'apple-container' &&
     (config.backend === 'auto' || config.backend === 'apple-container') &&
-    config.imageIngress === 'preloaded-only' &&
     config.buildEgress === 'disabled' &&
     !config.resources.pids.required &&
     config.resources.diskMb === null &&
     config.acceptObservedDiskRisk;
   if (!admitted) {
     throw new Error(
-      'secure nested Docker currently admits only the Apple Container developer-only preloaded/offline ephemeral variant with host ports and build egress disabled, advisory PID limits, and explicit observed-disk risk acceptance; no image, relay, daemon, or lease action was performed',
+      'secure nested Docker currently admits only the Apple Container developer-only preloaded-catalog ephemeral variant (offline or public-registry ingress with no IronCurtain-provided registry credentials) with host ports and build egress disabled, advisory PID limits, and explicit observed-disk risk acceptance; no image, relay, daemon, or lease action was performed',
     );
   }
 }

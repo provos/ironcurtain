@@ -207,7 +207,7 @@ export interface MitmProxyOptions {
     readonly seam: BuildEgressSeam;
   };
   /**
-   * Anonymous workload-image registry-egress mode (§6.4). When present, this proxy
+   * Public workload-image registry-egress mode (§6.4). When present, this proxy
    * serves ONLY the nested bundle's `public-registry` image-pull path: it has no LLM
    * providers, package registries, or dynamic passthrough. Every CONNECT is
    * TLS-terminated and every decrypted request is authorized against the frozen
@@ -216,8 +216,8 @@ export interface MitmProxyOptions {
    * bundle state and is never hashed or verified (§16.6); authority is constrained by
    * URL/operation gating, exact derived-redirect authorization, credential handling,
    * and the ceilings. See `registry-egress-proxy.ts` for the seam design. Mutually
-   * exclusive with `buildEgress`. Foundation code — inert behind the docker-workload
-   * admission fuse until a later phase constructs a `public-registry` session; a
+   * exclusive with `buildEgress`. Production constructs it only for an admitted
+   * `public-registry` session; a
    * `preloaded-only` session sets no guard, so registry traffic has no route.
    */
   readonly registryEgress?: {
@@ -452,6 +452,30 @@ const MAX_TOOL_RESULT_CONTENT_LEN = 500;
  * and 502 every allowed package and metadata request.
  */
 const REGISTRY_UPSTREAM_HTTPS_PORT = 443;
+
+interface RegistryConnectAuthority {
+  readonly hostname: string;
+  readonly port: number;
+}
+
+/**
+ * Registry mode accepts only a canonical DNS `host:decimal-port` authority.
+ * The ordinary proxy retains its legacy parser; this stricter boundary runs
+ * before registry CONNECT acknowledgement or certificate generation.
+ */
+function parseRegistryConnectAuthority(authority: string): RegistryConnectAuthority | undefined {
+  const match = /^([^:]+):([1-9][0-9]{0,4})$/u.exec(authority);
+  if (match === null) return undefined;
+  const hostname = match[1];
+  if (hostname.length > 253) return undefined;
+  const labels = hostname.split('.');
+  if (labels.some((label) => label.length > 63 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u.test(label))) {
+    return undefined;
+  }
+  const port = Number(match[2]);
+  if (!Number.isSafeInteger(port) || port > 65_535) return undefined;
+  return { hostname: hostname.toLowerCase(), port };
+}
 
 /** Truncate tool result content to MAX_TOOL_RESULT_CONTENT_LEN, appending ellipsis if needed. */
 function truncateToolResult(text: string): string {
@@ -1688,14 +1712,15 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
   outerServer.on('connect', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const url = req.url ?? '';
+    const registryAuthority = listenerMode.kind === 'registry-egress' ? parseRegistryConnectAuthority(url) : undefined;
     const colonIndex = url.lastIndexOf(':');
-    const rawHost = colonIndex > 0 ? url.substring(0, colonIndex) : url;
+    const rawHost = registryAuthority?.hostname ?? (colonIndex > 0 ? url.substring(0, colonIndex) : url);
     // Normalize so the allowlist is case-insensitive (RFC 1035 §2.3.3).
     // Critical when the wildcard escape hatch is enabled — without this,
     // `CONNECT API.TEST.COM:443` would miss the provider map and be treated
     // as an unknown host, opening a raw tunnel that bypasses MITM.
     const host = normalizeHost(rawHost);
-    const port = colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443;
+    const port = registryAuthority?.port ?? (colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443);
     const connId = ++connectionId;
 
     // Handle client socket errors early to prevent uncaught 'error' events
@@ -1709,6 +1734,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     activeClientSockets.add(clientSocket);
     clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
+    if (listenerMode.kind === 'registry-egress' && registryAuthority === undefined) {
+      logger.info(`[mitm-proxy] #${connId} DENIED malformed registry-egress CONNECT authority`);
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+
     // 1. Check allowlist (providers, registries, and dynamic passthrough).
     // Build-egress and registry-egress modes have none of these — every host is
     // TLS-terminated so the request layer can authorize it against the frozen
@@ -1720,6 +1752,15 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
     if (listenerMode.kind === 'standard' && !provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+    if (
+      listenerMode.kind === 'registry-egress' &&
+      !listenerMode.guard.manifest?.origins.some((origin) => origin.hostname === host && origin.port === port)
+    ) {
+      logger.info(`[mitm-proxy] #${connId} DENIED registry-egress CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       clientSocket.destroy();
       return;
@@ -1807,8 +1848,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const tlsSocket = new tls.TLSSocket(clientSocket, {
       isServer: true,
       SNICallback: (servername, cb) => {
-        const ctx = getOrCreateSecureContext(servername);
-        cb(null, ctx);
+        const normalizedServername = normalizeHost(servername);
+        if (listenerMode.kind === 'registry-egress' && normalizedServername !== host) {
+          cb(new Error('registry-egress TLS SNI must match the authorized CONNECT host'));
+          return;
+        }
+        cb(null, getOrCreateSecureContext(normalizedServername));
       },
     });
 

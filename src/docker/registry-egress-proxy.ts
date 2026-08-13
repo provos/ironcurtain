@@ -1,5 +1,5 @@
 /**
- * Proxy-side enforcement seam for anonymous workload-image registry egress (§6.4).
+ * Proxy-side enforcement seam for public workload-image registry egress (§6.4).
  *
  * ## Wiring-seam design (Phase 0F, §6.4 / §16.5 / §16.6 of the plan)
  *
@@ -25,7 +25,7 @@
  * client-origin URL/operation gating (the guard), exact derived-redirect authorization
  * (an unlisted CDN host is reachable only as the immediate `Location` of an authorized
  * manifest/blob response — HTTPS, credential-stripped, SSRF-checked by the transport,
- * finite hops), anonymous bearer-token handling, and per-request / per-session transfer
+ * finite hops), listed-origin bearer-token handling, and per-request / per-session transfer
  * ceilings. Because a derived-redirect authority is chosen by the upstream response
  * and no parent hop can re-derive it, the SSRF check must happen in this process:
  * the forwarder refuses (502, before upstream contact) any transport that does not
@@ -39,8 +39,8 @@
  * per-session ledger, and the I/O (stream, follow bounded redirects, enforce
  * ceilings), keeping the policy independently testable.
  *
- * Foundation code — inert behind the docker-workload admission fuse until a later
- * phase constructs a `public-registry` session.
+ * Production constructs this seam only for an explicitly admitted
+ * `public-registry` Docker-workload session.
  */
 
 import * as http from 'node:http';
@@ -244,7 +244,7 @@ export interface RegistryEgressForwardContext {
 
 /**
  * Authorize one registry-originated request against the frozen manifest (including
- * anonymous-bearer admission), then hand it to the shared mediated forwarder with
+ * listed-origin Bearer admission), then hand it to the shared mediated forwarder with
  * the registry-specific behaviors wired in: the per-session ledger, internal
  * derived-redirect following, and digest provenance. Any authorization rejection is
  * a fail-closed `403` with no upstream contact.

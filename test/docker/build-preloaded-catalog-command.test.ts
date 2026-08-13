@@ -13,8 +13,11 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
   runBuildPreloadedCatalog,
+  runBuildPreloadedCatalogCommand,
+  runPreloadedCatalogBuildSingleFlight,
   type RunBuildPreloadedCatalogOptions,
 } from '../../src/docker/build-preloaded-catalog-command.js';
+import { acquireProcessLock, ProcessLockBusyError } from '../../src/docker-workload/process-lock.js';
 import { publishCatalogGeneration } from '../../src/docker/preloaded-catalog-builder.js';
 import { catalogImageSources, type CatalogImageSource } from '../../src/docker/preloaded-catalog-sources.js';
 import {
@@ -189,5 +192,85 @@ describe('runBuildPreloadedCatalog', () => {
     await expect(
       runBuildPreloadedCatalog(baseOptions({ buildImage, agentBuildHash: () => 'not-a-hash' })),
     ).rejects.toThrow(/not lowercase sha256 hex/u);
+  });
+});
+
+describe('catalog-freeze command single-flight', () => {
+  const acquireTestLock = (path: string) =>
+    acquireProcessLock(path, {
+      processIdentityForPid: (pid) => (pid === process.pid ? 'catalog-command-test-process' : undefined),
+    });
+
+  it('returns help before acquiring the build lock', async () => {
+    const runSingleFlight = vi.fn(async () => {
+      throw new Error('help attempted to acquire the build lock');
+    });
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await runBuildPreloadedCatalogCommand(['--help'], { runSingleFlight });
+    } finally {
+      output.mockRestore();
+    }
+    expect(runSingleFlight).not.toHaveBeenCalled();
+  });
+
+  it('holds one process lock before generation resolution and through build completion', async () => {
+    const lock = join(privateDir('preloaded-command-lock-'), 'build.lock');
+    const stages: string[] = [];
+    const result = await runPreloadedCatalogBuildSingleFlight({
+      lockPath: lock,
+      acquireLock: acquireTestLock,
+      resolveGeneration: () => {
+        stages.push('resolve');
+        expect(() => acquireTestLock(lock)).toThrow(ProcessLockBusyError);
+        return { architecture: 'arm64', generation: 'ironcurtain-preloaded-arm64-v4' };
+      },
+      build: async (resolved) => {
+        stages.push(`build:${resolved.generation}`);
+        expect(() => acquireTestLock(lock)).toThrow(ProcessLockBusyError);
+        return 'published';
+      },
+    });
+
+    expect(result).toBe('published');
+    expect(stages).toEqual(['resolve', 'build:ironcurtain-preloaded-arm64-v4']);
+    const reacquired = acquireTestLock(lock);
+    reacquired.release();
+  });
+
+  it('rejects a concurrent freeze and releases after build failure', async () => {
+    const lock = join(privateDir('preloaded-command-lock-'), 'build.lock');
+    let releaseBuild!: () => void;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    const first = runPreloadedCatalogBuildSingleFlight({
+      lockPath: lock,
+      acquireLock: acquireTestLock,
+      resolveGeneration: () => ({ architecture: 'arm64', generation: 'ironcurtain-preloaded-arm64-v4' }),
+      build: async () => {
+        await buildBlocked;
+        throw new Error('injected build failure');
+      },
+    });
+
+    await expect(
+      runPreloadedCatalogBuildSingleFlight({
+        lockPath: lock,
+        acquireLock: acquireTestLock,
+        resolveGeneration: () => ({ architecture: 'arm64', generation: 'ironcurtain-preloaded-arm64-v5' }),
+        build: async () => 'must-not-run',
+      }),
+    ).rejects.toBeInstanceOf(ProcessLockBusyError);
+    releaseBuild();
+    await expect(first).rejects.toThrow(/injected build failure/u);
+
+    const afterFailure = await runPreloadedCatalogBuildSingleFlight({
+      lockPath: lock,
+      acquireLock: acquireTestLock,
+      resolveGeneration: () => ({ architecture: 'arm64', generation: 'ironcurtain-preloaded-arm64-v4' }),
+      build: async () => 'recovered',
+    });
+    expect(afterFailure).toBe('recovered');
   });
 });

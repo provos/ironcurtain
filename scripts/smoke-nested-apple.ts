@@ -3,6 +3,7 @@
 /** Production-entrypoint smoke for the admitted Apple secure-nested-Docker slice. */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -34,6 +35,7 @@ import {
   getBundleMitmControlSocketPath,
   getBundleMitmProxySocketPath,
   getBundleProxySocketPath,
+  getBundleRegistryEgressSocketPath,
   getBundleRuntimeRoot,
 } from '../src/config/paths.js';
 import { verifyOciImageArchive } from '../src/docker/oci-image-archive.js';
@@ -43,6 +45,19 @@ import { createPtyBridge, type PtyBridge } from '../src/pty/pty-bridge.js';
 import type { SessionMetadata } from '../src/session/types.js';
 import type { BundleId } from '../src/session/types.js';
 import { appendBoundedTuiOutput, hasClaudeTuiEvidence } from './smoke-nested-apple-tui.js';
+import {
+  DENIED_REGISTRY_SMOKE_IMAGE,
+  assertInternalBridge,
+  assertEmbeddedDnsResolver,
+  assertNoPublishedPortBindings,
+  assertRequiredBusyboxApplets,
+  bindPublicRegistryWorkloadNetwork,
+  assertRegistryPolicyDenied,
+  buildNestedAppleSmokeWorkloadConfig,
+  buildPublicRegistryWorkloadPlan,
+  parseNestedAppleSmokeMode,
+  type NestedAppleSmokeMode,
+} from './smoke-nested-apple-workload.js';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..');
@@ -73,9 +88,9 @@ interface SmokeEnvironment {
   readonly expectedConfigHash: string;
 }
 
-async function main(): Promise<void> {
+async function main(mode: 'batch' | 'public-registry'): Promise<void> {
   const { sourceCatalogDir, frozenCatalogDir, smokeRoot, smokeHome, workspace, expectedConfigHash } =
-    prepareSmokeEnvironment();
+    prepareSmokeEnvironment(mode);
   try {
     const argv = [CLI_PATH, 'start', '--agent', 'claude-code', '--workspace', workspace];
     const child = spawn(process.execPath, argv, {
@@ -101,6 +116,16 @@ async function main(): Promise<void> {
       );
       activeBundle = active;
       const outerId = requireAgentOuterId(active.lease);
+      const registryEgressSocketPath = withIronCurtainHome(smokeHome, () =>
+        getBundleRegistryEgressSocketPath(active.sessionId as BundleId),
+      );
+      if (mode === 'public-registry') {
+        if (!existsSync(registryEgressSocketPath) || !statSync(registryEgressSocketPath).isSocket()) {
+          throw new Error('active public-registry bundle lacks its exact host registry-egress listener UDS');
+        }
+      } else if (existsSync(registryEgressSocketPath)) {
+        throw new Error('active preloaded-only bundle unexpectedly provisioned a registry-egress listener UDS');
+      }
       const supervisorStatusPath = resolve(dirname(active.leasePath), 'status.json');
       const supervisor = loadResourceWatchdogSupervisorStatus(supervisorStatusPath);
       const supervisorIdentity = getProcessStartIdentity(supervisor.supervisorPid);
@@ -114,56 +139,60 @@ async function main(): Promise<void> {
       const before = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
       if (before.stdout.trim() !== '') throw new Error('private Docker inventory was not empty before smoke child');
 
-      // Harness-only workload ingress: copy one catalog-owned tiny helper archive
-      // into the already-mounted workspace, verify the exposed bytes with the
-      // production OCI verifier, load it through the private daemon, then retire
-      // the copy. This does not broaden production bootstrap or configuration.
-      const helperArchive = resolve(workspace, helper.archive.fileName);
-      copyFileSync(resolve(sourceCatalogDir, helper.archive.fileName), helperArchive);
-      chmodSync(helperArchive, 0o400);
-      const expectedHelperLabels = buildPreloadedImageLabels(helper, frozenDocker.catalog.generation);
-      await verifyOciImageArchive({
-        archivePath: helperArchive,
-        expectedArchiveSha256: helper.archive.sha256,
-        expectedSizeBytes: helper.archive.sizeBytes,
-        manifestDigest: helper.manifestDigest,
-        configDigest: helper.configDigest,
-        logicalName: helper.logicalName,
-        architecture: helper.architecture,
-        expectedLabels: expectedHelperLabels,
-      });
-      await innerDocker(runtime, outerId, ['image', 'load', '--input', `/workspace/${helper.archive.fileName}`]);
-      rmSync(helperArchive, { force: true });
-      const helperInspect = await innerDocker(runtime, outerId, [
-        'image',
-        'inspect',
-        '--format',
-        '{{json .}}',
-        helper.logicalName,
-      ]);
-      const helperInfo = JSON.parse(helperInspect.stdout) as {
-        Id?: string;
-        Config?: { Labels?: Readonly<Record<string, string>> };
-      };
-      if (helperInfo.Id !== helper.runtimeImageId) throw new Error('loaded helper immutable ID differs from catalog');
-      for (const [name, value] of Object.entries(expectedHelperLabels)) {
-        if (helperInfo.Config?.Labels?.[name] !== value) throw new Error(`loaded helper label differs: ${name}`);
+      if (mode === 'public-registry') {
+        await verifyPublicRegistryWorkload(runtime, outerId);
+      } else {
+        // Harness-only workload ingress: copy one catalog-owned tiny helper archive
+        // into the already-mounted workspace, verify the exposed bytes with the
+        // production OCI verifier, load it through the private daemon, then retire
+        // the copy. This does not broaden production bootstrap or configuration.
+        const helperArchive = resolve(workspace, helper.archive.fileName);
+        copyFileSync(resolve(sourceCatalogDir, helper.archive.fileName), helperArchive);
+        chmodSync(helperArchive, 0o400);
+        const expectedHelperLabels = buildPreloadedImageLabels(helper, frozenDocker.catalog.generation);
+        await verifyOciImageArchive({
+          archivePath: helperArchive,
+          expectedArchiveSha256: helper.archive.sha256,
+          expectedSizeBytes: helper.archive.sizeBytes,
+          manifestDigest: helper.manifestDigest,
+          configDigest: helper.configDigest,
+          logicalName: helper.logicalName,
+          architecture: helper.architecture,
+          expectedLabels: expectedHelperLabels,
+        });
+        await innerDocker(runtime, outerId, ['image', 'load', '--input', `/workspace/${helper.archive.fileName}`]);
+        rmSync(helperArchive, { force: true });
+        const helperInspect = await innerDocker(runtime, outerId, [
+          'image',
+          'inspect',
+          '--format',
+          '{{json .}}',
+          helper.logicalName,
+        ]);
+        const helperInfo = JSON.parse(helperInspect.stdout) as {
+          Id?: string;
+          Config?: { Labels?: Readonly<Record<string, string>> };
+        };
+        if (helperInfo.Id !== helper.runtimeImageId) throw new Error('loaded helper immutable ID differs from catalog');
+        for (const [name, value] of Object.entries(expectedHelperLabels)) {
+          if (helperInfo.Config?.Labels?.[name] !== value) throw new Error(`loaded helper label differs: ${name}`);
+        }
+        await innerDocker(runtime, outerId, [
+          'run',
+          '--rm',
+          '--pull',
+          'never',
+          '--network',
+          'none',
+          '--read-only',
+          '--cap-drop',
+          'ALL',
+          '--security-opt',
+          'no-new-privileges',
+          helper.runtimeImageId,
+          '--sleep=10ms',
+        ]);
       }
-      await innerDocker(runtime, outerId, [
-        'run',
-        '--rm',
-        '--pull',
-        'never',
-        '--network',
-        'none',
-        '--read-only',
-        '--cap-drop',
-        'ALL',
-        '--security-opt',
-        'no-new-privileges',
-        helper.runtimeImageId,
-        '--sleep=10ms',
-      ]);
       const after = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
       if (after.stdout.trim() !== '') throw new Error('private Docker inventory was not empty after smoke child');
       assertChildRunning(child, 'after private-Docker operation');
@@ -182,9 +211,14 @@ async function main(): Promise<void> {
         supervisorPid: supervisor.supervisorPid,
         supervisorIdentity,
       });
+      if (existsSync(registryEgressSocketPath)) {
+        throw new Error('closed bundle retained a registry-egress listener UDS');
+      }
       assertNoProviderRequest(resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'));
       succeeded = true;
-      process.stderr.write(`nested Apple smoke passed (session=${active.sessionId}, outer=${outerId})\n`);
+      process.stderr.write(
+        `nested Apple ${mode} infrastructure smoke passed (session=${active.sessionId}, outer=${outerId})\n`,
+      );
     } finally {
       try {
         if (child.exitCode === null && child.signalCode === null) {
@@ -222,7 +256,7 @@ async function main(): Promise<void> {
   }
 }
 
-function prepareSmokeEnvironment(providerBaseUrl?: string): SmokeEnvironment {
+function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: string): SmokeEnvironment {
   if (!existsSync(CLI_PATH)) throw new Error(`built CLI is missing: ${CLI_PATH}; run npm run build`);
   const operatorHome = process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain');
   const sourceCatalogDir = resolve(operatorHome, 'docker-workload', 'preloaded-catalog');
@@ -241,18 +275,7 @@ function prepareSmokeEnvironment(providerBaseUrl?: string): SmokeEnvironment {
     mkdirSync(workspace, { mode: 0o700 });
     assertSmokeSocketPathBudget(smokeHome);
     stageSelectedCatalog(sourceCatalogDir, smokeHome);
-    const resolvedWorkload = resolveDockerWorkloadConfig({
-      enabled: true,
-      tier: 'developer-only',
-      backend: 'apple-container',
-      imageMode: 'preloaded-catalog',
-      imageIngress: 'preloaded-only',
-      daemonState: 'ephemeral',
-      hostPortPublishing: false,
-      buildEgress: 'disabled',
-      acceptObservedDiskRisk: true,
-      resources: { memoryMb: 4096, cpus: 2, pids: { desired: 512, required: false }, diskMb: null },
-    });
+    const resolvedWorkload = resolveDockerWorkloadConfig(buildNestedAppleSmokeWorkloadConfig(mode));
     const expectedConfigHash = dockerWorkloadConfigHash(resolvedWorkload);
     writePrivateJson(resolve(smokeHome, 'config.json'), {
       anthropicApiKey: FAKE_API_KEY,
@@ -295,7 +318,7 @@ async function mainPty(): Promise<void> {
   const providerSink = await startRejectingProviderSink();
   let environment: SmokeEnvironment;
   try {
-    environment = prepareSmokeEnvironment(providerSink.url);
+    environment = prepareSmokeEnvironment('pty', providerSink.url);
   } catch (error) {
     await closeServer(providerSink.server);
     throw error;
@@ -346,6 +369,12 @@ async function mainPty(): Promise<void> {
     );
     activeBundle = active;
     const outerId = requireAgentOuterId(active.lease);
+    const registryEgressSocketPath = withIronCurtainHome(smokeHome, () =>
+      getBundleRegistryEgressSocketPath(active.sessionId as BundleId),
+    );
+    if (existsSync(registryEgressSocketPath)) {
+      throw new Error('active preloaded-only PTY bundle unexpectedly provisioned a registry-egress listener UDS');
+    }
     const supervisorStatusPath = resolve(dirname(active.leasePath), 'status.json');
     const supervisor = loadResourceWatchdogSupervisorStatus(supervisorStatusPath);
     const supervisorIdentity = getProcessStartIdentity(supervisor.supervisorPid);
@@ -390,6 +419,9 @@ async function mainPty(): Promise<void> {
       supervisorIdentity,
       leaseTimeoutMs: 180_000,
     });
+    if (existsSync(registryEgressSocketPath)) {
+      throw new Error('closed preloaded-only PTY bundle retained a registry-egress listener UDS');
+    }
     assertNoProviderRequest(resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'));
     await closeServer(providerSink.server);
     if (providerSink.requestCount() !== 0) {
@@ -515,6 +547,7 @@ function assertSmokeSocketPathBudget(smokeHome: string): void {
     getBundleProxySocketPath(SOCKET_PATH_PROBE_BUNDLE),
     getBundleMitmProxySocketPath(SOCKET_PATH_PROBE_BUNDLE),
     getBundleMitmControlSocketPath(SOCKET_PATH_PROBE_BUNDLE),
+    getBundleRegistryEgressSocketPath(SOCKET_PATH_PROBE_BUNDLE),
   ]);
   for (const socketPath of socketPaths) {
     const length = Buffer.byteLength(socketPath);
@@ -616,10 +649,187 @@ async function innerDocker(
   runtime: ReturnType<typeof createContainerRuntime>,
   outerId: string,
   args: readonly string[],
+  timeoutMs = 120_000,
 ): Promise<{ readonly stdout: string; readonly stderr: string }> {
-  const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], 120_000, 'codespace');
-  if (result.exitCode !== 0) throw new Error(`inner docker ${args[0]} failed: ${result.stderr}`);
+  const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], timeoutMs, 'codespace');
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `inner docker ${args[0] ?? '<empty>'} failed (exit ${result.exitCode}); ` +
+        `stdout=${boundedDiagnostic(result.stdout)}; stderr=${boundedDiagnostic(result.stderr)}`,
+    );
+  }
   return result;
+}
+
+async function expectInnerDockerFailure(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  args: readonly string[],
+  timeoutMs = 120_000,
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], timeoutMs, 'codespace');
+  if (result.exitCode === 0) throw new Error(`inner docker ${args[0]} unexpectedly succeeded`);
+  return result;
+}
+
+/**
+ * Production-entrypoint infrastructure acceptance only. This proves the
+ * admitted daemon path can pull and run a private inner service; it does not
+ * make a provider request and is not Claude-turn qualification.
+ */
+async function verifyPublicRegistryWorkload(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+): Promise<void> {
+  const nonce = randomBytes(24).toString('hex');
+  const plan = buildPublicRegistryWorkloadPlan(nonce);
+  let serverCreated = false;
+  let networkCreated = false;
+  let imagePulled = false;
+  try {
+    const existingImage = await innerDocker(runtime, outerId, ['image', 'ls', '--quiet', plan.image]);
+    if (existingImage.stdout.trim() !== '') {
+      throw new Error(`public-registry smoke image was already present before its allowed pull: ${plan.image}`);
+    }
+
+    const denied = await expectInnerDockerFailure(
+      runtime,
+      outerId,
+      ['image', 'pull', DENIED_REGISTRY_SMOKE_IMAGE],
+      60_000,
+    );
+    assertRegistryPolicyDenied(denied.stdout, denied.stderr);
+    const deniedInventory = await innerDocker(runtime, outerId, [
+      'image',
+      'ls',
+      '--quiet',
+      DENIED_REGISTRY_SMOKE_IMAGE,
+    ]);
+    if (deniedInventory.stdout.trim() !== '') throw new Error('denied registry pull left a local image behind');
+
+    await innerDocker(runtime, outerId, plan.pull, 300_000);
+    imagePulled = true;
+    const applets = await innerDocker(runtime, outerId, plan.inspectApplets);
+    assertRequiredBusyboxApplets(applets.stdout);
+    await innerDocker(runtime, outerId, plan.createNetwork);
+    networkCreated = true;
+    const networkProfile = await innerDocker(runtime, outerId, plan.inspectNetwork);
+    const { networkId } = assertInternalBridge(networkProfile.stdout);
+    const embeddedDns = await innerDocker(
+      runtime,
+      outerId,
+      bindPublicRegistryWorkloadNetwork(plan.inspectEmbeddedDns, networkId),
+    );
+    assertEmbeddedDnsResolver(embeddedDns.stdout);
+    const publicDns = await expectInnerDockerFailure(
+      runtime,
+      outerId,
+      bindPublicRegistryWorkloadNetwork(plan.probePublicDnsEgress, networkId),
+      15_000,
+    );
+    if (!publicDns.stderr.includes('IC_PUBLIC_DNS_PROBE_STARTED')) {
+      throw new Error(
+        `public-DNS egress negative did not prove child execution: ` +
+          `stdout=${boundedDiagnostic(publicDns.stdout)} stderr=${boundedDiagnostic(publicDns.stderr)}`,
+      );
+    }
+    const directIp = await expectInnerDockerFailure(runtime, outerId, plan.probeDirectIpEgress, 15_000);
+    if (!directIp.stderr.includes('IC_DIRECT_EGRESS_PROBE_STARTED')) {
+      throw new Error(
+        `direct-IP egress negative did not prove child execution: ` +
+          `stdout=${boundedDiagnostic(directIp.stdout)} stderr=${boundedDiagnostic(directIp.stderr)}`,
+      );
+    }
+    await innerDocker(runtime, outerId, bindPublicRegistryWorkloadNetwork(plan.startServer, networkId));
+    serverCreated = true;
+
+    const ports = await innerDocker(runtime, outerId, plan.inspectServerPorts);
+    assertNoPublishedPortBindings(ports.stdout);
+    const network = await innerDocker(runtime, outerId, plan.inspectServerNetwork);
+    if (network.stdout.trim() !== networkId) {
+      throw new Error(`inner server is not attached only to its private bridge: ${network.stdout.trim()}`);
+    }
+    const networkWithServer = await innerDocker(runtime, outerId, plan.inspectNetwork);
+    const serverEndpoint = assertInternalBridge(networkWithServer.stdout, plan.serverName);
+    if (serverEndpoint.networkId !== networkId || serverEndpoint.serverIpv4 === undefined) {
+      throw new Error('inner server endpoint inspection changed network identity or omitted IPv4');
+    }
+    try {
+      const loopback = await innerDocker(runtime, outerId, plan.probeServerLoopback, 60_000);
+      assertExactProbeNonce('server loopback', loopback.stdout, nonce);
+      const ipv4 = await innerDocker(
+        runtime,
+        outerId,
+        bindPublicRegistryWorkloadNetwork(plan.probeServerIpv4, networkId, serverEndpoint.serverIpv4),
+        60_000,
+      );
+      assertExactProbeNonce('sibling inspected IPv4', ipv4.stdout, nonce);
+      const alias = await innerDocker(
+        runtime,
+        outerId,
+        bindPublicRegistryWorkloadNetwork(plan.probeServerAlias, networkId),
+        60_000,
+      );
+      assertExactProbeNonce('sibling target alias', alias.stdout, nonce);
+    } catch (error) {
+      const state = await captureInnerDockerDiagnostic(runtime, outerId, [
+        'container',
+        'inspect',
+        '--format',
+        '{{json .State}}',
+        plan.serverName,
+      ]);
+      const logs = await captureInnerDockerDiagnostic(runtime, outerId, ['container', 'logs', plan.serverName]);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; ` + `serverState=${state}; serverLogs=${logs}`,
+        { cause: error },
+      );
+    }
+  } finally {
+    if (serverCreated) await innerDocker(runtime, outerId, plan.removeServer).catch(() => {});
+    if (networkCreated) await innerDocker(runtime, outerId, plan.removeNetwork).catch(() => {});
+    if (imagePulled) await innerDocker(runtime, outerId, plan.removeImage).catch(() => {});
+  }
+
+  const containers = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
+  if (containers.stdout.trim() !== '') throw new Error('private Docker inventory retained a smoke container');
+  const networks = await innerDocker(runtime, outerId, [
+    'network',
+    'ls',
+    '--quiet',
+    '--filter',
+    `name=^${plan.networkName}$`,
+  ]);
+  if (networks.stdout.trim() !== '') throw new Error('private Docker inventory retained the smoke bridge');
+  const image = await innerDocker(runtime, outerId, ['image', 'ls', '--quiet', plan.image]);
+  if (image.stdout.trim() !== '') throw new Error('private Docker inventory retained the pulled smoke image');
+}
+
+function assertExactProbeNonce(stage: string, value: string, nonce: string): void {
+  if (value.trim() !== nonce) {
+    throw new Error(`${stage} probe did not return the exact random nonce: ${boundedDiagnostic(value)}`);
+  }
+}
+
+const DIAGNOSTIC_TEXT_LIMIT = 4096;
+
+function boundedDiagnostic(value: string): string {
+  const normalized = value.trim();
+  if (normalized.length <= DIAGNOSTIC_TEXT_LIMIT) return JSON.stringify(normalized);
+  return JSON.stringify(`${normalized.slice(0, DIAGNOSTIC_TEXT_LIMIT)}...[truncated]`);
+}
+
+async function captureInnerDockerDiagnostic(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  args: readonly string[],
+): Promise<string> {
+  try {
+    const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], 10_000, 'codespace');
+    return `exit=${result.exitCode} stdout=${boundedDiagnostic(result.stdout)} stderr=${boundedDiagnostic(result.stderr)}`;
+  } catch (error) {
+    return `capture-failed=${boundedDiagnostic(error instanceof Error ? error.message : String(error))}`;
+  }
 }
 
 async function verifyPrivateDockerBaseline(
@@ -804,5 +1014,6 @@ function redact(value: string): string {
   return value.replaceAll(FAKE_API_KEY, '[REDACTED_FAKE_KEY]');
 }
 
-if (process.argv.includes('--pty')) await mainPty();
-else await main();
+const mode = parseNestedAppleSmokeMode(process.argv.slice(2));
+if (mode === 'pty') await mainPty();
+else await main(mode);

@@ -2336,17 +2336,12 @@ describe('MitmProxy', () => {
       await proxy.start();
 
       const { socket, statusCode } = await sendConnect(socketPath, 'random.example.com', 443);
-      expect(statusCode).toBe(200);
-      expect(socket).not.toBeNull();
-
-      // A raw tunnel would have no TLS peer behind it. The egress listener
-      // TLS-terminates instead and hands the decrypted request to the guard,
-      // which refuses it.
-      const response = await makeHttpsRequest(socket!, ca, 'random.example.com', {
-        path: '/v2/library/app/manifests/1.0',
-      });
-      expect(response.statusCode).toBe(403);
-      expect(response.body).toMatch(/registry egress denied/u);
+      // Registry mode rejects an unlisted CONNECT before acknowledging a
+      // tunnel, creating a TLS context/certificate, or contacting upstream.
+      expect(statusCode).toBe(403);
+      // Node may surface the client Socket object even for a non-2xx CONNECT
+      // response. That is not an acknowledged tunnel; require it to close.
+      if (socket !== null) await waitFor(() => socket.destroyed);
       expect(upstreamCalls).toBe(0);
     });
 

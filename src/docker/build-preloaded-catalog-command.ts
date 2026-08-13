@@ -21,6 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
+import { acquireProcessLock, type ProcessLockHandle } from '../docker-workload/process-lock.js';
 import type { ContainerRuntime } from './types.js';
 import { defaultExecFile, type ExecFileFn } from './docker-manager.js';
 import {
@@ -48,6 +49,11 @@ import {
   hostCatalogArchitecture,
   type CatalogImageSource,
 } from './preloaded-catalog-sources.js';
+import {
+  getPreloadedCatalogBuildLockPath,
+  loadCatalogGenerationRecords,
+  resolvePreloadedCatalogGeneration,
+} from './preloaded-catalog-generation.js';
 
 export interface FreezeCatalogRuntimes {
   readonly dockerRuntime: Pick<ContainerRuntime, 'inspectImage' | 'buildImage'>;
@@ -202,14 +208,28 @@ const buildPreloadedCatalogSpec: CommandSpec = {
   description: 'Freeze the trusted preloaded image catalog for the secure nested Docker runtime',
   usage: ['ironcurtain build-preloaded-catalog [options]'],
   options: [
-    { flag: 'generation', description: 'Catalog generation label (default: ironcurtain-preloaded-<arch>-v1)' },
+    { flag: 'generation', description: 'Explicit canonical generation newer than every present catalog' },
     { flag: 'docker-only', description: 'Skip the Apple `container` backend even when it is available' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
 };
 
 /** CLI wrapper: wires the real host runtimes and prints a freeze summary. */
-export async function runBuildPreloadedCatalogCommand(argv: readonly string[]): Promise<void> {
+export async function runBuildPreloadedCatalogCommand(
+  argv: readonly string[],
+  commandOptions: {
+    readonly runSingleFlight?: (options: {
+      readonly resolveGeneration: () => {
+        readonly architecture: 'amd64' | 'arm64';
+        readonly generation: string;
+      };
+      readonly build: (resolved: {
+        readonly architecture: 'amd64' | 'arm64';
+        readonly generation: string;
+      }) => Promise<void>;
+    }) => Promise<void>;
+  } = {},
+): Promise<void> {
   const { values } = parseArgs({
     args: [...argv],
     options: {
@@ -222,46 +242,83 @@ export async function runBuildPreloadedCatalogCommand(argv: readonly string[]): 
   });
   if (checkHelp({ help: values.help === true }, buildPreloadedCatalogSpec)) return;
 
-  const architecture = hostCatalogArchitecture();
-  const generation = values.generation ?? `ironcurtain-preloaded-${architecture}-v1`;
-
-  const { createDockerManager } = await import('./docker-manager.js');
-  const { computeAgentImageBuildHash } = await import('./docker-infrastructure.js');
-  const dockerRuntime = createDockerManager();
-  const appleRuntime = values['docker-only'] === true ? undefined : await resolveAppleRuntime();
-
-  // The whole build runs in a private sibling of the live staging tree, which
-  // is replaced only once every role has staged: a failed rebuild must never
-  // cost the host its usable catalog generation.
-  const result = await publishCatalogGeneration({
-    liveDirectory: getPreloadedCatalogStagingDir(),
-    build: (stagingDir) =>
-      runBuildPreloadedCatalog({
-        runtimes: { dockerRuntime, ...(appleRuntime === undefined ? {} : { appleRuntime }), exec: defaultExecFile },
-        sources: catalogImageSources(),
-        stagingDir,
-        frozenCatalogDir: getFrozenCatalogDir(),
-        generation,
-        createdAt: new Date().toISOString(),
+  const runSingleFlight = commandOptions.runSingleFlight ?? runPreloadedCatalogBuildSingleFlight;
+  await runSingleFlight({
+    resolveGeneration: () => {
+      const architecture = hostCatalogArchitecture();
+      const inputs = (['docker', 'apple-container'] as const).flatMap((runtimeKind) => [
+        { path: join(getFrozenCatalogDir(), preloadedCatalogFileName(runtimeKind)), runtimeKind },
+        { path: getStagedCatalogPath(runtimeKind), runtimeKind },
+      ]);
+      return {
         architecture,
-        agentBuildHash: computeAgentImageBuildHash,
-        onProgress: (message) => process.stderr.write(`[build-preloaded-catalog] ${message}\n`),
-      }),
-  });
+        generation: resolvePreloadedCatalogGeneration({
+          architecture,
+          ...(values.generation === undefined ? {} : { requestedGeneration: values.generation }),
+          catalogs: loadCatalogGenerationRecords(inputs),
+        }),
+      };
+    },
+    build: async ({ architecture, generation }) => {
+      const { createDockerManager } = await import('./docker-manager.js');
+      const { computeAgentImageBuildHash } = await import('./docker-infrastructure.js');
+      const dockerRuntime = createDockerManager();
+      const appleRuntime = values['docker-only'] === true ? undefined : await resolveAppleRuntime();
 
-  process.stdout.write(
-    [
-      `Preloaded catalog frozen (generation ${generation}, ${result.docker.catalog.images.length} images).`,
-      `  docker  staged: ${getStagedCatalogPath('docker')}`,
-      `  docker  frozen: ${result.frozenDockerPath}`,
-      ...(result.frozenApplePath === undefined
-        ? ['  apple-container: skipped (runtime unavailable or --docker-only)']
-        : [
-            `  apple   staged: ${getStagedCatalogPath('apple-container')}`,
-            `  apple   frozen: ${result.frozenApplePath}`,
-          ]),
-    ].join('\n') + '\n',
-  );
+      // The whole build runs in a private sibling of the live staging tree, which
+      // is replaced only once every role has staged: a failed rebuild must never
+      // cost the host its usable catalog generation.
+      const result = await publishCatalogGeneration({
+        liveDirectory: getPreloadedCatalogStagingDir(),
+        build: (stagingDir) =>
+          runBuildPreloadedCatalog({
+            runtimes: { dockerRuntime, ...(appleRuntime === undefined ? {} : { appleRuntime }), exec: defaultExecFile },
+            sources: catalogImageSources(),
+            stagingDir,
+            frozenCatalogDir: getFrozenCatalogDir(),
+            generation,
+            createdAt: new Date().toISOString(),
+            architecture,
+            agentBuildHash: computeAgentImageBuildHash,
+            onProgress: (message) => process.stderr.write(`[build-preloaded-catalog] ${message}\n`),
+          }),
+      });
+
+      process.stdout.write(
+        [
+          `Preloaded catalog frozen (generation ${generation}, ${result.docker.catalog.images.length} images).`,
+          `  docker  staged: ${getStagedCatalogPath('docker')}`,
+          `  docker  frozen: ${result.frozenDockerPath}`,
+          ...(result.frozenApplePath === undefined
+            ? ['  apple-container: skipped (runtime unavailable or --docker-only)']
+            : [
+                `  apple   staged: ${getStagedCatalogPath('apple-container')}`,
+                `  apple   frozen: ${result.frozenApplePath}`,
+              ]),
+        ].join('\n') + '\n',
+      );
+    },
+  });
+}
+
+/**
+ * Serialize generation reads, mutable-tag builds, staging, publication, and
+ * the success report under one host-user-wide lock.
+ */
+export async function runPreloadedCatalogBuildSingleFlight<T>(options: {
+  readonly resolveGeneration: () => { readonly architecture: 'amd64' | 'arm64'; readonly generation: string };
+  readonly build: (resolved: { readonly architecture: 'amd64' | 'arm64'; readonly generation: string }) => Promise<T>;
+  readonly lockPath?: string;
+  /** Test seam; production always uses the process-identity lock. */
+  readonly acquireLock?: (path: string) => Pick<ProcessLockHandle, 'release'>;
+}): Promise<T> {
+  const lock = (options.acquireLock ?? acquireProcessLock)(options.lockPath ?? getPreloadedCatalogBuildLockPath());
+  try {
+    const resolved = options.resolveGeneration();
+    return await options.build(resolved);
+  } finally {
+    lock.release();
+  }
 }
 
 async function resolveAppleRuntime(): Promise<

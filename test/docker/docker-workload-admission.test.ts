@@ -45,8 +45,19 @@ describe('secure nested Docker resolved-variant admission', () => {
     expect(() => assertDockerWorkloadVariantAdmitted(resolveDockerWorkloadConfig(undefined), 'docker')).not.toThrow();
   });
 
-  it('admits only the frozen Apple developer/preloaded variant', () => {
+  it('admits the frozen Apple developer variant with offline or credential-free public-registry image ingress', () => {
     expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'apple-container')).not.toThrow();
+    expect(() =>
+      assertDockerWorkloadVariantAdmitted(
+        resolveDockerWorkloadConfig({
+          enabled: true,
+          imageIngress: 'public-registry',
+          acceptObservedDiskRisk: true,
+          resources: { diskMb: null },
+        }),
+        'apple-container',
+      ),
+    ).not.toThrow();
   });
 
   it.each([
@@ -88,16 +99,6 @@ describe('secure nested Docker resolved-variant admission', () => {
         enabled: true,
         acceptObservedDiskRisk: true,
         resources: { pids: { required: true }, diskMb: null },
-      }),
-      'apple-container',
-    ],
-    [
-      'public registry ingress',
-      resolveDockerWorkloadConfig({
-        enabled: true,
-        imageIngress: 'public-registry',
-        acceptObservedDiskRisk: true,
-        resources: { diskMb: null },
       }),
       'apple-container',
     ],

@@ -16,7 +16,7 @@
       "operations": ["token"],
       "tokenPaths": [{ "kind": "exact", "value": "/token" }],
       "perRequest": { "maxBytes": 1048576, "maxDurationMs": 30000, "maxRedirectHops": 0 },
-      "requestHeaders": { "allow": ["accept", "user-agent"] }
+      "requestHeaders": { "allow": ["accept", "accept-encoding", "user-agent"] }
     },
     {
       "id": "ghcr-registry",

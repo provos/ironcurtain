@@ -49,6 +49,7 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: async () => state.infrastructure,
   buildAgentUidRemap: () => ({}),
   buildUdsSocketMounts: () => [],
+  buildDockerWorkloadRegistryEgressMount: () => [],
   createLedgeredAgentContainer: vi.fn(),
   dockerWorkloadSessionMetadata: vi.fn(() => ({
     leaseId: 'lease-1',
@@ -95,6 +96,7 @@ describe('PTY early-initialization cleanup ownership', () => {
     const teardown = vi.fn(async () => {});
     const proxyStop = vi.fn(async () => {});
     const mitmStop = vi.fn(async () => {});
+    const registryStop = vi.fn(async () => {});
     const docker = {};
     const dockerWorkload = { teardown };
     state.infrastructure = {
@@ -102,6 +104,7 @@ describe('PTY early-initialization cleanup ownership', () => {
       dockerWorkload,
       proxy: { stop: proxyStop },
       mitmProxy: { stop: mitmStop },
+      dockerWorkloadRegistryEgress: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock' },
       useTcp: false,
       runtimeKind: 'apple-container',
       setTokenSessionId: () => {},
@@ -127,6 +130,7 @@ describe('PTY early-initialization cleanup ownership', () => {
     expect(teardown).toHaveBeenCalledOnce();
     expect(mitmStop).toHaveBeenCalledOnce();
     expect(proxyStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
     expect(state.removeBundleRuntimeRoot).toHaveBeenCalledOnce();
     expect(state.updateSessionMetadata).toHaveBeenCalledWith(
       expect.any(String),

@@ -94,6 +94,8 @@ export interface StartAppleVmDockerWorkloadOptions {
   readonly nestedDaemon: DockerWorkloadBundleHandle;
   /** Immutable per-lease catalog view mounted into this VM. */
   readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig;
+  /** Selects the trusted daemon-only registry proxy bootstrap. */
+  readonly registryEgress?: boolean;
   /** Defaults to {@link APPLE_VM_DAEMON_READINESS_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -111,7 +113,7 @@ export interface StartAppleVmDockerWorkloadOptions {
  */
 export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWorkloadOptions): Promise<void> {
   const exec = appleVmDaemonExecFor(options.runtime, options.containerId);
-  await bootstrapAppleVmDaemon(exec);
+  await bootstrapAppleVmDaemon(exec, { registryEgress: options.registryEgress });
   const readiness = await waitForAppleVmDaemonReady(exec, {
     timeoutMs: options.timeoutMs ?? APPLE_VM_DAEMON_READINESS_TIMEOUT_MS,
     pollIntervalMs: options.pollIntervalMs,

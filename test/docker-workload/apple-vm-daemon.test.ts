@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
   APPLE_VM_DAEMON_API_DIR,
@@ -9,11 +10,16 @@ import {
   APPLE_VM_DAEMON_DOCKERD_COMMAND,
   APPLE_VM_DAEMON_DOCKER_HOST,
   APPLE_VM_DAEMON_INFO_ARGV,
+  APPLE_VM_DAEMON_IPTABLES,
   APPLE_VM_DAEMON_LOG_PATH,
   APPLE_VM_DAEMON_LOG_TAIL_ARGV,
   APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS,
   APPLE_VM_DAEMON_SOCKET,
   APPLE_VM_DAEMON_START_ARGV,
+  APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV,
+  APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE,
+  APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+  APPLE_VM_REGISTRY_EGRESS_SOCKET,
   APPLE_VM_DAEMON_TOOLCHAIN_DIR,
   bootstrapAppleVmDaemon,
   waitForAppleVmDaemonReady,
@@ -73,9 +79,16 @@ function fakeTimeline(startMs: number): { readonly now: () => number; readonly s
 }
 
 describe('Apple VM nested-daemon frozen commands', () => {
-  it('freezes the live-proven rootlesskit/dockerd invocation verbatim', () => {
+  it('freezes the disconnected rootlesskit/dockerd invocation and forwarding prerequisite verbatim', () => {
     expect(APPLE_VM_DAEMON_DOCKERD_COMMAND).toBe(
-      'rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run dockerd --host=unix:///run/ironcurtain-docker/docker.sock --data-root=/home/codespace/.local/share/docker --storage-driver=vfs --iptables=false --bridge=none',
+      [
+        "rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run sh -c 'set -e",
+        '[ "$(command -v iptables)" = "/usr/local/lib/ironcurtain-docker/bin/iptables" ]',
+        'iptables --version | /bin/grep -Eq "^iptables v[0-9]+(\\.[0-9]+)* \\(legacy\\)$"',
+        '/usr/bin/printf "1" > /proc/sys/net/ipv4/ip_forward',
+        '[ "$(/bin/cat /proc/sys/net/ipv4/ip_forward)" = "1" ]',
+        "exec dockerd --host=unix:///run/ironcurtain-docker/docker.sock --data-root=/home/codespace/.local/share/docker --storage-driver=vfs --iptables=false --bridge=none'",
+      ].join('\n'),
     );
   });
 
@@ -97,6 +110,7 @@ describe('Apple VM nested-daemon frozen commands', () => {
     expect(APPLE_VM_DAEMON_SOCKET).toBe('/run/ironcurtain-docker/docker.sock');
     expect(APPLE_VM_DAEMON_DOCKER_HOST).toBe('unix:///run/ironcurtain-docker/docker.sock');
     expect(APPLE_VM_DAEMON_TOOLCHAIN_DIR).toBe('/usr/local/lib/ironcurtain-docker/bin');
+    expect(APPLE_VM_DAEMON_IPTABLES).toBe('/usr/local/lib/ironcurtain-docker/bin/iptables');
     expect(APPLE_VM_DAEMON_LOG_PATH).toBe('/run/ironcurtain-docker/dockerd.log');
   });
 
@@ -122,9 +136,50 @@ describe('Apple VM nested-daemon frozen commands', () => {
         'set -e',
         'exec </dev/null >/run/ironcurtain-docker/dockerd.log 2>&1',
         'export XDG_RUNTIME_DIR=/run/ironcurtain-docker HOME=/home/codespace PATH=/usr/bin:/bin:/usr/local/lib/ironcurtain-docker/bin',
-        'exec nohup rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run dockerd --host=unix:///run/ironcurtain-docker/docker.sock --data-root=/home/codespace/.local/share/docker --storage-driver=vfs --iptables=false --bridge=none &',
+        "exec nohup rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run sh -c 'set -e",
+        '[ "$(command -v iptables)" = "/usr/local/lib/ironcurtain-docker/bin/iptables" ]',
+        'iptables --version | /bin/grep -Eq "^iptables v[0-9]+(\\.[0-9]+)* \\(legacy\\)$"',
+        '/usr/bin/printf "1" > /proc/sys/net/ipv4/ip_forward',
+        '[ "$(/bin/cat /proc/sys/net/ipv4/ip_forward)" = "1" ]',
+        "exec dockerd --host=unix:///run/ironcurtain-docker/docker.sock --data-root=/home/codespace/.local/share/docker --storage-driver=vfs --iptables=false --bridge=none' &",
       ].join('\n'),
     ]);
+  });
+
+  it('enables only namespace-local forwarding before dockerd while retaining the isolation flags', () => {
+    for (const script of [APPLE_VM_DAEMON_START_ARGV[2], APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2]]) {
+      const resolveIptables = script.indexOf('command -v iptables');
+      const verifyIptables = script.indexOf('iptables --version');
+      const setForwarding = script.indexOf('/usr/bin/printf "1" > /proc/sys/net/ipv4/ip_forward');
+      const verifyForwarding = script.indexOf('$(/bin/cat /proc/sys/net/ipv4/ip_forward)');
+      const startDaemon = script.indexOf('exec dockerd');
+      expect(resolveIptables).toBeGreaterThanOrEqual(0);
+      expect(verifyIptables).toBeGreaterThan(resolveIptables);
+      expect(setForwarding).toBeGreaterThan(verifyIptables);
+      expect(setForwarding).toBeGreaterThanOrEqual(0);
+      expect(verifyForwarding).toBeGreaterThan(setForwarding);
+      expect(startDaemon).toBeGreaterThan(verifyForwarding);
+      expect(script).toContain('--net=none');
+      expect(script).toContain('--disable-host-loopback');
+      expect(script).toContain('--iptables=false');
+      expect(script).toContain('--bridge=none');
+      expect(script).not.toMatch(/slirp|vpnkit|pasta|--iptables=true|--ip-masq/iu);
+      expect(script).not.toContain('/usr/sbin:/sbin');
+      expect(spawnSync('sh', ['-n', '-c', script], { encoding: 'utf8' })).toMatchObject({ status: 0, stderr: '' });
+    }
+  });
+
+  it('keeps the public-registry variant separate and shell-parseable', () => {
+    const script = APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2];
+    expect(spawnSync('sh', ['-n', '-c', script], { encoding: 'utf8' })).toMatchObject({ status: 0, stderr: '' });
+    expect(script).toContain(`/usr/bin/socat TCP-LISTEN:18081,bind=127.0.0.1`);
+    expect(script).toContain(`UNIX-CONNECT:${APPLE_VM_REGISTRY_EGRESS_SOCKET}`);
+    expect(script).toContain(APPLE_VM_REGISTRY_EGRESS_PROXY_URL);
+    expect(script).toContain(`SSL_CERT_FILE=${APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE}`);
+    expect(script).toContain('GET http://ironcurtain.invalid/__ironcurtain/health');
+    expect(script).not.toContain('0.0.0.0');
+    expect(script).toContain("sh -c 'set -e\n");
+    expect([...script.matchAll(/'/gu)]).toHaveLength(2);
   });
 
   it('keeps /usr/bin ahead of the toolchain dir so the image-capped newuidmap wins', () => {
@@ -161,6 +216,15 @@ describe('Apple VM nested-daemon bootstrap', () => {
     expect(calls.map((call) => ({ argv: call.argv, user: call.user }))).toEqual([
       { argv: [...APPLE_VM_DAEMON_API_DIR_STAT_ARGV], user: 'codespace' },
       { argv: [...APPLE_VM_DAEMON_START_ARGV], user: 'codespace' },
+    ]);
+  });
+
+  it('selects the public-registry bootstrap only when trusted options request it', async () => {
+    const { exec, calls } = recordingExec(healthyBootstrap);
+    await bootstrapAppleVmDaemon(exec, { registryEgress: true });
+    expect(calls.map((call) => call.argv)).toEqual([
+      [...APPLE_VM_DAEMON_API_DIR_STAT_ARGV],
+      [...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV],
     ]);
   });
 

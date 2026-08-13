@@ -1,5 +1,5 @@
 /**
- * Frozen, anonymous-only authorization for workload-image registry egress (§6.4).
+ * Frozen public-registry authorization for workload-image egress (§6.4).
  *
  * Pure policy (node + zod only — no transport, no sockets). Mirrors
  * `build-egress-policy.ts`: a strict manifest schema, validate-once → branded
@@ -17,18 +17,15 @@
  * to classify by-digest pulls and to record requested/reported digests as audit
  * provenance; it gates nothing.
  *
- * Anonymous bearer-token flow (§6.4): the bundle holds no registry credential,
- * so any `Authorization: Bearer <token>` the client presents was obtained
- * anonymously through this mediated path (a `401` drives the client to the
- * token-service origin and back). {@link sanitizeHeaders} therefore admits a
- * single Bearer token on a client-initiated request to a listed origin and
- * rejects every other credential scheme (Basic, Cookie, Proxy-Authorization,
- * …). Derived redirect requests always carry no credential at all.
+ * Bearer-token flow (§6.4): IronCurtain provisions no registry credential or
+ * private-registry configuration. {@link sanitizeHeaders} admits one
+ * syntactically valid Bearer token on a client-initiated request to a listed
+ * origin and rejects every other credential scheme (Basic, Cookie,
+ * Proxy-Authorization, …). It does not claim to prove where a bundle-supplied
+ * token originated. Derived redirect requests always carry no credential.
  *
- * Foundation code: stays inert behind the docker-workload admission fuse
- * (`assertDockerWorkloadImplementationAvailable`) until a later phase constructs
- * a `public-registry` session. The checked-in manifest is a DRAFT that Phase 0C
- * must freeze (reviewed origins, exact ceilings, hermetic protocol fixtures).
+ * The checked-in manifest is frozen; production constructs this guard only for
+ * an explicitly admitted `public-registry` Docker-workload session.
  */
 
 import { isIP } from 'node:net';
@@ -52,9 +49,9 @@ export const MAX_REGISTRY_EGRESS_MANIFEST_BYTES = 1024 * 1024;
  * fail-closed rejected on a request. `authorization` is in the set for the
  * allow-list schema check (bearer admission is structural, never allow-listed),
  * but {@link sanitizeHeaders} handles `authorization` specially before this set
- * is consulted so an anonymous Bearer token to a listed origin is admitted.
+ * is consulted so one Bearer token to a listed origin is admitted.
  */
-/** A single anonymous Bearer token; every other Authorization scheme is refused. */
+/** A single Bearer token to a listed origin; every other Authorization scheme is refused. */
 const BEARER_TOKEN_PATTERN = /^Bearer [A-Za-z0-9._~+/=-]+$/u;
 
 /** Connection-management headers dropped silently (the transport re-frames them). */
@@ -555,9 +552,8 @@ function sanitizeHeaders(
       throw new Error(`registry-egress header name is not canonical: ${rawName}`);
     }
     if (rawValue === undefined) continue;
-    // Anonymous bearer-token admission (§6.4): the bundle holds no registry
-    // credential, so a Bearer token here was obtained anonymously through this
-    // mediated path. Admit a single `Bearer <token>` to a listed origin; reject
+    // Bearer-token admission (§6.4): admit a single `Bearer <token>` to a listed
+    // origin; reject
     // every other Authorization scheme (Basic, Digest, …).
     if (name === 'authorization') {
       result[name] = admitBearerAuthorization(rawValue);
@@ -583,10 +579,10 @@ function sanitizeHeaders(
   return result;
 }
 
-/** Admit exactly one anonymous `Bearer <token>`; reject arrays and other schemes. */
+/** Admit exactly one `Bearer <token>`; reject arrays and other schemes. */
 function admitBearerAuthorization(value: string | readonly string[]): string {
   if (typeof value !== 'string' || !BEARER_TOKEN_PATTERN.test(value)) {
-    throw new Error('registry-egress authorization must be a single anonymous Bearer token');
+    throw new Error('registry-egress authorization must be a single Bearer token');
   }
   return value;
 }

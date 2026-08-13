@@ -55,6 +55,16 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   },
   buildAgentUidRemap: () => ({}),
   buildUdsSocketMounts: () => [],
+  buildDockerWorkloadRegistryEgressMount: (infra: { dockerWorkloadRegistryEgress?: { socketPath: string } }) =>
+    infra.dockerWorkloadRegistryEgress
+      ? [
+          {
+            source: infra.dockerWorkloadRegistryEgress.socketPath,
+            target: '/tmp/ironcurtain-registry-egress.sock',
+            readonly: false,
+          },
+        ]
+      : [],
   createLedgeredAgentContainer: async (options: {
     deterministicName: string;
     create(name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string>;
@@ -126,7 +136,10 @@ describe('Apple nested Docker PTY startup ordering', () => {
     rmSync(homeDir, { recursive: true, force: true });
   });
 
-  function installInfrastructure(workload: { status: string; teardown(): Promise<void> }): void {
+  function installInfrastructure(
+    workload: { status: string; teardown(): Promise<void> },
+    options: { publicRegistry?: boolean } = {},
+  ): void {
     const docker = {
       removeStaleContainer: vi.fn(async () => {}),
       create: vi.fn(async (config: DockerContainerConfig) => {
@@ -139,6 +152,9 @@ describe('Apple nested Docker PTY startup ordering', () => {
     state.infrastructure = {
       docker,
       dockerWorkload: workload,
+      dockerWorkloadRegistryEgress: options.publicRegistry
+        ? { listener: { stop: vi.fn(async () => {}) }, socketPath: join(socketsDir, 'registry-egress.sock') }
+        : undefined,
       dockerWorkloadBootstrap: {
         hostCatalogDirectory: homeDir,
         guestCatalogDirectory: '/run/ironcurtain-catalog',
@@ -231,5 +247,27 @@ describe('Apple nested Docker PTY startup ordering', () => {
       }),
     ).rejects.toThrow(/scripted daemon adjudication failure/);
     expect(attach).not.toHaveBeenCalled();
+  });
+
+  it('mounts and selects public-registry transport before PTY attach', async () => {
+    const workload = { status: 'admitted', teardown: vi.fn(async () => {}) };
+    installInfrastructure(workload, { publicRegistry: true });
+    state.startAppleVmDockerWorkload.mockImplementation(async () => {
+      workload.status = 'active';
+    });
+
+    await runPtySession({
+      config: config(),
+      mode: { kind: 'docker', agent: 'claude-code' },
+      workspacePath: homeDir,
+      attach: async () => 0,
+    });
+
+    expect(state.createdConfigs[0].mounts).toContainEqual({
+      source: join(socketsDir, 'registry-egress.sock'),
+      target: '/tmp/ironcurtain-registry-egress.sock',
+      readonly: false,
+    });
+    expect(state.startAppleVmDockerWorkload).toHaveBeenCalledWith(expect.objectContaining({ registryEgress: true }));
   });
 });

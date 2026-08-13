@@ -218,13 +218,48 @@ describe('registry-egress listener (end-to-end through createMitmProxy)', () => 
     const transport = recordingTransport({});
     const socketPath = await startRegistryListener(transport.transport);
 
-    const response = await httpsThroughProxy(socketPath, 'evil.example', {
-      path: '/v2/library/alpine/manifests/3.19',
-    });
+    expect(await connectStatus(socketPath, 'evil.example', 443)).toBe(403);
+    expect(transport.requests).toHaveLength(0);
+  });
 
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toMatch(/registry egress denied/u);
-    expect(response.body).toMatch(/unlisted host/u);
+  it.each([
+    'registry-1.docker.io:443junk',
+    'registry-1.docker.io:443/path',
+    'registry-1.docker.io:443.5',
+    'registry-1.docker.io:0443',
+    'user@registry-1.docker.io:443',
+    'registry-1.docker.io:443?query',
+    'registry-1.docker.io:443#fragment',
+    'registry-1.docker.io:0',
+    'registry-1.docker.io:65536',
+    ':443',
+  ])('rejects malformed CONNECT authority %s before TLS or upstream contact', async (authority) => {
+    const transport = recordingTransport({});
+    const socketPath = await startRegistryListener(transport.transport);
+
+    expect(await rawConnectStatus(socketPath, authority)).not.toBe(200);
+    expect(transport.requests).toHaveLength(0);
+  });
+
+  it('normalizes an uppercase canonical CONNECT hostname', async () => {
+    const transport = recordingTransport({});
+    const socketPath = await startRegistryListener(transport.transport);
+
+    expect(await rawConnectStatus(socketPath, 'REGISTRY-1.DOCKER.IO:443')).toBe(200);
+    expect(transport.requests).toHaveLength(0);
+  });
+
+  it('rejects TLS SNI that differs from the authorized CONNECT host', async () => {
+    const transport = recordingTransport({});
+    const socketPath = await startRegistryListener(transport.transport);
+    const tunnel = await sendConnect(socketPath, 'registry-1.docker.io', 443);
+
+    await expect(
+      new Promise<void>((done, fail) => {
+        const socket = tls.connect({ socket: tunnel, servername: 'auth.docker.io', ca: ca.certPem }, () => done());
+        socket.on('error', fail);
+      }),
+    ).rejects.toThrow();
     expect(transport.requests).toHaveLength(0);
   });
 
@@ -616,6 +651,41 @@ function sendConnect(socketPath: string, host: string, port: number): Promise<ne
     request.on('response', (response) => fail(new Error(`CONNECT refused with ${String(response.statusCode)}`)));
     request.on('error', fail);
     request.end();
+  });
+}
+
+function connectStatus(socketPath: string, host: string, port: number): Promise<number> {
+  return new Promise((done, fail) => {
+    const request = http.request({ socketPath, method: 'CONNECT', path: `${host}:${port}` });
+    request.on('connect', (response, socket: net.Socket) => {
+      socket.destroy();
+      done(response.statusCode ?? 0);
+    });
+    request.on('response', (response) => done(response.statusCode ?? 0));
+    request.on('error', fail);
+    request.end();
+  });
+}
+
+/** Sends an exact CONNECT request-target without Node's client normalization. */
+function rawConnectStatus(socketPath: string, authority: string): Promise<number> {
+  return new Promise((done, fail) => {
+    const socket = net.connect({ path: socketPath });
+    let response = '';
+    socket.on('connect', () => {
+      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`);
+    });
+    socket.on('data', (chunk: Buffer) => {
+      response += chunk.toString('utf8');
+      if (!response.includes('\r\n')) return;
+      const status = Number.parseInt(response.split(' ')[1] ?? '0', 10);
+      socket.destroy();
+      done(status);
+    });
+    socket.on('error', fail);
+    socket.on('close', () => {
+      if (response === '') fail(new Error(`CONNECT ${authority} closed without a response`));
+    });
   });
 }
 

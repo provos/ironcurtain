@@ -41,12 +41,24 @@ export const APPLE_VM_DAEMON_SOCKET = `${APPLE_VM_DAEMON_API_DIR}/docker.sock`;
 /** The `DOCKER_HOST` value the in-VM agent process receives. */
 export const APPLE_VM_DAEMON_DOCKER_HOST = `unix://${APPLE_VM_DAEMON_SOCKET}`;
 
+/** Exact Apple file mount visible on both sides of rootlesskit's `/run` copy-up. */
+export const APPLE_VM_REGISTRY_EGRESS_SOCKET = '/tmp/ironcurtain-registry-egress.sock';
+
+/** Rootless-netns loopback proxy; reachable only by bundle members that join that netns. */
+export const APPLE_VM_REGISTRY_EGRESS_PROXY_URL = 'http://127.0.0.1:18081';
+
+/** Public trust bundle already staged read-only in the outer orientation mount. */
+export const APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE = '/etc/ironcurtain/ca-bundle.pem';
+
 /**
  * Pinned daemon toolchain staged by the base image. dockerd/rootlesskit/
  * containerd/runc live here and stay OFF the default PATH; only the `docker`
  * client is symlinked into a PATH directory.
  */
 export const APPLE_VM_DAEMON_TOOLCHAIN_DIR = '/usr/local/lib/ironcurtain-docker/bin';
+
+/** Exact legacy helper selected on the trusted daemon bootstrap's private PATH. */
+export const APPLE_VM_DAEMON_IPTABLES = `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/iptables`;
 
 /** In-VM dockerd log — the only diagnostic surface a readiness timeout can quote. */
 export const APPLE_VM_DAEMON_LOG_PATH = `${APPLE_VM_DAEMON_API_DIR}/dockerd.log`;
@@ -63,16 +75,41 @@ const APPLE_VM_DAEMON_PATH = `/usr/bin:/bin:${APPLE_VM_DAEMON_TOOLCHAIN_DIR}`;
  */
 export const APPLE_VM_DAEMON_DATA_ROOT = `${APPLE_VM_DAEMON_HOME}/.local/share/docker`;
 
+const APPLE_VM_DOCKERD_COMMAND =
+  `dockerd --host=${APPLE_VM_DAEMON_DOCKER_HOST} --data-root=${APPLE_VM_DAEMON_DATA_ROOT} ` +
+  '--storage-driver=vfs --iptables=false --bridge=none';
+
 /**
- * The frozen rootlesskit + dockerd invocation (live-proven against the real
- * frozen images). There is no `dockerd-rootless.sh` in the 29.x toolchain, so
- * the direct rootlesskit form is the only working form; `--net=none` still
- * needs iproute2 in the image for loopback setup.
+ * The upstream rootless-daemon wrapper enables forwarding inside RootlessKit's
+ * private network namespace. Our staged toolchain intentionally omits that
+ * wrapper, so the direct invocation must establish and verify the same
+ * prerequisite. The namespace still has no uplink, host loopback, egress NAT,
+ * or default bridge, and daemon-wide Docker iptables management remains off.
+ * The reviewed helper is present only for Moby's per-sandbox embedded-DNS
+ * loopback redirection.
+ */
+const APPLE_VM_DAEMON_NETWORK_PREREQUISITES = [
+  'set -e',
+  `[ "$(command -v iptables)" = "${APPLE_VM_DAEMON_IPTABLES}" ]`,
+  'iptables --version | /bin/grep -Eq "^iptables v[0-9]+(\\.[0-9]+)* \\(legacy\\)$"',
+  '/usr/bin/printf "1" > /proc/sys/net/ipv4/ip_forward',
+  '[ "$(/bin/cat /proc/sys/net/ipv4/ip_forward)" = "1" ]',
+];
+
+const APPLE_VM_DAEMON_OFFLINE_INNER_SCRIPT = [
+  ...APPLE_VM_DAEMON_NETWORK_PREREQUISITES,
+  `exec ${APPLE_VM_DOCKERD_COMMAND}`,
+].join('\n');
+
+/**
+ * The frozen rootlesskit + dockerd invocation. There is no
+ * `dockerd-rootless.sh` in the 29.x toolchain. RootlessKit deliberately keeps
+ * `--net=none`; the child shell establishes only the namespace-local forwarding
+ * prerequisite above before replacing itself with dockerd.
  */
 export const APPLE_VM_DAEMON_DOCKERD_COMMAND =
-  `rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run dockerd ` +
-  `--host=${APPLE_VM_DAEMON_DOCKER_HOST} --data-root=${APPLE_VM_DAEMON_DATA_ROOT} ` +
-  '--storage-driver=vfs --iptables=false --bridge=none';
+  `rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run ` +
+  `sh -c '${APPLE_VM_DAEMON_OFFLINE_INNER_SCRIPT}'`;
 
 /**
  * Detach idiom: the shell replaces its own stdin/stdout/stderr with the log
@@ -92,6 +129,36 @@ const APPLE_VM_DAEMON_START_SCRIPT = [
   `exec </dev/null >${APPLE_VM_DAEMON_LOG_PATH} 2>&1`,
   `export XDG_RUNTIME_DIR=${APPLE_VM_DAEMON_API_DIR} HOME=${APPLE_VM_DAEMON_HOME} PATH=${APPLE_VM_DAEMON_PATH}`,
   `exec nohup ${APPLE_VM_DAEMON_DOCKERD_COMMAND} &`,
+].join('\n');
+
+const APPLE_VM_DAEMON_REGISTRY_EGRESS_INNER_SCRIPT = [
+  ...APPLE_VM_DAEMON_NETWORK_PREREQUISITES,
+  `test -S ${APPLE_VM_REGISTRY_EGRESS_SOCKET}`,
+  'unset ALL_PROXY all_proxy NO_PROXY no_proxy HTTP_PROXY HTTPS_PROXY http_proxy https_proxy SSL_CERT_FILE',
+  `export HTTP_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL} HTTPS_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`,
+  `export http_proxy=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL} https_proxy=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`,
+  `export SSL_CERT_FILE=${APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE}`,
+  `/usr/bin/socat TCP-LISTEN:18081,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${APPLE_VM_REGISTRY_EGRESS_SOCKET} &`,
+  'relay_pid=$!',
+  'trap "/bin/kill $relay_pid 2>/dev/null || true" EXIT',
+  'relay_ready=0',
+  'relay_attempt=0',
+  'while [ "$relay_attempt" -lt 40 ]; do',
+  '  /bin/kill -0 "$relay_pid"',
+  '  if /usr/bin/printf "GET http://ironcurtain.invalid/__ironcurtain/health HTTP/1.1\\r\\nHost: ironcurtain.invalid\\r\\nConnection: close\\r\\n\\r\\n" | /usr/bin/socat -T1 - TCP:127.0.0.1:18081,connect-timeout=1 | /bin/grep -q "IRONCURTAIN_OK/1"; then relay_ready=1; break; fi',
+  '  relay_attempt=$((relay_attempt + 1))',
+  '  /bin/sleep 0.05',
+  'done',
+  '[ "$relay_ready" -eq 1 ]',
+  'trap - EXIT',
+  `exec ${APPLE_VM_DOCKERD_COMMAND}`,
+].join('\n');
+
+const APPLE_VM_DAEMON_REGISTRY_EGRESS_START_SCRIPT = [
+  'set -e',
+  `exec </dev/null >${APPLE_VM_DAEMON_LOG_PATH} 2>&1`,
+  `export XDG_RUNTIME_DIR=${APPLE_VM_DAEMON_API_DIR} HOME=${APPLE_VM_DAEMON_HOME} PATH=${APPLE_VM_DAEMON_PATH}`,
+  `exec nohup rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run sh -c '${APPLE_VM_DAEMON_REGISTRY_EGRESS_INNER_SCRIPT}' &`,
 ].join('\n');
 
 /**
@@ -128,6 +195,13 @@ export const APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT = 'directory:1000:1000:700';
 
 /** Runtime-user step: start the daemon detached under the frozen invocation. */
 export const APPLE_VM_DAEMON_START_ARGV: readonly string[] = Object.freeze(['sh', '-c', APPLE_VM_DAEMON_START_SCRIPT]);
+
+/** Proxy-aware variant selected only by trusted resolved `public-registry` configuration. */
+export const APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV: readonly string[] = Object.freeze([
+  'sh',
+  '-c',
+  APPLE_VM_DAEMON_REGISTRY_EGRESS_START_SCRIPT,
+]);
 
 /** Readiness probe, through the pinned toolchain client rather than whatever is on PATH. */
 export const APPLE_VM_DAEMON_INFO_ARGV: readonly string[] = Object.freeze([
@@ -240,9 +314,17 @@ type DockerInfoAnswer =
  * must never create its own API directory, or its ownership and mode would be
  * whatever umask happened to apply.
  */
-export async function bootstrapAppleVmDaemon(exec: AppleVmDaemonExec): Promise<void> {
+export async function bootstrapAppleVmDaemon(
+  exec: AppleVmDaemonExec,
+  options: { readonly registryEgress?: boolean } = {},
+): Promise<void> {
   await assertApiDirectoryProvided(exec);
-  await execOrThrow(exec, APPLE_VM_DAEMON_START_ARGV, RUNTIME_EXEC_USER, 'apple-vm daemon start');
+  await execOrThrow(
+    exec,
+    options.registryEgress === true ? APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV : APPLE_VM_DAEMON_START_ARGV,
+    RUNTIME_EXEC_USER,
+    'apple-vm daemon start',
+  );
 }
 
 /**

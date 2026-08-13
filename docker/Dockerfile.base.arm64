@@ -36,9 +36,13 @@ RUN apt-get update && \
     # Fonts (Qt needs at least one font)
     fontconfig fonts-dejavu-core \
     # Rootless nested-daemon prerequisites: newuidmap/newgidmap (re-capped
-    # below), setcap to re-cap them, and the `ip` binary rootlesskit invokes
-    # for loopback setup even with --net=none.
-    uidmap iproute2 libcap2-bin \
+    # below), setcap to re-cap them, the `ip` binary rootlesskit invokes for
+    # loopback setup even with --net=none, and the legacy iptables backend
+    # Moby's per-sandbox embedded DNS resolver requires. Docker-wide iptables
+    # management remains disabled; the bootstrap selects only this exact
+    # legacy helper on its private PATH. The package's absolute helper paths
+    # remain bundle-visible and are not treated as an authority boundary.
+    uidmap iproute2 iptables libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Re-cap the id-map helpers: file capabilities, NOT setuid-root.
@@ -125,7 +129,8 @@ RUN npx playwright install-deps chromium && \
 # the symlink and plugin discovery resolve.
 COPY --from=docker-toolchain --chown=root:root /usr/local/bin/ /usr/local/lib/ironcurtain-docker/bin/
 COPY --from=docker-toolchain --chown=root:root /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
-RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker
+RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker && \
+    ln -s /usr/sbin/iptables-legacy /usr/local/lib/ironcurtain-docker/bin/iptables
 
 # /run is ext4 in the agent VM, not a tmpfs, so directories created here survive
 # into the runtime. The nested-daemon API directory MUST be image-provided: the

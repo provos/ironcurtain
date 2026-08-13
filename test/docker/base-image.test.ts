@@ -65,10 +65,12 @@ describe('arm64 agent base image inputs', () => {
 });
 
 describe('arm64 agent base image rootless prerequisites', () => {
-  it('installs the newuidmap, iproute2, and setcap packages rootlesskit hard-requires', () => {
-    expect(dockerfile).toMatch(/^\s+uidmap iproute2 libcap2-bin \\$/mu);
+  it('installs the rootlesskit and embedded-DNS prerequisites in one apt layer', () => {
+    expect(dockerfile).toMatch(/^\s+uidmap iproute2 iptables libcap2-bin \\$/mu);
     // One apt layer, one cleanup: no second unpinned package source.
-    expect(dockerfile).toMatch(/apt-get install -y --no-install-recommends[\s\S]*?uidmap iproute2 libcap2-bin/u);
+    expect(dockerfile).toMatch(
+      /apt-get install -y --no-install-recommends[\s\S]*?uidmap iproute2 iptables libcap2-bin/u,
+    );
   });
 
   it('grants the id-map helpers file capabilities rather than setuid-root', () => {
@@ -131,8 +133,12 @@ describe('arm64 agent base image Docker toolchain layer', () => {
     expect(dockerfile).not.toContain('/usr/local/lib/docker/cli-plugins');
   });
 
-  it('exposes only the client CLI on PATH and keeps daemon binaries off it', () => {
-    expect(lnInvocations()).toEqual([`ln -s ${TOOLCHAIN_BIN_DIR}/docker /usr/local/bin/docker`]);
+  it('exposes the client CLI globally and selects legacy iptables on the private daemon PATH', () => {
+    expect(lnInvocations()).toEqual([
+      `ln -s ${TOOLCHAIN_BIN_DIR}/docker /usr/local/bin/docker`,
+      `ln -s /usr/sbin/iptables-legacy ${TOOLCHAIN_BIN_DIR}/iptables`,
+    ]);
+    expect(dockerfile).not.toMatch(/ln -s \/usr\/sbin\/iptables-legacy \/usr\/local\/(?:s?bin)\/iptables/u);
     for (const daemonBinary of ['dockerd', 'rootlesskit', 'containerd', 'runc', 'ctr', 'docker-proxy', 'vpnkit']) {
       expect(dockerfile).not.toMatch(
         new RegExp(String.raw`(?:/usr/local/bin|/usr/local/sbin|/usr/bin|/usr/sbin|/bin|/sbin)/${daemonBinary}\b`, 'u'),

@@ -3,7 +3,7 @@
  *
  * ## What this module is
  *
- * Phase 0F froze two egress policies — anonymous workload-image registry pulls
+ * Phase 0F froze two egress policies — public workload-image registry pulls
  * (§6.4) and the narrow current-Dockerfile build path (§6.3) — each with a
  * guard factory and a whole-proxy MITM mode. This module is the single place
  * that turns a *resolved* Docker-workload configuration into the exact set of
@@ -45,10 +45,10 @@
  * unmediated route around the frozen manifest, so its absence is load-bearing
  * rather than incidental.
  *
- * Foundation code — inert behind the docker-workload admission fuse
- * (`assertDockerWorkloadImplementationAvailable`). No production caller
- * constructs these listeners yet; the nested rootless daemon that consumes them
- * does not exist.
+ * Production construction remains inert unless the resolved Docker-workload
+ * configuration explicitly admits the corresponding mode. The Apple
+ * public-registry lifecycle owns this module's registry listener; build egress
+ * remains unadmitted.
  */
 
 import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';

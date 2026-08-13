@@ -104,6 +104,30 @@ describe('registry-egress disabled mode (preloaded-only refuses registry traffic
 });
 
 describe('registry-egress proxy seam (enabled)', () => {
+  it('forwards Docker token compression negotiation and compressed bytes unchanged', async () => {
+    const compressed = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x49, 0x43]);
+    const upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+      res.end(compressed);
+    });
+    const observed = firstRequest(upstream);
+    const delivered: Buffer[] = [];
+
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: '/token?service=registry.test&scope=repository:library/app:pull',
+      headers: { 'accept-encoding': 'gzip' },
+      onData: (chunk) => delivered.push(chunk),
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect((await observed).headers['accept-encoding']).toBe('gzip');
+    expect(result.headers['content-encoding']).toBe('gzip');
+    expect(Buffer.concat(delivered)).toEqual(compressed);
+  });
+
   it('forwards a by-digest pull, stripping response cookies and injecting no credential', async () => {
     const body = Buffer.from('delivered-blob-bytes');
     const digest = digestOf(body);
@@ -434,7 +458,7 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(result.body).toMatch(/literal address/u);
   });
 
-  it('forwards an anonymous Bearer token to a listed origin', async () => {
+  it('forwards a client-supplied Bearer token to a listed origin', async () => {
     const upstream = await startUpstream((_req, res) => {
       res.writeHead(200);
       res.end('ok');
@@ -474,7 +498,7 @@ describe('registry-egress proxy seam (enabled)', () => {
       'registry.test',
       `/v2/library/app/blobs/${digestOf('x')}`,
       { authorization: 'Basic dXNlcjpwYXNz' },
-      /single anonymous Bearer token/u,
+      /single Bearer token/u,
     ],
   ] as const)('rejects %s with no upstream contact', async (_label, targetHost, path, headers, message) => {
     const spy = spyTransport();
@@ -579,9 +603,10 @@ function manifest(overrides: ManifestOverrides = {}): RegistryEgressManifest {
       {
         id: 'registry',
         destination: { protocol: 'https:', hostname: 'registry.test', port: 443 },
-        operations: ['api-version', 'manifest-pull', 'blob-pull'],
+        operations: ['api-version', 'token', 'manifest-pull', 'blob-pull'],
+        tokenPaths: [{ kind: 'exact', value: '/token' }],
         perRequest: overrides.perRequest ?? { maxBytes: 8 * 1024 * 1024, maxDurationMs: 30_000, maxRedirectHops: 2 },
-        requestHeaders: { allow: ['accept', 'user-agent', 'range'] },
+        requestHeaders: { allow: ['accept', 'accept-encoding', 'user-agent', 'range'] },
       },
     ],
     perSession: overrides.perSession ?? { maxTotalBytes: 512 * 1024 * 1024, maxConcurrentRequests: 4 },

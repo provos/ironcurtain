@@ -37,6 +37,7 @@ import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import {
   buildAgentUidRemap,
+  buildDockerWorkloadRegistryEgressMount,
   buildUdsSocketMounts,
   createLedgeredAgentContainer,
   dockerWorkloadSessionMetadata,
@@ -375,6 +376,9 @@ async function runPtySessionAttempt(
   // finally block can tear it down first (§8.3). Undefined for ordinary PTY
   // sessions — the capability is gated by the resolved-variant predicate.
   let dockerWorkload: DockerWorkloadBundleHandle | undefined;
+  let dockerWorkloadRegistryEgress:
+    | Awaited<ReturnType<typeof prepareDockerInfrastructure>>['dockerWorkloadRegistryEgress']
+    | undefined;
   let useTcp: boolean;
   let networkName: string | null = null;
   let allocatedNetworkSubnet: string | undefined;
@@ -432,6 +436,7 @@ async function runPtySessionAttempt(
     // either must still revoke the workload lease and stop both proxies.
     ({ docker, proxy, mitmProxy, useTcp } = infra);
     dockerWorkload = infra.dockerWorkload;
+    dockerWorkloadRegistryEgress = infra.dockerWorkloadRegistryEgress;
 
     // Match standalone batch metadata: persist the admitted lease tuple as
     // soon as preparation returns, before any PTY-specific callback can fail.
@@ -719,6 +724,8 @@ async function runPtySessionAttempt(
       }
     }
 
+    mounts.push(...buildDockerWorkloadRegistryEgressMount(infra));
+
     if (dockerWorkloadBootstrap !== undefined) {
       mounts.push(appleVmDockerWorkloadCatalogMount(dockerWorkloadBootstrap));
     }
@@ -862,6 +869,7 @@ async function runPtySessionAttempt(
         containerId,
         nestedDaemon,
         bootstrap: dockerWorkloadBootstrap,
+        registryEgress: dockerWorkloadRegistryEgress !== undefined,
       });
     }
 
@@ -978,6 +986,11 @@ async function runPtySessionAttempt(
     }
 
     try {
+      await dockerWorkloadRegistryEgress?.listener.stop();
+    } catch (error) {
+      resourceCleanupError = normalizePtyError(error);
+    }
+    try {
       if (docker) {
         // §8.3: teardown-first for a Docker-workload bundle, then the
         // belt-and-braces sweep for the non-ledgered sidecar/network, then release
@@ -997,7 +1010,9 @@ async function runPtySessionAttempt(
         releaseManagedResourceLease(effectiveSessionId);
       }
     } catch (error) {
-      resourceCleanupError = normalizePtyError(error);
+      const runtimeCleanupError = normalizePtyError(error);
+      if (resourceCleanupError === undefined) resourceCleanupError = runtimeCleanupError;
+      else resourceCleanupError.cause ??= runtimeCleanupError;
     } finally {
       // These host-only authority surfaces must retire even when runtime
       // cleanup verification fails. Keep their best-effort failures from

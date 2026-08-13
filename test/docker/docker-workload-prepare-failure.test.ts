@@ -209,7 +209,7 @@ function admittedHandle(): DockerWorkloadBundleHandle {
   return handle;
 }
 
-async function prepare(): Promise<unknown> {
+async function prepare(imageIngress: 'preloaded-only' | 'public-registry' = 'preloaded-only'): Promise<unknown> {
   const workspaceDir = join(getHome(), 'workspace');
   mkdirSync(workspaceDir, { recursive: true });
   const config = {
@@ -217,7 +217,7 @@ async function prepare(): Promise<unknown> {
     mcpServers: {},
     userConfig: {
       modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
-      dockerWorkload: resolveDockerWorkloadConfig({ enabled: true }),
+      dockerWorkload: resolveDockerWorkloadConfig({ enabled: true, imageIngress }),
       packageInstall: { enabled: false },
       containerRuntime: 'auto',
     },
@@ -235,6 +235,16 @@ async function prepare(): Promise<unknown> {
 }
 
 describe('prepareDockerInfrastructure — Docker-workload lease teardown on failure (§8.3)', () => {
+  it('stops the per-bundle registry listener when later preparation fails', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+
+    await expect(prepare('public-registry')).rejects.toThrow(/scripted post-attestation failure/u);
+
+    expect(supervisor.calls.stopRequested).toBe(1);
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 2 });
+  });
+
   it('tears down the staged lease when MITM startup fails before watchdog attestation', async () => {
     const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
     seam.makeMitm = (): MitmProxy => ({
