@@ -130,7 +130,14 @@ export class DockerWorkloadCleanupPreconditionError extends Error {
 export async function performSerializedDockerWorkloadCleanup(
   options: SerializedDockerWorkloadCleanupOptions,
 ): Promise<SerializedDockerWorkloadCleanupResult> {
-  const deadline = options.clock().getTime() + (options.timeoutMs ?? DOCKER_WORKLOAD_RECOVERY_BOUND_MS);
+  const timeoutMs = options.timeoutMs ?? DOCKER_WORKLOAD_RECOVERY_BOUND_MS;
+  const deadline = options.clock().getTime() + timeoutMs;
+  const assertBudget = (minimumRemainingMs = 0): void => {
+    const remainingMs = deadline - options.clock().getTime();
+    if (remainingMs <= minimumRemainingMs) {
+      throw new Error(`Docker-workload cleanup exceeded the ${timeoutMs}ms cooperative bound`);
+    }
+  };
   const claim = await acquireLifecycleClaim({
     leasePath: options.leasePath,
     clock: options.clock,
@@ -147,6 +154,7 @@ export async function performSerializedDockerWorkloadCleanup(
       if (current.cleanup === null) throw new Error('closed Docker-workload lease has no cleanup proof');
       return { alreadyClosed: true, cleanup: current.cleanup };
     }
+    assertBudget();
     options.revalidate?.(current);
     options.afterRevalidate?.();
 
@@ -166,28 +174,30 @@ export async function performSerializedDockerWorkloadCleanup(
             options.leasePath,
             options.generation,
             options.clock,
+            assertBudget,
           );
+          assertBudget();
           const lease = loadDockerWorkloadLease(options.leasePath);
           if (existsSync(lease.paths.stateRoot)) {
             assertExactTargetIdentity(lease, options.targetDevice, options.targetInode);
           }
+          assertBudget();
           removeExactBundleState(lease, options.leasePath);
+          assertBudget();
           const cleanup = await captureCleanupProof(
             options.runtime,
             lease,
             options.gapMs,
             options.clock,
             options.sleep,
+            assertBudget,
           );
-          if (options.clock().getTime() >= deadline) {
-            throw new Error(
-              `Docker-workload cleanup exceeded the ${options.timeoutMs ?? DOCKER_WORKLOAD_RECOVERY_BOUND_MS}ms bound`,
-            );
-          }
+          assertBudget();
           closeDockerWorkloadLease(options.leasePath, options.generation, cleanup, options.clock());
           return { alreadyClosed: false, revocation, cleanup };
         } catch (error) {
           if (!isLeaseMutationBusy(error) || options.clock().getTime() >= deadline) throw error;
+          assertBudget(CLEANUP_LOCK_POLL_MS);
           await options.sleep(CLEANUP_LOCK_POLL_MS);
         }
       }

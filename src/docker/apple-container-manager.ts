@@ -57,7 +57,6 @@ const STOP_TIMEOUT_SECONDS = 10;
  * an unsuccessful attempt is never treated as absence evidence.
  */
 const CONTAINER_INVENTORY_TIMEOUT_MS = 30_000;
-const CONTAINER_INVENTORY_MAX_ATTEMPTS = 2;
 const CONTAINER_INVENTORY_RETRY_DELAY_MS = 250;
 
 /**
@@ -413,26 +412,25 @@ export function createAppleContainerManager(
     return firstInspectEntry(stdout) as AppleContainerInspect | undefined;
   };
 
+  const listContainersJsonOnce = async (): Promise<string> => {
+    const { stdout } = await exec('container', ['list', '--all', '--format', 'json'], {
+      timeout: CONTAINER_INVENTORY_TIMEOUT_MS,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    return stdout;
+  };
   const listContainersJsonWithRetry = async (): Promise<string> => {
-    for (let attempt = 1; attempt <= CONTAINER_INVENTORY_MAX_ATTEMPTS; attempt++) {
-      try {
-        const { stdout } = await exec('container', ['list', '--all', '--format', 'json'], {
-          timeout: CONTAINER_INVENTORY_TIMEOUT_MS,
-          maxBuffer: 50 * 1024 * 1024,
-        });
-        return stdout;
-      } catch (error) {
-        if (attempt === CONTAINER_INVENTORY_MAX_ATTEMPTS || !isExecError(error) || !isExecTimeout(error)) {
-          throw error;
-        }
-        logger.warn(
-          `[apple-container-manager] container inventory timed out after ${CONTAINER_INVENTORY_TIMEOUT_MS}ms; ` +
-            `retrying once after ${CONTAINER_INVENTORY_RETRY_DELAY_MS}ms`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, CONTAINER_INVENTORY_RETRY_DELAY_MS));
-      }
+    try {
+      return await listContainersJsonOnce();
+    } catch (error) {
+      if (!isExecError(error) || !isExecTimeout(error)) throw error;
+      logger.warn(
+        `[apple-container-manager] container inventory timed out after ${CONTAINER_INVENTORY_TIMEOUT_MS}ms; ` +
+          `retrying once after ${CONTAINER_INVENTORY_RETRY_DELAY_MS}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, CONTAINER_INVENTORY_RETRY_DELAY_MS));
+      return listContainersJsonOnce();
     }
-    throw new Error('unreachable Apple container inventory retry state');
   };
 
   return {

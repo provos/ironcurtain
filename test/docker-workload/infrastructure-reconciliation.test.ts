@@ -230,6 +230,47 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     );
   });
 
+  it('reports post-close audit failure after continuing to recover later incident leases', async () => {
+    const runtime = createEventRuntime();
+    const firstIncident = seedLease({
+      leaseId: 'dw-a-incident-post-close-audit',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+    });
+    const secondIncident = seedLease({
+      leaseId: 'dw-b-incident-after-audit-failure',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+    });
+    markIncident(firstIncident);
+    markIncident(secondIncident);
+    const firstOriginal = loadDockerWorkloadLease(firstIncident.leasePath).incident;
+    const secondOriginal = loadDockerWorkloadLease(secondIncident.leasePath).incident;
+    const clock = createFakeClock('2026-07-20T12:00:02.000Z');
+
+    await expect(
+      admitDockerWorkloadBundle({
+        ...admissionOptions(runtime, clock),
+        auditSink: {
+          emit(event) {
+            if (event.leaseId === firstIncident.leaseId && event.kind === 'revocation-result') {
+              throw new Error('audit storage is unavailable');
+            }
+          },
+        },
+      }),
+    ).rejects.toThrow(/durably closed.*audit publication failed/u);
+
+    expect(loadDockerWorkloadLease(firstIncident.leasePath)).toMatchObject({
+      status: 'closed',
+      incident: firstOriginal,
+      cleanup: { exactOuterResourcesAbsent: true, stateRootAbsent: true },
+    });
+    expect(loadDockerWorkloadLease(secondIncident.leasePath)).toMatchObject({
+      status: 'closed',
+      incident: secondOriginal,
+      cleanup: { exactOuterResourcesAbsent: true, stateRootAbsent: true },
+    });
+  });
+
   it('recovers only the exact owned resource, preserves foreign resources, and preserves a healthy active lease', async () => {
     const runtime = createEventRuntime({
       containers: [

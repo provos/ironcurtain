@@ -184,6 +184,14 @@ interface ReconcileDockerWorkloadHeldResult extends ReconcileDockerWorkloadResul
   readonly fenceDetails: readonly string[];
 }
 
+/** Cleanup is proven, but mandatory post-close audit publication failed. */
+class DockerWorkloadPostCloseAuditError extends Error {
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'DockerWorkloadPostCloseAuditError';
+  }
+}
+
 export interface DockerWorkloadTeardownResult {
   readonly alreadyClosed: boolean;
   readonly supervisorLost: boolean;
@@ -756,8 +764,11 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
 
   const reconciled: string[] = [];
   const preserved: string[] = [];
-  const fenced: string[] = [];
-  const fenceDetails: string[] = [];
+  const fences: Array<{ readonly leaseId: string; readonly detail: string }> = [];
+  const postCloseAuditFailures: DockerWorkloadPostCloseAuditError[] = [];
+  const recordFence = (leaseId: string, detail: string): void => {
+    fences.push({ leaseId, detail });
+  };
   for (const leaseId of listLeaseIds(leasesRoot)) {
     const leaseDir = join(leasesRoot, leaseId);
     const leasePath = join(leaseDir, LEASE_FILE);
@@ -770,8 +781,7 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
       // symlinks, or an older unsupported schema must fence admission rather
       // than making possibly-running outer resources disappear from recovery.
       if (pathEntryExistsWithoutFollowing(leasePath)) {
-        fenced.push(leaseId);
-        fenceDetails.push(`${leaseId} (lease record is unreadable; exact recovery cannot be proven)`);
+        recordFence(leaseId, `${leaseId} (lease record is unreadable; exact recovery cannot be proven)`);
       }
       continue;
     }
@@ -788,8 +798,7 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
     // publish status. After the stale bound, cleanup-claim serialization makes
     // it safe for reconciliation to compete with an in-flight supervisor trip.
     if (!recoveringIncident && heartbeatFresh) {
-      fenced.push(leaseId);
-      fenceDetails.push(`${leaseId} (lifecycle is still owned or recently active)`);
+      recordFence(leaseId, `${leaseId} (lifecycle is still owned or recently active)`);
       continue;
     }
     try {
@@ -806,17 +815,34 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
       });
       reconciled.push(leaseId);
     } catch (error) {
+      if (error instanceof DockerWorkloadPostCloseAuditError) {
+        // Cleanup is already proven. Preserve mandatory audit failure as the
+        // pass result, but continue exact recovery so an earlier lease cannot
+        // starve later incident cleanup.
+        postCloseAuditFailures.push(error);
+        continue;
+      }
       if (isDockerWorkloadLifecycleClaimBusy(error) || error instanceof DockerWorkloadCleanupPreconditionError) {
-        fenced.push(leaseId);
-        fenceDetails.push(`${leaseId} (${error instanceof Error ? error.message : String(error)})`);
+        recordFence(leaseId, `${leaseId} (${error instanceof Error ? error.message : String(error)})`);
         continue;
       }
       fenceLease(leasePath, lease.leaseId, lease.generation, error, clock, options.auditSink);
-      fenced.push(leaseId);
-      fenceDetails.push(describeFencedLease(leasePath, leaseId, error));
+      recordFence(leaseId, describeFencedLease(leasePath, leaseId, error));
     }
   }
-  return { reconciled, preserved, fenced, fenceDetails };
+  if (postCloseAuditFailures.length === 1) throw postCloseAuditFailures[0];
+  if (postCloseAuditFailures.length > 1) {
+    throw new DockerWorkloadPostCloseAuditError(
+      `${postCloseAuditFailures.length} Docker-workload leases were durably closed, but mandatory audit publication failed`,
+      new AggregateError(postCloseAuditFailures),
+    );
+  }
+  return {
+    reconciled,
+    preserved,
+    fenced: fences.map((fence) => fence.leaseId),
+    fenceDetails: fences.map((fence) => fence.detail),
+  };
 }
 
 function isLeaseLive(
@@ -906,20 +932,27 @@ async function recoverStaleLease(context: {
     },
   });
   if (result.revocation !== undefined) {
-    emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
-      kind: 'revocation-result',
-      removedResourceIds: [...result.revocation.removedResourceIds],
-      finalOwnedResourceIds: [...result.revocation.finalOwnedResourceIds],
-    });
-    emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
-      kind: 'cleanup-proof',
-      inventories: result.cleanup.inventories,
-    });
-    emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
-      kind: 'lease-transition',
-      from: 'revoking',
-      to: 'closed',
-    });
+    try {
+      emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+        kind: 'revocation-result',
+        removedResourceIds: [...result.revocation.removedResourceIds],
+        finalOwnedResourceIds: [...result.revocation.finalOwnedResourceIds],
+      });
+      emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+        kind: 'cleanup-proof',
+        inventories: result.cleanup.inventories,
+      });
+      emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+        kind: 'lease-transition',
+        from: 'revoking',
+        to: 'closed',
+      });
+    } catch (error) {
+      throw new DockerWorkloadPostCloseAuditError(
+        `Docker-workload lease ${lease.leaseId} is durably closed, but mandatory cleanup audit publication failed`,
+        error,
+      );
+    }
   }
 
   try {
@@ -933,11 +966,18 @@ async function recoverStaleLease(context: {
     // Exact cleanup is already durably closed. A detached supervisor also
     // observes that proof directly, so a failed stop notification is an
     // operational incident, not unresolved workload authority.
-    emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
-      kind: 'incident',
-      code: 'watchdog-supervisor-stop-notification-failed',
-      detail: error instanceof Error ? error.message : String(error),
-    });
+    try {
+      emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+        kind: 'incident',
+        code: 'watchdog-supervisor-stop-notification-failed',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } catch (auditError) {
+      throw new DockerWorkloadPostCloseAuditError(
+        `Docker-workload lease ${lease.leaseId} is durably closed, but mandatory supervisor-loss audit publication failed`,
+        auditError,
+      );
+    }
   }
 }
 

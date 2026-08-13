@@ -26,7 +26,9 @@ export async function revokeDockerWorkloadOuterResources(
   leasePath: string,
   generation: string,
   now: () => Date = () => new Date(),
+  assertBudget: () => void = () => {},
 ): Promise<DockerWorkloadRevocationResult> {
+  assertBudget();
   let lease = loadDockerWorkloadLease(leasePath);
   if (lease.generation !== generation) throw new Error('Docker-workload revocation generation mismatch');
   if (lease.status === 'admitting' || lease.status === 'active') {
@@ -44,16 +46,16 @@ export async function revokeDockerWorkloadOuterResources(
     const current = requiredResource(loadDockerWorkloadLease(leasePath), snapshot.requestId);
     if (current.removal !== null) continue;
     if (current.kind === 'container') {
-      const removed = await revokeContainer(runtime, leasePath, generation, current, now);
+      const removed = await revokeContainer(runtime, leasePath, generation, current, now, assertBudget);
       removedResourceIds.push(removed);
     } else {
-      const removed = await revokeNetwork(runtime, leasePath, generation, current, now);
+      const removed = await revokeNetwork(runtime, leasePath, generation, current, now, assertBudget);
       removedResourceIds.push(removed);
     }
   }
 
   const finalLease = loadDockerWorkloadLease(leasePath);
-  const finalOwnedResourceIds = await inventoryOwnedResourceIds(runtime, finalLease);
+  const finalOwnedResourceIds = await inventoryOwnedResourceIds(runtime, finalLease, assertBudget);
   if (finalOwnedResourceIds.length !== 0) {
     throw new Error(`Docker-workload revocation left owned outer resources: ${finalOwnedResourceIds.join(',')}`);
   }
@@ -63,11 +65,14 @@ export async function revokeDockerWorkloadOuterResources(
 export async function inventoryOwnedResourceIds(
   runtime: ContainerRuntime,
   lease: DockerWorkloadLease,
+  assertBudget: () => void = () => {},
 ): Promise<readonly string[]> {
   if (runtime.listContainers === undefined) {
     throw new Error('selected outer runtime cannot inventory containers for cleanup proof');
   }
+  assertBudget();
   const containers = await runtime.listContainers();
+  assertBudget();
   assertUniqueInventory(containers, 'container');
   const ownershipTuples = new Set(
     lease.resources.map((resource) => `${resource.ownershipLabelKey}\0${resource.ownershipLabelValue}`),
@@ -84,7 +89,9 @@ export async function inventoryOwnedResourceIds(
     if (runtime.listNetworks === undefined) {
       throw new Error('selected outer runtime cannot inventory networks for cleanup proof');
     }
+    assertBudget();
     const networks = await runtime.listNetworks();
+    assertBudget();
     assertUniqueInventory(networks, 'network');
     ids.push(
       ...networks
@@ -106,8 +113,9 @@ async function revokeContainer(
   generation: string,
   resource: DockerWorkloadOuterResource,
   now: () => Date,
+  assertBudget: () => void,
 ): Promise<string> {
-  const inventory = await requiredContainerInventory(runtime);
+  const inventory = await requiredContainerInventory(runtime, assertBudget);
   let observedId = resource.observedId;
   if (observedId === null) {
     const matching = inventory.filter((container) => container.name === resource.requestedName);
@@ -145,9 +153,12 @@ async function revokeContainer(
     assertOwnership(observed, resource);
   }
 
+  assertBudget();
   await runtime.stop(observedId);
+  assertBudget();
   await runtime.remove(observedId);
-  const afterRemoval = await requiredContainerInventory(runtime);
+  assertBudget();
+  const afterRemoval = await requiredContainerInventory(runtime, assertBudget);
   if (afterRemoval.some((container) => container.id === observedId)) {
     throw new Error(`exact outer container still exists after revocation: ${observedId}`);
   }
@@ -167,11 +178,14 @@ async function revokeNetwork(
   generation: string,
   resource: DockerWorkloadOuterResource,
   now: () => Date,
+  assertBudget: () => void,
 ): Promise<string> {
   if (runtime.listNetworks === undefined) {
     throw new Error('selected outer runtime cannot inventory networks for exact revocation');
   }
+  assertBudget();
   const inventory = await runtime.listNetworks();
+  assertBudget();
   assertUniqueInventory(inventory, 'network');
   let observedId = resource.observedId;
   if (observedId === null) {
@@ -210,8 +224,11 @@ async function revokeNetwork(
     assertOwnership(observed, resource);
   }
 
+  assertBudget();
   await runtime.removeNetwork(observedId);
+  assertBudget();
   const after = await runtime.listNetworks();
+  assertBudget();
   assertUniqueInventory(after, 'network');
   if (after.some((network) => network.id === observedId)) {
     throw new Error(`exact outer network still exists after revocation: ${observedId}`);
@@ -226,9 +243,14 @@ async function revokeNetwork(
   return observedId;
 }
 
-async function requiredContainerInventory(runtime: ContainerRuntime): Promise<readonly DockerContainerInfo[]> {
+async function requiredContainerInventory(
+  runtime: ContainerRuntime,
+  assertBudget: () => void,
+): Promise<readonly DockerContainerInfo[]> {
   if (runtime.listContainers === undefined) throw new Error('selected outer runtime cannot inventory containers');
+  assertBudget();
   const inventory = await runtime.listContainers();
+  assertBudget();
   assertUniqueInventory(inventory, 'container');
   return inventory;
 }

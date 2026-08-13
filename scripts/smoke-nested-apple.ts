@@ -60,7 +60,6 @@ const SOCKET_PATH_PROBE_BUNDLE = 'ffffffff-ffff-4fff-8fff-ffffffffffff' as Bundl
 
 interface ActiveBundle {
   readonly sessionId: string;
-  readonly metadata: SessionMetadata & { readonly dockerWorkload: NonNullable<SessionMetadata['dockerWorkload']> };
   readonly leasePath: string;
   readonly lease: DockerWorkloadLease;
 }
@@ -109,27 +108,9 @@ async function main(): Promise<void> {
       assertChildRunning(child, 'before private-Docker operation');
 
       const runtime = createContainerRuntime('apple-container');
-      const frozenDocker = loadPreloadedImageCatalog(resolve(frozenCatalogDir, preloadedCatalogFileName('docker')));
-      const selected = frozenDocker.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
-      if (selected === undefined) throw new Error(`frozen Docker catalog is missing ${SELECTED_IMAGE}`);
+      const frozenDocker = await verifyPrivateDockerBaseline(runtime, outerId, frozenCatalogDir);
       const helper = frozenDocker.catalog.images.find((entry) => entry.logicalName === 'ironcurtain-helper:latest');
       if (helper === undefined) throw new Error('frozen Docker catalog is missing ironcurtain-helper:latest');
-
-      const info = await innerDocker(runtime, outerId, ['info', '--format', '{{json .}}']);
-      const parsedInfo = JSON.parse(info.stdout) as { Driver?: string; SecurityOptions?: readonly string[] };
-      if (parsedInfo.Driver !== 'vfs' || !parsedInfo.SecurityOptions?.some((item) => item.includes('rootless'))) {
-        throw new Error(`private Docker is not rootless+vfs: ${info.stdout.trim()}`);
-      }
-      const inspected = await innerDocker(runtime, outerId, [
-        'image',
-        'inspect',
-        '--format',
-        '{{.Id}}',
-        SELECTED_IMAGE,
-      ]);
-      if (inspected.stdout.trim() !== selected.runtimeImageId) {
-        throw new Error('selected inner image immutable ID differs from frozen Docker catalog');
-      }
       const before = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
       if (before.stdout.trim() !== '') throw new Error('private Docker inventory was not empty before smoke child');
 
@@ -192,22 +173,15 @@ async function main(): Promise<void> {
       const exitCode = await waitForExit(child, 90_000);
       if (exitCode !== 0) throw new Error(`CLI exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
 
-      const closed = await waitForClosedLease(active.leasePath);
-      assertClosedLeaseProof(closed, outerId);
-      if (await runtime.containerExists(outerId)) throw new Error(`exact outer VM still exists: ${outerId}`);
-      if (runtime.listContainers === undefined) throw new Error('Apple runtime cannot inventory containers');
-      const outerResource = closed.resources.find((resource) => resource.observedId === outerId);
-      if (outerResource === undefined) throw new Error('closed lease lost exact outer resource');
-      const owned = await runtime.listContainers({
-        labelFilter: `${outerResource.ownershipLabelKey}=${outerResource.ownershipLabelValue}`,
+      await verifyClosedBundle({
+        runtime,
+        active,
+        outerId,
+        smokeHome,
+        supervisorStatusPath,
+        supervisorPid: supervisor.supervisorPid,
+        supervisorIdentity,
       });
-      if (owned.length !== 0) throw new Error('generation-owned Apple VM inventory is not empty');
-      if (existsSync(closed.paths.stateRoot)) throw new Error('revocable state root still exists');
-      const runtimeRoot = withIronCurtainHome(smokeHome, () => getBundleRuntimeRoot(active.sessionId as BundleId));
-      if (existsSync(runtimeRoot)) throw new Error('per-bundle runtime root still exists');
-      const finalSupervisor = loadResourceWatchdogSupervisorStatus(supervisorStatusPath);
-      if (finalSupervisor.state !== 'closed') throw new Error(`watchdog supervisor ended in ${finalSupervisor.state}`);
-      await waitForProcessIdentityExit(supervisor.supervisorPid, supervisorIdentity, 10_000);
       assertNoProviderRequest(resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'));
       succeeded = true;
       process.stderr.write(`nested Apple smoke passed (session=${active.sessionId}, outer=${outerId})\n`);
@@ -298,8 +272,11 @@ function prepareSmokeEnvironment(providerBaseUrl?: string): SmokeEnvironment {
 }
 
 function smokeChildEnvironment(smokeHome: string): NodeJS.ProcessEnv {
+  return { ...process.env, ...smokeEnvironmentValues(smokeHome) };
+}
+
+function smokeEnvironmentValues(smokeHome: string): Readonly<Record<string, string>> {
   return {
-    ...process.env,
     IRONCURTAIN_HOME: smokeHome,
     IRONCURTAIN_CONTAINER_RUNTIME: 'apple-container',
     IRONCURTAIN_DOCKER_AUTH: 'apikey',
@@ -395,18 +372,7 @@ async function mainPty(): Promise<void> {
     );
 
     const runtime = createContainerRuntime('apple-container');
-    const info = await innerDocker(runtime, outerId, ['info', '--format', '{{json .}}']);
-    const parsedInfo = JSON.parse(info.stdout) as { Driver?: string; SecurityOptions?: readonly string[] };
-    if (parsedInfo.Driver !== 'vfs' || !parsedInfo.SecurityOptions?.some((item) => item.includes('rootless'))) {
-      throw new Error(`private Docker is not rootless+vfs: ${info.stdout.trim()}`);
-    }
-    const frozenDocker = loadPreloadedImageCatalog(resolve(frozenCatalogDir, preloadedCatalogFileName('docker')));
-    const selected = frozenDocker.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
-    if (selected === undefined) throw new Error(`frozen Docker catalog is missing ${SELECTED_IMAGE}`);
-    const inspected = await innerDocker(runtime, outerId, ['image', 'inspect', '--format', '{{.Id}}', SELECTED_IMAGE]);
-    if (inspected.stdout.trim() !== selected.runtimeImageId) {
-      throw new Error('selected inner image immutable ID differs from frozen Docker catalog');
-    }
+    await verifyPrivateDockerBaseline(runtime, outerId, frozenCatalogDir);
 
     // `/exit` is Claude Code's graceful TUI command. Success requires the
     // node-pty child to exit on its own; forced termination is cleanup-only.
@@ -414,22 +380,16 @@ async function mainPty(): Promise<void> {
     const exitCode = await waitForBridgeExit(bridge, PTY_GRACEFUL_EXIT_TIMEOUT_MS);
     if (exitCode !== 0) throw new Error(`PTY child exited ${exitCode}`);
 
-    const closed = await waitForClosedLease(active.leasePath, 180_000);
-    assertClosedLeaseProof(closed, outerId);
-    if (await runtime.containerExists(outerId)) throw new Error(`exact outer VM still exists: ${outerId}`);
-    if (runtime.listContainers === undefined) throw new Error('Apple runtime cannot inventory containers');
-    const outerResource = closed.resources.find((resource) => resource.observedId === outerId);
-    if (outerResource === undefined) throw new Error('closed lease lost exact outer resource');
-    const owned = await runtime.listContainers({
-      labelFilter: `${outerResource.ownershipLabelKey}=${outerResource.ownershipLabelValue}`,
+    await verifyClosedBundle({
+      runtime,
+      active,
+      outerId,
+      smokeHome,
+      supervisorStatusPath,
+      supervisorPid: supervisor.supervisorPid,
+      supervisorIdentity,
+      leaseTimeoutMs: 180_000,
     });
-    if (owned.length !== 0) throw new Error('generation-owned Apple VM inventory is not empty');
-    if (existsSync(closed.paths.stateRoot)) throw new Error('revocable state root still exists');
-    const runtimeRoot = withIronCurtainHome(smokeHome, () => getBundleRuntimeRoot(active.sessionId as BundleId));
-    if (existsSync(runtimeRoot)) throw new Error('per-bundle runtime root still exists');
-    const finalSupervisor = loadResourceWatchdogSupervisorStatus(supervisorStatusPath);
-    if (finalSupervisor.state !== 'closed') throw new Error(`watchdog supervisor ended in ${finalSupervisor.state}`);
-    await waitForProcessIdentityExit(supervisor.supervisorPid, supervisorIdentity, 10_000);
     assertNoProviderRequest(resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'));
     await closeServer(providerSink.server);
     if (providerSink.requestCount() !== 0) {
@@ -508,13 +468,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 function installSmokeProcessEnvironment(smokeHome: string): () => void {
-  const values: Readonly<Record<string, string>> = {
-    IRONCURTAIN_HOME: smokeHome,
-    IRONCURTAIN_CONTAINER_RUNTIME: 'apple-container',
-    IRONCURTAIN_DOCKER_AUTH: 'apikey',
-    ANTHROPIC_API_KEY: FAKE_API_KEY,
-    NO_COLOR: '1',
-  };
+  const values = smokeEnvironmentValues(smokeHome);
   const previous = new Map<string, string | undefined>();
   for (const [name, value] of Object.entries(values)) {
     previous.set(name, process.env[name]);
@@ -642,7 +596,7 @@ async function waitForActiveBundle(
         if (lease.status === 'incident')
           throw new Error(`Docker-workload activation entered incident: ${lease.incident?.detail}`);
         if (lease.status !== 'active') return undefined;
-        return { sessionId, metadata: metadata as ActiveBundle['metadata'], leasePath, lease };
+        return { sessionId, leasePath, lease };
       }
       return undefined;
     },
@@ -666,6 +620,59 @@ async function innerDocker(
   const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], 120_000, 'codespace');
   if (result.exitCode !== 0) throw new Error(`inner docker ${args[0]} failed: ${result.stderr}`);
   return result;
+}
+
+async function verifyPrivateDockerBaseline(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  frozenCatalogDir: string,
+): Promise<ReturnType<typeof loadPreloadedImageCatalog>> {
+  const info = await innerDocker(runtime, outerId, ['info', '--format', '{{json .}}']);
+  const parsedInfo = JSON.parse(info.stdout) as { Driver?: string; SecurityOptions?: readonly string[] };
+  if (parsedInfo.Driver !== 'vfs' || !parsedInfo.SecurityOptions?.some((item) => item.includes('rootless'))) {
+    throw new Error(`private Docker is not rootless+vfs: ${info.stdout.trim()}`);
+  }
+
+  const frozenDocker = loadPreloadedImageCatalog(resolve(frozenCatalogDir, preloadedCatalogFileName('docker')));
+  const selected = frozenDocker.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
+  if (selected === undefined) throw new Error(`frozen Docker catalog is missing ${SELECTED_IMAGE}`);
+  const inspected = await innerDocker(runtime, outerId, ['image', 'inspect', '--format', '{{.Id}}', SELECTED_IMAGE]);
+  if (inspected.stdout.trim() !== selected.runtimeImageId) {
+    throw new Error('selected inner image immutable ID differs from frozen Docker catalog');
+  }
+  return frozenDocker;
+}
+
+async function verifyClosedBundle(options: {
+  readonly runtime: ReturnType<typeof createContainerRuntime>;
+  readonly active: ActiveBundle;
+  readonly outerId: string;
+  readonly smokeHome: string;
+  readonly supervisorStatusPath: string;
+  readonly supervisorPid: number;
+  readonly supervisorIdentity: string;
+  readonly leaseTimeoutMs?: number;
+}): Promise<void> {
+  const closed = await waitForClosedLease(options.active.leasePath, options.leaseTimeoutMs);
+  assertClosedLeaseProof(closed, options.outerId);
+  if (await options.runtime.containerExists(options.outerId)) {
+    throw new Error(`exact outer VM still exists: ${options.outerId}`);
+  }
+  if (options.runtime.listContainers === undefined) throw new Error('Apple runtime cannot inventory containers');
+  const outerResource = closed.resources.find((resource) => resource.observedId === options.outerId);
+  if (outerResource === undefined) throw new Error('closed lease lost exact outer resource');
+  const owned = await options.runtime.listContainers({
+    labelFilter: `${outerResource.ownershipLabelKey}=${outerResource.ownershipLabelValue}`,
+  });
+  if (owned.length !== 0) throw new Error('generation-owned Apple VM inventory is not empty');
+  if (existsSync(closed.paths.stateRoot)) throw new Error('revocable state root still exists');
+  const runtimeRoot = withIronCurtainHome(options.smokeHome, () =>
+    getBundleRuntimeRoot(options.active.sessionId as BundleId),
+  );
+  if (existsSync(runtimeRoot)) throw new Error('per-bundle runtime root still exists');
+  const finalSupervisor = loadResourceWatchdogSupervisorStatus(options.supervisorStatusPath);
+  if (finalSupervisor.state !== 'closed') throw new Error(`watchdog supervisor ended in ${finalSupervisor.state}`);
+  await waitForProcessIdentityExit(options.supervisorPid, options.supervisorIdentity, 10_000);
 }
 
 async function waitForClosedLease(path: string, timeoutMs = TIMEOUT_MS): Promise<DockerWorkloadLease> {

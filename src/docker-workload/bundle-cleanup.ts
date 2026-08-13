@@ -59,14 +59,17 @@ export async function captureCleanupProof(
   gapMs: number,
   now: () => Date,
   sleep: (milliseconds: number) => Promise<void>,
+  assertBudget: (minimumRemainingMs?: number) => void = () => {},
 ): Promise<DockerWorkloadCleanupProof> {
-  const firstOwnedResourceIds = [...(await inventoryOwnedResourceIds(runtime, lease))];
+  const firstOwnedResourceIds = [...(await inventoryOwnedResourceIds(runtime, lease, assertBudget))];
   const first = {
     capturedAt: now().toISOString(),
     ownedResourceIds: firstOwnedResourceIds,
   };
+  assertBudget(gapMs);
   await sleep(gapMs);
-  const secondOwnedResourceIds = [...(await inventoryOwnedResourceIds(runtime, lease))];
+  assertBudget();
+  const secondOwnedResourceIds = [...(await inventoryOwnedResourceIds(runtime, lease, assertBudget))];
   const second = {
     capturedAt: now().toISOString(),
     ownedResourceIds: secondOwnedResourceIds,

@@ -99,14 +99,15 @@ export type PtyTarget = string | { readonly host: string; readonly port: number 
 
 export interface PtyProxyOptions {
   readonly target: PtyTarget;
-  /** Docker container ID (for SIGWINCH forwarding). */
+  /** Outer container ID used for SIGWINCH forwarding and bounded startup-close diagnostics. */
   readonly containerId: string;
   /**
-   * Active container runtime used for in-container PTY resize/verify execs.
+   * Active container runtime used for in-container PTY resize/verify execs and
+   * host-authoritative startup-close diagnostics.
    * Routing through the runtime (rather than a hardcoded `docker exec`) keeps
    * size management working on non-Docker backends (e.g. Apple `container`).
    * Optional so error-path tests can drive `attachPty` without a runtime;
-   * when absent, PTY size management is skipped.
+   * when absent, PTY size management and container-state diagnostics are skipped.
    */
   readonly runtime?: ContainerRuntime;
   /** Abort signal for graceful shutdown (e.g., SIGTERM). */
@@ -1102,11 +1103,14 @@ export async function attachPty(options: PtyProxyOptions): Promise<number> {
     // Both pre-connect errors and instant-close indicate "not ready yet".
     const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const code = await attachPtyOnce(options);
+      const code = await attachPtyOnce(options, deadline - Date.now());
       if (options.signal?.aborted) return 0;
       if (code !== ATTACH_INSTANT_CLOSE && code !== ATTACH_PRE_CONNECT_ERROR) return code;
       logger.info('PTY TCP connection not ready, retrying...');
-      await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
+      const remainingMs = deadline - Date.now();
+      if (remainingMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(PTY_READINESS_POLL_MS, remainingMs)));
+      }
     }
     throw new Error(`PTY TCP connection did not stabilize within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
   }
@@ -1163,26 +1167,55 @@ async function diagnosePtyStartupClose(options: PtyProxyOptions): Promise<string
  *   ATTACH_INSTANT_CLOSE     — connected, remote closed before data
  *   ATTACH_PRE_CONNECT_ERROR — socket connect itself failed
  */
-function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
+function attachPtyOnce(options: PtyProxyOptions, connectTimeoutMs = PTY_READINESS_TIMEOUT_MS): Promise<number> {
   const conn = connectToTarget(options.target);
 
   const { stdin, stdout } = process;
 
   return new Promise((resolvePromise) => {
     let resolved = false;
+    let cleanupConnected = (): void => {};
     const settle = (code: number): void => {
       if (resolved) return;
       resolved = true;
       resolvePromise(code);
     };
 
-    const onPreConnectError = (): void => {
+    function cleanupPreConnect(): void {
+      clearTimeout(connectTimer);
+      conn.removeListener('error', onPreConnectError);
+    }
+    function onAbort(): void {
+      cleanupConnected();
+      cleanupPreConnect();
+      options.signal?.removeEventListener('abort', onAbort);
+      conn.destroy();
+      settle(0);
+    }
+
+    function onPreConnectError(): void {
       // Pre-connect failure (no `connect` event ever fired). Distinct from
       // a post-connect close so the UDS caller can surface a hard failure
       // instead of treating a stale-socket false positive as success.
+      cleanupPreConnect();
+      options.signal?.removeEventListener('abort', onAbort);
       settle(ATTACH_PRE_CONNECT_ERROR);
-    };
+    }
     conn.once('error', onPreConnectError);
+    const connectTimer = setTimeout(
+      () => {
+        cleanupPreConnect();
+        options.signal?.removeEventListener('abort', onAbort);
+        conn.destroy();
+        settle(ATTACH_PRE_CONNECT_ERROR);
+      },
+      Math.max(1, connectTimeoutMs),
+    );
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
 
     conn.once('connect', () => {
       // Once connected, the pre-connect classifier no longer applies; remove
@@ -1190,7 +1223,7 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
       // only by the post-connect handler below — otherwise both fire and the
       // earlier-registered pre-connect listener wins, mis-reporting the
       // outcome as ATTACH_PRE_CONNECT_ERROR.
-      conn.removeListener('error', onPreConnectError);
+      cleanupPreConnect();
 
       // Defer raw mode, stdin forwarding, and resize handling until the first
       // data arrives from the remote. For TCP retries, an instant close (no
@@ -1281,16 +1314,11 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
         verifyAbort.abort();
         options.signal?.removeEventListener('abort', onAbort);
       }
-      function onAbort(): void {
-        cleanup();
-        conn.destroy();
-        settle(0);
-      }
+      cleanupConnected = cleanup;
       if (options.signal?.aborted) {
         onAbort();
         return;
       }
-      options.signal?.addEventListener('abort', onAbort, { once: true });
 
       conn.once('close', () => {
         cleanup();

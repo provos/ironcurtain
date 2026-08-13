@@ -1,11 +1,16 @@
 import { lstatSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  activateDockerWorkloadLease,
+  closeDockerWorkloadLease,
   createDockerWorkloadLease,
   heartbeatDockerWorkloadLease,
   loadDockerWorkloadLease,
+  observeDockerWorkloadOuterResource,
+  requestDockerWorkloadOuterResource,
+  revokeDockerWorkloadLease,
 } from '../../src/docker-workload/bundle-lease.js';
 import {
   performSerializedDockerWorkloadCleanup,
@@ -21,6 +26,159 @@ afterEach(() => {
 });
 
 describe('Docker-workload lifecycle ownership', () => {
+  it('returns an already-closed proof even when no cleanup budget remains', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'docker-workload-cleanup-closed-budget-'));
+    temporaryDirectories.push(directory);
+    const controlDir = join(directory, 'control');
+    const leasePath = join(controlDir, 'lease.json');
+    const workspaceRoot = join(directory, 'workspace');
+    mkdirSync(controlDir, { mode: 0o700 });
+    mkdirSync(workspaceRoot, { mode: 0o700 });
+    const generation = 'generation-cleanup-closed-budget-001';
+    const initial = new Date('2026-07-20T12:00:00.000Z');
+    createDockerWorkloadLease(leasePath, {
+      leaseId: 'lease-cleanup-closed-budget-001',
+      bundleId: 'bundle-cleanup-closed-budget-001',
+      generation,
+      runtimeKind: 'apple-container',
+      paths: {
+        workspaceRoot,
+        stateRoot: join(directory, 'absent-state'),
+        runtimeRoot: join(directory, 'absent-state', 'runtime'),
+        apiRoot: join(directory, 'absent-state', 'api'),
+        exchangeRoot: join(directory, 'absent-state', 'exchange'),
+        stagingRoot: join(directory, 'absent-state', 'staging'),
+      },
+      bindings: {
+        catalogSha256: '2'.repeat(64),
+        innerDockerCatalogSha256: '7'.repeat(64),
+        profileSha256: '3'.repeat(64),
+        watchdogPolicySha256: '5'.repeat(64),
+        toolchainDigest: '6'.repeat(64),
+      },
+      cleanupInventoryGapMs: 100,
+      now: initial,
+    });
+    revokeDockerWorkloadLease(leasePath, generation, initial);
+    const cleanup = {
+      exactOuterResourcesAbsent: true as const,
+      stateRootAbsent: true as const,
+      inventories: [
+        { capturedAt: '2026-07-20T12:00:00.000Z', ownedResourceIds: [] },
+        { capturedAt: '2026-07-20T12:00:00.100Z', ownedResourceIds: [] },
+      ] as const,
+    };
+    closeDockerWorkloadLease(leasePath, generation, cleanup, new Date('2026-07-20T12:00:00.100Z'));
+    const listContainers = vi.fn(async () => []);
+
+    await expect(
+      performSerializedDockerWorkloadCleanup({
+        runtime: { ...createMockDocker(), listContainers },
+        leasePath,
+        generation,
+        targetDevice: 0,
+        targetInode: 0,
+        gapMs: 100,
+        clock: () => new Date('2026-07-20T12:00:10.000Z'),
+        sleep: async () => {},
+        waitForOwner: true,
+        timeoutMs: 0,
+      }),
+    ).resolves.toEqual({ alreadyClosed: true, cleanup });
+    expect(listContainers).not.toHaveBeenCalled();
+  });
+
+  it('does not start another destructive phase after the cooperative cleanup budget expires', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'docker-workload-cleanup-budget-'));
+    temporaryDirectories.push(directory);
+    const controlDir = join(directory, 'control');
+    const leasePath = join(controlDir, 'lease.json');
+    const stateRoot = join(directory, 'state');
+    const workspaceRoot = join(directory, 'workspace');
+    mkdirSync(controlDir, { mode: 0o700 });
+    mkdirSync(stateRoot, { mode: 0o700 });
+    mkdirSync(workspaceRoot, { mode: 0o700 });
+    const target = lstatSync(stateRoot);
+    const generation = 'generation-cleanup-budget-001';
+    const initialMs = Date.parse('2026-07-20T12:00:00.000Z');
+    createDockerWorkloadLease(leasePath, {
+      leaseId: 'lease-cleanup-budget-001',
+      bundleId: 'bundle-cleanup-budget-001',
+      generation,
+      runtimeKind: 'apple-container',
+      paths: {
+        workspaceRoot,
+        stateRoot,
+        runtimeRoot: join(stateRoot, 'runtime'),
+        apiRoot: join(stateRoot, 'api'),
+        exchangeRoot: join(stateRoot, 'exchange'),
+        stagingRoot: join(stateRoot, 'staging'),
+      },
+      bindings: {
+        catalogSha256: '2'.repeat(64),
+        innerDockerCatalogSha256: '7'.repeat(64),
+        profileSha256: '3'.repeat(64),
+        watchdogPolicySha256: '5'.repeat(64),
+        toolchainDigest: '6'.repeat(64),
+      },
+      cleanupInventoryGapMs: 100,
+      now: new Date(initialMs),
+    });
+    requestDockerWorkloadOuterResource(leasePath, generation, {
+      requestId: 'resource-cleanup-budget-001',
+      kind: 'container',
+      role: 'agent',
+      requestedName: 'ic-cleanup-budget',
+      ownershipLabelKey: 'com.ironcurtain.docker-workload.generation',
+    });
+    observeDockerWorkloadOuterResource(
+      leasePath,
+      generation,
+      'resource-cleanup-budget-001',
+      'container-cleanup-budget-001',
+    );
+    activateDockerWorkloadLease(leasePath, generation);
+
+    let currentMs = initialMs;
+    const stop = vi.fn(async () => {});
+    const remove = vi.fn(async () => {});
+    const listContainers = vi.fn(async () => {
+      currentMs += 101;
+      return [
+        {
+          id: 'container-cleanup-budget-001',
+          name: 'ic-cleanup-budget',
+          created: new Date(initialMs).toISOString(),
+          running: true,
+          labels: { 'com.ironcurtain.docker-workload.generation': generation },
+        },
+      ];
+    });
+    const runtime = { ...createMockDocker(), stop, remove, listContainers };
+
+    await expect(
+      performSerializedDockerWorkloadCleanup({
+        runtime,
+        leasePath,
+        generation,
+        targetDevice: target.dev,
+        targetInode: target.ino,
+        gapMs: 100,
+        clock: () => new Date(currentMs),
+        sleep: async (milliseconds) => {
+          currentMs += milliseconds;
+        },
+        waitForOwner: true,
+        timeoutMs: 100,
+      }),
+    ).rejects.toThrow(/cooperative bound/u);
+
+    expect(listContainers).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(loadDockerWorkloadLease(leasePath).status).toBe('incident');
+  });
+
   it('timestamps cleanup inventories only after each authoritative inventory completes', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'docker-workload-cleanup-timestamp-'));
     temporaryDirectories.push(directory);
