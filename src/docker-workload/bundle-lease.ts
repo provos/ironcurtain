@@ -153,8 +153,13 @@ const leaseSchema = z
     if (lease.status === 'incident' && lease.incident === null) {
       context.addIssue({ code: 'custom', message: 'incident lease requires an incident record' });
     }
-    if (lease.status !== 'incident' && lease.incident !== null) {
-      context.addIssue({ code: 'custom', message: 'incident record is valid only for incident status' });
+    if (
+      lease.incident !== null &&
+      lease.status !== 'incident' &&
+      lease.status !== 'revoking' &&
+      lease.status !== 'closed'
+    ) {
+      context.addIssue({ code: 'custom', message: 'incident history is invalid for this lease status' });
     }
   });
 
@@ -331,6 +336,20 @@ export function revokeDockerWorkloadLease(path: string, generation: string, now 
   });
 }
 
+/** Begin an exact recovery attempt without discarding the original incident evidence. */
+export function recoverDockerWorkloadLeaseIncident(
+  path: string,
+  generation: string,
+  now = new Date(),
+): DockerWorkloadLease {
+  return updateLease(path, generation, now, (lease) => {
+    if (lease.status !== 'incident' || lease.incident === null) {
+      throw new Error('only an incident Docker-workload lease may begin recovery');
+    }
+    lease.status = 'revoking';
+  });
+}
+
 export function recordDockerWorkloadOuterResourceRemoval(
   path: string,
   generation: string,
@@ -382,11 +401,24 @@ export function recordDockerWorkloadLeaseIncident(
   now = new Date(),
 ): DockerWorkloadLease {
   return updateLease(path, generation, now, (lease) => {
-    if (lease.status === 'closed' || lease.status === 'incident') {
-      throw new Error(`cannot record incident for terminal Docker-workload lease: ${lease.status}`);
-    }
+    if (lease.status === 'closed') throw new Error('cannot record incident for closed Docker-workload lease');
+    if (lease.incident !== null) throw new Error('Docker-workload lease already has incident history');
     lease.status = 'incident';
     lease.incident = { ...incident, recordedAt: now.toISOString() };
+  });
+}
+
+/** Return a failed recovery to incident without replacing its original evidence. */
+export function returnDockerWorkloadLeaseRecoveryToIncident(
+  path: string,
+  generation: string,
+  now = new Date(),
+): DockerWorkloadLease {
+  return updateLease(path, generation, now, (lease) => {
+    if (lease.status !== 'revoking' || lease.incident === null) {
+      throw new Error('only a recovering Docker-workload lease may return to incident');
+    }
+    lease.status = 'incident';
   });
 }
 

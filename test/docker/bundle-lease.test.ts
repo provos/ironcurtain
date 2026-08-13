@@ -8,6 +8,7 @@ import {
   createDockerWorkloadLease,
   loadDockerWorkloadLease,
   observeDockerWorkloadOuterResource,
+  recoverDockerWorkloadLeaseIncident,
   recordDockerWorkloadLeaseIncident,
   recordDockerWorkloadOuterResourceRemoval,
   requestDockerWorkloadOuterResource,
@@ -119,7 +120,7 @@ describe('Docker-workload bundle lease', () => {
     ).toThrow(/not sufficiently separated/u);
   });
 
-  it('records a terminal incident without erasing the exact resource ledger', () => {
+  it('preserves a schema-v1 incident through recovery and successful close', () => {
     const { path, options } = fixture();
     createDockerWorkloadLease(path, options);
     requestDockerWorkloadOuterResource(path, options.generation, {
@@ -133,8 +134,44 @@ describe('Docker-workload bundle lease', () => {
       code: 'watchdog-loss',
       detail: 'detached watchdog heartbeat became stale',
     });
+    const canonicalV1Bytes = readFileSync(path, 'utf8');
     expect(incident).toMatchObject({ status: 'incident', resources: [{ requestId: 'daemon-sidecar' }] });
     expect(() => revokeDockerWorkloadLease(path, options.generation)).toThrow(/incident/u);
+    expect(loadDockerWorkloadLease(path).incident).toEqual(incident.incident);
+    expect(readFileSync(path, 'utf8')).toBe(canonicalV1Bytes);
+
+    const recovering = recoverDockerWorkloadLeaseIncident(path, options.generation);
+    expect(recovering).toMatchObject({ status: 'revoking', incident: incident.incident });
+    recordDockerWorkloadOuterResourceRemoval(path, options.generation, 'daemon-sidecar', {
+      kind: 'requested-name-absent',
+      identity: 'ic-daemon-fixture',
+    });
+    const closed = closeDockerWorkloadLease(path, options.generation, {
+      exactOuterResourcesAbsent: true,
+      stateRootAbsent: true,
+      inventories: [
+        { capturedAt: '2026-07-20T12:00:00.000Z', ownedResourceIds: [] },
+        { capturedAt: '2026-07-20T12:00:00.200Z', ownedResourceIds: [] },
+      ],
+    });
+    expect(closed).toMatchObject({ status: 'closed', incident: incident.incident, cleanup: { stateRootAbsent: true } });
+  });
+
+  it('never overwrites the original incident evidence', () => {
+    const { path, options } = fixture();
+    createDockerWorkloadLease(path, options);
+    const original = recordDockerWorkloadLeaseIncident(path, options.generation, {
+      code: 'original-loss',
+      detail: 'first cleanup failure',
+    }).incident;
+    recoverDockerWorkloadLeaseIncident(path, options.generation);
+    expect(() =>
+      recordDockerWorkloadLeaseIncident(path, options.generation, {
+        code: 'later-loss',
+        detail: 'later cleanup failure',
+      }),
+    ).toThrow(/already has incident history/u);
+    expect(loadDockerWorkloadLease(path).incident).toEqual(original);
   });
 
   it('requires canonical owner-only files and rejects symlink or non-canonical JSON substitution', () => {

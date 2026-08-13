@@ -23,12 +23,7 @@ import {
   ledgerOuterResourceCreate,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
-import {
-  APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH,
-  gateAppleVmNestedDaemonAgentCommand,
-  nestedDaemonAgentEnv,
-  resolveNestedDaemonBundle,
-} from '../../src/docker-workload/session-daemon.js';
+import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../../src/docker-workload/session-daemon.js';
 import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
 import { APPLE_VM_INNER_DOCKER_CATALOG_DIR } from '../../src/docker-workload/apple-private-docker.js';
 import { resolveDockerWorkloadAdmissionBindings } from '../../src/docker-workload/admission-bindings.js';
@@ -356,18 +351,6 @@ describe('nested daemon — DOCKER_HOST reaches the agent only when enabled (§8
 
   it('nestedDaemonAgentEnv contributes nothing without a bundle', () => {
     expect(nestedDaemonAgentEnv(undefined)).toEqual({});
-  });
-});
-
-describe('nested daemon — PTY agent readiness gate (§8.2 steps 5-6)', () => {
-  it('execs the agent command only after the host-owned marker appears', () => {
-    const agentCommand = ['socat', 'UNIX-LISTEN:/tmp/pty.sock,fork', 'EXEC:/agent,pty'];
-    const gated = gateAppleVmNestedDaemonAgentCommand(agentCommand);
-
-    expect(gated.slice(0, 2)).toEqual(['/bin/sh', '-c']);
-    expect(gated[2]).toContain(`while [ ! -f ${APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH} ]`);
-    expect(gated[2]).toContain('exec "$@"');
-    expect(gated.slice(4)).toEqual(agentCommand);
   });
 });
 

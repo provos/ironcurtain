@@ -41,22 +41,6 @@ import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 export const APPLE_VM_DAEMON_READINESS_TIMEOUT_MS = 90_000;
 
 /**
- * Host-created readiness marker mounted read-only at the guest orientation
- * root. A PTY command waits for this marker so the untrusted agent process does
- * not start while dockerd is booting or before its profile is adjudicated.
- */
-export const APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME = 'nested-daemon-ready';
-export const APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH = `/etc/ironcurtain/${APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME}`;
-
-const APPLE_VM_DAEMON_AGENT_GATE_SCRIPT = `while [ ! -f ${APPLE_VM_DAEMON_AGENT_READY_MARKER_PATH} ]; do sleep 0.05; done\nexec "$@"`;
-
-/** Wrap an Apple PTY agent command behind the host-owned daemon-ready marker. */
-export function gateAppleVmNestedDaemonAgentCommand(command: readonly string[]): readonly string[] {
-  if (command.length === 0) throw new Error('cannot gate an empty nested-daemon agent command');
-  return ['/bin/sh', '-c', APPLE_VM_DAEMON_AGENT_GATE_SCRIPT, 'ironcurtain-nested-daemon-agent-gate', ...command];
-}
-
-/**
  * The same-VM topology is implemented behind the resolved-variant guard on Apple
  * `container` only: the daemon needs a per-session VM to live in. This is an
  * implementation check, not a qualification or enablement claim.
@@ -116,7 +100,7 @@ export interface StartAppleVmDockerWorkloadOptions {
 }
 
 /**
- * Complete same-VM activation immediately before agent release: bootstrap and
+ * Complete same-VM activation before the host attaches to the PTY: bootstrap and
  * adjudicate the rootless daemon, preflight the pinned Docker client/plugin
  * tuple, provision the selected catalog-authorized agent image, record the
  * transparent observations, and activate the lease.

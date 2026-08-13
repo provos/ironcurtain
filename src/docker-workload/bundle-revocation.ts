@@ -147,7 +147,8 @@ async function revokeContainer(
 
   await runtime.stop(observedId);
   await runtime.remove(observedId);
-  if (await runtime.containerExists(observedId)) {
+  const afterRemoval = await requiredContainerInventory(runtime);
+  if (afterRemoval.some((container) => container.id === observedId)) {
     throw new Error(`exact outer container still exists after revocation: ${observedId}`);
   }
   recordDockerWorkloadOuterResourceRemoval(

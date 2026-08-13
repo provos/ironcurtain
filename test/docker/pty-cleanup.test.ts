@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -75,7 +75,7 @@ vi.mock('../../src/docker/container-lifecycle.js', () => ({
   },
 }));
 
-import { removeNestedDaemonReadyMarker, runPtySession } from '../../src/docker/pty-session.js';
+import { runPtySession } from '../../src/docker/pty-session.js';
 
 describe('PTY early-initialization cleanup ownership', () => {
   const directories: string[] = [];
@@ -168,16 +168,5 @@ describe('PTY early-initialization cleanup ownership', () => {
     expect(mitmStop).toHaveBeenCalledOnce();
     expect(proxyStop).toHaveBeenCalledOnce();
     expect(state.removeBundleRuntimeRoot).toHaveBeenCalledOnce();
-  });
-
-  it('retires a daemon-ready marker and treats an already-absent marker as success', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'pty-cleanup-'));
-    directories.push(directory);
-    const marker = join(directory, 'nested-daemon-ready');
-    writeFileSync(marker, 'ready\n');
-
-    removeNestedDaemonReadyMarker(marker);
-    expect(existsSync(marker)).toBe(false);
-    expect(() => removeNestedDaemonReadyMarker(marker)).not.toThrow();
   });
 });

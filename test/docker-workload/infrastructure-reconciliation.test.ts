@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -16,6 +16,8 @@ import {
   heartbeatDockerWorkloadLease,
   loadDockerWorkloadLease,
   observeDockerWorkloadOuterResource,
+  recoverDockerWorkloadLeaseIncident,
+  recordDockerWorkloadLeaseIncident,
   requestDockerWorkloadOuterResource,
 } from '../../src/docker-workload/bundle-lease.js';
 import { getDockerWorkloadLeaseDir, getDockerWorkloadStateRoot } from '../../src/config/paths.js';
@@ -139,7 +141,302 @@ function container(id: string, name: string, generation: string): DockerContaine
   return { id, name, created: '2026-07-20T12:00:00Z', running: true, labels: { [KEY]: generation } };
 }
 
+function markIncident(
+  seeded: ReturnType<typeof seedLease>,
+  code = 'docker-workload-cleanup-failed',
+  detail = 'authoritative Apple inventory timed out twice',
+): void {
+  recordDockerWorkloadLeaseIncident(
+    seeded.leasePath,
+    seeded.generation,
+    { code, detail },
+    new Date('2026-07-20T12:00:01.000Z'),
+  );
+}
+
 describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
+  it('automatically recovers an incident with an already-absent resource and leftover state before admission', async () => {
+    const runtime = createEventRuntime();
+    const incident = seedLease({
+      leaseId: 'dw-incident-absent',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-absent',
+          kind: 'container',
+          role: 'nested-daemon',
+          name: 'ic-already-absent',
+          observedId: 'already-absent-id',
+        },
+      ],
+      activate: true,
+    });
+    markIncident(incident);
+    const original = loadDockerWorkloadLease(incident.leasePath).incident;
+    expect(existsSync(getDockerWorkloadStateRoot(incident.leaseId))).toBe(true);
+
+    const handle = await admitDockerWorkloadBundle(
+      admissionOptions(runtime, createFakeClock('2026-07-20T12:00:02.000Z')),
+    );
+
+    const recovered = loadDockerWorkloadLease(incident.leasePath);
+    expect(recovered).toMatchObject({ status: 'closed', incident: original, cleanup: { stateRootAbsent: true } });
+    expect(existsSync(getDockerWorkloadStateRoot(incident.leaseId))).toBe(false);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+
+    const again = await reconcileDockerWorkloadLeases(
+      reconcileOptions(runtime, createFakeClock('2026-07-20T12:00:02.000Z')),
+    );
+    expect(again.reconciled).toEqual([]);
+    expect(again.preserved).toEqual([handle.leaseId]);
+    expect(loadDockerWorkloadLease(incident.leasePath)).toEqual(recovered);
+  });
+
+  it('does not re-fence a recovered lease when the old supervisor stop notification fails', async () => {
+    const runtime = createEventRuntime();
+    const incident = seedLease({
+      leaseId: 'dw-incident-stop-notification',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+    });
+    markIncident(incident);
+    const original = loadDockerWorkloadLease(incident.leasePath).incident;
+    const clock = createFakeClock('2026-07-20T12:00:02.000Z');
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const supervisor: WatchdogSupervisorController = {
+      ...createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }),
+      requestStop() {
+        throw new Error('old supervisor stop socket is unavailable');
+      },
+    };
+
+    const handle = await admitDockerWorkloadBundle({
+      ...admissionOptions(runtime, clock),
+      supervisor,
+      auditSink: sink,
+    });
+
+    expect(loadDockerWorkloadLease(incident.leasePath)).toMatchObject({
+      status: 'closed',
+      incident: original,
+      cleanup: { exactOuterResourcesAbsent: true, stateRootAbsent: true },
+    });
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        kind: 'incident',
+        code: 'watchdog-supervisor-stop-notification-failed',
+        detail: 'old supervisor stop socket is unavailable',
+      }),
+    );
+  });
+
+  it('recovers only the exact owned resource, preserves foreign resources, and preserves a healthy active lease', async () => {
+    const runtime = createEventRuntime({
+      containers: [
+        container('owned-incident-id', 'ic-owned-incident', 'gen-dw-a-incident'),
+        container('healthy-id', 'ic-healthy', 'gen-dw-b-healthy'),
+        { ...container('foreign-id', 'ic-foreign', 'foreign-generation'), labels: {} },
+      ],
+    });
+    const incident = seedLease({
+      leaseId: 'dw-a-incident',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-owned',
+          kind: 'container',
+          role: 'nested-daemon',
+          name: 'ic-owned-incident',
+          observedId: 'owned-incident-id',
+        },
+      ],
+      activate: true,
+    });
+    const healthy = seedLease({
+      leaseId: 'dw-b-healthy',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-healthy',
+          kind: 'container',
+          role: 'nested-daemon',
+          name: 'ic-healthy',
+          observedId: 'healthy-id',
+        },
+      ],
+      activate: true,
+    });
+    markIncident(incident);
+    const clock = createFakeClock('2026-07-20T12:00:02.000Z');
+
+    const result = await reconcileDockerWorkloadLeases({
+      ...reconcileOptions(runtime, clock),
+      supervisor: createFakeSupervisor({ clock: clock.clock }),
+    });
+
+    expect(result).toEqual({ reconciled: [incident.leaseId], preserved: [healthy.leaseId], fenced: [] });
+    expect(runtime.containers.map((entry) => entry.id).sort()).toEqual(['foreign-id', 'healthy-id']);
+    expect(loadDockerWorkloadLease(incident.leasePath).status).toBe('closed');
+    expect(loadDockerWorkloadLease(healthy.leasePath).status).toBe('active');
+  });
+
+  it('keeps the original incident and fences when exact ownership validation still fails', async () => {
+    const runtime = createEventRuntime({
+      containers: [{ ...container('wrong-label-id', 'ic-wrong-label', 'not-the-generation'), labels: {} }],
+    });
+    const incident = seedLease({
+      leaseId: 'dw-incident-wrong-label',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-wrong-label',
+          kind: 'container',
+          role: 'nested-daemon',
+          name: 'ic-wrong-label',
+          observedId: 'wrong-label-id',
+        },
+      ],
+      activate: true,
+    });
+    markIncident(incident, 'original-inventory-loss', 'the first inventory could not be completed');
+    const original = loadDockerWorkloadLease(incident.leasePath).incident;
+    const clock = createFakeClock('2026-07-20T12:00:02.000Z');
+
+    const result = await reconcileDockerWorkloadLeases(reconcileOptions(runtime, clock));
+
+    expect(result.fenced).toEqual([incident.leaseId]);
+    expect(runtime.containers.map((entry) => entry.id)).toEqual(['wrong-label-id']);
+    expect(loadDockerWorkloadLease(incident.leasePath)).toMatchObject({ status: 'incident', incident: original });
+    await expect(admitDockerWorkloadBundle(admissionOptions(runtime, clock))).rejects.toThrow(
+      /dw-incident-wrong-label.*original-inventory-loss.*latest recovery failure.*wrong generation label/u,
+    );
+  });
+
+  it('fences an incident create-before-observe collision with a foreign same-name resource', async () => {
+    const runtime = createEventRuntime({
+      containers: [container('foreign-same-name-id', 'ic-unobserved-collision', 'foreign-generation')],
+    });
+    const incident = seedLease({
+      leaseId: 'dw-incident-unobserved-collision',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-unobserved-collision',
+          kind: 'container',
+          role: 'nested-daemon',
+          name: 'ic-unobserved-collision',
+        },
+      ],
+    });
+    markIncident(incident, 'original-create-loss', 'create result was not observed');
+    const original = loadDockerWorkloadLease(incident.leasePath).incident;
+
+    const result = await reconcileDockerWorkloadLeases(
+      reconcileOptions(runtime, createFakeClock('2026-07-20T12:00:02.000Z')),
+    );
+
+    expect(result.fenced).toEqual([incident.leaseId]);
+    expect(runtime.containers.map((entry) => entry.id)).toEqual(['foreign-same-name-id']);
+    expect(loadDockerWorkloadLease(incident.leasePath)).toMatchObject({ status: 'incident', incident: original });
+  });
+
+  it('audits the complete successful incident recovery sequence', async () => {
+    const runtime = createEventRuntime({
+      containers: [container('audit-owned-id', 'ic-audit-owned', 'gen-dw-incident-audit')],
+    });
+    const incident = seedLease({
+      leaseId: 'dw-incident-audit',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      resources: [
+        {
+          requestId: 'res-audit-owned',
+          kind: 'container',
+          role: 'nested-daemon',
+          name: 'ic-audit-owned',
+          observedId: 'audit-owned-id',
+        },
+      ],
+      activate: true,
+    });
+    markIncident(incident);
+    const sink = createRecordingDockerWorkloadAuditSink();
+
+    const result = await reconcileDockerWorkloadLeases({
+      ...reconcileOptions(runtime, createFakeClock('2026-07-20T12:00:02.000Z')),
+      auditSink: sink,
+    });
+
+    expect(result.reconciled).toEqual([incident.leaseId]);
+    expect(sink.events.map((event) => event.kind)).toEqual([
+      'lease-transition',
+      'revocation-result',
+      'cleanup-proof',
+      'lease-transition',
+    ]);
+    expect(sink.events[0]).toMatchObject({ kind: 'lease-transition', from: 'incident', to: 'revoking' });
+    expect(sink.events[1]).toMatchObject({ kind: 'revocation-result', removedResourceIds: ['audit-owned-id'] });
+    expect(sink.events[3]).toMatchObject({ kind: 'lease-transition', from: 'revoking', to: 'closed' });
+  });
+
+  it('resumes a crash after incident-to-revoking transition', async () => {
+    const runtime = createEventRuntime();
+    const incident = seedLease({ leaseId: 'dw-incident-revoking', heartbeatIso: '2026-07-20T12:00:00.000Z' });
+    markIncident(incident);
+    const original = loadDockerWorkloadLease(incident.leasePath).incident;
+    recoverDockerWorkloadLeaseIncident(incident.leasePath, incident.generation, new Date('2026-07-20T12:00:02.000Z'));
+
+    const result = await reconcileDockerWorkloadLeases(
+      reconcileOptions(runtime, createFakeClock('2026-07-20T12:00:03.000Z')),
+    );
+
+    expect(result.reconciled).toEqual([incident.leaseId]);
+    expect(loadDockerWorkloadLease(incident.leasePath)).toMatchObject({ status: 'closed', incident: original });
+  });
+
+  it('continues reconciling later incidents when an earlier incident remains unresolved', async () => {
+    const failing = createEventRuntime();
+    const failingRuntime = {
+      ...failing.runtime,
+      async listContainers(): Promise<never> {
+        throw new Error('recorded Docker runtime inventory is unavailable');
+      },
+    };
+    const succeeding = createEventRuntime();
+    const first = seedLease({
+      leaseId: 'dw-a-unresolved',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      runtimeKind: 'docker',
+    });
+    const second = seedLease({
+      leaseId: 'dw-b-recoverable',
+      heartbeatIso: '2026-07-20T12:00:00.000Z',
+      runtimeKind: 'apple-container',
+    });
+    markIncident(first, 'first-failure', 'first runtime was unavailable');
+    markIncident(second, 'second-failure', 'second runtime transiently failed');
+    const clock = createFakeClock('2026-07-20T12:00:02.000Z');
+
+    const result = await reconcileDockerWorkloadLeases({
+      runtime: failingRuntime,
+      runtimeKind: 'docker',
+      runtimeForKind: (kind) => (kind === 'apple-container' ? succeeding.runtime : failingRuntime),
+      clock: clock.clock,
+      sleep: clock.sleep,
+      pidAlive: () => true,
+      supervisor: createFakeSupervisor({ clock: clock.clock, statusMode: 'absent' }),
+    });
+
+    expect(result).toEqual({ reconciled: [second.leaseId], preserved: [], fenced: [first.leaseId] });
+    expect(loadDockerWorkloadLease(first.leasePath)).toMatchObject({
+      status: 'incident',
+      incident: { code: 'first-failure', detail: 'first runtime was unavailable' },
+    });
+    expect(loadDockerWorkloadLease(second.leasePath)).toMatchObject({
+      status: 'closed',
+      incident: { code: 'second-failure', detail: 'second runtime transiently failed' },
+    });
+  });
+
   it('reconciles a stale lease before admitting a new bundle', async () => {
     const runtime = createEventRuntime();
     const stale = seedLease({ leaseId: 'dw-stale', heartbeatIso: '2026-07-20T10:00:00.000Z' });
@@ -241,7 +538,9 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
 
     const result = await reconcileDockerWorkloadLeases(reconcileOptions(runtime, clock));
     expect(result.fenced).toEqual([leaseId]);
-    await expect(admitDockerWorkloadBundle(admissionOptions(runtime, clock))).rejects.toThrow(/fenced leases block/u);
+    await expect(admitDockerWorkloadBundle(admissionOptions(runtime, clock))).rejects.toThrow(
+      /unresolved leases block/u,
+    );
   });
 
   it('preserves a live lease whose coordinator heartbeat is fresh', async () => {
@@ -436,7 +735,7 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     expect(loadDockerWorkloadLease(seeded.leasePath).status).toBe('incident');
   });
 
-  it('fences a lease whose recovery exceeds the frozen bound and then blocks new admission', async () => {
+  it('fences a lease whose recovery exceeds the bound, then retries it on the next admission', async () => {
     const runtime = createEventRuntime();
     const stale = seedLease({ leaseId: 'dw-slow', heartbeatIso: '2026-07-20T09:00:00.000Z' });
     const sink = createRecordingDockerWorkloadAuditSink();
@@ -448,9 +747,12 @@ describe('Docker-workload crash reconciliation (§8.3 recovery)', () => {
     expect(
       sink.events.some((event) => event.kind === 'incident' && event.code === 'docker-workload-recovery-fenced'),
     ).toBe(true);
+    const original = loadDockerWorkloadLease(stale.leasePath).incident;
 
-    await expect(
-      admitDockerWorkloadBundle(admissionOptions(runtime, createFakeClock('2026-07-20T12:10:00.000Z'))),
-    ).rejects.toThrow(/fenced leases block/u);
+    const handle = await admitDockerWorkloadBundle(
+      admissionOptions(runtime, createFakeClock('2026-07-20T12:10:00.000Z')),
+    );
+    expect(loadDockerWorkloadLease(stale.leasePath)).toMatchObject({ status: 'closed', incident: original });
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
   });
 });

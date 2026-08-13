@@ -52,6 +52,15 @@ import { createDockerProgressSink } from './docker-progress-sink.js';
 const STOP_TIMEOUT_SECONDS = 10;
 
 /**
+ * Apple Container's XPC-backed inventory can transiently hang after deleting
+ * a VM. Retry one killed-by-timeout list process, but keep the total bounded:
+ * an unsuccessful attempt is never treated as absence evidence.
+ */
+const CONTAINER_INVENTORY_TIMEOUT_MS = 30_000;
+const CONTAINER_INVENTORY_MAX_ATTEMPTS = 2;
+const CONTAINER_INVENTORY_RETRY_DELAY_MS = 250;
+
+/**
  * Minimum supported `container` CLI version. 1.1.0 is the floor for the
  * `uds` topology this backend now uses: it adds working per-file UDS
  * relays via `-v <host.sock>:<guest.sock>` (host-listens / guest-connects
@@ -404,6 +413,28 @@ export function createAppleContainerManager(
     return firstInspectEntry(stdout) as AppleContainerInspect | undefined;
   };
 
+  const listContainersJsonWithRetry = async (): Promise<string> => {
+    for (let attempt = 1; attempt <= CONTAINER_INVENTORY_MAX_ATTEMPTS; attempt++) {
+      try {
+        const { stdout } = await exec('container', ['list', '--all', '--format', 'json'], {
+          timeout: CONTAINER_INVENTORY_TIMEOUT_MS,
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        return stdout;
+      } catch (error) {
+        if (attempt === CONTAINER_INVENTORY_MAX_ATTEMPTS || !isExecError(error) || !isExecTimeout(error)) {
+          throw error;
+        }
+        logger.warn(
+          `[apple-container-manager] container inventory timed out after ${CONTAINER_INVENTORY_TIMEOUT_MS}ms; ` +
+            `retrying once after ${CONTAINER_INVENTORY_RETRY_DELAY_MS}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, CONTAINER_INVENTORY_RETRY_DELAY_MS));
+      }
+    }
+    throw new Error('unreachable Apple container inventory retry state');
+  };
+
   return {
     supportsImageSnapshots: false,
 
@@ -608,10 +639,7 @@ export function createAppleContainerManager(
     },
 
     async listContainers(options?: { readonly labelFilter?: string }): Promise<readonly DockerContainerInfo[]> {
-      const { stdout } = await exec('container', ['list', '--all', '--format', 'json'], {
-        timeout: 30_000,
-        maxBuffer: 50 * 1024 * 1024,
-      });
+      const stdout = await listContainersJsonWithRetry();
       const parsed = JSON.parse(stdout) as unknown;
       if (!Array.isArray(parsed)) {
         throw new Error('Unexpected apple-container list result: expected array');

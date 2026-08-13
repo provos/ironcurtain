@@ -302,7 +302,7 @@ export async function runResourceWatchdogSupervisor(options: RunResourceWatchdog
     if (lease.status === 'incident') {
       lastStatus = statusUpdate(lastStatus, now(), {
         state: 'incident',
-        detail: 'lease incident requires operator recovery',
+        detail: 'lease incident awaits bounded exact recovery by startup reconciliation',
       });
       writeStrictJsonAtomic(options.statusPath, lastStatus);
       return;

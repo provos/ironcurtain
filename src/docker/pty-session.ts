@@ -44,8 +44,6 @@ import {
   selectOuterContainerResources,
 } from './docker-infrastructure.js';
 import {
-  APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME,
-  gateAppleVmNestedDaemonAgentCommand,
   nestedDaemonAgentEnv,
   resolveNestedDaemonBundle,
   startAppleVmDockerWorkload,
@@ -390,7 +388,6 @@ async function runPtySessionAttempt(
   let adapterIdForSnapshot: string | null = null;
   let adapterDisplayNameForSnapshot: string | null = null;
   let conversationStateDirForSnapshot: string | undefined;
-  let nestedDaemonReadyMarkerPath: string | undefined;
   let userExited = false;
   let primaryError: Error | undefined;
   let flushError: Error | undefined;
@@ -544,17 +541,6 @@ async function runPtySessionAttempt(
     if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
       throw new Error('Docker-workload lease and immutable catalog staging must be present together');
     }
-    nestedDaemonReadyMarkerPath =
-      nestedDaemon === undefined ? undefined : resolve(orientationDir, APPLE_VM_DAEMON_AGENT_READY_MARKER_NAME);
-    if (nestedDaemonReadyMarkerPath !== undefined) {
-      try {
-        unlinkSync(nestedDaemonReadyMarkerPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
-    }
-    const effectivePtyCommand =
-      nestedDaemon === undefined ? ptyCommand : gateAppleVmNestedDaemonAgentCommand(ptyCommand);
 
     // Build container configuration
     const shortId = getBundleShortId(bundleId);
@@ -803,7 +789,7 @@ async function runPtySessionAttempt(
         mounts,
         env: { ...env, ...uidRemap.env },
         user: uidRemap.user,
-        command: effectivePtyCommand,
+        command: ptyCommand,
         // PTY sessions are standalone (no workflow/scope), so only the
         // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
         bundleLabel: bundleId,
@@ -863,11 +849,12 @@ async function runPtySessionAttempt(
       }
     }
 
-    // Same-VM activation: the container command is a trusted wrapper waiting
-    // on a marker under the read-only orientation mount. The shared bootstrap
-    // adjudicates dockerd, preflights the pinned client, provisions the trusted
-    // selected inner image, records observations, and activates the lease before this
-    // path publishes the marker that releases the untrusted PTY agent.
+    // Same-VM activation: socat may bind the PTY listener while the shared
+    // bootstrap adjudicates dockerd, preflights the pinned client, provisions
+    // the trusted selected inner image, records observations, and activates the
+    // lease. The untrusted agent is not launched until the host attaches below,
+    // so completing activation before attach preserves the release boundary
+    // without delaying Apple Container's published-socket listener.
     if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
       await startAppleVmDockerWorkload({
         runtime: docker,
@@ -875,10 +862,6 @@ async function runPtySessionAttempt(
         nestedDaemon,
         bootstrap: dockerWorkloadBootstrap,
       });
-      if (nestedDaemonReadyMarkerPath === undefined) {
-        throw new Error('nested-daemon PTY gate is missing its host readiness marker path');
-      }
-      writeFileSync(nestedDaemonReadyMarkerPath, 'ready\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     }
 
     // Write session registration for the escalation listener
@@ -1020,7 +1003,6 @@ async function runPtySessionAttempt(
       // masking the authoritative resource-cleanup error.
       await mitmProxy?.stop().catch(() => {});
       await proxy?.stop().catch(() => {});
-      removeNestedDaemonReadyMarker(nestedDaemonReadyMarkerPath);
       removeBundleRuntimeRoot(effectiveSessionId as BundleId, 'PTY session');
     }
     // Write session snapshot for resume support
@@ -1076,18 +1058,6 @@ async function runPtySessionAttempt(
   if (primaryError !== undefined) throw primaryError;
 }
 
-/** Best-effort retirement of host readiness evidence after PTY teardown. */
-export function removeNestedDaemonReadyMarker(path: string | undefined): void {
-  if (path === undefined) return;
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      logger.warn(`PTY session: unlinkSync(${path}) failed: ${errorMessage(error)}`);
-    }
-  }
-}
-
 function normalizePtyError(error: unknown): Error {
   return error instanceof Error ? error : new Error(errorMessage(error));
 }
@@ -1122,6 +1092,10 @@ const ATTACH_PRE_CONNECT_ERROR = -2;
  * connection is accepted — no separate readiness probe is used.
  */
 export async function attachPty(options: PtyProxyOptions): Promise<number> {
+  // A shutdown that arrived before attach must not connect: for PTY sessions
+  // the host connection is the capability that launches the agent behind the
+  // socat listener.
+  if (options.signal?.aborted) return 0;
   const isTcp = typeof options.target !== 'string';
   if (isTcp) {
     // TCP: poll until the connection succeeds and stays open, then attach.
@@ -1139,18 +1113,48 @@ export async function attachPty(options: PtyProxyOptions): Promise<number> {
   // UDS (Linux): readiness was already verified by waitForPtyReady. A
   // pre-connect failure here means the socket file existed but nothing
   // was actually listening — typically a stale file or a socat that
-  // crashed between probe and attach. Surface it instead of silently
-  // mapping to 0. Instant-close (connected then closed before data) is
-  // still treated as a normal close: the container started and exited
-  // before sending output.
+  // crashed between probe and attach. Surface either outcome instead of
+  // silently mapping a startup failure to a successful user exit.
   const code = await attachPtyOnce(options);
+  if (options.signal?.aborted) return 0;
   if (code === ATTACH_PRE_CONNECT_ERROR) {
     throw new Error(
       'PTY socket exists but no listener accepted the connection. ' +
         'The container may have crashed between readiness check and attach.',
     );
   }
-  return code === ATTACH_INSTANT_CLOSE ? 0 : code;
+  if (code === ATTACH_INSTANT_CLOSE) {
+    const diagnostic = await diagnosePtyStartupClose(options);
+    const message = `PTY listener closed the connection before sending any output. ${diagnostic}`;
+    // Persist the diagnosis while the session logger still owns its file;
+    // runPtySession tears the container down before the error reaches the CLI.
+    logger.error(`PTY startup failure: ${message}`);
+    throw new Error(message);
+  }
+  return code;
+}
+
+/**
+ * Capture the smallest host-authoritative diagnostic available before PTY
+ * teardown. This intentionally uses existing lifecycle probes rather than
+ * exposing a general container-log surface or reflecting untrusted output in
+ * an error message.
+ */
+async function diagnosePtyStartupClose(options: PtyProxyOptions): Promise<string> {
+  if (options.runtime === undefined) {
+    return 'Container state diagnostics were unavailable; the PTY relay or agent launcher may have failed.';
+  }
+  try {
+    if (await options.runtime.isRunning(options.containerId)) {
+      return 'The outer container is still running, so its PTY relay or agent launcher child failed before producing output.';
+    }
+    if (await options.runtime.containerExists(options.containerId)) {
+      return 'The outer container stopped before the agent produced output; its entrypoint or socat listener exited during startup.';
+    }
+    return 'The outer container disappeared or could not be inspected before teardown.';
+  } catch {
+    return 'The outer container state could not be inspected before teardown.';
+  }
 }
 
 /**

@@ -25,8 +25,10 @@ network. The Apple same-VM rootless daemon lifecycle and selected same-agent pri
 bootstrap are implemented. A fail-closed resolved-variant guard now admits only the exact Apple
 developer-only, preloaded/offline, ephemeral slice defined in §12 after a live Apple-availability
 preflight. `npm run smoke:nested:apple` exercises the built CLI session/bootstrap/activation path,
-then an exact lease-bound private-Docker child and teardown; it is not an agent-turn/provider, PTY,
-full product-entrypoint, 0C, or preview qualification. Docker Desktop, native Linux, public-registry,
+then an exact lease-bound private-Docker child and teardown. The complementary, manually invoked
+`npm run smoke:nested:apple:pty` drives the built `start --pty` entrypoint through the same node-pty
+bridge as mux and requires a post-activation Claude TUI redraw plus private-Docker evidence and exact
+teardown. Neither is an agent-turn/provider, full 0C, or preview qualification. Docker Desktop, native Linux, public-registry,
 build-egress, enforced-PID, bounded-disk, and preview variants remain rejected. No backend is
 implementation-qualified or preview-ready.
 **Amendment (2026-07-21, user-approved):** workload-image registry egress is promoted from Phase 3
@@ -457,7 +459,7 @@ judgement, not a gate.
 3. Start and attest the host watchdog against the exact state target, scope, thresholds, reserve, and expected identity. Failure aborts admission; later loss invokes the frozen revoke/delete order.
 4. Only after watchdog health is proven, create/start the daemon sidecar or Apple VM and bootstrap its in-VM daemon.
 5. Verify effective outer profile, API-root handoff/socket mode, exchange-root path equivalence, `docker info`, storage driver, outer network confinement, and resource placement.
-6. Start/orient the agent with `DOCKER_HOST`, forced workspace, dependency volume, public CA, fake sentinels, and backend metadata. PTY containers start with a trusted wrapper blocked on a host-created marker under the read-only orientation mount; publish that marker only after step 5 and the durable daemon-ready record complete.
+6. Orient the agent with `DOCKER_HOST`, forced workspace, dependency volume, public CA, fake sentinels, and backend metadata. In PTY mode, start the ordinary `socat` listener before the potentially long daemon bootstrap so Apple Container's published-socket relay can stabilize. The listener does not launch the agent until a host connection arrives. Attach only after step 5, the durable daemon-ready record, image provisioning, and lease activation complete; the host attach is the capability that releases the agent.
 
 An agent cannot supply create arguments for the outer daemon component.
 
@@ -471,7 +473,9 @@ An agent cannot supply create arguments for the outer daemon component.
 6. Take two host-authoritative inventories separated by a bounded grace interval.
 7. Stop the watchdog only after exact state removal and both inventories prove cleanup.
 
-Crash reconciliation starts before any new Docker-workload lease is admitted and scans every nonclosed lease. It opens each lease through its recorded runtime kind, even if automatic backend selection changed; an unavailable recorded runtime fences rather than proving absence through the wrong inventory. A present but unreadable/symlinked/unsupported lease marker also fences admission. Labels are discovery indexes only: deletion requires recorded exact outer IDs plus lease generation and state roots. A lease is stale after coordinator death/restart or a bounded missed host-owned heartbeat; the heartbeat is not writable from the bundle. Admission and per-lease locks atomically publish a complete owner record bound to PID start identity and a random token, and reclaim/release only the exact observed file instance. A nested heartbeat fixture proves daemon/descendant activity stops after exact outer deletion. Fault tests cover coordinator `SIGKILL`, restart reconciliation, backend-selection change, corrupt lease markers, lock publication/reuse races, a live newer lease, and unrelated/foreign object preservation. The recovery bound begins when the recorded outer runtime API becomes available; exceeding it leaves the lease fenced and raises an incident. This does not need a per-operation WAL or exact inner container inventory.
+Crash reconciliation starts before any new Docker-workload lease is admitted and scans every nonclosed lease. An `incident` is durable evidence that exact cleanup was not proven, not a permanently terminal state. Admission immediately retries each well-formed incident through its recorded runtime, bound watchdog policy, and the same serialized exact-cleanup path used by normal teardown. Recovery transitions `incident -> revoking -> closed`; it retains the original incident record verbatim, while the closed lease's cleanup proof and inventory timestamps prove that the historical incident was resolved. A crash after the transition to `revoking` resumes the same cleanup on the next pass. A failed retry returns to `incident` without replacing the first failure and continues to fence admission; corrupt or unverifiable records also remain fenced. Each lease receives at most one bounded attempt per reconciliation pass. Because all nonclosed leases are scanned to avoid starving later cleanup, a pass containing several unavailable runtimes may take the sum of their individual bounds.
+
+Reconciliation opens each lease through its recorded runtime kind, even if automatic backend selection changed; an unavailable recorded runtime fences rather than proving absence through the wrong inventory. A present but unreadable/symlinked/unsupported lease marker also fences admission. Labels are discovery indexes only: deletion requires recorded exact outer IDs plus lease generation and state roots. A lease is stale after coordinator death/restart or a bounded missed host-owned heartbeat; the heartbeat is not writable from the bundle. Admission and per-lease locks atomically publish a complete owner record bound to PID start identity and a random token, and reclaim/release only the exact observed file instance. A nested heartbeat fixture proves daemon/descendant activity stops after exact outer deletion. Fault tests cover coordinator `SIGKILL`, restart reconciliation, incident retry and retry-crash resumption, backend-selection change, corrupt lease markers, lock publication/reuse races, multiple concurrent live leases, and unrelated/foreign object preservation. The recovery bound begins when the recorded outer runtime API becomes available; exceeding it returns the lease to `incident` and keeps it fenced for a later bounded retry. This does not need a per-operation WAL or exact inner container inventory.
 
 ### 8.4 Audit
 
@@ -1284,9 +1288,12 @@ then-blocked workload path. The corrections are normative:
 - **Trusted provider gateways are a distinct address policy.** A provider override resolved from trusted
   host configuration may target loopback, RFC1918/CGNAT, or ULA addresses. Metadata and link-local remain
   denied. Passthrough, redirects, builds, and registries stay public-only and cannot select the exception.
-- **The PTY agent is gated, not merely unattached.** Its container command waits for a host-created marker
-  under the read-only orientation mount. The host publishes it only after daemon bootstrap, profile
-  adjudication, and the durable daemon-ready record.
+- **The PTY host attach is the agent-release capability.** The container starts its ordinary `socat`
+  listener immediately so Apple Container's published-socket relay can stabilize, but `socat` does not
+  launch the agent until the host connects. The host must not attach until daemon bootstrap, profile
+  adjudication, image provisioning, the durable daemon-ready record, and lease activation complete.
+  Socket-inode existence alone is not a successful PTY startup: a connection that closes before producing
+  any PTY output is a startup failure, while an explicit host shutdown remains a graceful exit.
 - **Exact Apple ownership is emitted.** Generic create labels, including the lease generation, are rendered
   by the Apple manager just as they are by the Docker manager.
 - **Recovery follows recorded state.** A stale lease is inventoried and revoked through `lease.runtimeKind`,
@@ -1311,8 +1318,8 @@ work, proxy, lease, or filesystem provisioning. Direct preparation callers recei
 
 The outer Apple VM takes CPU and memory from `dockerWorkload.resources` through one clamping helper used
 by batch and PTY paths; feature-off sessions continue to use `dockerResources`. Batch and PTY atomically
-merge the admitted lease tuple into the existing session metadata. PTY teardown retires the daemon-ready
-marker, proxies, and per-bundle runtime socket tree even when outer-resource cleanup verification throws.
+merge the admitted lease tuple into the existing session metadata. PTY teardown retires proxies and the
+per-bundle runtime socket tree even when outer-resource cleanup verification throws.
 
 Apple Container 1.1 accepts only the local catalog logical tag for `container create`; passing its
 verified `sha256:` index ID is treated as a registry reference and can attempt a fetch. Resolution still
@@ -1333,7 +1340,27 @@ running the catalog helper image under no-network/read-only/cap-drop/no-new-priv
 required gap, absent state and runtime roots, and a closed/exited watchdog. Failure retains the private
 temp root for diagnosis but retires the isolated multi-gigabyte archive link. Success removes it. This is
 a mandatory built-CLI/session-initialization and nested-Docker smoke before opening the developer slice;
-it is not an agent turn, provider protocol, PTY gate, complete G1-G10/0C run, or preview qualification.
+it is not an agent turn, provider protocol, or PTY test, and does not prove a non-empty Claude TUI stream,
+the complete G1-G10/0C run, or preview qualification.
+
+The complementary manual live gate, `npm run smoke:nested:apple:pty`, uses production
+`createPtyBridge`/node-pty to spawn the built `start --pty --agent claude-code` entrypoint. It reuses the
+same isolated home, exact catalogs, selected archive, and workspace contract. The harness does not probe
+or connect to the agent socket: with the production `socat,fork` listener, such a probe would itself
+launch an agent and invalidate the result. It waits for the persisted lease to become `active`, begins its
+evidence window only then, requests a normal terminal resize redraw, and requires both the Claude Code
+title and rendered TUI frame in newly emitted bytes. Zero post-activation bytes, startup logs that merely
+name Claude Code, or a socket/session inode fail. It also proves rootless+`vfs`, the selected inner image
+ID, graceful `/exit`, exact outer-ID absence, two empty inventories, state/runtime-root removal, watchdog
+closure, and no provider request. Its bounded evidence buffer, activation/TUI/exit/cleanup timeouts,
+forced cleanup fallback, failure diagnostics retention, and large-link retirement are mandatory.
+
+Prerequisites are macOS/Apple silicon with Apple Container 1.1 services running and the current frozen
+catalog pair plus sealed selected-agent archive installed read-only under the operator's normal
+`IRONCURTAIN_HOME`. No real provider/OAuth credential or agent turn is part of this gate: the isolated
+configuration uses a fake key and fails if provider traffic occurs. This gate validates the real PTY
+startup surface but still does not prove a provider protocol, useful agent turn, the complete G1-G10/0C
+run, or preview qualification.
 
 ## 17. Primary references
 

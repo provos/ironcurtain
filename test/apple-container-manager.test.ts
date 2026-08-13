@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   createAppleContainerManager,
   buildAppleCreateArgs,
@@ -23,7 +23,14 @@ type ExecCall = {
 
 type MockResponse =
   | { stdout: string; stderr?: string }
-  | { error: true; code: number; stdout?: string; stderr?: string };
+  | {
+      error: true;
+      code: number | string | null;
+      stdout?: string;
+      stderr?: string;
+      killed?: boolean;
+      signal?: string;
+    };
 
 /** Creates a mock exec function that records calls and returns configured results. */
 function createMockExec(): {
@@ -44,6 +51,8 @@ function createMockExec(): {
         code: response.code,
         stdout: response.stdout ?? '',
         stderr: response.stderr ?? '',
+        killed: response.killed,
+        signal: response.signal,
       });
     }
     return { stdout: response.stdout, stderr: response.stderr ?? '' };
@@ -608,6 +617,51 @@ describe('AppleContainerManager', () => {
     it('rejects malformed inventory rather than silently losing owned VMs', async () => {
       mock.setResponse(JSON.stringify([{ status: { state: 'running' } }]));
       await expect(manager().listContainers?.()).rejects.toThrow(/missing container ID/u);
+      expect(mock.calls).toHaveLength(1);
+    });
+
+    it('retries one killed-by-timeout inventory process and parses the complete retry result', async () => {
+      vi.useFakeTimers();
+      try {
+        mock.setSequence([
+          { error: true, code: null, killed: true, signal: 'SIGTERM' },
+          { stdout: JSON.stringify([listedContainer]) },
+        ]);
+        const inventory = manager().listContainers?.();
+        await vi.runAllTimersAsync();
+        await expect(inventory).resolves.toEqual([parseAppleContainerInfo(listedContainer)]);
+        expect(mock.calls).toHaveLength(2);
+        expect(mock.calls.map((call) => call.args)).toEqual([
+          ['list', '--all', '--format', 'json'],
+          ['list', '--all', '--format', 'json'],
+        ]);
+        expect(mock.calls.map((call) => call.opts.timeout)).toEqual([30_000, 30_000]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('propagates an exhausted timeout retry without converting it to an empty inventory', async () => {
+      vi.useFakeTimers();
+      try {
+        mock.setSequence([
+          { error: true, code: null, killed: true, signal: 'SIGTERM' },
+          { error: true, code: null, killed: true, signal: 'SIGTERM' },
+        ]);
+        const inventory = manager().listContainers?.();
+        const rejection = expect(inventory).rejects.toMatchObject({ killed: true, signal: 'SIGTERM' });
+        await vi.runAllTimersAsync();
+        await rejection;
+        expect(mock.calls).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry a non-timeout inventory failure', async () => {
+      mock.setError(1, '', 'XPC permission denied');
+      await expect(manager().listContainers?.()).rejects.toMatchObject({ code: 1 });
+      expect(mock.calls).toHaveLength(1);
     });
   });
 

@@ -60,14 +60,16 @@ export async function captureCleanupProof(
   now: () => Date,
   sleep: (milliseconds: number) => Promise<void>,
 ): Promise<DockerWorkloadCleanupProof> {
+  const firstOwnedResourceIds = [...(await inventoryOwnedResourceIds(runtime, lease))];
   const first = {
     capturedAt: now().toISOString(),
-    ownedResourceIds: [...(await inventoryOwnedResourceIds(runtime, lease))],
+    ownedResourceIds: firstOwnedResourceIds,
   };
   await sleep(gapMs);
+  const secondOwnedResourceIds = [...(await inventoryOwnedResourceIds(runtime, lease))];
   const second = {
     capturedAt: now().toISOString(),
-    ownedResourceIds: [...(await inventoryOwnedResourceIds(runtime, lease))],
+    ownedResourceIds: secondOwnedResourceIds,
   };
   if (first.ownedResourceIds.length !== 0 || second.ownedResourceIds.length !== 0) {
     throw new Error('watchdog supervisor cleanup inventories are not empty');

@@ -36,6 +36,7 @@ import {
   loadDockerWorkloadLease,
   observeDockerWorkloadOuterResource,
   recordDockerWorkloadLeaseIncident,
+  returnDockerWorkloadLeaseRecoveryToIncident,
   requestDockerWorkloadOuterResource,
   type DockerWorkloadCleanupProof,
 } from './bundle-lease.js';
@@ -178,6 +179,11 @@ export interface ReconcileDockerWorkloadResult {
   readonly fenced: readonly string[];
 }
 
+interface ReconcileDockerWorkloadHeldResult extends ReconcileDockerWorkloadResult {
+  /** Current-pass reasons, used only to make admission failures actionable. */
+  readonly fenceDetails: readonly string[];
+}
+
 export interface DockerWorkloadTeardownResult {
   readonly alreadyClosed: boolean;
   readonly supervisorLost: boolean;
@@ -208,7 +214,9 @@ export async function admitDockerWorkloadBundle(
     const reconciliation = await reconcileHeld({ ...options, clock, sleep, pidAlive, supervisor });
     if (reconciliation.fenced.length > 0) {
       throw new Error(
-        `refusing Docker-workload admission while fenced leases block it: ${reconciliation.fenced.join(', ')}`,
+        `refusing Docker-workload admission while unresolved leases block it: ${reconciliation.fenceDetails.join(
+          ', ',
+        )}`,
       );
     }
 
@@ -276,9 +284,12 @@ export async function admitDockerWorkloadBundle(
 export async function reconcileDockerWorkloadLeases(
   options: ReconcileDockerWorkloadOptions,
 ): Promise<ReconcileDockerWorkloadResult> {
-  return withDockerWorkloadAdmissionLock(getDockerWorkloadRoot(), options.processIdentityForPid, () =>
-    reconcileHeld(options),
+  const { reconciled, preserved, fenced } = await withDockerWorkloadAdmissionLock(
+    getDockerWorkloadRoot(),
+    options.processIdentityForPid,
+    () => reconcileHeld(options),
   );
+  return { reconciled, preserved, fenced };
 }
 
 interface DockerWorkloadBundleHandleContext {
@@ -568,7 +579,7 @@ export class DockerWorkloadBundleHandle {
         }
         // Image verification/loading can outlast the pre-create check. Bind
         // freshness, coordinator ownership, and the authority transition to
-        // one lifecycle owner before the caller publishes its release marker.
+        // one lifecycle owner before the caller attaches and releases the agent.
         this.assertWatchdogFresh();
         heartbeatDockerWorkloadLease(this.leasePath, this.generation, this.context.clock());
         activateDockerWorkloadLease(this.leasePath, this.generation, this.context.clock());
@@ -734,7 +745,7 @@ export class DockerWorkloadBundleHandle {
   }
 }
 
-async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<ReconcileDockerWorkloadResult> {
+async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<ReconcileDockerWorkloadHeldResult> {
   const clock = options.clock ?? defaultClock;
   const sleep = options.sleep ?? defaultSleep;
   const pidAlive = options.pidAlive ?? defaultPidAlive;
@@ -746,6 +757,7 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
   const reconciled: string[] = [];
   const preserved: string[] = [];
   const fenced: string[] = [];
+  const fenceDetails: string[] = [];
   for (const leaseId of listLeaseIds(leasesRoot)) {
     const leaseDir = join(leasesRoot, leaseId);
     const leasePath = join(leaseDir, LEASE_FILE);
@@ -757,26 +769,27 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
       // contents are authoritative lifecycle state. Corruption, permissions,
       // symlinks, or an older unsupported schema must fence admission rather
       // than making possibly-running outer resources disappear from recovery.
-      if (pathEntryExistsWithoutFollowing(leasePath)) fenced.push(leaseId);
+      if (pathEntryExistsWithoutFollowing(leasePath)) {
+        fenced.push(leaseId);
+        fenceDetails.push(`${leaseId} (lease record is unreadable; exact recovery cannot be proven)`);
+      }
       continue;
     }
     if (lease.status === 'closed') continue;
-    if (lease.status === 'incident') {
-      fenced.push(leaseId);
-      continue;
-    }
+    const recoveringIncident = lease.incident !== null;
     const now = clock();
     const heartbeatFresh = now.getTime() - Date.parse(lease.coordinator.heartbeatAt) < staleHeartbeatMs;
     const coordinatorLive = heartbeatFresh && pidAlive(lease.coordinator.pid);
-    if (isLeaseLive(lease, leaseDir, supervisor, coordinatorLive, now)) {
+    if (!recoveringIncident && isLeaseLive(lease, leaseDir, supervisor, coordinatorLive, now)) {
       preserved.push(leaseId);
       continue;
     }
     // A recent heartbeat fences long enough for a just-launched supervisor to
     // publish status. After the stale bound, cleanup-claim serialization makes
     // it safe for reconciliation to compete with an in-flight supervisor trip.
-    if (heartbeatFresh) {
+    if (!recoveringIncident && heartbeatFresh) {
       fenced.push(leaseId);
+      fenceDetails.push(`${leaseId} (lifecycle is still owned or recently active)`);
       continue;
     }
     try {
@@ -795,13 +808,15 @@ async function reconcileHeld(options: ReconcileDockerWorkloadOptions): Promise<R
     } catch (error) {
       if (isDockerWorkloadLifecycleClaimBusy(error) || error instanceof DockerWorkloadCleanupPreconditionError) {
         fenced.push(leaseId);
+        fenceDetails.push(`${leaseId} (${error instanceof Error ? error.message : String(error)})`);
         continue;
       }
       fenceLease(leasePath, lease.leaseId, lease.generation, error, clock, options.auditSink);
       fenced.push(leaseId);
+      fenceDetails.push(describeFencedLease(leasePath, leaseId, error));
     }
   }
-  return { reconciled, preserved, fenced };
+  return { reconciled, preserved, fenced, fenceDetails };
 }
 
 function isLeaseLive(
@@ -871,6 +886,7 @@ async function recoverStaleLease(context: {
     timeoutMs: recoveryBoundMs,
     processIdentityForPid: options.processIdentityForPid,
     revalidate: (claimedLease) => {
+      if (claimedLease.status === 'incident') return;
       if (claimedLease.status === 'revoking') return;
       if (claimedLease.status !== 'admitting' && claimedLease.status !== 'active') {
         throw new DockerWorkloadCleanupPreconditionError(
@@ -880,6 +896,13 @@ async function recoverStaleLease(context: {
       if (clock().getTime() - Date.parse(claimedLease.coordinator.heartbeatAt) < context.staleHeartbeatMs) {
         throw new DockerWorkloadCleanupPreconditionError('coordinator heartbeat refreshed before cleanup ownership');
       }
+    },
+    onRevoking: (from) => {
+      emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+        kind: 'lease-transition',
+        from,
+        to: 'revoking',
+      });
     },
   });
   if (result.revocation !== undefined) {
@@ -892,14 +915,30 @@ async function recoverStaleLease(context: {
       kind: 'cleanup-proof',
       inventories: result.cleanup.inventories,
     });
+    emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+      kind: 'lease-transition',
+      from: 'revoking',
+      to: 'closed',
+    });
   }
 
-  supervisor.requestStop(
-    join(leaseDir, STOP_REQUEST_FILE),
-    { leaseId: lease.leaseId, generation: lease.generation },
-    result.cleanup,
-    clock(),
-  );
+  try {
+    supervisor.requestStop(
+      join(leaseDir, STOP_REQUEST_FILE),
+      { leaseId: lease.leaseId, generation: lease.generation },
+      result.cleanup,
+      clock(),
+    );
+  } catch (error) {
+    // Exact cleanup is already durably closed. A detached supervisor also
+    // observes that proof directly, so a failed stop notification is an
+    // operational incident, not unresolved workload authority.
+    emitAudit(options.auditSink, lease.leaseId, lease.generation, clock().toISOString(), {
+      kind: 'incident',
+      code: 'watchdog-supervisor-stop-notification-failed',
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function fenceLease(
@@ -913,7 +952,9 @@ function fenceLease(
   const detail = error instanceof Error ? error.message : String(error);
   try {
     const current = loadDockerWorkloadLease(leasePath);
-    if (current.status !== 'incident' && current.status !== 'closed') {
+    if (current.incident !== null && current.status === 'revoking') {
+      returnDockerWorkloadLeaseRecoveryToIncident(leasePath, generation, clock());
+    } else if (current.status !== 'incident' && current.status !== 'closed') {
       recordDockerWorkloadLeaseIncident(
         leasePath,
         generation,
@@ -929,6 +970,17 @@ function fenceLease(
     code: 'docker-workload-recovery-fenced',
     detail,
   });
+}
+
+function describeFencedLease(leasePath: string, leaseId: string, error: unknown): string {
+  const latest = error instanceof Error ? error.message : String(error);
+  try {
+    const lease = loadDockerWorkloadLease(leasePath);
+    if (lease.incident === null) return `${leaseId} (latest recovery failure: ${latest})`;
+    return `${leaseId} (original incident ${lease.incident.code} at ${lease.incident.recordedAt}: ${lease.incident.detail}; latest recovery failure: ${latest})`;
+  } catch {
+    return `${leaseId} (lease record is unreadable; latest recovery failure: ${latest})`;
+  }
 }
 
 function leasePathsFor(workspaceRoot: string, stateRoot: string) {

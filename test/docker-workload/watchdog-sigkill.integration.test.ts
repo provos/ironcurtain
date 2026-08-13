@@ -256,14 +256,17 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
       expect(invocations).toContainEqual(['container', 'inspect', CONTAINER_ID]);
       expect(invocations).toContainEqual(['stop', '-t', '10', CONTAINER_ID]);
       expect(invocations).toContainEqual(['rm', '-f', CONTAINER_ID]);
-      expect(invocations).toContainEqual(['inspect', CONTAINER_ID]);
       const stopIndex = invocations.findIndex((args) => args[0] === 'stop');
       const removeIndex = invocations.findIndex((args) => args[0] === 'rm');
-      const existsProbeIndex = invocations.findIndex((args) => args[0] === 'inspect');
+      const postRemoveInventoryIndex = invocations.findIndex(
+        (args, index) => index > removeIndex && args[0] === 'container' && args[1] === 'ls',
+      );
       expect(stopIndex).toBeLessThan(removeIndex);
-      expect(removeIndex).toBeLessThan(existsProbeIndex);
+      expect(removeIndex).toBeLessThan(postRemoveInventoryIndex);
+      expect(invocations[postRemoveInventoryIndex]).toEqual(['container', 'ls', '--all', '--no-trunc', '--quiet']);
+      expect(invocations.slice(removeIndex + 1)).not.toContainEqual(['inspect', CONTAINER_ID]);
       const inventoryCalls = invocations.filter((args) => args[0] === 'container' && args[1] === 'ls');
-      expect(inventoryCalls.length).toBeGreaterThanOrEqual(4);
+      expect(inventoryCalls.length).toBeGreaterThanOrEqual(5);
       for (const call of inventoryCalls) {
         expect(call).toEqual(['container', 'ls', '--all', '--no-trunc', '--quiet']);
       }

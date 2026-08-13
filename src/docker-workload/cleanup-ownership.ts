@@ -8,7 +8,9 @@ import {
   closeDockerWorkloadLease,
   heartbeatDockerWorkloadLease,
   loadDockerWorkloadLease,
+  recoverDockerWorkloadLeaseIncident,
   recordDockerWorkloadLeaseIncident,
+  returnDockerWorkloadLeaseRecoveryToIncident,
   revokeDockerWorkloadLease,
   type DockerWorkloadCleanupProof,
   type DockerWorkloadLease,
@@ -99,7 +101,7 @@ export interface SerializedDockerWorkloadCleanupOptions {
   /** Recheck a stale observation after ownership is acquired, before mutation or runtime I/O. */
   readonly revalidate?: (lease: DockerWorkloadLease) => void;
   /** Synchronous audit hook after the durable transition and before runtime I/O. */
-  readonly onRevoking?: (from: 'admitting' | 'active') => void;
+  readonly onRevoking?: (from: 'admitting' | 'active' | 'incident') => void;
   /** Deterministic concurrency seam after stale revalidation and before revocation. */
   readonly afterRevalidate?: () => void;
 }
@@ -145,7 +147,6 @@ export async function performSerializedDockerWorkloadCleanup(
       if (current.cleanup === null) throw new Error('closed Docker-workload lease has no cleanup proof');
       return { alreadyClosed: true, cleanup: current.cleanup };
     }
-    if (current.status === 'incident') throw new Error('cannot clean an incident Docker-workload lease');
     options.revalidate?.(current);
     options.afterRevalidate?.();
 
@@ -153,7 +154,10 @@ export async function performSerializedDockerWorkloadCleanup(
       for (;;) {
         try {
           const beforeRevocation = loadDockerWorkloadLease(options.leasePath);
-          if (beforeRevocation.status === 'admitting' || beforeRevocation.status === 'active') {
+          if (beforeRevocation.status === 'incident') {
+            recoverDockerWorkloadLeaseIncident(options.leasePath, options.generation, options.clock());
+            options.onRevoking?.('incident');
+          } else if (beforeRevocation.status === 'admitting' || beforeRevocation.status === 'active') {
             revokeDockerWorkloadLease(options.leasePath, options.generation, options.clock());
             options.onRevoking?.(beforeRevocation.status);
           }
@@ -189,13 +193,16 @@ export async function performSerializedDockerWorkloadCleanup(
       }
     } catch (error) {
       const failed = loadDockerWorkloadLease(options.leasePath);
-      if (failed.status !== 'closed' && failed.status !== 'incident') {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (failed.incident !== null && failed.status === 'revoking') {
+        returnDockerWorkloadLeaseRecoveryToIncident(options.leasePath, options.generation, options.clock());
+      } else if (failed.status !== 'closed' && failed.status !== 'incident') {
         recordDockerWorkloadLeaseIncident(
           options.leasePath,
           options.generation,
           {
             code: 'docker-workload-cleanup-failed',
-            detail: error instanceof Error ? error.message : String(error),
+            detail,
           },
           options.clock(),
         );

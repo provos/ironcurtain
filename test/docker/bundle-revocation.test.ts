@@ -105,13 +105,43 @@ describe('Docker-workload exact outer-resource revocation', () => {
       container('container-owned', 'ic-daemon', fixture.options.generation),
     ]);
     state.removeFails = true;
+    let failOpenExistsCalls = 0;
+    state.runtime.containerExists = async () => {
+      failOpenExistsCalls += 1;
+      return false;
+    };
     await expect(
       revokeDockerWorkloadOuterResources(state.runtime, fixture.path, fixture.options.generation),
     ).rejects.toThrow(/still exists/u);
+    expect(failOpenExistsCalls).toBe(0);
     expect(loadDockerWorkloadLease(fixture.path).resources[0].removal).toBeNull();
     await expect(inventoryOwnedResourceIds(state.runtime, loadDockerWorkloadLease(fixture.path))).resolves.toEqual([
       'container-owned',
     ]);
+  });
+
+  it('does not record immutable-ID absence when the authoritative post-remove inventory fails', async () => {
+    const fixture = leaseFixture();
+    createDockerWorkloadLease(fixture.path, fixture.options);
+    request(fixture, 'daemon-sidecar', 'container', 'nested-daemon', 'ic-daemon');
+    observeDockerWorkloadOuterResource(fixture.path, fixture.options.generation, 'daemon-sidecar', 'container-owned');
+    activateDockerWorkloadLease(fixture.path, fixture.options.generation);
+    const state = runtimeState(fixture.options.generation, [
+      container('container-owned', 'ic-daemon', fixture.options.generation),
+    ]);
+    const listContainers = state.runtime.listContainers.bind(state.runtime);
+    let inventoryCalls = 0;
+    state.runtime.listContainers = async () => {
+      inventoryCalls += 1;
+      if (inventoryCalls === 2) throw new Error('scripted post-remove inventory timeout');
+      return listContainers();
+    };
+
+    await expect(
+      revokeDockerWorkloadOuterResources(state.runtime, fixture.path, fixture.options.generation),
+    ).rejects.toThrow(/post-remove inventory timeout/u);
+    expect(state.containers).toEqual([]);
+    expect(loadDockerWorkloadLease(fixture.path).resources[0].removal).toBeNull();
   });
 });
 
