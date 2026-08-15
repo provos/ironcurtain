@@ -175,6 +175,14 @@ const captureSchema = z
   })
   .optional();
 
+/** Content-free MITM usage statistics. Local persistence is enabled by default. */
+const statisticsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    retentionDays: z.number().int().positive().nullable().optional(),
+  })
+  .optional();
+
 const snapshotSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -397,6 +405,7 @@ export const userConfigSchema = z.object({
   packageInstall: packageInstallSchema,
   dockerResources: dockerResourcesSchema,
   capture: captureSchema,
+  statistics: statisticsSchema,
   snapshot: snapshotSchema,
 });
 
@@ -569,6 +578,8 @@ export interface ResolvedUserConfig {
    * docs/designs/mitm-token-trajectory-capture.md §10.
    */
   readonly capture?: { readonly enabled: boolean };
+  /** Content-free local LLM usage statistics. Optional for compatibility with injected test configs. */
+  readonly statistics?: { readonly enabled: boolean; readonly retentionDays: number | null };
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -927,6 +938,10 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     // `capture.enabled` in the config file. The session-factory
     // resolver applies the `?? false` default (§10).
     ...(config.capture?.enabled !== undefined ? { capture: { enabled: config.capture.enabled } } : {}),
+    statistics: {
+      enabled: config.statistics?.enabled ?? true,
+      retentionDays: config.statistics?.retentionDays !== undefined ? config.statistics.retentionDays : 90,
+    },
   };
 }
 

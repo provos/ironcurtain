@@ -36,6 +36,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'config', description: 'Edit configuration interactively' },
     { name: 'workflow', description: 'Run multi-agent workflows (start, resume, inspect)' },
     { name: 'observe', description: 'Watch live LLM token output for running sessions' },
+    { name: 'statistics', description: 'Manage locally persisted LLM statistics' },
     { name: 'doctor', description: 'Diagnose installation, credentials, and MCP server health' },
     { name: 'gc', description: 'Inspect or reclaim orphaned IronCurtain Docker resources' },
     { name: 'help', description: 'Show this help message' },
@@ -202,6 +203,11 @@ switch (subcommand) {
   case 'observe': {
     const { runObserveCommand } = await import('./observe/observe-command.js');
     await runObserveCommand(process.argv.slice(3));
+    break;
+  }
+  case 'statistics': {
+    const { runStatisticsCommand } = await import('./llm-metrics/statistics-command.js');
+    await runStatisticsCommand(process.argv.slice(3));
     break;
   }
   case 'doctor': {

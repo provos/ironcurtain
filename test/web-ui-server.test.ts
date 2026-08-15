@@ -10,6 +10,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { WebUiServer, type WebUiServerOptions } from '../src/web-ui/web-ui-server.js';
 import { SessionManager } from '../src/session/session-manager.js';
 import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
+import type { LlmStatisticsReader } from '../src/llm-metrics/query-service.js';
 import WebSocket from 'ws';
 
 // ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ function makeMockHandler(): ControlRequestHandler {
 let server: WebUiServer | null = null;
 const openSockets: WebSocket[] = [];
 
-function createServer(): WebUiServer {
+function createServer(overrides: Partial<WebUiServerOptions> = {}): WebUiServer {
   const opts: WebUiServerOptions = {
     port: 0, // OS assigns a free port
     host: '127.0.0.1',
@@ -46,6 +47,7 @@ function createServer(): WebUiServer {
     sessionManager: new SessionManager(),
     mode: { kind: 'builtin' },
     maxConcurrentWebSessions: 3,
+    ...overrides,
   };
   server = new WebUiServer(opts);
   return server;
@@ -280,6 +282,48 @@ describe('WebUiServer', () => {
       expect(response.id).toBe('req-2');
       expect(response.ok).toBe(false);
       expect(response.error.code).toBe('METHOD_NOT_FOUND');
+    });
+
+    it('bounds concurrent statistics requests per client', async () => {
+      let releaseSummaries: (() => void) | undefined;
+      const summariesReleased = new Promise<void>((resolve) => {
+        releaseSummaries = resolve;
+      });
+      const statisticsReader = {
+        capabilities: vi.fn().mockResolvedValue({ available: true }),
+        summarize: vi.fn(async () => {
+          await summariesReleased;
+          return [];
+        }),
+        timeSeries: vi.fn().mockResolvedValue([]),
+        listExchanges: vi.fn().mockResolvedValue({ items: [], nextCursor: null, snapshotMaxSequence: 0 }),
+        dimensions: vi.fn().mockResolvedValue([]),
+        sessionTotals: vi.fn().mockResolvedValue({}),
+      } as unknown as LlmStatisticsReader;
+      const srv = createServer({ statisticsReader });
+      const url = await srv.start();
+      const ws = createWs(`ws://127.0.0.1:${extractPort(url)}/ws?token=${extractToken(url)}`);
+      await new Promise<void>((resolve) => ws.on('open', resolve));
+
+      const responses: Array<{ id: string; ok: boolean; error?: { code: string } }> = [];
+      ws.on('message', (data: Buffer) => {
+        const response: unknown = JSON.parse(data.toString());
+        responses.push(response as (typeof responses)[number]);
+      });
+      const params = { fromMs: 1, toMs: 2, measures: ['totalTokens'] };
+      ws.send(JSON.stringify({ id: 'stats-1', method: 'statistics.summary', params }));
+      ws.send(JSON.stringify({ id: 'stats-2', method: 'statistics.summary', params }));
+      ws.send(JSON.stringify({ id: 'stats-3', method: 'statistics.summary', params }));
+
+      await vi.waitFor(() => {
+        expect(responses.find((response) => response.id === 'stats-3')).toMatchObject({
+          ok: false,
+          error: { code: 'RATE_LIMITED' },
+        });
+      });
+      expect(statisticsReader.summarize).toHaveBeenCalledTimes(2);
+      releaseSummaries?.();
+      await vi.waitFor(() => expect(responses.filter((response) => response.ok)).toHaveLength(2));
     });
   });
 

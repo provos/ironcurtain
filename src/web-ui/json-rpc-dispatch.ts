@@ -15,6 +15,7 @@ import { escalationDispatch } from './dispatch/escalation-dispatch.js';
 import { workflowDispatch, type WorkflowDispatchContext } from './dispatch/workflow-dispatch.js';
 import { personaDispatch } from './dispatch/persona-dispatch.js';
 import { configDispatch } from './dispatch/config-dispatch.js';
+import { statisticsDispatch } from './dispatch/statistics-dispatch.js';
 import { buildStatusDto } from './dispatch/types.js';
 
 // Re-export shared types for consumers (WebUiServer, tests)
@@ -40,6 +41,7 @@ export async function dispatch(
 
   if (method.startsWith('personas.')) return personaDispatch(ctx, method, params, client);
   if (method.startsWith('config.')) return configDispatch(ctx, method, params);
+  if (method.startsWith('statistics.')) return statisticsDispatch(ctx, method, params);
 
   throw new MethodNotFoundError(method);
 }

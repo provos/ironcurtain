@@ -59,6 +59,12 @@ describe('loadUserConfig', () => {
     expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     expect(config.anthropicApiKey).toBe('');
+    expect(config.statistics).toEqual({ enabled: true, retentionDays: 90 });
+  });
+
+  it('preserves an explicit statistics disable toggle', () => {
+    writeConfigFile({ statistics: { enabled: false, retentionDays: null } });
+    expect(loadUserConfig().statistics).toEqual({ enabled: false, retentionDays: null });
   });
 
   it('auto-creates config file with defaults when missing', () => {

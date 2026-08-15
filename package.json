@@ -29,7 +29,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.0.0 <27"
+    "node": ">=22.13.0 <27"
   },
   "bin": {
     "ironcurtain": "dist/cli.js"

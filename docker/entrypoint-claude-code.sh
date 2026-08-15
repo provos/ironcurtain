@@ -43,7 +43,9 @@ fi
 # Configure settings.json:
 # - skipDangerousModePermissionPrompt: suppresses the bypass-permissions warning
 # - skipWebFetchPreflight: bypasses domain safety check that fails in proxied env
-# - env.HTTPS_PROXY: ensures Claude Code's WebFetch routes through the MITM proxy
+# Proxy variables are intentionally inherited from the process environment.
+# Persisting the container-start URL here would override the short-lived
+# per-invocation attribution URL supplied by `docker exec --env`.
 # Auth mode determines how Claude Code gets its API credentials:
 # - OAuth mode (CLAUDE_CODE_OAUTH_TOKEN set): Claude Code reads the token from
 #   this env var directly -- no apiKeyHelper needed.
@@ -67,10 +69,7 @@ if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
     "defaultMode": "bypassPermissions"
   },
   "skipDangerousModePermissionPrompt": true,
-  "skipWebFetchPreflight": true,
-  "env": {
-    "HTTPS_PROXY": "${HTTPS_PROXY}"
-  }
+  "skipWebFetchPreflight": true
 }
 EOSETTINGS
 elif [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
@@ -85,10 +84,7 @@ elif [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
     "defaultMode": "bypassPermissions"
   },
   "skipDangerousModePermissionPrompt": true,
-  "skipWebFetchPreflight": true,
-  "env": {
-    "HTTPS_PROXY": "${HTTPS_PROXY}"
-  }
+  "skipWebFetchPreflight": true
 }
 EOSETTINGS
 else
@@ -103,10 +99,7 @@ else
   },
   "apiKeyHelper": "echo \$IRONCURTAIN_API_KEY",
   "skipDangerousModePermissionPrompt": true,
-  "skipWebFetchPreflight": true,
-  "env": {
-    "HTTPS_PROXY": "${HTTPS_PROXY}"
-  }
+  "skipWebFetchPreflight": true
 }
 EOSETTINGS
 fi

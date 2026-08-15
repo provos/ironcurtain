@@ -37,6 +37,7 @@ import * as logger from '../logger.js';
 import { getDaemonLogPath } from '../config/paths.js';
 import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
+import type { LlmMetricsRuntimeLease } from '../llm-metrics/runtime.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
 
@@ -114,6 +115,9 @@ export class IronCurtainDaemon {
   /** Token stream bridge (null if web UI not enabled). */
   private tokenStreamBridge: import('../web-ui/token-stream-bridge.js').TokenStreamBridge | null = null;
 
+  /** Daemon-owned reference keeps the shared statistics writer/reader available to the web UI. */
+  private metricsRuntime: LlmMetricsRuntimeLease | null = null;
+
   /** Web UI options from constructor. */
   private readonly webUiOptions: IronCurtainDaemonOptions['webUi'];
 
@@ -162,6 +166,16 @@ export class IronCurtainDaemon {
 
     // Set up file-based logger (redirects console.* to log file)
     logger.setup({ logFilePath: getDaemonLogPath('daemon') });
+
+    const statisticsConfig = loadUserConfig({ readOnly: true }).statistics;
+    if (statisticsConfig?.enabled !== false) {
+      try {
+        const { acquireLlmMetricsRuntime } = await import('../llm-metrics/runtime.js');
+        this.metricsRuntime = await acquireLlmMetricsRuntime({ retentionDays: statisticsConfig?.retentionDays });
+      } catch (error) {
+        logger.warn(`[Daemon] LLM statistics unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     // Start control socket for CLI communication
     await this.startControlSocket();
@@ -270,6 +284,15 @@ export class IronCurtainDaemon {
         this.tokenStreamBridge?.closeSession(s.label);
       }),
     );
+
+    if (this.metricsRuntime) {
+      try {
+        await this.metricsRuntime.release();
+      } catch (error) {
+        logger.warn(`[Daemon] Error closing LLM statistics: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      this.metricsRuntime = null;
+    }
 
     // Teardown logger last (restores console.* to original behavior)
     logger.teardown();
@@ -768,6 +791,7 @@ export class IronCurtainDaemon {
       // awaited in shutdown()) reaps the children -- no separate close here.
       daemonId: randomBytes(4).toString('hex'),
       daemonPid: process.pid,
+      statisticsReader: this.metricsRuntime?.reader,
     });
     const workflowManager = new WorkflowManager({
       eventBus: server.getEventBus(),

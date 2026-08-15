@@ -93,7 +93,12 @@ export type MethodName =
   | 'config.setModelProviders'
   // OpenRouter model-slug catalog for autocomplete/validation. Ungated read of
   // PUBLIC data (mirrors `config.getModelProviders`); no secret, no mutation.
-  | 'config.listOpenrouterModels';
+  | 'config.listOpenrouterModels'
+  | 'statistics.capabilities'
+  | 'statistics.summary'
+  | 'statistics.series'
+  | 'statistics.exchanges'
+  | 'statistics.dimensions';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -150,7 +155,8 @@ export type ErrorCode =
   //   (`'*'` domain/list or out-of-workspace path) without `allowBroadPolicy`;
   //   surfaced terminally via the `persona.compile.failed` event.
   | 'PERSONA_EXISTS'
-  | 'BROAD_POLICY_REJECTED';
+  | 'BROAD_POLICY_REJECTED'
+  | 'STATISTICS_UNAVAILABLE';
 
 // ---------------------------------------------------------------------------
 // DTO Types
@@ -182,6 +188,9 @@ export interface BudgetSummaryDto {
   readonly elapsedSeconds: number;
   readonly estimatedCostUsd: number;
   readonly tokenTrackingAvailable: boolean;
+  readonly tokenTrackingStatus?: 'complete' | 'partial' | 'unavailable';
+  readonly observedExchanges?: number;
+  readonly incompleteExchanges?: number;
   readonly limits: {
     readonly maxTotalTokens: number | null;
     readonly maxSteps: number | null;

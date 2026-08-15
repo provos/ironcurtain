@@ -7,6 +7,7 @@
  */
 
 import { isPlainObject } from '../utils/is-plain-object.js';
+import { matchesEndpointPattern, resolveCompletionEndpoint } from './llm-observation/completion-endpoint.js';
 
 /**
  * Discriminator for the agent invoking the proxy. Set at proxy construction
@@ -92,6 +93,9 @@ export function parseUpstreamBaseUrl(baseUrl: string): UpstreamTarget {
 }
 
 export interface ProviderConfig {
+  /** Stable logical route/service identifier used by content-free statistics. */
+  readonly id?: string;
+
   /** Hostname of the API endpoint (e.g., 'api.anthropic.com'). */
   readonly host: string;
 
@@ -119,6 +123,12 @@ export interface ProviderConfig {
    * point 4 of docs/designs/mitm-token-trajectory-capture.md.
    */
   readonly captureEndpoints?: readonly EndpointPattern[];
+
+  /** Explicit completion protocol descriptors; never expands allowedEndpoints. */
+  readonly completionEndpoints?: readonly import('./llm-observation/completion-endpoint.js').CompletionEndpoint[];
+
+  /** Gateway metadata adapter. Base-URL overrides downgrade direct routes to opaque. */
+  readonly gatewayAdapterId?: string;
 
   /**
    * How the API key is transmitted in requests.
@@ -182,23 +192,7 @@ function matchesEndpoint(
   method: string | undefined,
   path: string | undefined,
 ): boolean {
-  if (!method || !path) return false;
-  const cleanPath = path.split('?')[0]; // strip query string
-
-  return patterns.some((ep) => {
-    if (ep.method !== method.toUpperCase()) return false;
-    if (ep.path.includes('*')) {
-      // Escape regex metacharacters in non-glob segments, then replace
-      // '*' with [^/]+ to match exactly one path segment.
-      const escaped = ep.path
-        .split('*')
-        .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        .join('[^/]+');
-      const regex = new RegExp('^' + escaped + '$');
-      return regex.test(cleanPath);
-    }
-    return cleanPath === ep.path;
-  });
+  return patterns.some((endpoint) => matchesEndpointPattern(endpoint, method, path));
 }
 
 /**
@@ -229,6 +223,16 @@ export function isCapturableEndpoint(
 ): boolean {
   if (!config.captureEndpoints || config.captureEndpoints.length === 0) return false;
   return matchesEndpoint(config.captureEndpoints, method, path);
+}
+
+/** Resolve the explicit completion descriptor for an already-authorized request. */
+export function resolveProviderCompletionEndpoint(
+  config: ProviderConfig,
+  method: string | undefined,
+  path: string | undefined,
+): import('./llm-observation/completion-endpoint.js').CompletionEndpoint | undefined {
+  if (!config.completionEndpoints) return undefined;
+  return resolveCompletionEndpoint(config.completionEndpoints, method, path);
 }
 
 // --- Request body rewriters ---
@@ -486,6 +490,7 @@ export function shouldRewriteBody(
 // --- Built-in providers ---
 
 export const anthropicProvider: ProviderConfig = {
+  id: 'anthropic',
   host: 'api.anthropic.com',
   displayName: 'Anthropic',
   allowedEndpoints: [
@@ -508,6 +513,15 @@ export const anthropicProvider: ProviderConfig = {
   // Capture only the completion endpoint; the housekeeping paths above
   // (settings, telemetry, eval, registry) carry no model-emitted content.
   captureEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+  completionEndpoints: [
+    {
+      method: 'POST',
+      path: '/v1/messages',
+      protocol: 'anthropic-messages',
+      capabilities: { metricsSupport: 'full', trajectoryCapture: true },
+    },
+  ],
+  gatewayAdapterId: 'direct',
   keyInjection: { type: 'header', headerName: 'x-api-key' },
   fakeKeyPrefix: 'sk-ant-api03-ironcurtain-',
   requestRewriter: anthropicRequestRewriter,
@@ -515,6 +529,7 @@ export const anthropicProvider: ProviderConfig = {
 };
 
 export const claudePlatformProvider: ProviderConfig = {
+  id: 'claude-platform',
   host: 'platform.claude.com',
   displayName: 'Claude Platform',
   allowedEndpoints: [{ method: 'GET', path: '/v1/oauth/hello' }],
@@ -523,6 +538,7 @@ export const claudePlatformProvider: ProviderConfig = {
 };
 
 export const openaiProvider: ProviderConfig = {
+  id: 'openai',
   host: 'api.openai.com',
   displayName: 'OpenAI',
   allowedEndpoints: [
@@ -537,11 +553,31 @@ export const openaiProvider: ProviderConfig = {
   // api.openai.com → ResponsesReassembler). /v1/chat/completions is NOT
   // captured — no harness uses it and there is no chat-completions reassembler.
   captureEndpoints: [{ method: 'POST', path: '/v1/responses' }],
+  completionEndpoints: [
+    {
+      method: 'POST',
+      path: '/v1/responses',
+      protocol: 'openai-responses',
+      capabilities: { metricsSupport: 'full', trajectoryCapture: true },
+    },
+    {
+      method: 'POST',
+      path: '/v1/chat/completions',
+      protocol: 'openai-chat-completions',
+      capabilities: {
+        metricsSupport: 'partial',
+        streamingUsageNegotiation: 'client_or_agent_adapter',
+        trajectoryCapture: false,
+      },
+    },
+  ],
+  gatewayAdapterId: 'direct',
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ironcurtain-',
 };
 
 export const codexChatGptProvider: ProviderConfig = {
+  id: 'chatgpt-codex',
   host: 'chatgpt.com',
   displayName: 'ChatGPT Codex',
   allowedEndpoints: [
@@ -578,6 +614,15 @@ export const codexChatGptProvider: ProviderConfig = {
   // polling/resume that return application/json state, not a fresh
   // generation, and are GETs — so they never match this POST capture gate.
   captureEndpoints: [{ method: 'POST', path: '/backend-api/codex/responses' }],
+  completionEndpoints: [
+    {
+      method: 'POST',
+      path: '/backend-api/codex/responses',
+      protocol: 'openai-responses',
+      capabilities: { metricsSupport: 'full', trajectoryCapture: true },
+    },
+  ],
+  gatewayAdapterId: 'direct',
   keyInjection: { type: 'bearer' },
   // Codex expects ChatGPT access tokens to be JWT-shaped in auth.json.
   // Keep the fake credential structurally valid so local parsing passes,
@@ -587,6 +632,7 @@ export const codexChatGptProvider: ProviderConfig = {
 };
 
 export const codexAuthProvider: ProviderConfig = {
+  id: 'openai-auth',
   host: 'auth.openai.com',
   displayName: 'OpenAI Auth',
   allowedEndpoints: [{ method: 'GET', path: '/api/accounts/v1/user-auth-credential/whoami' }],
@@ -595,6 +641,7 @@ export const codexAuthProvider: ProviderConfig = {
 };
 
 export const anthropicOAuthProvider: ProviderConfig = {
+  id: 'anthropic',
   host: 'api.anthropic.com',
   displayName: 'Anthropic (OAuth)',
   allowedEndpoints: [
@@ -603,6 +650,8 @@ export const anthropicOAuthProvider: ProviderConfig = {
     { method: 'GET' as const, path: '/api/oauth/usage' },
   ],
   captureEndpoints: anthropicProvider.captureEndpoints,
+  completionEndpoints: anthropicProvider.completionEndpoints,
+  gatewayAdapterId: 'direct',
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
   requestRewriter: anthropicRequestRewriter,
@@ -610,6 +659,7 @@ export const anthropicOAuthProvider: ProviderConfig = {
 };
 
 export const claudePlatformOAuthProvider: ProviderConfig = {
+  id: 'claude-platform',
   host: 'platform.claude.com',
   displayName: 'Claude Platform (OAuth)',
   allowedEndpoints: claudePlatformProvider.allowedEndpoints,
@@ -618,6 +668,7 @@ export const claudePlatformOAuthProvider: ProviderConfig = {
 };
 
 export const googleProvider: ProviderConfig = {
+  id: 'google',
   host: 'generativelanguage.googleapis.com',
   displayName: 'Google',
   allowedEndpoints: [
@@ -628,6 +679,21 @@ export const googleProvider: ProviderConfig = {
     { method: 'POST', path: '/v1beta/models/*/generateContent' },
     { method: 'POST', path: '/v1beta/models/*/streamGenerateContent' },
   ],
+  completionEndpoints: [
+    {
+      method: 'POST',
+      path: '/v1beta/models/*/generateContent',
+      protocol: 'google-generate-content',
+      capabilities: { metricsSupport: 'full', trajectoryCapture: true },
+    },
+    {
+      method: 'POST',
+      path: '/v1beta/models/*/streamGenerateContent',
+      protocol: 'google-generate-content',
+      capabilities: { metricsSupport: 'full', trajectoryCapture: true },
+    },
+  ],
+  gatewayAdapterId: 'direct',
   keyInjection: { type: 'header', headerName: 'x-goog-api-key' },
   fakeKeyPrefix: 'AIzaSy-ironcurtain-',
 };

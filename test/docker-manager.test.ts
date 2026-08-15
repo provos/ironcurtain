@@ -16,7 +16,7 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process';
 type ExecCall = {
   cmd: string;
   args: readonly string[];
-  opts: { timeout?: number; maxBuffer?: number };
+  opts: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv };
 };
 
 type MockResponse =
@@ -479,6 +479,41 @@ describe('DockerManager', () => {
         'container-id',
         'cmd',
       ]);
+    });
+
+    it('inherits per-exec environment overrides without exposing values in argv', async () => {
+      mock.setResponse('ok');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.exec('container-id', ['cmd'], undefined, 'codespace', undefined, {
+        HTTPS_PROXY: 'http://lease:opaque-token@127.0.0.1:18080',
+        HTTP_PROXY: 'http://lease:opaque-token@127.0.0.1:18080',
+      });
+
+      expect(mock.calls[0].args).toEqual([
+        'exec',
+        '--user',
+        'codespace',
+        '--env',
+        'HTTPS_PROXY',
+        '--env',
+        'HTTP_PROXY',
+        'container-id',
+        'cmd',
+      ]);
+      expect(mock.calls[0].opts.env).toMatchObject({
+        HTTPS_PROXY: 'http://lease:opaque-token@127.0.0.1:18080',
+        HTTP_PROXY: 'http://lease:opaque-token@127.0.0.1:18080',
+      });
+      expect(mock.calls[0].args.join(' ')).not.toContain('opaque-token');
+    });
+
+    it('rejects invalid per-exec environment variable names', async () => {
+      const manager = createDockerManager(mock.mockExec);
+      await expect(
+        manager.exec('container-id', ['cmd'], undefined, undefined, undefined, { 'BAD-NAME': 'value' }),
+      ).rejects.toThrow('Invalid container exec environment variable name');
+      expect(mock.calls).toHaveLength(0);
     });
 
     it('returns non-zero exit code without throwing', async () => {

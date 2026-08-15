@@ -29,6 +29,7 @@
  */
 
 import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type {
   AgentConversationId,
@@ -53,6 +54,9 @@ import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import * as logger from '../logger.js';
 import { DEFAULT_EXEC_TIMEOUT_MS } from './docker-manager.js';
 import { getTokenStreamBus } from './token-stream-bus.js';
+import type { DockerExecResult } from './types.js';
+import { getLlmMetricsEventBus } from '../llm-metrics/event-bus.js';
+import { ObservedUsageAccumulator, type ObservedUsageSnapshot } from '../llm-metrics/observed-usage-accumulator.js';
 
 export interface DockerAgentSessionDeps {
   readonly config: IronCurtainConfig;
@@ -159,6 +163,9 @@ export class DockerAgentSession implements Session {
 
   /** Unsubscribe handle for the token-stream cost subscription. */
   private unsubscribeCostStream: (() => void) | null = null;
+  private readonly observedUsage: ObservedUsageAccumulator;
+  private unsubscribeObservedUsage: (() => void) | null = null;
+  private lastTurnUsage: ObservedUsageSnapshot;
 
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onEscalationExpired?: () => void;
@@ -178,6 +185,8 @@ export class DockerAgentSession implements Session {
     this.onEscalationResolved = deps.onEscalationResolved;
     this.onDiagnostic = deps.onDiagnostic;
     this.createdAt = new Date().toISOString();
+    this.observedUsage = new ObservedUsageAccumulator(this.sessionId, this.infra.beginMetricsInvocation !== undefined);
+    this.lastTurnUsage = this.observedUsage.takeTurnSnapshot('');
 
     // If the agent CLI has a prior conversation transcript for THIS
     // conversation id, treat the first turn as "already done" so
@@ -248,6 +257,11 @@ export class DockerAgentSession implements Session {
         this.authoritativeCostUsd += event.costUsd;
       }
     });
+    if (this.infra.beginMetricsInvocation !== undefined) {
+      this.unsubscribeObservedUsage = getLlmMetricsEventBus().subscribe((exchange) => {
+        this.observedUsage.observe(exchange);
+      });
+    }
 
     // Trajectory capture is driven HERE only in standalone (owns-infra)
     // mode: the session owns the bundle and runs exactly one Claude session
@@ -322,8 +336,33 @@ export class DockerAgentSession implements Session {
       const command = this.infra.skillsMount && batchArgs?.length ? [...baseCommand, ...batchArgs] : baseCommand;
       logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
+      const turnId = randomUUID();
+      const metricsLease = this.infra.beginMetricsInvocation?.({
+        sessionId: this.sessionId,
+        agentConversationId: this.agentConversationId,
+        turnId,
+        bundleId: this.infra.bundleId,
+        workflowRunId: this.infra.workflowId,
+        agentId: this.infra.adapter.id,
+      });
       const execStartMs = Date.now();
-      const { exitCode, stdout, stderr } = await this.infra.docker.exec(this.infra.containerId, command, execTimeout);
+      let execResult: DockerExecResult;
+      try {
+        const proxyEnvironment = metricsLease
+          ? { HTTPS_PROXY: metricsLease.proxyUrl, HTTP_PROXY: metricsLease.proxyUrl }
+          : undefined;
+        execResult = await this.infra.docker.exec(
+          this.infra.containerId,
+          command,
+          execTimeout,
+          undefined,
+          undefined,
+          proxyEnvironment,
+        );
+      } finally {
+        await metricsLease?.end();
+      }
+      const { exitCode, stdout, stderr } = execResult;
       const execDurationMs = Date.now() - execStartMs;
       const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
       logger.info(
@@ -343,17 +382,23 @@ export class DockerAgentSession implements Session {
       const response = this.infra.adapter.extractResponse(exitCode, stdout, stderr);
 
       this.cumulativeCostUsd = this.resolveCostUsd(response.costUsd);
+      const observedTurn = this.observedUsage.takeTurnSnapshot(turnId);
+      this.lastTurnUsage = observedTurn;
 
       const turn: ConversationTurn = {
         turnNumber: this.turns.length + 1,
         userMessage,
         assistantResponse: response.text,
         usage: {
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
+          promptTokens: observedTurn.inputTokens,
+          completionTokens: observedTurn.outputTokens,
+          totalTokens: observedTurn.totalTokens,
+          cacheReadTokens: observedTurn.cacheReadTokens,
+          cacheWriteTokens: observedTurn.cacheWriteTokens,
+          thinkingTokens: observedTurn.thinkingTokens,
+          usageCompleteness: observedTurn.status,
+          observedExchanges: observedTurn.observedExchanges,
+          incompleteExchanges: observedTurn.incompleteExchanges,
         },
         timestamp: turnStart,
       };
@@ -440,24 +485,30 @@ export class DockerAgentSession implements Session {
 
   getBudgetStatus(): BudgetStatus {
     const elapsedSeconds = this.cumulativeActiveMs / 1000;
+    const current = this.lastTurnUsage;
+    const cumulative = this.observedUsage.cumulativeSnapshot();
+    const observedCost = cumulative.costUsd > 0 ? cumulative.costUsd : this.cumulativeCostUsd;
 
     return {
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalTokens: 0,
+      totalInputTokens: current.inputTokens,
+      totalOutputTokens: current.outputTokens,
+      totalTokens: current.totalTokens,
       stepCount: this.turns.length,
       elapsedSeconds,
-      estimatedCostUsd: this.cumulativeCostUsd,
+      estimatedCostUsd: observedCost,
       limits: this.config.userConfig.resourceBudget,
       cumulative: {
-        totalInputTokens: 0,
-        totalOutputTokens: 0,
-        totalTokens: 0,
+        totalInputTokens: cumulative.inputTokens,
+        totalOutputTokens: cumulative.outputTokens,
+        totalTokens: cumulative.totalTokens,
         stepCount: this.turns.length,
         activeSeconds: elapsedSeconds,
-        estimatedCostUsd: this.cumulativeCostUsd,
+        estimatedCostUsd: observedCost,
       },
-      tokenTrackingAvailable: false,
+      tokenTrackingAvailable: cumulative.status !== 'unavailable',
+      tokenTrackingStatus: cumulative.status,
+      observedExchanges: cumulative.observedExchanges,
+      incompleteExchanges: cumulative.incompleteExchanges,
     };
   }
 
@@ -485,6 +536,8 @@ export class DockerAgentSession implements Session {
     this.auditTailer?.stop();
     this.unsubscribeCostStream?.();
     this.unsubscribeCostStream = null;
+    this.unsubscribeObservedUsage?.();
+    this.unsubscribeObservedUsage = null;
 
     // Trajectory capture: end the capture session BEFORE infrastructure
     // teardown so the `session-end` manifest entry is durable. The

@@ -23,6 +23,7 @@ import { WebEventBus } from './web-event-bus.js';
 import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from './web-ui-types.js';
 import { dispatch, buildStatusDto, type WorkflowDispatchContext } from './json-rpc-dispatch.js';
 import type { WorkflowManager } from '../workflow/workflow-manager.js';
+import type { LlmStatisticsReader } from '../llm-metrics/query-service.js';
 import { wsDataToString } from './ws-utils.js';
 import { assignConnId } from './conn-registry.js';
 import { personaCompileOrchestrator } from '../persona/persona-compile-orchestrator.js';
@@ -43,6 +44,10 @@ const MIME_TYPES: Record<string, string> = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
 };
+
+const MAX_STATISTICS_REQUESTS_PER_CLIENT = 2;
+const MAX_STATISTICS_REQUESTS_GLOBAL = 8;
+const MAX_WEBSOCKET_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // WebUiServer
@@ -80,6 +85,8 @@ export interface WebUiServerOptions {
    */
   readonly daemonId?: string;
   readonly daemonPid?: number;
+  /** Existing daemon-owned statistics reader; no second HTTP/WS server is created. */
+  readonly statisticsReader?: LlmStatisticsReader;
 }
 
 export class WebUiServer {
@@ -98,6 +105,8 @@ export class WebUiServer {
   private orphanTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly aliveClients = new Set<WsWebSocket>();
   private readonly missedPings = new Map<WsWebSocket, number>();
+  private readonly activeStatisticsRequestsByClient = new WeakMap<WsWebSocket, number>();
+  private activeStatisticsRequests = 0;
   private readonly staticRoot: string;
   private readonly staticCache = new Map<string, { content: Buffer; mime: string }>();
 
@@ -133,6 +142,7 @@ export class WebUiServer {
       captureTracesDefault: options.captureTracesDefault ?? false,
       allowPolicyMutation: options.allowPolicyMutation ?? false,
       ptySessionManager: this.ptySessionManager,
+      statisticsReader: options.statisticsReader,
     };
 
     // Subscribe to own event bus and broadcast to WS clients
@@ -564,19 +574,35 @@ export class WebUiServer {
       }
       frame = parsed as RequestFrame;
     } catch {
-      client.send(
-        JSON.stringify({
-          id: '',
-          ok: false,
-          error: { code: 'INVALID_PARAMS', message: 'Invalid JSON-RPC frame' },
-        } satisfies ResponseFrame),
-      );
+      this.sendResponse(client, {
+        id: '',
+        ok: false,
+        error: { code: 'INVALID_PARAMS', message: 'Invalid JSON-RPC frame' },
+      });
       return;
+    }
+
+    const isStatisticsRequest = frame.method.startsWith('statistics.');
+    if (isStatisticsRequest) {
+      const clientActive = this.activeStatisticsRequestsByClient.get(client) ?? 0;
+      if (
+        clientActive >= MAX_STATISTICS_REQUESTS_PER_CLIENT ||
+        this.activeStatisticsRequests >= MAX_STATISTICS_REQUESTS_GLOBAL
+      ) {
+        this.sendResponse(client, {
+          id: frame.id,
+          ok: false,
+          error: { code: 'RATE_LIMITED', message: 'Too many concurrent statistics requests' },
+        });
+        return;
+      }
+      this.activeStatisticsRequestsByClient.set(client, clientActive + 1);
+      this.activeStatisticsRequests += 1;
     }
 
     try {
       const payload = await dispatch(this.dispatchCtx, frame.method, frame.params ?? {}, client);
-      client.send(JSON.stringify({ id: frame.id, ok: true, payload } satisfies ResponseFrame));
+      this.sendResponse(client, { id: frame.id, ok: true, payload });
     } catch (err: unknown) {
       const response: ResponseFrame =
         err instanceof RpcError
@@ -590,8 +616,25 @@ export class WebUiServer {
               ok: false,
               error: { code: 'INTERNAL_ERROR', message: err instanceof Error ? err.message : String(err) },
             };
-      client.send(JSON.stringify(response));
+      this.sendResponse(client, response);
+    } finally {
+      if (isStatisticsRequest) {
+        const clientActive = this.activeStatisticsRequestsByClient.get(client) ?? 1;
+        if (clientActive <= 1) this.activeStatisticsRequestsByClient.delete(client);
+        else this.activeStatisticsRequestsByClient.set(client, clientActive - 1);
+        this.activeStatisticsRequests = Math.max(0, this.activeStatisticsRequests - 1);
+      }
     }
+  }
+
+  private sendResponse(client: WsWebSocket, response: ResponseFrame): void {
+    if (client.readyState !== WsWebSocket.OPEN) return;
+    const serialized = JSON.stringify(response);
+    if (client.bufferedAmount + Buffer.byteLength(serialized) > MAX_WEBSOCKET_BUFFERED_BYTES) {
+      client.close(1013, 'WebSocket response backpressure');
+      return;
+    }
+    client.send(serialized);
   }
 }
 

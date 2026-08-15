@@ -11,6 +11,9 @@ import type { AgentAdapter, AgentResponse, ConversationStateConfig } from '../sr
 import type { ContainerRuntime } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
+import { getLlmMetricsEventBus } from '../src/llm-metrics/event-bus.js';
+import type { MetricsInvocationContext } from '../src/llm-metrics/attribution-registry.js';
+import type { LlmExchangeCompleted } from '../src/llm-metrics/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import {
   createMockAdapter,
@@ -229,6 +232,105 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
   };
 }
 
+function metricsExchange(context: MetricsInvocationContext, thinkingTokens: number | null = 2): LlmExchangeCompleted {
+  return {
+    schemaVersion: 1,
+    exchangeId: `exchange-${context.turnId ?? 'session'}`,
+    attribution: {
+      sessionId: context.sessionId,
+      agentConversationId: context.agentConversationId ?? null,
+      turnId: context.turnId ?? null,
+      bundleId: context.bundleId ?? null,
+      workflowRunId: context.workflowRunId ?? null,
+      stateId: context.stateId ?? null,
+      personaId: context.personaId ?? null,
+      agentId: context.agentId ?? null,
+      quality: 'exact',
+    },
+    route: {
+      logicalProvider: 'anthropic',
+      providerProfileId: 'native',
+      protocol: 'anthropic-messages',
+      gatewayKind: 'direct',
+      clientRouteId: null,
+      upstreamRouteId: null,
+    },
+    identity: {
+      requestedModel: { value: 'claude-test', source: 'request' },
+      forwardedModel: { value: 'claude-test', source: 'forwarded_request' },
+      responseModel: { value: 'claude-test', source: 'protocol_response' },
+      servedModel: { value: 'claude-test', source: 'protocol_response_direct' },
+      servedProvider: { value: 'anthropic', source: 'configured_route' },
+    },
+    responseMetadata: {
+      providerRequestId: null,
+      providerResponseId: 'message-test',
+      gatewayGenerationId: null,
+      actualServiceTier: null,
+    },
+    request: {
+      requestedModel: 'claude-test',
+      streaming: true,
+      requestedServiceTier: null,
+      reasoningMode: 'enabled',
+      reasoningEffort: null,
+      thinkingBudgetTokens: null,
+      speedMode: null,
+      qualityFlags: [],
+    },
+    outcome: {
+      termination: 'stop',
+      providerStopReason: 'end_turn',
+      responseStatus: 200,
+      refusal: false,
+      refusalCategory: null,
+      refusalSource: 'not_reported',
+    },
+    usage: {
+      inputTokensReported: 10,
+      inputTokensTotal: 15,
+      inputTokensAccuracy: 'derived_exact',
+      inputTokensUncached: 10,
+      cacheReadInputTokens: 5,
+      cacheWriteInputTokens: 0,
+      toolUseInputTokens: null,
+      outputTokensReported: 7,
+      outputTokenSemantics: 'includes_thinking',
+      outputTokensTotal: 7,
+      outputTokensAccuracy: 'reported_exact',
+      thinkingTokens,
+      thinkingTokensAccuracy: thinkingTokens === null ? 'unknown' : 'reported_exact',
+      nonThinkingOutputTokens: thinkingTokens === null ? null : 7 - thinkingTokens,
+      nonThinkingOutputTokensAccuracy: thinkingTokens === null ? 'unknown' : 'derived_exact',
+      providerTotalTokens: 22,
+      canonicalTotalTokens: 22,
+      costUsd: 0.01,
+      usageSource: 'test',
+      usageCompleteness: 'complete',
+      usageSemanticsVersion: 1,
+      qualityFlags: [],
+    },
+    timing: {
+      requestReceivedAt: new Date().toISOString(),
+      requestBodyCompleteOffsetMs: 1,
+      responseHeadersOffsetMs: 2,
+      firstUpstreamBodyByteOffsetMs: 2.5,
+      firstProtocolEventOffsetMs: 3,
+      firstReasoningEventOffsetMs: null,
+      lastReasoningEventOffsetMs: null,
+      firstOutputEventOffsetMs: 3,
+      lastOutputEventOffsetMs: 4,
+      protocolTerminalOffsetMs: 4,
+      upstreamResponseEndOffsetMs: 5,
+      clientDeliveryEndOffsetMs: 5,
+      clientAborted: false,
+    },
+    transportAttempts: [],
+    gatewayRouteAttempts: [],
+    qualityFlags: [],
+  };
+}
+
 function createTestDeps(tempDir: string): DockerAgentSessionDeps {
   const sessionDir = join(tempDir, 'session');
   const sandboxDir = join(tempDir, 'sandbox');
@@ -339,6 +441,84 @@ describe('DockerAgentSession', () => {
     expect(budget.tokenTrackingAvailable).toBe(false);
     expect(budget.totalTokens).toBe(0);
     expect(budget.estimatedCostUsd).toBe(0);
+  });
+
+  it('accounts exact MITM exchanges without enforcing configured token budgets', async () => {
+    const end = vi.fn(async () => {});
+    const beginMetricsInvocation = vi.fn((context: MetricsInvocationContext) => ({
+      proxyUrl: 'http://ironcurtain:opaque@test-proxy.invalid',
+      end: async () => {
+        getLlmMetricsEventBus().publish(metricsExchange(context));
+        await end();
+      },
+    }));
+    deps = {
+      ...deps,
+      agentConversationId: 'conversation-test' as import('../src/session/types.js').AgentConversationId,
+      config: {
+        ...deps.config,
+        userConfig: {
+          ...deps.config.userConfig,
+          resourceBudget: { ...deps.config.userConfig.resourceBudget, maxTotalTokens: 1 },
+        },
+      },
+      infra: { ...deps.infra, beginMetricsInvocation },
+    };
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await expect(session.sendMessage('Count this turn')).resolves.toBe('Task completed successfully');
+
+    expect(beginMetricsInvocation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'test-session-id',
+        agentConversationId: 'conversation-test',
+        bundleId: 'test-session-id',
+        turnId: expect.any(String),
+      }),
+    );
+    expect(end).toHaveBeenCalledOnce();
+    expect(session.getHistory()[0]?.usage).toMatchObject({
+      promptTokens: 15,
+      completionTokens: 7,
+      thinkingTokens: 2,
+      totalTokens: 22,
+      usageCompleteness: 'complete',
+      observedExchanges: 1,
+    });
+    expect(session.getBudgetStatus()).toMatchObject({
+      totalInputTokens: 15,
+      totalOutputTokens: 7,
+      totalTokens: 22,
+      tokenTrackingAvailable: true,
+      tokenTrackingStatus: 'complete',
+      observedExchanges: 1,
+    });
+  });
+
+  it('keeps an unavailable thinking breakdown null instead of inventing zero', async () => {
+    const beginMetricsInvocation = (context: MetricsInvocationContext) => ({
+      proxyUrl: 'http://ironcurtain:opaque@test-proxy.invalid',
+      end: async () => {
+        getLlmMetricsEventBus().publish(metricsExchange(context, null));
+      },
+    });
+    deps = {
+      ...deps,
+      agentConversationId: 'conversation-test' as import('../src/session/types.js').AgentConversationId,
+      infra: { ...deps.infra, beginMetricsInvocation },
+    };
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await session.sendMessage('Count without a reasoning split');
+
+    expect(session.getHistory()[0]?.usage.thinkingTokens).toBeNull();
+    expect(session.getBudgetStatus()).toMatchObject({
+      totalOutputTokens: 7,
+      totalTokens: 22,
+      tokenTrackingStatus: 'complete',
+    });
   });
 
   it('getBudgetStatus reflects cost from adapter response', async () => {

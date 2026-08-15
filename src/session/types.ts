@@ -185,6 +185,12 @@ export interface ConversationTurn {
     totalTokens: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
+    /** Provider-reported thinking/reasoning subset when available. */
+    thinkingTokens?: number | null;
+    /** Whether the numeric values cover every observed exchange in the turn. */
+    usageCompleteness?: 'complete' | 'partial' | 'unavailable';
+    observedExchanges?: number;
+    incompleteExchanges?: number;
   };
 
   /** ISO 8601 timestamp when this turn started. */
@@ -236,6 +242,10 @@ export interface BudgetStatus {
 
   /** False for Docker sessions where token usage is not observable. */
   readonly tokenTrackingAvailable: boolean;
+  /** Separates unavailable tracking from partial lower-bound totals. */
+  readonly tokenTrackingStatus?: 'complete' | 'partial' | 'unavailable';
+  readonly observedExchanges?: number;
+  readonly incompleteExchanges?: number;
 }
 
 /**
