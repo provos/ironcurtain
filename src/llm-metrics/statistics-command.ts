@@ -102,8 +102,7 @@ export async function runStatisticsCommand(
   }
 
   const now = dependencies.now ?? Date.now;
-  const cutoffMs =
-    values.all === true ? Math.min(Number.MAX_SAFE_INTEGER, now() + 1) : parseCutoff(values.before as string);
+  const cutoffMs = values.all === true ? Math.min(MAX_DATE_MS, now() + 1) : parseCutoff(values.before as string);
   const databasePath = dependencies.databasePath ?? getLlmStatisticsDatabasePath();
   const databaseExists = dependencies.databaseExists ?? existsSync;
   if (!databaseExists(databasePath)) {

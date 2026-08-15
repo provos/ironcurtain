@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { dispatch } from '../json-rpc-dispatch.js';
 import type { WorkflowDispatchContext } from '../dispatch/workflow-dispatch.js';
 import type { LlmStatisticsReader } from '../../llm-metrics/query-service.js';
+import { LlmMetricsRepositoryUnavailableError } from '../../llm-metrics/persistence/repository.js';
 
 function context(reader?: LlmStatisticsReader): WorkflowDispatchContext {
   return { statisticsReader: reader } as unknown as WorkflowDispatchContext;
@@ -75,6 +76,21 @@ describe('statistics WebSocket dispatch', () => {
   it('keeps data methods unavailable when statistics are disabled', async () => {
     await expect(
       dispatch(context(), 'statistics.dimensions', { fromMs: 0, toMs: 1, dimension: 'protocol' }),
+    ).rejects.toMatchObject({ code: 'STATISTICS_UNAVAILABLE' });
+  });
+
+  it('reports repository failures as temporarily unavailable', async () => {
+    const statisticsReader = reader();
+    vi.spyOn(statisticsReader, 'summarize').mockRejectedValue(
+      new LlmMetricsRepositoryUnavailableError('LLM metrics repository is closing'),
+    );
+
+    await expect(
+      dispatch(context(statisticsReader), 'statistics.summary', {
+        fromMs: 0,
+        toMs: 1,
+        measures: ['requestCount'],
+      }),
     ).rejects.toMatchObject({ code: 'STATISTICS_UNAVAILABLE' });
   });
 });

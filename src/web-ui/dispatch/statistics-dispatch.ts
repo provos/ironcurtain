@@ -2,6 +2,7 @@
 
 import { z } from 'zod';
 
+import { LlmMetricsRepositoryUnavailableError } from '../../llm-metrics/persistence/repository.js';
 import type { WorkflowDispatchContext } from './workflow-dispatch.js';
 import { validateParams } from './types.js';
 import { InvalidParamsError, MethodNotFoundError, RpcError } from '../web-ui-types.js';
@@ -113,6 +114,9 @@ async function mapQueryError<T>(operation: () => Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     if (error instanceof RpcError) throw error;
+    if (error instanceof LlmMetricsRepositoryUnavailableError) {
+      throw new RpcError('STATISTICS_UNAVAILABLE', 'LLM statistics are temporarily unavailable');
+    }
     throw new InvalidParamsError(error instanceof Error ? error.message : 'Invalid statistics query');
   }
 }

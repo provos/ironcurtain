@@ -55,6 +55,22 @@ describe('statistics management command', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('keeps the --all reporting cutoff inside the JavaScript Date range', async () => {
+    const deleteBefore = vi.fn().mockResolvedValue(result('complete', 0, null));
+    const write = vi.fn();
+
+    await runStatisticsCommand(['delete', '--all'], {
+      databasePath: '/tmp/statistics.sqlite3',
+      databaseExists: () => true,
+      now: () => 8_640_000_000_000_000,
+      openRepository: async () => ({ deleteBefore, close: vi.fn(async () => {}) }),
+      write,
+    });
+
+    expect(deleteBefore).toHaveBeenCalledWith(8_640_000_000_000_000, expect.any(Object));
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('Deleted 0 statistics exchange(s)'));
+  });
+
   it('rejects ambiguous or malformed deletion requests before opening storage', async () => {
     const openRepository = vi.fn();
     await expect(
