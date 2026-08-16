@@ -204,6 +204,8 @@ const FILTER_COLUMNS: Readonly<Record<keyof NonNullable<LlmExchangeScanQuery['fi
   attributionQuality: 'attribution_quality',
   sessionId: 'session_id',
   workflowRunId: 'workflow_run_id',
+  stateId: 'state_id',
+  personaId: 'persona_id',
   bundleId: 'bundle_id',
 };
 

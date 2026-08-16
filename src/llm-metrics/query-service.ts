@@ -247,6 +247,8 @@ const DIMENSION_VALUE: Readonly<
   attributionQuality: (row) => row.attributionQuality,
   sessionId: (row) => row.sessionId,
   workflowRunId: (row) => row.workflowRunId,
+  stateId: (row) => row.stateId,
+  personaId: (row) => row.personaId,
   bundleId: (row) => row.bundleId,
 };
 

@@ -94,6 +94,21 @@ describe('statistics WebSocket dispatch', () => {
     expect(summarize).toHaveBeenCalledWith(query);
   });
 
+  it('accepts workflow state and persona dimensions and filters', async () => {
+    const statisticsReader = reader();
+    const summarize = vi.spyOn(statisticsReader, 'summarize');
+    const query = {
+      fromMs: 1,
+      toMs: 2,
+      measures: ['requestCount'] as const,
+      groupBy: ['stateId', 'personaId'] as const,
+      filters: { stateId: ['review'], personaId: ['security-reviewer'] },
+    };
+
+    await dispatch(context(statisticsReader), 'statistics.summary', query);
+    expect(summarize).toHaveBeenCalledWith(query);
+  });
+
   it('rejects unbounded or structurally invalid input before the reader', async () => {
     await expect(
       dispatch(context(reader()), 'statistics.exchanges', { fromMs: 0, toMs: 1, limit: 501 }),
@@ -112,6 +127,14 @@ describe('statistics WebSocket dispatch', () => {
         toMs: 1,
         measures: ['requestCount'],
         bucketMs: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      dispatch(context(reader()), 'statistics.summary', {
+        fromMs: 0,
+        toMs: 1,
+        measures: ['requestCount'],
+        typo: true,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });

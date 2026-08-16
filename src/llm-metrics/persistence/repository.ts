@@ -45,6 +45,8 @@ export type LlmStatisticsDimension =
   | 'attributionQuality'
   | 'sessionId'
   | 'workflowRunId'
+  | 'stateId'
+  | 'personaId'
   | 'bundleId';
 
 export type LlmStatisticsDimensionValue = string | boolean | null;
@@ -75,6 +77,8 @@ export interface LlmExchangeFilters {
   readonly attributionQuality?: readonly string[];
   readonly sessionId?: readonly string[];
   readonly workflowRunId?: readonly string[];
+  readonly stateId?: readonly string[];
+  readonly personaId?: readonly string[];
   readonly bundleId?: readonly string[];
 }
 

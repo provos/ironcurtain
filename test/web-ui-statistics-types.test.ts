@@ -15,6 +15,8 @@ describe('statistics frontend DTO types', () => {
       'outputMeasurementProvenance',
       'thinkingMeasurementProvenance',
       'nonThinkingMeasurementProvenance',
+      'stateId',
+      'personaId',
     ];
     const filters: LlmExchangeFilters = {
       actualServiceTier: ['priority'],
@@ -22,10 +24,13 @@ describe('statistics frontend DTO types', () => {
       outputMeasurementProvenance: ['reported_exact'],
       thinkingMeasurementProvenance: ['reported_exact'],
       nonThinkingMeasurementProvenance: ['derived_exact'],
+      stateId: ['review'],
+      personaId: ['security-reviewer'],
     };
 
-    expect(dimensions).toHaveLength(5);
+    expect(dimensions).toHaveLength(7);
     expect(filters.actualServiceTier).toEqual(['priority']);
+    expect(filters.stateId).toEqual(['review']);
   });
 
   it('mirrors correlation IDs and all measurement provenance on exchange DTOs', () => {

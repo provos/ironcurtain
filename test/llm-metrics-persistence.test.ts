@@ -253,6 +253,8 @@ describe('SQLite LLM metrics repository', () => {
         limit: 10,
         filters: {
           actualServiceTier: ['priority'],
+          stateId: ['state-1'],
+          personaId: ['persona-1'],
           inputMeasurementProvenance: ['reported_exact'],
           outputMeasurementProvenance: ['reported_exact'],
           thinkingMeasurementProvenance: ['reported_exact'],
@@ -266,6 +268,8 @@ describe('SQLite LLM metrics repository', () => {
 
     const expectedDimensions = [
       ['actualServiceTier', 'priority'],
+      ['stateId', 'state-1'],
+      ['personaId', 'persona-1'],
       ['inputMeasurementProvenance', 'reported_exact'],
       ['outputMeasurementProvenance', 'reported_exact'],
       ['thinkingMeasurementProvenance', 'reported_exact'],

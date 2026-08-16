@@ -40,6 +40,8 @@ const dimensionSchema = z.enum([
   'attributionQuality',
   'sessionId',
   'workflowRunId',
+  'stateId',
+  'personaId',
   'bundleId',
 ]);
 
@@ -102,15 +104,19 @@ const filtersSchema = z
     attributionQuality: identifierList.optional(),
     sessionId: identifierList.optional(),
     workflowRunId: identifierList.optional(),
+    stateId: identifierList.optional(),
+    personaId: identifierList.optional(),
     bundleId: identifierList.optional(),
   })
   .strict();
 
-const rangeSchema = z.object({
-  fromMs: z.number().int().nonnegative(),
-  toMs: z.number().int().nonnegative(),
-  filters: filtersSchema.optional(),
-});
+const rangeSchema = z
+  .object({
+    fromMs: z.number().int().nonnegative(),
+    toMs: z.number().int().nonnegative(),
+    filters: filtersSchema.optional(),
+  })
+  .strict();
 
 const summarySchema = rangeSchema.extend({
   measures: z.array(measureSchema).min(1).max(20),

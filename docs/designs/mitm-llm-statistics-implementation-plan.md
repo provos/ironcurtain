@@ -554,7 +554,7 @@ Initial dimensions:
 - requested/forwarded/served model and served provider;
 - reasoning/service/speed mode;
 - streaming, outcome/refusal, usage completeness, attribution quality;
-- session/workflow/bundle IDs.
+- session/workflow/state/persona/bundle IDs.
 
 Initial measures:
 
