@@ -15,10 +15,12 @@
  * content.
  */
 
-import { StringDecoder } from 'node:string_decoder';
 import type { CaptureProvider, Reassembler, ReassemblyResult } from './trajectory-types.js';
 import { OPENROUTER_HOST } from '../config/user-config.js';
 import { openRouterWireForPath } from './openrouter.js';
+import { SseLineSplitter } from './llm-observation/sse-event-framer.js';
+
+export { SseLineSplitter } from './llm-observation/sse-event-framer.js';
 
 /** Errors thrown by the reassemblers when the stream is unrecoverable. */
 export class ReassemblyError extends Error {
@@ -46,103 +48,6 @@ export interface RawEvent {
   readonly eventType: string;
   readonly dataUtf8: string;
   readonly offsetMs: number;
-}
-
-/**
- * Provider-agnostic SSE line splitter. Mirrors the line discipline in
- * `sse-extractor.ts` (CRLF or LF treated as a single break) but emits
- * `(eventType, dataPayload)` tuples instead of parsed events. The data
- * payload is the exact bytes after `data: ` — no trim, no parse.
- *
- * Bytes are decoded through a `StringDecoder` so a multibyte UTF-8
- * sequence split across two `feed()` chunks (zlib emits chunks on
- * arbitrary boundaries) is held back until its continuation arrives,
- * rather than each chunk decoding independently to a `U+FFFD`
- * replacement and corrupting the captured body.
- */
-export class SseLineSplitter {
-  private readonly decoder = new StringDecoder('utf8');
-  private buffer = '';
-  private currentEventType = '';
-  /** Pending `data:` payload for the in-flight event (multi-line dataspec). */
-  private currentData: string | null = null;
-
-  feed(chunk: Buffer, sink: (event: string, data: string) => void): void {
-    this.buffer += this.decoder.write(chunk);
-    let pos = 0;
-    while (pos < this.buffer.length) {
-      const nextLf = this.buffer.indexOf('\n', pos);
-      const nextCr = this.buffer.indexOf('\r', pos);
-      let lineEnd: number;
-      if (nextLf === -1 && nextCr === -1) break;
-      if (nextCr === -1) lineEnd = nextLf;
-      else if (nextLf === -1) lineEnd = nextCr;
-      else lineEnd = Math.min(nextLf, nextCr);
-
-      const line = this.buffer.slice(pos, lineEnd);
-      this.processLine(line, sink);
-      pos = lineEnd + 1;
-      if (this.buffer[lineEnd] === '\r' && pos < this.buffer.length && this.buffer[pos] === '\n') {
-        pos++;
-      }
-    }
-    this.buffer = this.buffer.slice(pos);
-  }
-
-  /** Force-flush a trailing line buffer (no terminator). */
-  flush(sink: (event: string, data: string) => void): void {
-    // Drain any bytes the decoder is still holding. For a complete stream
-    // this is empty; for one truncated mid-multibyte it yields the U+FFFD
-    // replacement — acceptable, since a truncated stream fails reassembly
-    // anyway (the binary-session model discards it).
-    this.buffer += this.decoder.end();
-    if (this.buffer.length > 0) {
-      this.processLine(this.buffer, sink);
-      this.buffer = '';
-    }
-    // Emit any pending event on EOF.
-    if (this.currentData !== null) {
-      sink(this.currentEventType, this.currentData);
-      this.currentData = null;
-      this.currentEventType = '';
-    }
-  }
-
-  private processLine(line: string, sink: (event: string, data: string) => void): void {
-    if (line === '') {
-      // Empty line = SSE event terminator
-      if (this.currentData !== null) {
-        sink(this.currentEventType, this.currentData);
-      }
-      this.currentEventType = '';
-      this.currentData = null;
-      return;
-    }
-    if (line.startsWith(':')) {
-      // Comment line, ignore
-      return;
-    }
-    if (line.startsWith('event:')) {
-      // Per SSE spec, single leading space after `:` is optional and ignored
-      let value = line.slice(6);
-      if (value.startsWith(' ')) value = value.slice(1);
-      this.currentEventType = value;
-      return;
-    }
-    if (line.startsWith('data:')) {
-      let value = line.slice(5);
-      if (value.startsWith(' ')) value = value.slice(1);
-      if (this.currentData === null) {
-        this.currentData = value;
-      } else {
-        // Concatenate multi-line data with newline (per SSE spec, but
-        // both Anthropic and OpenAI emit single-line data).
-        this.currentData += '\n' + value;
-      }
-      return;
-    }
-    // Ignore id:, retry:, and other unknown fields.
-  }
 }
 
 // =====================================================================
@@ -376,11 +281,23 @@ export abstract class AbstractSseReassembler implements Reassembler {
 
   push(chunk: Buffer): void {
     if (this.failed) return;
-    this.splitter.feed(chunk, (eventType, data) => this.onEvent(eventType, data));
+    try {
+      this.splitter.feed(chunk, (eventType, data) => this.onEvent(eventType, data));
+    } catch (err) {
+      this.failed = true;
+      this.failureReason = err instanceof Error ? err.message : String(err);
+    }
   }
 
   finalize(): ReassemblyResult {
-    this.splitter.flush((eventType, data) => this.onEvent(eventType, data));
+    if (!this.failed) {
+      try {
+        this.splitter.flush((eventType, data) => this.onEvent(eventType, data));
+      } catch (err) {
+        this.failed = true;
+        this.failureReason = err instanceof Error ? err.message : String(err);
+      }
+    }
     if (this.failed) {
       throw new ReassemblyError(this.failureReason ?? 'reassembly failed');
     }

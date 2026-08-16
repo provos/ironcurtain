@@ -62,6 +62,9 @@ import { createCachedStager } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
 import { withProvisionLock } from './provision-lock.js';
 import * as logger from '../logger.js';
+import type { MetricsInvocationContext, MetricsInvocationLease } from '../llm-metrics/attribution-registry.js';
+import { acquireLlmMetricsRuntime, type LlmMetricsRuntimeLease } from '../llm-metrics/runtime.js';
+import { hasMetricsCapableCompletionEndpoint } from './llm-observation/completion-endpoint.js';
 
 export { InternalNetworkConnectivityError };
 
@@ -199,8 +202,12 @@ export interface PreContainerInfrastructure {
   readonly socketsDir: string;
   /** MITM proxy listen address (port for TCP mode, socketPath for UDS mode). */
   readonly mitmAddr: { socketPath?: string; port?: number };
+  /** Container-facing base URL for the MITM proxy, without attribution credentials. */
+  readonly metricsProxyUrl: string;
   /** Authentication method used for this session. */
   readonly authKind: DockerAuthKind;
+  /** Resolved provider-profile name retained for attribution and grouping. */
+  readonly providerProfileId: string;
   /** Host-side conversation state directory, if the adapter supports resume. */
   readonly conversationStateDir?: string;
   /** Conversation state config from the adapter, if resume is supported. */
@@ -256,6 +263,9 @@ export interface PreContainerInfrastructure {
    */
   setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
 
+  /** Register an exact invocation context and return its credentialed proxy URL. */
+  beginMetricsInvocation?(context: MetricsInvocationContext): MetricsInvocationLease;
+
   /**
    * Begin trajectory capture for a session. Atomically:
    *   1. sets the proxy's captureSessionId (`MitmProxy.setCaptureSessionId`)
@@ -300,6 +310,8 @@ export interface PreContainerInfrastructure {
    * (§9). Undefined when capture is disabled. Not for orchestrator use.
    */
   readonly captureWriter?: TrajectoryCaptureWriter;
+  /** Process-scoped statistics runtime reference held for this infrastructure bundle. */
+  readonly metricsRuntime?: LlmMetricsRuntimeLease;
 }
 
 /**
@@ -411,11 +423,11 @@ export async function prepareDockerInfrastructure(
   // session-specific config copy (the same invariant the config.dockerAuth
   // stamp below relies on).
   const activeProfile = resolveActiveProfile(config.userConfig.modelProviders, providerProfileName);
+  const providerProfileId = providerProfileName ?? config.userConfig.modelProviders.default;
   config.activeProviderProfile = activeProfile;
   if (activeProfile.type === 'openrouter' && activeProfile.apiKey === '') {
-    const activeName = providerProfileName ?? config.userConfig.modelProviders.default;
     throw new Error(
-      `Provider profile "${activeName}" is OpenRouter but no API key is configured. ` +
+      `Provider profile "${providerProfileId}" is OpenRouter but no API key is configured. ` +
         "Set OPENROUTER_API_KEY or the profile's apiKey in ~/.ironcurtain/config.json.",
     );
   }
@@ -635,6 +647,10 @@ export async function prepareDockerInfrastructure(
   // off. Consumers pass the raw override only — they never re-resolve
   // against `userConfig.capture?.enabled`.
   const captureEnabled = captureInput ? (captureInput.override ?? config.userConfig.capture?.enabled ?? false) : false;
+  const statisticsEnabled = config.userConfig.statistics.enabled;
+  const metricsCapable =
+    statisticsEnabled &&
+    providerMappings.some((mapping) => hasMetricsCapableCompletionEndpoint(mapping.config.completionEndpoints));
 
   // Construct the trajectory-capture writer when capture is enabled.
   // When disabled, no writer is created, no taps are installed, and the
@@ -646,14 +662,16 @@ export async function prepareDockerInfrastructure(
     captureWriter = createTrajectoryCaptureWriter({ capturesDir: captureInput.capturesDir });
   }
 
-  const captureProxyOptions = captureWriter
-    ? {
-        capture: captureWriter,
-        recordedAgentName: captureInput?.recordedAgentName,
-        workflowRunId: captureInput?.workflowRunId,
-        bundleId: String(bundleId),
-      }
-    : {};
+  // Attribution metadata is independent of trajectory capture. In particular,
+  // statistics must remain attributable when capture is disabled (the common
+  // production configuration).
+  const proxyAttributionOptions = {
+    recordedAgentName: captureInput?.recordedAgentName ?? adapter.id,
+    workflowRunId: captureInput?.workflowRunId ?? workflowId,
+    bundleId: String(bundleId),
+    providerProfileId,
+  };
+  const captureProxyOptions = captureWriter ? { capture: captureWriter } : {};
 
   const mitmProxy = useTcp
     ? createMitmProxy({
@@ -666,6 +684,8 @@ export async function prepareDockerInfrastructure(
         initialTokenSessionId: routingId,
         agentKind,
         allowRemoteAddress,
+        statisticsEnabled: metricsCapable,
+        ...proxyAttributionOptions,
         ...captureProxyOptions,
       })
     : createMitmProxy({
@@ -677,6 +697,8 @@ export async function prepareDockerInfrastructure(
         controlSocketPath: getBundleMitmControlSocketPath(bundleId),
         initialTokenSessionId: routingId,
         agentKind,
+        statisticsEnabled: metricsCapable,
+        ...proxyAttributionOptions,
         ...captureProxyOptions,
       });
 
@@ -693,6 +715,13 @@ export async function prepareDockerInfrastructure(
   } else {
     logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
   }
+
+  const metricsProxyUrl =
+    topology === 'tcp-hostonly'
+      ? `http://${hostOnlyNetwork?.gateway ?? '127.0.0.1'}:${mitmAddr.port ?? 0}`
+      : topology === 'tcp-sidecar'
+        ? `http://${DOCKER_HOST_GATEWAY}:${mitmAddr.port ?? 0}`
+        : 'http://127.0.0.1:18080';
   // apple-container's `-v <sock>` vsock relay propagates the host
   // socket's mode bits to the guest side (owner is always root there),
   // so the non-root `codespace` user can only connect() when "other"
@@ -728,6 +757,17 @@ export async function prepareDockerInfrastructure(
   }
   if (!useTcp && runtimeKind === 'apple-container') {
     chmodSync(socketPath, 0o666);
+  }
+
+  let metricsRuntime: LlmMetricsRuntimeLease | undefined;
+  if (metricsCapable) {
+    try {
+      metricsRuntime = await acquireLlmMetricsRuntime({
+        retentionDays: config.userConfig.statistics.retentionDays,
+      });
+    } catch (error) {
+      logger.warn(`LLM statistics persistence unavailable: ${errorMessage(error)}`);
+    }
   }
 
   // Remaining setup steps can fail -- clean up started proxies on error.
@@ -828,7 +868,9 @@ export async function prepareDockerInfrastructure(
       hostOnlyNetwork,
       socketsDir,
       mitmAddr,
+      metricsProxyUrl,
       authKind,
+      providerProfileId,
       conversationStateDir,
       conversationStateConfig,
       skillsMount,
@@ -838,6 +880,12 @@ export async function prepareDockerInfrastructure(
       setTokenSessionId: (id) => {
         mitmProxy.setTokenSessionId(id);
       },
+      ...(metricsCapable
+        ? {
+            beginMetricsInvocation: (context: MetricsInvocationContext) =>
+              mitmProxy.beginMetricsInvocation(metricsProxyUrl, context),
+          }
+        : {}),
       // Trajectory-capture lifecycle. When captureWriter is undefined
       // (capture disabled, the common case), every method is a cheap
       // no-op — zero cost on the forwarding path. When set, the bundle
@@ -863,11 +911,13 @@ export async function prepareDockerInfrastructure(
         }
       },
       captureWriter,
+      metricsRuntime,
     };
   } catch (error) {
     // Best-effort cleanup of proxies started above
     await mitmProxy.stop().catch(() => {});
     await proxy.stop().catch(() => {});
+    await metricsRuntime?.release().catch(() => {});
     // Host-only network was created before the proxies; remove it too.
     // (A leak through the narrow window before this catch is self-healing:
     // createHostOnlyNetwork removes the stale same-named network first.)
@@ -937,6 +987,7 @@ export async function createDockerInfrastructure(
     }
     await core.mitmProxy.stop().catch(() => {});
     await core.proxy.stop().catch(() => {});
+    await core.metricsRuntime?.release().catch(() => {});
     throw error;
   }
 }
@@ -996,6 +1047,10 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
         logger.warn(`destroyDockerInfrastructure: captureWriter.close() failed: ${errorMessage(err)}`),
       );
   }
+
+  await infra.metricsRuntime
+    ?.release()
+    .catch((err: unknown) => logger.warn(`destroyDockerInfrastructure: metrics flush failed: ${errorMessage(err)}`));
 
   // CA and fake keys are intentionally absent: neither owns any
   // process-level resources. CA material is persisted in ~/.ironcurtain/ca/

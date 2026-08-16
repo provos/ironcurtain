@@ -22,6 +22,7 @@ import ora from 'ora';
 import type { IronCurtainConfig } from '../config/types.js';
 import { createSessionId, getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
 import { buildSessionConfig } from '../session/index.js';
+import { loadSessionMetadata } from '../session/session-metadata.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
@@ -44,6 +45,8 @@ import {
   releaseManagedResourceLease,
   withInternalNetworkAllocationRetry,
 } from './docker-resource-lifecycle.js';
+import type { MetricsInvocationLease } from '../llm-metrics/attribution-registry.js';
+import type { LlmMetricsRuntimeLease } from '../llm-metrics/runtime.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -260,6 +263,11 @@ async function runPtySessionAttempt(
   // the persisted snapshot name wins over any passed flag (which is
   // warn-ignored upstream). Fresh sessions use the passed flag.
   const providerProfileName = isResume ? resumeSnapshot.providerProfileName : options.providerProfileName;
+  // New snapshots carry persona directly. Session metadata is the backwards-
+  // compatible source for resumable PTYs created before that field existed.
+  const persona = isResume
+    ? (resumeSnapshot.persona ?? loadSessionMetadata(effectiveSessionId)?.persona)
+    : options.persona;
 
   // Delegate to shared buildSessionConfig() so PTY sessions get the same
   // config patching as standard Docker sessions (persona, memory MCP server
@@ -267,7 +275,7 @@ async function runPtySessionAttempt(
   const dirConfig = buildSessionConfig(options.config, effectiveSessionId, sessionId, {
     resumeSessionId: options.resumeSessionId,
     workspacePath: isResume ? resumeSnapshot.workspacePath : options.workspacePath,
-    persona: options.persona,
+    persona,
     providerProfileName,
     mode: options.mode,
   });
@@ -334,6 +342,9 @@ async function runPtySessionAttempt(
   // this explicit flush is required for a clean capture — the destroy-time
   // safety net does not run here.
   let flushCapture: (() => Promise<void>) | undefined;
+  let metricsLease: MetricsInvocationLease | undefined;
+  let metricsRuntime: LlmMetricsRuntimeLease | undefined;
+  let invocationProxyUrl: string | undefined;
   let ptyExitCode: number | null = null;
   let adapterIdForSnapshot: string | null = null;
   let adapterDisplayNameForSnapshot: string | null = null;
@@ -341,7 +352,7 @@ async function runPtySessionAttempt(
   let userExited = false;
 
   const claudeMdContent = buildDockerClaudeMd({
-    personaName: options.persona,
+    personaName: persona,
     memoryEnabled: dirConfig.memoryEnabled,
   });
 
@@ -377,6 +388,14 @@ async function runPtySessionAttempt(
     // routing ID to this session's ID for the session's lifetime.
     const captureSessionId = effectiveSessionId as import('../session/types.js').SessionId;
     infra.setTokenSessionId(captureSessionId);
+    metricsLease = infra.beginMetricsInvocation?.({
+      sessionId: captureSessionId,
+      bundleId: infra.bundleId,
+      personaId: persona,
+      agentId: infra.adapter.id,
+    });
+    invocationProxyUrl = metricsLease?.proxyUrl;
+    metricsRuntime = infra.metricsRuntime;
 
     // Begin trajectory capture (no-op when disabled). Standalone PTY runs
     // exactly one session through the bundle. The matching flush is in the
@@ -508,8 +527,8 @@ async function runPtySessionAttempt(
       const proxyUrl = `http://${infra.hostOnlyNetwork.gateway}:${mitmAddr.port}`;
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
-        HTTPS_PROXY: proxyUrl,
-        HTTP_PROXY: proxyUrl,
+        HTTPS_PROXY: invocationProxyUrl ?? proxyUrl,
+        HTTP_PROXY: invocationProxyUrl ?? proxyUrl,
       };
       execAptProxyUrl = proxyUrl;
 
@@ -530,8 +549,8 @@ async function runPtySessionAttempt(
       const proxyUrl = `http://host.docker.internal:${mitmPort}`;
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
-        HTTPS_PROXY: proxyUrl,
-        HTTP_PROXY: proxyUrl,
+        HTTPS_PROXY: invocationProxyUrl ?? proxyUrl,
+        HTTP_PROXY: invocationProxyUrl ?? proxyUrl,
       };
 
       // Write apt proxy config so sudo apt-get routes through the MITM proxy
@@ -606,8 +625,8 @@ async function runPtySessionAttempt(
       const udsProxyUrl = 'http://127.0.0.1:18080';
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
-        HTTPS_PROXY: udsProxyUrl,
-        HTTP_PROXY: udsProxyUrl,
+        HTTPS_PROXY: invocationProxyUrl ?? udsProxyUrl,
+        HTTP_PROXY: invocationProxyUrl ?? udsProxyUrl,
       };
       network = null;
 
@@ -843,6 +862,10 @@ async function runPtySessionAttempt(
       }
     }
 
+    // Revoke the session-long attribution lease only after the agent exits,
+    // then drain already-attributed exchanges before proxy teardown.
+    await metricsLease?.end();
+
     // Flush trajectory capture before proxy teardown so the session-end
     // manifest entry is durable (§11). No-op when capture is disabled.
     if (flushCapture) {
@@ -861,6 +884,9 @@ async function runPtySessionAttempt(
     // Stop proxies
     await mitmProxy?.stop().catch(() => {});
     await proxy?.stop().catch(() => {});
+    await metricsRuntime?.release().catch((err: unknown) => {
+      logger.warn(`PTY metrics flush failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
 
     // Write session snapshot for resume support
     if (adapterIdForSnapshot) {
@@ -875,6 +901,7 @@ async function runPtySessionAttempt(
           exitCode: ptyExitCode,
           lastActivity: new Date().toISOString(),
           workspacePath: sandboxDir,
+          ...(persona !== undefined ? { persona } : {}),
           providerProfileName: resolvedProviderProfileName,
           agent: adapterIdForSnapshot,
           label: `${adapterDisplayNameForSnapshot ?? adapterIdForSnapshot} (interactive)`,

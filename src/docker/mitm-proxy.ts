@@ -24,6 +24,7 @@ import { randomSerialNumber, type CertificateAuthority } from './ca.js';
 import {
   isCapturableEndpoint,
   isEndpointAllowed,
+  resolveProviderCompletionEndpoint,
   shouldRewriteBody,
   type AgentKind,
   type ProviderConfig,
@@ -43,6 +44,28 @@ import { OPENROUTER_HOST } from '../config/user-config.js';
 import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
+import {
+  MetricsAttributionRegistry,
+  parseMetricsProxyAuthorization,
+  type MetricsAttributionHandle,
+  type MetricsInvocationContext,
+  type MetricsInvocationLease,
+} from '../llm-metrics/attribution-registry.js';
+import { ResponseObservationHub } from './llm-observation/response-observation-hub.js';
+import { LlmMetricsExchangeObserver } from '../llm-metrics/exchange-observer.js';
+import { createBuiltInProtocolRegistry } from '../llm-metrics/protocol-registry.js';
+import { getLlmMetricsEventBus } from '../llm-metrics/event-bus.js';
+import { DirectGatewayAdapter } from '../llm-metrics/gateways/direct.js';
+import { OpaqueGatewayAdapter } from '../llm-metrics/gateways/opaque.js';
+import { OpenRouterGatewayAdapter } from '../llm-metrics/gateways/openrouter.js';
+import { IronCurtainGatewayAdapter } from '../llm-metrics/gateways/ironcurtain.js';
+import type {
+  LlmExchangeAttribution,
+  LlmExchangeRoute,
+  LlmGatewayAdapter,
+  LlmProtocolId,
+} from '../llm-metrics/types.js';
+import { validateCompletionEndpoints, type CompletionEndpoint } from './llm-observation/completion-endpoint.js';
 
 /**
  * Runtime control surface for the MITM proxy's host allowlist.
@@ -131,6 +154,9 @@ export interface MitmProxy {
    * `DockerInfrastructure.beginCaptureSession()`.
    */
   setCapturePersona(persona: string | undefined): void;
+
+  /** Bind an immutable metrics context to a short-lived proxy credential. */
+  beginMetricsInvocation(baseProxyUrl: string, context: MetricsInvocationContext): MetricsInvocationLease;
 }
 
 export interface MitmProxyOptions {
@@ -231,6 +257,15 @@ export interface MitmProxyOptions {
 
   /** Bundle ID stamped onto every captured ExchangeRecord (when present). */
   readonly bundleId?: string;
+
+  /** Stable selected provider-profile identity for statistics attribution. */
+  readonly providerProfileId?: string;
+
+  /** Injectable for tests; a proxy owns its registry by default. */
+  readonly metricsAttributionRegistry?: MetricsAttributionRegistry;
+
+  /** Enables passive in-memory statistics observation/publication. */
+  readonly statisticsEnabled?: boolean;
 }
 
 export interface ProviderKeyMapping {
@@ -258,6 +293,66 @@ const MAX_RETRY_BODY_BYTES = 1 * 1024 * 1024;
  * proxy from unbounded memory growth on very large completions.
  */
 export const MAX_JSON_RESPONSE_CAPTURE_BYTES = 2 * 1024 * 1024; // 2 MB
+const MAX_METRICS_REQUEST_OBSERVATION_BYTES = 8 * 1024 * 1024;
+
+interface MetricsGatewaySelection {
+  readonly adapter: LlmGatewayAdapter;
+  readonly kind: LlmExchangeRoute['gatewayKind'];
+}
+
+function normalizeMetricsHost(host: string): string {
+  return host.toLowerCase().replace(/\.$/, '');
+}
+
+function officialProviderForOrigin(protocol: LlmProtocolId, host: string): string | null {
+  const normalized = normalizeMetricsHost(host);
+  if (protocol === 'anthropic-messages' && normalized === 'api.anthropic.com') return 'anthropic';
+  if (protocol === 'openai-responses' && (normalized === 'api.openai.com' || normalized === 'chatgpt.com')) {
+    return 'openai';
+  }
+  if (protocol === 'openai-chat-completions' && normalized === 'api.openai.com') return 'openai';
+  if (protocol === 'google-generate-content' && normalized === 'generativelanguage.googleapis.com') return 'google';
+  return null;
+}
+
+function selectMetricsGateway(
+  config: ProviderConfig,
+  protocol: LlmProtocolId,
+  clientHost: string,
+): MetricsGatewaySelection {
+  // Generic base-URL overrides are opaque even when they preserve the client
+  // protocol. A future trusted route must be an explicit provider config, not
+  // inferred from its hostname or response claims.
+  if (config.upstreamTarget) return { adapter: new OpaqueGatewayAdapter(), kind: 'opaque' };
+  if (config.gatewayAdapterId === 'openrouter' && normalizeMetricsHost(clientHost) === OPENROUTER_HOST) {
+    return { adapter: new OpenRouterGatewayAdapter(), kind: 'openrouter' };
+  }
+  if (config.gatewayAdapterId === 'ironcurtain') {
+    return { adapter: new IronCurtainGatewayAdapter(), kind: 'ironcurtain' };
+  }
+  const officialProvider = officialProviderForOrigin(protocol, clientHost);
+  if (config.gatewayAdapterId === 'direct' && officialProvider !== null) {
+    return {
+      adapter: new DirectGatewayAdapter({ providerId: officialProvider, officialOrigin: true }),
+      kind: 'direct',
+    };
+  }
+  return { adapter: new OpaqueGatewayAdapter(), kind: 'opaque' };
+}
+
+function fallbackMetricsAttribution(bundleId: string | undefined): LlmExchangeAttribution {
+  return Object.freeze({
+    sessionId: null,
+    agentConversationId: null,
+    turnId: null,
+    bundleId: bundleId ?? null,
+    workflowRunId: null,
+    stateId: null,
+    personaId: null,
+    agentId: null,
+    quality: bundleId ? 'bundle_only' : 'unattributed',
+  });
+}
 
 /**
  * Output of `createBoundedJsonResponseCapture` -- the stateful hooks used to
@@ -586,6 +681,12 @@ export function extractFromJsonResponse(body: Buffer, sessionId: import('../sess
 }
 
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
+  for (const provider of options.providers) {
+    validateCompletionEndpoints(provider.config.completionEndpoints ?? [], provider.config.allowedEndpoints);
+  }
+
+  const metricsAttributionRegistry = options.metricsAttributionRegistry ?? new MetricsAttributionRegistry();
+  const metricsProtocolRegistry = createBuiltInProtocolRegistry();
   // Token stream extractor installation is gated on `tokenSessionId`.
   // This is a mutable per-proxy value that callers flip around each
   // active agent (see `setTokenSessionId` on the returned handle). When
@@ -722,10 +823,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     readonly passthrough: boolean;
     readonly host: string;
     readonly port: number;
+    /** Opaque correlation token copied from the CONNECT request. */
+    readonly metricsLeaseToken?: string;
   }
   const activeClientSockets = new Set<Socket>();
   const activeTlsSockets = new Set<tls.TLSSocket>();
   const activeUpstreamRequests = new Set<http.ClientRequest>();
+  const activeMetricsObservers = new Set<LlmMetricsExchangeObserver>();
   const activeTunnelPairs = new Set<{ client: Socket; upstream: Socket }>();
   const socketMetadata = new WeakMap<tls.TLSSocket, ConnectionMeta>();
 
@@ -908,9 +1012,30 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
+    // Observability is resolved only after forwarding authorization. A
+    // completion descriptor can classify an allowed route; it can never grant
+    // network access. Unsupported descriptors remain completely unobserved.
+    let completionEndpoint: CompletionEndpoint | undefined;
+    if (options.statisticsEnabled === true) {
+      try {
+        completionEndpoint = resolveProviderCompletionEndpoint(provider.config, method, path);
+      } catch (error) {
+        // Bad observability configuration must not alter an authorized request.
+        logger.warn(
+          `[mitm-proxy] completion descriptor unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
     const keyResult = validateAndSwapApiKey(modifiedHeaders, provider);
+
+    // Route-level negotiation is stable whether statistics are enabled or
+    // disabled, so toggling local observation cannot change provider output.
+    if (provider.config.gatewayAdapterId === 'openrouter' && normalizeHost(targetHost) === OPENROUTER_HOST) {
+      modifiedHeaders['x-openrouter-metadata'] = 'enabled';
+    }
 
     // Resolve upstream target: use custom gateway if configured, otherwise the original host.
     const upstream = provider.config.upstreamTarget;
@@ -918,6 +1043,150 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const upstreamPort = upstream?.port ?? targetPort;
     const upstreamPathPrefix = upstream?.pathPrefix ?? '';
     const upstreamUseTls = upstream?.useTls ?? true;
+
+    let metricsAttribution: MetricsAttributionHandle | undefined;
+    let metricsObserver: LlmMetricsExchangeObserver | undefined;
+    let metricsResponseAttached = false;
+    if (completionEndpoint && completionEndpoint.capabilities.metricsSupport !== 'unsupported') {
+      const protocolAdapter = metricsProtocolRegistry.get(completionEndpoint.protocol);
+      if (protocolAdapter) {
+        // Revalidate the CONNECT credential for every inner request. Missing,
+        // invalid, or revoked leases never borrow another invocation.
+        metricsAttribution = metricsAttributionRegistry.acquire(meta.metricsLeaseToken);
+        try {
+          const attribution = metricsAttribution?.attribution ?? fallbackMetricsAttribution(options.bundleId);
+          const gateway = selectMetricsGateway(provider.config, completionEndpoint.protocol, targetHost);
+          const logicalProvider = provider.config.id ?? 'unknown';
+          const publicClientOrigin =
+            officialProviderForOrigin(completionEndpoint.protocol, targetHost) !== null ||
+            (gateway.kind === 'openrouter' && normalizeHost(targetHost) === OPENROUTER_HOST);
+          const stableConfiguredRoute = provider.config.id ?? null;
+          const route: LlmExchangeRoute = Object.freeze({
+            logicalProvider,
+            providerProfileId: options.providerProfileId ?? null,
+            protocol: completionEndpoint.protocol,
+            gatewayKind: gateway.kind,
+            clientRouteId: publicClientOrigin ? targetHost : stableConfiguredRoute,
+            upstreamRouteId: upstream
+              ? stableConfiguredRoute === null
+                ? null
+                : `${stableConfiguredRoute}:override`
+              : publicClientOrigin
+                ? targetHost
+                : stableConfiguredRoute,
+          });
+          metricsObserver = new LlmMetricsExchangeObserver({
+            endpoint: completionEndpoint,
+            attribution,
+            route,
+            protocolAdapter,
+            gatewayAdapter: gateway.adapter,
+            requestPath: (path ?? '').split('?')[0] ?? '',
+            onCompleted: (exchange) => {
+              if (metricsObserver) activeMetricsObservers.delete(metricsObserver);
+              try {
+                getLlmMetricsEventBus().publish(exchange);
+              } finally {
+                metricsAttribution?.release();
+              }
+            },
+          });
+          activeMetricsObservers.add(metricsObserver);
+        } catch (error) {
+          metricsAttribution?.release();
+          metricsAttribution = undefined;
+          logger.warn(
+            `[mitm-proxy] metrics observer unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+
+    if (metricsObserver) {
+      const observer = metricsObserver;
+      const settleClientDelivery = (aborted: boolean): void => {
+        if (!metricsResponseAttached) {
+          observer.markObservationUnavailable(
+            clientRes.headersSent ? clientRes.statusCode : null,
+            'response_body_not_observed',
+          );
+        }
+        observer.markClientDeliveryEnd(aborted);
+      };
+      clientRes.once('finish', () => settleClientDelivery(false));
+      clientRes.once('close', () => settleClientDelivery(!clientRes.writableFinished));
+    }
+
+    let metricsRequestChunks: Buffer[] = [];
+    let metricsRequestBytes = 0;
+    let metricsRequestOverflowed = false;
+    let metricsRequestFinished = false;
+    const markMetricsRequestFailure = (): void => {
+      metricsRequestOverflowed = true;
+      metricsRequestChunks = [];
+      metricsRequestBytes = 0;
+      try {
+        metricsObserver?.markQualityFlag('request_observation_failure');
+      } catch {
+        // Passive observation cannot escape into request forwarding.
+      }
+    };
+    const pushMetricsRequestChunk = (chunk: Buffer): void => {
+      if (!metricsObserver || metricsRequestFinished || metricsRequestOverflowed) return;
+      if (metricsRequestBytes + chunk.length > MAX_METRICS_REQUEST_OBSERVATION_BYTES) {
+        metricsRequestOverflowed = true;
+        metricsRequestChunks = [];
+        metricsRequestBytes = 0;
+        metricsObserver.markQualityFlag('request_observation_byte_limit');
+        return;
+      }
+      try {
+        metricsRequestChunks.push(Buffer.from(chunk));
+        metricsRequestBytes += chunk.length;
+      } catch {
+        markMetricsRequestFailure();
+      }
+    };
+    const finishStreamedMetricsRequest = (): void => {
+      if (!metricsObserver || metricsRequestFinished) return;
+      metricsRequestFinished = true;
+      try {
+        if (!metricsRequestOverflowed) {
+          const body = Buffer.concat(metricsRequestChunks, metricsRequestBytes);
+          metricsObserver.observeUnchangedRequest(body);
+        }
+      } catch {
+        markMetricsRequestFailure();
+      }
+      metricsRequestChunks = [];
+      metricsRequestBytes = 0;
+      try {
+        metricsObserver.markRequestBodyComplete();
+      } catch {
+        // Passive observation cannot escape into request forwarding.
+      }
+    };
+    const observeBufferedMetricsRequest = (originalBody: Buffer, forwardedBody: Buffer): void => {
+      if (!metricsObserver || metricsRequestFinished) return;
+      metricsRequestFinished = true;
+      try {
+        if (
+          originalBody.length <= MAX_METRICS_REQUEST_OBSERVATION_BYTES &&
+          forwardedBody.length <= MAX_METRICS_REQUEST_OBSERVATION_BYTES
+        ) {
+          if (originalBody === forwardedBody) metricsObserver.observeUnchangedRequest(originalBody);
+          else {
+            metricsObserver.observeOriginalRequest(originalBody);
+            metricsObserver.observeForwardedRequest(forwardedBody);
+          }
+        } else {
+          metricsObserver.markQualityFlag('request_observation_byte_limit');
+        }
+        metricsObserver.markRequestBodyComplete();
+      } catch {
+        markMetricsRequestFailure();
+      }
+    };
 
     // Set Host header to match the upstream target so the gateway receives
     // the correct virtual-host. Include port only when non-standard.
@@ -964,6 +1233,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       // prepended AFTER endpoint filtering (which runs on the original path).
       const upstreamPath = upstreamPathPrefix ? `${upstreamPathPrefix}${path}` : path;
       const requestFn = upstreamUseTls ? https.request : http.request;
+      const metricsAttempt = metricsObserver?.beginTransportAttempt();
       const upstreamReq = requestFn(
         {
           hostname: upstreamHost,
@@ -995,11 +1265,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             const onDrained = (): void => {
               if (handled) return;
               handled = true;
+              metricsAttempt?.complete({ responseStatus: 401, outcome: 'auth_retry' });
               retryWithRefreshedToken(tokenManager, provider, modifiedHeaders, bodyOverride, clientRes, forwardRequest);
             };
             const onAborted = (): void => {
               if (handled) return;
               handled = true;
+              metricsAttempt?.complete({ responseStatus: 401, outcome: 'aborted' });
               if (!clientRes.headersSent) {
                 clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
                 clientRes.end('Upstream connection closed during auth retry.');
@@ -1011,7 +1283,58 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             return;
           }
 
-          clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+          const finalStatus = upstreamRes.statusCode ?? 502;
+
+          if (metricsObserver) {
+            const observer = metricsObserver;
+            let metricsHub: ResponseObservationHub | undefined;
+            let metricsUpstreamSettled = false;
+            const finishMetricsUpstream = (aborted: boolean): void => {
+              if (metricsUpstreamSettled) return;
+              metricsUpstreamSettled = true;
+              metricsAttempt?.complete({ responseStatus: finalStatus, outcome: aborted ? 'aborted' : 'response' });
+              if (aborted) metricsHub?.abort('upstream_response_aborted');
+              else metricsHub?.end();
+              observer.markUpstreamResponseEnd();
+            };
+            upstreamRes.once('end', () => finishMetricsUpstream(false));
+            upstreamRes.once('aborted', () => finishMetricsUpstream(true));
+            upstreamRes.once('error', () => finishMetricsUpstream(true));
+            upstreamRes.once('close', () => {
+              if (!upstreamRes.complete) finishMetricsUpstream(true);
+            });
+            try {
+              const contentTypeValue = upstreamRes.headers['content-type'];
+              const contentType = Array.isArray(contentTypeValue)
+                ? contentTypeValue.join(',').toLowerCase()
+                : (contentTypeValue ?? '').toLowerCase();
+              const streamingMetrics =
+                contentType.includes('text/event-stream') ||
+                (contentType === '' && completionEndpoint?.protocol === 'openai-responses');
+              observer.observeResponseHeaders(finalStatus, upstreamRes.headers);
+              metricsHub = new ResponseObservationHub({
+                contentEncoding: upstreamRes.headers['content-encoding'],
+                frameSse: streamingMetrics,
+                consumers: [observer.responseConsumer(streamingMetrics)],
+                onDecoderFailure: (failure) => observer.markQualityFlag(failure.reason),
+              });
+              metricsResponseAttached = true;
+              upstreamRes.on('data', (chunk: Buffer) => {
+                observer.markFirstUpstreamBodyByte();
+                metricsHub?.write(chunk);
+              });
+            } catch {
+              // Adapter or observer failures are local to metrics. Forward the
+              // original upstream response and settle an explicitly partial record.
+              try {
+                observer.markResponseObservationUnavailable(finalStatus, 'response_observer_setup_failed');
+              } catch {
+                observer.abort('response_observer_setup_failed');
+              }
+            }
+          }
+
+          clientRes.writeHead(finalStatus, upstreamRes.headers);
           clientRes.flushHeaders();
           clientRes.socket?.setNoDelay(true);
 
@@ -1187,6 +1510,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
 
       upstreamReq.on('error', (err) => {
+        metricsAttempt?.complete({ responseStatus: null, outcome: 'error' });
         const log = isConnectionReset(err) ? logger.debug : logger.info;
         log(`[mitm-proxy] upstream error: ${err.message}`);
         activeUpstreamRequests.delete(upstreamReq);
@@ -1219,11 +1543,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         // bytes; the forwarding pipe stays line-rate. Adding a 'data'
         // listener directly to clientReq would flip it to flowing mode
         // and race the upstream pipe — the PassThrough avoids that.
-        if (captureHandle) {
+        if (captureHandle || metricsObserver) {
           const reqTap = new PassThrough();
           const handle = captureHandle;
-          reqTap.on('data', (chunk: Buffer) => handle.pushRequestChunk(chunk));
-          reqTap.on('end', () => handle.finishRequest());
+          reqTap.on('data', (chunk: Buffer) => {
+            handle?.pushRequestChunk(chunk);
+            pushMetricsRequestChunk(chunk);
+          });
+          reqTap.on('end', () => {
+            handle?.finishRequest();
+            finishStreamedMetricsRequest();
+          });
           clientReq.pipe(reqTap).pipe(upstreamReq);
         } else {
           clientReq.pipe(upstreamReq);
@@ -1323,6 +1653,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           }
         }
 
+        observeBufferedMetricsRequest(rawBody, finalBody);
         forwardRequest(finalBody);
       } else {
         forwardRequest();
@@ -1532,6 +1863,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const host = normalizeHost(rawHost);
     const port = colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443;
     const connId = ++connectionId;
+    const metricsLeaseToken = parseMetricsProxyAuthorization(req.headers['proxy-authorization']);
 
     // Handle client socket errors early to prevent uncaught 'error' events
     clientSocket.on('error', (err) => {
@@ -1648,6 +1980,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       passthrough: false,
       host,
       port,
+      metricsLeaseToken,
     });
 
     tlsSocket.on('error', (err) => {
@@ -2028,6 +2361,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       capturePersona = persona;
     },
 
+    beginMetricsInvocation(baseProxyUrl: string, context: MetricsInvocationContext): MetricsInvocationLease {
+      return metricsAttributionRegistry.createLease(baseProxyUrl, context);
+    },
+
     async start() {
       // Emit the egress-filter downgrade notice once per actual listening
       // proxy. Construction-time logging would fire even for proxies that
@@ -2086,6 +2423,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     },
 
     async stop() {
+      // Finalize partial observations before tearing transports down so exact
+      // attribution leases cannot remain held behind asynchronous decoders.
+      for (const observer of [...activeMetricsObservers]) {
+        observer.abort('proxy_stopped');
+      }
+      activeMetricsObservers.clear();
+
       // 1. Destroy active tunnel pairs (CONNECT passthrough + WebSocket bridges)
       for (const pair of activeTunnelPairs) {
         if (!pair.client.destroyed) pair.client.destroy();

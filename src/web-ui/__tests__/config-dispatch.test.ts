@@ -198,6 +198,36 @@ describe('config.setModelProviders — gate', () => {
   });
 });
 
+describe('config statistics settings', () => {
+  it('returns default-on collection and the default retention when absent', async () => {
+    writeConfig({});
+    await expect(configDispatch(makeCtx(false), 'config.getStatistics', {})).resolves.toEqual({
+      enabled: true,
+      retentionDays: 90,
+    });
+  });
+
+  it('persists an explicit opt-out and disabled automatic retention behind the mutation gate', async () => {
+    writeConfig({});
+    const ctx = makeCtx(true);
+    const emitSpy = vi.spyOn(ctx.eventBus, 'emit');
+
+    await expect(configDispatch(ctx, 'config.setStatistics', { enabled: false, retentionDays: null })).resolves.toEqual(
+      { enabled: false, retentionDays: null },
+    );
+    expect(readConfig().statistics).toEqual({ enabled: false, retentionDays: null });
+    expect(emitSpy).toHaveBeenCalledWith('config.changed', {});
+  });
+
+  it('rejects statistics mutation when policy mutation is disabled', async () => {
+    writeConfig({});
+    await expect(
+      configDispatch(makeCtx(false), 'config.setStatistics', { enabled: false, retentionDays: 30 }),
+    ).rejects.toMatchObject({ code: 'POLICY_MUTATION_FORBIDDEN' });
+    expect(readConfig().statistics).toBeUndefined();
+  });
+});
+
 describe('config.setModelProviders — M5 per-profile apiKey', () => {
   function seedTwoProfiles(): void {
     writeConfig({

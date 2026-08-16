@@ -30,12 +30,13 @@ import {
   type DockerProgressSink,
   type DockerProgressOperation,
 } from './docker-progress-sink.js';
+import { buildContainerExecEnvironmentArgs } from './container-exec-environment.js';
 
 /** Async exec function signature matching promisified execFile. */
 export type ExecFileFn = (
   cmd: string,
   args: readonly string[],
-  opts: { timeout?: number; maxBuffer?: number },
+  opts: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
@@ -442,6 +443,7 @@ export function createDockerManager(
       timeoutMs?: number,
       execUser?: string | null,
       workdir?: string,
+      environment?: Readonly<Record<string, string>>,
     ): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
       // Resolve the `--user` flag (see ContainerRuntime.exec JSDoc):
@@ -459,11 +461,17 @@ export function createDockerManager(
       const resolvedUser = execUser === undefined ? 'codespace' : execUser;
       const userArgs = resolvedUser === null ? [] : (['--user', resolvedUser] as const);
       const workdirArgs = workdir === undefined ? [] : (['--workdir', workdir] as const);
+      const environmentArgs = buildContainerExecEnvironmentArgs(environment);
       try {
-        const { stdout, stderr } = await exec('docker', ['exec', ...userArgs, ...workdirArgs, nameOrId, ...command], {
-          timeout,
-          maxBuffer: 50 * 1024 * 1024,
-        });
+        const { stdout, stderr } = await exec(
+          'docker',
+          ['exec', ...userArgs, ...workdirArgs, ...environmentArgs, nameOrId, ...command],
+          {
+            timeout,
+            maxBuffer: 50 * 1024 * 1024,
+            ...(environment ? { env: { ...process.env, ...environment } } : {}),
+          },
+        );
         return { exitCode: 0, stdout, stderr };
       } catch (err: unknown) {
         if (isExecError(err)) {

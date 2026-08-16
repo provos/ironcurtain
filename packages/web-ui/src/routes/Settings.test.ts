@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import type { GetModelProvidersDto, SetModelProvidersDto, OpenrouterModelsDto } from '$lib/types.js';
+import type {
+  GetModelProvidersDto,
+  SetModelProvidersDto,
+  OpenrouterModelsDto,
+  StatisticsConfigDto,
+} from '$lib/types.js';
 
 // ---------------------------------------------------------------------------
 // Mock the store — declared before importing the component (mirrors
@@ -12,6 +17,8 @@ import type { GetModelProvidersDto, SetModelProvidersDto, OpenrouterModelsDto } 
 const mockGet = vi.fn<() => Promise<GetModelProvidersDto>>();
 const mockSet = vi.fn<(input: SetModelProvidersDto) => Promise<GetModelProvidersDto>>();
 const mockList = vi.fn<() => Promise<OpenrouterModelsDto>>();
+const mockGetStatistics = vi.fn<() => Promise<StatisticsConfigDto>>();
+const mockSetStatistics = vi.fn<(input: StatisticsConfigDto) => Promise<StatisticsConfigDto>>();
 
 // A realistic catalog covering every fixture slug (incl. z-ai/glm-5.2) plus a
 // few glm variants for the filter/keyboard test. Used as the SAFE default so the
@@ -34,6 +41,8 @@ vi.mock('$lib/stores.svelte.js', () => ({
   getModelProviders: (...args: unknown[]) => mockGet(...(args as [])),
   setModelProviders: (...args: unknown[]) => mockSet(...(args as [SetModelProvidersDto])),
   listOpenrouterModels: (...args: unknown[]) => mockList(...(args as [])),
+  getStatisticsConfig: (...args: unknown[]) => mockGetStatistics(...(args as [])),
+  setStatisticsConfig: (...args: unknown[]) => mockSetStatistics(...(args as [StatisticsConfigDto])),
   get appState() {
     return appStateMock;
   },
@@ -72,6 +81,8 @@ describe('Settings', () => {
     mockGet.mockReset();
     mockSet.mockReset();
     mockList.mockReset();
+    mockGetStatistics.mockReset();
+    mockSetStatistics.mockReset();
     appStateMock.daemonStatus = { allowPolicyMutation: true };
     connectionGenerationMock.value = 0;
     configChangedGenerationMock.value = 0;
@@ -80,6 +91,23 @@ describe('Settings', () => {
     // SAFE default: bundled (warn-only) AND a list covering every fixture slug —
     // so opening/saving existing profiles never spuriously hard-blocks.
     mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'bundled' });
+    mockGetStatistics.mockResolvedValue({ enabled: true, retentionDays: 90 });
+    mockSetStatistics.mockImplementation((input) => Promise.resolve(input));
+  });
+
+  it('shows default-on statistics and saves an explicit opt-out', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('statistics-settings')).toBeTruthy());
+    const enabled = screen.getByTestId('statistics-enabled') as HTMLInputElement;
+    const retention = screen.getByTestId('statistics-retention') as HTMLInputElement;
+    expect(enabled.checked).toBe(true);
+    expect(retention.value).toBe('90');
+
+    await fireEvent.click(enabled);
+    await fireEvent.input(retention, { target: { value: '' } });
+    await fireEvent.click(screen.getByTestId('save-statistics'));
+
+    await vi.waitFor(() => expect(mockSetStatistics).toHaveBeenCalledWith({ enabled: false, retentionDays: null }));
   });
 
   it('renders the profile list with native first and non-deletable', async () => {

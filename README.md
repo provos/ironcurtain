@@ -254,6 +254,7 @@ IronCurtain stores configuration and session data in `~/.ironcurtain/`:
 ├── personas/                # Persona directories (constitution, policy, workspace, memory)
 ├── skills/                  # User-global SKILL.md packages, mounted into every Docker session
 ├── jobs/                    # Cron job definitions, workspaces, and run records
+├── statistics/              # Content-free local LLM usage database + pseudonymization key
 ├── sessions/
 │   └── {sessionId}/
 │       ├── sandbox/         # Per-session filesystem sandbox
@@ -289,6 +290,23 @@ ironcurtain config
 ```
 
 Key configuration areas: models and API keys, resource budgets (token/step/time/cost limits), auto-approve escalations, web search provider, audit redaction, and memory server LLM settings. See [CONFIG.md](CONFIG.md) for the full reference.
+
+### Local LLM statistics
+
+Content-free LLM usage collection is enabled by default. It records token counts (input, thinking, output, and
+totals), timing, protocol/provider/model routing, outcomes, refusals, and cost metadata when providers expose it. It
+does not store prompts, completions, thinking text, tool payloads, request/response bodies, credentials, or arbitrary
+headers. User/config-derived labels and non-public routes are pseudonymized with a local HMAC key; bounded model and
+provider identifiers remain readable for analysis.
+
+Data lives in `~/.ironcurtain/statistics/llm-usage.sqlite3`; the pseudonymization key is
+`~/.ironcurtain/statistics/identity.key`. The default retention period is 90 days. Use `ironcurtain config` →
+**LLM Statistics**, the web UI Settings view, or set `"statistics": { "enabled": false }` to opt out. Set
+`retentionDays` to `null` to disable automatic pruning. Restart a long-running daemon after changing these settings.
+
+Manual deletion is available with `ironcurtain statistics delete --before <ISO-date-or-epoch-ms>` or `--all`.
+This is logical SQLite row deletion, not secure erasure: deleted bytes may remain in free pages, WAL files, filesystem
+snapshots, or backups. The identity key is not rotated or deleted by these commands.
 
 To route LLM traffic through a gateway like LiteLLM or OpenRouter (in both Code Mode and Docker Agent Mode), see [MODEL_ROUTING.md](MODEL_ROUTING.md).
 

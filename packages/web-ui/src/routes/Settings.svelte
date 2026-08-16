@@ -1,9 +1,17 @@
 <script lang="ts">
-  import type { GetModelProvidersDto, ProfileDto, OpenrouterProfileDto, ModelMapRuleDto } from '$lib/types.js';
+  import type {
+    GetModelProvidersDto,
+    ProfileDto,
+    OpenrouterProfileDto,
+    ModelMapRuleDto,
+    StatisticsConfigDto,
+  } from '$lib/types.js';
   import {
     getModelProviders,
     setModelProviders,
     listOpenrouterModels,
+    getStatisticsConfig,
+    setStatisticsConfig,
     appState,
     connectionGeneration,
     configChangedGeneration,
@@ -45,6 +53,11 @@
   // The fetched, masked registry. `profileNames` preserves list order (native first).
   let registry = $state<GetModelProvidersDto | null>(null);
   let defaultName = $state(NATIVE_NAME);
+  let statistics = $state<StatisticsConfigDto | null>(null);
+  let statisticsEnabled = $state(true);
+  let statisticsRetentionDays = $state('90');
+  let statisticsSaving = $state(false);
+  let statisticsError = $state('');
 
   // Editable working copy of openrouter profiles keyed by name (native excluded —
   // it is implicit and non-editable). The masked apiKey is the placeholder; an
@@ -95,7 +108,9 @@
     loading = true;
     error = '';
     try {
-      applyRegistry(await getModelProviders());
+      const [registryDto, statisticsDto] = await Promise.all([getModelProviders(), getStatisticsConfig()]);
+      applyRegistry(registryDto);
+      applyStatistics(statisticsDto);
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
@@ -108,7 +123,9 @@
     // Don't clobber an in-progress edit dialog.
     if (editing) return;
     try {
-      applyRegistry(await getModelProviders());
+      const [registryDto, statisticsDto] = await Promise.all([getModelProviders(), getStatisticsConfig()]);
+      applyRegistry(registryDto);
+      applyStatistics(statisticsDto);
     } catch {
       // Best-effort.
     }
@@ -117,6 +134,31 @@
   function applyRegistry(dto: GetModelProvidersDto): void {
     registry = dto;
     defaultName = dto.default;
+  }
+
+  function applyStatistics(dto: StatisticsConfigDto): void {
+    statistics = dto;
+    statisticsEnabled = dto.enabled;
+    statisticsRetentionDays = dto.retentionDays === null ? '' : String(dto.retentionDays);
+  }
+
+  async function saveStatistics(): Promise<void> {
+    // Svelte's numeric input binding uses null for an empty field even though
+    // values loaded from config are represented as strings.
+    const rawRetention = String(statisticsRetentionDays ?? '').trim();
+    const retentionDays = rawRetention === '' ? null : Number(rawRetention);
+    if (retentionDays !== null && (!Number.isInteger(retentionDays) || retentionDays <= 0)) {
+      statisticsError = 'Retention must be a positive whole number of days, or blank to disable automatic deletion.';
+      return;
+    }
+    statisticsSaving = true;
+    statisticsError = '';
+    try {
+      applyStatistics(await setStatisticsConfig({ enabled: statisticsEnabled, retentionDays }));
+    } catch (err) {
+      statisticsError = rpcError(err).message;
+    }
+    statisticsSaving = false;
   }
 
   // List of openrouter profile names (native rendered separately, non-editable).
@@ -345,7 +387,73 @@
 
 <div class="p-6 space-y-5 animate-fade-in">
   <div class="flex items-center justify-between flex-wrap gap-3">
-    <h2 class="text-xl font-semibold tracking-tight">Model Providers</h2>
+    <h2 class="text-xl font-semibold tracking-tight">Settings</h2>
+  </div>
+
+  {#if error}
+    <Alert variant="destructive">{error}</Alert>
+  {/if}
+
+  {#if !loading && statistics}
+    <Card data-testid="statistics-settings">
+      <CardHeader>
+        <CardTitle>Local LLM Statistics</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div class="space-y-4">
+          <label class="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              bind:checked={statisticsEnabled}
+              disabled={!mutationAllowed || statisticsSaving}
+              data-testid="statistics-enabled"
+            />
+            <span>
+              Collect content-free usage statistics
+              <span class="block text-[11px] text-muted-foreground">
+                Enabled by default. Stores token counts, timing, routing, model, outcome, and refusal metadata locally;
+                never prompt or response bodies. Restart the daemon after saving to apply collection changes.
+              </span>
+            </span>
+          </label>
+          <div class="max-w-xs">
+            <label class="text-xs text-muted-foreground" for="statistics-retention">Retention days</label>
+            <Input
+              id="statistics-retention"
+              type="number"
+              min="1"
+              step="1"
+              bind:value={statisticsRetentionDays}
+              disabled={!mutationAllowed || statisticsSaving}
+              placeholder="blank disables automatic deletion"
+              data-testid="statistics-retention"
+            />
+            <p class="text-[11px] text-muted-foreground mt-1">
+              Default: 90 days. Blank keeps data until manual deletion.
+            </p>
+          </div>
+          {#if statisticsError}
+            <Alert variant="destructive"><span data-testid="statistics-error">{statisticsError}</span></Alert>
+          {/if}
+          {#if mutationAllowed}
+            <Button
+              variant="default"
+              size="sm"
+              onclick={saveStatistics}
+              loading={statisticsSaving}
+              disabled={statisticsSaving}
+              data-testid="save-statistics"
+            >
+              Save statistics settings
+            </Button>
+          {/if}
+        </div>
+      </CardContent>
+    </Card>
+  {/if}
+
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <h3 class="text-lg font-semibold tracking-tight">Model Providers</h3>
     <div class="flex items-center gap-3">
       <Badge variant="outline">{openrouterNames.length} profile{openrouterNames.length === 1 ? '' : 's'}</Badge>
       {#if mutationAllowed}
@@ -362,10 +470,6 @@
     OpenRouter with a bound model map and key. Pick a default here, or select a profile per session at
     <span class="font-mono">/new</span> or with <span class="font-mono">--provider-profile</span>.
   </p>
-
-  {#if error}
-    <Alert variant="destructive">{error}</Alert>
-  {/if}
 
   {#if saveError}
     <div data-testid="settings-error">

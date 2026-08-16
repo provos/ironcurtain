@@ -114,6 +114,7 @@ describe('OpenRouter through the real MITM (G3 / §12.2)', () => {
     rewriter?: RequestBodyRewriter;
     upstreamResponder?: UpstreamResponder;
     initialTokenSessionId?: SessionId;
+    statisticsEnabled?: boolean;
   }): Promise<void> {
     upstream = await createFakeUpstream(options.upstreamResponder);
     const kind = options.kind ?? 'messages';
@@ -127,6 +128,7 @@ describe('OpenRouter through the real MITM (G3 / §12.2)', () => {
       ca,
       providers: [{ config, fakeKey: FAKE_KEY, realKey: REAL_KEY }],
       dnsLookup: localhostDnsLookup,
+      statisticsEnabled: options.statisticsEnabled,
       ...(options.initialTokenSessionId ? { initialTokenSessionId: options.initialTokenSessionId } : {}),
     });
     await proxy.start();
@@ -162,6 +164,13 @@ describe('OpenRouter through the real MITM (G3 / §12.2)', () => {
     await post('/api/v1/messages', { model: 'claude-sonnet-4-6', messages: [] });
     const req = (upstream as FakeUpstream).requests()[0];
     expect(req.headers['authorization']).toBe(`Bearer ${REAL_KEY}`);
+    expect(req.headers['x-openrouter-metadata']).toBe('enabled');
+  });
+
+  it('keeps OpenRouter metadata negotiation enabled when statistics are enabled', async () => {
+    await startProxy({ statisticsEnabled: true });
+    await post('/api/v1/messages', { model: 'claude-sonnet-4-6', messages: [] });
+    expect((upstream as FakeUpstream).requests()[0].headers['x-openrouter-metadata']).toBe('enabled');
   });
 
   // 2. Model rewrite: requested Anthropic id is remapped to the GLM slug.

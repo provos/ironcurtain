@@ -2335,6 +2335,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     // there's no bundle to borrow — `infrastructure` / `stateDir` /
     // `stateSlug` opt in only when shared-container mode applies.
     const workflowOptions = {
+      workflowRunId: instance.id,
+      stateId,
+      personaId: stateConfig.persona,
       ...(bundle ? { infrastructure: bundle } : {}),
       ...(workflowStateDir ? { stateDir: workflowStateDir, stateSlug } : {}),
       ...resolveWorkflowSkillsOptions(stateConfig.skills, workflowSkillsDir),

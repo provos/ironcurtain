@@ -29,10 +29,20 @@ import type {
   ArtifactContentDto,
   MessageLogResponseDto,
   GetModelProvidersDto,
+  StatisticsConfigDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
   PtySink,
   CreateSessionOptions,
+  StatisticsCapabilitiesDto,
+  StatisticsSummaryQuery,
+  StatisticsMetricSummaryDto,
+  StatisticsSeriesQuery,
+  StatisticsTimeBucketDto,
+  StatisticsExchangeQuery,
+  StatisticsExchangePageDto,
+  StatisticsDimensionQuery,
+  StatisticsDimensionValueDto,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
@@ -165,7 +175,7 @@ export const personasChangedGeneration = $state({ value: 0 });
 
 /**
  * Monotonically increasing counter bumped on every `config.changed` server-push
- * event (a `config.setModelProviders` write). The Settings view reads `.value`
+ * event (for example a provider or statistics settings write). The Settings view reads `.value`
  * as a $effect dependency to refresh its locally-held provider-profile view,
  * mirroring `personasChangedGeneration`. Kept off appState because the config
  * view state lives in the route component, not the global store.
@@ -810,11 +820,10 @@ export async function hydratePersonaCompiles(): Promise<Set<string>> {
 
 // ── Config (modelProviders) RPC actions ────────────────────────────────
 //
-// `config.getModelProviders` is ungated (read); `config.setModelProviders` is
-// gated server-side on the daemon's `--allow-policy-mutation` flag (rejects with
-// POLICY_MUTATION_FORBIDDEN when off). The Settings view hides mutation controls
-// when `appState.daemonStatus.allowPolicyMutation` is false. A successful write
-// broadcasts a `config.changed` server-push event (bumps configChangedGeneration).
+// Config reads are ungated; writes are gated server-side on the daemon's
+// `--allow-policy-mutation` flag (rejects with POLICY_MUTATION_FORBIDDEN when
+// off). The Settings view hides mutation controls when the flag is false. A
+// successful write broadcasts `config.changed` (bumps configChangedGeneration).
 
 /**
  * Read the model-provider registry. Every openrouter profile's `apiKey` is
@@ -838,6 +847,14 @@ export async function setModelProviders(input: SetModelProvidersDto): Promise<Ge
   });
 }
 
+export async function getStatisticsConfig(): Promise<StatisticsConfigDto> {
+  return getWsClient().request<StatisticsConfigDto>('config.getStatistics', {});
+}
+
+export async function setStatisticsConfig(input: StatisticsConfigDto): Promise<StatisticsConfigDto> {
+  return getWsClient().request<StatisticsConfigDto>('config.setStatistics', { ...input });
+}
+
 /**
  * Fetch the OpenRouter model-slug catalog for autocomplete/validation. `source`
  * tells the caller whether the list is authoritative (`live`/`cache` → hard-block
@@ -849,6 +866,32 @@ export async function listOpenrouterModels(forceRefresh = false): Promise<Openro
     'config.listOpenrouterModels',
     forceRefresh ? { forceRefresh: true } : {},
   );
+}
+
+// ── Read-only LLM statistics RPC actions ─────────────────────────────
+
+export async function getStatisticsCapabilities(): Promise<StatisticsCapabilitiesDto> {
+  return getWsClient().request<StatisticsCapabilitiesDto>('statistics.capabilities', {});
+}
+
+export async function getStatisticsSummary(
+  query: StatisticsSummaryQuery,
+): Promise<readonly StatisticsMetricSummaryDto[]> {
+  return getWsClient().request<readonly StatisticsMetricSummaryDto[]>('statistics.summary', { ...query });
+}
+
+export async function getStatisticsSeries(query: StatisticsSeriesQuery): Promise<readonly StatisticsTimeBucketDto[]> {
+  return getWsClient().request<readonly StatisticsTimeBucketDto[]>('statistics.series', { ...query });
+}
+
+export async function getStatisticsExchanges(query: StatisticsExchangeQuery): Promise<StatisticsExchangePageDto> {
+  return getWsClient().request<StatisticsExchangePageDto>('statistics.exchanges', { ...query });
+}
+
+export async function getStatisticsDimensions(
+  query: StatisticsDimensionQuery,
+): Promise<readonly StatisticsDimensionValueDto[]> {
+  return getWsClient().request<readonly StatisticsDimensionValueDto[]>('statistics.dimensions', { ...query });
 }
 
 export async function connectWithToken(token: string): Promise<void> {

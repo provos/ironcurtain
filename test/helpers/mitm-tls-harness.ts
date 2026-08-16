@@ -28,9 +28,10 @@ export function sendConnect(
   socketPath: string,
   host: string,
   port: number,
+  headers?: Readonly<Record<string, string>>,
 ): Promise<{ socket: import('node:net').Socket | null; statusCode: number }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ socketPath, method: 'CONNECT', path: `${host}:${port}` });
+    const req = http.request({ socketPath, method: 'CONNECT', path: `${host}:${port}`, headers });
     req.on('connect', (res, socket) => resolve({ socket, statusCode: res.statusCode ?? 0 }));
     req.on('error', reject);
     req.on('response', (res) => resolve({ socket: null, statusCode: res.statusCode ?? 0 }));

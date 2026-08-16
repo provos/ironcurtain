@@ -19,10 +19,15 @@
 import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
 import * as zlib from 'node:zlib';
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { AnthropicReassembler } from '../../src/docker/trajectory-reassembler.js';
-import { beginCaptureExchange, createResponseCaptureInlet } from '../../src/docker/trajectory-tap.js';
+import {
+  beginCaptureExchange,
+  createResponseCaptureInlet,
+  type CaptureExchangeHandle,
+} from '../../src/docker/trajectory-tap.js';
 import { createTrajectoryCaptureWriter, type TrajectoryCaptureWriter } from '../../src/docker/trajectory-capture.js';
 import type { ExchangeRecord, ManifestEntry } from '../../src/docker/trajectory-types.js';
 import type { SessionId } from '../../src/session/types.js';
@@ -452,19 +457,99 @@ describe('Trajectory capture decompression (createResponseCaptureInlet)', () => 
       .map((l) => JSON.parse(l) as T);
   }
 
+  it('does not inherit the metrics decoder response cap', async () => {
+    const decoded = Buffer.alloc(33 * 1024 * 1024, 0x61);
+    const compressed = zlib.gzipSync(decoded);
+    const captureTap = new PassThrough();
+    let decodedBytes = 0;
+    captureTap.on('data', (chunk: Buffer) => {
+      decodedBytes += chunk.length;
+    });
+    const ended = new Promise<void>((resolve) => captureTap.once('end', resolve));
+    const abort = vi.fn();
+    const onPoison = vi.fn();
+    const inlet = createResponseCaptureInlet({
+      captureTap,
+      contentEncoding: 'gzip',
+      captureHandle: { abort } as unknown as CaptureExchangeHandle,
+      onPoison,
+    });
+
+    inlet.end(compressed);
+    await ended;
+
+    expect(decodedBytes).toBe(decoded.length);
+    expect(abort).not.toHaveBeenCalled();
+    expect(onPoison).not.toHaveBeenCalled();
+  });
+
+  it('does not poison capture when the downstream tap reports an advisory high-water signal', async () => {
+    const decoded = Buffer.from('downstream high-water is not data loss\n'.repeat(10_000));
+    const compressed = zlib.gzipSync(decoded);
+    const captureTap = new PassThrough();
+    const chunks: Buffer[] = [];
+    captureTap.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    const originalWrite = captureTap.write.bind(captureTap);
+    captureTap.write = ((chunk: Uint8Array) => {
+      originalWrite(chunk);
+      return false;
+    }) as typeof captureTap.write;
+    const ended = new Promise<void>((resolve) => captureTap.once('end', resolve));
+    const abort = vi.fn();
+    const onPoison = vi.fn();
+    const inlet = createResponseCaptureInlet({
+      captureTap,
+      contentEncoding: 'gzip',
+      captureHandle: { abort } as unknown as CaptureExchangeHandle,
+      onPoison,
+    });
+
+    inlet.end(compressed);
+    await ended;
+
+    expect(Buffer.concat(chunks)).toEqual(decoded);
+    expect(abort).not.toHaveBeenCalled();
+    expect(onPoison).not.toHaveBeenCalled();
+  });
+
+  it('poisons only capture when a non-draining decoder exceeds its bounded input backlog', async () => {
+    const captureTap = new PassThrough();
+    captureTap.on('data', () => {});
+    const captureFailed = new Promise<void>((resolve) => captureTap.once('error', () => resolve()));
+    const abort = vi.fn();
+    const onPoison = vi.fn();
+    const inlet = createResponseCaptureInlet({
+      captureTap,
+      contentEncoding: 'gzip',
+      captureHandle: { abort } as unknown as CaptureExchangeHandle,
+      onPoison,
+    });
+
+    const wire = zlib.gzipSync(Buffer.alloc(9 * 1024 * 1024, 0xa5), { level: 0 });
+    const forwarded: Buffer[] = [];
+    for (let offset = 0; offset < wire.length; offset += 64 * 1024) {
+      const chunk = wire.subarray(offset, offset + 64 * 1024);
+      forwarded.push(Buffer.from(chunk));
+      inlet.write(chunk);
+    }
+    inlet.end();
+    await captureFailed;
+
+    expect(Buffer.concat(forwarded).equals(wire)).toBe(true);
+    expect(abort).toHaveBeenCalledOnce();
+    expect(onPoison).toHaveBeenCalledOnce();
+    expect(onPoison).toHaveBeenCalledWith('reassembly-failure');
+  });
+
   /**
    * Drive a complete capture lifecycle: begin an exchange, attach a
    * response, feed `wireBytes` to the inlet (in two halves to exercise
    * chunked behavior), close the inlet, and await `endSession`.
    *
    * Waits for the captureTap to fully drain (the in-flight reassembly
-   * Promise settles) before calling `endSession`. This mirrors the
-   * production lifecycle: in real use, the orchestrator never calls
-   * `endSession` until the underlying agent session has cleanly closed,
-   * which is long after any in-flight response capture has finalized.
-   * Driving them back-to-back would trip the dispatcher's
-   * `endRequested`-drops-new-writes guard before the in-flight record
-   * could be enqueued.
+   * Promise settles) before calling `endSession`. Most tests use the normal
+   * production ordering; the teardown-race behavior is covered separately
+   * by the trajectory-poison lifecycle tests.
    */
   async function driveCapture(opts: {
     sessionId: SessionId;
