@@ -120,14 +120,16 @@ export interface TrajectoryCaptureWriter {
    */
   markSessionPoisoned(sessionId: SessionId, reason: PoisonReason): void;
   /**
-   * Register an in-flight reassembly Promise for a session. The
+   * Register an in-flight reassembly Promise and its exchange identity.
+   * The exchange remains authorized to write after `endSession` starts;
+   * exchanges first registered after that boundary are rejected. The
    * dispatcher's Phase B drain (`endSession`) awaits these before
    * emitting the `session-end` manifest entry, so a captureTap whose
    * `_flush` is still pending cannot race the manifest end-marker.
    * Promise settlement (resolve or reject) auto-deregisters; the caller
    * does not need to clear the slot.
    */
-  trackInFlight(sessionId: SessionId, promise: Promise<unknown>): void;
+  trackInFlight(sessionId: SessionId, exchangeId: string, promise: Promise<unknown>): void;
 }
 
 /**
@@ -152,6 +154,8 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
   const manifestQueue: PendingManifest[] = [];
   /** Per-session in-flight reassembly promises. */
   const inFlight = new Map<SessionId, Set<Promise<unknown>>>();
+  /** Exchange IDs authorized to finish writing after endSession starts. */
+  const inFlightExchangeIds = new Map<SessionId, Set<string>>();
   /** Sessions currently waiting in Phase B of endSession. */
   const endResolvers = new Map<SessionId, () => void>();
   let directoryReady = false;
@@ -410,18 +414,32 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
     return JSON.stringify(value) + '\n';
   }
 
-  function trackInFlightInternal(sessionId: SessionId, promise: Promise<unknown>): void {
+  function trackInFlightInternal(sessionId: SessionId, exchangeId: string, promise: Promise<unknown>): void {
+    const session = sessions.get(sessionId);
+    if (closed || closing || !session || session.endRequested || session.poisoned) return;
     let set = inFlight.get(sessionId);
     if (!set) {
       set = new Set();
       inFlight.set(sessionId, set);
     }
+    let exchangeIds = inFlightExchangeIds.get(sessionId);
+    if (!exchangeIds) {
+      exchangeIds = new Set();
+      inFlightExchangeIds.set(sessionId, exchangeIds);
+    }
     set.add(promise);
+    exchangeIds.add(exchangeId);
     const cleanup = (): void => {
       const s = inFlight.get(sessionId);
-      if (!s) return;
-      s.delete(promise);
-      if (s.size === 0) inFlight.delete(sessionId);
+      if (s) {
+        s.delete(promise);
+        if (s.size === 0) inFlight.delete(sessionId);
+      }
+      const ids = inFlightExchangeIds.get(sessionId);
+      if (ids) {
+        ids.delete(exchangeId);
+        if (ids.size === 0) inFlightExchangeIds.delete(sessionId);
+      }
       // A settled in-flight promise may have been the last gate on a
       // pending endSession — nudge the drain.
       void scheduleDrain();
@@ -437,6 +455,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
    */
   function forceClearInFlight(sessionId: SessionId): void {
     inFlight.delete(sessionId);
+    inFlightExchangeIds.delete(sessionId);
   }
 
   return {
@@ -507,7 +526,9 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         logger.warn(`[trajectory-capture] write() before beginSession for ${sid}`);
         return;
       }
-      if (session.endRequested || session.poisoned) {
+      const finishingTrackedExchange =
+        session.endRequested && inFlightExchangeIds.get(sid)?.has(record.exchangeId) === true;
+      if ((session.endRequested && !finishingTrackedExchange) || session.poisoned) {
         totalDropped += 1;
         return;
       }
@@ -623,8 +644,8 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       markSessionPoisonedInternal(session, reason);
     },
 
-    trackInFlight(sessionId: SessionId, promise: Promise<unknown>): void {
-      trackInFlightInternal(sessionId, promise);
+    trackInFlight(sessionId: SessionId, exchangeId: string, promise: Promise<unknown>): void {
+      trackInFlightInternal(sessionId, exchangeId, promise);
     },
   };
 }

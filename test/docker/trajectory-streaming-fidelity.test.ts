@@ -547,13 +547,9 @@ describe('Trajectory capture decompression (createResponseCaptureInlet)', () => 
    * chunked behavior), close the inlet, and await `endSession`.
    *
    * Waits for the captureTap to fully drain (the in-flight reassembly
-   * Promise settles) before calling `endSession`. This mirrors the
-   * production lifecycle: in real use, the orchestrator never calls
-   * `endSession` until the underlying agent session has cleanly closed,
-   * which is long after any in-flight response capture has finalized.
-   * Driving them back-to-back would trip the dispatcher's
-   * `endRequested`-drops-new-writes guard before the in-flight record
-   * could be enqueued.
+   * Promise settles) before calling `endSession`. Most tests use the normal
+   * production ordering; the teardown-race behavior is covered separately
+   * by the trajectory-poison lifecycle tests.
    */
   async function driveCapture(opts: {
     sessionId: SessionId;

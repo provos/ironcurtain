@@ -274,7 +274,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       // rejection warning never fires; the dispatcher consumes it via
       // `Promise.allSettled`.
       completion.catch(() => {});
-      inputs.writer.trackInFlight(inputs.sessionId, completion);
+      inputs.writer.trackInFlight(inputs.sessionId, exchangeId, completion);
 
       const finishCompletion = (ok: boolean, err?: Error): void => {
         if (ok) {
