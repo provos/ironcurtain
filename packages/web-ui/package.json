@@ -40,7 +40,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.13",
     "marked": "^15.0.12",
     "phosphor-svelte": "^3.1.0",
     "tailwind-merge": "^3.6.0"
