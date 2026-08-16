@@ -1567,31 +1567,40 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
     }
 
-    const upstreamReq = outboundTransport.request(
-      {
-        destination: { protocol: 'http:', hostname: host, port },
-        method,
-        path,
-        headers: forwardHeaders,
-      },
-      (upstreamRes) => {
-        upstreamRes.on('error', (err) => {
-          const log = isConnectionReset(err) ? logger.debug : logger.info;
-          log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
-          if (!clientRes.headersSent) {
-            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-            clientRes.end(`Upstream response error: ${err.message}`);
-          } else {
-            clientRes.socket?.destroy();
-          }
-        });
+    let upstreamReq: http.ClientRequest;
+    try {
+      upstreamReq = outboundTransport.request(
+        {
+          destination: { protocol: 'http:', hostname: host, port },
+          method,
+          path,
+          headers: forwardHeaders,
+        },
+        (upstreamRes) => {
+          upstreamRes.on('error', (err) => {
+            const log = isConnectionReset(err) ? logger.debug : logger.info;
+            log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+              clientRes.end(`Upstream response error: ${err.message}`);
+            } else {
+              clientRes.socket?.destroy();
+            }
+          });
 
-        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-        clientRes.flushHeaders();
-        clientRes.socket?.setNoDelay(true);
-        upstreamRes.pipe(clientRes);
-      },
-    );
+          clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+          clientRes.flushHeaders();
+          clientRes.socket?.setNoDelay(true);
+          upstreamRes.pipe(clientRes);
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.info(`[mitm-proxy] upstream request rejected (plain HTTP passthrough): ${message}`);
+      clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+      clientRes.end(`Upstream request rejected: ${message}`);
+      return;
+    }
 
     activeUpstreamRequests.add(upstreamReq);
     upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
@@ -2026,12 +2035,24 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       forwardHeaders[key] = value;
     }
 
-    const upstreamReq = outboundTransport.request({
-      destination: { protocol: 'http:', hostname: targetHost, port: targetPort },
-      method: 'GET',
-      path,
-      headers: forwardHeaders,
-    });
+    let upstreamReq: http.ClientRequest;
+    try {
+      upstreamReq = outboundTransport.request({
+        destination: { protocol: 'http:', hostname: targetHost, port: targetPort },
+        method: 'GET',
+        path,
+        headers: forwardHeaders,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.info(`[mitm-proxy] WebSocket upgrade request rejected: ${message}`);
+      if (!clientSocket.destroyed) {
+        clientSocket.end(
+          'HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+        );
+      }
+      return;
+    }
     upstreamReq.setTimeout(30_000);
     activeUpstreamRequests.add(upstreamReq);
 

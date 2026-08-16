@@ -29,6 +29,18 @@ Supported providers: `anthropic`, `google`, `openai`.
 | `autoApprove.enabled`      | boolean | `false`                      | Let an LLM auto-approve escalated tool calls instead of waiting for a human. |
 | `autoApprove.modelId`      | string  | `anthropic:claude-haiku-4-5` | Model used for auto-approval decisions.                                      |
 
+### Network destination screening
+
+IronCurtain screens every proxy destination again after DNS resolution. Localhost, `.local`, `.internal`,
+`.docker.internal`, private/link-local/metadata addresses, empty answer sets, and mixed public/private
+answer sets are rejected even when a passthrough domain was approved. This prevents DNS rebinding and
+SSRF into the host or VPN network. It also means internal registries and split-DNS names that resolve to
+private addresses are intentionally unavailable from ordinary sessions.
+
+Agent images do not bake in a user-specific IronCurtain CA. Each ephemeral container installs the
+session-mounted public CA into its system trust store at startup and also receives tool-specific trust
+environment variables. The first Docker Agent session after this upgrade may rebuild its agent image.
+
 ## Resource Limits
 
 All budget fields are nullable — set to `null` to disable the limit.
@@ -80,7 +92,8 @@ images already available to the private runtime:
 The current admitted implementation is the Apple Container developer slice. `containerRuntime` may
 remain `auto` when Apple Container is available; unsupported runtime resolutions fail before nested
 Docker is provisioned. If an ordinary Docker resource is `null`, nested Docker keeps its safe fallback
-instead of inheriting an unlimited value.
+instead of inheriting an unlimited value. The setting is global for Docker Agent execution: standalone
+sessions and each workflow infrastructure bundle receive their own private nested daemon when enabled.
 
 ### Connecting nested containers
 

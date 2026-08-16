@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -6,7 +6,11 @@ import {
   reconcileDockerWorkloadLeases,
   type DockerWorkloadAdmissionOptions,
 } from '../../src/docker-workload/infrastructure.js';
-import { getDockerWorkloadRoot } from '../../src/config/paths.js';
+import {
+  getDockerWorkloadLeaseDir,
+  getDockerWorkloadRoot,
+  getDockerWorkloadStateRoot,
+} from '../../src/config/paths.js';
 import { loadDockerWorkloadLease, revokeDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { tryAcquireDockerWorkloadLifecycleClaim } from '../../src/docker-workload/cleanup-ownership.js';
 import { createRecordingDockerWorkloadAuditSink } from '../../src/docker-workload/lifecycle-evidence.js';
@@ -49,6 +53,24 @@ function baseOptions(
 }
 
 describe('Docker-workload admission (§8.2 order)', () => {
+  it('validates the watchdog template before creating lease-specific directories', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock });
+    const leaseId = 'dw-invalid-template';
+
+    await expect(
+      admitDockerWorkloadBundle({
+        ...baseOptions(clock, runtime, supervisor),
+        leaseId,
+        watchdogPolicyTemplatePath: join(getHome(), 'missing-watchdog-policy.json'),
+      }),
+    ).rejects.toThrow();
+
+    expect(existsSync(getDockerWorkloadLeaseDir(leaseId))).toBe(false);
+    expect(existsSync(getDockerWorkloadStateRoot(leaseId))).toBe(false);
+  });
+
   it('ledgers before create, attests the watchdog before the nested-daemon create, and observes before use', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();

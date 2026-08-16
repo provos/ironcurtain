@@ -91,3 +91,25 @@ if [ "$(id -u)" = "0" ] && [ -n "$IRONCURTAIN_AGENT_UID" ] && [ -n "$IRONCURTAIN
   # the parent entrypoint's because this file is sourced, not executed.
   exec runuser -u codespace -- "$0" "$@"
 fi
+
+# Install the session-mounted public MITM CA into this ephemeral container's
+# system trust store. The image remains CA-neutral: the certificate arrives
+# through the read-only /etc/ironcurtain orientation mount. This block lives in
+# the already-shared bootstrap helper so Claude, Codex, and Goose cannot drift.
+IRONCURTAIN_RUNTIME_CA=/etc/ironcurtain/ca-cert.pem
+IRONCURTAIN_SYSTEM_CA=/usr/local/share/ca-certificates/ironcurtain-session-ca.crt
+
+if [ -f "$IRONCURTAIN_RUNTIME_CA" ]; then
+  if ! command -v update-ca-certificates >/dev/null 2>&1; then
+    echo '[ironcurtain] cannot install runtime trust: update-ca-certificates is unavailable' >&2
+    exit 1
+  fi
+
+  if [ "$(id -u)" = '0' ]; then
+    install -m 0444 "$IRONCURTAIN_RUNTIME_CA" "$IRONCURTAIN_SYSTEM_CA" || exit 1
+    update-ca-certificates >/dev/null || exit 1
+  else
+    sudo -n install -m 0444 "$IRONCURTAIN_RUNTIME_CA" "$IRONCURTAIN_SYSTEM_CA" || exit 1
+    sudo -n update-ca-certificates >/dev/null || exit 1
+  fi
+fi

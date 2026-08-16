@@ -964,6 +964,36 @@ describe('MitmProxy', () => {
     }
   });
 
+  it('contains a synchronous plain-HTTP transport rejection and keeps serving requests', async () => {
+    const rejectingTransport: OutboundTransport = {
+      kind: 'direct',
+      addressGuard: 'local-resolver',
+      request() {
+        throw new Error('synchronous destination rejection');
+      },
+    };
+    proxy = createMitmProxy({ socketPath, ca, providers: [], outboundTransport: rejectingTransport });
+    await proxy.start();
+    proxy.hosts.addHost('rejected.example.com');
+
+    const request = (path: string): Promise<{ statusCode: number; body: string }> =>
+      new Promise((resolve, reject) => {
+        const req = http.request({ socketPath, method: 'GET', path }, (res) => {
+          let body = '';
+          res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+          res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+
+    await expect(request('http://rejected.example.com/path')).resolves.toMatchObject({
+      statusCode: 502,
+      body: expect.stringContaining('synchronous destination rejection'),
+    });
+    await expect(request('http://not-approved.example.com/path')).resolves.toMatchObject({ statusCode: 403 });
+  });
+
   it('routes plain HTTP proxy requests to Debian registry hosts through registry validation', async () => {
     const debianRegistry: RegistryConfig = {
       host: 'deb.debian.org',
@@ -1958,6 +1988,55 @@ describe('MitmProxy', () => {
 
     // The proxy should reject with 403 - either as a response or by destroying the socket
     expect(result.destroyed || result.data.includes('Forbidden') || result.data === '').toBe(true);
+  });
+
+  it('contains a synchronous WebSocket transport rejection and keeps serving requests', async () => {
+    const rejectingTransport: OutboundTransport = {
+      kind: 'direct',
+      addressGuard: 'local-resolver',
+      request() {
+        throw new Error('synchronous WebSocket destination rejection');
+      },
+    };
+    proxy = createMitmProxy({ socketPath, ca, providers: [], outboundTransport: rejectingTransport });
+    await proxy.start();
+    proxy.hosts.addHost('rejected-ws.example.com');
+
+    const statusCode = await new Promise<number>((resolve, reject) => {
+      const req = http.request({
+        socketPath,
+        method: 'GET',
+        path: 'http://rejected-ws.example.com/ws',
+        headers: {
+          host: 'rejected-ws.example.com',
+          upgrade: 'websocket',
+          connection: 'Upgrade',
+          'sec-websocket-key': crypto.randomBytes(16).toString('base64'),
+          'sec-websocket-version': '13',
+        },
+      });
+      req.on('response', (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('upgrade', (_res, socket) => {
+        socket.destroy();
+        reject(new Error('unexpected WebSocket upgrade'));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(statusCode).toBe(502);
+
+    const health = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ socketPath, method: 'GET', path: 'http://not-approved.example.com/path' }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(health).toBe(403);
   });
 
   it('forwards plain HTTP through CONNECT tunnel to passthrough domain', async () => {

@@ -82,6 +82,22 @@ describe('runtime trust consumers', () => {
     });
   });
 
+  it('installs the mounted public CA into each ephemeral container system store', () => {
+    const trustScript = readFileSync(join(process.cwd(), 'docker', 'entrypoint-uid-remap.sh'), 'utf8');
+    expect(trustScript).toContain('IRONCURTAIN_RUNTIME_CA=/etc/ironcurtain/ca-cert.pem');
+    expect(trustScript).toContain('IRONCURTAIN_SYSTEM_CA=/usr/local/share/ca-certificates/ironcurtain-session-ca.crt');
+    expect(trustScript).toContain('sudo -n install -m 0444 "$IRONCURTAIN_RUNTIME_CA" "$IRONCURTAIN_SYSTEM_CA"');
+    expect(trustScript).toContain('sudo -n update-ca-certificates');
+    expect(trustScript).not.toMatch(/PRIVATE KEY|ca-key|key\.pem/iu);
+
+    for (const agent of ['claude-code', 'codex', 'goose']) {
+      const dockerfile = readFileSync(join(process.cwd(), 'docker', `Dockerfile.${agent}`), 'utf8');
+      const entrypoint = readFileSync(join(process.cwd(), 'docker', `entrypoint-${agent}.sh`), 'utf8');
+      expect(dockerfile).toContain('COPY entrypoint-uid-remap.sh /usr/local/bin/ironcurtain-uid-remap.sh');
+      expect(entrypoint).toContain('. /usr/local/bin/ironcurtain-uid-remap.sh');
+    }
+  });
+
   it('binds apt HTTP, HTTPS, and TLS trust to one fixed endpoint', () => {
     expect(renderAptProxyConfig('http://127.0.0.1:18080')).toBe(
       'Acquire::http::Proxy "http://127.0.0.1:18080";\n' +

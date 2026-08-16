@@ -219,6 +219,10 @@ export async function admitDockerWorkloadBundle(
       );
     }
 
+    // Validate the packaged policy before creating lease-specific state. A
+    // broken or incomplete install must fail without accumulating empty
+    // lease/state directories on every retry.
+    const template = loadFrozenWatchdogPolicyTemplate(options.watchdogPolicyTemplatePath);
     const leaseDir = getDockerWorkloadLeaseDir(leaseId);
     const stateRoot = getDockerWorkloadStateRoot(leaseId);
     createStateRootSubtree(stateRoot);
@@ -226,7 +230,6 @@ export async function admitDockerWorkloadBundle(
     const evidenceDir = join(leaseDir, EVIDENCE_DIR);
     mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
 
-    const template = loadFrozenWatchdogPolicyTemplate(options.watchdogPolicyTemplatePath);
     const policyPath = join(leaseDir, POLICY_FILE);
     const loadedPolicy = renderWatchdogPolicy(template.template, stateRoot, policyPath);
 
