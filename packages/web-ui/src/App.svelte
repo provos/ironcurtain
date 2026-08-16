@@ -11,13 +11,18 @@
   import { onMount } from 'svelte';
   import {
     appState,
-    initConnection,
+    configChangedGeneration,
     connectWithToken,
+    connectionGeneration,
+    getStatisticsSummary,
+    initConnection,
     resolveEscalation,
     getTheme,
     setTheme,
     type ThemeId,
   } from './lib/stores.svelte.js';
+  import type { StatisticsMetricSummaryDto } from './lib/types.js';
+  import { calendarRange, localTimeZone } from '$lib/components/features/statistics/statistics-helpers.js';
   import Dashboard from './routes/Dashboard.svelte';
   import Statistics from './routes/Statistics.svelte';
   import Sessions from './routes/Sessions.svelte';
@@ -33,6 +38,7 @@
   import { Badge } from '$lib/components/ui/badge/index.js';
   import EscalationModal from '$lib/components/features/escalation-modal.svelte';
   import MatrixRain from '$lib/components/features/matrix-rain.svelte';
+  import StatisticsNavSummary from '$lib/components/features/statistics/StatisticsNavSummary.svelte';
   import { startFlashTitle } from '$lib/flash-title.js';
 
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck';
@@ -85,6 +91,73 @@
     mql.addEventListener('change', onChange);
     return () => mql.removeEventListener('change', onChange);
   });
+
+  // The statistics summary card is desktop-only chrome (hidden below md), so its
+  // data load is gated on the same breakpoint. Mirrors the reduced-motion setup.
+  function readDesktopViewport(): boolean {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(min-width: 768px)').matches;
+  }
+  let desktopViewport = $state(readDesktopViewport());
+
+  $effect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mql = window.matchMedia('(min-width: 768px)');
+    const onChange = (e: MediaQueryListEvent) => {
+      desktopViewport = e.matches;
+    };
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  });
+
+  // Sidebar "today" statistics summary. Polled on a slow cadence (the daemon
+  // has no statistics push event); re-arms on reconnect and config changes.
+  // The generation counter discards responses from a superseded effect run —
+  // the same pattern as the Statistics route.
+  const STATISTICS_SUMMARY_REFRESH_MS = 2 * 60 * 1_000;
+  let statisticsSummaries = $state<readonly StatisticsMetricSummaryDto[]>([]);
+  let statisticsAvailable = $state(false);
+  let statisticsLoadGeneration = 0;
+  let statisticsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    void connectionGeneration.value;
+    void configChangedGeneration.value;
+    if (!appState.connected || !desktopViewport) {
+      statisticsLoadGeneration++;
+      statisticsAvailable = false;
+      statisticsSummaries = [];
+      return;
+    }
+    const generation = ++statisticsLoadGeneration;
+    // Debounce the initial load: `connected` and `connectionGeneration` flip in
+    // separate turns on connect, and the cleanup cancels the first schedule
+    // before any request is sent.
+    statisticsTimer = setTimeout(() => void refreshStatisticsSummary(generation), 100);
+    return () => {
+      clearTimeout(statisticsTimer);
+      statisticsLoadGeneration++;
+    };
+  });
+
+  async function refreshStatisticsSummary(generation: number): Promise<void> {
+    try {
+      const next = await getStatisticsSummary({
+        ...calendarRange(Date.now(), 1, localTimeZone),
+        measures: ['effectiveOutputTokensPerSecond', 'outputTokens', 'requestCount'],
+      });
+      if (generation !== statisticsLoadGeneration) return;
+      statisticsSummaries = next;
+      statisticsAvailable = true;
+    } catch {
+      if (generation !== statisticsLoadGeneration) return;
+      statisticsSummaries = [];
+      statisticsAvailable = false;
+    }
+    if (generation === statisticsLoadGeneration) {
+      statisticsTimer = setTimeout(() => void refreshStatisticsSummary(generation), STATISTICS_SUMMARY_REFRESH_MS);
+    }
+  }
 
   // Auto-open the escalation modal when new escalations arrive (unless on the Escalations page),
   // and auto-close when no escalations remain.
@@ -175,6 +248,13 @@
     { id: 'personas', label: 'Personas', icon: UserCircle },
     { id: 'settings', label: 'Settings', icon: GearSix },
   ] as const;
+
+  type NavView = (typeof navItems)[number]['id'];
+
+  function selectView(view: NavView): void {
+    appState.currentView = view;
+    closeDrawer();
+  }
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -226,7 +306,7 @@
     </div>
   </div>
 {:else}
-  {#snippet navContents()}
+  {#snippet navContents(showStatisticsSummary: boolean)}
     <div class="px-4 py-4 border-b border-border">
       <div class="flex items-center gap-2.5">
         <div class="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center shrink-0">
@@ -248,10 +328,8 @@
     <div class="flex-1 py-2 px-2 space-y-0.5">
       {#each navItems as item (item.id)}
         <button
-          onclick={() => {
-            appState.currentView = item.id;
-            closeDrawer();
-          }}
+          onclick={() => selectView(item.id)}
+          data-testid={`nav-${item.id}`}
           aria-current={appState.currentView === item.id ? 'page' : undefined}
           class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all
             {appState.currentView === item.id
@@ -284,6 +362,15 @@
         </button>
       {/each}
     </div>
+
+    {#if showStatisticsSummary}
+      <StatisticsNavSummary
+        available={statisticsAvailable}
+        summaries={statisticsSummaries}
+        active={appState.currentView === 'statistics'}
+        onselect={() => selectView('statistics')}
+      />
+    {/if}
 
     {#if appState.daemonStatus}
       <div class="px-4 py-3 border-t border-border text-[11px] text-muted-foreground space-y-1.5 font-mono">
@@ -354,7 +441,7 @@
 
     <!-- Desktop sidebar: hidden below md. -->
     <nav data-testid="sidebar-nav" class="hidden md:flex w-56 bg-sidebar border-r border-border flex-col shrink-0">
-      {@render navContents()}
+      {@render navContents(true)}
     </nav>
 
     <!-- Mobile drawer backdrop. Click to dismiss. -->
@@ -387,7 +474,7 @@
             <X size={18} />
           </button>
         </div>
-        {@render navContents()}
+        {@render navContents(false)}
       </nav>
     </div>
 

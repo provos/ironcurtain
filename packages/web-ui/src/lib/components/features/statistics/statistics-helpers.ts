@@ -7,6 +7,9 @@ import type {
 
 export type StatisticsIdentityMode = 'routed' | 'served';
 
+/** Resolved once per module load; calendar math is local-time by contract. */
+export const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
 const IDENTITY_DIMENSIONS: Readonly<
   Record<StatisticsIdentityMode, readonly [LlmStatisticsDimension, LlmStatisticsDimension]>
 > = {
@@ -163,6 +166,12 @@ export function allocateSeriesStyles(keys: readonly string[]): ReadonlyMap<strin
     });
   }
   return styles;
+}
+
+/** Compact throughput display for the speed figures (median, quartiles). */
+export function formatSpeed(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '—';
+  return value.toFixed(value >= 100 ? 0 : 1);
 }
 
 export function formatCompactNumber(value: number | null, maximumFractionDigits = 1): string {

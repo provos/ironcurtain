@@ -4,6 +4,7 @@ import { parsePort } from '../scripts/parse-port.js';
 
 export const PTY_BANNER_TEXT = 'Type to send keystrokes';
 export const PTY_LIVE_FRAME_TEXT = '[mock] agent working';
+const MOCK_PORT = parsePort(process.env.IRONCURTAIN_MOCK_PORT, 7400);
 const MOCK_RESET_PORT = parsePort(process.env.IRONCURTAIN_MOCK_RESET_PORT, 7401);
 
 /**
@@ -36,13 +37,15 @@ export async function connectWithToken(page: Page): Promise<void> {
 }
 
 /**
- * Click a navigation item in the sidebar by its label text.
+ * Click a navigation item in the sidebar. Nav buttons carry stable
+ * `nav-{id}` test ids — their accessible names absorb badge counts
+ * (e.g. "Workflows 1"), so name-based matching is fragile here.
  */
 export async function navigateTo(
   page: Page,
   view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs' | 'Workflows' | 'Personas' | 'Statistics' | 'Settings',
 ): Promise<void> {
-  await page.getByTestId('sidebar-nav').getByRole('button', { name: view }).click();
+  await page.getByTestId('sidebar-nav').getByTestId(`nav-${view.toLowerCase()}`).click();
 }
 
 /**
@@ -59,10 +62,7 @@ export async function navigateToWorkflowsList(page: Page): Promise<void> {
   // effect has fired by the time we land on the Workflows view. The gate badge
   // on the sidebar's Workflows nav item is the visible signal that
   // pendingGates is populated.
-  const workflowsNavBadge = page
-    .getByTestId('sidebar-nav')
-    .locator('button', { hasText: 'Workflows' })
-    .locator('.font-mono');
+  const workflowsNavBadge = page.getByTestId('sidebar-nav').getByTestId('nav-workflows').locator('.font-mono');
   await expect(workflowsNavBadge).toBeVisible({ timeout: 10_000 });
 
   await navigateTo(page, 'Workflows');
@@ -168,7 +168,7 @@ let rpcSeq = 0;
  * test raise a terminal-backed escalation while the UI remains on another view.
  */
 export async function sendPtyPromptRpc(label: number, text: string): Promise<void> {
-  const ws = new WebSocket('ws://127.0.0.1:7400/ws?token=mock-dev-token');
+  const ws = new WebSocket(`ws://127.0.0.1:${MOCK_PORT}/ws?token=mock-dev-token`);
 
   try {
     await new Promise<void>((resolve, reject) => {
