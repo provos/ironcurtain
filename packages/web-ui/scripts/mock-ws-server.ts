@@ -17,6 +17,7 @@ import { resolve, dirname } from 'path';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
+import { parsePort } from './parse-port.js';
 import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
 import { makeAgentSessionEndedPayload } from './agent-session-events.js';
 import {
@@ -83,7 +84,7 @@ interface MockEscalation {
 // State
 // ---------------------------------------------------------------------------
 
-const PORT = parseInt(process.env.PORT ?? '7400', 10);
+const PORT = parsePort(process.env.PORT, 7400);
 const MOCK_TOKEN = 'mock-dev-token';
 const startTime = Date.now();
 
@@ -2591,7 +2592,7 @@ wss.on('connection', (ws) => {
 });
 
 // HTTP server for test-only endpoints (e.g., state reset, workflow event injection)
-const RESET_PORT = parseInt(process.env.RESET_PORT ?? '7401', 10);
+const RESET_PORT = parsePort(process.env.RESET_PORT, 7401);
 const httpServer = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/__ready') {
     res.writeHead(204);

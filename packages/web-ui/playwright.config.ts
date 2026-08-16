@@ -1,8 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import { parsePort } from './scripts/parse-port.js';
 
-const webUiPort = parseInt(process.env.IRONCURTAIN_WEB_UI_PORT ?? '5173', 10);
-const mockPort = parseInt(process.env.IRONCURTAIN_MOCK_PORT ?? '7400', 10);
-const resetPort = parseInt(process.env.IRONCURTAIN_MOCK_RESET_PORT ?? '7401', 10);
+const webUiPort = parsePort(process.env.IRONCURTAIN_WEB_UI_PORT, 5173);
+const mockPort = parsePort(process.env.IRONCURTAIN_MOCK_PORT, 7400);
+const resetPort = parsePort(process.env.IRONCURTAIN_MOCK_RESET_PORT, 7401);
 
 export default defineConfig({
   testDir: 'e2e',

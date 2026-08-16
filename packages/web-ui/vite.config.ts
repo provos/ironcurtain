@@ -3,10 +3,11 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { sveltePhosphorOptimize } from 'phosphor-svelte/vite';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { parsePort } from './scripts/parse-port.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const devPort = parseInt(process.env.IRONCURTAIN_WEB_UI_PORT ?? '5173', 10);
-const daemonPort = parseInt(process.env.IRONCURTAIN_WEB_UI_DAEMON_PORT ?? '7400', 10);
+const devPort = parsePort(process.env.IRONCURTAIN_WEB_UI_PORT, 5173);
+const daemonPort = parsePort(process.env.IRONCURTAIN_WEB_UI_DAEMON_PORT, 7400);
 
 export default defineConfig({
   plugins: [svelte(), sveltePhosphorOptimize()],
