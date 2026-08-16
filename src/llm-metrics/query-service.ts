@@ -30,6 +30,7 @@ const MAX_SCAN_DURATION_MS = 5_000;
 const MAX_AGGREGATION_DURATION_MS = 5_000;
 const MAX_AGGREGATION_WORK_UNITS = 1_000_000;
 const AGGREGATION_YIELD_WORK_UNITS = 25_000;
+const AGGREGATION_DEADLINE_CHECK_ROWS = 128;
 const AGGREGATION_SCAN_PAGE_SIZE = 1_000;
 const MAX_GROUPS = 500;
 const MAX_DIMENSION_VALUES = 500;
@@ -116,6 +117,26 @@ class StatisticsAggregationGuard {
     await new Promise<void>((resolve) => setImmediate(resolve));
     this.checkDeadline();
   }
+}
+
+async function forEachAggregationItem<Item>(
+  items: Iterable<Item>,
+  guard: StatisticsAggregationGuard,
+  workUnitsPerItem: number,
+  visit: (item: Item) => void,
+): Promise<void> {
+  let completedItems = 0;
+  let pendingWorkUnits = 0;
+  for (const item of items) {
+    visit(item);
+    completedItems += 1;
+    pendingWorkUnits += workUnitsPerItem;
+    if (completedItems % AGGREGATION_DEADLINE_CHECK_ROWS === 0) {
+      await guard.checkpoint(pendingWorkUnits);
+      pendingWorkUnits = 0;
+    }
+  }
+  if (pendingWorkUnits > 0) await guard.checkpoint(pendingWorkUnits);
 }
 
 export type LlmStatisticsMeasure = StatisticsMeasure;
@@ -535,13 +556,14 @@ function rowGroupIdentity(
   return { key: JSON.stringify(groupBy.map((dimension) => dimensions[dimension])), dimensions };
 }
 
-function groupRows(
+async function groupRows(
   rows: readonly StoredLlmExchange[],
   groupBy: readonly LlmStatisticsDimension[],
-): StatisticsRowGroup[] {
+  guard: StatisticsAggregationGuard,
+): Promise<StatisticsRowGroup[]> {
   if (groupBy.length === 0) return [{ dimensions: {}, rows }];
   const groups = new Map<string, { dimensions: Record<string, string | boolean | null>; rows: StoredLlmExchange[] }>();
-  for (const row of rows) {
+  await forEachAggregationItem(rows, guard, groupBy.length, (row) => {
     const { key, dimensions } = rowGroupIdentity(row, groupBy);
     let group = groups.get(key);
     if (group === undefined) {
@@ -550,36 +572,59 @@ function groupRows(
       groups.set(key, group);
     }
     group.rows.push(row);
-  }
+  });
   return [...groups.values()];
 }
 
-function topGroupKeys(
+type RankedGroup = readonly [key: string, count: number];
+
+function compareRankedGroups(left: RankedGroup, right: RankedGroup): number {
+  return right[1] - left[1] || left[0].localeCompare(right[0]);
+}
+
+function insertRankedGroup(groups: RankedGroup[], candidate: RankedGroup, limit: number): void {
+  let lower = 0;
+  let upper = groups.length;
+  while (lower < upper) {
+    const middle = lower + Math.floor((upper - lower) / 2);
+    if (compareRankedGroups(candidate, groups[middle]) < 0) upper = middle;
+    else lower = middle + 1;
+  }
+  if (lower >= limit) return;
+  groups.splice(lower, 0, candidate);
+  if (groups.length > limit) groups.pop();
+}
+
+async function topGroupKeys(
   rows: readonly StoredLlmExchange[],
   groupBy: readonly LlmStatisticsDimension[],
   limit: number,
-): ReadonlySet<string> {
+  guard: StatisticsAggregationGuard,
+): Promise<ReadonlySet<string>> {
   const counts = new Map<string, number>();
-  for (const row of rows) {
+  await forEachAggregationItem(rows, guard, groupBy.length, (row) => {
     const { key } = rowGroupIdentity(row, groupBy);
     counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return new Set(
-    [...counts]
-      .sort(([leftKey, leftCount], [rightKey, rightCount]) => rightCount - leftCount || leftKey.localeCompare(rightKey))
-      .slice(0, limit)
-      .map(([key]) => key),
-  );
+  });
+
+  const ranked: RankedGroup[] = [];
+  await forEachAggregationItem(counts, guard, 1, (entry) => insertRankedGroup(ranked, entry, limit));
+  return new Set(ranked.map(([key]) => key));
 }
 
-function retainTopGroupRows(
+async function retainTopGroupRows(
   rows: readonly StoredLlmExchange[],
   groupBy: readonly LlmStatisticsDimension[],
   limit: number | undefined,
-): readonly StoredLlmExchange[] {
+  guard: StatisticsAggregationGuard,
+): Promise<readonly StoredLlmExchange[]> {
   if (limit === undefined) return rows;
-  const retained = topGroupKeys(rows, groupBy, limit);
-  return rows.filter((row) => retained.has(rowGroupIdentity(row, groupBy).key));
+  const retained = await topGroupKeys(rows, groupBy, limit, guard);
+  const result: StoredLlmExchange[] = [];
+  await forEachAggregationItem(rows, guard, groupBy.length, (row) => {
+    if (retained.has(rowGroupIdentity(row, groupBy).key)) result.push(row);
+  });
+  return result;
 }
 
 function validateSummaryQuery(query: SummaryQuery): void {
@@ -806,10 +851,8 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
     const guard = new StatisticsAggregationGuard();
     guard.ensureWork(rows.length, summaryAggregationPasses(query));
     const groupBy = query.groupBy ?? [];
-    const retainedRows = retainTopGroupRows(rows, groupBy, query.topGroups);
-    await guard.checkpoint(query.topGroups === undefined ? 0 : rows.length * groupBy.length * 2);
-    const groups = groupRows(retainedRows, groupBy);
-    await guard.checkpoint(retainedRows.length * groupBy.length);
+    const retainedRows = await retainTopGroupRows(rows, groupBy, query.topGroups, guard);
+    const groups = await groupRows(retainedRows, groupBy, guard);
     const budget = new StatisticsOutputBudget();
     const summaries = await summarizeGroups(groups, query.measures, budget, guard);
     budget.addOverhead([]);
@@ -849,24 +892,23 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
     const guard = new StatisticsAggregationGuard();
     guard.ensureWork(rows.length, summaryAggregationPasses(query, 1));
     const groupBy = query.groupBy ?? [];
-    const retainedRows = retainTopGroupRows(rows, groupBy, query.topGroups);
-    await guard.checkpoint(query.topGroups === undefined ? 0 : rows.length * groupBy.length * 2);
+    const retainedRows = await retainTopGroupRows(rows, groupBy, query.topGroups, guard);
     const budget = new StatisticsOutputBudget();
     const result: TimeBucket[] = [];
 
     if (hasFixedBucket) {
       const bucketMs = query.bucketMs ?? 1;
       const buckets = new Map<number, StoredLlmExchange[]>();
-      for (const row of retainedRows) {
+      await forEachAggregationItem(retainedRows, guard, 1, (row) => {
         const start = query.fromMs + Math.floor((row.completedAtMs - query.fromMs) / bucketMs) * bucketMs;
         const bucket = buckets.get(start) ?? [];
         bucket.push(row);
         buckets.set(start, bucket);
+      });
+      const preparedBuckets: Array<{ readonly fromMs: number; readonly groups: StatisticsRowGroup[] }> = [];
+      for (const [fromMs, bucketRows] of [...buckets.entries()].sort(([left], [right]) => left - right)) {
+        preparedBuckets.push({ fromMs, groups: await groupRows(bucketRows, groupBy, guard) });
       }
-      await guard.checkpoint(retainedRows.length);
-      const preparedBuckets = [...buckets.entries()]
-        .sort(([left], [right]) => left - right)
-        .map(([fromMs, bucketRows]) => ({ fromMs, groups: groupRows(bucketRows, groupBy) }));
       budget.ensureCardinality(
         preparedBuckets.reduce((total, bucket) => total + bucket.groups.length * query.measures.length, 0),
       );
@@ -884,17 +926,17 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
       if (calendarBucket === undefined) throw new Error('Invalid statistics calendar bucket');
       const formatter = calendarFormatter(calendarBucket.timeZone);
       const buckets = new Map<string, StoredLlmExchange[]>();
-      for (const row of retainedRows) {
+      await forEachAggregationItem(retainedRows, guard, 1, (row) => {
         const key = calendarDateKey(row.completedAtMs, formatter);
         const bucket = buckets.get(key) ?? [];
         bucket.push(row);
         buckets.set(key, bucket);
-      }
-      await guard.checkpoint(retainedRows.length);
+      });
       if (buckets.size > MAX_TIME_SERIES_BUCKETS) throw new Error('Statistics time series exceeds the bucket limit');
-      const preparedBuckets = [...buckets.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, bucketRows]) => ({ key, groups: groupRows(bucketRows, groupBy) }));
+      const preparedBuckets: Array<{ readonly key: string; readonly groups: StatisticsRowGroup[] }> = [];
+      for (const [key, bucketRows] of [...buckets.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+        preparedBuckets.push({ key, groups: await groupRows(bucketRows, groupBy, guard) });
+      }
       budget.ensureCardinality(
         preparedBuckets.reduce((total, bucket) => total + bucket.groups.length * query.measures.length, 0),
       );

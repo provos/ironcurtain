@@ -8,9 +8,20 @@ import type {
   StatisticsDistributionQuery,
   StatisticsMetricDistributionDto,
   StatisticsSeriesQuery,
+  StatisticsIdentitySource,
 } from '../packages/web-ui/src/lib/types.js';
+import type { IdentitySource } from '../src/llm-metrics/types.js';
 
 describe('statistics frontend DTO types', () => {
+  it('keeps identity-source values synchronized with the backend contract', () => {
+    const parity: [
+      StatisticsIdentitySource extends IdentitySource ? true : false,
+      IdentitySource extends StatisticsIdentitySource ? true : false,
+    ] = [true, true];
+
+    expect(parity).toEqual([true, true]);
+  });
+
   it('mirror service-tier and measurement-provenance query fields', () => {
     const dimensions: readonly LlmStatisticsDimension[] = [
       'actualServiceTier',

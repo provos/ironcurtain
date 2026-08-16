@@ -126,6 +126,105 @@ describe('LLM statistics query output safety', () => {
     expect(heartbeats).toBeGreaterThan(0);
   });
 
+  it('yields while assigning a large calendar series to local-day buckets', async () => {
+    const rows = Array.from({ length: 30_000 }, (_, index) => row(index));
+    const service = new LlmStatisticsQueryService(repository(rows));
+    const originalFormatToParts = Intl.DateTimeFormat.prototype.formatToParts;
+    let formatCalls = 0;
+    const formatSpy = vi.spyOn(Intl.DateTimeFormat.prototype, 'formatToParts').mockImplementation(function (
+      this: Intl.DateTimeFormat,
+      value?: number | Date,
+    ) {
+      formatCalls += 1;
+      return originalFormatToParts.call(this, value);
+    });
+    let active = true;
+    let observedIntermediateProgress = false;
+    const pulse = (): void => {
+      setImmediate(() => {
+        if (formatCalls > 0 && formatCalls < rows.length) observedIntermediateProgress = true;
+        if (active) pulse();
+      });
+    };
+    pulse();
+
+    try {
+      const result = await service.timeSeries({
+        fromMs: BASE_TIME,
+        toMs: BASE_TIME + rows.length,
+        measures: ['requestCount'],
+        calendarBucket: { unit: 'day', timeZone: 'America/Los_Angeles' },
+      });
+      expect(result).toMatchObject([{ summaries: [{ measure: 'requestCount', value: rows.length }] }]);
+    } finally {
+      active = false;
+      formatSpy.mockRestore();
+    }
+    expect(observedIntermediateProgress).toBe(true);
+  });
+
+  it('yields while ranking top groups over a large snapshot', async () => {
+    let aggregationStarted = false;
+    let dimensionReads = 0;
+    const rows = Array.from({ length: 30_000 }, (_, index) => {
+      const item = row(index);
+      Object.defineProperty(item, 'servedModel', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          if (aggregationStarted) dimensionReads += 1;
+          return `model-${index % 10}`;
+        },
+      });
+      return item;
+    });
+    const backing = repository(rows);
+    vi.mocked(backing.scan).mockImplementation((query: LlmExchangeScanQuery) => {
+      const start =
+        query.cursor === undefined
+          ? 0
+          : Math.max(
+              0,
+              rows.findIndex(
+                (candidate) =>
+                  candidate.completedAtMs === query.cursor?.completedAtMs &&
+                  candidate.exchangeId === query.cursor.exchangeId,
+              ) + 1,
+            );
+      const page = rows.slice(start, start + query.limit);
+      if (page.length === 0) aggregationStarted = true;
+      return Promise.resolve(page);
+    });
+    const service = new LlmStatisticsQueryService(backing);
+    let active = true;
+    let observedIntermediateProgress = false;
+    const pulse = (): void => {
+      setImmediate(() => {
+        if (dimensionReads > 0 && dimensionReads < rows.length) observedIntermediateProgress = true;
+        if (active) pulse();
+      });
+    };
+    pulse();
+
+    try {
+      const result = await service.summarize({
+        fromMs: BASE_TIME,
+        toMs: BASE_TIME + rows.length,
+        measures: ['requestCount'],
+        groupBy: ['servedModel'],
+        topGroups: 8,
+      });
+      expect(result).toHaveLength(8);
+      expect(result.every((summary) => summary.value === 3_000)).toBe(true);
+      expect(result.map((summary) => summary.dimensions.servedModel)).toEqual(
+        Array.from({ length: 8 }, (_, index) => `model-${index}`),
+      );
+    } finally {
+      active = false;
+    }
+    expect(observedIntermediateProgress).toBe(true);
+  });
+
   it('ranks top groups over the stable snapshot and retains a ranked null-identity group', async () => {
     const rows = [
       row(0, { completedAtMs: BASE_TIME, servedModel: null }),
