@@ -39,6 +39,8 @@ import type {
   StatisticsMetricSummaryDto,
   StatisticsSeriesQuery,
   StatisticsTimeBucketDto,
+  StatisticsDistributionQuery,
+  StatisticsMetricDistributionDto,
   StatisticsExchangeQuery,
   StatisticsExchangePageDto,
   StatisticsDimensionQuery,
@@ -48,7 +50,15 @@ import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
-export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas' | 'settings';
+export type ViewId =
+  | 'dashboard'
+  | 'statistics'
+  | 'sessions'
+  | 'escalations'
+  | 'jobs'
+  | 'workflows'
+  | 'personas'
+  | 'settings';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -882,6 +892,12 @@ export async function getStatisticsSummary(
 
 export async function getStatisticsSeries(query: StatisticsSeriesQuery): Promise<readonly StatisticsTimeBucketDto[]> {
   return getWsClient().request<readonly StatisticsTimeBucketDto[]>('statistics.series', { ...query });
+}
+
+export async function getStatisticsDistribution(
+  query: StatisticsDistributionQuery,
+): Promise<StatisticsMetricDistributionDto> {
+  return getWsClient().request<StatisticsMetricDistributionDto>('statistics.distribution', { ...query });
 }
 
 export async function getStatisticsExchanges(query: StatisticsExchangeQuery): Promise<StatisticsExchangePageDto> {

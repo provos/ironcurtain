@@ -5,6 +5,8 @@ import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const devPort = parseInt(process.env.IRONCURTAIN_WEB_UI_PORT ?? '5173', 10);
+const daemonPort = parseInt(process.env.IRONCURTAIN_WEB_UI_DAEMON_PORT ?? '7400', 10);
 
 export default defineConfig({
   plugins: [svelte(), sveltePhosphorOptimize()],
@@ -18,14 +20,14 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    port: 5173,
+    port: devPort,
     proxy: {
       // Matches both GET /ws/auth (preflight) and the WS upgrade at /ws.
       // http-proxy with `ws: true` handles both HTTP and WS over the
       // same target; the http:// scheme works for both paths because
       // the proxy inspects the Upgrade header to decide which to use.
       '/ws': {
-        target: 'http://127.0.0.1:7400',
+        target: `http://127.0.0.1:${daemonPort}`,
         ws: true,
         changeOrigin: true,
       },

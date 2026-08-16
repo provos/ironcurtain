@@ -99,6 +99,7 @@ export type MethodName =
   | 'statistics.capabilities'
   | 'statistics.summary'
   | 'statistics.series'
+  | 'statistics.distribution'
   | 'statistics.exchanges'
   | 'statistics.dimensions';
 

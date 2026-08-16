@@ -5,6 +5,9 @@ import type {
   LlmStatisticsDimension,
   StatisticsExchangeDto,
   StatisticsDimensionValueDto,
+  StatisticsDistributionQuery,
+  StatisticsMetricDistributionDto,
+  StatisticsSeriesQuery,
 } from '../packages/web-ui/src/lib/types.js';
 
 describe('statistics frontend DTO types', () => {
@@ -39,6 +42,8 @@ describe('statistics frontend DTO types', () => {
       | 'providerRequestId'
       | 'providerResponseId'
       | 'gatewayGenerationId'
+      | 'servedModelSource'
+      | 'servedProviderSource'
       | 'firstUpstreamBodyByteOffsetMs'
       | 'inputMeasurementProvenance'
       | 'outputMeasurementProvenance'
@@ -48,6 +53,8 @@ describe('statistics frontend DTO types', () => {
       providerRequestId: 'request-1',
       providerResponseId: 'response-1',
       gatewayGenerationId: 'generation-1',
+      servedModelSource: 'router_metadata',
+      servedProviderSource: 'router_metadata',
       firstUpstreamBodyByteOffsetMs: 12.5,
       inputMeasurementProvenance: 'reported_exact',
       outputMeasurementProvenance: 'reported_exact',
@@ -65,5 +72,33 @@ describe('statistics frontend DTO types', () => {
       { value: null, count: 1 },
     ];
     expect(values.map((entry) => entry.value)).toEqual([true, false, null]);
+  });
+
+  it('mirrors calendar-series and distribution contracts', () => {
+    const series: StatisticsSeriesQuery = {
+      fromMs: 0,
+      toMs: 1,
+      measures: ['requestCount'],
+      calendarBucket: { unit: 'day', timeZone: 'America/Los_Angeles' },
+    };
+    const query: StatisticsDistributionQuery = {
+      fromMs: 0,
+      toMs: 1,
+      measure: 'effectiveOutputTokensPerSecond',
+      maxBins: 20,
+    };
+    const result: StatisticsMetricDistributionDto = {
+      measure: query.measure,
+      bins: [{ lower: 0, upper: 1, count: 1 }],
+      sampleCount: 1,
+      eligibleCount: 2,
+      coverage: 0.5,
+      minimum: 0.5,
+      maximum: 0.5,
+      formulaVersion: 1,
+    };
+
+    expect(series.calendarBucket?.timeZone).toBe('America/Los_Angeles');
+    expect(result.bins).toHaveLength(1);
   });
 });

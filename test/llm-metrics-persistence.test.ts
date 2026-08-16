@@ -208,6 +208,8 @@ describe('SQLite LLM metrics repository', () => {
       totalTokens: 140,
       logicalProvider: 'openrouter',
       servedModel: 'served-model',
+      servedModelSource: 'router_metadata',
+      servedProviderSource: 'router_metadata',
       providerRequestId: 'request-1',
       providerResponseId: 'response-1',
       gatewayGenerationId: 'generation-1',
@@ -373,6 +375,7 @@ describe('SQLite LLM metrics repository', () => {
 
     await expect(opened.repository.scan(range)).resolves.toHaveLength(2);
     expect(readerWorkers).toBe(1);
+    expect(opened.repository.health()).toMatchObject({ readerState: 'ready', readerLastError: null });
     await opened.repository.close();
 
     const database = new DatabaseSync(opened.databasePath, { readOnly: true });
@@ -964,7 +967,13 @@ describe('LLM statistics query service', () => {
         completeUsageExchanges: 1,
         partialUsageExchanges: 1,
       });
-      expect(await service.capabilities()).toMatchObject({ available: true, dtoVersion: 1, formulaVersion: 1 });
+      expect(await service.capabilities()).toMatchObject({
+        available: true,
+        dtoVersion: 2,
+        formulaVersion: 1,
+        maxScannedRows: 100_000,
+        allowedCalendarBucketUnits: ['day'],
+      });
     } finally {
       await repository.close();
       rmSync(directory, { recursive: true, force: true });

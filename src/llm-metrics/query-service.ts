@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 
 import type {
   LlmExchangeFilters,
@@ -8,12 +9,28 @@ import type {
   LlmStatisticsDimensionValue,
   StoredLlmExchange,
 } from './persistence/repository.js';
-import { STATISTICS_BUCKET_SIZES_MS } from './query-contract.js';
+import {
+  isValidStatisticsTimeZone,
+  MAX_STATISTICS_AGGREGATION_ROWS,
+  MAX_STATISTICS_DISTRIBUTION_BINS,
+  MAX_STATISTICS_TOP_GROUPS,
+  STATISTICS_BUCKET_SIZES_MS,
+  STATISTICS_CALENDAR_BUCKET_UNITS,
+  STATISTICS_DISTRIBUTION_MEASURES,
+  STATISTICS_MEASURES,
+  type StatisticsDistributionMeasure,
+  type StatisticsMeasure,
+} from './query-contract.js';
 
-const DTO_VERSION = 1;
+const DTO_VERSION = 2;
 const FORMULA_VERSION = 1;
 const MAX_PAGE_SIZE = 500;
-const MAX_SCANNED_ROWS = 10_000;
+const MAX_SCANNED_BYTES = 64 * 1024 * 1024;
+const MAX_SCAN_DURATION_MS = 5_000;
+const MAX_AGGREGATION_DURATION_MS = 5_000;
+const MAX_AGGREGATION_WORK_UNITS = 1_000_000;
+const AGGREGATION_YIELD_WORK_UNITS = 25_000;
+const AGGREGATION_SCAN_PAGE_SIZE = 1_000;
 const MAX_GROUPS = 500;
 const MAX_DIMENSION_VALUES = 500;
 const MAX_OUTPUT_ITEMS = 10_000;
@@ -21,9 +38,16 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_TIME_SERIES_BUCKETS = 1_000;
 const MAX_CURSOR_BYTES = 1_024;
 const MAX_RANGE_MS = 366 * 24 * 60 * 60 * 1_000;
+const DEFAULT_DISTRIBUTION_BINS = 20;
 const ALLOWED_BUCKETS_MS = new Set<number>(STATISTICS_BUCKET_SIZES_MS);
+const ALLOWED_MEASURES: ReadonlySet<StatisticsMeasure> = new Set(STATISTICS_MEASURES);
+const ALLOWED_DISTRIBUTION_MEASURES: ReadonlySet<StatisticsDistributionMeasure> = new Set(
+  STATISTICS_DISTRIBUTION_MEASURES,
+);
 const OUTPUT_CARDINALITY_ERROR = 'Statistics response exceeds the output-cardinality limit';
 const OUTPUT_BYTES_ERROR = 'Statistics response exceeds the output-byte limit';
+const AGGREGATION_WORK_ERROR = 'Statistics query exceeds the aggregation-work limit';
+const AGGREGATION_DURATION_ERROR = 'Statistics query exceeds the aggregation-duration limit';
 
 function serializedBytes(value: unknown): number {
   if (value === undefined) throw new Error(OUTPUT_BYTES_ERROR);
@@ -69,50 +93,33 @@ class StatisticsOutputBudget {
   }
 }
 
-export type LlmStatisticsMeasure =
-  | 'requestCount'
-  | 'refusalCount'
-  | 'refusalRate'
-  | 'errorCount'
-  | 'errorRate'
-  | 'inputTokens'
-  | 'uncachedInputTokens'
-  | 'cacheReadInputTokens'
-  | 'cacheWriteInputTokens'
-  | 'toolUseInputTokens'
-  | 'thinkingTokens'
-  | 'nonThinkingOutputTokens'
-  | 'outputTokens'
-  | 'totalTokens'
-  | 'costUsd'
-  | 'ttftMs'
-  | 'upstreamLatencyMs'
-  | 'clientLatencyMs'
-  | 'observableOutputTokensPerSecond'
-  | 'effectiveOutputTokensPerSecond';
+class StatisticsAggregationGuard {
+  private readonly deadlineAt = performance.now() + MAX_AGGREGATION_DURATION_MS;
+  private workSinceYield = 0;
 
-const ALLOWED_MEASURES: ReadonlySet<LlmStatisticsMeasure> = new Set<LlmStatisticsMeasure>([
-  'requestCount',
-  'refusalCount',
-  'refusalRate',
-  'errorCount',
-  'errorRate',
-  'inputTokens',
-  'uncachedInputTokens',
-  'cacheReadInputTokens',
-  'cacheWriteInputTokens',
-  'toolUseInputTokens',
-  'thinkingTokens',
-  'nonThinkingOutputTokens',
-  'outputTokens',
-  'totalTokens',
-  'costUsd',
-  'ttftMs',
-  'upstreamLatencyMs',
-  'clientLatencyMs',
-  'observableOutputTokensPerSecond',
-  'effectiveOutputTokensPerSecond',
-]);
+  ensureWork(rowCount: number, passes: number): void {
+    const workUnits = rowCount * passes;
+    if (!Number.isSafeInteger(workUnits) || workUnits > MAX_AGGREGATION_WORK_UNITS) {
+      throw new Error(AGGREGATION_WORK_ERROR);
+    }
+  }
+
+  checkDeadline(): void {
+    if (performance.now() > this.deadlineAt) throw new Error(AGGREGATION_DURATION_ERROR);
+  }
+
+  async checkpoint(completedWorkUnits: number): Promise<void> {
+    this.checkDeadline();
+    this.workSinceYield += completedWorkUnits;
+    if (this.workSinceYield < AGGREGATION_YIELD_WORK_UNITS) return;
+    this.workSinceYield = 0;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    this.checkDeadline();
+  }
+}
+
+export type LlmStatisticsMeasure = StatisticsMeasure;
+export type LlmStatisticsDistributionMeasure = StatisticsDistributionMeasure;
 
 export interface StatisticsRangeQuery {
   readonly fromMs: number;
@@ -134,6 +141,8 @@ export interface CursorPage<T> {
 export interface SummaryQuery extends StatisticsRangeQuery {
   readonly measures: readonly LlmStatisticsMeasure[];
   readonly groupBy?: readonly LlmStatisticsDimension[];
+  /** Keep the highest request-count groups over the query's stable snapshot. */
+  readonly topGroups?: number;
 }
 
 export interface MetricSummary {
@@ -142,6 +151,8 @@ export interface MetricSummary {
   /** Sum/count/rate for additive measures; arithmetic mean for latency and rate-per-second samples. */
   readonly value: number | null;
   readonly sampleCount: number;
+  /** Distinct non-null session IDs among observations sampled for this measure. */
+  readonly sampleSessionCount: number;
   readonly eligibleCount: number;
   readonly coverage: number;
   readonly median: number | null;
@@ -151,7 +162,13 @@ export interface MetricSummary {
 }
 
 export interface TimeSeriesQuery extends SummaryQuery {
-  readonly bucketMs: number;
+  /** Fixed-duration bucket retained for backwards compatibility. Exactly one bucket form is required. */
+  readonly bucketMs?: number;
+  /** Calendar day in an IANA time zone. Exactly one bucket form is required. */
+  readonly calendarBucket?: {
+    readonly unit: 'day';
+    readonly timeZone: string;
+  };
 }
 
 export interface TimeBucket {
@@ -168,6 +185,28 @@ export interface DimensionQuery extends StatisticsRangeQuery {
 export interface DimensionValue {
   readonly value: LlmStatisticsDimensionValue;
   readonly count: number;
+}
+
+export interface DistributionQuery extends StatisticsRangeQuery {
+  readonly measure: LlmStatisticsDistributionMeasure;
+  readonly maxBins?: number;
+}
+
+export interface DistributionBin {
+  readonly lower: number;
+  readonly upper: number;
+  readonly count: number;
+}
+
+export interface MetricDistribution {
+  readonly measure: LlmStatisticsDistributionMeasure;
+  readonly bins: readonly DistributionBin[];
+  readonly sampleCount: number;
+  readonly eligibleCount: number;
+  readonly coverage: number;
+  readonly minimum: number | null;
+  readonly maximum: number | null;
+  readonly formulaVersion: number;
 }
 
 export interface LlmUsageTotals {
@@ -197,6 +236,7 @@ export interface StatisticsCapabilities {
   readonly maxScannedRows: number;
   readonly maxGroups: number;
   readonly allowedBucketSizesMs: readonly number[];
+  readonly allowedCalendarBucketUnits: readonly (typeof STATISTICS_CALENDAR_BUCKET_UNITS)[number][];
   readonly health: LlmMetricsRepositoryHealth;
 }
 
@@ -204,6 +244,7 @@ export interface LlmStatisticsReader {
   listExchanges(query: ExchangeQuery): Promise<CursorPage<StoredLlmExchange>>;
   summarize(query: SummaryQuery): Promise<readonly MetricSummary[]>;
   timeSeries(query: TimeSeriesQuery): Promise<readonly TimeBucket[]>;
+  distribution(query: DistributionQuery): Promise<MetricDistribution>;
   dimensions(query: DimensionQuery): Promise<readonly DimensionValue[]>;
   sessionTotals(sessionId: string): Promise<LlmUsageTotals>;
   capabilities(): Promise<StatisticsCapabilities>;
@@ -397,6 +438,10 @@ function rowMeasure(row: StoredLlmExchange, measure: LlmStatisticsMeasure): numb
   }
 }
 
+function distinctSessionCount(rows: readonly StoredLlmExchange[]): number {
+  return new Set(rows.flatMap((row) => (row.sessionId === null ? [] : [row.sessionId]))).size;
+}
+
 function summarizeMeasure(
   rows: readonly StoredLlmExchange[],
   dimensions: Readonly<Record<string, string | boolean | null>>,
@@ -406,6 +451,7 @@ function summarizeMeasure(
   let value: number | null;
   let eligibleCount: number;
   let sampleCount: number;
+  let sampleRows: readonly StoredLlmExchange[];
 
   switch (measure) {
     case 'requestCount':
@@ -413,6 +459,7 @@ function summarizeMeasure(
       value = rows.length;
       eligibleCount = rows.length;
       sampleCount = rows.length;
+      sampleRows = rows;
       break;
     case 'refusalCount':
     case 'refusalRate': {
@@ -422,6 +469,7 @@ function summarizeMeasure(
       value = measure === 'refusalCount' ? refused : eligible.length === 0 ? null : refused / eligible.length;
       eligibleCount = rows.length;
       sampleCount = eligible.length;
+      sampleRows = eligible;
       break;
     }
     case 'errorCount':
@@ -431,12 +479,18 @@ function summarizeMeasure(
       value = measure === 'errorCount' ? errors : rows.length === 0 ? null : errors / rows.length;
       eligibleCount = rows.length;
       sampleCount = rows.length;
+      sampleRows = rows;
       break;
     }
-    default:
-      values = rows.map((row) => rowMeasure(row, measure)).filter((entry): entry is number => entry !== null);
+    default: {
+      const samples = rows.flatMap((row) => {
+        const measured = rowMeasure(row, measure);
+        return measured === null ? [] : [{ row, measured }];
+      });
+      values = samples.map((sample) => sample.measured);
       eligibleCount = rows.length;
       sampleCount = values.length;
+      sampleRows = samples.map((sample) => sample.row);
       value =
         values.length === 0
           ? null
@@ -448,6 +502,7 @@ function summarizeMeasure(
             ? values.reduce((total, entry) => total + entry, 0) / values.length
             : values.reduce((total, entry) => total + entry, 0);
       break;
+    }
   }
 
   const sorted = [...values].sort((left, right) => left - right);
@@ -456,6 +511,7 @@ function summarizeMeasure(
     measure,
     value,
     sampleCount,
+    sampleSessionCount: distinctSessionCount(sampleRows),
     eligibleCount,
     coverage: eligibleCount === 0 ? 0 : sampleCount / eligibleCount,
     median: quantile(sorted, 0.5),
@@ -465,20 +521,28 @@ function summarizeMeasure(
   };
 }
 
+interface StatisticsRowGroup {
+  readonly dimensions: Readonly<Record<string, string | boolean | null>>;
+  readonly rows: readonly StoredLlmExchange[];
+}
+
+function rowGroupIdentity(
+  row: StoredLlmExchange,
+  groupBy: readonly LlmStatisticsDimension[],
+): { readonly key: string; readonly dimensions: Record<string, string | boolean | null> } {
+  const dimensions: Record<string, string | boolean | null> = {};
+  for (const dimension of groupBy) dimensions[dimension] = DIMENSION_VALUE[dimension](row);
+  return { key: JSON.stringify(groupBy.map((dimension) => dimensions[dimension])), dimensions };
+}
+
 function groupRows(
   rows: readonly StoredLlmExchange[],
   groupBy: readonly LlmStatisticsDimension[],
-): readonly { dimensions: Readonly<Record<string, string | boolean | null>>; rows: readonly StoredLlmExchange[] }[] {
-  if (new Set(groupBy).size !== groupBy.length || groupBy.length > 3) throw new Error('Invalid statistics grouping');
-  if (groupBy.some((dimension) => !(dimension in DIMENSION_VALUE))) {
-    throw new Error('Unknown statistics dimension');
-  }
+): StatisticsRowGroup[] {
   if (groupBy.length === 0) return [{ dimensions: {}, rows }];
   const groups = new Map<string, { dimensions: Record<string, string | boolean | null>; rows: StoredLlmExchange[] }>();
   for (const row of rows) {
-    const dimensions: Record<string, string | boolean | null> = {};
-    for (const dimension of groupBy) dimensions[dimension] = DIMENSION_VALUE[dimension](row);
-    const key = JSON.stringify(groupBy.map((dimension) => dimensions[dimension]));
+    const { key, dimensions } = rowGroupIdentity(row, groupBy);
     let group = groups.get(key);
     if (group === undefined) {
       if (groups.size >= MAX_GROUPS) throw new Error('Statistics query exceeds the group cardinality limit');
@@ -488,6 +552,34 @@ function groupRows(
     group.rows.push(row);
   }
   return [...groups.values()];
+}
+
+function topGroupKeys(
+  rows: readonly StoredLlmExchange[],
+  groupBy: readonly LlmStatisticsDimension[],
+  limit: number,
+): ReadonlySet<string> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const { key } = rowGroupIdentity(row, groupBy);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return new Set(
+    [...counts]
+      .sort(([leftKey, leftCount], [rightKey, rightCount]) => rightCount - leftCount || leftKey.localeCompare(rightKey))
+      .slice(0, limit)
+      .map(([key]) => key),
+  );
+}
+
+function retainTopGroupRows(
+  rows: readonly StoredLlmExchange[],
+  groupBy: readonly LlmStatisticsDimension[],
+  limit: number | undefined,
+): readonly StoredLlmExchange[] {
+  if (limit === undefined) return rows;
+  const retained = topGroupKeys(rows, groupBy, limit);
+  return rows.filter((row) => retained.has(rowGroupIdentity(row, groupBy).key));
 }
 
 function validateSummaryQuery(query: SummaryQuery): void {
@@ -506,21 +598,37 @@ function validateSummaryQuery(query: SummaryQuery): void {
   if (groupBy.some((dimension) => !(dimension in DIMENSION_VALUE))) {
     throw new Error('Unknown statistics dimension');
   }
+  if (
+    query.topGroups !== undefined &&
+    (!Number.isSafeInteger(query.topGroups) ||
+      query.topGroups < 1 ||
+      query.topGroups > MAX_STATISTICS_TOP_GROUPS ||
+      groupBy.length === 0)
+  ) {
+    throw new Error('Invalid statistics top-groups limit');
+  }
 }
 
-function summarizeRows(
-  rows: readonly StoredLlmExchange[],
-  query: SummaryQuery,
+function summaryAggregationPasses(query: SummaryQuery, additionalPasses = 0): number {
+  const groupingDimensions = query.groupBy?.length ?? 0;
+  const topGroupPasses = query.topGroups === undefined ? 0 : groupingDimensions * 2;
+  return query.measures.length + groupingDimensions + topGroupPasses + additionalPasses;
+}
+
+async function summarizeGroups(
+  groups: readonly StatisticsRowGroup[],
+  measures: readonly LlmStatisticsMeasure[],
   budget: StatisticsOutputBudget,
-): readonly MetricSummary[] {
-  const groups = groupRows(rows, query.groupBy ?? []);
-  budget.ensureCardinality(groups.length * query.measures.length);
+  guard: StatisticsAggregationGuard,
+): Promise<readonly MetricSummary[]> {
+  budget.ensureCardinality(groups.length * measures.length);
   const summaries: MetricSummary[] = [];
   for (const group of groups) {
-    for (const measure of query.measures) {
+    for (const measure of measures) {
       const summary = summarizeMeasure(group.rows, group.dimensions, measure);
       budget.addItem(summary);
       summaries.push(summary);
+      await guard.checkpoint(group.rows.length);
     }
   }
   return summaries;
@@ -531,6 +639,112 @@ function optionalSum(rows: readonly StoredLlmExchange[], field: keyof StoredLlmE
     .map((row) => row[field])
     .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
   return values.length === 0 ? null : values.reduce((total, value) => total + value, 0);
+}
+
+interface CalendarDateParts {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+}
+
+function calendarFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat('en-CA-u-ca-iso8601-nu-latn', {
+    timeZone,
+    calendar: 'iso8601',
+    numberingSystem: 'latn',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+}
+
+function calendarDateParts(timestampMs: number, formatter: Intl.DateTimeFormat): CalendarDateParts {
+  const parts = new Map(formatter.formatToParts(timestampMs).map((part) => [part.type, part.value]));
+  const year = Number(parts.get('year'));
+  const month = Number(parts.get('month'));
+  const day = Number(parts.get('day'));
+  if (!Number.isSafeInteger(year) || !Number.isSafeInteger(month) || !Number.isSafeInteger(day)) {
+    throw new Error('Unable to calculate statistics calendar bucket');
+  }
+  return { year, month, day };
+}
+
+function calendarDateKey(timestampMs: number, formatter: Intl.DateTimeFormat): string {
+  const { year, month, day } = calendarDateParts(timestampMs, formatter);
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function parseCalendarDateKey(key: string): CalendarDateParts {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (match === null) throw new Error('Unable to calculate statistics calendar bucket');
+  return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+}
+
+function nextCalendarDateKey(key: string): string {
+  const { year, month, day } = parseCalendarDateKey(key);
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  return `${String(next.getUTCFullYear()).padStart(4, '0')}-${String(next.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    next.getUTCDate(),
+  ).padStart(2, '0')}`;
+}
+
+/** Find the first instant whose local ISO calendar date is `key`. */
+function calendarDateStartMs(key: string, formatter: Intl.DateTimeFormat): number {
+  const { year, month, day } = parseCalendarDateKey(key);
+  const approximate = Date.UTC(year, month - 1, day);
+  let lower = approximate - 36 * 60 * 60 * 1_000;
+  let upper = approximate + 36 * 60 * 60 * 1_000;
+  while (lower < upper) {
+    const middle = lower + Math.floor((upper - lower) / 2);
+    if (calendarDateKey(middle, formatter) < key) lower = middle + 1;
+    else upper = middle;
+  }
+  if (calendarDateKey(lower, formatter) !== key) throw new Error('Unable to calculate statistics calendar bucket');
+  return lower;
+}
+
+function niceCeiling(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  const ceiling = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return ceiling * magnitude;
+}
+
+function distributionBins(sorted: readonly number[], maxBins: number): readonly DistributionBin[] {
+  if (sorted.length === 0) return [];
+  const minimum = sorted[0];
+  const maximum = sorted[sorted.length - 1];
+  if (minimum === maximum) {
+    const width = niceCeiling(Math.max(Math.abs(minimum) * 0.1, 1));
+    return [{ lower: minimum, upper: minimum + width, count: sorted.length }];
+  }
+
+  const interquartileRange = (quantile(sorted, 0.75) ?? maximum) - (quantile(sorted, 0.25) ?? minimum);
+  const rawWidth = interquartileRange > 0 ? (2 * interquartileRange) / Math.cbrt(sorted.length) : 0;
+  const desiredBins = Math.max(
+    1,
+    Math.min(maxBins, rawWidth > 0 ? Math.ceil((maximum - minimum) / rawWidth) : Math.ceil(Math.sqrt(sorted.length))),
+  );
+  let width = niceCeiling((maximum - minimum) / desiredBins);
+  let lower = Math.floor(minimum / width) * width;
+  let binCount = Math.max(1, Math.ceil((maximum - lower) / width));
+  while (binCount > maxBins) {
+    width = niceCeiling(width * 1.01);
+    lower = Math.floor(minimum / width) * width;
+    binCount = Math.max(1, Math.ceil((maximum - lower) / width));
+  }
+  const bins = Array.from({ length: binCount }, (_, index) => ({
+    lower: lower + index * width,
+    upper: lower + (index + 1) * width,
+    count: 0,
+  }));
+  for (const value of sorted) {
+    const index = Math.min(binCount - 1, Math.max(0, Math.floor((value - lower) / width)));
+    const bin = bins[index];
+    bins[index] = { ...bin, count: bin.count + 1 };
+  }
+  return bins;
 }
 
 export class LlmStatisticsQueryService implements LlmStatisticsReader {
@@ -589,42 +803,143 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
     validateRange(query);
     validateSummaryQuery(query);
     const rows = await this.loadBoundedRows(query);
+    const guard = new StatisticsAggregationGuard();
+    guard.ensureWork(rows.length, summaryAggregationPasses(query));
+    const groupBy = query.groupBy ?? [];
+    const retainedRows = retainTopGroupRows(rows, groupBy, query.topGroups);
+    await guard.checkpoint(query.topGroups === undefined ? 0 : rows.length * groupBy.length * 2);
+    const groups = groupRows(retainedRows, groupBy);
+    await guard.checkpoint(retainedRows.length * groupBy.length);
     const budget = new StatisticsOutputBudget();
-    const summaries = summarizeRows(rows, query, budget);
+    const summaries = await summarizeGroups(groups, query.measures, budget, guard);
     budget.addOverhead([]);
     return budget.complete(summaries);
   }
 
   async timeSeries(query: TimeSeriesQuery): Promise<readonly TimeBucket[]> {
     validateRange(query);
-    if (!Number.isSafeInteger(query.bucketMs) || !ALLOWED_BUCKETS_MS.has(query.bucketMs)) {
+    const hasFixedBucket = query.bucketMs !== undefined;
+    const hasCalendarBucket = query.calendarBucket !== undefined;
+    if (hasFixedBucket === hasCalendarBucket) throw new Error('Exactly one statistics bucket form is required');
+    if (hasFixedBucket && (!Number.isSafeInteger(query.bucketMs) || !ALLOWED_BUCKETS_MS.has(query.bucketMs ?? -1))) {
       throw new Error('Invalid statistics bucket size');
     }
+    if (hasCalendarBucket) {
+      const calendarBucket: unknown = query.calendarBucket;
+      if (
+        typeof calendarBucket !== 'object' ||
+        calendarBucket === null ||
+        !('unit' in calendarBucket) ||
+        calendarBucket.unit !== 'day' ||
+        !('timeZone' in calendarBucket) ||
+        typeof calendarBucket.timeZone !== 'string' ||
+        !isValidStatisticsTimeZone(calendarBucket.timeZone)
+      ) {
+        throw new Error('Invalid statistics calendar bucket');
+      }
+    }
     validateSummaryQuery(query);
-    if (Math.ceil((query.toMs - query.fromMs + 1) / query.bucketMs) > MAX_TIME_SERIES_BUCKETS) {
+    if (
+      hasFixedBucket &&
+      Math.ceil((query.toMs - query.fromMs + 1) / (query.bucketMs ?? 1)) > MAX_TIME_SERIES_BUCKETS
+    ) {
       throw new Error('Statistics time series exceeds the bucket limit');
     }
     const rows = await this.loadBoundedRows(query);
-    const buckets = new Map<number, StoredLlmExchange[]>();
-    for (const row of rows) {
-      const start = query.fromMs + Math.floor((row.completedAtMs - query.fromMs) / query.bucketMs) * query.bucketMs;
-      const bucket = buckets.get(start) ?? [];
-      bucket.push(row);
-      buckets.set(start, bucket);
-    }
+    const guard = new StatisticsAggregationGuard();
+    guard.ensureWork(rows.length, summaryAggregationPasses(query, 1));
+    const groupBy = query.groupBy ?? [];
+    const retainedRows = retainTopGroupRows(rows, groupBy, query.topGroups);
+    await guard.checkpoint(query.topGroups === undefined ? 0 : rows.length * groupBy.length * 2);
     const budget = new StatisticsOutputBudget();
     const result: TimeBucket[] = [];
-    for (const [fromMs, bucketRows] of [...buckets.entries()].sort(([left], [right]) => left - right)) {
-      const bucket = {
-        fromMs,
-        toMs: Math.min(fromMs + query.bucketMs, query.toMs + 1),
-        summaries: summarizeRows(bucketRows, query, budget),
-      };
-      budget.addOverhead({ ...bucket, summaries: [] });
-      result.push(bucket);
+
+    if (hasFixedBucket) {
+      const bucketMs = query.bucketMs ?? 1;
+      const buckets = new Map<number, StoredLlmExchange[]>();
+      for (const row of retainedRows) {
+        const start = query.fromMs + Math.floor((row.completedAtMs - query.fromMs) / bucketMs) * bucketMs;
+        const bucket = buckets.get(start) ?? [];
+        bucket.push(row);
+        buckets.set(start, bucket);
+      }
+      await guard.checkpoint(retainedRows.length);
+      const preparedBuckets = [...buckets.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([fromMs, bucketRows]) => ({ fromMs, groups: groupRows(bucketRows, groupBy) }));
+      budget.ensureCardinality(
+        preparedBuckets.reduce((total, bucket) => total + bucket.groups.length * query.measures.length, 0),
+      );
+      for (const { fromMs, groups } of preparedBuckets) {
+        const bucket = {
+          fromMs,
+          toMs: Math.min(fromMs + bucketMs, query.toMs + 1),
+          summaries: await summarizeGroups(groups, query.measures, budget, guard),
+        };
+        budget.addOverhead({ ...bucket, summaries: [] });
+        result.push(bucket);
+      }
+    } else {
+      const calendarBucket = query.calendarBucket;
+      if (calendarBucket === undefined) throw new Error('Invalid statistics calendar bucket');
+      const formatter = calendarFormatter(calendarBucket.timeZone);
+      const buckets = new Map<string, StoredLlmExchange[]>();
+      for (const row of retainedRows) {
+        const key = calendarDateKey(row.completedAtMs, formatter);
+        const bucket = buckets.get(key) ?? [];
+        bucket.push(row);
+        buckets.set(key, bucket);
+      }
+      await guard.checkpoint(retainedRows.length);
+      if (buckets.size > MAX_TIME_SERIES_BUCKETS) throw new Error('Statistics time series exceeds the bucket limit');
+      const preparedBuckets = [...buckets.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, bucketRows]) => ({ key, groups: groupRows(bucketRows, groupBy) }));
+      budget.ensureCardinality(
+        preparedBuckets.reduce((total, bucket) => total + bucket.groups.length * query.measures.length, 0),
+      );
+      for (const { key, groups } of preparedBuckets) {
+        const fromMs = Math.max(query.fromMs, calendarDateStartMs(key, formatter));
+        const toMs = Math.min(query.toMs + 1, calendarDateStartMs(nextCalendarDateKey(key), formatter));
+        const bucket = { fromMs, toMs, summaries: await summarizeGroups(groups, query.measures, budget, guard) };
+        budget.addOverhead({ ...bucket, summaries: [] });
+        result.push(bucket);
+      }
     }
     budget.addOverhead([]);
     return budget.complete(result);
+  }
+
+  async distribution(query: DistributionQuery): Promise<MetricDistribution> {
+    validateRange(query);
+    if (!ALLOWED_DISTRIBUTION_MEASURES.has(query.measure)) throw new Error('Invalid statistics distribution measure');
+    const maxBins = boundedInteger(
+      query.maxBins,
+      DEFAULT_DISTRIBUTION_BINS,
+      MAX_STATISTICS_DISTRIBUTION_BINS,
+      'distribution bins',
+    );
+    const rows = await this.loadBoundedRows(query);
+    const guard = new StatisticsAggregationGuard();
+    guard.ensureWork(rows.length, 1);
+    const samples = rows.flatMap((row) => {
+      const value = rowMeasure(row, query.measure);
+      return value === null ? [] : [value];
+    });
+    await guard.checkpoint(rows.length);
+    const sorted = samples.sort((left, right) => left - right);
+    await guard.checkpoint(samples.length);
+    const result: MetricDistribution = {
+      measure: query.measure,
+      bins: distributionBins(sorted, maxBins),
+      sampleCount: sorted.length,
+      eligibleCount: rows.length,
+      coverage: rows.length === 0 ? 0 : sorted.length / rows.length,
+      minimum: sorted[0] ?? null,
+      maximum: sorted.at(-1) ?? null,
+      formulaVersion: FORMULA_VERSION,
+    };
+    return new StatisticsOutputBudget().complete(result);
   }
 
   async dimensions(query: DimensionQuery): Promise<readonly DimensionValue[]> {
@@ -688,23 +1003,51 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
       formulaVersion: FORMULA_VERSION,
       schemaVersion: health.schemaVersion,
       maxPageSize: MAX_PAGE_SIZE,
-      maxScannedRows: MAX_SCANNED_ROWS,
+      maxScannedRows: MAX_STATISTICS_AGGREGATION_ROWS,
       maxGroups: MAX_GROUPS,
       allowedBucketSizesMs: [...ALLOWED_BUCKETS_MS],
+      allowedCalendarBucketUnits: [...STATISTICS_CALENDAR_BUCKET_UNITS],
       health,
     });
   }
 
   private async loadBoundedRows(query: StatisticsRangeQuery): Promise<readonly StoredLlmExchange[]> {
     const snapshotMaxSequence = await this.repository.snapshotMaxSequence();
-    const rows = await this.repository.scan({
-      fromMs: query.fromMs,
-      toMs: query.toMs,
-      filters: query.filters,
-      limit: MAX_SCANNED_ROWS + 1,
-      snapshotMaxSequence,
-    });
-    if (rows.length > MAX_SCANNED_ROWS) throw new Error('Statistics query exceeds the scanned-row limit');
+    const startedAt = performance.now();
+    const rows: StoredLlmExchange[] = [];
+    let scannedBytes = 0;
+    let cursor: { readonly completedAtMs: number; readonly exchangeId: string } | undefined;
+    while (rows.length <= MAX_STATISTICS_AGGREGATION_ROWS) {
+      if (performance.now() - startedAt > MAX_SCAN_DURATION_MS) {
+        throw new Error('Statistics query exceeds the scan-duration limit');
+      }
+      const page = await this.repository.scan({
+        fromMs: query.fromMs,
+        toMs: query.toMs,
+        filters: query.filters,
+        limit: Math.min(AGGREGATION_SCAN_PAGE_SIZE, MAX_STATISTICS_AGGREGATION_ROWS + 1 - rows.length),
+        snapshotMaxSequence,
+        cursor,
+      });
+      if (performance.now() - startedAt > MAX_SCAN_DURATION_MS) {
+        throw new Error('Statistics query exceeds the scan-duration limit');
+      }
+      for (const row of page) {
+        if (rows.length % 128 === 0 && performance.now() - startedAt > MAX_SCAN_DURATION_MS) {
+          throw new Error('Statistics query exceeds the scan-duration limit');
+        }
+        scannedBytes += serializedBytes(row);
+        if (scannedBytes > MAX_SCANNED_BYTES) throw new Error('Statistics query exceeds the scanned-byte limit');
+        rows.push(row);
+      }
+      if (rows.length > MAX_STATISTICS_AGGREGATION_ROWS) {
+        throw new Error('Statistics query exceeds the scanned-row limit');
+      }
+      if (page.length < AGGREGATION_SCAN_PAGE_SIZE) break;
+      const last = page.at(-1);
+      if (last === undefined) break;
+      cursor = { completedAtMs: last.completedAtMs, exchangeId: last.exchangeId };
+    }
     return rows;
   }
 }
