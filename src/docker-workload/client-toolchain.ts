@@ -119,13 +119,12 @@ export function loadClientToolchainManifest(path: string): LoadedClientToolchain
 
 /**
  * Prove that the client inside the agent is connected to the intended daemon
- * and that every executable in the catalog toolchain tuple is exact.
+ * and that every executable matches the compatibility manifest.
  */
 export async function preflightClientToolchain(options: {
   readonly runtime: Pick<ContainerRuntime, 'exec'>;
   readonly containerId: string;
   readonly manifest: LoadedClientToolchainManifest;
-  readonly expectedToolchainDigest?: string;
 }): Promise<ClientToolchainPreflight> {
   const dockerVersion = await execute(options.runtime, options.containerId, DOCKER_VERSION_PREFLIGHT_ARGV);
   let dockerJson: unknown;
@@ -175,9 +174,6 @@ export async function preflightClientToolchain(options: {
     compose: composeVersion,
   };
   const toolchainDigest = computeHash(toolchain);
-  if (options.expectedToolchainDigest !== undefined && toolchainDigest !== options.expectedToolchainDigest) {
-    throw new Error('Docker client toolchain digest differs from the preloaded catalog');
-  }
   return {
     architecture: expected.architecture,
     dockerApi: {

@@ -597,8 +597,8 @@ export function createAppleContainerManager(
     },
 
     // Workflow snapshot creation remains Docker-only. Generic image inventory
-    // operations are implemented because the verified preloaded-image catalog
-    // needs them on Apple Container even though supportsImageSnapshots is false.
+    // operations support selected-image transport and cleanup on Apple
+    // Container even though supportsImageSnapshots is false.
     commit: (): Promise<string> => unsupported('image commit (workflow snapshots)'),
 
     async removeImage(ref: string): Promise<boolean> {

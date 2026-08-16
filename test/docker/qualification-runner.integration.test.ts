@@ -14,7 +14,7 @@ describe.skipIf(!enabled)('real local Vitest qualification runner', () => {
     try {
       const result = await runVitestQualificationSuite({
         suiteId: 'runner-integration',
-        testFiles: ['test/docker/preloaded-image-staging.test.ts'],
+        testFiles: ['test/docker/runtime-trust.test.ts'],
         repositoryRoot: resolve('.'),
         reportDirectory,
         timeoutMs: 30_000,

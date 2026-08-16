@@ -58,7 +58,7 @@ describe('arm64 agent base image inputs', () => {
     for (const reference of fromReferences()) expect(reference).toMatch(/@sha256:[0-9a-f]{64}$/u);
   });
 
-  it('single-sources the toolchain digest with the nested-daemon image', () => {
+  it('single-sources the toolchain digest with the future nested-daemon image', () => {
     expect(dockerfile).toContain(`FROM docker@${DOCKER_TOOLCHAIN_DIGEST} AS docker-toolchain`);
     expect(nestedDaemonDockerfile).toContain(`FROM docker@${DOCKER_TOOLCHAIN_DIGEST} AS stock`);
   });

@@ -3,25 +3,27 @@
 **Purpose.** This is the captured endpoint evidence behind the frozen
 `config/docker-workload/build-egress-manifest.json` (see the secure-nested-runtime
 implementation plan, build-egress sections). It is a durable record of what the
-current IronCurtain Dockerfiles actually fetch during a cold-cache
-(`--no-cache`) rebuild of every trusted infrastructure image. The `run`-seam
-manifest is now frozen from this evidence; see "Freeze decisions" below.
+current in-scope IronCurtain Dockerfiles fetch during a cold-cache
+(`--no-cache`) rebuild. The `run`-seam manifest is frozen from this evidence;
+see "Freeze decisions" below. Bundle images remain untrusted, so this record
+authorizes a future rebuild path rather than attesting the resulting code.
 
 **Capture runs (two passes).**
 
-- Backend: Docker Desktop 29.2.1, arm64, macOS. Proxy reached from build containers via `host.docker.internal`. Each Dockerfile built cold-cache with the recording proxy as its **sole** egress route; all 8 builds exit `0`, `0` failed fetch attempts, `0` direct-connect-suspected in both passes.
+- Backend: Docker Desktop 29.2.1, arm64, macOS. Proxy reached from build containers via `host.docker.internal`. Each then-present Dockerfile built cold-cache with the recording proxy as its **sole** egress route; all 8 historical builds exit `0`, `0` failed fetch attempts, `0` direct-connect-suspected in both passes.
 - **Pass 1 — tunnel** (`--build`): discovered the endpoint set. HTTPS is tunnel-recorded (host:port only — the proxy blind-pipes bytes without terminating TLS); plain HTTP (apt) is fully path-visible. This is the "Observed endpoints" table below.
 - **Pass 2 — terminate-TLS** (`--build --ca-inject`): the capture CA is trusted inside each build the way production wires trust, so the proxy terminates TLS and sees full HTTPS paths. All 13 hosts reached full path visibility with zero CA resistance. This resolved the path-gating decision and produced the frozen manifest.
 
 ## Dockerfiles covered
 
-`Dockerfile.base.arm64`, `Dockerfile.claude-code`, `Dockerfile.codex`,
-`Dockerfile.goose`, `nested-daemon/Dockerfile`, `nested-relay/Dockerfile`,
-`docker-workload/helper/Dockerfile`, `docker-workload/socat/Dockerfile`.
-
-The last four fetch **nothing** at RUN time (Go builds with vendored/CGO-off
-deps, minimal images) — no mediated egress observed. All observed egress comes
-from the base image and the three agent images.
+The current manifest's source set is `Dockerfile.base.arm64`,
+`Dockerfile.claude-code`, `Dockerfile.codex`, and `Dockerfile.goose`; all
+observed egress came from those files. The historical capture also built
+`nested-relay/Dockerfile` plus the now-deleted nested-daemon, helper, and
+catalog-socat Dockerfiles. Those four observed no RUN-time fetches. The retained
+future DD relay remains a separately pinned authority-bearing service, but its
+build and daemon-layer inputs require fresh qualification before that backend
+is promoted.
 
 ## Observed endpoints (13 unique)
 
@@ -58,8 +60,9 @@ Each endpoint maps to a known toolchain step in the Dockerfiles:
   Dockerfile frontend are fetched by the Docker daemon, not by a RUN step, so
   they bypass the RUN-step proxy entirely and do **not** appear above. These are
   the `base-image` seam: they must be inventoried from the `FROM` lines and
-  their digests pinned. Base images observed in the Dockerfiles: `node:22-trixie`
-  (base), plus the golang builder image(s) in the Go Dockerfiles.
+  reviewed separately. The current bundle source set uses `node:22-trixie`;
+  future relay/backend builds must inventory their own builder and frontend
+  images when qualified.
 
 ## Freeze decisions
 
@@ -93,12 +96,11 @@ Each endpoint maps to a known toolchain step in the Dockerfiles:
    pull (`node:22-trixie`, repository `library/node`) with no manifest change — a
    committed test asserts that manifest/blob/token path. The
    `base-image`/`dockerfile-frontend` seam enums stay in the build-egress schema as
-   provenance/audit vocabulary only. Pinning the `FROM` digest is deferred to the next
-   catalog re-freeze (a rebuild is not byte-reproducible while `RUN`-step apt/npm stay
-   unpinned, and the runtime already runs the sha256-bound frozen catalog image). Routing
-   the daemon's `FROM` pull to the registry-egress listener is a Phase 1 wiring item. The
-   golang builder / nested-daemon `FROM`s are preloaded-catalog roles (built at freeze
-   time, already digest-pinned), not in the in-bundle rebuild scope.
+   provenance/audit vocabulary only. A rebuild is not byte-reproducible while
+   RUN-step apt/npm inputs remain unpinned, and bundle-image identity is not a host
+   security boundary. Routing daemon `FROM` pulls through registry egress remains a
+   future wiring item. Any future DD relay build is qualified and pinned independently
+   because that service receives network authority unavailable to the bundle.
 
 The raw per-group drafts (`build-egress-manifest.draft.json`, `capture-evidence.json`,
 `build-logs.json`, and the per-build `overlays/`) are produced under the operator's

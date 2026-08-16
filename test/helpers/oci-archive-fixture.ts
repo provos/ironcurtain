@@ -1,20 +1,14 @@
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  buildPreloadedImageLabels,
-  catalogTupleDigest,
-  IMAGE_BUILD_HASH_SCHEMA,
-  RUNTIME_TRUST_SCHEMA,
-  type PreloadedImageCatalogEntry,
-} from '../../src/docker/preloaded-image-catalog.js';
 
 export interface OciArchiveFixtureOptions {
   readonly directory: string;
   readonly logicalName: string;
   readonly buildHash: string;
   readonly architecture: 'amd64' | 'arm64';
-  readonly catalogGeneration: string;
+  /** Optional label used to create distinct image identities in one test. */
+  readonly fixtureId?: string;
   /** Docker uses the config digest; Apple Container uses the OCI index digest. */
   readonly runtimeImageIdKind?: 'config' | 'index';
   /** Test-only Apple identity, which is independent of a platform-save archive's index bytes. */
@@ -27,47 +21,30 @@ export interface OciArchiveFixtureOptions {
   readonly duplicateLayer?: boolean;
   /** Apple `container image save --platform` wraps the selected manifest in a nested index. */
   readonly nestedIndex?: boolean;
-  readonly toolchain?: {
-    readonly dockerCli: string;
-    readonly dockerDaemon: string;
-    readonly buildx: string;
-    readonly compose: string;
-  };
-  readonly dockerApi?: { readonly min: string; readonly max: string };
 }
 
-export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): PreloadedImageCatalogEntry {
-  const toolchain =
-    options.toolchain ??
-    ({
-      dockerCli: '28.3.2',
-      dockerDaemon: '28.3.2',
-      buildx: '0.25.0',
-      compose: '2.38.2',
-    } as const);
-  const provenance = {
-    source: 'local qualification fixture',
-    sourceDigest: `sha256:${'7'.repeat(64)}`,
-    createdAt: '2026-07-20T12:00:00.000Z',
+export interface OciArchiveFixture {
+  readonly logicalName: string;
+  readonly runtimeImageId: string;
+  readonly manifestDigest: string;
+  readonly configDigest: string;
+  readonly buildHash: string;
+  readonly architecture: 'amd64' | 'arm64';
+  readonly labels: Readonly<Record<string, string>>;
+  readonly createdAt: string;
+  readonly archive: {
+    readonly fileName: string;
+    readonly sha256: string;
+    readonly sizeBytes: number;
   };
-  const provisional: PreloadedImageCatalogEntry = {
-    runtimeKind: options.runtimeImageIdKind === 'index' ? 'apple-container' : 'docker',
-    logicalName: options.logicalName,
-    runtimeImageId: `sha256:${'0'.repeat(64)}`,
-    manifestDigest: `sha256:${'0'.repeat(64)}`,
-    configDigest: `sha256:${'0'.repeat(64)}`,
-    buildHashSchema: IMAGE_BUILD_HASH_SCHEMA,
-    buildHash: options.buildHash,
-    architecture: options.architecture,
-    dockerApi: options.dockerApi ?? { min: '1.44', max: '1.48' },
-    runtimeTrustSchema: RUNTIME_TRUST_SCHEMA,
-    toolchain,
-    toolchainDigest: catalogTupleDigest(toolchain),
-    provenance,
-    provenanceDigest: catalogTupleDigest(provenance),
-    archive: { fileName: 'fixture.oci.tar', sha256: '0'.repeat(64), sizeBytes: 1 },
-  };
-  const labels = buildPreloadedImageLabels(provisional, options.catalogGeneration);
+}
+
+export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciArchiveFixture {
+  const createdAt = '2026-07-20T12:00:00.000Z';
+  const labels = {
+    'ironcurtain.build-hash': options.buildHash,
+    ...(options.fixtureId === undefined ? {} : { 'ironcurtain.test-fixture-id': options.fixtureId }),
+  } as const;
 
   const emptyLayerTar = Buffer.alloc(1024);
   const layerDigest = digest(emptyLayerTar);
@@ -78,7 +55,7 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): Prelo
       os: 'linux',
       config: { Labels: labels },
       rootfs: { type: 'layers', diff_ids: options.duplicateLayer ? [diffId, diffId] : [diffId] },
-      history: [{ created: provenance.createdAt, created_by: 'fixture' }],
+      history: [{ created: createdAt, created_by: 'fixture' }],
     }),
   );
   const configDigest = digest(config);
@@ -171,11 +148,15 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): Prelo
   writeFileSync(join(options.directory, fileName), archive, { mode: 0o444 });
 
   return {
-    ...provisional,
+    logicalName: options.logicalName,
     runtimeImageId:
       options.runtimeImageIdOverride ?? (options.runtimeImageIdKind === 'index' ? indexDigest : configDigest),
     manifestDigest,
     configDigest,
+    buildHash: options.buildHash,
+    architecture: options.architecture,
+    labels,
+    createdAt,
     archive: { fileName, sha256: sha256(archive), sizeBytes: archive.length },
   };
 }

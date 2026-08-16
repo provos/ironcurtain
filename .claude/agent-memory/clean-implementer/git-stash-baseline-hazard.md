@@ -29,25 +29,3 @@ Better approaches for baseline-error comparison (no stash):
   and it was clean).
 - Always check `git stash list` BEFORE any stash op; if other stashes exist,
   avoid bare `git stash pop` (it pops the top, which may not be yours).
-
-## BEST for whole-program tsc baselines: a throwaway HEAD worktree
-`tsc -p tsconfig.eslint.json --noEmit --rootDir .` emits ~1760 PRE-EXISTING
-errors in this repo, so "did I add errors?" is unanswerable by eyeballing.
-Recipe (works even when ANOTHER agent is concurrently editing src/ — their
-in-flight breakage shows up as clearly-attributed added lines):
-```
-git -C <repo> worktree add -f <scratch>/baseline HEAD
-ln -s <repo>/node_modules <scratch>/baseline/node_modules   # required; no npm i
-cd <scratch>/baseline && npx tsc -p tsconfig.eslint.json --noEmit --rootDir . \
-  2>&1 | grep -Ev TS6059 > ../before.txt
-# same command in the real repo -> after.txt, then: diff before.txt after.txt
-git -C <repo> worktree remove --force <scratch>/baseline
-```
-Read the diff carefully: DELETING a line shifts every later error in that file
-by one, so an unchanged pre-existing error legitimately appears as a
-`file.ts(117,..)` -> `file.ts(116,..)` rewrite. That is not a new error.
-
-## zsh gotcha in the Bash tool: unquoted `$VAR` does NOT word-split
-The shell here is zsh, not bash. `FILES="a.ts b.ts"; npx eslint $FILES` passes
-ONE argument (the whole string) and fails with "No files matching the pattern".
-Use a zsh array instead — `files=(a.ts b.ts); npx eslint $files` — or `${=FILES}`.

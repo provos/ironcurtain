@@ -26,7 +26,7 @@ describe('purpose-built rootless nested daemon image', () => {
     expect(dockerfile).not.toMatch(/tcp:\/\//u);
   });
 
-  it('contains the complete catalog identity label surface and no credential material', () => {
+  it('contains qualification identity labels and no catalog or credential material', () => {
     for (const label of [
       'ironcurtain.build-hash-schema',
       'ironcurtain.build-hash',
@@ -36,11 +36,11 @@ describe('purpose-built rootless nested daemon image', () => {
       'ironcurtain.runtime-trust-schema',
       'ironcurtain.toolchain-digest',
       'ironcurtain.provenance-digest',
-      'ironcurtain.catalog-generation',
       'com.ironcurtain.docker-workload.image-role',
     ]) {
       expect(dockerfile).toContain(label);
     }
+    expect(dockerfile).not.toContain('catalog-generation');
     expect(dockerfile).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY|API_KEY|AUTH_TOKEN/u);
   });
 });

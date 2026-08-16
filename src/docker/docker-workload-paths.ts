@@ -9,7 +9,7 @@
  * be pointed at an unreviewed manifest by passing a different path.
  *
  * Runtime *staging* copies (which live under `$IRONCURTAIN_HOME`) are a
- * separate concern owned by `./preloaded-catalog-paths.ts`.
+ * separate from the per-session selected-agent artifact cache.
  */
 
 import { dirname, resolve } from 'node:path';

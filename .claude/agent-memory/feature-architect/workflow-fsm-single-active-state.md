@@ -1,7 +1,7 @@
 # Workflow FSM: single-active-state spine + vestigial parallelism (verified 2026-06-18)
 
 The IronCurtain workflow abstraction is **single-active-state by construction**. Verified
-while scoping `docs/brainstorm/evolve-parallelism.md`.
+while scoping `docs/designs/evolve-sync-parallelism-slice.md`.
 
 ## The single-active-state spine (the load-bearing assumption)
 - `const stateValue = String(snapshot.value)` (`orchestrator.ts:1873` as of 2026-06-18; was
@@ -76,7 +76,7 @@ Intra-round fan-out (eval N candidates concurrently) is the high-value form; DB 
 tolerates it. Ship it INSIDE evolve_result.py bridge (parallelism stays a leaf, FSM
 single-active-state intact), serialize cognition promote at fan-in. True XState parallel
 regions (Option C) break gate+policy+checkpoint spine — avoid as first step.
-See `docs/brainstorm/evolve-parallelism.md`.
+See `docs/designs/evolve-sync-parallelism-slice.md`.
 
 ## Coordinator IS built for concurrent callers (verified 2026-06-18 — de-risks the "one real unknown")
 - `ToolCallCoordinator` holds a FIFO `callMutex` (AsyncMutex, fair FIFO async-mutex.ts:13,

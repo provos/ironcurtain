@@ -25,7 +25,6 @@ import {
   APPLE_VM_DAEMON_DOCKER_HOST,
   APPLE_VM_DAEMON_TOOLCHAIN_DIR,
 } from '../../src/docker-workload/apple-vm-daemon.js';
-import { buildPreloadedImageLabels } from '../../src/docker/preloaded-image-catalog.js';
 import { loadClientToolchainManifest } from '../../src/docker-workload/client-toolchain.js';
 import type { ContainerRuntime, DockerExecResult } from '../../src/docker/types.js';
 import { writeOciArchiveFixture } from '../helpers/oci-archive-fixture.js';
@@ -243,20 +242,11 @@ describe('private Docker Engine adapter and provisioning', () => {
   it('verifies and loads the selected archive through the exact guest path, then reinspects it', async () => {
     const manifest = loadClientToolchainManifest(TEST_CLIENT_TOOLCHAIN_MANIFEST_PATH);
     const logicalName = 'ironcurtain-claude-code:latest';
-    const generation = 'private-docker-load-test';
     const entry = writeOciArchiveFixture({
       directory: tempDirectory,
       logicalName,
       buildHash: 'a'.repeat(64),
       architecture: manifest.manifest.architecture,
-      catalogGeneration: generation,
-      toolchain: {
-        dockerCli: manifest.manifest.docker.cliVersion,
-        dockerDaemon: manifest.manifest.docker.daemonVersion,
-        buildx: manifest.manifest.buildxVersion,
-        compose: manifest.manifest.composeVersion,
-      },
-      dockerApi: manifest.manifest.docker.compatibleApiRange,
     });
     const commands: (readonly string[])[] = [];
     let loaded = false;
@@ -271,8 +261,8 @@ describe('private Docker Engine adapter and provisioning', () => {
             {
               Id: entry.runtimeImageId,
               RepoTags: [logicalName],
-              Config: { Labels: buildPreloadedImageLabels(entry, generation) },
-              Created: entry.provenance.createdAt,
+              Config: { Labels: entry.labels },
+              Created: entry.createdAt,
             },
           ]),
           stderr: '',
@@ -321,7 +311,7 @@ describe('private Docker Engine adapter and provisioning', () => {
     ]);
   });
 
-  it('translates only direct catalog archive children to the read-only guest mount', async () => {
+  it('translates only direct selected-artifact archive children to the read-only guest mount', async () => {
     const commands: (readonly string[])[] = [];
     const runtime = createAppleVmPrivateDockerRuntime({
       outerRuntime: execRuntime((argv) => {

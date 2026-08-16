@@ -213,7 +213,7 @@ function validateOciMetadata(
     manifest.config.mediaType !== 'application/vnd.oci.image.config.v1+json' ||
     manifest.config.digest !== options.configDigest
   ) {
-    throw new Error('OCI image archive config digest does not match the catalog');
+    throw new Error('OCI image archive config digest does not match the expected image');
   }
   const configEntry = entries.get(blobPath(options.configDigest));
   if (!configEntry || manifest.config.size !== configEntry.size) {
@@ -242,7 +242,7 @@ function validateOciMetadata(
 
   const config = parseJsonEntry(entries, blobPath(options.configDigest));
   if (!isRecord(config) || config.architecture !== options.architecture || config.os !== 'linux') {
-    throw new Error('OCI image archive config platform does not match the catalog');
+    throw new Error('OCI image archive config platform does not match the expected image');
   }
   const configSection = config.config;
   if (Object.keys(options.expectedLabels).length > 0 && (!isRecord(configSection) || !isRecord(configSection.Labels))) {
@@ -305,7 +305,7 @@ function validateDockerLoadMetadata(
     throw new Error('OCI image archive Docker compatibility config does not match the OCI config');
   }
   if (!Array.isArray(item.RepoTags) || item.RepoTags.length !== 1 || item.RepoTags[0] !== options.logicalName) {
-    throw new Error('OCI image archive Docker compatibility tag does not match the catalog logical name');
+    throw new Error('OCI image archive Docker compatibility tag does not match the expected logical name');
   }
 
   const rootfs = config.rootfs;

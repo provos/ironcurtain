@@ -196,7 +196,7 @@ export function dockerWorkloadConfigHash(config: ResolvedDockerWorkloadConfig): 
 /**
  * Admit only the Mac developer slice whose complete runtime path is currently
  * implemented. The caller resolves `auto` first, then invokes this guard before
- * any feature-attributable runtime, image, catalog, proxy, lease, or filesystem
+ * any feature-attributable runtime, image, proxy, lease, or filesystem
  * provisioning. Operational artifacts are verified later by their owning
  * seams; this guard deliberately contains no release/commit bookkeeping.
  */

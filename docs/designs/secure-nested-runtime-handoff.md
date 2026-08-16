@@ -20,14 +20,14 @@ transport. It no longer admits sessions from a frozen bundle-image catalog or wr
 authority into new leases. On 2026-08-15 the complete replacement public-registry product-entrypoint
 smoke passed after the migration, including managed-network probes and exact outer-VM teardown.
 
-The 2026-08-15 threat-model correction treats every bundle image as untrusted, keeps host create/profile,
-proxy, watchdog, and cleanup controls as the authority, and moves bundle-image catalogs to explicit
-qualification/provenance tooling. Full preview qualification and a real Claude provider turn are also
-incomplete.
+The 2026-08-15 threat-model correction treats every bundle image as untrusted and keeps host
+create/profile, proxy, watchdog, and cleanup controls as the authority. Obsolete catalog generation,
+pairing, and freshness tooling is removed; Git history retains that qualification experiment. Full
+preview qualification and a real Claude provider turn are also incomplete.
 
 ## Current Working State
 
-The baseline commit contains the complete public-registry slice and historical generation-v3 catalog
+The baseline commit contained the complete public-registry slice and historical generation-v3 catalog
 artifacts. The subsequent usability slice makes mediated public pulls the enabled-state default, exposes
 the two operator choices in the CLI and web settings, and keeps qualification/offline modes explicit.
 The current working tree removes frozen catalog identity from production admission, automatically
@@ -90,28 +90,16 @@ resolved-variant guard.
 - Leases, watchdog supervision, serialized cleanup ownership, incident recovery, exact immutable outer IDs, generation labels, and two empty cleanup inventories remain the host authority.
 - Successful smoke runs removed their exact VM, lease/state/runtime/socket trees, watchdog, and isolated smoke home. The managed inner network intentionally remains inside its disposable VM until that exact outer VM is removed; it is not a separately ledgered host resource.
 
-### Historical catalog workflow and corrected disposition
+### Catalog retirement and selected-current disposition
 
-- Historical catalog generation `ironcurtain-preloaded-arm64-v3` froze eight roles for Docker and Apple
-  backends. Those bundle images are not trusted under the colluding-bundle threat model.
-- Frozen and operator-staged copies were byte-identical after publication. Their baseline SHA-256 values
-  were:
-
-  ```text
-  docker:          94fc353afeb79bc09bb9aeeac15a4cf0177dc07b7bc0a0724820cf93e9de894b
-  apple-container: 92cc8552116f6400ab24200fd5239782e8815ffad5559550ea91838015efbfd4
-  ```
-
-- The builder's crash-recoverable lock, monotonic generation, archive verifier, and backend-ID comparison
-  remain valid qualification machinery and historical evidence.
-- They must no longer gate ordinary product start, bind a new bundle lease, or require an operator
-  refreeze after a current-agent rebuild.
-- Production now resolves/builds the selected current agent once, captures one stable per-session
-  outer reference plus Docker-compatible inner archive from that resolution, and stage only that selected
-  archive. Checksums and archive validation detect transport corruption/TOCTOU; they do not attest guest
-  code.
-- The future Docker Desktop fixed uplink relay remains independently digest/config pinned because it owns
-  network authority unavailable to the agent/daemon. It must not rotate with a bundle-image generation.
+Generation v3 proved archive canonicalization and cross-backend loading, but its eight bundle roles never
+constrained the colluding bundle. Catalog generation, pairing, freshness checks, and staged copies are now
+removed from the current tree. Production resolves/builds the selected current agent once, captures one
+stable per-session outer reference and Docker-compatible inner archive, and stages only that artifact.
+Checksums and archive validation detect transport corruption/TOCTOU; they do not attest guest code.
+Tolerant lease parsing remains solely for exact recovery of historical leases. The future Docker Desktop
+fixed uplink relay remains independently digest/config pinned because it owns network authority unavailable
+to the bundle.
 
 ## Required User Configuration
 
@@ -170,54 +158,13 @@ fixed name is safe because every admitted daemon and its managed network are bun
 the supported service topology rather than an isolation boundary: the untrusted agent has Docker
 administrator authority over its bundle-local daemon and may change inner resources.
 
-## Historical Live Evidence Recorded
+## Historical pre-migration evidence
 
-These runs predate the managed-network usability slice. Both commands used the built production CLI,
-an isolated `IRONCURTAIN_HOME`, real Apple Container, the v3 catalog, the real private daemon, and
-exact cleanup verification. The offline/PTY gates explicitly request `preloaded-only`; the
-public-registry gate writes the same minimal `{ "enabled": true }` workload request used by
-operators.
-
-### Offline regression
-
-```bash
-npm run smoke:nested:apple
-```
-
-Passed:
-
-```text
-session=0b5e5675-984b-45ff-a749-9a5999575dcf
-outer=ic-dw-agent-40e65c4ccf73b9a8
-```
-
-### Public-registry/server regression
-
-```bash
-npm run smoke:nested:apple:public-registry
-```
-
-Passed:
-
-```text
-session=600cbcc7-5f78-439c-b523-0f55ceec48e7
-outer=ic-dw-agent-24305f0f7a11d892
-```
-
-The public-registry gate proved:
-
-- an unlisted pull received an explicit policy `403` rather than a DNS/timeout substitute;
-- Docker Official `busybox:1.37.0-glibc` was absent before the allowed pull and then pulled through the mediated listener;
-- required BusyBox `httpd` and `wget` applets existed;
-- an inspected harness-created `--internal` user-defined bridge had no published ports;
-- server loopback returned the random nonce;
-- a hardened sibling fetched the nonce by inspected server IPv4;
-- a separate hardened sibling fetched the nonce by the `target` network alias through Docker's `127.0.0.11` resolver;
-- inner host-network direct public-IP and public-DNS probes failed;
-- fixture containers and the pulled fixture image were removed; and
-- exact outer VM, listener/socket, runtime/state, lease, and watchdog cleanup completed.
-
-The successful harnesses removed `/private/tmp/ic-na-u6UYT1` and `/private/tmp/ic-na-Wvhul2`; exact Apple inventory contained neither outer ID afterward.
+Earlier catalog-based offline and public-registry smokes exercised the built CLI and exact cleanup, but
+they do not qualify selected-current transport or the managed-network slice. Their catalog identities,
+temporary paths, and duplicate validation tables are intentionally omitted here; Git history retains the
+diagnostic record. Fresh selected-current offline and PTY gates remain pending. The current
+public-registry result follows.
 
 ## Managed-Network Usability Slice Evidence
 
@@ -244,19 +191,13 @@ The updated production lifecycle now creates and strictly admits the fixed bundl
 
 Every reachability assertion compares an exact random nonce rather than only a `curl` exit status.
 This matters because port `18080` is already occupied by IronCurtain's outer agent proxy: an earlier
-probe that used that reserved port reached an unrelated listener and correctly caused the smoke to
-be tightened. Ports `18080` and `18081` remain reserved for IronCurtain's agent/provider proxy and
-registry relay respectively. Per-probe nonce values and stdout were observed by the live harness but
-were not persisted as durable session evidence; the retained control-flow evidence is that those
-assertions completed and each run advanced to its recorded later-stage failure.
+probe reached that unrelated listener and caused the smoke to be tightened. Ports `18080` and `18081`
+remain reserved for the agent/provider proxy and registry relay. Per-probe nonce values and stdout are
+not durable artifacts; the current evidence is that the exact assertions completed and the final
+selected-current harness reached its recorded green result and cleanup.
 
-The historical catalog-based managed-network attempts did not finish fully green. Run root
-`/private/tmp/ic-na-Jf7d3v` completed all functional probes and cleanup, then failed only because the
-harness compared Docker's truncated `network ls --quiet` value with the full immutable network ID. The
-subsequent run root `/private/tmp/ic-na-VhdXFU` was blocked before activation because a concurrent ordinary
-IronCurtain session rebuilt `ironcurtain-claude-code:latest`, so its runtime ID no longer matched frozen
-catalog generation v3. Those failures motivated the current resolve-once transport and are superseded by
-the replacement result below; no catalog rewrite or refreeze was required.
+Catalog-era failed attempts exposed mutable-tag and network-ID bookkeeping defects; they are superseded
+by the selected-current result below and retained only in Git history.
 
 ### Replacement selected-current-agent live result
 
@@ -275,66 +216,13 @@ publication probes. Post-run `container list --all` contained no exact outer VM,
 contained no `ironcurtain-capture-*` alias, the isolated smoke root was removed, and unrelated pre-existing
 Apple containers were unchanged.
 
-### Current working-tree validation
+### Recorded selected-current validation
 
-After the selected-current-agent migration and final live smoke:
-
-```text
-non-integration root tests:         6,160 passed in 293 files
-selected-image Apple qualification: passed against the current 1.6 GiB image
-web tests:                          473 passed in 27 files
-web Settings Playwright:            5 passed on isolated ports
-root TypeScript:                    passed
-script TypeScript:                  passed
-root lint:                          passed
-root/web/supplemental format checks passed
-web svelte-check:                   0 errors; 2 pre-existing warnings
-git diff --check:                   passed
-```
-
-An earlier complete core-suite attempt reached 6,220 passed, 127 skipped, and 1 todo, with one
-real-Docker PTY integration failure caused by Docker Desktop's writable layer reporting
-`No space left on device`. Host filesystem space was available; `docker system df` instead showed
-large Docker-managed image, volume, and build-cache usage. No Docker data was pruned without
-operator authorization. Build and circular-dependency checks also passed during this slice.
-
-## Static Validation at the Baseline Commit
-
-```text
-npm test:                 6,198 core passed; 123 skipped; 1 todo
-web tests:                468 passed
-npm run lint:             passed
-npm run typecheck:scripts passed
-npm run check:cycles:     338 files; no circular dependency
-npm run build:            passed
-git diff --check:         passed
-```
-
-The web build still prints pre-existing Svelte accessibility and chunk-size warnings; they were not failures in this slice.
-
-## Usability Slice Validation
-
-The enabled-state default, CLI/web settings, and minimal-request smoke were revalidated on 2026-08-15:
-
-```text
-npm test:                         6,214 core passed; 123 skipped; 1 todo
-web tests:                        473 passed
-web Settings Playwright:          5 passed
-npm run lint:                     passed
-npm run typecheck:scripts:        passed
-npm run check:cycles:             338 files; no circular dependency
-npm run build:                    passed
-git diff --check:                 passed
-public-registry Apple smoke:      passed; exact test VM removed
-```
-
-The live public-registry run above persisted only `{ "dockerWorkload": { "enabled": true } }`, proving
-that the operator-facing default reaches the existing mediated pull path without the former internal
-risk/resource boilerplate. Post-run Apple inventory contained no `ic-dw-agent-24305f0f7a11d892` object.
-
-That pass is the historical pre-managed-network run described above. The later catalog-drift blocker was
-removed by selected-current-agent transport, and the replacement managed-network smoke is recorded in
-**Replacement selected-current-agent live result**.
+At the selected-current migration snapshot, the non-integration root suite, focused selected-image Apple
+artifact tests, the Apple backend qualification suite, web/unit/UI checks, TypeScript, lint, formatting,
+build, cycle check, and diff check passed.
+The exact public-registry live result above remains the runtime evidence. After removing catalog-only
+modules and fixtures, rerun the current-tree gates before merge rather than reusing historical test counts.
 
 ## Important Boundaries: Do Not Overclaim
 
@@ -405,9 +293,6 @@ Production:
 - `src/docker-workload/session-daemon.ts` — readiness, provisioning, managed-network admission, and activation ordering.
 - `src/docker-workload/config.ts` — supported-variant guard.
 - `src/config/paths.ts` — exact per-bundle registry UDS paths.
-- `scripts/qualify-preloaded-catalog.ts` and `src/docker/build-preloaded-catalog-command.ts` — explicit
-  qualification-only catalog regeneration (`npm run qualify:catalog --`); never a product-start step.
-- `src/docker/preloaded-catalog-generation.ts` — historical monotonic generation/global lock machinery; not a product-start dependency after migration.
 - `docker/Dockerfile.base.arm64` — rootless Docker toolchain and legacy iptables dependency.
 
 Acceptance and tests:
@@ -421,42 +306,10 @@ Acceptance and tests:
 - `test/mitm-proxy.test.ts` — raw CONNECT/SNI/certificate-boundary coverage.
 - `test/docker/nested-daemon-wiring.test.ts` — daemon command and Apple mount wiring.
 - `test/docker-workload/apple-vm-daemon.test.ts` — exact rootless bootstrap invariants.
-- `test/docker/preloaded-catalog-generation.test.ts` — qualification-tooling generation and global lock-path behavior while retained.
-
-## Retained Diagnostic Artifacts
-
-Eleven failed or diagnostic public-registry smoke roots remain mode 0700 under `/private/tmp`:
-
-```text
-/private/tmp/ic-na-iL7g2r
-/private/tmp/ic-na-NnhTJI
-/private/tmp/ic-na-DenDfP
-/private/tmp/ic-na-WbKNZB
-/private/tmp/ic-na-rcBPU9
-/private/tmp/ic-na-341OPa
-/private/tmp/ic-na-2JHXZ6
-/private/tmp/ic-na-oieEe1
-/private/tmp/ic-na-eQF8j3
-/private/tmp/ic-na-Jf7d3v
-/private/tmp/ic-na-VhdXFU
-```
-
-Their failures led respectively to the Docker token `Accept-Encoding` fix, namespace-local forwarding/internal bridge correction, BusyBox fixture correction, layered network diagnostics, and the embedded-DNS/legacy-iptables diagnosis. Each retained run was audited closed with exact outer absence and cleanup proof. They contain isolated smoke state and fake credentials only. Retain them for further forensic comparison or delete only by explicit exact path after they are no longer needed; never glob-delete `/private/tmp/ic-na-*` while a smoke may be running.
-
-The six later roots record, respectively: omitted/default-network behavior, the reserved-`18080`
-listener collision, absent `-p` binding selection, Docker's exact `{"8080/tcp":null}` inspect shape,
-the truncated-network-ID bookkeeping failure after otherwise successful functional probes, and the
-pre-activation frozen-catalog mismatch. Their exact smoke VMs were absent after cleanup or were never
-activated. An unrelated user-owned active Apple VM was left untouched.
-
-The abandoned 9.4 GB catalog pending directory from an overlapping failed build was explicitly removed
-after v3 publication. The historical v3 catalog was not affected.
 
 ## Safe Continuation Rules
 
-- Do not regenerate or hand-edit v3 merely to unblock product start. If qualification needs a new fixture,
-  use `npm run qualify:catalog --`; do not run two builders, mutate Dockerfiles during its locked build, or
-  bypass the entrypoint with direct builder calls.
+- Do not restore catalog generation, pairing, or refreeze as a product or qualification prerequisite.
 - Preserve checksums and archive validation in the replacement transport, but never label bundle-image
   hashes or tool versions as host security authority.
 - Do not start a second live smoke while another harness owns an isolated Apple VM; poll the existing harness through its `finally` cleanup.

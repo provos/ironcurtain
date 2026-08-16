@@ -41,7 +41,7 @@ describe('selected agent artifact', () => {
       logicalName,
       buildHash,
       architecture: 'arm64',
-      catalogGeneration: 'artifact-test',
+      fixtureId: 'artifact-test',
       runtimeImageIdKind: 'index',
       runtimeImageIdOverride: `sha256:${'1'.repeat(64)}`,
       nestedIndex: true,
@@ -117,7 +117,7 @@ describe('selected agent artifact', () => {
       logicalName,
       buildHash,
       architecture: 'arm64',
-      catalogGeneration: 'artifact-alias-reconciliation-test',
+      fixtureId: 'artifact-alias-reconciliation-test',
       runtimeImageIdKind: 'index',
     });
     const oldTimestamp = Date.now() - 2 * 60 * 60_000;
@@ -187,7 +187,7 @@ describe('selected agent artifact', () => {
         logicalName,
         buildHash,
         architecture: 'arm64',
-        catalogGeneration: `artifact-replacement-${index}`,
+        fixtureId: `artifact-replacement-${index}`,
         runtimeImageIdKind: 'index',
       }),
     );
@@ -244,7 +244,7 @@ describe('selected agent artifact', () => {
         logicalName,
         buildHash,
         architecture: 'arm64',
-        catalogGeneration: `artifact-swap-${index}`,
+        fixtureId: `artifact-swap-${index}`,
         runtimeImageIdKind: 'index',
       }),
     );
@@ -348,7 +348,7 @@ describe('selected agent artifact', () => {
         logicalName,
         buildHash,
         architecture: 'arm64',
-        catalogGeneration: `artifact-gc-${index}`,
+        fixtureId: `artifact-gc-${index}`,
         runtimeImageIdKind: 'index',
       }),
     );
@@ -410,7 +410,7 @@ describe('selected agent artifact', () => {
       logicalName,
       buildHash,
       architecture: 'arm64',
-      catalogGeneration: 'artifact-corruption-test',
+      fixtureId: 'artifact-corruption-test',
       runtimeImageIdKind: 'index',
     });
     const artifact = await prepareSelectedAgentArtifact({
@@ -449,7 +449,7 @@ describe('selected agent artifact', () => {
       logicalName,
       buildHash,
       architecture: 'arm64',
-      catalogGeneration: 'artifact-poison-rebuild-test',
+      fixtureId: 'artifact-poison-rebuild-test',
       runtimeImageIdKind: 'index',
     });
     let saves = 0;

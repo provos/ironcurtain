@@ -53,7 +53,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.mjs && npm run build:web-ui --if-present",
+    "clean:dist": "node scripts/clean-dist.mjs",
+    "build": "npm run clean:dist && tsc && node scripts/copy-assets.mjs && npm run build:web-ui --if-present",
     "build:web-ui": "npm run build -w packages/web-ui",
     "start": "tsx src/cli.ts start",
     "annotate-tools": "tsx src/cli.ts annotate-tools",
@@ -67,8 +68,6 @@
     "test": "bash scripts/test.sh",
     "openrouter-live-check": "node scripts/openrouter-live-check.mjs",
     "qualify:apple": "tsx scripts/qualify-backend.ts --backend apple",
-    "qualify:catalog": "tsx scripts/qualify-preloaded-catalog.ts",
-    "qualify:catalog:check": "IRONCURTAIN_QUALIFY_CATALOG=1 vitest run test/docker/preloaded-catalog-freshness.test.ts",
     "smoke:nested:apple": "npm run build && tsx scripts/smoke-nested-apple.ts",
     "smoke:nested:apple:pty": "npm run build && tsx scripts/smoke-nested-apple.ts --pty",
     "smoke:nested:apple:public-registry": "npm run build && tsx scripts/smoke-nested-apple.ts --public-registry",

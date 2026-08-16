@@ -7,7 +7,7 @@ import {
   preflightClientToolchain,
   type ClientToolchainManifest,
 } from '../../src/docker-workload/client-toolchain.js';
-import { catalogTupleDigest } from '../../src/docker/preloaded-image-catalog.js';
+import { computeHash } from '../../src/hash.js';
 import type { ContainerRuntime, DockerExecResult } from '../../src/docker/types.js';
 
 const temporaryDirectories: string[] = [];
@@ -50,7 +50,7 @@ describe('Docker client toolchain manifest', () => {
 });
 
 describe('Docker client toolchain preflight', () => {
-  it('proves the exact connected tuple and catalog-compatible digest', async () => {
+  it('proves the exact connected tuple and records its digest', async () => {
     const fixture = manifestFixture();
     const loaded = loadClientToolchainManifest(fixture.path);
     const runtime = runtimeFixture();
@@ -59,13 +59,12 @@ describe('Docker client toolchain preflight', () => {
       runtime,
       containerId: 'agent-id',
       manifest: loaded,
-      expectedToolchainDigest: catalogTupleDigest(tuple),
     });
     expect(result).toMatchObject({
       architecture: 'arm64',
       dockerApi: { actual: '1.53' },
       toolchain: tuple,
-      toolchainDigest: catalogTupleDigest(tuple),
+      toolchainDigest: computeHash(tuple),
     });
     expect(runtime.exec).toHaveBeenNthCalledWith(
       1,
@@ -75,7 +74,7 @@ describe('Docker client toolchain preflight', () => {
     );
   });
 
-  it('fails closed for absent server data, version drift, plugin drift, and catalog drift', async () => {
+  it('fails closed for absent server data, version drift, and plugin drift', async () => {
     const fixture = manifestFixture();
     const loaded = loadClientToolchainManifest(fixture.path);
     await expect(
@@ -101,15 +100,6 @@ describe('Docker client toolchain preflight', () => {
         manifest: loaded,
       }),
     ).rejects.toThrow(/Buildx version expected 0\.31\.1, got 0\.32\.0/u);
-
-    await expect(
-      preflightClientToolchain({
-        runtime: runtimeFixture(),
-        containerId: 'agent-id',
-        manifest: loaded,
-        expectedToolchainDigest: '0'.repeat(64),
-      }),
-    ).rejects.toThrow(/differs from the preloaded catalog/u);
   });
 
   it('rejects failed commands and unparseable plugin output', async () => {

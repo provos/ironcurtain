@@ -58,7 +58,6 @@ export function createTestAppleVmDockerWorkloadBootstrap(
     logicalName,
     buildHash,
     architecture: FROZEN_CLIENT_TOOLCHAIN.manifest.architecture,
-    catalogGeneration: 'selected-agent-test',
   });
   activeTestArtifact = {
     logicalName,

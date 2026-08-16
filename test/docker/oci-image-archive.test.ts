@@ -4,7 +4,6 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { verifyOciImageArchive } from '../../src/docker/oci-image-archive.js';
-import { buildPreloadedImageLabels } from '../../src/docker/preloaded-image-catalog.js';
 import { writeOciArchiveFixture } from '../helpers/oci-archive-fixture.js';
 
 const temporaryDirectories: string[] = [];
@@ -54,13 +53,13 @@ describe('OCI image archive verification', () => {
     ).rejects.toThrow(/non-symlink/u);
   });
 
-  it('rejects a catalog label tuple that is absent from the image config', async () => {
+  it('rejects a required label that is absent from the image config', async () => {
     const fixture = makeFixture();
     await expect(
       verifyOciImageArchive({
         ...verifyOptions(fixture.directory, fixture.entry),
         expectedLabels: {
-          ...buildPreloadedImageLabels(fixture.entry, 'catalog-fixture.1'),
+          ...fixture.entry.labels,
           'ironcurtain.unstamped': 'required',
         },
       }),
@@ -87,7 +86,6 @@ function makeFixture(extraFiles?: readonly { readonly name: string; readonly con
     logicalName: 'ironcurtain-claude-code:latest',
     buildHash: '4'.repeat(64),
     architecture: 'arm64',
-    catalogGeneration: 'catalog-fixture.1',
     extraFiles,
   });
   return { directory, entry };
@@ -106,6 +104,6 @@ function verifyOptions(directory: string, entry: ReturnType<typeof writeOciArchi
     configDigest: entry.configDigest,
     logicalName: entry.logicalName,
     architecture: entry.architecture,
-    expectedLabels: buildPreloadedImageLabels(entry, 'catalog-fixture.1'),
+    expectedLabels: entry.labels,
   } as const;
 }

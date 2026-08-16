@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { canonicalizeDockerSaveArchive } from '../../src/docker/oci-image-archive-canonicalizer.js';
-import { buildPreloadedImageLabels } from '../../src/docker/preloaded-image-catalog.js';
 import { writeOciArchiveFixture } from '../helpers/oci-archive-fixture.js';
 
 const temporaryDirectories: string[] = [];
@@ -22,7 +21,6 @@ describe('Docker-save archive canonicalizer', () => {
       logicalName: 'localhost/ironcurtain-canonical:fixture',
       buildHash: '9'.repeat(64),
       architecture: 'arm64',
-      catalogGeneration: 'canonical-fixture.1',
       extraFiles: [{ name: `blobs/sha256/${sha256(legacy)}`, content: legacy }],
     });
     const source = join(directory, entry.archive.fileName);
@@ -32,7 +30,7 @@ describe('Docker-save archive canonicalizer', () => {
       outputArchivePath: output,
       logicalName: entry.logicalName,
       architecture: entry.architecture,
-      expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+      expectedLabels: entry.labels,
     });
     expect(canonical).toMatchObject({
       manifestDigest: entry.manifestDigest,
@@ -49,7 +47,6 @@ describe('Docker-save archive canonicalizer', () => {
       logicalName: 'localhost/ironcurtain-canonical:fixture',
       buildHash: '9'.repeat(64),
       architecture: 'arm64',
-      catalogGeneration: 'canonical-fixture.1',
     });
     const source = join(directory, entry.archive.fileName);
     const bytes = readFileSync(source);
@@ -64,7 +61,7 @@ describe('Docker-save archive canonicalizer', () => {
         outputArchivePath: output,
         logicalName: entry.logicalName,
         architecture: entry.architecture,
-        expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+        expectedLabels: entry.labels,
       }),
     ).rejects.toThrow(/digest|checksum|JSON|padding/u);
     expect(() => readFileSync(output)).toThrow();
@@ -80,7 +77,6 @@ describe('Docker-save archive canonicalizer', () => {
       logicalName: 'localhost/ironcurtain-canonical:fixture',
       buildHash: '9'.repeat(64),
       architecture: 'arm64',
-      catalogGeneration: 'canonical-fixture.1',
       ...mutation,
     });
     await expect(
@@ -89,7 +85,7 @@ describe('Docker-save archive canonicalizer', () => {
         outputArchivePath: join(directory, 'canonical.tar'),
         logicalName: entry.logicalName,
         architecture: entry.architecture,
-        expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+        expectedLabels: entry.labels,
       }),
     ).rejects.toThrow(expectedError);
   });
@@ -101,7 +97,6 @@ describe('Docker-save archive canonicalizer', () => {
       logicalName: 'localhost/ironcurtain-canonical:fixture',
       buildHash: '9'.repeat(64),
       architecture: 'arm64',
-      catalogGeneration: 'canonical-fixture.1',
       duplicateLayer: true,
     });
 
@@ -110,7 +105,7 @@ describe('Docker-save archive canonicalizer', () => {
       outputArchivePath: join(directory, 'canonical.tar'),
       logicalName: entry.logicalName,
       architecture: entry.architecture,
-      expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+      expectedLabels: entry.labels,
     });
 
     expect(canonical.layerDigests).toHaveLength(2);
@@ -124,7 +119,6 @@ describe('Docker-save archive canonicalizer', () => {
       logicalName: 'localhost/ironcurtain-canonical:fixture',
       buildHash: '9'.repeat(64),
       architecture: 'arm64',
-      catalogGeneration: 'canonical-fixture.1',
       nestedIndex: true,
     });
 
@@ -133,7 +127,7 @@ describe('Docker-save archive canonicalizer', () => {
       outputArchivePath: join(directory, 'canonical.tar'),
       logicalName: entry.logicalName,
       architecture: entry.architecture,
-      expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+      expectedLabels: entry.labels,
     });
 
     expect(canonical.manifestDigest).toBe(entry.manifestDigest);

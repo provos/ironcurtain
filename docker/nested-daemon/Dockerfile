@@ -15,7 +15,6 @@ ARG IRONCURTAIN_DOCKER_API_MAX=""
 ARG IRONCURTAIN_RUNTIME_TRUST_SCHEMA=""
 ARG IRONCURTAIN_TOOLCHAIN_DIGEST=""
 ARG IRONCURTAIN_PROVENANCE_DIGEST=""
-ARG IRONCURTAIN_CATALOG_GENERATION=""
 
 LABEL ironcurtain.build-hash-schema="${IRONCURTAIN_BUILD_HASH_SCHEMA}" \
       ironcurtain.build-hash="${IRONCURTAIN_BUILD_HASH}" \
@@ -25,7 +24,6 @@ LABEL ironcurtain.build-hash-schema="${IRONCURTAIN_BUILD_HASH_SCHEMA}" \
       ironcurtain.runtime-trust-schema="${IRONCURTAIN_RUNTIME_TRUST_SCHEMA}" \
       ironcurtain.toolchain-digest="${IRONCURTAIN_TOOLCHAIN_DIGEST}" \
       ironcurtain.provenance-digest="${IRONCURTAIN_PROVENANCE_DIGEST}" \
-      ironcurtain.catalog-generation="${IRONCURTAIN_CATALOG_GENERATION}" \
       com.ironcurtain.docker-workload.image-role="nested-daemon"
 
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
