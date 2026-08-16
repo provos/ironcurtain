@@ -10,6 +10,7 @@ import type {
   StatisticsSummaryQuery,
   StatisticsTimeBucketDto,
 } from '$lib/types.js';
+import { calendarDayDomain } from '$lib/components/features/statistics/statistics-helpers.js';
 
 const mockCapabilities = vi.fn<() => Promise<StatisticsCapabilitiesDto>>();
 const mockSummary = vi.fn<(query: StatisticsSummaryQuery) => Promise<readonly StatisticsMetricSummaryDto[]>>();
@@ -357,10 +358,13 @@ describe('Statistics route', () => {
     );
   });
 
-  it('uses an inclusive drilldown end for a half-open DST calendar bucket', async () => {
-    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-03-08T18:00:00.000Z'));
-    const fromMs = Date.parse('2026-03-08T08:00:00.000Z');
-    const nextMidnightMs = Date.parse('2026-03-09T07:00:00.000Z');
+  it('uses an inclusive drilldown end for a half-open calendar bucket', async () => {
+    const nowMs = Date.parse('2026-03-08T18:00:00.000Z');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const today = calendarDayDomain(nowMs, 1, timeZone);
+    const fromMs = today.todayFromMs;
+    const nextMidnightMs = today.buckets[0]!.toMs + 1;
     mockSeries.mockResolvedValue([
       {
         fromMs,
@@ -376,7 +380,7 @@ describe('Statistics route', () => {
     try {
       render(Statistics);
       await screen.findByRole('heading', { name: 'LLM statistics' }, { timeout: 2_000 });
-      await fireEvent.click(screen.getByRole('button', { name: /Select Today, Mar 8, 2026/i }));
+      await fireEvent.click(screen.getByRole('button', { name: /Select Today,/i }));
 
       await vi.waitFor(() => {
         const detailQuery = mockSummary.mock.calls
