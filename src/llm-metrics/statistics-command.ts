@@ -25,7 +25,11 @@ const STATISTICS_COMMAND_SPEC: CommandSpec = {
   description: 'Manage locally persisted LLM statistics',
   usage: ['ironcurtain statistics delete --before <ISO-date-or-epoch-ms>', 'ironcurtain statistics delete --all'],
   options: [
-    { flag: 'before', placeholder: '<time>', description: 'Delete before epoch-ms or an ISO date with timezone' },
+    {
+      flag: 'before',
+      placeholder: '<time>',
+      description: 'Delete before epoch-ms, YYYY-MM-DD, or an ISO timestamp with timezone',
+    },
     { flag: 'all', description: 'Delete all rows present at command start' },
     { flag: 'help', short: 'h', description: 'Show this help' },
   ],

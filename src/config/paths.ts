@@ -61,6 +61,10 @@ export function getLlmStatisticsDatabasePath(): string {
 }
 
 /** Returns the local key used to derive opaque identifiers in statistics rows. */
+export function getLlmStatisticsIdentityKeyPath(statisticsDirectory = getStatisticsDir()): string {
+  return resolve(statisticsDirectory, 'identity.key');
+}
+
 /**
  * Characters permitted in any identifier that gets embedded in a
  * filesystem path by this module (session IDs, workflow IDs, persona

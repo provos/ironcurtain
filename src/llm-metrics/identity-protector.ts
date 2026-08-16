@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 
+import { getLlmStatisticsIdentityKeyPath } from '../config/paths.js';
 import { asIdentifier, asProviderIdentifier } from './normalization.js';
 import type { LlmMetricsRepository } from './persistence/repository.js';
 import type { GatewayRouteAttempt, LlmExchangeCompleted, LlmModelIdentity, SourcedIdentity } from './types.js';
@@ -88,7 +89,7 @@ function writeCompleteFile(path: string, contents: Buffer): void {
  */
 function loadOrCreateIdentityKey(statisticsDirectory: string): Buffer {
   ensureStatisticsDirectory(statisticsDirectory);
-  const keyPath = join(statisticsDirectory, IDENTITY_KEY_FILENAME);
+  const keyPath = getLlmStatisticsIdentityKeyPath(statisticsDirectory);
   if (existsSync(keyPath)) return readIdentityKey(keyPath);
 
   const candidatePath = join(
