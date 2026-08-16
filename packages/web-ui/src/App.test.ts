@@ -47,6 +47,11 @@ vi.mock('./lib/stores.svelte.js', () => ({
   resolveEscalation: vi.fn(),
   getTheme: () => 'iron',
   setTheme: vi.fn(),
+  // App.svelte loads the sidebar statistics summary through the store; the
+  // matchMedia stub reports a mobile viewport, so the load path stays dormant.
+  connectionGeneration: { value: 0 },
+  configChangedGeneration: { value: 0 },
+  getStatisticsSummary: vi.fn().mockResolvedValue([]),
 }));
 
 // Stub routed views and feature components -- their internals pull in WS/store

@@ -33,13 +33,14 @@
     collapseHiddenTrendSignals,
     createStatisticsRequestLimiter,
     findMeasure,
+    localTimeZone,
     statisticsIdentityDimensions,
     type StatisticsIdentityMode,
   } from '$lib/components/features/statistics/statistics-helpers.js';
 
   const HOUR_MS = 60 * 60 * 1_000;
   const STALE = Symbol('stale statistics request');
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const timeZone = localTimeZone;
   const limiter = createStatisticsRequestLimiter(2);
   const MAX_VISIBLE_TREND_SERIES = 4;
   const MAX_RETURNED_TREND_SERIES = 8;

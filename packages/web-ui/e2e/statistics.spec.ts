@@ -53,7 +53,15 @@ test.describe('LLM statistics', () => {
 
   test('renders the mixed provider and model dataset on desktop', async ({ page, request }, testInfo) => {
     await resetMockServer(request, { statisticsScenario: 'mixed' });
-    await openStatistics(page);
+    await connectWithToken(page);
+
+    const navSummary = page.getByTestId('sidebar-nav').getByTestId('statistics-nav-summary');
+    await expect(navSummary).toBeVisible();
+    await expect(navSummary).toContainText('tok/s');
+    await expect(navSummary).toContainText('Middle 50%');
+    await expect(navSummary).toContainText('Output');
+    await expect(navSummary).toContainText('Measured');
+    await navSummary.click();
 
     await expect(page.getByRole('heading', { name: 'LLM statistics' })).toBeVisible();
     await expect(page.getByLabel('Effective output speed', { exact: true })).toContainText('output tokens/s');
@@ -138,6 +146,10 @@ test.describe('LLM statistics', () => {
     expect(new Set(activeStyles).size).toBe(activeStyles.length);
 
     await attachScreenshot(page, testInfo, 'statistics-longitudinal-routed-desktop');
+    await testInfo.attach('statistics-sidebar-receipt-desktop', {
+      body: await page.getByTestId('sidebar-nav').screenshot({ animations: 'disabled' }),
+      contentType: 'image/png',
+    });
 
     await page.getByRole('button', { name: 'Served model' }).click();
     await expect(page.getByRole('button', { name: 'Served model' })).toHaveAttribute('aria-pressed', 'true');
