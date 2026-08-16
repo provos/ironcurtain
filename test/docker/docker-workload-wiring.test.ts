@@ -50,7 +50,6 @@ import {
   createMockRuntimeTrust,
 } from '../helpers/docker-mocks.js';
 import {
-  ADMISSION_BINDINGS,
   ADMISSION_CONFIG_HASH,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
@@ -90,7 +89,6 @@ async function admit(
     runtimeKind: 'apple-container',
     bundleId: BUNDLE_ID,
     workspaceRoot: join(getHome(), 'workspace'),
-    bindings: ADMISSION_BINDINGS,
     configHash: ADMISSION_CONFIG_HASH,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
@@ -133,20 +131,22 @@ function makeCore(docker: ContainerRuntime, handle: DockerWorkloadBundleHandle):
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
     imageResolution: {
-      mode: 'preloaded-catalog',
-      runtimeKind: 'apple-container',
+      mode: 'selected-agent-artifact',
       logicalName: 'ironcurtain-claude-code:latest',
       imageRef: 'ironcurtain-claude-code:latest',
       immutableImageId: TEST_APPLE_IMAGE_ID,
       buildHash: '1'.repeat(64),
-      catalogGeneration: 'test-generation',
-      catalogSha256: '2'.repeat(64),
-      manifestDigest: `sha256:${'3'.repeat(64)}`,
-      configDigest: `sha256:${'4'.repeat(64)}`,
-      toolchainDigest: '5'.repeat(64),
-      provenanceDigest: '6'.repeat(64),
-      archivePath: join(tempDir, 'agent.tar'),
-      archiveSha256: '7'.repeat(64),
+      artifact: {
+        logicalName: 'ironcurtain-claude-code:latest',
+        buildHash: '1'.repeat(64),
+        architecture: 'arm64',
+        appleImageId: TEST_APPLE_IMAGE_ID,
+        dockerImageId: `sha256:${'3'.repeat(64)}`,
+        manifestDigest: `sha256:${'4'.repeat(64)}`,
+        archivePath: join(tempDir, 'agent.tar'),
+        archiveSha256: '7'.repeat(64),
+        archiveSizeBytes: 1024,
+      },
     },
     runtimeKind: 'apple-container',
     topology: 'uds',
@@ -197,7 +197,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
     expect(lease.resources[0].requestedName).not.toBe(result.containerName);
   });
 
-  it('observes the stopped Apple VM before accepting its catalog image descriptor', async () => {
+  it('observes the stopped Apple VM before accepting its prepared image descriptor', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
     const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
@@ -218,7 +218,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
       mounts: [],
       create: (name, labels) =>
         runtime.runtime.create({
-          image: 'catalog-logical:latest',
+          image: 'selected-logical:latest',
           name,
           mounts: [],
           network: 'none',
@@ -233,7 +233,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
     expect(loadDockerWorkloadLease(handle.leasePath).resources[0]?.observedId).toBe(containerId);
   });
 
-  it('rejects an admitted Apple create when its catalog-bound immutable image ID is missing', async () => {
+  it('rejects an admitted Apple create when its prepared immutable image ID is missing', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
     const handle = await admit(clock, runtime, createFakeSupervisor({ clock: clock.clock }));
@@ -248,7 +248,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
         mounts: [],
         create: (name, labels) =>
           runtime.runtime.create({
-            image: 'catalog-logical:latest',
+            image: 'selected-logical:latest',
             name,
             mounts: [],
             network: 'none',
@@ -257,7 +257,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
             labels,
           }),
       }),
-    ).rejects.toThrow(/missing its catalog-bound immutable image ID/u);
+    ).rejects.toThrow(/missing its prepared immutable image ID/u);
 
     expect(runtime.events).toEqual([]);
     expect(loadDockerWorkloadLease(handle.leasePath).resources).toEqual([]);
@@ -283,7 +283,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
         mounts: [],
         create: (name, labels) =>
           runtime.runtime.create({
-            image: 'catalog-logical:latest',
+            image: 'selected-logical:latest',
             name,
             mounts: [],
             network: 'none',
@@ -700,12 +700,7 @@ describe('Docker-workload wiring — outer resource envelope', () => {
         dockerResources: { memoryMb: 7777, cpus: 7 },
         dockerWorkload: {
           enabled: true,
-          tier: 'developer-only',
-          backend: 'apple-container',
-          imageMode: 'preloaded-catalog',
           imageIngress: 'preloaded-only',
-          daemonState: 'ephemeral',
-          hostPortPublishing: false,
           buildEgress: 'disabled',
           acceptObservedDiskRisk: true,
           resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },

@@ -31,13 +31,7 @@ describe('effective secure nested resource capabilities', () => {
   });
 
   it('records Apple hypervisor CPU/memory, unsupported PIDs, and watchdog-observed disk honestly', () => {
-    const config = resolveDockerWorkloadConfig({
-      enabled: true,
-      backend: 'apple-container',
-      resources: { diskMb: null },
-      acceptObservedDiskRisk: true,
-    });
-    if (!config.enabled) throw new Error('fixture did not enable Docker workload');
+    const config = enabledConfig(null);
     const result = resolveEffectiveCapabilities({
       backend: 'apple-container',
       config,
@@ -58,13 +52,11 @@ describe('effective secure nested resource capabilities', () => {
   });
 
   it('rejects Apple required PIDs and any attempt to call guest tuning enforced', () => {
-    const requiredConfig = resolveDockerWorkloadConfig({
-      enabled: true,
-      backend: 'apple-container',
-      resources: { pids: { required: true }, diskMb: null },
-      acceptObservedDiskRisk: true,
-    });
-    if (!requiredConfig.enabled) throw new Error('fixture did not enable Docker workload');
+    const optionalConfig = enabledConfig(null);
+    const requiredConfig = {
+      ...optionalConfig,
+      resources: { ...optionalConfig.resources, pids: { max: optionalConfig.resources.pids.max, required: true } },
+    };
     expect(() =>
       resolveEffectiveCapabilities({
         backend: 'apple-container',
@@ -73,13 +65,6 @@ describe('effective secure nested resource capabilities', () => {
       }),
     ).toThrow(/cannot satisfy required authoritative PID/u);
 
-    const optionalConfig = resolveDockerWorkloadConfig({
-      enabled: true,
-      backend: 'apple-container',
-      resources: { diskMb: null },
-      acceptObservedDiskRisk: true,
-    });
-    if (!optionalConfig.enabled) throw new Error('fixture did not enable Docker workload');
     expect(() =>
       resolveEffectiveCapabilities({
         backend: 'apple-container',
@@ -90,12 +75,7 @@ describe('effective secure nested resource capabilities', () => {
   });
 
   it('rejects observed disk without opt-in, watchdog, or pre-daemon attestation', () => {
-    const accepted = resolveDockerWorkloadConfig({
-      enabled: true,
-      resources: { diskMb: null },
-      acceptObservedDiskRisk: true,
-    });
-    if (!accepted.enabled) throw new Error('fixture did not enable Docker workload');
+    const accepted = enabledConfig(null);
     const observed = evidence({
       cpu: enforced('outer-cgroup', 2),
       memoryMb: enforced('outer-cgroup', 4096),
@@ -155,9 +135,13 @@ describe('effective secure nested resource capabilities', () => {
   });
 });
 
-function enabledConfig() {
-  const config = resolveDockerWorkloadConfig({ enabled: true });
-  if (!config.enabled) throw new Error('fixture did not enable Docker workload');
+function enabledConfig(diskMb: number | null = 8192) {
+  const resolved = resolveDockerWorkloadConfig({ enabled: true });
+  if (!resolved.enabled) throw new Error('fixture did not enable Docker workload');
+  const config = {
+    ...resolved,
+    resources: { ...resolved.resources, diskMb },
+  };
   return config;
 }
 

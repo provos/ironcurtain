@@ -538,6 +538,21 @@ export function createAppleContainerManager(
       });
     },
 
+    async tagImage(sourceRef: string, targetRef: string): Promise<void> {
+      await exec('container', ['image', 'tag', sourceRef, targetRef], {
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+      });
+    },
+
+    async saveImageArchive(ref: string, archivePath: string, platform = 'linux/arm64'): Promise<void> {
+      await runStreamed({
+        operation: 'container image save',
+        args: ['image', 'save', '--platform', platform, '--output', archivePath, ref],
+        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
+      });
+    },
+
     async buildImage(
       tag: string,
       dockerfilePath: string,

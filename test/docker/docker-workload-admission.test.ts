@@ -32,11 +32,7 @@ beforeEach(() => {
 });
 
 function admittedAppleConfig() {
-  return resolveDockerWorkloadConfig({
-    enabled: true,
-    acceptObservedDiskRisk: true,
-    resources: { diskMb: null },
-  });
+  return resolveDockerWorkloadConfig({ enabled: true });
 }
 
 describe('secure nested Docker resolved-variant admission', () => {
@@ -45,66 +41,22 @@ describe('secure nested Docker resolved-variant admission', () => {
     expect(() => assertDockerWorkloadVariantAdmitted(resolveDockerWorkloadConfig(undefined), 'docker')).not.toThrow();
   });
 
-  it('admits the frozen Apple developer variant with offline or credential-free public-registry image ingress', () => {
+  it('admits the simple opt-in and its preloaded-only image-ingress opt-out on Apple', () => {
     expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'apple-container')).not.toThrow();
     expect(() =>
       assertDockerWorkloadVariantAdmitted(
         resolveDockerWorkloadConfig({
           enabled: true,
-          imageIngress: 'public-registry',
-          acceptObservedDiskRisk: true,
-          resources: { diskMb: null },
+          imageIngress: 'preloaded-only',
         }),
         'apple-container',
       ),
     ).not.toThrow();
   });
 
-  it.each([
-    ['auto resolved to Docker', admittedAppleConfig(), 'docker'],
-    [
-      'explicit Apple backend resolved to Docker',
-      resolveDockerWorkloadConfig({
-        enabled: true,
-        backend: 'apple-container',
-        acceptObservedDiskRisk: true,
-        resources: { diskMb: null },
-      }),
-      'docker',
-    ],
-    [
-      'explicit Docker backend resolved to Apple',
-      resolveDockerWorkloadConfig({
-        enabled: true,
-        backend: 'docker',
-        acceptObservedDiskRisk: true,
-        resources: { diskMb: null },
-      }),
-      'apple-container',
-    ],
-    ['bounded disk', resolveDockerWorkloadConfig({ enabled: true }), 'apple-container'],
-    [
-      'build egress',
-      resolveDockerWorkloadConfig({
-        enabled: true,
-        buildEgress: 'ironcurtain-dockerfiles',
-        acceptObservedDiskRisk: true,
-        resources: { diskMb: null },
-      }),
-      'apple-container',
-    ],
-    [
-      'required PID enforcement',
-      resolveDockerWorkloadConfig({
-        enabled: true,
-        acceptObservedDiskRisk: true,
-        resources: { pids: { required: true }, diskMb: null },
-      }),
-      'apple-container',
-    ],
-  ] as const)('rejects %s', (_label, config, runtimeKind) => {
-    expect(() => assertDockerWorkloadVariantAdmitted(config, runtimeKind)).toThrow(
-      /currently admits only the Apple Container developer-only/u,
+  it('rejects an enabled capability resolved to Docker', () => {
+    expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'docker')).toThrow(
+      /currently admits only the Apple Container developer slice/u,
     );
   });
 
@@ -116,7 +68,7 @@ describe('secure nested Docker resolved-variant admission', () => {
         containerRuntime: 'auto',
         dockerWorkload: admittedAppleConfig(),
       } as ResolvedUserConfig),
-    ).rejects.toThrow(/currently admits only the Apple Container developer-only/u);
+    ).rejects.toThrow(/currently admits only the Apple Container developer slice/u);
     expect(registerBuiltinAdapters).not.toHaveBeenCalled();
     expect(resolveRuntimeKind).toHaveBeenCalledOnce();
   });
@@ -191,11 +143,11 @@ describe('secure nested Docker admission — prepareDockerInfrastructure', () =>
         join(home, 'escalations'),
         'bundle-fuse-001' as BundleId,
       ),
-    ).rejects.toThrow(/currently admits only the Apple Container developer-only/u);
+    ).rejects.toThrow(/currently admits only the Apple Container developer slice/u);
 
     // Effective runtime resolution is read-only. At this seam rejection
     // precedes the active-profile stamp and feature-attributable adapter,
-    // runtime, image, catalog, proxy, lease, and filesystem work.
+    // runtime, image, artifact, proxy, lease, and filesystem work.
     expect(config.activeProviderProfile).toBeUndefined();
     expect(existsSync(getDockerWorkloadRoot())).toBe(false);
     expect(readdirSync(home)).toEqual([]);

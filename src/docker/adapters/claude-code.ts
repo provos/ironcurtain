@@ -40,6 +40,7 @@ import {
   buildResizePtyScript,
   buildCheckPtySizeScript,
   buildNetworkSection,
+  buildNestedDockerSection,
   buildPolicySection,
   buildAttributionSection,
 } from './shared-scripts.js';
@@ -99,6 +100,8 @@ When cloning repos, use ${context.workspaceDir} as the target directory
 (e.g. \`${context.workspaceDir}/repo-name\`).
 
 ${buildNetworkSection('the sandbox tools via `execute_code`')}
+
+${buildNestedDockerSection(context)}
 
 IMPORTANT: Your built-in server-side web search tool (WebSearch) is DISABLED
 and will NOT work — it is stripped by the security proxy. You MUST use the

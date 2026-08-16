@@ -509,6 +509,18 @@ describe('AppleContainerManager', () => {
       expect(await manager().imageExists('img')).toBe(false);
     });
 
+    it('tags an image to an exact capture reference', async () => {
+      mock.setResponse('');
+
+      await manager().tagImage?.('ironcurtain-claude-code:latest', 'ironcurtain-capture-123:latest');
+
+      expect(mock.calls[0]).toEqual({
+        cmd: 'container',
+        args: ['image', 'tag', 'ironcurtain-claude-code:latest', 'ironcurtain-capture-123:latest'],
+        opts: expect.objectContaining({ timeout: 60_000 }),
+      });
+    });
+
     it('getImageLabel reads variant config labels', async () => {
       mock.setResponse(JSON.stringify([appleImage]));
       expect(await manager().getImageLabel('img', 'ironcurtain.build-hash')).toBe('abc123');
@@ -779,6 +791,26 @@ describe('AppleContainerManager', () => {
       });
       await m.loadImageArchive('/trusted/catalog/agent.oci.tar');
       expect(spawn.calls[0]?.args).toEqual(['image', 'load', '--input', '/trusted/catalog/agent.oci.tar']);
+    });
+
+    it('exports one explicit platform image to an OCI archive path', async () => {
+      const spawn = createMockSpawn();
+      const m = createAppleContainerManager(mock.mockExec, availableProbe, {
+        spawn: spawn.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+      expect(m.saveImageArchive).toBeDefined();
+      await m.saveImageArchive?.('ironcurtain-claude-code:latest', '/trusted/artifact/apple.oci.tar', 'linux/arm64');
+      expect(spawn.calls[0]?.args).toEqual([
+        'image',
+        'save',
+        '--platform',
+        'linux/arm64',
+        '--output',
+        '/trusted/artifact/apple.oci.tar',
+        'ironcurtain-claude-code:latest',
+      ]);
     });
 
     it('surfaces the Rosetta remediation hint on builder bootstrap failures', async () => {

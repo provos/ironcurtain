@@ -251,6 +251,20 @@ describe('GooseAdapter.buildSystemPrompt', () => {
   it('contains NO direct internet access warning', () => {
     const prompt = adapter.buildSystemPrompt(sampleContext);
     expect(prompt).toContain('NO direct internet access');
+    expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
+  });
+
+  it('includes managed-network guidance only for admitted nested Docker', () => {
+    const prompt = adapter.buildSystemPrompt({
+      ...sampleContext,
+      nestedDocker: { networkName: 'ironcurtain' },
+    });
+
+    expect(prompt).toContain('### Nested Docker');
+    expect(prompt).toContain('--network "$IRONCURTAIN_DOCKER_NETWORK"');
+    expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
+    expect(prompt).toContain('`--network host`');
+    expect(prompt).toContain('supported service topology, not a security boundary');
   });
 });
 

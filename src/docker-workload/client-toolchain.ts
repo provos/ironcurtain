@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { loadImmutableHostJson } from '../hardened-fs.js';
-import { catalogTupleDigest } from '../docker/preloaded-image-catalog.js';
+import { computeHash } from '../hash.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import { compareDockerApiVersions } from '../docker/docker-api-version.js';
 
@@ -174,7 +174,7 @@ export async function preflightClientToolchain(options: {
     buildx: buildxMatch[1],
     compose: composeVersion,
   };
-  const toolchainDigest = catalogTupleDigest(toolchain);
+  const toolchainDigest = computeHash(toolchain);
   if (options.expectedToolchainDigest !== undefined && toolchainDigest !== options.expectedToolchainDigest) {
     throw new Error('Docker client toolchain digest differs from the preloaded catalog');
   }

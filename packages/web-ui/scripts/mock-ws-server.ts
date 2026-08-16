@@ -628,6 +628,9 @@ let modelProviders: MockModelProviders = {
 
 const ORIGINAL_MODEL_PROVIDERS: MockModelProviders = structuredClone(modelProviders);
 
+let dockerWorkloadSettings = { enabled: false, allowPublicRegistryPulls: true };
+const ORIGINAL_DOCKER_WORKLOAD_SETTINGS = structuredClone(dockerWorkloadSettings);
+
 // ---------------------------------------------------------------------------
 // OpenRouter model catalog (config.listOpenrouterModels).
 //
@@ -1352,6 +1355,7 @@ function resetState(opts?: ResetOptions): void {
   clearCompileState();
   // Restore the model-provider registry so a set-mutating e2e starts fresh.
   modelProviders = structuredClone(ORIGINAL_MODEL_PROVIDERS);
+  dockerWorkloadSettings = structuredClone(ORIGINAL_DOCKER_WORKLOAD_SETTINGS);
   // clearCompileState resets allowPolicyMutation to true (the default); honor a
   // per-test override AFTER it so a flag-OFF e2e (controls hidden) is real.
   if (opts?.allowPolicyMutation !== undefined) {
@@ -2070,9 +2074,8 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     }
 
     // -----------------------------------------------------------------------
-    // Config (modelProviders). Read is ungated; the write is gated on
-    // allowPolicyMutation and applies the M5/F7/F10 contract, then broadcasts
-    // config.changed (mirrors config-dispatch.ts).
+    // Config reads are ungated; writes use the allowPolicyMutation gate and
+    // broadcast config.changed (mirrors config-dispatch.ts).
     // -----------------------------------------------------------------------
 
     case 'config.getModelProviders':
@@ -2085,6 +2088,23 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       if (applied) return applied;
       broadcast('config.changed', {});
       return buildModelProvidersDto();
+    }
+
+    case 'config.getDockerWorkload':
+      return dockerWorkloadSettings;
+
+    case 'config.setDockerWorkload': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      if (typeof params.enabled !== 'boolean' || typeof params.allowPublicRegistryPulls !== 'boolean') {
+        return errorResult('INVALID_PARAMS', 'enabled and allowPublicRegistryPulls must be booleans');
+      }
+      dockerWorkloadSettings = {
+        enabled: params.enabled,
+        allowPublicRegistryPulls: params.allowPublicRegistryPulls,
+      };
+      broadcast('config.changed', {});
+      return dockerWorkloadSettings;
     }
 
     // Ungated read of the OpenRouter catalog. Source is env-toggled (see

@@ -220,11 +220,12 @@ function validateOciMetadata(
     throw new Error('OCI image archive config descriptor size mismatch');
   }
 
-  const layerDigests: string[] = [];
+  const layers: { readonly digest: string; readonly mediaType: string }[] = [];
   for (const layer of manifest.layers) {
     if (
       !isRecord(layer) ||
-      layer.mediaType !== 'application/vnd.oci.image.layer.v1.tar' ||
+      (layer.mediaType !== 'application/vnd.oci.image.layer.v1.tar' &&
+        layer.mediaType !== 'application/vnd.oci.image.layer.v1.tar+gzip') ||
       typeof layer.digest !== 'string' ||
       typeof layer.size !== 'number'
     ) {
@@ -235,32 +236,32 @@ function validateOciMetadata(
     if (!entry || entry.size !== layer.size) {
       throw new Error(`OCI image archive layer descriptor mismatch: ${layer.digest}`);
     }
-    layerDigests.push(layer.digest);
+    layers.push({ digest: layer.digest, mediaType: layer.mediaType });
   }
-  if (layerDigests.length === 0) throw new Error('OCI image archive manifest has no layers');
+  if (layers.length === 0) throw new Error('OCI image archive manifest has no layers');
 
   const config = parseJsonEntry(entries, blobPath(options.configDigest));
   if (!isRecord(config) || config.architecture !== options.architecture || config.os !== 'linux') {
     throw new Error('OCI image archive config platform does not match the catalog');
   }
   const configSection = config.config;
-  if (!isRecord(configSection) || !isRecord(configSection.Labels)) {
+  if (Object.keys(options.expectedLabels).length > 0 && (!isRecord(configSection) || !isRecord(configSection.Labels))) {
     throw new Error('OCI image archive config labels are missing');
   }
   for (const [name, expected] of Object.entries(options.expectedLabels)) {
-    if (configSection.Labels[name] !== expected) {
+    if (!isRecord(configSection) || !isRecord(configSection.Labels) || configSection.Labels[name] !== expected) {
       throw new Error(`OCI image archive config label mismatch: ${name}`);
     }
   }
 
-  validateDockerLoadMetadata(entries, options, config, layerDigests);
+  validateDockerLoadMetadata(entries, options, config, layers);
   const exactPaths = new Set([
     'oci-layout',
     'index.json',
     'manifest.json',
     blobPath(options.manifestDigest),
     blobPath(options.configDigest),
-    ...layerDigests.map(blobPath),
+    ...layers.map((layer) => blobPath(layer.digest)),
   ]);
   const actualPaths = new Set(entries.keys());
   const unexpected = [...actualPaths].filter((path) => !exactPaths.has(path));
@@ -278,7 +279,7 @@ function validateOciMetadata(
     sizeBytes: options.expectedSizeBytes,
     manifestDigest: options.manifestDigest,
     configDigest: options.configDigest,
-    layerDigests,
+    layerDigests: layers.map((layer) => layer.digest),
   };
 }
 
@@ -292,7 +293,7 @@ function validateDockerLoadMetadata(
   entries: ReadonlyMap<string, ArchiveEntry>,
   options: VerifyOciImageArchiveOptions,
   config: Record<string, unknown>,
-  ociLayerDigests: readonly string[],
+  ociLayers: readonly { readonly digest: string; readonly mediaType: string }[],
 ): void {
   const dockerManifest = parseJsonEntry(entries, 'manifest.json');
   if (!Array.isArray(dockerManifest) || dockerManifest.length !== 1 || !isRecord(dockerManifest[0])) {
@@ -312,22 +313,20 @@ function validateDockerLoadMetadata(
     throw new Error('OCI image archive config rootfs diff IDs are invalid');
   }
   const diffIds = Array.from(rootfs.diff_ids as unknown[]);
-  if (
-    diffIds.length !== ociLayerDigests.length ||
-    !Array.isArray(item.Layers) ||
-    item.Layers.length !== diffIds.length
-  ) {
+  if (diffIds.length !== ociLayers.length || !Array.isArray(item.Layers) || item.Layers.length !== diffIds.length) {
     throw new Error('OCI image archive Docker compatibility layer count does not match OCI layers');
   }
-  if (!isRecord(item.LayerSources) || Object.keys(item.LayerSources).length !== ociLayerDigests.length) {
+  const uniqueLayerDigests = new Set(ociLayers.map((layer) => layer.digest));
+  if (!isRecord(item.LayerSources) || Object.keys(item.LayerSources).length !== uniqueLayerDigests.size) {
     throw new Error('OCI image archive Docker compatibility layer sources are invalid');
   }
   for (let index = 0; index < diffIds.length; index++) {
     const diffId = diffIds[index];
     if (typeof diffId !== 'string') throw new Error('OCI image archive config contains an invalid diff ID');
     assertDigest(diffId, 'rootfs diff ID');
-    const layerDigest = ociLayerDigests[index];
-    if (diffId !== layerDigest) {
+    const layer = ociLayers[index];
+    const layerDigest = layer.digest;
+    if (layer.mediaType === 'application/vnd.oci.image.layer.v1.tar' && diffId !== layerDigest) {
       throw new Error('OCI image archive uncompressed layer digest does not match the config diff ID');
     }
     const expectedLayerPath = blobPath(layerDigest);
@@ -335,13 +334,19 @@ function validateDockerLoadMetadata(
       throw new Error('OCI image archive Docker compatibility layer path does not match the config diff ID');
     }
     const layerEntry = entries.get(expectedLayerPath);
-    if (layerEntry?.digest !== diffId.slice('sha256:'.length)) {
+    if (layerEntry === undefined) {
+      throw new Error('OCI image archive Docker compatibility layer is missing');
+    }
+    if (
+      layer.mediaType === 'application/vnd.oci.image.layer.v1.tar' &&
+      layerEntry.digest !== diffId.slice('sha256:'.length)
+    ) {
       throw new Error('OCI image archive Docker compatibility layer bytes do not match the config diff ID');
     }
     const source = item.LayerSources[layerDigest];
     if (
       !isRecord(source) ||
-      source.mediaType !== 'application/vnd.oci.image.layer.v1.tar' ||
+      source.mediaType !== layer.mediaType ||
       source.digest !== layerDigest ||
       source.size !== layerEntry.size
     ) {

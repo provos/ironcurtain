@@ -5,7 +5,7 @@
  * without a real container runtime, real daemon, or the implementation fuse.
  */
 
-import { chmodSync, copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach } from 'vitest';
@@ -17,12 +17,11 @@ import {
   APPLE_VM_DAEMON_API_DIR_STAT_ARGV,
 } from '../../../src/docker-workload/apple-vm-daemon.js';
 import {
-  APPLE_VM_INNER_DOCKER_CATALOG_DIR,
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
   type AppleVmDockerWorkloadBootstrapConfig,
 } from '../../../src/docker-workload/apple-private-docker.js';
 import { loadClientToolchainManifest } from '../../../src/docker-workload/client-toolchain.js';
-import { buildPreloadedImageLabels, loadPreloadedImageCatalog } from '../../../src/docker/preloaded-image-catalog.js';
-import { getFrozenCatalogDir, getFrozenCatalogPath } from '../../../src/docker/preloaded-catalog-paths.js';
 import type { WatchdogSupervisorController } from '../../../src/docker-workload/infrastructure.js';
 import type { ResourceWatchdogSupervisorStatus } from '../../../src/docker-workload/resource-watchdog-supervisor.js';
 import { createMockDocker } from '../../helpers/docker-mocks.js';
@@ -33,48 +32,49 @@ import type {
   DockerExecResult,
   DockerNetworkInfo,
 } from '../../../src/docker/types.js';
+import { writeOciArchiveFixture } from '../../helpers/oci-archive-fixture.js';
 
 export const WATCHDOG_TEMPLATE_PATH = resolve('config/docker-workload/resource-watchdog-policy.json');
 export const WATCHDOG_ENTRYPOINT_PATH = resolve('dist/docker-workload/resource-watchdog-supervisor-main.js');
 
-const FROZEN_DOCKER_CATALOG = loadPreloadedImageCatalog(getFrozenCatalogPath('docker'));
 const FROZEN_CLIENT_TOOLCHAIN = loadClientToolchainManifest(
   resolve('config/docker-workload/client-toolchain.arm64.json'),
 );
 
-export const TEST_APPLE_VM_DOCKER_WORKLOAD_BOOTSTRAP: AppleVmDockerWorkloadBootstrapConfig = {
-  hostCatalogDirectory: getFrozenCatalogDir(),
-  guestCatalogDirectory: APPLE_VM_INNER_DOCKER_CATALOG_DIR,
-  outerAppleCatalogPath: getFrozenCatalogPath('apple-container'),
-  innerDockerCatalogPath: getFrozenCatalogPath('docker'),
-  selectedImageLogicalName: 'ironcurtain-claude-code:latest',
-  clientToolchainManifestPath: FROZEN_CLIENT_TOOLCHAIN.path,
-};
+export const TEST_CLIENT_TOOLCHAIN_MANIFEST_PATH = FROZEN_CLIENT_TOOLCHAIN.path;
+
+let activeTestArtifact: AppleVmDockerWorkloadBootstrapConfig['artifact'] | undefined;
 
 /** Isolated per-test lease view whose selected archive can be safely retired. */
 export function createTestAppleVmDockerWorkloadBootstrap(
   parentDirectory: string,
 ): AppleVmDockerWorkloadBootstrapConfig {
-  const hostCatalogDirectory = mkdtempSync(join(parentDirectory, 'private-docker-catalog-'));
-  chmodSync(hostCatalogDirectory, 0o700);
-  const outerAppleCatalogPath = join(hostCatalogDirectory, 'preloaded-catalog.apple-container.json');
-  const innerDockerCatalogPath = join(hostCatalogDirectory, 'preloaded-catalog.docker.json');
-  copyFileSync(getFrozenCatalogPath('apple-container'), outerAppleCatalogPath);
-  copyFileSync(getFrozenCatalogPath('docker'), innerDockerCatalogPath);
-  chmodSync(outerAppleCatalogPath, 0o400);
-  chmodSync(innerDockerCatalogPath, 0o400);
-  const selectedImageLogicalName = 'ironcurtain-claude-code:latest';
-  const selected = FROZEN_DOCKER_CATALOG.catalog.images.find(
-    (candidate) => candidate.logicalName === selectedImageLogicalName,
-  );
-  if (selected === undefined) throw new Error(`test catalog is missing ${selectedImageLogicalName}`);
-  writeFileSync(join(hostCatalogDirectory, selected.archive.fileName), '', { mode: 0o400 });
+  const hostArtifactDirectory = mkdtempSync(join(parentDirectory, 'selected-agent-artifact-'));
+  chmodSync(hostArtifactDirectory, 0o700);
+  const logicalName = 'ironcurtain-claude-code:latest';
+  const buildHash = 'a'.repeat(64);
+  const selected = writeOciArchiveFixture({
+    directory: hostArtifactDirectory,
+    logicalName,
+    buildHash,
+    architecture: FROZEN_CLIENT_TOOLCHAIN.manifest.architecture,
+    catalogGeneration: 'selected-agent-test',
+  });
+  activeTestArtifact = {
+    logicalName,
+    buildHash,
+    architecture: selected.architecture,
+    appleImageId: `sha256:${'b'.repeat(64)}`,
+    dockerImageId: selected.configDigest,
+    manifestDigest: selected.manifestDigest,
+    archivePath: join(hostArtifactDirectory, selected.archive.fileName),
+    archiveSha256: selected.archive.sha256,
+    archiveSizeBytes: selected.archive.sizeBytes,
+  };
   return {
-    hostCatalogDirectory,
-    guestCatalogDirectory: APPLE_VM_INNER_DOCKER_CATALOG_DIR,
-    outerAppleCatalogPath,
-    innerDockerCatalogPath,
-    selectedImageLogicalName,
+    hostArtifactDirectory,
+    guestArtifactDirectory: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
+    artifact: activeTestArtifact,
     clientToolchainManifestPath: FROZEN_CLIENT_TOOLCHAIN.path,
   };
 }
@@ -138,6 +138,8 @@ export const QUALIFIED_DOCKER_INFO = {
   ServerVersion: '29.2.1',
 } as const;
 
+export const MANAGED_INNER_NETWORK_ID = '8'.repeat(64);
+
 /**
  * Default in-container exec responder: every bootstrap command succeeds and the
  * readiness probe reports the required daemon configuration. Recognises each command by its
@@ -146,6 +148,24 @@ export const QUALIFIED_DOCKER_INFO = {
  * API-directory contract cannot leave this harness silently asserting the old one.
  */
 export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExecResult {
+  if (argv.includes('network') && argv.includes('create')) {
+    return { exitCode: 0, stdout: `${MANAGED_INNER_NETWORK_ID}\n`, stderr: '' };
+  }
+  if (argv.includes('network') && argv.includes('inspect')) {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        Id: MANAGED_INNER_NETWORK_ID,
+        Name: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+        Driver: 'bridge',
+        Scope: 'local',
+        Internal: true,
+        Labels: { 'com.ironcurtain.managed-workload': 'true' },
+        Containers: {},
+      }),
+      stderr: '',
+    };
+  }
   if (argv.includes('info')) return { exitCode: 0, stdout: JSON.stringify(QUALIFIED_DOCKER_INFO), stderr: '' };
   if (argv.includes('version') && argv.includes('{{json .}}')) {
     const manifest = FROZEN_CLIENT_TOOLCHAIN.manifest;
@@ -181,16 +201,18 @@ export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExec
   }
   if (argv.includes('image') && argv.includes('inspect')) {
     const logicalName = argv.at(-1);
-    const entry = FROZEN_DOCKER_CATALOG.catalog.images.find((candidate) => candidate.logicalName === logicalName);
-    if (entry === undefined) return { exitCode: 1, stdout: '', stderr: `No such image: ${logicalName}` };
+    const artifact = activeTestArtifact;
+    if (artifact === undefined || artifact.logicalName !== logicalName) {
+      return { exitCode: 1, stdout: '', stderr: `No such image: ${logicalName}` };
+    }
     return {
       exitCode: 0,
       stdout: JSON.stringify([
         {
-          Id: entry.runtimeImageId,
-          RepoTags: [entry.logicalName],
-          Config: { Labels: buildPreloadedImageLabels(entry, FROZEN_DOCKER_CATALOG.catalog.generation) },
-          Created: entry.provenance.createdAt,
+          Id: artifact.dockerImageId,
+          RepoTags: [artifact.logicalName],
+          Config: { Labels: { 'ironcurtain.build-hash': artifact.buildHash } },
+          Created: '2026-07-20T12:00:00.000Z',
         },
       ]),
       stderr: '',

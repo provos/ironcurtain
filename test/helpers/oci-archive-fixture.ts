@@ -17,12 +17,16 @@ export interface OciArchiveFixtureOptions {
   readonly catalogGeneration: string;
   /** Docker uses the config digest; Apple Container uses the OCI index digest. */
   readonly runtimeImageIdKind?: 'config' | 'index';
+  /** Test-only Apple identity, which is independent of a platform-save archive's index bytes. */
+  readonly runtimeImageIdOverride?: string;
   /** Test-only archive entries used to prove the verifier rejects extras. */
   readonly extraFiles?: readonly { readonly name: string; readonly content: Buffer }[];
   /** Test-only metadata mutations used to prove strict source canonicalization. */
   readonly indexMediaType?: string;
   readonly descriptorMediaType?: string;
   readonly duplicateLayer?: boolean;
+  /** Apple `container image save --platform` wraps the selected manifest in a nested index. */
+  readonly nestedIndex?: boolean;
   readonly toolchain?: {
     readonly dockerCli: string;
     readonly dockerDaemon: string;
@@ -95,15 +99,36 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): Prelo
     }),
   );
   const manifestDigest = digest(manifest);
+  const nestedIndex = options.nestedIndex
+    ? Buffer.from(
+        JSON.stringify({
+          schemaVersion: 2,
+          mediaType: 'application/vnd.oci.image.index.v1+json',
+          manifests: [
+            {
+              mediaType: 'application/vnd.oci.image.manifest.v1+json',
+              digest: manifestDigest,
+              size: manifest.length,
+              platform: { architecture: options.architecture, os: 'linux' },
+            },
+          ],
+        }),
+      )
+    : undefined;
+  const nestedIndexDigest = nestedIndex === undefined ? undefined : digest(nestedIndex);
   const index = Buffer.from(
     JSON.stringify({
       schemaVersion: 2,
       mediaType: options.indexMediaType ?? 'application/vnd.oci.image.index.v1+json',
       manifests: [
         {
-          mediaType: options.descriptorMediaType ?? 'application/vnd.oci.image.manifest.v1+json',
-          digest: manifestDigest,
-          size: manifest.length,
+          mediaType:
+            options.descriptorMediaType ??
+            (nestedIndex === undefined
+              ? 'application/vnd.oci.image.manifest.v1+json'
+              : 'application/vnd.oci.image.index.v1+json'),
+          digest: nestedIndexDigest ?? manifestDigest,
+          size: nestedIndex?.length ?? manifest.length,
           platform: { architecture: options.architecture, os: 'linux' },
           annotations: { 'org.opencontainers.image.ref.name': options.logicalName },
         },
@@ -131,6 +156,9 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): Prelo
   const archive = Buffer.concat([
     tarFile('oci-layout', layout),
     tarFile('index.json', index),
+    ...(nestedIndex === undefined || nestedIndexDigest === undefined
+      ? []
+      : [tarFile(blobPath(nestedIndexDigest), nestedIndex)]),
     tarFile(blobPath(configDigest), config),
     tarFile(blobPath(layerDigest), emptyLayerTar),
     tarFile(blobPath(manifestDigest), manifest),
@@ -144,7 +172,8 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): Prelo
 
   return {
     ...provisional,
-    runtimeImageId: options.runtimeImageIdKind === 'index' ? indexDigest : configDigest,
+    runtimeImageId:
+      options.runtimeImageIdOverride ?? (options.runtimeImageIdKind === 'index' ? indexDigest : configDigest),
     manifestDigest,
     configDigest,
     archive: { fileName, sha256: sha256(archive), sizeBytes: archive.length },

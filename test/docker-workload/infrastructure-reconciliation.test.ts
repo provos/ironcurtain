@@ -125,7 +125,6 @@ function admissionOptions(runtime: EventRuntime, clock: FakeClock): DockerWorklo
     runtimeKind: 'docker',
     bundleId: 'bundle-fresh-001',
     workspaceRoot: join(getHome(), 'workspace'),
-    bindings: ADMISSION_BINDINGS,
     configHash: ADMISSION_CONFIG_HASH,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,

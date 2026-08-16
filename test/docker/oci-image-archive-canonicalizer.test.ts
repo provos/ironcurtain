@@ -73,7 +73,6 @@ describe('Docker-save archive canonicalizer', () => {
   it.each([
     [{ indexMediaType: 'application/json' }, /OCI manifest/u],
     [{ descriptorMediaType: 'application/json' }, /index descriptor/u],
-    [{ duplicateLayer: true }, /duplicate layer/u],
   ] as const)('rejects an ambiguous source graph %#', async (mutation, expectedError) => {
     const directory = tempDirectory();
     const entry = writeOciArchiveFixture({
@@ -93,6 +92,52 @@ describe('Docker-save archive canonicalizer', () => {
         expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
       }),
     ).rejects.toThrow(expectedError);
+  });
+
+  it('canonicalizes a graph that reuses one layer descriptor', async () => {
+    const directory = tempDirectory();
+    const entry = writeOciArchiveFixture({
+      directory,
+      logicalName: 'localhost/ironcurtain-canonical:fixture',
+      buildHash: '9'.repeat(64),
+      architecture: 'arm64',
+      catalogGeneration: 'canonical-fixture.1',
+      duplicateLayer: true,
+    });
+
+    const canonical = await canonicalizeDockerSaveArchive({
+      sourceArchivePath: join(directory, entry.archive.fileName),
+      outputArchivePath: join(directory, 'canonical.tar'),
+      logicalName: entry.logicalName,
+      architecture: entry.architecture,
+      expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+    });
+
+    expect(canonical.layerDigests).toHaveLength(2);
+    expect(new Set(canonical.layerDigests).size).toBe(1);
+  });
+
+  it('canonicalizes Apple platform-save output with a nested OCI index', async () => {
+    const directory = tempDirectory();
+    const entry = writeOciArchiveFixture({
+      directory,
+      logicalName: 'localhost/ironcurtain-canonical:fixture',
+      buildHash: '9'.repeat(64),
+      architecture: 'arm64',
+      catalogGeneration: 'canonical-fixture.1',
+      nestedIndex: true,
+    });
+
+    const canonical = await canonicalizeDockerSaveArchive({
+      sourceArchivePath: join(directory, entry.archive.fileName),
+      outputArchivePath: join(directory, 'canonical.tar'),
+      logicalName: entry.logicalName,
+      architecture: entry.architecture,
+      expectedLabels: buildPreloadedImageLabels(entry, 'canonical-fixture.1'),
+    });
+
+    expect(canonical.manifestDigest).toBe(entry.manifestDigest);
+    expect(canonical.configDigest).toBe(entry.configDigest);
   });
 });
 

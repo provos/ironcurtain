@@ -13,7 +13,8 @@ export async function resetMockServer(
   request: APIRequestContext,
   opts?: { allowPolicyMutation?: boolean },
 ): Promise<void> {
-  await request.post('http://localhost:7401/__reset', opts ? { data: opts } : undefined);
+  const resetPort = process.env.MOCK_RESET_PORT ?? '7401';
+  await request.post(`http://localhost:${resetPort}/__reset`, opts ? { data: opts } : undefined);
 }
 
 /**

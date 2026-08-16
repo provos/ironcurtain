@@ -31,6 +31,7 @@ import type {
   GetModelProvidersDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
+  DockerWorkloadSettingsDto,
   PtySink,
   CreateSessionOptions,
 } from './types.js';
@@ -165,10 +166,9 @@ export const personasChangedGeneration = $state({ value: 0 });
 
 /**
  * Monotonically increasing counter bumped on every `config.changed` server-push
- * event (a `config.setModelProviders` write). The Settings view reads `.value`
- * as a $effect dependency to refresh its locally-held provider-profile view,
- * mirroring `personasChangedGeneration`. Kept off appState because the config
- * view state lives in the route component, not the global store.
+ * event. The Settings view reads `.value` as an $effect dependency to refresh
+ * its locally-held provider-profile and runtime views. Kept off appState because
+ * the config view state lives in the route component, not the global store.
  */
 export const configChangedGeneration = $state({ value: 0 });
 
@@ -808,13 +808,12 @@ export async function hydratePersonaCompiles(): Promise<Set<string>> {
   return new Set(next.keys());
 }
 
-// ── Config (modelProviders) RPC actions ────────────────────────────────
+// ── Config RPC actions ─────────────────────────────────────────────────
 //
-// `config.getModelProviders` is ungated (read); `config.setModelProviders` is
-// gated server-side on the daemon's `--allow-policy-mutation` flag (rejects with
-// POLICY_MUTATION_FORBIDDEN when off). The Settings view hides mutation controls
-// when `appState.daemonStatus.allowPolicyMutation` is false. A successful write
-// broadcasts a `config.changed` server-push event (bumps configChangedGeneration).
+// Config reads are ungated; writes are gated server-side on the daemon's
+// `--allow-policy-mutation` flag (rejects with POLICY_MUTATION_FORBIDDEN when
+// off). The Settings view hides mutation controls when the flag is false. A
+// successful write broadcasts `config.changed` (bumps configChangedGeneration).
 
 /**
  * Read the model-provider registry. Every openrouter profile's `apiKey` is
@@ -849,6 +848,22 @@ export async function listOpenrouterModels(forceRefresh = false): Promise<Openro
     'config.listOpenrouterModels',
     forceRefresh ? { forceRefresh: true } : {},
   );
+}
+
+/** Read the two supported nested-Docker settings. */
+export async function getDockerWorkloadSettings(): Promise<DockerWorkloadSettingsDto> {
+  return getWsClient().request<DockerWorkloadSettingsDto>('config.getDockerWorkload', {});
+}
+
+/**
+ * Update only nested-Docker enablement and mediated public registry pulls.
+ * Advanced runtime fields are deliberately absent from this wire contract.
+ */
+export async function setDockerWorkloadSettings(input: DockerWorkloadSettingsDto): Promise<DockerWorkloadSettingsDto> {
+  return getWsClient().request<DockerWorkloadSettingsDto>('config.setDockerWorkload', {
+    enabled: input.enabled,
+    allowPublicRegistryPulls: input.allowPublicRegistryPulls,
+  });
 }
 
 export async function connectWithToken(token: string): Promise<void> {

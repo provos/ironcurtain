@@ -1,5 +1,10 @@
 import { isIP } from 'node:net';
 import type { DockerWorkloadRequestedConfig } from '../src/docker-workload/config.js';
+import { APPLE_VM_DAEMON_DOCKER_HOST } from '../src/docker-workload/apple-vm-daemon.js';
+import {
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
+} from '../src/docker-workload/apple-private-docker.js';
 
 export type NestedAppleSmokeMode = 'batch' | 'pty' | 'public-registry';
 
@@ -16,22 +21,37 @@ export interface PublicRegistryWorkloadPlan {
   readonly image: string;
   readonly networkName: string;
   readonly serverName: string;
+  readonly publishedServerName: string;
+  readonly publishedHostPort: number;
+  readonly hostServerName: string;
+  readonly hostServerPort: number;
+  readonly defaultProbeName: string;
   readonly serverAlias: string;
   readonly pull: readonly string[];
   readonly inspectApplets: readonly string[];
-  readonly createNetwork: readonly string[];
   readonly inspectNetwork: readonly string[];
+  readonly inspectDefaultBridge: readonly string[];
+  readonly startDefaultNetworkContainer: readonly string[];
+  readonly inspectDefaultNetworkContainer: readonly string[];
   readonly inspectEmbeddedDns: readonly string[];
   readonly probePublicDnsEgress: readonly string[];
   readonly startServer: readonly string[];
   readonly inspectServerPorts: readonly string[];
   readonly inspectServerNetwork: readonly string[];
   readonly probeDirectIpEgress: readonly string[];
+  readonly startHostNetworkServer: readonly string[];
+  readonly inspectHostNetworkServer: readonly string[];
+  readonly probeHostNetworkServerLoopback: readonly string[];
   readonly probeServerLoopback: readonly string[];
   readonly probeServerIpv4: readonly string[];
   readonly probeServerAlias: readonly string[];
+  readonly startPublishedServer: readonly string[];
+  readonly probePublishedServerLoopback: readonly string[];
+  readonly inspectPublishedServerPorts: readonly string[];
   readonly removeServer: readonly string[];
-  readonly removeNetwork: readonly string[];
+  readonly removePublishedServer: readonly string[];
+  readonly removeHostNetworkServer: readonly string[];
+  readonly removeDefaultNetworkContainer: readonly string[];
   readonly removeImage: readonly string[];
 }
 
@@ -43,18 +63,9 @@ export function parseNestedAppleSmokeMode(argv: readonly string[]): NestedAppleS
 }
 
 export function buildNestedAppleSmokeWorkloadConfig(mode: NestedAppleSmokeMode): DockerWorkloadRequestedConfig {
-  return {
-    enabled: true,
-    tier: 'developer-only',
-    backend: 'apple-container',
-    imageMode: 'preloaded-catalog',
-    imageIngress: mode === 'public-registry' ? 'public-registry' : 'preloaded-only',
-    daemonState: 'ephemeral',
-    hostPortPublishing: false,
-    buildEgress: 'disabled',
-    acceptObservedDiskRisk: true,
-    resources: { memoryMb: 4096, cpus: 2, pids: { desired: 512, required: false }, diskMb: null },
-  };
+  // Exercise the same requested shape operators use. Registry ingress is the
+  // enabled-state default; deterministic offline/PTY gates opt out explicitly.
+  return mode === 'public-registry' ? { enabled: true } : { enabled: true, imageIngress: 'preloaded-only' };
 }
 
 /**
@@ -66,10 +77,16 @@ export function buildPublicRegistryWorkloadPlan(nonce: string): PublicRegistryWo
     throw new Error('public-registry smoke nonce must be 32-128 lowercase hexadecimal characters');
   }
   const suffix = nonce.slice(0, 12);
-  const networkName = `ic-smoke-net-${suffix}`;
+  const networkName = APPLE_VM_DOCKER_WORKLOAD_NETWORK;
   const serverName = `ic-smoke-server-${suffix}`;
+  const publishedServerName = `ic-smoke-published-${suffix}`;
+  const publishedHostPort = 30_000 + (Number.parseInt(nonce.slice(4, 8), 16) % 8_000);
+  const hostServerName = `ic-smoke-host-${suffix}`;
+  const hostServerPort = 22_000 + (Number.parseInt(nonce.slice(0, 4), 16) % 8_000);
+  const defaultProbeName = `ic-smoke-default-${suffix}`;
   const serverAlias = 'target';
   const serverScript = '/bin/busybox printf "%s" "$1" > /tmp/index.html; exec /bin/busybox httpd -f -p 8080 -h /tmp';
+  const hostServerScript = `/bin/busybox printf "%s" "$1" > /tmp/index.html; exec /bin/busybox httpd -f -p ${hostServerPort} -h /tmp`;
   const probeScript = [
     'attempt=0',
     'while [ "$attempt" -lt 10 ]; do',
@@ -84,6 +101,11 @@ export function buildPublicRegistryWorkloadPlan(nonce: string): PublicRegistryWo
     image: PUBLIC_REGISTRY_SMOKE_IMAGE,
     networkName,
     serverName,
+    publishedServerName,
+    publishedHostPort,
+    hostServerName,
+    hostServerPort,
+    defaultProbeName,
     serverAlias,
     pull: ['image', 'pull', PUBLIC_REGISTRY_SMOKE_IMAGE],
     inspectApplets: [
@@ -103,8 +125,33 @@ export function buildPublicRegistryWorkloadPlan(nonce: string): PublicRegistryWo
       '/bin/busybox',
       '--list',
     ],
-    createNetwork: ['network', 'create', '--driver', 'bridge', '--internal', networkName],
     inspectNetwork: ['network', 'inspect', '--format', '{{json .}}', networkName],
+    inspectDefaultBridge: ['network', 'inspect', '--format', '{{json .}}', 'bridge'],
+    startDefaultNetworkContainer: [
+      'container',
+      'run',
+      '--detach',
+      '--name',
+      defaultProbeName,
+      '--pull',
+      'never',
+      '--read-only',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      PUBLIC_REGISTRY_SMOKE_IMAGE,
+      '/bin/busybox',
+      'sleep',
+      '300',
+    ],
+    inspectDefaultNetworkContainer: [
+      'container',
+      'inspect',
+      '--format',
+      '{{json .NetworkSettings.Networks}}',
+      defaultProbeName,
+    ],
     inspectEmbeddedDns: [
       'container',
       'run',
@@ -190,6 +237,43 @@ export function buildPublicRegistryWorkloadPlan(nonce: string): PublicRegistryWo
       '-c',
       '/bin/busybox printf "IC_DIRECT_EGRESS_PROBE_STARTED\\n" >&2; exec /bin/busybox wget -T 3 -qO- http://1.1.1.1/',
     ],
+    startHostNetworkServer: [
+      'container',
+      'run',
+      '--detach',
+      '--name',
+      hostServerName,
+      '--network',
+      'host',
+      '--pull',
+      'never',
+      '--read-only',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,nodev,size=64k',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      PUBLIC_REGISTRY_SMOKE_IMAGE,
+      '/bin/busybox',
+      'sh',
+      '-c',
+      hostServerScript,
+      'sh',
+      nonce,
+    ],
+    inspectHostNetworkServer: ['container', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', hostServerName],
+    probeHostNetworkServerLoopback: [
+      'container',
+      'exec',
+      hostServerName,
+      '/bin/busybox',
+      'sh',
+      '-c',
+      probeScript,
+      'sh',
+      `http://127.0.0.1:${hostServerPort}/`,
+    ],
     probeServerLoopback: [
       'container',
       'exec',
@@ -243,8 +327,55 @@ export function buildPublicRegistryWorkloadPlan(nonce: string): PublicRegistryWo
       'sh',
       `http://${serverAlias}:8080/`,
     ],
+    startPublishedServer: [
+      'container',
+      'run',
+      '--detach',
+      '--name',
+      publishedServerName,
+      '--network',
+      NETWORK_ID_ARGUMENT,
+      '--publish',
+      `127.0.0.1:${publishedHostPort}:8080`,
+      '--pull',
+      'never',
+      '--read-only',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,nodev,size=64k',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      PUBLIC_REGISTRY_SMOKE_IMAGE,
+      '/bin/busybox',
+      'sh',
+      '-c',
+      serverScript,
+      'sh',
+      nonce,
+    ],
+    probePublishedServerLoopback: [
+      'container',
+      'exec',
+      publishedServerName,
+      '/bin/busybox',
+      'sh',
+      '-c',
+      probeScript,
+      'sh',
+      'http://127.0.0.1:8080/',
+    ],
+    inspectPublishedServerPorts: [
+      'container',
+      'inspect',
+      '--format',
+      '{{json .NetworkSettings.Ports}}',
+      publishedServerName,
+    ],
     removeServer: ['container', 'rm', '--force', serverName],
-    removeNetwork: ['network', 'rm', networkName],
+    removePublishedServer: ['container', 'rm', '--force', publishedServerName],
+    removeHostNetworkServer: ['container', 'rm', '--force', hostServerName],
+    removeDefaultNetworkContainer: ['container', 'rm', '--force', defaultProbeName],
     removeImage: ['image', 'rm', PUBLIC_REGISTRY_SMOKE_IMAGE],
   };
 }
@@ -252,6 +383,27 @@ export function buildPublicRegistryWorkloadPlan(nonce: string): PublicRegistryWo
 export interface InternalBridgeInspection {
   readonly networkId: string;
   readonly serverIpv4?: string;
+}
+
+/** Prove the live agent container received the exact nested-Docker contract. */
+export function assertExactAgentDockerEnvironment(value: string): void {
+  const lines = value.split(/\r?\n/u);
+  const expected = {
+    DOCKER_HOST: APPLE_VM_DAEMON_DOCKER_HOST,
+    [APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  } as const;
+  for (const [name, expectedValue] of Object.entries(expected)) {
+    const matches = lines.filter((line) => line.startsWith(`${name}=`));
+    if (matches.length !== 1 || matches[0] !== `${name}=${expectedValue}`) {
+      throw new Error(`agent container lacks exact ${name}=${expectedValue}`);
+    }
+  }
+}
+
+/** Compare identity evidence without treating unrelated localhost content as reachability. */
+export function isExactSmokeNonceResponse(value: string, nonce: string): boolean {
+  if (!/^[a-f0-9]{32,128}$/u.test(nonce)) throw new Error('smoke response nonce is invalid');
+  return value === nonce;
 }
 
 /** Fail before topology checks if the resolved tag lacks either required applet. */
@@ -272,8 +424,16 @@ export function assertNoPublishedPortBindings(value: string): void {
     throw new Error('inner server returned malformed Docker port-binding inspection', { cause: error });
   }
   if (parsed === null) return;
-  if (typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0) return;
-  throw new Error(`inner server unexpectedly publishes a port: ${value.trim()}`);
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('inner server returned malformed Docker port-binding inspection shape');
+  }
+  for (const binding of Object.values(parsed)) {
+    if (binding === null || (Array.isArray(binding) && binding.length === 0)) continue;
+    if (Array.isArray(binding)) {
+      throw new Error(`inner server unexpectedly publishes a port: ${value.trim()}`);
+    }
+    throw new Error('inner server returned malformed Docker port-binding inspection shape');
+  }
 }
 
 /** Require Docker's per-sandbox resolver without accepting a host/public resolver fallback. */
@@ -287,7 +447,7 @@ export function assertEmbeddedDnsResolver(value: string): void {
   }
 }
 
-/** Require the product's supported inner-only, user-defined bridge topology. */
+/** Inspect the precreated bundle-local user-defined bridge topology. */
 export function assertInternalBridge(value: string, serverName?: string): InternalBridgeInspection {
   let parsed: unknown;
   try {
@@ -299,10 +459,12 @@ export function assertInternalBridge(value: string, serverName?: string): Intern
     typeof parsed !== 'object' ||
     parsed === null ||
     Array.isArray(parsed) ||
+    (parsed as { Name?: unknown }).Name !== APPLE_VM_DOCKER_WORKLOAD_NETWORK ||
     (parsed as { Driver?: unknown }).Driver !== 'bridge' ||
+    (parsed as { Scope?: unknown }).Scope !== 'local' ||
     (parsed as { Internal?: unknown }).Internal !== true
   ) {
-    throw new Error('inner network is not an internal user-defined bridge');
+    throw new Error('inner network is not the bundle-local managed internal bridge');
   }
   const networkId = (parsed as { Id?: unknown }).Id;
   if (typeof networkId !== 'string' || !/^[a-f0-9]{64}$/u.test(networkId)) {
@@ -338,6 +500,54 @@ export function assertInternalBridge(value: string, serverName?: string): Intern
     throw new Error('inner server endpoint returned a malformed IPv4 address');
   }
   return { networkId, serverIpv4 };
+}
+
+/** Require no endpoint before the acceptance fixture attaches its first child. */
+export function assertEmptyInternalBridge(value: string): InternalBridgeInspection {
+  const inspection = assertInternalBridge(value);
+  const parsed = JSON.parse(value.trim()) as { Containers?: unknown };
+  if (
+    typeof parsed.Containers !== 'object' ||
+    parsed.Containers === null ||
+    Array.isArray(parsed.Containers) ||
+    Object.keys(parsed.Containers).length !== 0
+  ) {
+    throw new Error('bundle-local managed bridge was not empty before the smoke fixture');
+  }
+  return inspection;
+}
+
+/** Accept only the daemon's exact no-default-bridge diagnostic. */
+export function assertDefaultBridgeUnavailable(stdout: string, stderr: string): void {
+  const output = `${stdout}\n${stderr}`;
+  if (!/(?:network bridge not found|no such network(?::| ) bridge)/iu.test(output)) {
+    throw new Error(`default bridge negative lacked an exact unavailable diagnostic: ${output.trim()}`);
+  }
+}
+
+/** Require a default-mode child to have no runtime endpoint, address, or gateway. */
+export function assertDefaultContainerHasNoUsableNetwork(value: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.trim()) as unknown;
+  } catch (error) {
+    throw new Error('default-network container inspection returned malformed JSON', { cause: error });
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('default-network container inspection was not a network map');
+  }
+  for (const attachment of Object.values(parsed)) {
+    if (typeof attachment !== 'object' || attachment === null || Array.isArray(attachment)) {
+      throw new Error('default-network container inspection contained a malformed attachment');
+    }
+    const fields = attachment as Record<string, unknown>;
+    for (const name of ['NetworkID', 'EndpointID', 'Gateway', 'IPAddress', 'IPv6Gateway', 'GlobalIPv6Address']) {
+      const field = fields[name];
+      if (field !== undefined && field !== '') {
+        throw new Error(`default-network container unexpectedly received ${name}`);
+      }
+    }
+  }
 }
 
 /** Substitute trusted inspect results only into dedicated argv elements. */

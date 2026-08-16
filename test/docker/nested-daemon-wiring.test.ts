@@ -14,7 +14,7 @@
  * adjudicated configuration rather than a "some daemon answered" flag.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -29,12 +29,11 @@ import {
   APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV,
   APPLE_VM_REGISTRY_EGRESS_SOCKET,
 } from '../../src/docker-workload/apple-vm-daemon.js';
-import { APPLE_VM_INNER_DOCKER_CATALOG_DIR } from '../../src/docker-workload/apple-private-docker.js';
-import { resolveDockerWorkloadAdmissionBindings } from '../../src/docker-workload/admission-bindings.js';
-import { loadPreloadedImageCatalog } from '../../src/docker/preloaded-image-catalog.js';
-import { getFrozenProfileCeilingPath } from '../../src/docker/docker-workload-paths.js';
-import { getFrozenCatalogPath } from '../../src/docker/preloaded-catalog-paths.js';
-import { sha256Hex } from '../../src/hash.js';
+import {
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
+  APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
+} from '../../src/docker-workload/apple-private-docker.js';
 import {
   admitDockerWorkloadBundle,
   type DockerWorkloadBundleHandle,
@@ -56,7 +55,6 @@ import {
   createMockRuntimeTrust,
 } from '../helpers/docker-mocks.js';
 import {
-  ADMISSION_BINDINGS,
   ADMISSION_CONFIG_HASH,
   QUALIFIED_DOCKER_INFO,
   WATCHDOG_ENTRYPOINT_PATH,
@@ -75,7 +73,6 @@ import {
 
 const getHome = useDockerWorkloadHome();
 const BUNDLE_ID = 'bundle-nested-daemon-1';
-const TEST_APPLE_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
 
 let tempDir: string;
 
@@ -112,7 +109,6 @@ async function admitBundle(options?: {
     runtimeKind: 'apple-container',
     bundleId: BUNDLE_ID,
     workspaceRoot: join(getHome(), 'workspace'),
-    bindings: ADMISSION_BINDINGS,
     configHash: ADMISSION_CONFIG_HASH,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,
@@ -139,7 +135,8 @@ function makeCore(
 ): PreContainerInfrastructure {
   const runtimeKind = overrides.runtimeKind ?? 'apple-container';
   const admittedApple = overrides.dockerWorkload !== undefined && runtimeKind === 'apple-container';
-  if (admittedApple) docker.getImageId = async () => TEST_APPLE_IMAGE_ID;
+  const bootstrap = admittedApple ? createTestAppleVmDockerWorkloadBootstrap(tempDir) : undefined;
+  if (bootstrap) docker.getImageId = async () => bootstrap.artifact.appleImageId;
   const bundleDir = join(tempDir, 'bundle');
   const workspaceDir = join(tempDir, 'workspace');
   const escalationDir = join(tempDir, 'escalations');
@@ -164,22 +161,14 @@ function makeCore(
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
-    imageResolution: admittedApple
+    imageResolution: bootstrap
       ? {
-          mode: 'preloaded-catalog',
-          runtimeKind: 'apple-container',
-          logicalName: 'ironcurtain-claude-code:latest',
-          imageRef: 'ironcurtain-claude-code:latest',
-          immutableImageId: TEST_APPLE_IMAGE_ID,
-          buildHash: '1'.repeat(64),
-          catalogGeneration: 'test-generation',
-          catalogSha256: '2'.repeat(64),
-          manifestDigest: `sha256:${'3'.repeat(64)}`,
-          configDigest: `sha256:${'4'.repeat(64)}`,
-          toolchainDigest: '5'.repeat(64),
-          provenanceDigest: '6'.repeat(64),
-          archivePath: join(tempDir, 'agent.tar'),
-          archiveSha256: '7'.repeat(64),
+          mode: 'selected-agent-artifact',
+          logicalName: bootstrap.artifact.logicalName,
+          imageRef: bootstrap.artifact.logicalName,
+          immutableImageId: bootstrap.artifact.appleImageId,
+          buildHash: bootstrap.artifact.buildHash,
+          artifact: bootstrap.artifact,
         }
       : undefined,
     runtimeKind,
@@ -193,8 +182,7 @@ function makeCore(
     beginCaptureSession: () => {},
     endCaptureSession: async () => {},
     dockerWorkload: overrides.dockerWorkload,
-    dockerWorkloadBootstrap:
-      overrides.dockerWorkload === undefined ? undefined : createTestAppleVmDockerWorkloadBootstrap(tempDir),
+    dockerWorkloadBootstrap: bootstrap,
     dockerWorkloadRegistryEgress: overrides.publicRegistry
       ? { listener: createMockMitmProxy(), socketPath: join(socketsDir, 'registry-egress.sock') }
       : undefined,
@@ -237,6 +225,10 @@ function capturingRuntime(runtime: EventRuntime): {
 
 function daemonInfoProbes(runtime: EventRuntime): (readonly string[])[] {
   return runtime.execs.filter((argv) => argv.includes('info'));
+}
+
+function managedNetworkCreates(runtime: EventRuntime): (readonly string[])[] {
+  return runtime.execs.filter((argv) => argv.includes('network') && argv.includes('create'));
 }
 
 describe('nested daemon — watchdog gate on the daemon-launching create (§8.2 step 4)', () => {
@@ -290,6 +282,15 @@ describe('nested daemon — watchdog gate on the daemon-launching create (§8.2 
       `start:${result.containerId}`,
     ]);
     expect(daemonInfoProbes(runtime)).toHaveLength(1);
+    expect(managedNetworkCreates(runtime)).toHaveLength(1);
+    const readinessIndex = runtime.execs.findIndex((argv) => argv.includes('info'));
+    const provisioningIndex = runtime.execs.findIndex(
+      (argv) => argv.includes('version') && argv.includes('{{json .}}'),
+    );
+    const networkIndex = runtime.execs.findIndex((argv) => argv.includes('network') && argv.includes('create'));
+    expect(readinessIndex).toBeGreaterThanOrEqual(0);
+    expect(provisioningIndex).toBeGreaterThan(readinessIndex);
+    expect(networkIndex).toBeGreaterThan(provisioningIndex);
   });
 });
 
@@ -343,10 +344,25 @@ describe('nested daemon — readiness failure is fail-closed (§8.2 step 5)', ()
     expect(daemonInfoProbes(runtime)).toHaveLength(0);
     expect(runtime.containers).toHaveLength(0);
   });
+
+  it('aborts and tears down when the managed internal bridge cannot be created', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv.includes('network') && argv.includes('create')
+          ? { exitCode: 1, stdout: '', stderr: 'bridge unavailable' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+
+    await expect(
+      createSessionContainers(makeCore(runtime.runtime, { dockerWorkload: handle }), makeConfig()),
+    ).rejects.toThrow(/managed network create/u);
+    expect(runtime.containers).toHaveLength(0);
+    expect(runtime.events.some((event) => event.startsWith('remove:'))).toBe(true);
+  });
 });
 
-describe('nested daemon — DOCKER_HOST reaches the agent only when enabled (§8.2 step 6)', () => {
-  it('sets the VM-local socket on the agent container when a bundle is admitted', async () => {
+describe('nested daemon — private Docker environment reaches only an enabled agent (§8.2 step 6)', () => {
+  it('sets the VM-local socket and fixed managed network when a bundle is admitted', async () => {
     const { runtime, handle } = await admitBundle();
     const capturing = capturingRuntime(runtime);
     const core = makeCore(capturing.runtime, { dockerWorkload: handle });
@@ -354,7 +370,9 @@ describe('nested daemon — DOCKER_HOST reaches the agent only when enabled (§8
     await createSessionContainers(core, makeConfig());
 
     expect(capturing.config().env.DOCKER_HOST).toBe(APPLE_VM_DAEMON_DOCKER_HOST);
+    expect(capturing.config().env[APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]).toBe(APPLE_VM_DOCKER_WORKLOAD_NETWORK);
     expect(APPLE_VM_DAEMON_DOCKER_HOST).toBe('unix:///run/ironcurtain-docker/docker.sock');
+    expect(APPLE_VM_DOCKER_WORKLOAD_NETWORK).toBe('ironcurtain');
   });
 
   it('nestedDaemonAgentEnv contributes nothing without a bundle', () => {
@@ -382,17 +400,20 @@ describe('nested daemon — feature-off equivalence', () => {
     );
     expect(differing.sort()).toEqual(['env', 'labels', 'mounts', 'name']);
     expect(Object.keys(off.config().env)).not.toContain('DOCKER_HOST');
+    expect(Object.keys(off.config().env)).not.toContain(APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV);
     expect(off.config().mounts).not.toContainEqual(
-      expect.objectContaining({ target: APPLE_VM_INNER_DOCKER_CATALOG_DIR }),
+      expect.objectContaining({ target: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR }),
     );
     expect(enabled.config().mounts).toContainEqual({
-      source: expect.stringContaining('private-docker-catalog-'),
-      target: APPLE_VM_INNER_DOCKER_CATALOG_DIR,
+      source: expect.stringContaining('selected-agent-artifact-'),
+      target: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
       readonly: true,
     });
-    // ...and DOCKER_HOST is the ONLY environment difference.
+    // ...and the two private-Docker variables are the ONLY environment difference.
     const enabledEnvRest = Object.fromEntries(
-      Object.entries(enabled.config().env).filter(([key]) => key !== 'DOCKER_HOST'),
+      Object.entries(enabled.config().env).filter(
+        ([key]) => key !== 'DOCKER_HOST' && key !== APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
+      ),
     );
     expect(enabledEnvRest).toEqual(off.config().env);
   });
@@ -480,8 +501,14 @@ describe('nested daemon — daemon-ready evidence (§8.4)', () => {
     expect(audit.events).toContainEqual(
       expect.objectContaining({
         kind: 'private-docker-bootstrap',
-        innerDockerCatalogSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
-        image: { logicalName: 'ironcurtain-claude-code:latest', immutableImageId: expect.any(String) },
+        artifact: {
+          logicalName: 'ironcurtain-claude-code:latest',
+          buildHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          archiveSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          outerAppleImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+          innerDockerImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+        },
+        network: { name: 'ironcurtain', runtimeId: expect.stringMatching(/^[a-f0-9]{64}$/u) },
       }),
     );
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
@@ -500,54 +527,5 @@ describe('nested daemon — daemon-ready evidence (§8.4)', () => {
     ).rejects.toThrow();
 
     expect(audit.events.some((event) => event.kind === 'daemon-ready')).toBe(false);
-  });
-});
-
-describe('nested daemon — admission bindings are the real operational inputs', () => {
-  it('binds the catalog hash and base-role toolchain digest from the catalog the session will use', () => {
-    const catalogPath = getFrozenCatalogPath('apple-container');
-    const catalog = loadPreloadedImageCatalog(catalogPath);
-    const selected = catalog.catalog.images.find((image) => image.logicalName === 'ironcurtain-claude-code:latest');
-
-    const innerDockerCatalogPath = getFrozenCatalogPath('docker');
-    const bindings = resolveDockerWorkloadAdmissionBindings({
-      catalogPath,
-      innerDockerCatalogPath,
-      selectedImageLogicalName: 'ironcurtain-claude-code:latest',
-    });
-
-    expect(bindings.catalogSha256).toBe(sha256Hex(readFileSync(catalogPath)));
-    expect(bindings.innerDockerCatalogSha256).toBe(sha256Hex(readFileSync(innerDockerCatalogPath)));
-    expect(bindings.toolchainDigest).toBe(selected?.toolchainDigest);
-  });
-
-  it('binds the frozen profile ceiling by its exact bytes', () => {
-    const bindings = resolveDockerWorkloadAdmissionBindings({
-      catalogPath: getFrozenCatalogPath('apple-container'),
-      innerDockerCatalogPath: getFrozenCatalogPath('docker'),
-      selectedImageLogicalName: 'ironcurtain-claude-code:latest',
-    });
-
-    expect(bindings.profileSha256).toBe(sha256Hex(readFileSync(getFrozenProfileCeilingPath())));
-  });
-
-  it('fails closed when the catalog lacks the selected agent image', () => {
-    const withoutSelected = (runtimeKind: 'apple-container' | 'docker'): string => {
-      const truncated = join(tempDir, `catalog-without-selected.${runtimeKind}.json`);
-      const catalog = JSON.parse(readFileSync(getFrozenCatalogPath(runtimeKind), 'utf8')) as {
-        images: { logicalName: string }[];
-      };
-      catalog.images = catalog.images.filter((image) => image.logicalName !== 'ironcurtain-claude-code:latest');
-      writeFileSync(truncated, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600 });
-      return truncated;
-    };
-
-    expect(() =>
-      resolveDockerWorkloadAdmissionBindings({
-        catalogPath: withoutSelected('apple-container'),
-        innerDockerCatalogPath: withoutSelected('docker'),
-        selectedImageLogicalName: 'ironcurtain-claude-code:latest',
-      }),
-    ).toThrow(/missing the selected image ironcurtain-claude-code:latest/u);
   });
 });

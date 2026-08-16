@@ -1,16 +1,14 @@
 /**
- * Operator-facing freeze entry point for the preloaded image catalog.
+ * Qualification-only freeze entry point for the historical image catalog.
  *
- * `ironcurtain build-preloaded-catalog` builds every required role image on the
- * trusted host's Docker, stamps the frozen catalog labels, stages one sealed
- * archive per role under the private staging directory, and publishes the
- * backend-bound catalogs — both a runtime-resolvable copy next to the archives
- * and a committed frozen record under `config/docker-workload/`.
+ * `npm run qualify:catalog -- [options]` builds every qualification role image,
+ * stamps catalog labels, stages one sealed archive per role, and publishes the
+ * backend-bound qualification records. Production startup neither reads nor
+ * refreshes these outputs.
  *
- * This is trusted-host preparation, not a session action, so it does not consult
- * the runtime admission fuse. Running a real build is a supervised validation
- * step; the core orchestration takes injected runtimes/build/stage functions so
- * it is exercisable without Docker.
+ * This is a supervised reproducibility/compatibility tool, not a session action
+ * or security-admission step. The core orchestration takes injected
+ * runtimes/build/stage functions so it is exercisable without Docker.
  *
  * The core never touches the live staging tree: it fills whatever directory it
  * is handed, and `publishCatalogGeneration` replaces the live generation only
@@ -204,9 +202,9 @@ function copyFrozenCatalog(stagedPath: string, frozenPath: string): void {
 }
 
 const buildPreloadedCatalogSpec: CommandSpec = {
-  name: 'ironcurtain build-preloaded-catalog',
-  description: 'Freeze the trusted preloaded image catalog for the secure nested Docker runtime',
-  usage: ['ironcurtain build-preloaded-catalog [options]'],
+  name: 'npm run qualify:catalog --',
+  description: 'Regenerate qualification-only image catalogs and sealed archive fixtures',
+  usage: ['npm run qualify:catalog -- [options]'],
   options: [
     { flag: 'generation', description: 'Explicit canonical generation newer than every present catalog' },
     { flag: 'docker-only', description: 'Skip the Apple `container` backend even when it is available' },
@@ -286,7 +284,7 @@ export async function runBuildPreloadedCatalogCommand(
 
       process.stdout.write(
         [
-          `Preloaded catalog frozen (generation ${generation}, ${result.docker.catalog.images.length} images).`,
+          `Qualification catalog frozen (generation ${generation}, ${result.docker.catalog.images.length} images).`,
           `  docker  staged: ${getStagedCatalogPath('docker')}`,
           `  docker  frozen: ${result.frozenDockerPath}`,
           ...(result.frozenApplePath === undefined

@@ -41,6 +41,74 @@ All budget fields are nullable — set to `null` to disable the limit.
 | `resourceBudget.maxEstimatedCostUsd`  | number \| null  | `5.0`     | Estimated cost cap in USD.                                                 |
 | `resourceBudget.warnThresholdPercent` | integer         | `80`      | Emit a warning when this percentage of any limit is consumed. Range: 1–99. |
 
+## Nested Docker Workloads
+
+Docker Agent sessions can expose a private Docker daemon to the agent. The capability is off unless
+`dockerWorkload.enabled` is true. Configure it with `ironcurtain config` → **Docker Agent** →
+**Nested Docker**, in web Settings, or with the minimal JSON:
+
+```json
+{
+  "dockerWorkload": {
+    "enabled": true
+  }
+}
+```
+
+When enabled, anonymous workload-image pulls from Docker Hub and GHCR are available by default through
+IronCurtain's fixed mediated registry proxy. This does not grant generic internet access, registry
+credentials, private-registry access, or host-port publication. To disable live pulls and use only
+images already available to the private runtime:
+
+```json
+{
+  "dockerWorkload": {
+    "enabled": true,
+    "imageIngress": "preloaded-only"
+  }
+}
+```
+
+| Field                         | Type            | Default when enabled | Description                                                                                 |
+| ----------------------------- | --------------- | -------------------- | ------------------------------------------------------------------------------------------- |
+| `dockerWorkload.enabled`      | boolean         | `false`              | Enable private nested Docker for Docker Agent sessions.                                     |
+| `dockerWorkload.imageIngress` | string          | `public-registry`    | `public-registry` for mediated Docker Hub/GHCR pulls; `preloaded-only` disables live pulls. |
+| `containerRuntime`            | string          | `auto`               | `auto`, `docker`, or `apple-container`; the current nested-Docker slice requires Apple.     |
+| `dockerResources.memoryMb`    | integer \| null | `8192`               | Ordinary container memory ceiling; numeric values are inherited by nested Docker.           |
+| `dockerResources.cpus`        | number \| null  | `4`                  | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.              |
+
+The current admitted implementation is the Apple Container developer slice. `containerRuntime` may
+remain `auto` when Apple Container is available; unsupported runtime resolutions fail before nested
+Docker is provisioned. If an ordinary Docker resource is `null`, nested Docker keeps its safe fallback
+instead of inheriting an unlimited value.
+
+### Connecting nested containers
+
+An admitted session exports `IRONCURTAIN_DOCKER_NETWORK=ironcurtain`. Attach every service and
+client container to that managed internal network; Docker's embedded DNS then resolves container
+names and aliases:
+
+```bash
+docker run -d --name target --network "$IRONCURTAIN_DOCKER_NETWORK" <service-image>
+docker run --rm --network "$IRONCURTAIN_DOCKER_NETWORK" <client-image> http://target:<port>/
+```
+
+For Compose, declare the existing managed network as the default:
+
+```yaml
+networks:
+  default:
+    external: true
+    name: ${IRONCURTAIN_DOCKER_NETWORK}
+```
+
+The nested daemon has no default bridge. Do not use `-p`/`--publish` or `--network host`: neither
+publishes an inner service to macOS. The Mac host and the agent shell cannot reach the service at
+`localhost`; connect from a sibling container by its service name or network alias. IronCurtain gives
+this guidance to the agent only after the nested-Docker capability is successfully admitted for the
+new session. This is the supported service topology, not a security boundary: the agent has Docker
+administrator authority over its bundle-local daemon.
+
 ## Auto-Compact
 
 Controls automatic context compaction when the conversation approaches token limits.

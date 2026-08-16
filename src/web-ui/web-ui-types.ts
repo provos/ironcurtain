@@ -87,10 +87,12 @@ export type MethodName =
   | 'personas.setMemory'
   | 'personas.delete'
   | 'personas.setBroadPolicyOptIn'
-  // Config (modelProviders registry). Read is ungated; the mutation is gated
-  // on the daemon's `--allow-policy-mutation` kill switch (POLICY_MUTATION_FORBIDDEN).
+  // Config reads are ungated; mutations are gated on the daemon's
+  // `--allow-policy-mutation` kill switch (POLICY_MUTATION_FORBIDDEN).
   | 'config.getModelProviders'
   | 'config.setModelProviders'
+  | 'config.getDockerWorkload'
+  | 'config.setDockerWorkload'
   // OpenRouter model-slug catalog for autocomplete/validation. Ungated read of
   // PUBLIC data (mirrors `config.getModelProviders`); no secret, no mutation.
   | 'config.listOpenrouterModels';
@@ -659,6 +661,16 @@ export interface SetModelProvidersDto {
 export interface OpenrouterModelsDto {
   readonly models: readonly string[];
   readonly source: 'live' | 'cache' | 'bundled';
+}
+
+/**
+ * The intentionally small nested-Docker settings surface. Enabling public
+ * registry pulls grants only the mediated Docker Hub/GHCR path; it does not
+ * grant the nested daemon generic internet access or registry credentials.
+ */
+export interface DockerWorkloadSettingsDto {
+  readonly enabled: boolean;
+  readonly allowPublicRegistryPulls: boolean;
 }
 
 // ---------------------------------------------------------------------------

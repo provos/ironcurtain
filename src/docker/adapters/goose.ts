@@ -33,6 +33,7 @@ import {
   buildResizePtyScript,
   buildCheckPtySizeScript,
   buildNetworkSection,
+  buildNestedDockerSection,
   buildPolicySection,
   buildAttributionSection,
 } from './shared-scripts.js';
@@ -150,6 +151,7 @@ After cloning a repo or writing files via MCP tools, use your built-in
 tools for subsequent file operations.
 
 ${buildNetworkSection('the IronCurtain MCP tools')}
+${buildNestedDockerSection(context)}
 ${buildPolicySection('MCP tool call')}
 ${buildAttributionSection()}`;
 }

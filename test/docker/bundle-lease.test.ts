@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { stableStringify } from '../../src/hash.js';
 import {
   activateDockerWorkloadLease,
   closeDockerWorkloadLease,
@@ -23,6 +24,30 @@ afterEach(() => {
 });
 
 describe('Docker-workload bundle lease', () => {
+  it('keeps legacy catalog-bearing v1 leases readable and cleanable without writing those fields to new leases', () => {
+    const { path, options } = fixture();
+    const created = createDockerWorkloadLease(path, options);
+    expect(created.bindings).toEqual({ watchdogPolicySha256: options.bindings.watchdogPolicySha256 });
+
+    const legacy = JSON.parse(readFileSync(path, 'utf8')) as {
+      bindings: Record<string, string>;
+    };
+    legacy.bindings = { ...legacy.bindings, ...options.bindings };
+    writeFileSync(path, `${stableStringify(legacy)}\n`, { mode: 0o600 });
+    expect(loadDockerWorkloadLease(path).bindings.catalogSha256).toBe(options.bindings.catalogSha256);
+
+    revokeDockerWorkloadLease(path, options.generation);
+    const closed = closeDockerWorkloadLease(path, options.generation, {
+      exactOuterResourcesAbsent: true,
+      stateRootAbsent: true,
+      inventories: [
+        { capturedAt: '2026-07-20T12:00:00.000Z', ownedResourceIds: [] },
+        { capturedAt: '2026-07-20T12:00:00.200Z', ownedResourceIds: [] },
+      ],
+    });
+    expect(closed.status).toBe('closed');
+  });
+
   it('durably records request before immutable observation and closes only after exact cleanup proof', () => {
     const { path, options } = fixture();
     expect(createDockerWorkloadLease(path, options)).toMatchObject({ status: 'admitting', sequence: 0 });

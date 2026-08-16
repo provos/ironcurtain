@@ -28,7 +28,7 @@ import {
 } from '../../src/docker/docker-workload-paths.js';
 import { createMitmProxy, type MitmProxy } from '../../src/docker/mitm-proxy.js';
 import type { DestinationBoundRequest, OutboundTransport } from '../../src/docker/outbound-transport.js';
-import { resolveDockerWorkloadConfig, type ResolvedDockerWorkloadConfig } from '../../src/docker-workload/config.js';
+import type { ResolvedDockerWorkloadConfig } from '../../src/docker-workload/config.js';
 import { sha256Hex } from '../../src/hash.js';
 
 /** node-forge RSA keygen is slow in pure JS; one CA and per-host leaf per file. */
@@ -480,7 +480,19 @@ function workload(overrides: {
   imageIngress: 'preloaded-only' | 'public-registry';
   buildEgress: 'disabled' | 'ironcurtain-dockerfiles';
 }): ResolvedDockerWorkloadConfig {
-  return resolveDockerWorkloadConfig({ enabled: true, ...overrides });
+  // This suite qualifies the lower-level frozen build-egress implementation,
+  // which is intentionally not expressible through ordinary user config.
+  return {
+    enabled: true,
+    ...overrides,
+    acceptObservedDiskRisk: true,
+    resources: {
+      memoryMb: 4096,
+      cpus: 2,
+      pids: { desired: 512, required: false },
+      diskMb: null,
+    },
+  };
 }
 
 function tempDirectory(): string {

@@ -11,7 +11,7 @@
  *  - which backend currently implements the topology (Apple `container` only),
  *  - the `ContainerRuntime.exec` -> {@link AppleVmDaemonExec} adaptation plus
  *    the bootstrap/adjudicate/record sequence,
- *  - the one environment variable the agent process gets as a result.
+ *  - the private socket and managed-network environment the agent receives.
  *
  * Everything here is inert for an ordinary session: with no admitted
  * Docker-workload bundle every entry point resolves to "absent" and callers
@@ -26,7 +26,13 @@ import {
   waitForAppleVmDaemonReady,
   type AppleVmDaemonExec,
 } from './apple-vm-daemon.js';
-import { provisionAppleVmDockerWorkload, type AppleVmDockerWorkloadBootstrapConfig } from './apple-private-docker.js';
+import {
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
+  createAppleVmDockerWorkloadNetwork,
+  provisionAppleVmDockerWorkload,
+  type AppleVmDockerWorkloadBootstrapConfig,
+} from './apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from './infrastructure.js';
 
 /**
@@ -73,13 +79,19 @@ export function resolveNestedDaemonBundle(
 
 /**
  * §8.2 step 6: the agent reaches the daemon over the VM-local socket, which is
- * never published outside the VM. Empty for every ordinary session, so the
- * container environment is byte-identical to today when the feature is off.
+ * never published outside the VM, and receives the fixed name of its managed
+ * inner bridge. Empty for every ordinary session, so the container environment
+ * is byte-identical to today when the feature is off.
  */
 export function nestedDaemonAgentEnv(
   nestedDaemon: DockerWorkloadBundleHandle | undefined,
 ): Readonly<Record<string, string>> {
-  return nestedDaemon === undefined ? {} : { DOCKER_HOST: APPLE_VM_DAEMON_DOCKER_HOST };
+  return nestedDaemon === undefined
+    ? {}
+    : {
+        DOCKER_HOST: APPLE_VM_DAEMON_DOCKER_HOST,
+        [APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+      };
 }
 
 /** Adapt the container runtime's exec to the daemon module's single command seam. */
@@ -92,7 +104,7 @@ export interface StartAppleVmDockerWorkloadOptions {
   /** The already-started agent container, i.e. the VM the daemon runs inside. */
   readonly containerId: string;
   readonly nestedDaemon: DockerWorkloadBundleHandle;
-  /** Immutable per-lease catalog view mounted into this VM. */
+  /** Immutable per-lease selected-agent archive mounted into this VM. */
   readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig;
   /** Selects the trusted daemon-only registry proxy bootstrap. */
   readonly registryEgress?: boolean;
@@ -104,7 +116,7 @@ export interface StartAppleVmDockerWorkloadOptions {
 /**
  * Complete same-VM activation before the host attaches to the PTY: bootstrap and
  * adjudicate the rootless daemon, preflight the pinned Docker client/plugin
- * tuple, provision the selected catalog-authorized agent image, record the
+ * tuple, provision the selected prepared agent image, record the
  * transparent observations, and activate the lease.
  *
  * Any failure propagates unchanged. There is no degraded mode in which the
@@ -124,6 +136,10 @@ export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWork
     containerId: options.containerId,
     config: options.bootstrap,
   });
-  options.nestedDaemon.recordPrivateDockerBootstrap(provisioning);
+  const network = await createAppleVmDockerWorkloadNetwork({
+    outerRuntime: options.runtime,
+    containerId: options.containerId,
+  });
+  options.nestedDaemon.recordPrivateDockerBootstrap(provisioning, network);
   await options.nestedDaemon.activate();
 }

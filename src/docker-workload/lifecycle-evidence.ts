@@ -131,8 +131,6 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
       ...baseEventShape,
       kind: z.literal('private-docker-bootstrap'),
       attestation: z.literal(DAEMON_READY_ATTESTATION),
-      innerDockerCatalogSha256: sha256Schema,
-      catalogGeneration: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u),
       toolchainDigest: sha256Schema,
       toolchain: z
         .object({
@@ -142,10 +140,19 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
           compose: softwareVersionSchema,
         })
         .strict(),
-      image: z
+      artifact: z
         .object({
           logicalName: z.string().min(1).max(255),
-          immutableImageId: runtimeIdentitySchema,
+          buildHash: sha256Schema,
+          archiveSha256: sha256Schema,
+          outerAppleImageId: runtimeIdentitySchema,
+          innerDockerImageId: runtimeIdentitySchema,
+        })
+        .strict(),
+      network: z
+        .object({
+          name: resourceNameSchema,
+          runtimeId: runtimeIdentitySchema,
         })
         .strict(),
     })

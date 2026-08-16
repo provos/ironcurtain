@@ -29,6 +29,7 @@ import {
   buildAttributionSection,
   buildCheckPtySizeScript,
   buildNetworkSection,
+  buildNestedDockerSection,
   buildPolicySection,
   buildResizePtyScript,
 } from './shared-scripts.js';
@@ -60,6 +61,7 @@ After cloning a repo or writing files via MCP tools, use your built-in
 tools for subsequent file operations.
 
 ${buildNetworkSection('the IronCurtain MCP tools')}
+${buildNestedDockerSection(context)}
 ${buildPolicySection('MCP tool call')}
 ${buildAttributionSection()}`;
 }
@@ -76,7 +78,12 @@ if [ -n "$IRONCURTAIN_MODEL" ]; then
   MODEL_ARGS=(--model "$IRONCURTAIN_MODEL")
 fi
 
-exec codex --ask-for-approval never --sandbox danger-full-access "\${MODEL_ARGS[@]}" --cd /workspace
+# Codex accepts additional session-wide developer instructions through its
+# config layer. JSON string encoding is valid TOML and keeps the mounted prompt
+# in one argv element even when it contains quotes or newlines.
+DEVELOPER_INSTRUCTIONS=$(node -e 'process.stdout.write(JSON.stringify(process.env.IRONCURTAIN_SYSTEM_PROMPT || ""))')
+
+exec codex --ask-for-approval never --sandbox danger-full-access -c "developer_instructions=$DEVELOPER_INSTRUCTIONS" "\${MODEL_ARGS[@]}" --cd /workspace
 `;
 }
 

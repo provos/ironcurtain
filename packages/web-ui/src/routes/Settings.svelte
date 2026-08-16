@@ -1,7 +1,15 @@
 <script lang="ts">
-  import type { GetModelProvidersDto, ProfileDto, OpenrouterProfileDto, ModelMapRuleDto } from '$lib/types.js';
+  import type {
+    DockerWorkloadSettingsDto,
+    GetModelProvidersDto,
+    ProfileDto,
+    OpenrouterProfileDto,
+    ModelMapRuleDto,
+  } from '$lib/types.js';
   import {
+    getDockerWorkloadSettings,
     getModelProviders,
+    setDockerWorkloadSettings,
     setModelProviders,
     listOpenrouterModels,
     appState,
@@ -41,6 +49,22 @@
 
   let loading = $state(true);
   let error = $state('');
+
+  // Runtime settings are intentionally independent of provider settings so a
+  // failure in either read does not hide the other card.
+  let runtimeLoading = $state(true);
+  let runtimeError = $state<{ code: string; message: string } | null>(null);
+  let runtimeSaving = $state(false);
+  let runtimeSaved = $state(false);
+  let dockerWorkloadEnabled = $state(false);
+  let allowPublicRegistryPulls = $state(true);
+  let runtimeBaseline = $state<DockerWorkloadSettingsDto | null>(null);
+  const runtimeLoaded = $derived(runtimeBaseline !== null);
+  const runtimeDirty = $derived(
+    runtimeBaseline !== null &&
+      (dockerWorkloadEnabled !== runtimeBaseline.enabled ||
+        allowPublicRegistryPulls !== runtimeBaseline.allowPublicRegistryPulls),
+  );
 
   // The fetched, masked registry. `profileNames` preserves list order (native first).
   let registry = $state<GetModelProvidersDto | null>(null);
@@ -82,6 +106,7 @@
 
   $effect(() => {
     void load();
+    void loadRuntimeSettings();
   });
 
   // Refresh on (re)connect and on every config.changed server-push event.
@@ -105,13 +130,58 @@
   async function refreshOnChange(): Promise<void> {
     // Skip generation 0 so we don't double-load on mount (load() runs separately).
     if (connectionGeneration.value === 0 && configChangedGeneration.value === 0) return;
-    // Don't clobber an in-progress edit dialog.
+    if (!runtimeDirty) {
+      try {
+        applyRuntimeSettings(await getDockerWorkloadSettings());
+      } catch {
+        // Best-effort. Keep a previously loaded DTO rather than replacing it
+        // with local defaults or clobbering unsaved edits.
+      }
+    }
+    // Don't clobber an in-progress provider-profile edit dialog.
     if (editing) return;
     try {
       applyRegistry(await getModelProviders());
     } catch {
       // Best-effort.
     }
+  }
+
+  async function loadRuntimeSettings(): Promise<void> {
+    runtimeLoading = true;
+    runtimeError = null;
+    runtimeBaseline = null;
+    try {
+      applyRuntimeSettings(await getDockerWorkloadSettings());
+    } catch (err) {
+      runtimeError = rpcError(err);
+    }
+    runtimeLoading = false;
+  }
+
+  function applyRuntimeSettings(dto: DockerWorkloadSettingsDto): void {
+    dockerWorkloadEnabled = dto.enabled;
+    allowPublicRegistryPulls = dto.allowPublicRegistryPulls;
+    runtimeBaseline = { ...dto };
+  }
+
+  async function saveRuntimeSettings(): Promise<void> {
+    if (!runtimeLoaded || !runtimeDirty) return;
+    runtimeSaving = true;
+    runtimeSaved = false;
+    runtimeError = null;
+    try {
+      applyRuntimeSettings(
+        await setDockerWorkloadSettings({
+          enabled: dockerWorkloadEnabled,
+          allowPublicRegistryPulls,
+        }),
+      );
+      runtimeSaved = true;
+    } catch (err) {
+      runtimeError = rpcError(err);
+    }
+    runtimeSaving = false;
   }
 
   function applyRegistry(dto: GetModelProvidersDto): void {
@@ -344,8 +414,112 @@
 </script>
 
 <div class="p-6 space-y-5 animate-fade-in">
+  <section class="space-y-3" aria-labelledby="runtime-heading">
+    <h2 id="runtime-heading" class="text-xl font-semibold tracking-tight">Runtime</h2>
+    <Card>
+      <CardHeader>
+        <CardTitle>Nested Docker</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {#if runtimeLoading}
+          <div class="flex items-center justify-center py-8" data-testid="runtime-loading">
+            <Spinner size="sm" />
+          </div>
+        {:else if !runtimeLoaded}
+          <div class="space-y-3" data-testid="runtime-settings-load-error">
+            <Alert variant="destructive">
+              Runtime settings could not be loaded. No changes can be saved until the current configuration is
+              available.
+              {#if runtimeError}<span class="block mt-1 text-xs">{runtimeError.message}</span>{/if}
+            </Alert>
+            <Button variant="outline" size="sm" onclick={loadRuntimeSettings} data-testid="retry-runtime-settings">
+              Retry
+            </Button>
+          </div>
+        {:else}
+          <div class="space-y-4" data-testid="docker-workload-settings">
+            <label class="flex items-start gap-3 text-sm">
+              <input
+                type="checkbox"
+                class="mt-1"
+                bind:checked={dockerWorkloadEnabled}
+                onchange={() => (runtimeSaved = false)}
+                disabled={!mutationAllowed || runtimeSaving}
+                data-testid="docker-workload-enabled"
+              />
+              <span>
+                Enable Docker inside agent sessions
+                <span class="block text-xs text-muted-foreground mt-1">
+                  Gives new container sessions a private, ephemeral Docker daemon. It does not expose the host Docker
+                  socket or host ports. Currently requires macOS on Apple silicon with Apple Container installed.
+                </span>
+              </span>
+            </label>
+
+            <label class="flex items-start gap-3 text-sm" class:opacity-60={!dockerWorkloadEnabled}>
+              <input
+                type="checkbox"
+                class="mt-1"
+                bind:checked={allowPublicRegistryPulls}
+                onchange={() => (runtimeSaved = false)}
+                disabled={!mutationAllowed || runtimeSaving || !dockerWorkloadEnabled}
+                data-testid="docker-workload-public-registry"
+              />
+              <span>
+                Allow public image pulls
+                <span class="block text-xs text-muted-foreground mt-1">
+                  Pulls from Docker Hub and GHCR use IronCurtain’s restricted registry mediation. This does not grant
+                  generic internet access or pass registry credentials into the session.
+                </span>
+              </span>
+            </label>
+
+            <p class="text-xs text-muted-foreground">
+              Changes apply to new agent sessions. Running sessions are unchanged.
+            </p>
+
+            {#if runtimeError}
+              <div data-testid="runtime-settings-error">
+                <Alert variant="destructive">
+                  <span class="font-mono text-xs">{runtimeError.code}</span>
+                  <span class="block mt-1">{runtimeError.message}</span>
+                </Alert>
+              </div>
+            {/if}
+
+            {#if runtimeSaved}
+              <p class="text-xs text-success" role="status" data-testid="runtime-settings-saved">
+                Saved. New agent sessions will use these settings.
+              </p>
+            {/if}
+
+            {#if mutationAllowed}
+              <div class="flex justify-end">
+                <Button
+                  variant="default"
+                  size="sm"
+                  onclick={saveRuntimeSettings}
+                  loading={runtimeSaving}
+                  disabled={runtimeSaving || !runtimeDirty}
+                  data-testid="save-runtime-settings"
+                >
+                  Save runtime settings
+                </Button>
+              </div>
+            {:else}
+              <p class="text-xs text-muted-foreground" data-testid="runtime-settings-readonly">
+                Runtime settings are read-only in this daemon. Run <code>ironcurtain config</code> to change them, or
+                restart the daemon with <code>--allow-policy-mutation</code>.
+              </p>
+            {/if}
+          </div>
+        {/if}
+      </CardContent>
+    </Card>
+  </section>
+
   <div class="flex items-center justify-between flex-wrap gap-3">
-    <h2 class="text-xl font-semibold tracking-tight">Model Providers</h2>
+    <h2 id="model-providers-heading" class="text-xl font-semibold tracking-tight">Model Providers</h2>
     <div class="flex items-center gap-3">
       <Badge variant="outline">{openrouterNames.length} profile{openrouterNames.length === 1 ? '' : 's'}</Badge>
       {#if mutationAllowed}

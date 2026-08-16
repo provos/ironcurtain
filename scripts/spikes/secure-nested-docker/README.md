@@ -4,6 +4,16 @@ This directory contains only the platform probes and capture tools that still ha
 It is not a second test suite and no result here qualifies a backend. Product behavior belongs in
 `src/docker-workload`, product tests, and `npm run qualify:apple`.
 
+The Apple developer slice is currently admitted with this minimal operator configuration:
+
+```json
+{ "dockerWorkload": { "enabled": true } }
+```
+
+That enabled state defaults to mediated Docker Hub/GHCR pulls. Deterministic offline and PTY-only
+qualification gates set `imageIngress: "preloaded-only"` explicitly. Nothing in this retained-probe
+directory changes either product default or the preview qualification state.
+
 ## Retention ledger
 
 | Area                                                                         | Status        | Why                                                                                                                                                                                                        |
@@ -97,8 +107,9 @@ npm run qualify:apple
 ```
 
 This command is not secure-nested-runtime Phase 0C qualification and does not open the admission
-fuse. Add the missing platform and product-entrypoint gates to the release suite instead of
-restoring an exploratory Apple runner; admission remains closed until those gates pass.
+fuse for additional backends or preview. The Apple developer slice is admitted, but full G1-G10/0C
+evidence remains incomplete. Add missing gates to the release suite instead of restoring an
+exploratory Apple runner.
 
 ## Build-egress capture
 

@@ -28,7 +28,7 @@ import { loadResourceWatchdogPolicy, type LoadedResourceWatchdogPolicy } from '.
 // Type-only: the readiness record is deliberately field-compatible with the
 // `daemon-ready` evidence payload, and a type import adds no runtime edge.
 import type { AppleVmDaemonReadiness } from './apple-vm-daemon.js';
-import type { AppleVmDockerWorkloadProvisioning } from './apple-private-docker.js';
+import type { AppleVmDockerWorkloadNetwork, AppleVmDockerWorkloadProvisioning } from './apple-private-docker.js';
 import {
   activateDockerWorkloadLease,
   createDockerWorkloadLease,
@@ -91,14 +91,6 @@ export type DockerWorkloadRuntimeKind = ContainerRuntimeKind;
 export type OuterResourceKind = 'container' | 'network';
 export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'proxy' | 'network';
 
-/** The sha256 attestation bindings the caller supplies; the watchdog policy hash is computed at render time. */
-export interface DockerWorkloadAdmissionBindings {
-  readonly catalogSha256: string;
-  readonly innerDockerCatalogSha256: string;
-  readonly profileSha256: string;
-  readonly toolchainDigest: string;
-}
-
 /**
  * A precommitted outer-resource ledger entry. The caller creates the runtime
  * object with the returned name and ownership labels, then calls `observed()`
@@ -132,7 +124,6 @@ export interface DockerWorkloadAdmissionOptions {
   readonly runtimeKind: DockerWorkloadRuntimeKind;
   readonly bundleId: string;
   readonly workspaceRoot: string;
-  readonly bindings: DockerWorkloadAdmissionBindings;
   /** The resolved capability config hash recorded in the admission audit event. */
   readonly configHash: string;
   readonly watchdogPolicyTemplatePath: string;
@@ -246,7 +237,7 @@ export async function admitDockerWorkloadBundle(
       generation,
       runtimeKind: options.runtimeKind,
       paths: leasePathsFor(options.workspaceRoot, stateRoot),
-      bindings: { ...options.bindings, watchdogPolicySha256: loadedPolicy.sha256 },
+      bindings: { watchdogPolicySha256: loadedPolicy.sha256 },
       cleanupInventoryGapMs: loadedPolicy.policy.cleanupInventoryGapMs,
       coordinatorPid: process.pid,
       now: clock(),
@@ -493,18 +484,26 @@ export class DockerWorkloadBundleHandle {
     });
   }
 
-  /** Record the exact private-Docker inputs and bundle-local observations before activation. */
-  recordPrivateDockerBootstrap(provisioning: AppleVmDockerWorkloadProvisioning): void {
+  /** Record the exact private-Docker inputs and advisory bundle-local observations before activation. */
+  recordPrivateDockerBootstrap(
+    provisioning: AppleVmDockerWorkloadProvisioning,
+    network: AppleVmDockerWorkloadNetwork,
+  ): void {
     this.emit({
       kind: 'private-docker-bootstrap',
       attestation: DAEMON_READY_ATTESTATION,
-      innerDockerCatalogSha256: provisioning.image.catalogSha256,
-      catalogGeneration: provisioning.image.catalogGeneration,
       toolchainDigest: provisioning.preflight.toolchainDigest,
       toolchain: provisioning.preflight.toolchain,
-      image: {
+      artifact: {
         logicalName: provisioning.image.logicalName,
-        immutableImageId: provisioning.image.immutableImageId,
+        buildHash: provisioning.image.buildHash,
+        archiveSha256: provisioning.image.archiveSha256,
+        outerAppleImageId: provisioning.image.outerAppleImageId,
+        innerDockerImageId: provisioning.image.immutableImageId,
+      },
+      network: {
+        name: network.name,
+        runtimeId: network.id,
       },
     });
   }

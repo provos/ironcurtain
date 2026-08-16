@@ -32,6 +32,12 @@ export interface CanonicalizeDockerSaveArchiveOptions {
   readonly logicalName: string;
   readonly architecture: 'amd64' | 'arm64';
   readonly expectedLabels: Readonly<Record<string, string>>;
+  /**
+   * Exact mutable references the source runtime may retain in its OCI
+   * annotation after a unique capture alias is created. These names are only
+   * structural metadata; the caller pins and inspects the alias before save.
+   */
+  readonly acceptedSourceReferences?: readonly string[];
 }
 
 export interface CanonicalizedDockerSaveArchive extends VerifiedOciImageArchive {
@@ -90,11 +96,7 @@ export async function canonicalizeDockerSaveArchive(
           LayerSources: Object.fromEntries(
             graph.layers.map((layer) => [
               layer.digest,
-              {
-                mediaType: 'application/vnd.oci.image.layer.v1.tar',
-                size: layer.size,
-                digest: layer.digest,
-              },
+              { mediaType: layer.mediaType, size: layer.size, digest: layer.digest },
             ]),
           ),
         },
@@ -147,6 +149,9 @@ function validateOptions(options: CanonicalizeDockerSaveArchiveOptions): void {
     if (name.length === 0 || name.length > 512 || value.length > 4096)
       throw new Error('canonical image label is invalid');
   }
+  for (const reference of options.acceptedSourceReferences ?? []) {
+    if (!validLogicalName(reference)) throw new Error('accepted Docker-save source reference is invalid');
+  }
 }
 
 async function extractSourceArchive(sourcePath: string, directory: string): Promise<ReadonlyMap<string, SourceEntry>> {
@@ -180,10 +185,25 @@ async function extractSourceArchive(sourcePath: string, directory: string): Prom
       const size = parseTarOctal(header.subarray(124, 136), 'size');
       const type = header[156];
       if (type === 53) {
-        if (size !== 0 || (name !== 'blobs' && name !== 'blobs/sha256')) {
+        if (size !== 0 || (name !== '.' && name !== 'blobs' && name !== 'blobs/sha256')) {
           throw new Error(`Docker-save source contains unexpected directory: ${name}`);
         }
         entries.set(name, { size: 0, digest: digest(Buffer.alloc(0)) });
+        continue;
+      }
+      if (type === 120) {
+        if (!/(?:^|\/)PaxHeader\/[A-Za-z0-9._-]+$/u.test(name) || size > 4096) {
+          throw new Error(`Docker-save source contains unsupported PAX metadata: ${name}`);
+        }
+        const content = await reader.readExact(size);
+        if (content === null || !validApplePaxMetadata(content.toString('utf8'))) {
+          throw new Error(`Docker-save source contains invalid PAX metadata: ${name}`);
+        }
+        const padding = (TAR_BLOCK_BYTES - (size % TAR_BLOCK_BYTES)) % TAR_BLOCK_BYTES;
+        if (padding > 0) {
+          const bytes = await reader.readExact(padding);
+          if (bytes === null || !isZero(bytes)) throw new Error(`Docker-save source has invalid padding: ${name}`);
+        }
         continue;
       }
       if (type !== 0 && type !== 48) throw new Error(`Docker-save source contains special entry: ${name}`);
@@ -238,6 +258,20 @@ async function extractSourceArchive(sourcePath: string, directory: string): Prom
   }
 }
 
+function validApplePaxMetadata(value: string): boolean {
+  let offset = 0;
+  while (offset < value.length) {
+    const separator = value.indexOf(' ', offset);
+    if (separator === -1) return false;
+    const length = Number.parseInt(value.slice(offset, separator), 10);
+    if (!Number.isSafeInteger(length) || length <= separator - offset + 1) return false;
+    const record = value.slice(offset, offset + length);
+    if (record.length !== length || !/^\d+ (?:atime|ctime)=\d+\n$/u.test(record)) return false;
+    offset += length;
+  }
+  return offset === value.length;
+}
+
 function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options: CanonicalizeDockerSaveArchiveOptions) {
   const layout = parseJson(entries, 'oci-layout');
   if (!isObject(layout) || layout.imageLayoutVersion !== '1.0.0') throw new Error('Docker-save OCI layout is invalid');
@@ -251,13 +285,51 @@ function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options:
   ) {
     throw new Error('Docker-save source must contain exactly one OCI manifest');
   }
-  const descriptor: unknown = index.manifests[0];
-  if (
-    !isObject(descriptor) ||
-    descriptor.mediaType !== 'application/vnd.oci.image.manifest.v1+json' ||
-    typeof descriptor.digest !== 'string'
-  )
+  const topLevelDescriptor: unknown = index.manifests[0];
+  if (!isObject(topLevelDescriptor) || typeof topLevelDescriptor.digest !== 'string') {
     throw new Error('Docker-save index descriptor is invalid');
+  }
+  assertDigest(topLevelDescriptor.digest, 'Docker-save index descriptor digest');
+  if (isObject(topLevelDescriptor.annotations)) {
+    const sourceName = topLevelDescriptor.annotations['org.opencontainers.image.ref.name'];
+    const acceptedSourceReferences = options.acceptedSourceReferences ?? [options.logicalName];
+    if (
+      sourceName !== undefined &&
+      !acceptedSourceReferences.some((reference) => sameLogicalImageReference(sourceName, reference))
+    ) {
+      throw new Error('Docker-save index logical name differs from the requested image');
+    }
+  }
+  let descriptor = topLevelDescriptor;
+  if (topLevelDescriptor.mediaType === 'application/vnd.oci.image.index.v1+json') {
+    const nestedEntry = requiredEntry(entries, blobPath(topLevelDescriptor.digest));
+    if (topLevelDescriptor.size !== nestedEntry.size) {
+      throw new Error('Docker-save nested index size does not match its descriptor');
+    }
+    const nested = parseJson(entries, blobPath(topLevelDescriptor.digest));
+    if (
+      !isObject(nested) ||
+      nested.schemaVersion !== 2 ||
+      nested.mediaType !== 'application/vnd.oci.image.index.v1+json' ||
+      !Array.isArray(nested.manifests)
+    ) {
+      throw new Error('Docker-save nested OCI index is invalid');
+    }
+    const matches = nested.manifests.filter(
+      (candidate): candidate is JsonObject =>
+        isObject(candidate) &&
+        isObject(candidate.platform) &&
+        candidate.platform.os === 'linux' &&
+        candidate.platform.architecture === options.architecture,
+    );
+    if (matches.length !== 1) {
+      throw new Error('Docker-save nested OCI index must contain exactly one requested platform');
+    }
+    descriptor = matches[0];
+  }
+  if (descriptor.mediaType !== 'application/vnd.oci.image.manifest.v1+json' || typeof descriptor.digest !== 'string') {
+    throw new Error('Docker-save index descriptor is invalid');
+  }
   assertDigest(descriptor.digest, 'Docker-save manifest digest');
   const manifestDigest = descriptor.digest;
   const manifest = requiredEntry(entries, blobPath(manifestDigest));
@@ -286,10 +358,12 @@ function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options:
     throw new Error('Docker-save config platform mismatch');
   }
   const configSection = configJson.config;
-  if (!isObject(configSection) || !isObject(configSection.Labels))
+  if (Object.keys(options.expectedLabels).length > 0 && (!isObject(configSection) || !isObject(configSection.Labels)))
     throw new Error('Docker-save config labels are missing');
   for (const [name, expected] of Object.entries(options.expectedLabels)) {
-    if (configSection.Labels[name] !== expected) throw new Error(`Docker-save config label mismatch: ${name}`);
+    if (!isObject(configSection) || !isObject(configSection.Labels) || configSection.Labels[name] !== expected) {
+      throw new Error(`Docker-save config label mismatch: ${name}`);
+    }
   }
   const rootfs = configJson.rootfs;
   if (!isObject(rootfs) || rootfs.type !== 'layers') {
@@ -300,41 +374,60 @@ function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options:
   if (diffIds.length !== manifestJson.layers.length || manifestJson.layers.length === 0) {
     throw new Error('Docker-save layer count is invalid');
   }
-  const layers = manifestJson.layers.map((value, index) => {
+  const layers = manifestJson.layers.map((value) => {
     if (
       !isObject(value) ||
-      value.mediaType !== 'application/vnd.oci.image.layer.v1.tar' ||
+      (value.mediaType !== 'application/vnd.oci.image.layer.v1.tar' &&
+        value.mediaType !== 'application/vnd.oci.image.layer.v1.tar+gzip') ||
       typeof value.digest !== 'string' ||
       typeof value.size !== 'number'
     ) {
-      throw new Error('Docker-save source must use uncompressed OCI layers');
+      throw new Error('Docker-save source contains an unsupported OCI layer');
     }
     assertDigest(value.digest, 'Docker-save layer digest');
-    if (diffIds[index] !== value.digest) throw new Error('Docker-save layer digest/diff ID mismatch');
     const entry = requiredEntry(entries, blobPath(value.digest));
     if (entry.size !== value.size) throw new Error('Docker-save layer size mismatch');
-    return { ...entry, digest: value.digest };
+    return { ...entry, digest: value.digest, mediaType: value.mediaType };
   });
-  if (new Set(layers.map((layer) => layer.digest)).size !== layers.length) {
-    throw new Error('Docker-save source contains a duplicate layer digest');
+  if (entries.has('manifest.json')) {
+    const dockerManifest = parseJson(entries, 'manifest.json');
+    if (!Array.isArray(dockerManifest) || dockerManifest.length !== 1 || !isObject(dockerManifest[0])) {
+      throw new Error('Docker-save compatibility manifest must contain one image');
+    }
+    const dockerItem = dockerManifest[0];
+    if (
+      dockerItem.Config !== blobPath(configDigest) ||
+      !Array.isArray(dockerItem.RepoTags) ||
+      dockerItem.RepoTags.length !== 1 ||
+      dockerItem.RepoTags[0] !== options.logicalName ||
+      !Array.isArray(dockerItem.Layers) ||
+      JSON.stringify(dockerItem.Layers) !== JSON.stringify(layers.map((layer) => blobPath(layer.digest)))
+    ) {
+      throw new Error('Docker-save compatibility manifest differs from the OCI graph/logical name');
+    }
   }
+  return {
+    manifestDigest,
+    configDigest,
+    manifest,
+    config,
+    layers,
+  };
+}
 
-  const dockerManifest = parseJson(entries, 'manifest.json');
-  if (!Array.isArray(dockerManifest) || dockerManifest.length !== 1 || !isObject(dockerManifest[0])) {
-    throw new Error('Docker-save compatibility manifest must contain one image');
-  }
-  const dockerItem = dockerManifest[0];
-  if (
-    dockerItem.Config !== blobPath(configDigest) ||
-    !Array.isArray(dockerItem.RepoTags) ||
-    dockerItem.RepoTags.length !== 1 ||
-    dockerItem.RepoTags[0] !== options.logicalName ||
-    !Array.isArray(dockerItem.Layers) ||
-    JSON.stringify(dockerItem.Layers) !== JSON.stringify(layers.map((layer) => blobPath(layer.digest)))
-  ) {
-    throw new Error('Docker-save compatibility manifest differs from the OCI graph/logical name');
-  }
-  return { manifestDigest, configDigest, manifest, config, layers };
+function sameLogicalImageReference(actual: unknown, expected: string): boolean {
+  if (typeof actual !== 'string') return false;
+  const normalize = (value: string): string => {
+    for (const prefix of ['docker.io/library/', 'localhost/']) {
+      if (value.startsWith(prefix)) return value.slice(prefix.length);
+    }
+    return value;
+  };
+  return normalize(actual) === normalize(expected);
+}
+
+function validLogicalName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/u.test(value) && value.includes(':');
 }
 
 function requiredEntry(entries: ReadonlyMap<string, SourceEntry>, name: string): SourceEntry {

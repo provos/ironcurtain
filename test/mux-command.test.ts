@@ -94,6 +94,7 @@ vi.mock('../src/config/paths.js', async (importActual) => {
 // --- Imports (after mocks) ---
 
 import { main as muxMain } from '../src/mux/mux-command.js';
+import { resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
 
 // --- Helpers ---
 
@@ -178,6 +179,25 @@ describe('ironcurtain mux preflight integration', () => {
     // Mode line must reach stderr in the same shape as `start`/`daemon`/`bot`.
     const stderrText = stderr.lines.join('');
     expect(stderrText).toMatch(/Mode: container \/ claude-code \(API key\)/);
+  });
+
+  it('prints effective nested Docker and mediated-pull status before fullscreen', async () => {
+    const configModule = await import('../src/config/index.js');
+    vi.mocked(configModule.loadConfig).mockReturnValue({
+      ...mockConfig,
+      userConfig: {
+        ...mockConfig.userConfig,
+        dockerWorkload: resolveDockerWorkloadConfig({ enabled: true }),
+      },
+    });
+
+    await muxMain([], {
+      resolveSessionMode: vi.fn().mockResolvedValue(makePreflightSuccess('claude-code')),
+      createMuxApp: vi.fn(() => makeFakeMuxApp()),
+      skipNativeProbes: true,
+    });
+
+    expect(stderr.lines.join('')).toMatch(/Nested Docker: enabled · pulls: Docker Hub\/GHCR via mediated proxy/);
   });
 
   it('--capture-traces forwards captureTraces: true to the MuxApp', async () => {

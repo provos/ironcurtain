@@ -16,6 +16,7 @@ import { isPlainObject } from '../utils/is-plain-object.js';
 import {
   dockerWorkloadRequestedSchema,
   resolveDockerWorkloadConfig,
+  type DockerWorkloadRequestedConfig,
   type ResolvedDockerWorkloadConfig,
 } from '../docker-workload/config.js';
 
@@ -658,7 +659,40 @@ export function loadUserConfig(options?: { readOnly?: boolean }): ResolvedUserCo
   const parsed = parseConfigJson(raw, configPath);
   warnUnknownFields(parsed, configPath);
   const validated = validateConfig(parsed, configPath);
+  if (options?.readOnly !== true) {
+    migrateRequestedDockerWorkloadConfig(configPath, parsed, validated);
+  }
   return applyEnvOverrides(mergeWithDefaults(validated));
+}
+
+/**
+ * Read the validated requested nested-Docker block without applying defaults,
+ * backfilling, environment overrides, or creating the config file. Settings
+ * surfaces use this to preserve an explicit offline preference while the
+ * resolved disabled value remains authority-free `{ enabled: false }`.
+ */
+export function loadRequestedDockerWorkloadConfig(): DockerWorkloadRequestedConfig | undefined {
+  const configPath = getUserConfigPath();
+  if (!existsSync(configPath)) return undefined;
+  const raw = readFileSync(configPath, 'utf-8');
+  const parsed = parseConfigJson(raw, configPath);
+  return validateConfig(parsed, configPath).dockerWorkload;
+}
+
+/**
+ * Persist the canonical two-choice nested-Docker request after a successful
+ * normal load. Read-only loads deliberately skip this helper. Validation runs
+ * first, so unsupported legacy intent is reported instead of rewritten.
+ */
+function migrateRequestedDockerWorkloadConfig(configPath: string, parsed: unknown, validated: UserConfig): void {
+  if (!isPlainObject(parsed) || !Object.hasOwn(parsed, 'dockerWorkload')) return;
+  const existing = parsed['dockerWorkload'];
+  const canonical = validated.dockerWorkload;
+  if (JSON.stringify(existing) === JSON.stringify(canonical)) return;
+
+  const migrated = { ...parsed, dockerWorkload: canonical };
+  writeConfigFile(configPath, JSON.stringify(migrated, null, 2) + '\n');
+  process.stderr.write('Migrated config field: dockerWorkload\n');
 }
 
 /**
@@ -854,6 +888,20 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   const c = config.autoCompact;
   const a = config.autoApprove;
   const r = config.auditRedaction;
+  // Resolve the ordinary container envelope once. Nested Docker inherits its
+  // numeric values unless it has an explicit override; `null` is deliberately
+  // not inherited because unlimited ordinary-container settings are not safe
+  // private-VM defaults.
+  const resolvedDockerResources: ResolvedDockerResourcesConfig = {
+    memoryMb:
+      config.dockerResources?.memoryMb === undefined
+        ? USER_CONFIG_DEFAULTS.dockerResources.memoryMb
+        : config.dockerResources.memoryMb,
+    cpus:
+      config.dockerResources?.cpus === undefined
+        ? USER_CONFIG_DEFAULTS.dockerResources.cpus
+        : config.dockerResources.cpus,
+  };
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
@@ -914,15 +962,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       allowedPackages: config.packageInstall?.allowedPackages ?? [],
       deniedPackages: config.packageInstall?.deniedPackages ?? [],
     },
-    // Destructure preserves explicit `null` (= "no limit"); only `undefined`
-    // falls back to the default.
-    dockerResources: (() => {
-      const {
-        memoryMb = USER_CONFIG_DEFAULTS.dockerResources.memoryMb,
-        cpus = USER_CONFIG_DEFAULTS.dockerResources.cpus,
-      } = config.dockerResources ?? {};
-      return { memoryMb, cpus };
-    })(),
+    dockerResources: resolvedDockerResources,
     snapshot: {
       enabled: config.snapshot?.enabled ?? USER_CONFIG_DEFAULTS.snapshot.enabled,
       maxAgeDays:
@@ -931,7 +971,10 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
           : USER_CONFIG_DEFAULTS.snapshot.maxAgeDays,
       sweepIntervalHours: config.snapshot?.sweepIntervalHours ?? USER_CONFIG_DEFAULTS.snapshot.sweepIntervalHours,
     },
-    dockerWorkload: resolveDockerWorkloadConfig(config.dockerWorkload),
+    dockerWorkload: resolveDockerWorkloadConfig(config.dockerWorkload, {
+      memoryMb: resolvedDockerResources.memoryMb ?? undefined,
+      cpus: resolvedDockerResources.cpus ?? undefined,
+    }),
     // Capture is left undefined unless the user explicitly set
     // `capture.enabled` in the config file. The session-factory
     // resolver applies the `?? false` default (§10).
@@ -1223,5 +1266,15 @@ export function saveUserConfig(changes: UserConfig): void {
     throw new Error(`Invalid config after merge:\n${issues}`);
   }
 
-  writeConfigFile(configPath, JSON.stringify(merged, null, 2) + '\n');
+  // `dockerWorkloadRequestedSchema` accepts the previously documented
+  // implementation-policy fields only as a compatibility input and transforms
+  // them to the canonical two-choice request. Persist that transformed block
+  // so the next successful save completes the migration without rewriting or
+  // stripping unrelated top-level configuration.
+  const normalized = { ...merged };
+  if (result.data.dockerWorkload !== undefined) {
+    normalized['dockerWorkload'] = result.data.dockerWorkload;
+  }
+
+  writeConfigFile(configPath, JSON.stringify(normalized, null, 2) + '\n');
 }

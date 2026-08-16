@@ -318,7 +318,9 @@ async function createDockerSession(
           recordedAgentName: agentId,
         },
         undefined, // scriptsDir
-        undefined, // options (CreateDockerInfrastructureOptions)
+        options.preparedDockerImageResolution
+          ? { preparedImageResolution: options.preparedDockerImageResolution }
+          : undefined,
         options.providerProfileName,
       );
       // Standalone sessions use their bundle for the session's entire
@@ -328,7 +330,7 @@ async function createDockerSession(
       infra.setTokenSessionId(sessionId);
       builtInfra = true;
 
-      // §8.4: persist the Docker-workload lease identity + attestation bindings
+      // §8.4: persist the Docker-workload lease identity + watchdog-policy binding
       // for audit/inspection. Merged into the metadata `buildSessionConfig`
       // already wrote — the lease tuple is only known after admission, which
       // runs inside `createDockerInfrastructure`. Inert for ordinary sessions

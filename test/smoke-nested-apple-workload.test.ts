@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
   PUBLIC_REGISTRY_SMOKE_IMAGE,
+  assertDefaultBridgeUnavailable,
+  assertDefaultContainerHasNoUsableNetwork,
+  assertEmptyInternalBridge,
   assertEmbeddedDnsResolver,
+  assertExactAgentDockerEnvironment,
   assertInternalBridge,
   assertNoPublishedPortBindings,
   assertRegistryPolicyDenied,
@@ -10,6 +14,7 @@ import {
   bindPublicRegistryWorkloadNetwork,
   buildNestedAppleSmokeWorkloadConfig,
   buildPublicRegistryWorkloadPlan,
+  isExactSmokeNonceResponse,
   parseNestedAppleSmokeMode,
 } from '../scripts/smoke-nested-apple-workload.js';
 
@@ -31,20 +36,19 @@ describe('nested Apple smoke invocation', () => {
 describe('nested Apple public-registry acceptance plan', () => {
   const nonce = '0123456789abcdef0123456789abcdef';
 
-  it('opens only public image ingress while retaining the no-publication envelope', () => {
-    const config = buildNestedAppleSmokeWorkloadConfig('public-registry');
-    expect(config).toMatchObject({
+  it('uses the product-default request for public ingress and explicit offline opt-outs', () => {
+    expect(buildNestedAppleSmokeWorkloadConfig('public-registry')).toEqual({ enabled: true });
+    expect(buildNestedAppleSmokeWorkloadConfig('batch')).toEqual({
       enabled: true,
-      backend: 'apple-container',
-      imageIngress: 'public-registry',
-      hostPortPublishing: false,
-      buildEgress: 'disabled',
+      imageIngress: 'preloaded-only',
     });
-    expect(buildNestedAppleSmokeWorkloadConfig('batch').imageIngress).toBe('preloaded-only');
-    expect(buildNestedAppleSmokeWorkloadConfig('pty').imageIngress).toBe('preloaded-only');
+    expect(buildNestedAppleSmokeWorkloadConfig('pty')).toEqual({
+      enabled: true,
+      imageIngress: 'preloaded-only',
+    });
   });
 
-  it('uses one reviewed image, an internal inner bridge, exact nonce arguments, and no publish flag', () => {
+  it('uses one reviewed image, the managed bridge, exact nonces, and no ordinary publish flag', () => {
     const plan = buildPublicRegistryWorkloadPlan(nonce);
     expect(plan.image).toBe(PUBLIC_REGISTRY_SMOKE_IMAGE);
     expect(plan.image).toBe('busybox:1.37.0-glibc');
@@ -67,8 +71,19 @@ describe('nested Apple public-registry acceptance plan', () => {
       '--list',
     ]);
     expect(DENIED_REGISTRY_SMOKE_IMAGE).toMatch(/^example\.invalid\//u);
-    expect(plan.createNetwork).toEqual(['network', 'create', '--driver', 'bridge', '--internal', plan.networkName]);
+    expect(plan.networkName).toBe('ironcurtain');
     expect(plan.inspectNetwork).toEqual(['network', 'inspect', '--format', '{{json .}}', plan.networkName]);
+    expect(plan.inspectDefaultBridge).toEqual(['network', 'inspect', '--format', '{{json .}}', 'bridge']);
+    expect(plan.startDefaultNetworkContainer).not.toContain('--network');
+    expect(plan.startDefaultNetworkContainer).toContain(plan.defaultProbeName);
+    expect(plan.inspectDefaultNetworkContainer).toEqual([
+      'container',
+      'inspect',
+      '--format',
+      '{{json .NetworkSettings.Networks}}',
+      plan.defaultProbeName,
+    ]);
+    expect(plan.removeDefaultNetworkContainer).toEqual(['container', 'rm', '--force', plan.defaultProbeName]);
     expect(plan.serverAlias).toBe('target');
     expect(plan.startServer).not.toContain(plan.networkName);
     expect(plan.probeServerIpv4).not.toContain(plan.networkName);
@@ -77,6 +92,25 @@ describe('nested Apple public-registry acceptance plan', () => {
     expect(plan.probeDirectIpEgress).not.toContain(plan.networkName);
     expect(plan.probeDirectIpEgress.join(' ')).toContain('http://1.1.1.1/');
     expect(plan.probeDirectIpEgress.join(' ')).toContain('IC_DIRECT_EGRESS_PROBE_STARTED');
+    expect(plan.startHostNetworkServer).toContain('host');
+    expect(plan.startHostNetworkServer).toContain(plan.hostServerName);
+    expect(plan.startHostNetworkServer.at(-1)).toBe(nonce);
+    expect(plan.hostServerPort).toBe(22_000 + (Number.parseInt(nonce.slice(0, 4), 16) % 8_000));
+    expect(plan.hostServerPort).toBeGreaterThanOrEqual(22_000);
+    expect(plan.hostServerPort).toBeLessThan(30_000);
+    expect(plan.hostServerPort).not.toBe(18_080);
+    expect(plan.hostServerPort).not.toBe(18_081);
+    expect(plan.startHostNetworkServer.join(' ')).toContain(`-p ${plan.hostServerPort}`);
+    expect(plan.inspectHostNetworkServer).toEqual([
+      'container',
+      'inspect',
+      '--format',
+      '{{.HostConfig.NetworkMode}}',
+      plan.hostServerName,
+    ]);
+    expect(plan.probeHostNetworkServerLoopback).toContain(plan.hostServerName);
+    expect(plan.probeHostNetworkServerLoopback.join(' ')).toContain(`http://127.0.0.1:${plan.hostServerPort}/`);
+    expect(plan.removeHostNetworkServer).toEqual(['container', 'rm', '--force', plan.hostServerName]);
     expect(plan.inspectEmbeddedDns.join(' ')).toContain('/etc/resolv.conf');
     expect(plan.probePublicDnsEgress.join(' ')).toContain('http://example.com/');
     expect(plan.probePublicDnsEgress.join(' ')).toContain('IC_PUBLIC_DNS_PROBE_STARTED');
@@ -88,7 +122,16 @@ describe('nested Apple public-registry acceptance plan', () => {
     expect(plan.startServer.at(-1)).toBe(nonce);
     expect(plan.startServer.at(-3)).not.toContain(nonce);
 
-    const argv = [
+    expect(plan.startPublishedServer).toContain('--publish');
+    expect(plan.publishedHostPort).toBe(30_000 + (Number.parseInt(nonce.slice(4, 8), 16) % 8_000));
+    expect(plan.publishedHostPort).toBeGreaterThanOrEqual(30_000);
+    expect(plan.publishedHostPort).toBeLessThan(38_000);
+    expect(plan.publishedHostPort).not.toBe(plan.hostServerPort);
+    expect(plan.startPublishedServer).toContain(`127.0.0.1:${plan.publishedHostPort}:8080`);
+    expect(plan.startPublishedServer).toContain(plan.publishedServerName);
+    expect(plan.probePublishedServerLoopback).toContain(plan.publishedServerName);
+    expect(plan.probePublishedServerLoopback.join(' ')).toContain('http://127.0.0.1:8080/');
+    const ordinaryArgv = [
       ...plan.startServer,
       ...plan.inspectEmbeddedDns,
       ...plan.probePublicDnsEgress,
@@ -97,19 +140,32 @@ describe('nested Apple public-registry acceptance plan', () => {
       ...plan.probeServerIpv4,
       ...plan.probeServerAlias,
     ];
-    expect(argv).not.toContain('-p');
-    expect(argv).not.toContain('--publish');
-    expect(argv).not.toContain('--publish-all');
+    expect(ordinaryArgv).not.toContain('-p');
+    expect(ordinaryArgv).not.toContain('--publish');
+    expect(ordinaryArgv).not.toContain('--publish-all');
   });
 
   it('rejects shell-capable nonce values', () => {
     expect(() => buildPublicRegistryWorkloadPlan('$(touch /tmp/no)')).toThrow(/nonce/u);
   });
 
+  it('distinguishes only the exact nonce from unrelated localhost responses', () => {
+    expect(isExactSmokeNonceResponse(nonce, nonce)).toBe(true);
+    expect(isExactSmokeNonceResponse(`${nonce}\n`, nonce)).toBe(false);
+    expect(isExactSmokeNonceResponse('IRONCURTAIN_OK/1\n', nonce)).toBe(false);
+    expect(isExactSmokeNonceResponse('', nonce)).toBe(false);
+    expect(() => isExactSmokeNonceResponse(nonce, 'not-a-nonce')).toThrow(/nonce/u);
+  });
+
   it('accepts only empty Docker port-binding inspections', () => {
     expect(() => assertNoPublishedPortBindings('null\n')).not.toThrow();
     expect(() => assertNoPublishedPortBindings('{}\n')).not.toThrow();
+    expect(() => assertNoPublishedPortBindings('{"8080/tcp":null}')).not.toThrow();
+    expect(() => assertNoPublishedPortBindings('{"443/tcp":[],"8080/tcp":null}')).not.toThrow();
     expect(() => assertNoPublishedPortBindings('{"8080/tcp":[{"HostPort":"1234"}]}')).toThrow(/publishes/u);
+    expect(() => assertNoPublishedPortBindings('{"8080/tcp":{}}')).toThrow(/malformed/u);
+    expect(() => assertNoPublishedPortBindings('{"8080/tcp":"none"}')).toThrow(/malformed/u);
+    expect(() => assertNoPublishedPortBindings('[]')).toThrow(/malformed/u);
     expect(() => assertNoPublishedPortBindings('not-json')).toThrow(/malformed/u);
   });
 
@@ -123,33 +179,130 @@ describe('nested Apple public-registry acceptance plan', () => {
     expect(() => assertEmbeddedDnsResolver('search example.test\n')).toThrow(/embedded DNS/u);
   });
 
+  it('requires the exact nested-Docker environment exported by the live agent container', () => {
+    expect(() =>
+      assertExactAgentDockerEnvironment(
+        'HOME=/home/codespace\nDOCKER_HOST=unix:///run/ironcurtain-docker/docker.sock\nIRONCURTAIN_DOCKER_NETWORK=ironcurtain\n',
+      ),
+    ).not.toThrow();
+    expect(() => assertExactAgentDockerEnvironment('IRONCURTAIN_DOCKER_NETWORK=ironcurtain\n')).toThrow(/DOCKER_HOST/u);
+    expect(() =>
+      assertExactAgentDockerEnvironment(
+        'DOCKER_HOST=unix:///run/ironcurtain-docker/docker.sock\nIRONCURTAIN_DOCKER_NETWORK=wrong\n',
+      ),
+    ).toThrow(/IRONCURTAIN_DOCKER_NETWORK/u);
+    expect(() =>
+      assertExactAgentDockerEnvironment(
+        'DOCKER_HOST=unix:///run/ironcurtain-docker/docker.sock\nDOCKER_HOST=unix:///other.sock\nIRONCURTAIN_DOCKER_NETWORK=ironcurtain\n',
+      ),
+    ).toThrow(/DOCKER_HOST/u);
+  });
+
   it('accepts only an internal bridge and extracts the exact server endpoint IPv4', () => {
     const networkId = 'a'.repeat(64);
-    const empty = JSON.stringify({ Id: networkId, Driver: 'bridge', Internal: true, Containers: {} });
+    const empty = JSON.stringify({
+      Id: networkId,
+      Name: 'ironcurtain',
+      Driver: 'bridge',
+      Scope: 'local',
+      Internal: true,
+      Containers: {},
+    });
     expect(assertInternalBridge(empty)).toEqual({ networkId });
+    expect(assertEmptyInternalBridge(empty)).toEqual({ networkId });
     const withServer = JSON.stringify({
       Id: networkId,
+      Name: 'ironcurtain',
       Driver: 'bridge',
+      Scope: 'local',
       Internal: true,
       Containers: { endpoint: { Name: 'server', IPv4Address: '172.20.0.2/16' } },
     });
     expect(assertInternalBridge(withServer, 'server')).toEqual({ networkId, serverIpv4: '172.20.0.2' });
+    expect(() => assertEmptyInternalBridge(withServer)).toThrow(/not empty/u);
     expect(() =>
       assertInternalBridge(
         JSON.stringify({
           Id: networkId,
+          Name: 'ironcurtain',
           Driver: 'bridge',
+          Scope: 'local',
           Internal: true,
           Containers: { endpoint: { Name: 'server', IPv4Address: '172.20.0.2/99' } },
         }),
         'server',
       ),
     ).toThrow(/malformed/u);
-    expect(() => assertInternalBridge('{"Id":"bad","Driver":"bridge","Internal":true}')).toThrow(/ID/u);
-    expect(() => assertInternalBridge(`{"Id":"${networkId}","Driver":"bridge","Internal":false}`)).toThrow(/internal/u);
-    expect(() => assertInternalBridge(`{"Id":"${networkId}","Driver":"overlay","Internal":true}`)).toThrow(/internal/u);
+    expect(() =>
+      assertInternalBridge(
+        JSON.stringify({ Id: 'bad', Name: 'ironcurtain', Driver: 'bridge', Scope: 'local', Internal: true }),
+      ),
+    ).toThrow(/ID/u);
+    expect(() =>
+      assertInternalBridge(
+        JSON.stringify({
+          Id: networkId,
+          Name: 'ironcurtain',
+          Driver: 'bridge',
+          Scope: 'local',
+          Internal: false,
+        }),
+      ),
+    ).toThrow(/internal/u);
+    expect(() =>
+      assertInternalBridge(
+        JSON.stringify({
+          Id: networkId,
+          Name: 'ironcurtain',
+          Driver: 'overlay',
+          Scope: 'local',
+          Internal: true,
+        }),
+      ),
+    ).toThrow(/internal/u);
+    expect(() =>
+      assertInternalBridge(
+        JSON.stringify({ Id: networkId, Name: 'other', Driver: 'bridge', Scope: 'local', Internal: true }),
+      ),
+    ).toThrow(/managed/u);
     expect(() => assertInternalBridge(empty, 'server')).toThrow(/endpoint/u);
     expect(() => assertInternalBridge('not-json')).toThrow(/malformed/u);
+  });
+
+  it('accepts only exact default-bridge absence', () => {
+    expect(() =>
+      assertDefaultBridgeUnavailable('', 'Error response from daemon: network bridge not found'),
+    ).not.toThrow();
+    expect(() => assertDefaultBridgeUnavailable('', 'permission denied')).toThrow(/unavailable diagnostic/u);
+  });
+
+  it('allows only empty default-mode attachment metadata', () => {
+    expect(() => assertDefaultContainerHasNoUsableNetwork('{}')).not.toThrow();
+    expect(() =>
+      assertDefaultContainerHasNoUsableNetwork(
+        JSON.stringify({
+          bridge: {
+            NetworkID: '',
+            EndpointID: '',
+            Gateway: '',
+            IPAddress: '',
+            IPv6Gateway: '',
+            GlobalIPv6Address: '',
+          },
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertDefaultContainerHasNoUsableNetwork(
+        JSON.stringify({ bridge: { NetworkID: 'a'.repeat(64), EndpointID: '', Gateway: '', IPAddress: '' } }),
+      ),
+    ).toThrow(/NetworkID/u);
+    expect(() =>
+      assertDefaultContainerHasNoUsableNetwork(
+        JSON.stringify({ bridge: { NetworkID: '', EndpointID: '', Gateway: '172.17.0.1', IPAddress: '' } }),
+      ),
+    ).toThrow(/Gateway/u);
+    expect(() => assertDefaultContainerHasNoUsableNetwork('not-json')).toThrow(/malformed JSON/u);
   });
 
   it('binds trusted network inspection only into dedicated argv fields', () => {

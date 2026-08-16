@@ -93,11 +93,13 @@ const leaseSchema = z
       .strict(),
     bindings: z
       .object({
-        catalogSha256: sha256Schema,
-        innerDockerCatalogSha256: sha256Schema,
-        profileSha256: sha256Schema,
+        // Accepted only for backward-compatible recovery of version-1 leases.
+        // New leases persist no catalog/profile/toolchain authority.
+        catalogSha256: sha256Schema.optional(),
+        innerDockerCatalogSha256: sha256Schema.optional(),
+        profileSha256: sha256Schema.optional(),
         watchdogPolicySha256: sha256Schema,
-        toolchainDigest: sha256Schema,
+        toolchainDigest: sha256Schema.optional(),
       })
       .strict(),
     coordinator: z
@@ -216,7 +218,7 @@ export function createDockerWorkloadLease(
     status: 'admitting',
     runtimeKind: options.runtimeKind,
     paths: options.paths,
-    bindings: options.bindings,
+    bindings: { watchdogPolicySha256: options.bindings.watchdogPolicySha256 },
     coordinator: {
       pid: options.coordinatorPid ?? process.pid,
       startedAt: now,

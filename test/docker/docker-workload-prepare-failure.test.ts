@@ -13,7 +13,7 @@
  * (with the harness's fake clock/supervisor/runtime injected) so the assertion
  * is the on-disk lease status, not a spy. Everything the prepare path would
  * otherwise touch — adapter, container runtime, CA, both proxies, and the
- * bindings resolver — is mocked; the resolved-variant guard is mocked open exactly the
+ * selected artifact — is mocked; the resolved-variant guard is mocked open exactly the
  * way the shipped seams are driven elsewhere (the fuse itself is covered by
  * test/docker/docker-workload-admission.test.ts and is untouched here).
  */
@@ -29,16 +29,17 @@ import type { CertificateAuthority } from '../../src/docker/ca.js';
 import type { DockerProxy } from '../../src/docker/code-mode-proxy.js';
 import type { MitmProxy, MitmProxyOptions } from '../../src/docker/mitm-proxy.js';
 import type { ContainerRuntime } from '../../src/docker/types.js';
+import type { AgentImageResolution } from '../../src/docker/docker-infrastructure.js';
 import type {
   DockerWorkloadAdmissionOptions,
   DockerWorkloadBundleHandle,
 } from '../../src/docker-workload/infrastructure.js';
+import type { SelectedAgentArtifact } from '../../src/docker/selected-agent-artifact.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { resolveDockerWorkloadConfig } from '../../src/docker-workload/config.js';
 import type { BundleId } from '../../src/session/types.js';
 import { createMockAdapter, createMockCA, createMockMitmProxy, createMockProxy } from '../helpers/docker-mocks.js';
 import {
-  ADMISSION_BINDINGS,
   createEventRuntime,
   createFakeClock,
   createFakeSupervisor,
@@ -52,7 +53,8 @@ import {
 interface PrepareSeam {
   adapter?: AgentAdapter;
   runtime?: ContainerRuntime;
-  bindings?: DockerWorkloadAdmissionOptions['bindings'];
+  artifact: SelectedAgentArtifact;
+  prepareArtifactCalls: number;
   ca?: CertificateAuthority;
   handle?: DockerWorkloadBundleHandle;
   admissionOverrides: () => Partial<DockerWorkloadAdmissionOptions>;
@@ -62,6 +64,18 @@ interface PrepareSeam {
 }
 
 const seam = vi.hoisted<PrepareSeam>(() => ({
+  artifact: {
+    logicalName: 'ironcurtain-claude-code:latest',
+    buildHash: 'a'.repeat(64),
+    architecture: 'arm64',
+    appleImageId: `sha256:${'b'.repeat(64)}`,
+    dockerImageId: `sha256:${'c'.repeat(64)}`,
+    manifestDigest: `sha256:${'d'.repeat(64)}`,
+    archivePath: '/tmp/test-selected-agent-artifact/selected-agent.oci.tar',
+    archiveSha256: 'e'.repeat(64),
+    archiveSizeBytes: 1,
+  },
+  prepareArtifactCalls: 0,
   admissionOverrides: () => ({}),
   makeProxy: () => {
     throw new Error('code-mode proxy double not installed');
@@ -102,22 +116,24 @@ vi.mock('../../src/docker-workload/config.js', async (importOriginal) => ({
   assertAdmittedDockerWorkloadRuntimeAvailable: async () => {},
 }));
 
-// The real resolver hashes the staged catalog + frozen profile ceiling, neither
-// of which exists under the per-test IRONCURTAIN_HOME.
-vi.mock('../../src/docker-workload/admission-bindings.js', () => ({
-  resolveDockerWorkloadAdmissionBindings: () => seam.bindings,
+// Image construction/export is not relevant to the post-admission cleanup
+// windows exercised here. Return one internally consistent prepared artifact.
+vi.mock('../../src/docker/selected-agent-artifact.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/docker/selected-agent-artifact.js')>()),
+  prepareSelectedAgentArtifact: async (options: { logicalName: string; buildHash: string }) => {
+    seam.prepareArtifactCalls += 1;
+    return { ...seam.artifact, logicalName: options.logicalName, buildHash: options.buildHash };
+  },
 }));
 
 // This test fails before container assembly; use a path-only immutable-view
-// double so it can focus on lease cleanup instead of catalog publication.
+// double so it can focus on lease cleanup instead of artifact publication.
 vi.mock('../../src/docker-workload/apple-private-docker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/docker-workload/apple-private-docker.js')>()),
-  stageAppleVmDockerWorkloadBootstrap: () => ({
-    hostCatalogDirectory: '/tmp/test-preloaded-catalog',
-    guestCatalogDirectory: '/opt/ironcurtain/preloaded-catalog',
-    outerAppleCatalogPath: '/tmp/test-preloaded-catalog/preloaded-catalog.apple-container.json',
-    innerDockerCatalogPath: '/tmp/test-preloaded-catalog/preloaded-catalog.docker.json',
-    selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+  stageAppleVmDockerWorkloadBootstrap: (options: { artifact: SelectedAgentArtifact }) => ({
+    hostArtifactDirectory: '/tmp/test-selected-agent-artifact',
+    guestArtifactDirectory: '/opt/ironcurtain/selected-agent-artifact',
+    artifact: options.artifact,
     clientToolchainManifestPath: '/tmp/test-client-toolchain.json',
   }),
 }));
@@ -149,9 +165,9 @@ beforeEach(() => {
   runtime = createEventRuntime();
   seam.adapter = failFastAdapter();
   seam.runtime = runtime.runtime;
-  seam.bindings = ADMISSION_BINDINGS;
   seam.ca = createMockCA(tempDir);
   seam.handle = undefined;
+  seam.prepareArtifactCalls = 0;
   seam.stops = { proxy: 0, mitm: 0 };
   seam.makeProxy = (socketPath: string): DockerProxy => ({
     ...createMockProxy(socketPath),
@@ -209,7 +225,10 @@ function admittedHandle(): DockerWorkloadBundleHandle {
   return handle;
 }
 
-async function prepare(imageIngress: 'preloaded-only' | 'public-registry' = 'preloaded-only'): Promise<unknown> {
+async function prepare(
+  imageIngress: 'preloaded-only' | 'public-registry' = 'preloaded-only',
+  preparedImageResolution?: AgentImageResolution,
+): Promise<unknown> {
   const workspaceDir = join(getHome(), 'workspace');
   mkdirSync(workspaceDir, { recursive: true });
   const config = {
@@ -231,10 +250,38 @@ async function prepare(imageIngress: 'preloaded-only' | 'public-registry' = 'pre
     workspaceDir,
     join(tempDir, 'escalations'),
     BUNDLE_ID,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    preparedImageResolution,
   );
 }
 
 describe('prepareDockerInfrastructure — Docker-workload lease teardown on failure (§8.3)', () => {
+  it('threads the exact CLI-prepared artifact without resolving or exporting it again', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    const { computeAgentImageBuildHash } = await import('../../src/docker/docker-infrastructure.js');
+    const buildHash = computeAgentImageBuildHash(seam.artifact.logicalName);
+    const artifact = { ...seam.artifact, buildHash };
+
+    await expect(
+      prepare('preloaded-only', {
+        mode: 'selected-agent-artifact',
+        logicalName: artifact.logicalName,
+        imageRef: artifact.logicalName,
+        buildHash,
+        immutableImageId: artifact.appleImageId,
+        artifact,
+      }),
+    ).rejects.toThrow(/scripted post-attestation failure/u);
+
+    expect(seam.prepareArtifactCalls).toBe(0);
+    expect(supervisor.calls.stopRequested).toBe(1);
+  });
+
   it('stops the per-bundle registry listener when later preparation fails', async () => {
     const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
 

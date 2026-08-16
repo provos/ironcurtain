@@ -12,6 +12,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadUserConfig,
+  loadRequestedDockerWorkloadConfig,
   saveUserConfig,
   validateModelId,
   ESCALATION_TIMEOUT_MIN,
@@ -197,7 +198,11 @@ interface DiffEntry {
   to: unknown;
 }
 
-export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): [string, DiffEntry][] {
+export function computeDiff(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  requestedDockerWorkload?: UserConfig['dockerWorkload'],
+): [string, DiffEntry][] {
   const diffs: [string, DiffEntry][] = [];
 
   const topLevelKeys = [
@@ -275,8 +280,40 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
   }
 
   diffModelProviders(resolved, pending, diffs);
+  diffDockerWorkload(resolved, pending, requestedDockerWorkload, diffs);
 
   return diffs;
+}
+
+/** Compare only the two nested-Docker choices exposed by the interactive UI. */
+function diffDockerWorkload(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  baselineRequested: UserConfig['dockerWorkload'],
+  diffs: [string, DiffEntry][],
+): void {
+  const pendingRequested = pending.dockerWorkload;
+  if (!pendingRequested) return;
+
+  if (pendingRequested.enabled !== undefined && pendingRequested.enabled !== resolved.dockerWorkload?.enabled) {
+    diffs.push([
+      'dockerWorkload.enabled',
+      { from: resolved.dockerWorkload?.enabled ?? false, to: pendingRequested.enabled },
+    ]);
+  }
+
+  if (pendingRequested.imageIngress !== undefined) {
+    const resolvedIngress =
+      resolved.dockerWorkload?.enabled === true
+        ? resolved.dockerWorkload.imageIngress
+        : (baselineRequested?.imageIngress ?? 'public-registry');
+    if (pendingRequested.imageIngress !== resolvedIngress) {
+      diffs.push([
+        'dockerWorkload.publicPulls',
+        { from: resolvedIngress === 'public-registry', to: pendingRequested.imageIngress === 'public-registry' },
+      ]);
+    }
+  }
 }
 
 /**
@@ -1520,7 +1557,35 @@ const DOCKER_AGENT_LABELS: Readonly<Record<DockerAgent, string>> = {
   codex: 'Codex CLI',
 };
 
-async function handleDockerAgent(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+function currentNestedDocker(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  requested: UserConfig['dockerWorkload'],
+): { enabled: boolean; publicPulls: boolean } {
+  const enabled = pending.dockerWorkload?.enabled ?? resolved.dockerWorkload?.enabled ?? false;
+  const resolvedIngress =
+    resolved.dockerWorkload?.enabled === true
+      ? resolved.dockerWorkload.imageIngress
+      : (requested?.imageIngress ?? 'public-registry');
+  const ingress = pending.dockerWorkload?.imageIngress ?? resolvedIngress;
+  return { enabled, publicPulls: ingress === 'public-registry' };
+}
+
+function nestedDockerSummary(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  requested: UserConfig['dockerWorkload'],
+): string {
+  const current = currentNestedDocker(resolved, pending, requested);
+  if (!current.enabled) return 'off';
+  return current.publicPulls ? 'on, public pulls on' : 'on, local images only';
+}
+
+async function handleDockerAgent(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  requestedDockerWorkload: UserConfig['dockerWorkload'],
+): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const currentPreferred = pending.preferredDockerAgent ?? resolved.preferredDockerAgent;
@@ -1535,6 +1600,11 @@ async function handleDockerAgent(resolved: ResolvedUserConfig, pending: UserConf
         value: 'dockerResources',
         label: 'Container resources...',
         hint: dockerResourcesSummary(resolved, pending),
+      },
+      {
+        value: 'nestedDocker',
+        label: 'Nested Docker...',
+        hint: nestedDockerSummary(resolved, pending, requestedDockerWorkload),
       },
       {
         value: 'configureGoose',
@@ -1571,6 +1641,70 @@ async function handleDockerAgent(resolved: ResolvedUserConfig, pending: UserConf
       await handleGooseConfig(resolved, pending);
     } else if (field === 'dockerResources') {
       await handleDockerResources(resolved, pending);
+    } else if (field === 'nestedDocker') {
+      await handleNestedDocker(resolved, pending, requestedDockerWorkload);
+    }
+  }
+}
+
+/** Submenu for the two user-facing secure nested-Docker policy choices. */
+async function handleNestedDocker(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  requestedDockerWorkload: UserConfig['dockerWorkload'],
+): Promise<void> {
+  p.note('Currently requires macOS on Apple silicon with Apple Container installed.', 'Availability');
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const current = currentNestedDocker(resolved, pending, requestedDockerWorkload);
+    const options: { value: string; label: string; hint?: string }[] = [
+      { value: 'enabled', label: 'Docker inside agent sessions', hint: current.enabled ? 'on' : 'off' },
+    ];
+    if (current.enabled) {
+      options.push({
+        value: 'publicPulls',
+        label: 'Public registry pulls',
+        hint: current.publicPulls ? 'on (Docker Hub and GHCR)' : 'off (local images only)',
+      });
+    }
+    options.push({ value: 'back', label: 'Back' });
+
+    const field = await p.select({
+      message: 'Nested Docker',
+      options,
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'enabled') {
+      const enabled = await p.confirm({
+        message: 'Enable Docker inside agent sessions?',
+        initialValue: current.enabled,
+      });
+      if (isCancelled(enabled)) continue;
+      if (enabled !== current.enabled) {
+        pending.dockerWorkload = {
+          ...pending.dockerWorkload,
+          enabled: enabled as boolean,
+          // Disabled resolved config intentionally carries no authority.
+          // Stamp the validated raw preference shown by this editor when
+          // re-enabling so saveUserConfig's merge cannot change it silently.
+          ...(enabled
+            ? { imageIngress: current.publicPulls ? ('public-registry' as const) : ('preloaded-only' as const) }
+            : {}),
+        };
+      }
+    } else if (field === 'publicPulls') {
+      const publicPulls = await p.confirm({
+        message: 'Allow public image pulls from Docker Hub and GHCR?',
+        initialValue: current.publicPulls,
+      });
+      if (isCancelled(publicPulls)) continue;
+      if (publicPulls !== current.publicPulls) {
+        pending.dockerWorkload = {
+          ...pending.dockerWorkload,
+          imageIngress: (publicPulls as boolean) ? 'public-registry' : 'preloaded-only',
+        };
+      }
     }
   }
 }
@@ -1768,8 +1902,12 @@ function sessionModeHint(resolved: ResolvedUserConfig, pending: UserConfig): str
   return SESSION_MODE_SHORT_LABELS[pending.preferredMode ?? resolved.preferredMode];
 }
 
-function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {
-  const diffs = computeDiff(resolved, pending);
+function changeCount(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+  requestedDockerWorkload: UserConfig['dockerWorkload'],
+): string {
+  const diffs = computeDiff(resolved, pending, requestedDockerWorkload);
   if (diffs.length === 0) return 'no changes';
   return `${diffs.length} change${diffs.length > 1 ? 's' : ''} pending`;
 }
@@ -1798,6 +1936,7 @@ export async function runConfigCommand(): Promise<void> {
   );
 
   const pending: UserConfig = {};
+  const requestedDockerWorkload = loadRequestedDockerWorkloadConfig();
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
@@ -1815,7 +1954,11 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'snapshots', label: `Container Snapshots (${snapshotHint(resolved, pending)})` },
         { value: 'sessionMode', label: `Session Mode (${sessionModeHint(resolved, pending)})` },
         { value: 'dockerAgent', label: `Docker Agent (${dockerAgentHint(resolved, pending)})` },
-        { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
+        {
+          value: 'save',
+          label: 'Save & Exit',
+          hint: changeCount(resolved, pending, requestedDockerWorkload),
+        },
         { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
       ],
     });
@@ -1856,13 +1999,13 @@ export async function runConfigCommand(): Promise<void> {
         await handleSessionMode(resolved, pending);
         break;
       case 'dockerAgent':
-        await handleDockerAgent(resolved, pending);
+        await handleDockerAgent(resolved, pending, requestedDockerWorkload);
         break;
       case 'cancel':
         p.cancel('Changes discarded.');
         return;
       case 'save': {
-        const diffs = computeDiff(resolved, pending);
+        const diffs = computeDiff(resolved, pending, requestedDockerWorkload);
         if (diffs.length === 0) {
           p.outro('No changes to save.');
           return;

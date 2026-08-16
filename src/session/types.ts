@@ -4,7 +4,7 @@ import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
 import type { AgentId, TransientFailureKind } from '../docker/agent-adapter.js';
-import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
+import type { AgentImageResolution, DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 
 /**
@@ -143,7 +143,7 @@ export interface SessionMetadata {
 
   /**
    * Present only for secure nested Docker-workload sessions. Records the
-   * host-only lease identity and its frozen attestation bindings for audit
+   * host-only lease identity and watchdog-policy binding for audit
    * and post-hoc inspection. Because a Docker-workload bundle's daemon state
    * is ephemeral (`daemonState: ephemeral`), a persisted lease can never be
    * revived, so resume validation refuses any session carrying this field.
@@ -389,6 +389,9 @@ export interface SessionOptions {
    * When 'docker', the agent field specifies which external agent to run.
    */
   mode?: SessionMode;
+
+  /** Exact Docker image prepared by the CLI preflight for this session. */
+  preparedDockerImageResolution?: AgentImageResolution;
 
   /** If provided, reuses the sandbox from this previous session via symlink. */
   resumeSessionId?: string;

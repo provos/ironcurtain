@@ -43,13 +43,14 @@ import {
   dockerWorkloadSessionMetadata,
   removeBundleRuntimeRoot,
   selectOuterContainerResources,
+  type AgentImageResolution,
 } from './docker-infrastructure.js';
 import {
   nestedDaemonAgentEnv,
   resolveNestedDaemonBundle,
   startAppleVmDockerWorkload,
 } from '../docker-workload/session-daemon.js';
-import { appleVmDockerWorkloadCatalogMount } from '../docker-workload/apple-private-docker.js';
+import { appleVmDockerWorkloadArtifactMount } from '../docker-workload/apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
 import { errorMessage } from '../utils/error-message.js';
@@ -65,6 +66,8 @@ import {
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
   readonly mode: SessionMode & { kind: 'docker' };
+  /** Exact Docker image prepared by the CLI before the spinner/PTY handoff. */
+  readonly preparedImageResolution?: AgentImageResolution;
   /** Validated workspace path. When provided, replaces the session sandbox. */
   readonly workspacePath?: string;
   /** Session ID to resume. When set, reuses the existing session directory. */
@@ -430,6 +433,7 @@ async function runPtySessionAttempt(
       },
       undefined, // scriptsDir
       providerProfileName,
+      options.preparedImageResolution,
     );
     // Publish every cleanup-owned resource before any subsequent callback can
     // throw. In particular, capture hooks are extension points; a failure in
@@ -545,7 +549,7 @@ async function runPtySessionAttempt(
     const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
     const dockerWorkloadBootstrap = infra.dockerWorkloadBootstrap;
     if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
-      throw new Error('Docker-workload lease and immutable catalog staging must be present together');
+      throw new Error('Docker-workload lease and selected-agent artifact staging must be present together');
     }
 
     // Build container configuration
@@ -727,7 +731,7 @@ async function runPtySessionAttempt(
     mounts.push(...buildDockerWorkloadRegistryEgressMount(infra));
 
     if (dockerWorkloadBootstrap !== undefined) {
-      mounts.push(appleVmDockerWorkloadCatalogMount(dockerWorkloadBootstrap));
+      mounts.push(appleVmDockerWorkloadArtifactMount(dockerWorkloadBootstrap));
     }
 
     // Mount conversation state directory if the adapter supports resume
@@ -823,8 +827,7 @@ async function runPtySessionAttempt(
       dockerWorkload,
       runtimeKind: infra.runtimeKind,
       runtime: docker,
-      expectedImageId:
-        infra.imageResolution?.mode === 'preloaded-catalog' ? infra.imageResolution.immutableImageId : undefined,
+      expectedImageId: infra.imageResolution?.immutableImageId,
       deterministicName: mainContainerName,
       baseLabels: resourceLabels,
       mounts,

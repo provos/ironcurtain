@@ -10,7 +10,6 @@ import {
   type DockerWorkloadAuditSink,
 } from '../../src/docker-workload/lifecycle-evidence.js';
 import {
-  ADMISSION_BINDINGS,
   ADMISSION_CONFIG_HASH,
   WATCHDOG_ENTRYPOINT_PATH,
   WATCHDOG_TEMPLATE_PATH,
@@ -41,7 +40,6 @@ async function bringUp(
     runtimeKind: 'docker',
     bundleId: 'bundle-teardown-001',
     workspaceRoot: join(getHome(), 'workspace'),
-    bindings: ADMISSION_BINDINGS,
     configHash: ADMISSION_CONFIG_HASH,
     watchdogPolicyTemplatePath: WATCHDOG_TEMPLATE_PATH,
     watchdogSupervisorEntrypointPath: WATCHDOG_ENTRYPOINT_PATH,

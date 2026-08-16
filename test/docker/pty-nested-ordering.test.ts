@@ -229,6 +229,8 @@ describe('Apple nested Docker PTY startup ordering', () => {
 
     expect(state.createdConfigs).toHaveLength(1);
     expect(state.createdConfigs[0].command).toEqual(EXPECTED_PTY_COMMAND);
+    expect(state.createdConfigs[0].env.DOCKER_HOST).toBe('unix:///run/ironcurtain-docker/docker.sock');
+    expect(state.createdConfigs[0].env.IRONCURTAIN_DOCKER_NETWORK).toBe('ironcurtain');
     expect(events).toEqual(['activation-start', 'activation-complete', 'attach']);
   });
 

@@ -73,10 +73,9 @@ import {
   stageRuntimeTrust,
   type RuntimeTrustMetadata,
 } from './runtime-trust.js';
-import { resolvePreloadedImage, type ResolvedPreloadedImage } from './preloaded-image-catalog.js';
-import { getStagedCatalogPath } from './preloaded-catalog-paths.js';
 import { getFrozenWatchdogPolicyTemplatePath, getIronCurtainPackageRoot } from './docker-workload-paths.js';
-import type { ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
+import { prepareSelectedAgentArtifact, type SelectedAgentArtifact } from './selected-agent-artifact.js';
+import { formatDockerWorkloadStatus, type ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
 import type {
   DockerWorkloadBundleHandle,
   OuterResourceKind,
@@ -89,7 +88,8 @@ import {
 } from '../docker-workload/session-daemon.js';
 import { APPLE_VM_REGISTRY_EGRESS_SOCKET } from '../docker-workload/apple-vm-daemon.js';
 import {
-  appleVmDockerWorkloadCatalogMount,
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  appleVmDockerWorkloadArtifactMount,
   stageAppleVmDockerWorkloadBootstrap,
   type AppleVmDockerWorkloadBootstrapConfig,
 } from '../docker-workload/apple-private-docker.js';
@@ -214,7 +214,7 @@ export interface PreContainerInfrastructure {
   readonly orientationDir: string;
   readonly systemPrompt: string;
   readonly image: string;
-  /** Exact image-resolution tuple; catalog mode carries its immutable evidence. */
+  /** Exact image-resolution tuple; admitted mode carries selected-artifact evidence. */
   readonly imageResolution?: AgentImageResolution;
   /** Container runtime backend this bundle was built for. */
   readonly runtimeKind: ContainerRuntimeKind;
@@ -349,7 +349,7 @@ export interface PreContainerInfrastructure {
    * guard currently admits only the explicit Apple developer slice.
    */
   readonly dockerWorkload?: DockerWorkloadBundleHandle;
-  /** Immutable per-lease catalog view used only by an admitted Apple Docker workload. */
+  /** Immutable per-lease selected-agent artifact used only by an admitted Apple Docker workload. */
   readonly dockerWorkloadBootstrap?: AppleVmDockerWorkloadBootstrapConfig;
   /** Per-bundle host listener mounted only into the admitted public-registry Apple VM. */
   readonly dockerWorkloadRegistryEgress?: {
@@ -442,68 +442,14 @@ export interface CaptureSetupInput {
   readonly workflowRunId?: WorkflowId;
 }
 
-export type ImageProvisioning =
-  | { readonly imageMode?: 'build-if-stale' }
-  | {
-      readonly imageMode: 'preloaded-catalog';
-      readonly catalogPath: string;
-      readonly runtimeKind: ContainerRuntimeKind;
-      readonly architecture?: 'amd64' | 'arm64';
-      readonly dockerApiVersion?: string;
-    };
-
-export type AgentImageResolution =
-  | {
-      readonly mode: 'build-if-stale';
-      readonly logicalName: string;
-      readonly imageRef: string;
-      readonly buildHash: string;
-    }
-  | (ResolvedPreloadedImage & { readonly imageRef: string });
-
-/**
- * Derive the trusted image-resolution mode from the resolved Docker-workload
- * configuration. This is the single mapping both image call paths use so they
- * branch identically and early:
- *
- * - Feature off (or absent) -> `undefined`, i.e. today's `build-if-stale`.
- * - Feature on with `preloaded-catalog` -> a preloaded-catalog provisioning
- *   bound to the trusted staged catalog for the effective backend, so
- *   `resolveAgentImage()` never calls `ensureImage`/`ensureBaseImage`/
- *   `buildImage`/`pullImage`.
- *
- * `resolvedRuntimeKind` is the runtime the caller already resolved (env
- * override > config > auto probe), and the catalog is ALWAYS bound to it. A
- * concrete workload `backend` is a CONSTRAINT on that resolution, never an
- * override of it: the live `ContainerRuntime` is constructed from
- * `resolvedRuntimeKind` upstream, so honoring a disagreeing `backend` here
- * would hand that runtime another backend's immutable image IDs and hash the
- * admission bindings from a catalog the session never loads. A disagreement is
- * therefore rejected rather than silently reconciled — one check covers both
- * image call paths and `admissionCatalogPath`. The mapping is pure so both call
- * paths and tests can exercise it without a container runtime.
- */
-export function imageProvisioningForConfig(
-  dockerWorkload: ResolvedDockerWorkloadConfig | undefined,
-  resolvedRuntimeKind: ContainerRuntimeKind,
-): ImageProvisioning | undefined {
-  // The enabled config always carries `imageMode: 'preloaded-catalog'` today;
-  // feature-off is the only other state and maps to the legacy build path.
-  if (dockerWorkload?.enabled !== true) return undefined;
-  const { backend } = dockerWorkload;
-  if (backend !== 'auto' && backend !== resolvedRuntimeKind) {
-    throw new Error(
-      `dockerWorkload.backend is "${backend}" but the resolved container runtime is "${resolvedRuntimeKind}". ` +
-        `Set containerRuntime (or IRONCURTAIN_CONTAINER_RUNTIME) to "${backend}", ` +
-        'or set dockerWorkload.backend to "auto" to follow the resolved runtime.',
-    );
-  }
-  return {
-    imageMode: 'preloaded-catalog',
-    catalogPath: getStagedCatalogPath(resolvedRuntimeKind),
-    runtimeKind: resolvedRuntimeKind,
-  };
-}
+export type AgentImageResolution = {
+  readonly mode: 'build-if-stale' | 'selected-agent-artifact';
+  readonly logicalName: string;
+  readonly imageRef: string;
+  readonly buildHash: string;
+  readonly immutableImageId?: string;
+  readonly artifact?: SelectedAgentArtifact;
+};
 
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
@@ -518,10 +464,10 @@ export async function prepareDockerInfrastructure(
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
   providerProfileName?: string,
-  imageProvisioning?: ImageProvisioning,
+  preparedImageResolution?: AgentImageResolution,
 ): Promise<PreContainerInfrastructure> {
   // Secure nested Docker resolves the effective runtime and rejects every
-  // unsupported variant before feature-attributable runtime, image, catalog,
+  // unsupported variant before feature-attributable runtime, image, artifact,
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
   // read-only probe; ordinary CLI credential preflight is outside this seam.
   // Keep the feature-off path's historical profile/adapter/runtime ordering.
@@ -533,6 +479,8 @@ export async function prepareDockerInfrastructure(
       await import('../docker-workload/config.js');
     assertDockerWorkloadVariantAdmitted(config.userConfig.dockerWorkload, admittedRuntimeKind);
     await assertAdmittedDockerWorkloadRuntimeAvailable();
+    const nestedDockerStatus = formatDockerWorkloadStatus(config.userConfig.dockerWorkload);
+    if (nestedDockerStatus) logger.info(nestedDockerStatus);
   }
 
   // Resolve and STAMP the active provider profile before adapter registration
@@ -652,11 +600,25 @@ export async function prepareDockerInfrastructure(
   // the proxies start, below.
   const dockerWorkloadConfig = config.userConfig.dockerWorkload;
   let dockerWorkloadAgentImage: string | undefined;
+  let dockerWorkloadImageResolution: AgentImageResolution | undefined;
   let admittedDockerWorkload:
     | { readonly handle: DockerWorkloadBundleHandle; readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig }
     | undefined;
   if (dockerWorkloadConfig?.enabled === true) {
     dockerWorkloadAgentImage = await adapter.getImage();
+    dockerWorkloadImageResolution = preparedImageResolution;
+    if (dockerWorkloadImageResolution === undefined) {
+      const built = await resolveAgentImage(dockerWorkloadAgentImage, docker);
+      const artifact = await prepareSelectedAgentArtifact({
+        runtime: docker,
+        logicalName: dockerWorkloadAgentImage,
+        buildHash: built.buildHash,
+      });
+      dockerWorkloadImageResolution = selectedAgentImageResolution(built, artifact);
+    }
+    assertPreparedImageResolution(dockerWorkloadImageResolution, dockerWorkloadAgentImage, true);
+    const artifact = dockerWorkloadImageResolution.artifact;
+    if (artifact === undefined) throw new Error('prepared nested Docker agent image is missing its selected artifact');
     admittedDockerWorkload = await admitDockerWorkloadForSession({
       dockerWorkload: dockerWorkloadConfig,
       runtime: docker,
@@ -664,7 +626,7 @@ export async function prepareDockerInfrastructure(
       bundleId,
       workspaceRoot: workspaceDir,
       auditLogPath,
-      selectedImageLogicalName: dockerWorkloadAgentImage,
+      artifact,
     });
   }
   const dockerWorkload = admittedDockerWorkload?.handle;
@@ -956,32 +918,27 @@ export async function prepareDockerInfrastructure(
     // gateway on host-only networks, the Docker host alias otherwise.
     const proxyHost = hostOnlyNetwork ? hostOnlyNetwork.gateway : DOCKER_HOST_GATEWAY;
     const proxyAddress = useTcp && proxy.port !== undefined ? `${proxyHost}:${proxy.port}` : undefined;
-    const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, workspaceDir, proxyAddress);
+    const nestedDocker = dockerWorkload === undefined ? undefined : { networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK };
+    const { systemPrompt } = prepareSession(
+      adapter,
+      serverListings,
+      bundleDir,
+      config,
+      workspaceDir,
+      proxyAddress,
+      nestedDocker,
+    );
 
     const orientationDir = resolve(bundleDir, 'orientation');
     const runtimeTrust = stageRuntimeTrust(orientationDir, ca.certPem);
 
     // Resolve the stock agent image once, before any container operation.
-    // Preloaded-catalog mode returns an immutable ID and cannot fall through
-    // to the legacy build path. Workflow dependencies are provisioned at
-    // runtime into mounted caches below; they are no longer baked into
-    // per-workflow Docker images.
+    // An admitted workload already carries the exact selected artifact created
+    // before lease admission; ordinary sessions use the normal build cache.
     const agentImage = dockerWorkloadAgentImage ?? (await adapter.getImage());
-    // Explicit override wins (tests); otherwise derive from resolved config so
-    // this path branches on the same trusted image mode as the `ensureDockerImage`
-    // preflight. An admitted Apple workload resolves the outer agent from the
-    // same per-lease immutable view later mounted for private-Docker bootstrap.
-    const configuredImageProvisioning = imageProvisioningForConfig(config.userConfig.dockerWorkload, runtimeKind);
-    const resolvedImageProvisioning =
-      imageProvisioning ??
-      (dockerWorkloadBootstrap === undefined
-        ? configuredImageProvisioning
-        : {
-            imageMode: 'preloaded-catalog',
-            catalogPath: dockerWorkloadBootstrap.outerAppleCatalogPath,
-            runtimeKind,
-          });
-    const imageResolution = await resolveAgentImage(agentImage, docker, resolvedImageProvisioning);
+    const imageResolution =
+      dockerWorkloadImageResolution ?? preparedImageResolution ?? (await resolveAgentImage(agentImage, docker));
+    assertPreparedImageResolution(imageResolution, agentImage, dockerWorkloadConfig?.enabled === true);
     const agentBuildHash = imageResolution.buildHash;
     const image = imageResolution.imageRef;
     // Surface the (unpinned) agent CLI version baked into the image so silent
@@ -1161,7 +1118,7 @@ export async function createDockerInfrastructure(
     captureInput,
     scriptsDir,
     providerProfileName,
-    options?.imageProvisioning,
+    options?.preparedImageResolution,
   );
 
   return assembleDockerInfrastructure(core, config, options);
@@ -1446,9 +1403,8 @@ export interface CreateAgentContainerOptions {
   /** Runtime used to inspect and, on failed adjudication, remove the stopped create. */
   readonly runtime: ContainerRuntime;
   /**
-   * Catalog-bound immutable image ID expected in an Apple stopped create.
-   * Undefined for the legacy image path and for Docker, which creates by the
-   * immutable ID directly.
+   * Prepared immutable image ID expected in an Apple stopped create.
+   * Undefined for ordinary sessions.
    */
   readonly expectedImageId?: string;
   /** Deterministic name used when the bundle is not ledgered. */
@@ -1488,7 +1444,7 @@ export async function createLedgeredAgentContainer(options: CreateAgentContainer
     options.runtimeKind === 'apple-container' &&
     options.expectedImageId === undefined
   ) {
-    throw new Error('admitted Apple Docker workload is missing its catalog-bound immutable image ID');
+    throw new Error('admitted Apple Docker workload is missing its prepared immutable image ID');
   }
 
   const adjudicateObserved = async (containerId: string): Promise<void> => {
@@ -1537,7 +1493,7 @@ const SHA256_IMAGE_ID = /^(?:sha256:)?([a-f0-9]{64})$/u;
 /**
  * Apple Container 1.1 creates a local image by logical tag, not by its
  * `sha256:` index ID. Close that tag lookup race by inspecting the exact
- * stopped VM and comparing its captured descriptor with the catalog identity
+ * stopped VM and comparing its captured descriptor with the prepared identity
  * before start.
  */
 async function assertAppleStoppedCreateImage(
@@ -1602,17 +1558,15 @@ interface DockerWorkloadAdmissionForSessionOptions {
   readonly bundleId: BundleId;
   readonly workspaceRoot: string;
   readonly auditLogPath: string;
-  readonly selectedImageLogicalName: string;
+  readonly artifact: SelectedAgentArtifact;
 }
 
 /**
  * Assemble and drive the §8.2-step-1 admission for a secure nested
  * Docker-workload bundle.
  *
- * Two gates run before any lease exists, so an unsupported request leaves
- * nothing behind: the backend must implement the same-VM nested daemon, and
- * the operational bindings must resolve from the real staged catalog and
- * frozen profile ceiling.
+ * The backend gate runs before any lease exists. The already-resolved selected
+ * artifact is then hard-linked into the lease without reopening global state.
  */
 async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionForSessionOptions): Promise<{
   readonly handle: DockerWorkloadBundleHandle;
@@ -1621,16 +1575,10 @@ async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionFor
   const { admitDockerWorkloadBundle } = await import('../docker-workload/infrastructure.js');
   const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
   const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
-  const { resolveDockerWorkloadAdmissionBindings } = await import('../docker-workload/admission-bindings.js');
   const { assertNestedDaemonBackendImplemented } = await import('../docker-workload/session-daemon.js');
 
   assertNestedDaemonBackendImplemented(options.runtimeKind);
   const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
-  const bindings = resolveDockerWorkloadAdmissionBindings({
-    catalogPath: admissionCatalogPath(options.dockerWorkload, options.runtimeKind),
-    innerDockerCatalogPath: getStagedCatalogPath('docker'),
-    selectedImageLogicalName: options.selectedImageLogicalName,
-  });
   const packageRoot = getIronCurtainPackageRoot();
   const handle = await admitDockerWorkloadBundle({
     runtime: options.runtime,
@@ -1638,10 +1586,7 @@ async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionFor
     runtimeForKind: (kind) => (kind === options.runtimeKind ? options.runtime : createContainerRuntime(kind)),
     bundleId: String(options.bundleId),
     workspaceRoot: options.workspaceRoot,
-    // The config hash is passed separately from the bindings so the admission
-    // audit trail keeps the capability identity as well as the artifact set.
     configHash,
-    bindings,
     watchdogPolicyTemplatePath: getFrozenWatchdogPolicyTemplatePath(),
     watchdogSupervisorEntrypointPath: resolve(
       packageRoot,
@@ -1654,30 +1599,13 @@ async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionFor
   try {
     const bootstrap = stageAppleVmDockerWorkloadBootstrap({
       leaseStagingRoot: handle.stagingRoot,
-      bindings,
-      selectedImageLogicalName: options.selectedImageLogicalName,
+      artifact: options.artifact,
     });
     return { handle, bootstrap };
   } catch (error) {
     await handle.teardown();
     throw error;
   }
-}
-
-/**
- * The staged catalog the admission binds — resolved through the SAME mapping
- * that later selects the session's image, so the hash recorded on the lease and
- * the archive the session actually loads can never come from different files.
- */
-function admissionCatalogPath(
-  dockerWorkload: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>,
-  runtimeKind: ContainerRuntimeKind,
-): string {
-  const provisioning = imageProvisioningForConfig(dockerWorkload, runtimeKind);
-  if (provisioning?.imageMode !== 'preloaded-catalog') {
-    throw new Error('Docker-workload admission requires a preloaded-catalog image mode');
-  }
-  return provisioning.catalogPath;
 }
 
 /**
@@ -1779,8 +1707,8 @@ export interface CreateDockerInfrastructureOptions {
    * workflow dependency caches keep their base-image hash.
    */
   readonly baseImageOverride?: string;
-  /** Trusted image selection; omitted preserves the existing build-if-stale path. */
-  readonly imageProvisioning?: ImageProvisioning;
+  /** Exact CLI preflight result, threaded into this one session without re-resolution. */
+  readonly preparedImageResolution?: AgentImageResolution;
 }
 
 /**
@@ -1858,10 +1786,10 @@ async function createSessionContainersAttempt(
     const nestedDaemon = resolveNestedDaemonBundle(core.dockerWorkload, core.runtimeKind);
     const dockerWorkloadBootstrap = core.dockerWorkloadBootstrap;
     if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
-      throw new Error('Docker-workload lease and immutable catalog staging must be present together');
+      throw new Error('Docker-workload lease and selected-agent artifact staging must be present together');
     }
     if (dockerWorkloadBootstrap !== undefined) {
-      mounts.push(appleVmDockerWorkloadCatalogMount(dockerWorkloadBootstrap));
+      mounts.push(appleVmDockerWorkloadArtifactMount(dockerWorkloadBootstrap));
     }
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
@@ -2103,8 +2031,7 @@ async function createSessionContainersAttempt(
       dockerWorkload: core.dockerWorkload,
       runtimeKind: core.runtimeKind,
       runtime: core.docker,
-      expectedImageId:
-        core.imageResolution?.mode === 'preloaded-catalog' ? core.imageResolution.immutableImageId : undefined,
+      expectedImageId: core.imageResolution?.immutableImageId,
       deterministicName: mainContainerName,
       baseLabels: bundleLabels.labels,
       mounts,
@@ -2146,7 +2073,7 @@ async function createSessionContainersAttempt(
 
     // Same-VM activation: the container that just started IS the daemon
     // component. Bootstrap/adjudicate dockerd, preflight the pinned client,
-    // provision the selected catalog-authorized inner image, record observations, and
+    // provision the selected prepared inner image, record observations, and
     // activate the lease before any agent process is exec'd into it.
     if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
       await startAppleVmDockerWorkload({
@@ -2457,8 +2384,7 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
 export async function ensureDockerImage(
   agentId: AgentId,
   userConfig: ResolvedUserConfig,
-  imageProvisioning?: ImageProvisioning,
-): Promise<void> {
+): Promise<AgentImageResolution> {
   let admittedRuntimeKind: ContainerRuntimeKind | undefined;
   if (userConfig.dockerWorkload?.enabled === true) {
     const { resolveRuntimeKind } = await import('./container-runtime.js');
@@ -2476,10 +2402,50 @@ export async function ensureDockerImage(
   const image = await adapter.getImage();
   const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(userConfig.containerRuntime));
   const docker = createContainerRuntime(runtimeKind);
-  // An explicit override wins (tests); otherwise derive from resolved config so
-  // the preflight branches on the same trusted image mode as the session path.
-  const provisioning = imageProvisioning ?? imageProvisioningForConfig(userConfig.dockerWorkload, runtimeKind);
-  await resolveAgentImage(image, docker, provisioning);
+  const resolved = await resolveAgentImage(image, docker);
+  if (userConfig.dockerWorkload?.enabled === true) {
+    const artifact = await prepareSelectedAgentArtifact({
+      runtime: docker,
+      logicalName: image,
+      buildHash: resolved.buildHash,
+    });
+    return selectedAgentImageResolution(resolved, artifact);
+  }
+  return resolved;
+}
+
+function selectedAgentImageResolution(
+  built: AgentImageResolution,
+  artifact: SelectedAgentArtifact,
+): AgentImageResolution {
+  return {
+    mode: 'selected-agent-artifact',
+    logicalName: built.logicalName,
+    imageRef: built.logicalName,
+    buildHash: built.buildHash,
+    immutableImageId: artifact.appleImageId,
+    artifact,
+  };
+}
+
+function assertPreparedImageResolution(
+  resolution: AgentImageResolution,
+  expectedLogicalName: string,
+  requireSelectedArtifact: boolean,
+): void {
+  if (resolution.logicalName !== expectedLogicalName || resolution.imageRef !== expectedLogicalName) {
+    throw new Error(`prepared agent image does not match selected agent: ${expectedLogicalName}`);
+  }
+  if (!requireSelectedArtifact) return;
+  if (
+    resolution.mode !== 'selected-agent-artifact' ||
+    resolution.artifact === undefined ||
+    resolution.immutableImageId !== resolution.artifact.appleImageId ||
+    resolution.buildHash !== resolution.artifact.buildHash ||
+    resolution.logicalName !== resolution.artifact.logicalName
+  ) {
+    throw new Error('prepared nested Docker agent image is incomplete or internally inconsistent');
+  }
 }
 
 /**
@@ -2561,31 +2527,8 @@ interface AgentImageBuildSpec {
 }
 
 /** Resolve an agent image through exactly one trusted image mode. */
-export async function resolveAgentImage(
-  image: string,
-  docker: ContainerRuntime,
-  provisioning: ImageProvisioning = { imageMode: 'build-if-stale' },
-): Promise<AgentImageResolution> {
+export async function resolveAgentImage(image: string, docker: ContainerRuntime): Promise<AgentImageResolution> {
   const spec = computeAgentImageBuildSpec(image);
-  if (provisioning.imageMode === 'preloaded-catalog') {
-    const resolved = await resolvePreloadedImage(docker, {
-      catalogPath: provisioning.catalogPath,
-      runtimeKind: provisioning.runtimeKind,
-      logicalName: image,
-      expectedBuildHash: spec.agentBuildHash,
-      architecture: provisioning.architecture,
-      dockerApiVersion: provisioning.dockerApiVersion,
-    });
-    // Apple Container 1.1 treats a local `sha256:` ID passed to `container
-    // create` as a registry reference. The resolver has just proved that this
-    // catalog-authorized logical tag maps to the exact immutable ID and label
-    // tuple. Apple therefore creates by that verified logical name, followed
-    // by a stopped-create descriptor check before start; Docker can create by
-    // the immutable ID directly.
-    const imageRef = provisioning.runtimeKind === 'apple-container' ? resolved.logicalName : resolved.immutableImageId;
-    return { ...resolved, imageRef };
-  }
-
   const buildHash = await ensureImageFromSpec(image, docker, spec);
   return { mode: 'build-if-stale', logicalName: image, imageRef: image, buildHash };
 }
@@ -2615,7 +2558,7 @@ function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
   return { dockerDir, baseDockerfile, baseImage, baseBuildHash, agentDockerfile, agentBuildHash };
 }
 
-/** Exact build hash a trusted preloaded-catalog builder must record. */
+/** Exact build hash recorded on the current checked-in agent image. */
 export function computeAgentImageBuildHash(image: string): string {
   return computeAgentImageBuildSpec(image).agentBuildHash;
 }

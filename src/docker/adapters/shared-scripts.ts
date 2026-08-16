@@ -4,6 +4,8 @@
  * These are extracted to avoid duplication between the Claude Code and Goose adapters.
  */
 
+import type { OrientationContext } from '../agent-adapter.js';
+
 // ─── PTY Shell Scripts ──────────────────────────────────────
 
 /**
@@ -62,6 +64,38 @@ export function buildNetworkSection(toolReference: string): string {
   return `### Network
 The container has NO direct internet access. All HTTP requests and
 git operations MUST go through ${toolReference}.`;
+}
+
+/**
+ * Nested-Docker orientation shared by every agent adapter. The section is
+ * capability-gated so ordinary sessions are never told that a Docker daemon
+ * or its managed network exists.
+ */
+export function buildNestedDockerSection(context: OrientationContext): string {
+  if (context.nestedDocker === undefined) return '';
+
+  return `### Nested Docker
+A private Docker daemon is available through \`DOCKER_HOST\`. IronCurtain has
+created the internal network exported as \`IRONCURTAIN_DOCKER_NETWORK\`
+(\`${context.nestedDocker.networkName}\`). Attach every service and sibling
+container to that network so Docker's embedded DNS resolves container names.
+
+Example:
+  \`docker run -d --name target --network "$IRONCURTAIN_DOCKER_NETWORK" <service-image>\`
+  \`docker run --rm --network "$IRONCURTAIN_DOCKER_NETWORK" <client-image> http://target:<port>/\`
+
+For Compose, use the existing network as the default:
+  \`networks:\`
+  \`  default:\`
+  \`    external: true\`
+  \`    name: \${IRONCURTAIN_DOCKER_NETWORK}\`
+
+The nested daemon has no default bridge. Do not use \`-p\`/\`--publish\` or
+\`--network host\`; neither exposes an inner service to the Mac. The Mac host
+and the agent shell cannot reach an inner service through \`localhost\`.
+Connect from a sibling container by service name or network alias instead.
+This is the supported service topology, not a security boundary: the agent has
+Docker administrator authority over its bundle-local daemon.`;
 }
 
 /**

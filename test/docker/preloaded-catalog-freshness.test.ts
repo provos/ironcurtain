@@ -7,11 +7,12 @@
  * does not close this gap: its metadata stays internally self-consistent when a
  * Dockerfile changes underneath it.
  *
- * So these tests recompute from the source tree and compare against the
- * committed JSON. A red test here means the catalog needs re-freezing
- * (`ironcurtain build-preloaded-catalog`) — NOT that the assertion is wrong.
- * Runtime resolution would fail closed on the same drift, so this is a
- * staleness alarm rather than a security control.
+ * This explicit qualification check recomputes from the source tree and
+ * compares against the committed JSON. A red check means the qualification
+ * fixture needs regeneration (`npm run qualify:catalog --`) — never that a
+ * production session should be denied or an operator should refreeze before
+ * starting IronCurtain. The ordinary test suite skips this source-freshness
+ * gate; run `npm run qualify:catalog:check` when qualifying a catalog snapshot.
  *
  * Agent-role build hashes are deliberately out of scope: `hashKind: 'agent'`
  * derives from the live built image, not from the source tree.
@@ -47,60 +48,64 @@ function loadCatalog(kind: ContainerRuntimeKind): readonly PreloadedImageCatalog
 const architectureMatches = (): boolean =>
   RUNTIME_KINDS.every((kind) => loadCatalog(kind).every((entry) => entry.architecture === hostCatalogArchitecture()));
 
-describe.skipIf(!architectureMatches())('committed preloaded catalogs match the source tree', () => {
-  for (const kind of RUNTIME_KINDS) {
-    describe(kind, () => {
-      it('records the current content build hash for every content-hashed role', () => {
-        const entries = loadCatalog(kind);
-        const drifted = catalogImageSources()
-          .filter((source) => source.hashKind === 'content')
-          .flatMap((source) => {
+const qualificationRequested = process.env.IRONCURTAIN_QUALIFY_CATALOG === '1';
+
+describe.skipIf(!qualificationRequested || !architectureMatches())(
+  'qualification-only preloaded catalogs match the source tree',
+  () => {
+    for (const kind of RUNTIME_KINDS) {
+      describe(kind, () => {
+        it('records the current content build hash for every content-hashed role', () => {
+          const entries = loadCatalog(kind);
+          const drifted = catalogImageSources()
+            .filter((source) => source.hashKind === 'content')
+            .flatMap((source) => {
+              const entry = entries.find((candidate) => candidate.logicalName === source.logicalName);
+              if (entry === undefined) return [`${source.role}: absent from the committed ${kind} catalog`];
+              const actual = computeContentBuildHash(source.dockerfile, source.contextDir);
+              return actual === entry.buildHash
+                ? []
+                : [`${source.role}: frozen ${entry.buildHash.slice(0, 16)} != on-disk ${actual.slice(0, 16)}`];
+            });
+
+          expect(drifted, `regenerate the ${kind} qualification catalog (npm run qualify:catalog --)`).toEqual([]);
+        });
+
+        it('records the current Dockerfile provenance digest for every role', () => {
+          const entries = loadCatalog(kind);
+          const drifted = catalogImageSources().flatMap((source) => {
             const entry = entries.find((candidate) => candidate.logicalName === source.logicalName);
             if (entry === undefined) return [`${source.role}: absent from the committed ${kind} catalog`];
-            const actual = computeContentBuildHash(source.dockerfile, source.contextDir);
-            return actual === entry.buildHash
+            const actual = dockerfileSourceDigest(source.dockerfile);
+            return actual === entry.provenance.sourceDigest
               ? []
-              : [`${source.role}: frozen ${entry.buildHash.slice(0, 16)} != on-disk ${actual.slice(0, 16)}`];
+              : [
+                  `${source.role}: frozen ${entry.provenance.sourceDigest.slice(7, 23)} != on-disk ${actual.slice(7, 23)}`,
+                ];
           });
 
-        expect(drifted, `re-freeze the ${kind} catalog (ironcurtain build-preloaded-catalog)`).toEqual([]);
-      });
-
-      it('records the current Dockerfile provenance digest for every role', () => {
-        const entries = loadCatalog(kind);
-        const drifted = catalogImageSources().flatMap((source) => {
-          const entry = entries.find((candidate) => candidate.logicalName === source.logicalName);
-          if (entry === undefined) return [`${source.role}: absent from the committed ${kind} catalog`];
-          const actual = dockerfileSourceDigest(source.dockerfile);
-          return actual === entry.provenance.sourceDigest
-            ? []
-            : [
-                `${source.role}: frozen ${entry.provenance.sourceDigest.slice(7, 23)} != on-disk ${actual.slice(7, 23)}`,
-              ];
+          expect(drifted, `regenerate the ${kind} qualification catalog (npm run qualify:catalog --)`).toEqual([]);
         });
 
-        expect(drifted, `re-freeze the ${kind} catalog (ironcurtain build-preloaded-catalog)`).toEqual([]);
-      });
+        it('records the declared toolchain tuple for every role', () => {
+          // The tuple is hand-maintained qualification provenance. A stale
+          // declaration would survive regeneration and misdescribe the fixture.
+          const entries = loadCatalog(kind);
+          const drifted = catalogImageSources().flatMap((source) => {
+            const entry = entries.find((candidate) => candidate.logicalName === source.logicalName);
+            if (entry === undefined) return [`${source.role}: absent from the committed ${kind} catalog`];
+            // The catalog stores every field, nulls included, so compare the whole
+            // tuple with a stable key order rather than dropping absent entries.
+            const canonical = (tuple: Record<string, string | null>): string =>
+              JSON.stringify(Object.fromEntries(Object.entries(tuple).sort(([a], [b]) => a.localeCompare(b))));
+            return canonical(source.toolchain) === canonical(entry.toolchain)
+              ? []
+              : [`${source.role}: declared ${canonical(source.toolchain)} != frozen ${canonical(entry.toolchain)}`];
+          });
 
-      it('records the declared toolchain tuple for every role', () => {
-        // The tuple is hand-maintained and feeds the runtime-operational
-        // `toolchainDigest`, so a stale declaration would survive a re-freeze and
-        // keep attesting something the image does not carry.
-        const entries = loadCatalog(kind);
-        const drifted = catalogImageSources().flatMap((source) => {
-          const entry = entries.find((candidate) => candidate.logicalName === source.logicalName);
-          if (entry === undefined) return [`${source.role}: absent from the committed ${kind} catalog`];
-          // The catalog stores every field, nulls included, so compare the whole
-          // tuple with a stable key order rather than dropping absent entries.
-          const canonical = (tuple: Record<string, string | null>): string =>
-            JSON.stringify(Object.fromEntries(Object.entries(tuple).sort(([a], [b]) => a.localeCompare(b))));
-          return canonical(source.toolchain) === canonical(entry.toolchain)
-            ? []
-            : [`${source.role}: declared ${canonical(source.toolchain)} != frozen ${canonical(entry.toolchain)}`];
+          expect(drifted, `regenerate the ${kind} qualification catalog (npm run qualify:catalog --)`).toEqual([]);
         });
-
-        expect(drifted, `re-freeze the ${kind} catalog (ironcurtain build-preloaded-catalog)`).toEqual([]);
       });
-    });
-  }
-});
+    }
+  },
+);

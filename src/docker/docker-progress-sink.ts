@@ -28,7 +28,8 @@ export type DockerProgressOperation =
   | 'docker image load'
   | 'container pull'
   | 'container build'
-  | 'container image load';
+  | 'container image load'
+  | 'container image save';
 
 export interface DockerProgressSink {
   /** Writable that the child's stdout pipes into. */

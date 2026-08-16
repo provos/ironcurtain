@@ -286,8 +286,21 @@ export interface ContainerRuntime {
   /** Inspect one local Docker image. Returns undefined when the image does not exist. */
   inspectImage(ref: string): Promise<DockerImageInfo | undefined>;
 
+  /**
+   * Create a second local reference for an image. Optional because the Apple
+   * selected-agent capture path is the only caller that needs to pin a
+   * mutable logical tag before exporting it.
+   */
+  tagImage?(sourceRef: string, targetRef: string): Promise<void>;
+
   /** Load a host-verified OCI image archive. Never accepts stdin. */
   loadImageArchive(archivePath: string): Promise<void>;
+
+  /**
+   * Export exactly one local image to an OCI archive. Optional because only
+   * Apple nested-Docker admission needs host-side image transport today.
+   */
+  saveImageArchive?(ref: string, archivePath: string, platform?: 'linux/amd64' | 'linux/arm64'): Promise<void>;
 
   /** Build a Docker image from a Dockerfile. Optional labels are stamped on the image. */
   buildImage(tag: string, dockerfilePath: string, contextDir: string, labels?: Record<string, string>): Promise<void>;

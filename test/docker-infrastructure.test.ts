@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { arch, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import type {
   AgentImageResolution,
   DockerInfrastructure,
@@ -18,7 +18,6 @@ import {
   computeWorkflowDependencyHash,
   buildWorkflowExecCommand,
   checkDockerContainerWritableStorage,
-  computeAgentImageBuildHash,
   resolveAgentImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, AgentId, ConversationStateConfig } from '../src/docker/agent-adapter.js';
@@ -32,7 +31,6 @@ import { generateFakeKey } from '../src/docker/fake-keys.js';
 import { makeOpenRouterProvider, makeOpenRouterRewriter } from '../src/docker/openrouter.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
 import { dockerAllocationPoolForSubnet } from '../src/docker/docker-resource-lifecycle.js';
-import { buildPreloadedImageLabels, type PreloadedImageCatalog } from '../src/docker/preloaded-image-catalog.js';
 import { getBundleShortId, type BundleId } from '../src/session/types.js';
 
 // Container target the mock adapter advertises via `skills.containerPath`.
@@ -54,7 +52,6 @@ import {
   type CreateMockDockerOptions,
   type DockerCallTracker,
 } from './helpers/docker-mocks.js';
-import { writeOciArchiveFixture } from './helpers/oci-archive-fixture.js';
 
 /**
  * Type-level tests for the DockerInfrastructure interface.
@@ -674,22 +671,25 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
   };
 }
 
-function makeApplePreloadedResolution(logicalName: string, immutableImageId: string): AgentImageResolution {
+function makeAppleArtifactResolution(logicalName: string, immutableImageId: string): AgentImageResolution {
+  const buildHash = 'a'.repeat(64);
   return {
-    mode: 'preloaded-catalog',
-    runtimeKind: 'apple-container',
+    mode: 'selected-agent-artifact',
     logicalName,
     imageRef: logicalName,
     immutableImageId,
-    buildHash: 'build-hash',
-    catalogGeneration: 'generation',
-    catalogSha256: 'catalog-sha256',
-    manifestDigest: `sha256:${'b'.repeat(64)}`,
-    configDigest: `sha256:${'c'.repeat(64)}`,
-    toolchainDigest: 'toolchain-digest',
-    provenanceDigest: 'provenance-digest',
-    archivePath: '/catalog/agent.tar',
-    archiveSha256: 'archive-sha256',
+    buildHash,
+    artifact: {
+      logicalName,
+      buildHash,
+      architecture: 'arm64',
+      appleImageId: immutableImageId,
+      dockerImageId: `sha256:${'b'.repeat(64)}`,
+      manifestDigest: `sha256:${'c'.repeat(64)}`,
+      archivePath: '/artifacts/selected-agent.oci.tar',
+      archiveSha256: 'd'.repeat(64),
+      archiveSizeBytes: 1024,
+    },
   };
 }
 
@@ -784,7 +784,7 @@ describe('createSessionContainers', () => {
     expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
   });
 
-  it('creates Apple by the catalog logical tag and verifies the stopped descriptor before start', async () => {
+  it('creates Apple by the prepared logical tag and verifies the stopped descriptor before start', async () => {
     const tracker = createDockerCallTracker();
     const events: string[] = [];
     const immutableImageId = `sha256:${'a'.repeat(64)}`;
@@ -808,7 +808,7 @@ describe('createSessionContainers', () => {
     const core = {
       ...makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker }),
       image: logicalName,
-      imageResolution: makeApplePreloadedResolution(logicalName, immutableImageId),
+      imageResolution: makeAppleArtifactResolution(logicalName, immutableImageId),
     };
 
     await createSessionContainers(core, makeMockConfig());
@@ -826,7 +826,7 @@ describe('createSessionContainers', () => {
     const core = {
       ...makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker }),
       image: logicalName,
-      imageResolution: makeApplePreloadedResolution(logicalName, immutableImageId),
+      imageResolution: makeAppleArtifactResolution(logicalName, immutableImageId),
     };
 
     await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(
@@ -1507,152 +1507,6 @@ describe('ensureImage builds no per-workflow image', () => {
     await ensureImage('ironcurtain-claude-code:latest', docker);
 
     expect(built).toEqual([]);
-  });
-
-  it('preloaded-catalog mode returns the immutable ID with zero build or pull calls', async () => {
-    const image = 'ironcurtain-claude-code:latest';
-    const buildHash = computeAgentImageBuildHash(image);
-    const architecture = arch() === 'arm64' ? 'arm64' : 'amd64';
-    const generation = 'catalog-test.1';
-    const entry = writeOciArchiveFixture({
-      directory: tempDir,
-      logicalName: image,
-      buildHash,
-      architecture,
-      catalogGeneration: generation,
-    });
-    const catalog: PreloadedImageCatalog = {
-      schemaVersion: 1,
-      runtimeKind: 'docker',
-      generation,
-      createdAt: '2026-07-20T12:00:00.000Z',
-      images: [entry],
-    };
-    const catalogPath = join(tempDir, 'catalog.json');
-    writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o444 });
-
-    const docker = createMockDocker();
-    let buildCalls = 0;
-    let pullCalls = 0;
-    docker.buildImage = async () => {
-      buildCalls++;
-      throw new Error('build must not be called');
-    };
-    docker.pullImage = async () => {
-      pullCalls++;
-      throw new Error('pull must not be called');
-    };
-    docker.inspectImage = async () => ({
-      id: entry.runtimeImageId,
-      repoTags: [image],
-      created: entry.provenance.createdAt,
-      labels: buildPreloadedImageLabels(entry, catalog.generation),
-    });
-
-    const resolved = await resolveAgentImage(image, docker, {
-      imageMode: 'preloaded-catalog',
-      catalogPath,
-      runtimeKind: 'docker',
-      architecture,
-      dockerApiVersion: '1.45',
-    });
-
-    expect(resolved.mode).toBe('preloaded-catalog');
-    expect(resolved.imageRef).toBe(entry.runtimeImageId);
-    expect(buildCalls).toBe(0);
-    expect(pullCalls).toBe(0);
-  });
-
-  it('uses only the verified catalog logical name as Apple Container 1.1 create reference', async () => {
-    const image = 'ironcurtain-claude-code:latest';
-    const buildHash = computeAgentImageBuildHash(image);
-    const architecture = arch() === 'arm64' ? 'arm64' : 'amd64';
-    const generation = 'catalog-apple-test.1';
-    const entry = writeOciArchiveFixture({
-      directory: tempDir,
-      logicalName: image,
-      buildHash,
-      architecture,
-      catalogGeneration: generation,
-      runtimeImageIdKind: 'index',
-    });
-    const catalog: PreloadedImageCatalog = {
-      schemaVersion: 1,
-      runtimeKind: 'apple-container',
-      generation,
-      createdAt: '2026-07-20T12:00:00.000Z',
-      images: [entry],
-    };
-    const catalogPath = join(tempDir, 'catalog.apple-container.json');
-    writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o444 });
-    const docker = createMockDocker();
-    docker.inspectImage = async (ref) => {
-      expect(ref).toBe(image);
-      return {
-        id: entry.runtimeImageId,
-        repoTags: [image],
-        created: entry.provenance.createdAt,
-        labels: buildPreloadedImageLabels(entry, generation),
-      };
-    };
-
-    const resolved = await resolveAgentImage(image, docker, {
-      imageMode: 'preloaded-catalog',
-      catalogPath,
-      runtimeKind: 'apple-container',
-      architecture,
-    });
-
-    expect(resolved).toMatchObject({
-      mode: 'preloaded-catalog',
-      imageRef: image,
-      logicalName: image,
-      immutableImageId: entry.runtimeImageId,
-    });
-  });
-
-  it('rejects a stale Apple logical tag before returning any create reference', async () => {
-    const image = 'ironcurtain-claude-code:latest';
-    const buildHash = computeAgentImageBuildHash(image);
-    const architecture = arch() === 'arm64' ? 'arm64' : 'amd64';
-    const generation = 'catalog-apple-stale.1';
-    const entry = writeOciArchiveFixture({
-      directory: tempDir,
-      logicalName: image,
-      buildHash,
-      architecture,
-      catalogGeneration: generation,
-      runtimeImageIdKind: 'index',
-    });
-    const catalog: PreloadedImageCatalog = {
-      schemaVersion: 1,
-      runtimeKind: 'apple-container',
-      generation,
-      createdAt: '2026-07-20T12:00:00.000Z',
-      images: [entry],
-    };
-    const catalogPath = join(tempDir, 'catalog.apple-container.stale.json');
-    writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o444 });
-    const docker = createMockDocker();
-    docker.inspectImage = async () => ({
-      id: `sha256:${'f'.repeat(64)}`,
-      repoTags: [image],
-      created: entry.provenance.createdAt,
-      labels: buildPreloadedImageLabels(entry, generation),
-    });
-    let createRan = false;
-
-    await expect(
-      resolveAgentImage(image, docker, {
-        imageMode: 'preloaded-catalog',
-        catalogPath,
-        runtimeKind: 'apple-container',
-        architecture,
-      }).then(() => {
-        createRan = true;
-      }),
-    ).rejects.toThrow(/preloaded image ID mismatch/u);
-    expect(createRan).toBe(false);
   });
 });
 

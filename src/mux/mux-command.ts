@@ -25,6 +25,7 @@ import type { PreflightOptions, PreflightResult } from '../session/preflight.js'
 import type { AgentId } from '../docker/agent-adapter.js';
 import { createMuxApp, type MuxApp, type MuxAppOptions } from './mux-app.js';
 import { buildProviderProfileSnapshots } from './provider-profile-snapshot.js';
+import { formatDockerWorkloadStatus } from '../docker-workload/config.js';
 
 const muxSpec: CommandSpec = {
   name: 'ironcurtain mux',
@@ -182,6 +183,8 @@ export async function main(args?: string[], deps: MuxMainDeps = {}): Promise<voi
     process.exit(1);
   }
   const resolvedAgent = preflight.mode.agent;
+  const nestedDockerStatus = formatDockerWorkloadStatus(config.userConfig.dockerWorkload);
+  if (nestedDockerStatus) process.stderr.write(chalk.dim(nestedDockerStatus) + '\n');
 
   const hasWarnings = emitAutoApproveWarning(config.userConfig);
   if (hasWarnings) {

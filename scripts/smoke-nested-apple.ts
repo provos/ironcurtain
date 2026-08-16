@@ -6,9 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,16 +16,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
-import { createServer, type Server } from 'node:http';
+import { createServer, get as httpGet, type Server } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadDockerWorkloadLease, type DockerWorkloadLease } from '../src/docker-workload/bundle-lease.js';
-import { loadDockerWorkloadCatalogPair } from '../src/docker-workload/catalog-pair.js';
 import { dockerWorkloadConfigHash, resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
 import { getProcessStartIdentity } from '../src/docker-workload/process-lock.js';
 import { APPLE_VM_DAEMON_DOCKER_HOST, APPLE_VM_DAEMON_TOOLCHAIN_DIR } from '../src/docker-workload/apple-vm-daemon.js';
+import { APPLE_VM_DOCKER_WORKLOAD_NETWORK } from '../src/docker-workload/apple-private-docker.js';
 import { loadResourceWatchdogSupervisorStatus } from '../src/docker-workload/resource-watchdog-supervisor.js';
 import { createContainerRuntime } from '../src/docker/container-runtime.js';
 import {
@@ -38,15 +35,16 @@ import {
   getBundleRegistryEgressSocketPath,
   getBundleRuntimeRoot,
 } from '../src/config/paths.js';
-import { verifyOciImageArchive } from '../src/docker/oci-image-archive.js';
-import { preloadedCatalogFileName } from '../src/docker/preloaded-catalog-paths.js';
-import { buildPreloadedImageLabels, loadPreloadedImageCatalog } from '../src/docker/preloaded-image-catalog.js';
 import { createPtyBridge, type PtyBridge } from '../src/pty/pty-bridge.js';
 import type { SessionMetadata } from '../src/session/types.js';
 import type { BundleId } from '../src/session/types.js';
 import { appendBoundedTuiOutput, hasClaudeTuiEvidence } from './smoke-nested-apple-tui.js';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
+  assertDefaultBridgeUnavailable,
+  assertDefaultContainerHasNoUsableNetwork,
+  assertEmptyInternalBridge,
+  assertExactAgentDockerEnvironment,
   assertInternalBridge,
   assertEmbeddedDnsResolver,
   assertNoPublishedPortBindings,
@@ -55,6 +53,7 @@ import {
   assertRegistryPolicyDenied,
   buildNestedAppleSmokeWorkloadConfig,
   buildPublicRegistryWorkloadPlan,
+  isExactSmokeNonceResponse,
   parseNestedAppleSmokeMode,
   type NestedAppleSmokeMode,
 } from './smoke-nested-apple-workload.js';
@@ -80,8 +79,6 @@ interface ActiveBundle {
 }
 
 interface SmokeEnvironment {
-  readonly sourceCatalogDir: string;
-  readonly frozenCatalogDir: string;
   readonly smokeRoot: string;
   readonly smokeHome: string;
   readonly workspace: string;
@@ -89,8 +86,7 @@ interface SmokeEnvironment {
 }
 
 async function main(mode: 'batch' | 'public-registry'): Promise<void> {
-  const { sourceCatalogDir, frozenCatalogDir, smokeRoot, smokeHome, workspace, expectedConfigHash } =
-    prepareSmokeEnvironment(mode);
+  const { smokeRoot, smokeHome, workspace, expectedConfigHash } = prepareSmokeEnvironment(mode);
   try {
     const argv = [CLI_PATH, 'start', '--agent', 'claude-code', '--workspace', workspace];
     const child = spawn(process.execPath, argv, {
@@ -133,50 +129,18 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
       assertChildRunning(child, 'before private-Docker operation');
 
       const runtime = createContainerRuntime('apple-container');
-      const frozenDocker = await verifyPrivateDockerBaseline(runtime, outerId, frozenCatalogDir);
-      const helper = frozenDocker.catalog.images.find((entry) => entry.logicalName === 'ironcurtain-helper:latest');
-      if (helper === undefined) throw new Error('frozen Docker catalog is missing ironcurtain-helper:latest');
+      await verifyAgentDockerEnvironment(runtime, outerId);
+      const selectedImageId = await verifyPrivateDockerBaseline(
+        runtime,
+        outerId,
+        resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'),
+      );
       const before = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
       if (before.stdout.trim() !== '') throw new Error('private Docker inventory was not empty before smoke child');
 
       if (mode === 'public-registry') {
         await verifyPublicRegistryWorkload(runtime, outerId);
       } else {
-        // Harness-only workload ingress: copy one catalog-owned tiny helper archive
-        // into the already-mounted workspace, verify the exposed bytes with the
-        // production OCI verifier, load it through the private daemon, then retire
-        // the copy. This does not broaden production bootstrap or configuration.
-        const helperArchive = resolve(workspace, helper.archive.fileName);
-        copyFileSync(resolve(sourceCatalogDir, helper.archive.fileName), helperArchive);
-        chmodSync(helperArchive, 0o400);
-        const expectedHelperLabels = buildPreloadedImageLabels(helper, frozenDocker.catalog.generation);
-        await verifyOciImageArchive({
-          archivePath: helperArchive,
-          expectedArchiveSha256: helper.archive.sha256,
-          expectedSizeBytes: helper.archive.sizeBytes,
-          manifestDigest: helper.manifestDigest,
-          configDigest: helper.configDigest,
-          logicalName: helper.logicalName,
-          architecture: helper.architecture,
-          expectedLabels: expectedHelperLabels,
-        });
-        await innerDocker(runtime, outerId, ['image', 'load', '--input', `/workspace/${helper.archive.fileName}`]);
-        rmSync(helperArchive, { force: true });
-        const helperInspect = await innerDocker(runtime, outerId, [
-          'image',
-          'inspect',
-          '--format',
-          '{{json .}}',
-          helper.logicalName,
-        ]);
-        const helperInfo = JSON.parse(helperInspect.stdout) as {
-          Id?: string;
-          Config?: { Labels?: Readonly<Record<string, string>> };
-        };
-        if (helperInfo.Id !== helper.runtimeImageId) throw new Error('loaded helper immutable ID differs from catalog');
-        for (const [name, value] of Object.entries(expectedHelperLabels)) {
-          if (helperInfo.Config?.Labels?.[name] !== value) throw new Error(`loaded helper label differs: ${name}`);
-        }
         await innerDocker(runtime, outerId, [
           'run',
           '--rm',
@@ -189,8 +153,9 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
           'ALL',
           '--security-opt',
           'no-new-privileges',
-          helper.runtimeImageId,
-          '--sleep=10ms',
+          '--entrypoint',
+          '/bin/true',
+          selectedImageId,
         ]);
       }
       const after = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
@@ -241,7 +206,6 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
           await waitForClosedLeaseWithin(cleanupLeasePath, 180_000);
         }
       } finally {
-        retireIsolatedSelectedArchive(smokeHome);
         if (succeeded) rmSync(smokeRoot, { recursive: true, force: true });
         else
           process.stderr.write(
@@ -250,7 +214,6 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
       }
     }
   } catch (error) {
-    retireIsolatedSelectedArchive(smokeHome);
     process.stderr.write(`nested Apple smoke failed; diagnostics retained at ${smokeRoot}\n`);
     throw error;
   }
@@ -258,10 +221,6 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
 
 function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: string): SmokeEnvironment {
   if (!existsSync(CLI_PATH)) throw new Error(`built CLI is missing: ${CLI_PATH}; run npm run build`);
-  const operatorHome = process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain');
-  const sourceCatalogDir = resolve(operatorHome, 'docker-workload', 'preloaded-catalog');
-  const frozenCatalogDir = resolve(PACKAGE_ROOT, 'config', 'docker-workload');
-  assertSourceCatalogMatchesFrozen(sourceCatalogDir, frozenCatalogDir);
 
   const smokeRoot = realpathSync(mkdtempSync('/private/tmp/ic-na-'));
   const smokeHome = resolve(smokeRoot, 'home');
@@ -274,21 +233,21 @@ function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: s
     mkdirSync(smokeHome, { mode: 0o700 });
     mkdirSync(workspace, { mode: 0o700 });
     assertSmokeSocketPathBudget(smokeHome);
-    stageSelectedCatalog(sourceCatalogDir, smokeHome);
-    const resolvedWorkload = resolveDockerWorkloadConfig(buildNestedAppleSmokeWorkloadConfig(mode));
+    const requestedWorkload = buildNestedAppleSmokeWorkloadConfig(mode);
+    const smokeDockerResources = { memoryMb: 4096, cpus: 2 } as const;
+    const resolvedWorkload = resolveDockerWorkloadConfig(requestedWorkload, smokeDockerResources);
     const expectedConfigHash = dockerWorkloadConfigHash(resolvedWorkload);
     writePrivateJson(resolve(smokeHome, 'config.json'), {
       anthropicApiKey: FAKE_API_KEY,
       preferredMode: 'container',
       preferredDockerAgent: 'claude-code',
       containerRuntime: 'apple-container',
-      dockerResources: { memoryMb: 1024, cpus: 1 },
-      dockerWorkload: resolvedWorkload,
+      dockerResources: smokeDockerResources,
+      dockerWorkload: requestedWorkload,
       ...(providerBaseUrl === undefined ? {} : { anthropicBaseUrl: providerBaseUrl }),
     });
-    return { sourceCatalogDir, frozenCatalogDir, smokeRoot, smokeHome, workspace, expectedConfigHash };
+    return { smokeRoot, smokeHome, workspace, expectedConfigHash };
   } catch (error) {
-    retireIsolatedSelectedArchive(smokeHome);
     process.stderr.write(`nested Apple smoke setup failed; diagnostics retained at ${smokeRoot}\n`);
     throw error;
   }
@@ -323,7 +282,7 @@ async function mainPty(): Promise<void> {
     await closeServer(providerSink.server);
     throw error;
   }
-  const { frozenCatalogDir, smokeRoot, smokeHome, workspace, expectedConfigHash } = environment;
+  const { smokeRoot, smokeHome, workspace, expectedConfigHash } = environment;
   const restoreEnvironment = installSmokeProcessEnvironment(smokeHome);
   let bridge: PtyBridge | undefined;
   let unsubscribeOutput: (() => void) | undefined;
@@ -401,7 +360,12 @@ async function mainPty(): Promise<void> {
     );
 
     const runtime = createContainerRuntime('apple-container');
-    await verifyPrivateDockerBaseline(runtime, outerId, frozenCatalogDir);
+    await verifyAgentDockerEnvironment(runtime, outerId);
+    await verifyPrivateDockerBaseline(
+      runtime,
+      outerId,
+      resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'),
+    );
 
     // `/exit` is Claude Code's graceful TUI command. Success requires the
     // node-pty child to exit on its own; forced termination is cleanup-only.
@@ -455,7 +419,6 @@ async function mainPty(): Promise<void> {
     } finally {
       await closeServer(providerSink.server);
       restoreEnvironment();
-      retireIsolatedSelectedArchive(smokeHome);
       if (succeeded) rmSync(smokeRoot, { recursive: true, force: true });
       else
         process.stderr.write(
@@ -514,33 +477,6 @@ function installSmokeProcessEnvironment(smokeHome: string): () => void {
   };
 }
 
-function assertSourceCatalogMatchesFrozen(sourceDir: string, frozenDir: string): void {
-  const sourceStats = statSync(sourceDir);
-  if (!sourceStats.isDirectory() || (sourceStats.mode & 0o077) !== 0) {
-    throw new Error(`staged catalog directory must be private and owner-only: ${sourceDir}`);
-  }
-  const source = loadDockerWorkloadCatalogPair({
-    appleCatalogPath: resolve(sourceDir, preloadedCatalogFileName('apple-container')),
-    dockerCatalogPath: resolve(sourceDir, preloadedCatalogFileName('docker')),
-  });
-  const frozen = loadDockerWorkloadCatalogPair({
-    appleCatalogPath: resolve(frozenDir, preloadedCatalogFileName('apple-container')),
-    dockerCatalogPath: resolve(frozenDir, preloadedCatalogFileName('docker')),
-  });
-  if (source.apple.sha256 !== frozen.apple.sha256 || source.docker.sha256 !== frozen.docker.sha256) {
-    throw new Error(`staged catalogs in ${sourceDir} do not match the current frozen catalog pair`);
-  }
-  const selected = source.apple.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
-  if (selected === undefined) throw new Error(`staged catalog is missing ${SELECTED_IMAGE}`);
-  const archive = resolve(sourceDir, selected.archive.fileName);
-  if (!existsSync(archive) || statSync(archive).size !== selected.archive.sizeBytes) {
-    throw new Error(`selected staged archive is absent or wrong-sized: ${archive}`);
-  }
-  for (const path of [source.apple.path, source.docker.path, archive]) {
-    if ((statSync(path).mode & 0o222) !== 0) throw new Error(`staged catalog input must have no write bits: ${path}`);
-  }
-}
-
 function assertSmokeSocketPathBudget(smokeHome: string): void {
   const socketPaths = withIronCurtainHome(smokeHome, () => [
     getBundleControlSocketPath(SOCKET_PATH_PROBE_BUNDLE),
@@ -568,24 +504,6 @@ function withIronCurtainHome<T>(home: string, operation: () => T): T {
   } finally {
     if (previous === undefined) delete process.env.IRONCURTAIN_HOME;
     else process.env.IRONCURTAIN_HOME = previous;
-  }
-}
-
-function stageSelectedCatalog(sourceDir: string, smokeHome: string): void {
-  const target = resolve(smokeHome, 'docker-workload', 'preloaded-catalog');
-  mkdirSync(target, { recursive: true, mode: 0o700 });
-  for (const kind of ['apple-container', 'docker'] as const) {
-    const name = preloadedCatalogFileName(kind);
-    copyFileSync(resolve(sourceDir, name), resolve(target, name));
-    chmodSync(resolve(target, name), 0o400);
-  }
-  const apple = loadPreloadedImageCatalog(resolve(sourceDir, preloadedCatalogFileName('apple-container')));
-  const selected = apple.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
-  if (selected === undefined) throw new Error(`staged Apple catalog is missing ${SELECTED_IMAGE}`);
-  try {
-    linkSync(resolve(sourceDir, selected.archive.fileName), resolve(target, selected.archive.fileName));
-  } catch (error) {
-    throw new Error('cannot hard-link the selected catalog archive into the isolated smoke home', { cause: error });
   }
 }
 
@@ -684,8 +602,11 @@ async function verifyPublicRegistryWorkload(
   const nonce = randomBytes(24).toString('hex');
   const plan = buildPublicRegistryWorkloadPlan(nonce);
   let serverCreated = false;
-  let networkCreated = false;
+  let publishedServerCreated = false;
+  let hostServerCreated = false;
+  let defaultContainerCreated = false;
   let imagePulled = false;
+  let managedNetworkId: string | undefined;
   try {
     const existingImage = await innerDocker(runtime, outerId, ['image', 'ls', '--quiet', plan.image]);
     if (existingImage.stdout.trim() !== '') {
@@ -711,10 +632,33 @@ async function verifyPublicRegistryWorkload(
     imagePulled = true;
     const applets = await innerDocker(runtime, outerId, plan.inspectApplets);
     assertRequiredBusyboxApplets(applets.stdout);
-    await innerDocker(runtime, outerId, plan.createNetwork);
-    networkCreated = true;
     const networkProfile = await innerDocker(runtime, outerId, plan.inspectNetwork);
-    const { networkId } = assertInternalBridge(networkProfile.stdout);
+    const { networkId } = assertEmptyInternalBridge(networkProfile.stdout);
+    managedNetworkId = networkId;
+    const defaultBridge = await expectInnerDockerFailure(runtime, outerId, plan.inspectDefaultBridge);
+    assertDefaultBridgeUnavailable(defaultBridge.stdout, defaultBridge.stderr);
+    await innerDocker(runtime, outerId, plan.startDefaultNetworkContainer);
+    defaultContainerCreated = true;
+    const defaultNetwork = await innerDocker(runtime, outerId, plan.inspectDefaultNetworkContainer);
+    assertDefaultContainerHasNoUsableNetwork(defaultNetwork.stdout);
+    const networkAfterDefaultProbe = await innerDocker(runtime, outerId, plan.inspectNetwork);
+    const afterDefaultProbe = assertEmptyInternalBridge(networkAfterDefaultProbe.stdout);
+    if (afterDefaultProbe.networkId !== networkId) {
+      throw new Error('default-network negative changed the managed bridge identity');
+    }
+    await innerDocker(runtime, outerId, plan.removeDefaultNetworkContainer);
+    defaultContainerCreated = false;
+    const defaultProbeInventory = await innerDocker(runtime, outerId, [
+      'container',
+      'ls',
+      '--all',
+      '--quiet',
+      '--filter',
+      `name=^${plan.defaultProbeName}$`,
+    ]);
+    if (defaultProbeInventory.stdout.trim() !== '') {
+      throw new Error('failed default-network probe retained a container or endpoint');
+    }
     const embeddedDns = await innerDocker(
       runtime,
       outerId,
@@ -771,6 +715,38 @@ async function verifyPublicRegistryWorkload(
         60_000,
       );
       assertExactProbeNonce('sibling target alias', alias.stdout, nonce);
+      await innerDocker(runtime, outerId, plan.startHostNetworkServer);
+      hostServerCreated = true;
+      const hostNetworkMode = await innerDocker(runtime, outerId, plan.inspectHostNetworkServer);
+      if (hostNetworkMode.stdout.trim() !== 'host') {
+        throw new Error(`dedicated host-network service resolved to ${hostNetworkMode.stdout.trim()}`);
+      }
+      const hostLoopback = await innerDocker(runtime, outerId, plan.probeHostNetworkServerLoopback, 60_000);
+      assertExactProbeNonce('host-network server loopback', hostLoopback.stdout, nonce);
+      await assertAgentShellDoesNotReturnNonce(
+        runtime,
+        outerId,
+        plan.hostServerPort,
+        nonce,
+        'nested host-network service',
+      );
+      if (await localhostReturnsExactNonce(plan.hostServerPort, nonce)) {
+        throw new Error(
+          `smoke host unexpectedly reached nested host-network nonce on localhost:${plan.hostServerPort}`,
+        );
+      }
+      await assertAgentShellDoesNotReturnNonce(runtime, outerId, 8080, nonce, 'unpublished managed-bridge service');
+
+      await innerDocker(runtime, outerId, bindPublicRegistryWorkloadNetwork(plan.startPublishedServer, networkId));
+      publishedServerCreated = true;
+      const publishedLoopback = await innerDocker(runtime, outerId, plan.probePublishedServerLoopback, 60_000);
+      assertExactProbeNonce('published server loopback', publishedLoopback.stdout, nonce);
+      const publishedPorts = await innerDocker(runtime, outerId, plan.inspectPublishedServerPorts);
+      assertNoPublishedPortBindings(publishedPorts.stdout);
+      await assertAgentShellDoesNotReturnNonce(runtime, outerId, plan.publishedHostPort, nonce, 'nested -p service');
+      if (await localhostReturnsExactNonce(plan.publishedHostPort, nonce)) {
+        throw new Error(`smoke host unexpectedly reached nested -p nonce on localhost:${plan.publishedHostPort}`);
+      }
     } catch (error) {
       const state = await captureInnerDockerDiagnostic(runtime, outerId, [
         'container',
@@ -786,27 +762,109 @@ async function verifyPublicRegistryWorkload(
       );
     }
   } finally {
+    if (defaultContainerCreated) {
+      await innerDocker(runtime, outerId, plan.removeDefaultNetworkContainer).catch(() => {});
+    }
+    if (publishedServerCreated) await innerDocker(runtime, outerId, plan.removePublishedServer).catch(() => {});
+    if (hostServerCreated) await innerDocker(runtime, outerId, plan.removeHostNetworkServer).catch(() => {});
     if (serverCreated) await innerDocker(runtime, outerId, plan.removeServer).catch(() => {});
-    if (networkCreated) await innerDocker(runtime, outerId, plan.removeNetwork).catch(() => {});
     if (imagePulled) await innerDocker(runtime, outerId, plan.removeImage).catch(() => {});
   }
 
   const containers = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
   if (containers.stdout.trim() !== '') throw new Error('private Docker inventory retained a smoke container');
-  const networks = await innerDocker(runtime, outerId, [
-    'network',
-    'ls',
-    '--quiet',
-    '--filter',
-    `name=^${plan.networkName}$`,
-  ]);
-  if (networks.stdout.trim() !== '') throw new Error('private Docker inventory retained the smoke bridge');
+  if (managedNetworkId === undefined) {
+    throw new Error('private Docker never established the bundle-managed internal bridge identity');
+  }
+  const finalNetworkProfile = await innerDocker(runtime, outerId, plan.inspectNetwork);
+  const finalNetwork = assertEmptyInternalBridge(finalNetworkProfile.stdout);
+  if (finalNetwork.networkId !== managedNetworkId) {
+    throw new Error('private Docker lost or replaced the bundle-managed internal bridge');
+  }
   const image = await innerDocker(runtime, outerId, ['image', 'ls', '--quiet', plan.image]);
   if (image.stdout.trim() !== '') throw new Error('private Docker inventory retained the pulled smoke image');
 }
 
+async function verifyAgentDockerEnvironment(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+): Promise<void> {
+  const result = await runtime.exec(outerId, ['/usr/bin/env'], 10_000, 'codespace');
+  if (result.exitCode !== 0) {
+    throw new Error(`agent environment inspection failed: ${boundedDiagnostic(result.stderr)}`);
+  }
+  assertExactAgentDockerEnvironment(result.stdout);
+}
+
+async function assertAgentShellDoesNotReturnNonce(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  port: number,
+  nonce: string,
+  stage: string,
+): Promise<void> {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('agent-shell probe port is invalid');
+  if (!/^[a-f0-9]{32,128}$/u.test(nonce)) throw new Error('agent-shell probe nonce is invalid');
+  const result = await runtime.exec(
+    outerId,
+    [
+      '/usr/bin/curl',
+      '--noproxy',
+      '*',
+      '--connect-timeout',
+      '2',
+      '--max-time',
+      '3',
+      '--max-filesize',
+      '4096',
+      '--silent',
+      '--show-error',
+      `http://127.0.0.1:${port}/`,
+    ],
+    10_000,
+    'codespace',
+  );
+  if (isExactSmokeNonceResponse(result.stdout, nonce)) {
+    throw new Error(`agent shell unexpectedly received the exact ${stage} nonce on localhost:${port}`);
+  }
+}
+
+/** Direct smoke-process probe; connection failure or unrelated bounded content is acceptable. */
+async function localhostReturnsExactNonce(port: number, nonce: string): Promise<boolean> {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('host probe port is invalid');
+  if (!/^[a-f0-9]{32,128}$/u.test(nonce)) throw new Error('host probe nonce is invalid');
+  return new Promise<boolean>((resolvePromise) => {
+    let settled = false;
+    let size = 0;
+    const chunks: Buffer[] = [];
+    const settle = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
+    };
+    const request = httpGet({ hostname: '127.0.0.1', port, path: '/', agent: false }, (response) => {
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 4096) {
+          response.destroy();
+          settle(false);
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once('end', () => settle(isExactSmokeNonceResponse(Buffer.concat(chunks).toString('utf8'), nonce)));
+      response.once('error', () => settle(false));
+    });
+    request.setTimeout(3_000, () => {
+      request.destroy();
+      settle(false);
+    });
+    request.once('error', () => settle(false));
+  });
+}
+
 function assertExactProbeNonce(stage: string, value: string, nonce: string): void {
-  if (value.trim() !== nonce) {
+  if (!isExactSmokeNonceResponse(value, nonce)) {
     throw new Error(`${stage} probe did not return the exact random nonce: ${boundedDiagnostic(value)}`);
   }
 }
@@ -835,22 +893,54 @@ async function captureInnerDockerDiagnostic(
 async function verifyPrivateDockerBaseline(
   runtime: ReturnType<typeof createContainerRuntime>,
   outerId: string,
-  frozenCatalogDir: string,
-): Promise<ReturnType<typeof loadPreloadedImageCatalog>> {
+  auditPath: string,
+): Promise<string> {
   const info = await innerDocker(runtime, outerId, ['info', '--format', '{{json .}}']);
   const parsedInfo = JSON.parse(info.stdout) as { Driver?: string; SecurityOptions?: readonly string[] };
   if (parsedInfo.Driver !== 'vfs' || !parsedInfo.SecurityOptions?.some((item) => item.includes('rootless'))) {
     throw new Error(`private Docker is not rootless+vfs: ${info.stdout.trim()}`);
   }
+  const managedNetwork = await innerDocker(runtime, outerId, [
+    'network',
+    'inspect',
+    '--format',
+    '{{json .}}',
+    APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  ]);
+  assertInternalBridge(managedNetwork.stdout);
 
-  const frozenDocker = loadPreloadedImageCatalog(resolve(frozenCatalogDir, preloadedCatalogFileName('docker')));
-  const selected = frozenDocker.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
-  if (selected === undefined) throw new Error(`frozen Docker catalog is missing ${SELECTED_IMAGE}`);
+  const expectedImageId = readPreparedInnerImageId(auditPath);
   const inspected = await innerDocker(runtime, outerId, ['image', 'inspect', '--format', '{{.Id}}', SELECTED_IMAGE]);
-  if (inspected.stdout.trim() !== selected.runtimeImageId) {
-    throw new Error('selected inner image immutable ID differs from frozen Docker catalog');
+  if (inspected.stdout.trim() !== expectedImageId) {
+    throw new Error('selected inner image immutable ID differs from the prepared artifact observation');
   }
-  return frozenDocker;
+  return expectedImageId;
+}
+
+function readPreparedInnerImageId(auditPath: string): string {
+  if (!existsSync(auditPath)) throw new Error(`Docker-workload audit log is missing: ${auditPath}`);
+  const events = readFileSync(auditPath, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as unknown);
+  const event = events.find(
+    (candidate): candidate is { kind: 'private-docker-bootstrap'; artifact: { innerDockerImageId: string } } => {
+      if (candidate === null || typeof candidate !== 'object') return false;
+      const record = candidate as { kind?: unknown; artifact?: unknown };
+      if (
+        record.kind !== 'private-docker-bootstrap' ||
+        record.artifact === null ||
+        typeof record.artifact !== 'object'
+      ) {
+        return false;
+      }
+      return /^sha256:[a-f0-9]{64}$/u.test(
+        String((record.artifact as { innerDockerImageId?: unknown }).innerDockerImageId),
+      );
+    },
+  );
+  if (event === undefined) throw new Error('Docker-workload audit lacks a prepared selected-agent observation');
+  return event.artifact.innerDockerImageId;
 }
 
 async function verifyClosedBundle(options: {
@@ -998,16 +1088,6 @@ function discoverSoleLeasePath(home: string): string | undefined {
     .filter(existsSync);
   if (paths.length > 1) throw new Error(`isolated smoke home contains multiple leases: ${paths.join(', ')}`);
   return paths[0];
-}
-
-function retireIsolatedSelectedArchive(smokeHome: string): void {
-  const staging = resolve(smokeHome, 'docker-workload', 'preloaded-catalog');
-  if (!existsSync(staging)) return;
-  const catalogPath = resolve(staging, preloadedCatalogFileName('apple-container'));
-  if (!existsSync(catalogPath)) return;
-  const catalog = loadPreloadedImageCatalog(catalogPath);
-  const selected = catalog.catalog.images.find((entry) => entry.logicalName === SELECTED_IMAGE);
-  if (selected !== undefined) rmSync(resolve(staging, selected.archive.fileName), { force: true });
 }
 
 function redact(value: string): string {
