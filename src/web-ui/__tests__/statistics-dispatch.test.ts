@@ -206,14 +206,14 @@ describe('statistics WebSocket dispatch', () => {
         calendarBucket: { unit: 'day', timeZone: 'UTC' },
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
-    await expect(
-      dispatch(context(reader()), 'statistics.series', {
-        fromMs: 0,
-        toMs: 1,
-        measures: ['requestCount'],
-        calendarBucket: { unit: 'day', timeZone: 'not/a-real-zone' },
-      }),
-    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    const invalidTimeZone = dispatch(context(reader()), 'statistics.series', {
+      fromMs: 0,
+      toMs: 1,
+      measures: ['requestCount'],
+      calendarBucket: { unit: 'day', timeZone: 'not/a-real-zone' },
+    });
+    await expect(invalidTimeZone).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(invalidTimeZone).rejects.toThrow('timeZone must be a valid IANA time zone');
     await expect(
       dispatch(context(reader()), 'statistics.distribution', {
         fromMs: 0,

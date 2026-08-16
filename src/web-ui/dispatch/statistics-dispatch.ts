@@ -92,7 +92,11 @@ const summarySchema = rangeSchema
 const calendarBucketSchema = z
   .object({
     unit: z.literal('day'),
-    timeZone: z.string().min(1).max(STATISTICS_TIME_ZONE_MAX_LENGTH).refine(isValidStatisticsTimeZone),
+    timeZone: z
+      .string()
+      .min(1)
+      .max(STATISTICS_TIME_ZONE_MAX_LENGTH)
+      .refine(isValidStatisticsTimeZone, { message: 'timeZone must be a valid IANA time zone' }),
   })
   .strict();
 

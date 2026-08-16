@@ -98,7 +98,22 @@ describe('statistics frontend DTO types', () => {
       formulaVersion: 1,
     };
 
-    expect(series.calendarBucket?.timeZone).toBe('America/Los_Angeles');
+    expect(series.calendarBucket.timeZone).toBe('America/Los_Angeles');
     expect(result.bins).toHaveLength(1);
+  });
+
+  it('requires exactly one time-series bucket form at compile time', () => {
+    // @ts-expect-error Statistics series require a fixed or calendar bucket.
+    const missing: StatisticsSeriesQuery = { fromMs: 0, toMs: 1, measures: ['requestCount'] };
+    // @ts-expect-error Statistics series cannot use both bucket forms.
+    const duplicate: StatisticsSeriesQuery = {
+      fromMs: 0,
+      toMs: 1,
+      measures: ['requestCount'],
+      bucketMs: 60_000,
+      calendarBucket: { unit: 'day', timeZone: 'UTC' },
+    };
+
+    expect([missing, duplicate]).toHaveLength(2);
   });
 });

@@ -283,13 +283,17 @@ export interface StatisticsSummaryQuery extends StatisticsRangeQuery {
   readonly topGroups?: number;
 }
 
-export interface StatisticsSeriesQuery extends StatisticsSummaryQuery {
-  readonly bucketMs?: number;
-  readonly calendarBucket?: {
-    readonly unit: 'day';
-    readonly timeZone: string;
-  };
-}
+export type StatisticsSeriesQuery = StatisticsSummaryQuery &
+  (
+    | { readonly bucketMs: number; readonly calendarBucket?: never }
+    | {
+        readonly bucketMs?: never;
+        readonly calendarBucket: {
+          readonly unit: 'day';
+          readonly timeZone: string;
+        };
+      }
+  );
 
 export interface StatisticsDistributionQuery extends StatisticsRangeQuery {
   readonly measure: LlmStatisticsDistributionMeasure;
