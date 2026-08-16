@@ -1,9 +1,10 @@
 import { expect, type Page, type APIRequestContext, type Locator } from '@playwright/test';
 import { WebSocket } from 'ws';
+import { parsePort } from '../scripts/parse-port.js';
 
 export const PTY_BANNER_TEXT = 'Type to send keystrokes';
 export const PTY_LIVE_FRAME_TEXT = '[mock] agent working';
-const MOCK_RESET_PORT = process.env.IRONCURTAIN_MOCK_RESET_PORT ?? '7401';
+const MOCK_RESET_PORT = parsePort(process.env.IRONCURTAIN_MOCK_RESET_PORT, 7401);
 
 /**
  * Reset the mock server's mutable state so tests are isolated. Pass
