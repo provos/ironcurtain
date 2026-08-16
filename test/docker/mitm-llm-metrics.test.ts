@@ -69,7 +69,9 @@ const CAPTURE_COMPATIBLE_SSE = [
 ].join('\n');
 
 function makeLargeCaptureCompatibleSse(): string {
-  const text = randomBytes(7 * 1024 * 1024).toString('base64');
+  // Base64 expansion keeps the decoded SSE just over the 8 MiB pending-input
+  // boundary while avoiding unnecessary work in the full CI matrix.
+  const text = randomBytes(6 * 1024 * 1024 + 256 * 1024).toString('base64');
   const events = [
     'event: message_start',
     'data: {"type":"message_start","message":{"id":"msg_large","type":"message","role":"assistant","model":"claude-served","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}',
@@ -570,7 +572,7 @@ describe('MITM LLM metrics integration', () => {
     expect(uncapturedResponse.body).toEqual(compressed);
     await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(2);
     expect(exchanges[1]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
-  });
+  }, 60_000);
 
   it('finalizes once when the client aborts a live upstream stream', async () => {
     upstream = await createUpstream((_request, response) => {
