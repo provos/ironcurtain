@@ -46,6 +46,33 @@ describe('statistics WebSocket dispatch', () => {
     expect(summarize).toHaveBeenCalledWith(query);
   });
 
+  it('dispatches an allowed time-series bucket to the daemon-owned reader', async () => {
+    const statisticsReader = reader();
+    const timeSeries = vi
+      .spyOn(statisticsReader, 'timeSeries')
+      .mockResolvedValue([{ fromMs: 0, toMs: 60_000, summaries: [] }]);
+    const query = { fromMs: 0, toMs: 60_000, measures: ['requestCount'] as const, bucketMs: 60_000 as const };
+
+    await expect(dispatch(context(statisticsReader), 'statistics.series', query)).resolves.toEqual([
+      { fromMs: 0, toMs: 60_000, summaries: [] },
+    ]);
+    expect(timeSeries).toHaveBeenCalledWith(query);
+  });
+
+  it('accepts boolean filters and provider labels returned by dimensions', async () => {
+    const statisticsReader = reader();
+    const summarize = vi.spyOn(statisticsReader, 'summarize');
+    const query = {
+      fromMs: 1,
+      toMs: 2,
+      measures: ['requestCount'] as const,
+      filters: { streaming: [true], refusal: [false], servedProvider: ['Google AI Studio (Direct)'] },
+    };
+
+    await dispatch(context(statisticsReader), 'statistics.summary', query);
+    expect(summarize).toHaveBeenCalledWith(query);
+  });
+
   it('accepts service-tier and measurement-provenance dimensions and filters', async () => {
     const statisticsReader = reader();
     const summarize = vi.spyOn(statisticsReader, 'summarize');
@@ -70,6 +97,22 @@ describe('statistics WebSocket dispatch', () => {
   it('rejects unbounded or structurally invalid input before the reader', async () => {
     await expect(
       dispatch(context(reader()), 'statistics.exchanges', { fromMs: 0, toMs: 1, limit: 501 }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      dispatch(context(reader()), 'statistics.summary', {
+        fromMs: 0,
+        toMs: 1,
+        measures: ['requestCount'],
+        filters: { protocol: Array.from({ length: 21 }, (_, index) => `protocol-${index}`) },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      dispatch(context(reader()), 'statistics.series', {
+        fromMs: 0,
+        toMs: 1,
+        measures: ['requestCount'],
+        bucketMs: 1,
+      }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });
 

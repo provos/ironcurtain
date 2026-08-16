@@ -85,6 +85,27 @@ function repository(
 }
 
 describe('LLM statistics query output safety', () => {
+  it('accepts exactly 10,000 scanned rows and rejects the documented 10,001-row overflow', async () => {
+    const rows = Array.from({ length: 10_001 }, (_, index) => row(index));
+    const accepted = new LlmStatisticsQueryService(repository(rows.slice(0, 10_000)));
+    await expect(
+      accepted.summarize({
+        fromMs: BASE_TIME,
+        toMs: BASE_TIME + 20_000,
+        measures: ['requestCount'],
+      }),
+    ).resolves.toMatchObject([{ measure: 'requestCount', value: 10_000 }]);
+
+    const rejected = new LlmStatisticsQueryService(repository(rows));
+    await expect(
+      rejected.summarize({
+        fromMs: BASE_TIME,
+        toMs: BASE_TIME + 20_000,
+        measures: ['requestCount'],
+      }),
+    ).rejects.toThrow('Statistics query exceeds the scanned-row limit');
+  });
+
   it('rejects a list page whose valid bounded rows exceed the byte budget', async () => {
     const longFlag = `flag-${'x'.repeat(251)}`;
     const rows = Array.from({ length: 300 }, (_, index) =>

@@ -1,6 +1,7 @@
 import * as http from 'node:http';
 import * as tls from 'node:tls';
 import * as zlib from 'node:zlib';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -11,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadOrCreateCA, type CertificateAuthority } from '../../src/docker/ca.js';
 import { createMitmProxy, type MitmProxy } from '../../src/docker/mitm-proxy.js';
 import type { OAuthTokenManager } from '../../src/docker/oauth-token-manager.js';
-import { anthropicProvider, type ProviderConfig } from '../../src/docker/provider-config.js';
+import { anthropicProvider, googleProvider, type ProviderConfig } from '../../src/docker/provider-config.js';
 import { createTrajectoryCaptureWriter, type TrajectoryCaptureWriter } from '../../src/docker/trajectory-capture.js';
 import { getLlmMetricsEventBus, resetLlmMetricsEventBus } from '../../src/llm-metrics/event-bus.js';
 import type { MetricsInvocationLease } from '../../src/llm-metrics/attribution-registry.js';
@@ -20,8 +21,11 @@ import type { SessionId } from '../../src/session/types.js';
 import { sendConnect } from '../helpers/mitm-tls-harness.js';
 
 const CLIENT_HOST = 'api.anthropic.com';
+const GOOGLE_HOST = 'generativelanguage.googleapis.com';
 const FAKE_KEY = 'sk-ant-api03-ironcurtain-test';
 const REAL_KEY = 'sk-ant-api03-real-test';
+const GOOGLE_FAKE_KEY = 'AIzaSy-ironcurtain-test';
+const GOOGLE_REAL_KEY = 'AIzaSy-real-test';
 
 const ANTHROPIC_SSE = [
   'event: message_start',
@@ -63,6 +67,42 @@ const CAPTURE_COMPATIBLE_SSE = [
   '',
   '',
 ].join('\n');
+
+function makeLargeCaptureCompatibleSse(): string {
+  const text = randomBytes(7 * 1024 * 1024).toString('base64');
+  const events = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_large","type":"message","role":"assistant","model":"claude-served","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+    '',
+  ];
+  for (let offset = 0; offset < text.length; offset += 4096) {
+    events.push(
+      'event: content_block_delta',
+      `data: ${JSON.stringify({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: text.slice(offset, offset + 4096) },
+      })}`,
+      '',
+    );
+  }
+  events.push(
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":0}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4242}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+    '',
+  );
+  return events.join('\n');
+}
 
 interface CapturedRequest {
   readonly headers: http.IncomingHttpHeaders;
@@ -129,6 +169,18 @@ function metricsProvider(upstreamPort: number): ProviderConfig {
   };
 }
 
+function googleMetricsProvider(upstreamPort: number): ProviderConfig {
+  return {
+    ...googleProvider,
+    upstreamTarget: {
+      hostname: '127.0.0.1',
+      port: upstreamPort,
+      pathPrefix: '',
+      useTls: false,
+    },
+  };
+}
+
 function proxyAuthorization(lease: MetricsInvocationLease): string {
   const proxyUrl = new URL(lease.proxyUrl);
   const credentials = `${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`;
@@ -141,16 +193,30 @@ interface BufferResponse {
   readonly body: Buffer;
 }
 
-function makeHttpsBufferRequest(socket: Socket, ca: CertificateAuthority, body: Buffer): Promise<BufferResponse> {
+function makeHttpsBufferRequest(
+  socket: Socket,
+  ca: CertificateAuthority,
+  body: Buffer,
+  options: {
+    readonly host?: string;
+    readonly path?: string;
+    readonly apiKeyHeader?: string;
+    readonly apiKey?: string;
+  } = {},
+): Promise<BufferResponse> {
+  const host = options.host ?? CLIENT_HOST;
+  const path = options.path ?? '/v1/messages';
+  const apiKeyHeader = options.apiKeyHeader ?? 'x-api-key';
+  const apiKey = options.apiKey ?? FAKE_KEY;
   return new Promise((resolve, reject) => {
-    const tlsSocket = tls.connect({ socket, servername: CLIENT_HOST, ca: ca.certPem }, () => {
+    const tlsSocket = tls.connect({ socket, servername: host, ca: ca.certPem }, () => {
       const requestHeaders = [
-        'POST /v1/messages HTTP/1.1',
-        `Host: ${CLIENT_HOST}`,
+        `POST ${path} HTTP/1.1`,
+        `Host: ${host}`,
         'Connection: close',
         'Content-Type: application/json',
         `Content-Length: ${body.length}`,
-        `x-api-key: ${FAKE_KEY}`,
+        `${apiKeyHeader}: ${apiKey}`,
         '',
         '',
       ].join('\r\n');
@@ -378,6 +444,132 @@ describe('MITM LLM metrics integration', () => {
     await expect.poll(() => exchanges.length).toBe(1);
     expect(exchanges[0]?.attribution).toMatchObject({ quality: 'bundle_only', bundleId: 'bundle-fallback' });
     expect(exchanges[0]?.usage).toMatchObject({ inputTokensTotal: 130, outputTokensTotal: 50, thinkingTokens: 30 });
+  });
+
+  it('captures a built-in Google generateContent JSON response with minimal valid usage', async () => {
+    const responseBody = Buffer.from(
+      JSON.stringify({
+        modelVersion: 'gemini-2.5-flash-001',
+        responseId: 'google-json-response',
+        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'hello' }] } }],
+        usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3, totalTokenCount: 7 },
+      }),
+    );
+    upstream = await createUpstream((_request, response) => {
+      sendFixedResponse(response, responseBody, { 'Content-Type': 'application/json' });
+    });
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      statisticsEnabled: true,
+      providers: [{ config: googleMetricsProvider(upstream.port), fakeKey: GOOGLE_FAKE_KEY, realKey: GOOGLE_REAL_KEY }],
+    });
+    await proxy.start();
+
+    const { socket, statusCode } = await sendConnect(socketPath, GOOGLE_HOST, 443);
+    expect(statusCode).toBe(200);
+    const response = await makeHttpsBufferRequest(socket as Socket, ca, Buffer.from(JSON.stringify({ contents: [] })), {
+      host: GOOGLE_HOST,
+      path: '/v1beta/models/gemini-2.5-flash:generateContent',
+      apiKeyHeader: 'x-goog-api-key',
+      apiKey: GOOGLE_FAKE_KEY,
+    });
+
+    expect(response.body).toEqual(responseBody);
+    await expect.poll(() => exchanges.length).toBe(1);
+    expect(exchanges[0]?.route).toMatchObject({ logicalProvider: 'google', protocol: 'google-generate-content' });
+    expect(exchanges[0]?.identity.requestedModel).toEqual({ value: 'gemini-2.5-flash', source: 'request' });
+    expect(exchanges[0]?.usage).toMatchObject({
+      inputTokensTotal: 4,
+      toolUseInputTokens: 0,
+      outputTokensTotal: 3,
+      thinkingTokens: 0,
+      providerTotalTokens: 7,
+      canonicalTotalTokens: 7,
+      usageCompleteness: 'complete',
+    });
+    expect(upstream.requests[0]?.headers['x-goog-api-key']).toBe(GOOGLE_REAL_KEY);
+  });
+
+  it('captures a built-in Google streamGenerateContent SSE response with minimal valid usage', async () => {
+    const googleSse = [
+      'data: {"modelVersion":"gemini-2.5-flash-001","responseId":"google-stream-response","candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}',
+      '',
+      '',
+    ].join('\n');
+    upstream = await createUpstream((_request, response) => {
+      sendFixedResponse(response, Buffer.from(googleSse), { 'Content-Type': 'text/event-stream' });
+    });
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      statisticsEnabled: true,
+      providers: [{ config: googleMetricsProvider(upstream.port), fakeKey: GOOGLE_FAKE_KEY, realKey: GOOGLE_REAL_KEY }],
+    });
+    await proxy.start();
+
+    const { socket } = await sendConnect(socketPath, GOOGLE_HOST, 443);
+    const response = await makeHttpsBufferRequest(socket as Socket, ca, Buffer.from(JSON.stringify({ contents: [] })), {
+      host: GOOGLE_HOST,
+      path: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
+      apiKeyHeader: 'x-goog-api-key',
+      apiKey: GOOGLE_FAKE_KEY,
+    });
+
+    expect(response.body.toString()).toBe(googleSse);
+    await expect.poll(() => exchanges.length).toBe(1);
+    expect(exchanges[0]?.identity.requestedModel).toEqual({ value: 'gemini-2.5-flash', source: 'request' });
+    expect(exchanges[0]?.request.streaming).toBe(true);
+    expect(exchanges[0]?.usage).toMatchObject({
+      inputTokensTotal: 5,
+      toolUseInputTokens: 0,
+      outputTokensTotal: 2,
+      thinkingTokens: 0,
+      canonicalTotalTokens: 7,
+      usageCompleteness: 'complete',
+    });
+  });
+
+  it('keeps large compressed SSE observable and byte-identical with trajectory capture on and off', async () => {
+    const largeSse = makeLargeCaptureCompatibleSse();
+    const compressed = zlib.gzipSync(Buffer.from(largeSse));
+    expect(Buffer.byteLength(largeSse)).toBeGreaterThan(8 * 1024 * 1024);
+    expect(compressed.length).toBeGreaterThan(64 * 1024);
+    upstream = await createUpstream((_request, response) => {
+      sendFixedResponse(response, compressed, {
+        'Content-Type': 'text/event-stream',
+        'Content-Encoding': 'gzip',
+      });
+    });
+    const captureSessionId = 'large-capture-and-metrics' as SessionId;
+    captureWriter = createTrajectoryCaptureWriter({ capturesDir: join(tempDir, 'large-captures') });
+    captureWriter.beginSession({ sessionId: captureSessionId });
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      statisticsEnabled: true,
+      capture: captureWriter,
+      providers: [{ config: metricsProvider(upstream.port), fakeKey: FAKE_KEY, realKey: REAL_KEY }],
+    });
+    proxy.setCaptureSessionId(captureSessionId);
+    await proxy.start();
+
+    const requestBody = Buffer.from(JSON.stringify({ model: 'claude-requested', stream: true, messages: [] }));
+    const capturedConnect = await sendConnect(socketPath, CLIENT_HOST, 443);
+    const capturedResponse = await makeHttpsBufferRequest(capturedConnect.socket as Socket, ca, requestBody);
+    expect(capturedResponse.body).toEqual(compressed);
+    await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(1);
+    expect(exchanges[0]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
+    expect(exchanges[0]?.qualityFlags).not.toContain('consumer-decoded-byte-limit');
+    await captureWriter.endSession(captureSessionId);
+    expect(captureWriter.stats()).toMatchObject({ written: 1, dropped: 0, openSessions: 0 });
+
+    proxy.setCaptureSessionId(undefined);
+    const uncapturedConnect = await sendConnect(socketPath, CLIENT_HOST, 443);
+    const uncapturedResponse = await makeHttpsBufferRequest(uncapturedConnect.socket as Socket, ca, requestBody);
+    expect(uncapturedResponse.body).toEqual(compressed);
+    await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(2);
+    expect(exchanges[1]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
   });
 
   it('finalizes once when the client aborts a live upstream stream', async () => {

@@ -14,7 +14,7 @@ export type ContentDecodingFailureReason =
   | 'compressed-byte-limit'
   | 'decoded-byte-limit'
   | 'expansion-ratio-limit'
-  | 'decoder-backpressure'
+  | 'decoder-backlog-limit'
   | 'decoder-error'
   | 'consumer-error';
 
@@ -27,6 +27,8 @@ export interface ContentDecoderLimits {
   readonly maxExpansionRatio: number;
   /** Allows small compressed bodies to expand without noisy ratio failures. */
   readonly expansionRatioSlackBytes: number;
+  /** Maximum compressed bytes accepted by zlib but not yet consumed. */
+  readonly maxPendingInputBytes: number;
 }
 
 export const DEFAULT_CONTENT_DECODER_LIMITS: ContentDecoderLimits = Object.freeze({
@@ -34,6 +36,7 @@ export const DEFAULT_CONTENT_DECODER_LIMITS: ContentDecoderLimits = Object.freez
   maxDecodedBytes: 32 * 1024 * 1024,
   maxExpansionRatio: 64,
   expansionRatioSlackBytes: 64 * 1024,
+  maxPendingInputBytes: 16 * 1024 * 1024,
 });
 
 export interface ContentDecoderFailure {
@@ -82,6 +85,10 @@ function resolveLimits(overrides: Partial<ContentDecoderLimits> | undefined): Co
     expansionRatioSlackBytes: positiveFinite(
       'expansionRatioSlackBytes',
       overrides?.expansionRatioSlackBytes ?? DEFAULT_CONTENT_DECODER_LIMITS.expansionRatioSlackBytes,
+    ),
+    maxPendingInputBytes: positiveFinite(
+      'maxPendingInputBytes',
+      overrides?.maxPendingInputBytes ?? DEFAULT_CONTENT_DECODER_LIMITS.maxPendingInputBytes,
     ),
   });
 }
@@ -166,11 +173,14 @@ export class BoundedContentDecoder {
     }
 
     try {
-      // The observation branch must not queue behind zlib. Forwarding owns
-      // the real flow-control path, so a false return detaches this copy.
-      if (!this.decoder.write(chunk)) {
-        this.detach('decoder-backpressure', 'content decoder requested backpressure');
+      // This passive branch cannot pause forwarding. Bound zlib's accepted
+      // input explicitly instead of treating its advisory high-water signal
+      // as either data loss or permission to queue the whole response.
+      if (this.decoder.writableLength + chunk.length > this.limits.maxPendingInputBytes) {
+        this.detach('decoder-backlog-limit', 'content decoder pending-input limit exceeded');
+        return;
       }
+      this.decoder.write(chunk);
     } catch (error) {
       this.detach('decoder-error', error instanceof Error ? error.message : String(error));
     }

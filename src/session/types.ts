@@ -6,6 +6,7 @@ import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
 import type { AgentId, TransientFailureKind } from '../docker/agent-adapter.js';
 import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
+import type { WorkflowId } from '../workflow/types.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -306,6 +307,11 @@ export interface EscalationRequest {
  * bundle while any session is still holding it.
  */
 export interface WorkflowBorrowOptions {
+  /** Workflow run and logical state used to attribute LLM statistics. */
+  readonly workflowRunId?: WorkflowId;
+  readonly stateId?: string;
+  readonly personaId?: string;
+
   /**
    * Pre-built Docker infrastructure bundle. When set, the session
    * factory borrows this bundle instead of creating its own, and the

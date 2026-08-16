@@ -51,6 +51,10 @@ export const USER_CONFIG_DEFAULTS = {
     maxAgeDays: 7,
     sweepIntervalHours: 24,
   },
+  statistics: {
+    enabled: true,
+    retentionDays: 90,
+  },
 } as const;
 
 export const ESCALATION_TIMEOUT_MIN = 30;
@@ -578,8 +582,8 @@ export interface ResolvedUserConfig {
    * docs/designs/mitm-token-trajectory-capture.md §10.
    */
   readonly capture?: { readonly enabled: boolean };
-  /** Content-free local LLM usage statistics. Optional for compatibility with injected test configs. */
-  readonly statistics?: { readonly enabled: boolean; readonly retentionDays: number | null };
+  /** Content-free local LLM usage statistics. */
+  readonly statistics: { readonly enabled: boolean; readonly retentionDays: number | null };
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -624,6 +628,7 @@ const DEFAULT_CONFIG_CONTENT =
       preferredMode: USER_CONFIG_DEFAULTS.preferredMode,
       dockerResources: USER_CONFIG_DEFAULTS.dockerResources,
       snapshot: USER_CONFIG_DEFAULTS.snapshot,
+      statistics: USER_CONFIG_DEFAULTS.statistics,
     },
     null,
     2,
@@ -939,8 +944,11 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     // resolver applies the `?? false` default (§10).
     ...(config.capture?.enabled !== undefined ? { capture: { enabled: config.capture.enabled } } : {}),
     statistics: {
-      enabled: config.statistics?.enabled ?? true,
-      retentionDays: config.statistics?.retentionDays !== undefined ? config.statistics.retentionDays : 90,
+      enabled: config.statistics?.enabled ?? USER_CONFIG_DEFAULTS.statistics.enabled,
+      retentionDays:
+        config.statistics?.retentionDays !== undefined
+          ? config.statistics.retentionDays
+          : USER_CONFIG_DEFAULTS.statistics.retentionDays,
     },
   };
 }

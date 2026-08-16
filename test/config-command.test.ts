@@ -249,6 +249,22 @@ describe('config-command', () => {
     expect(mocks.outro).toHaveBeenCalledWith('No changes to save.');
   });
 
+  it('can explicitly opt out of default-on LLM statistics', async () => {
+    seedConfig(env.testHome, {});
+    mocks.select
+      .mockResolvedValueOnce('statistics')
+      .mockResolvedValueOnce('enabled')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    expect(readConfig(env.testHome).statistics).toEqual({ enabled: false, retentionDays: 90 });
+    const firstCall = mocks.select.mock.calls[0][0] as { options: { value: string }[] };
+    expect(firstCall.options.some((option) => option.value === 'statistics')).toBe(true);
+  });
+
   it('adding an openrouter profile writes the whole modelProviders block', async () => {
     seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
@@ -418,6 +434,7 @@ describe('computeDiff', () => {
       },
     },
     serverCredentials: {},
+    statistics: { enabled: true, retentionDays: 90 },
   };
 
   it('returns empty array when no changes', () => {
@@ -438,6 +455,12 @@ describe('computeDiff', () => {
     };
     const diffs = computeDiff(resolved, pending);
     expect(diffs).toEqual([['resourceBudget.maxSteps', { from: 200, to: null }]]);
+  });
+
+  it('reports statistics opt-out against the default-on resolved value', () => {
+    expect(computeDiff(resolved, { statistics: { enabled: false } })).toEqual([
+      ['statistics.enabled', { from: true, to: false }],
+    ]);
   });
 
   it('detects multiple changes across categories', () => {

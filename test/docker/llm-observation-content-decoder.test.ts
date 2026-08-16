@@ -1,4 +1,5 @@
 import * as zlib from 'node:zlib';
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { BoundedContentDecoder, type ContentDecoderFailure } from '../../src/docker/llm-observation/content-decoder.js';
 
@@ -45,6 +46,45 @@ describe('BoundedContentDecoder', () => {
     expect(result.failure).toBeUndefined();
     expect(result.state).toBe('ended');
     expect(result.body.equals(body)).toBe(true);
+  });
+
+  it.each([
+    ['gzip', zlib.gzipSync],
+    ['deflate', zlib.deflateSync],
+    ['br', zlib.brotliCompressSync],
+  ] as const)('drains normal %s high-water signals instead of detaching', async (encoding, compress) => {
+    const largeBody = randomBytes(256 * 1024);
+    const wire = compress(largeBody);
+    expect(wire.length).toBeGreaterThan(64 * 1024);
+
+    const result = await decode(encoding, wire);
+
+    expect(result.failure).toBeUndefined();
+    expect(result.state).toBe('ended');
+    expect(result.body).toEqual(largeBody);
+  });
+
+  it('detaches when synchronous writes outrun the compressed-input backlog bound', async () => {
+    const wire = zlib.gzipSync(randomBytes(512 * 1024));
+    let failure: ContentDecoderFailure | undefined;
+    const decoder = new BoundedContentDecoder({
+      contentEncoding: 'gzip',
+      limits: {
+        maxCompressedBytes: wire.length + 1,
+        maxPendingInputBytes: 64 * 1024,
+      },
+      onDecodedChunk: () => {},
+      onFailure: (value) => {
+        failure = value;
+      },
+    });
+
+    for (let offset = 0; offset < wire.length; offset += 16 * 1024) {
+      decoder.write(Buffer.from(wire.subarray(offset, offset + 16 * 1024)));
+    }
+
+    expect(failure?.reason).toBe('decoder-backlog-limit');
+    expect(decoder.snapshot().state).toBe('detached');
   });
 
   it('detaches unsupported and stacked encodings without throwing', async () => {

@@ -75,6 +75,7 @@ describe('loadUserConfig', () => {
     expect(content.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
     expect(content.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(content.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
+    expect(content.statistics).toEqual(USER_CONFIG_DEFAULTS.statistics);
     // anthropicApiKey intentionally omitted from auto-created file
     expect(content.anthropicApiKey).toBeUndefined();
   });

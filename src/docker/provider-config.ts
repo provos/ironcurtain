@@ -167,7 +167,7 @@ export interface EndpointPattern {
   /**
    * Path pattern. Supports two forms:
    * - Exact match: '/v1/messages' (compared after stripping query string)
-   * - Glob with '*' segments: '/v1beta/models/STAR/generateContent'
+   * - Glob within a segment: '/v1beta/models/STAR:generateContent'
    *   (each '*' matches exactly one path segment [^/]+)
    *
    * Non-glob characters are regex-escaped before matching to prevent
@@ -672,23 +672,23 @@ export const googleProvider: ProviderConfig = {
   host: 'generativelanguage.googleapis.com',
   displayName: 'Google',
   allowedEndpoints: [
-    { method: 'POST', path: '/v1beta/models/*/generateContent' },
-    { method: 'POST', path: '/v1beta/models/*/streamGenerateContent' },
+    { method: 'POST', path: '/v1beta/models/*:generateContent' },
+    { method: 'POST', path: '/v1beta/models/*:streamGenerateContent' },
   ],
   captureEndpoints: [
-    { method: 'POST', path: '/v1beta/models/*/generateContent' },
-    { method: 'POST', path: '/v1beta/models/*/streamGenerateContent' },
+    { method: 'POST', path: '/v1beta/models/*:generateContent' },
+    { method: 'POST', path: '/v1beta/models/*:streamGenerateContent' },
   ],
   completionEndpoints: [
     {
       method: 'POST',
-      path: '/v1beta/models/*/generateContent',
+      path: '/v1beta/models/*:generateContent',
       protocol: 'google-generate-content',
       capabilities: { metricsSupport: 'full', trajectoryCapture: true },
     },
     {
       method: 'POST',
-      path: '/v1beta/models/*/streamGenerateContent',
+      path: '/v1beta/models/*:streamGenerateContent',
       protocol: 'google-generate-content',
       capabilities: { metricsSupport: 'full', trajectoryCapture: true },
     },

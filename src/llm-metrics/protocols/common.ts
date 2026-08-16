@@ -57,7 +57,7 @@ export function readResponseHeaderIdentifier(
   return null;
 }
 
-export function inspectCommonRequest(value: unknown): LlmRequestFacts {
+export function inspectCommonRequest(value: unknown, serviceTiers: readonly string[] = SERVICE_TIERS): LlmRequestFacts {
   const body = asRecord(value);
   const flags = new Set<string>();
   if (!body) flags.add('invalid_request_envelope');
@@ -66,7 +66,7 @@ export function inspectCommonRequest(value: unknown): LlmRequestFacts {
   const stream = body && 'stream' in body ? asBoolean(body['stream']) : null;
   if (body && 'stream' in body && stream === null) flags.add('invalid_boolean:stream');
 
-  const serviceTier = asKnownString(body?.['service_tier'], SERVICE_TIERS);
+  const serviceTier = asKnownString(body?.['service_tier'], serviceTiers);
   if (body?.['service_tier'] !== undefined && body['service_tier'] !== null && serviceTier === null) {
     flags.add('unknown_service_tier');
   }

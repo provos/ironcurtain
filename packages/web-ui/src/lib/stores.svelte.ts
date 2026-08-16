@@ -29,6 +29,7 @@ import type {
   ArtifactContentDto,
   MessageLogResponseDto,
   GetModelProvidersDto,
+  StatisticsConfigDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
   PtySink,
@@ -174,7 +175,7 @@ export const personasChangedGeneration = $state({ value: 0 });
 
 /**
  * Monotonically increasing counter bumped on every `config.changed` server-push
- * event (a `config.setModelProviders` write). The Settings view reads `.value`
+ * event (for example a provider or statistics settings write). The Settings view reads `.value`
  * as a $effect dependency to refresh its locally-held provider-profile view,
  * mirroring `personasChangedGeneration`. Kept off appState because the config
  * view state lives in the route component, not the global store.
@@ -819,11 +820,10 @@ export async function hydratePersonaCompiles(): Promise<Set<string>> {
 
 // ── Config (modelProviders) RPC actions ────────────────────────────────
 //
-// `config.getModelProviders` is ungated (read); `config.setModelProviders` is
-// gated server-side on the daemon's `--allow-policy-mutation` flag (rejects with
-// POLICY_MUTATION_FORBIDDEN when off). The Settings view hides mutation controls
-// when `appState.daemonStatus.allowPolicyMutation` is false. A successful write
-// broadcasts a `config.changed` server-push event (bumps configChangedGeneration).
+// Config reads are ungated; writes are gated server-side on the daemon's
+// `--allow-policy-mutation` flag (rejects with POLICY_MUTATION_FORBIDDEN when
+// off). The Settings view hides mutation controls when the flag is false. A
+// successful write broadcasts `config.changed` (bumps configChangedGeneration).
 
 /**
  * Read the model-provider registry. Every openrouter profile's `apiKey` is
@@ -845,6 +845,14 @@ export async function setModelProviders(input: SetModelProvidersDto): Promise<Ge
     ...(input.default !== undefined ? { default: input.default } : {}),
     profiles: input.profiles,
   });
+}
+
+export async function getStatisticsConfig(): Promise<StatisticsConfigDto> {
+  return getWsClient().request<StatisticsConfigDto>('config.getStatistics', {});
+}
+
+export async function setStatisticsConfig(input: StatisticsConfigDto): Promise<StatisticsConfigDto> {
+  return getWsClient().request<StatisticsConfigDto>('config.setStatistics', { ...input });
 }
 
 /**

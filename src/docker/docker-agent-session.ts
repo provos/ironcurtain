@@ -113,6 +113,10 @@ export interface DockerAgentSessionDeps {
   readonly systemPromptOverride?: string;
   /** Qualified model ID ("provider:model-name") to use for this session's turns, overriding the adapter default. */
   readonly agentModelOverride?: string;
+  /** Content-free workflow dimensions attached to metrics leases. */
+  readonly metricsStateId?: string;
+  readonly metricsPersonaId?: string;
+  readonly metricsWorkflowRunId?: string;
   readonly onEscalation?: (request: EscalationRequest) => void;
   readonly onEscalationExpired?: () => void;
   readonly onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
@@ -126,6 +130,9 @@ export class DockerAgentSession implements Session {
   private readonly infra: DockerInfrastructure;
   private readonly ownsInfra: boolean;
   private readonly agentModelOverride?: string;
+  private readonly metricsStateId?: string;
+  private readonly metricsPersonaId?: string;
+  private readonly metricsWorkflowRunId?: string;
   private readonly systemPrompt: string;
 
   private status: SessionStatus = 'initializing';
@@ -179,6 +186,9 @@ export class DockerAgentSession implements Session {
     this.infra = deps.infra;
     this.ownsInfra = deps.ownsInfra;
     this.agentModelOverride = deps.agentModelOverride;
+    this.metricsStateId = deps.metricsStateId;
+    this.metricsPersonaId = deps.metricsPersonaId;
+    this.metricsWorkflowRunId = deps.metricsWorkflowRunId;
     this.systemPrompt = deps.systemPromptOverride ?? deps.infra.systemPrompt;
     this.onEscalation = deps.onEscalation;
     this.onEscalationExpired = deps.onEscalationExpired;
@@ -342,7 +352,9 @@ export class DockerAgentSession implements Session {
         agentConversationId: this.agentConversationId,
         turnId,
         bundleId: this.infra.bundleId,
-        workflowRunId: this.infra.workflowId,
+        workflowRunId: this.metricsWorkflowRunId ?? this.infra.workflowId,
+        stateId: this.metricsStateId,
+        personaId: this.metricsPersonaId,
         agentId: this.infra.adapter.id,
       });
       const execStartMs = Date.now();

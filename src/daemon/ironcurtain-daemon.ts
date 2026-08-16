@@ -168,10 +168,10 @@ export class IronCurtainDaemon {
     logger.setup({ logFilePath: getDaemonLogPath('daemon') });
 
     const statisticsConfig = loadUserConfig({ readOnly: true }).statistics;
-    if (statisticsConfig?.enabled !== false) {
+    if (statisticsConfig.enabled) {
       try {
         const { acquireLlmMetricsRuntime } = await import('../llm-metrics/runtime.js');
-        this.metricsRuntime = await acquireLlmMetricsRuntime({ retentionDays: statisticsConfig?.retentionDays });
+        this.metricsRuntime = await acquireLlmMetricsRuntime({ retentionDays: statisticsConfig.retentionDays });
       } catch (error) {
         logger.warn(`[Daemon] LLM statistics unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }

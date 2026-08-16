@@ -297,7 +297,7 @@ export interface StatisticsTimeBucketDto {
 }
 
 export interface StatisticsDimensionValueDto {
-  readonly value: string | null;
+  readonly value: string | boolean | null;
   readonly count: number;
 }
 
@@ -313,6 +313,8 @@ export interface StatisticsRepositoryHealthDto {
   readonly queuedRecords: number;
   readonly queuedBytes: number;
   readonly lastError: string | null;
+  readonly readerState: 'idle' | 'starting' | 'ready' | 'unavailable' | 'closed';
+  readonly readerLastError: string | null;
 }
 
 export interface StatisticsCapabilitiesDto {
@@ -864,6 +866,11 @@ export interface GetModelProvidersDto {
 export interface SetModelProvidersDto {
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+export interface StatisticsConfigDto {
+  readonly enabled: boolean;
+  readonly retentionDays: number | null;
 }
 
 /**

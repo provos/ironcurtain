@@ -647,7 +647,7 @@ export async function prepareDockerInfrastructure(
   // off. Consumers pass the raw override only — they never re-resolve
   // against `userConfig.capture?.enabled`.
   const captureEnabled = captureInput ? (captureInput.override ?? config.userConfig.capture?.enabled ?? false) : false;
-  const statisticsEnabled = config.userConfig.statistics?.enabled !== false;
+  const statisticsEnabled = config.userConfig.statistics.enabled;
   const metricsCapable =
     statisticsEnabled &&
     providerMappings.some((mapping) => hasMetricsCapableCompletionEndpoint(mapping.config.completionEndpoints));
@@ -763,7 +763,7 @@ export async function prepareDockerInfrastructure(
   if (metricsCapable) {
     try {
       metricsRuntime = await acquireLlmMetricsRuntime({
-        retentionDays: config.userConfig.statistics?.retentionDays,
+        retentionDays: config.userConfig.statistics.retentionDays,
       });
     } catch (error) {
       logger.warn(`LLM statistics persistence unavailable: ${errorMessage(error)}`);

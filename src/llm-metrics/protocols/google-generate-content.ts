@@ -39,6 +39,75 @@ interface GoogleUsageValues {
   total: number | null;
 }
 
+type GoogleAdditiveUsageField = 'prompt' | 'candidates' | 'thoughts' | 'toolUsePrompt';
+
+interface GoogleUsageSnapshot {
+  readonly values: GoogleUsageValues;
+  readonly derived: ReadonlySet<GoogleAdditiveUsageField>;
+}
+
+const GOOGLE_ADDITIVE_USAGE_FIELDS = [
+  ['prompt', 'promptTokenCount'],
+  ['candidates', 'candidatesTokenCount'],
+  ['thoughts', 'thoughtsTokenCount'],
+  ['toolUsePrompt', 'toolUsePromptTokenCount'],
+] as const satisfies readonly (readonly [GoogleAdditiveUsageField, string])[];
+
+/**
+ * Google totalTokenCount is additive over prompt, tool-use prompt,
+ * candidates, and thoughts. cachedContentTokenCount is a subset of prompt and
+ * is deliberately excluded. Missing additive fields are exact only when the
+ * non-negative remainder forces them all to zero or leaves one sole unknown.
+ */
+function reconcileGoogleUsage(
+  usage: Record<string, unknown>,
+  values: GoogleUsageValues,
+  flags: Set<string>,
+): GoogleUsageSnapshot {
+  if (values.total === null) return { values, derived: new Set() };
+
+  const missing: GoogleAdditiveUsageField[] = [];
+  let knownTotal = 0;
+  for (const [field, wireField] of GOOGLE_ADDITIVE_USAGE_FIELDS) {
+    const value = values[field];
+    if (value === null) {
+      // An explicitly invalid count is not an omitted optional component and
+      // must not be repaired from a second, potentially contradictory field.
+      if (wireField in usage && usage[wireField] !== null) return { values, derived: new Set() };
+      missing.push(field);
+      continue;
+    }
+    knownTotal += value;
+    if (!Number.isSafeInteger(knownTotal)) {
+      flags.add('contradictory_usage:provider_total');
+      return { values, derived: new Set() };
+    }
+  }
+
+  const remainder = values.total - knownTotal;
+  if (remainder < 0 || (missing.length === 0 && remainder !== 0)) {
+    flags.add('contradictory_usage:provider_total');
+    return { values, derived: new Set() };
+  }
+  if (missing.length === 0 || (remainder !== 0 && missing.length > 1)) {
+    return { values, derived: new Set() };
+  }
+
+  const reconciled = { ...values };
+  const derived = new Set<GoogleAdditiveUsageField>();
+  if (remainder === 0) {
+    for (const field of missing) {
+      reconciled[field] = 0;
+      derived.add(field);
+    }
+  } else {
+    const field = missing[0];
+    reconciled[field] = remainder;
+    derived.add(field);
+  }
+  return { values: reconciled, derived };
+}
+
 function googleFinishReason(reason: unknown): {
   stop: NormalizedStopReason;
   termination: NormalizedTermination;
@@ -105,6 +174,7 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
   private refusal: boolean | null = null;
   private refusalSource: RefusalSource = 'not_reported';
   private sawUsage = false;
+  private sawAuthoritativeUsage = false;
   private usage: GoogleUsageValues = {
     prompt: null,
     cached: null,
@@ -113,6 +183,7 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
     toolUsePrompt: null,
     total: null,
   };
+  private readonly derivedUsageFields = new Set<GoogleAdditiveUsageField>();
   private readonly flags = new Set<string>();
 
   observeResponseHeaders(headers: GatewayResponseHeaders): void {
@@ -126,7 +197,7 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
       return;
     }
     const alreadyTerminal = this.protocolTerminal;
-    this.observeResponse(response);
+    this.observeResponse(response, true);
     if (alreadyTerminal) this.flags.add('duplicate_protocol_terminal');
     this.protocolTerminal = true;
   }
@@ -137,7 +208,7 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
       this.flags.add('invalid_stream_event');
       return 'control';
     }
-    this.observeResponse(response);
+    this.observeResponse(response, false);
     let reasoning = false;
     for (const candidate of asArray(response['candidates']) ?? []) {
       const content = asRecord(asRecord(candidate)?.['content']);
@@ -165,23 +236,36 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
     if (cached !== null && prompt !== null && cached > prompt)
       this.flags.add('contradictory_usage:cache_exceeds_input');
     const canonicalTotal = addCounts(input, output);
+    if (this.usage.total !== null && canonicalTotal !== null && this.usage.total !== canonicalTotal) {
+      this.flags.add('contradictory_usage:provider_total');
+    }
     const invalid = [...this.flags].some((flag) => flag.startsWith('invalid_count:'));
     const usage = makeNormalizedUsage({
-      inputTokensReported: prompt,
+      inputTokensReported: this.derivedUsageFields.has('prompt') ? null : prompt,
       inputTokensTotal: input,
       inputTokensAccuracy: input === null ? 'unknown' : 'derived_exact',
       inputTokensUncached: cached !== null && cached <= (prompt ?? -1) ? uncached : null,
       cacheReadInputTokens: cached,
       cacheWriteInputTokens: null,
       toolUseInputTokens: this.usage.toolUsePrompt,
-      outputTokensReported: this.usage.candidates,
+      outputTokensReported: this.derivedUsageFields.has('candidates') ? null : this.usage.candidates,
       outputTokenSemantics: 'excludes_thinking',
       outputTokensTotal: output,
       outputTokensAccuracy: output === null ? 'unknown' : 'derived_exact',
       thinkingTokens: this.usage.thoughts,
-      thinkingTokensAccuracy: this.usage.thoughts === null ? 'unknown' : 'reported_exact',
+      thinkingTokensAccuracy:
+        this.usage.thoughts === null
+          ? 'unknown'
+          : this.derivedUsageFields.has('thoughts')
+            ? 'derived_exact'
+            : 'reported_exact',
       nonThinkingOutputTokens: this.usage.candidates,
-      nonThinkingOutputTokensAccuracy: this.usage.candidates === null ? 'unknown' : 'reported_exact',
+      nonThinkingOutputTokensAccuracy:
+        this.usage.candidates === null
+          ? 'unknown'
+          : this.derivedUsageFields.has('candidates')
+            ? 'derived_exact'
+            : 'reported_exact',
       providerTotalTokens: this.usage.total,
       canonicalTotalTokens: canonicalTotal,
       usageSource: this.sawUsage ? 'google_usage_metadata' : null,
@@ -212,12 +296,12 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
     };
   }
 
-  private observeResponse(response: Record<string, unknown>): void {
+  private observeResponse(response: Record<string, unknown>, wholeJsonResponse: boolean): void {
     const model = readIdentifier(response, 'modelVersion', this.flags);
     const id = readIdentifier(response, 'responseId', this.flags);
     if (model !== null) this.responseModel = model;
     if (id !== null) this.providerResponseId = id;
-    this.observeUsage(asRecord(response['usageMetadata']));
+    let terminalUsage = wholeJsonResponse;
     const promptFeedback = asRecord(response['promptFeedback']);
     if (promptFeedback?.['blockReason'] !== undefined) {
       this.stopReason = 'content_filter';
@@ -225,6 +309,7 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
       this.refusal = true;
       this.refusalSource = 'prompt_feedback';
       this.protocolTerminal = true;
+      terminalUsage = true;
     }
     for (const candidate of asArray(response['candidates']) ?? []) {
       const candidateRecord = asRecord(candidate);
@@ -238,13 +323,15 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
       this.refusal = mapped.refusal;
       this.refusalSource = mapped.source;
       this.protocolTerminal = true;
+      terminalUsage = true;
     }
+    this.observeUsage(asRecord(response['usageMetadata']), terminalUsage);
   }
 
-  private observeUsage(usage: Record<string, unknown> | undefined): void {
+  private observeUsage(usage: Record<string, unknown> | undefined, authoritative: boolean): void {
     if (!usage) return;
     this.sawUsage = true;
-    const next: GoogleUsageValues = {
+    const raw: GoogleUsageValues = {
       prompt: readCount(usage, 'promptTokenCount', this.flags),
       cached: readCount(usage, 'cachedContentTokenCount', this.flags),
       candidates: readCount(usage, 'candidatesTokenCount', this.flags),
@@ -252,13 +339,23 @@ export class GoogleGenerateContentAccumulator implements LlmProtocolAccumulator 
       toolUsePrompt: readCount(usage, 'toolUsePromptTokenCount', this.flags),
       total: readCount(usage, 'totalTokenCount', this.flags),
     };
-    for (const field of Object.keys(next) as (keyof GoogleUsageValues)[]) {
-      const candidate = next[field];
-      if (candidate === null) continue;
+    const next = reconcileGoogleUsage(usage, raw, this.flags);
+    if (authoritative && this.sawAuthoritativeUsage) this.flags.add('duplicate_terminal_usage');
+    for (const field of Object.keys(next.values) as (keyof GoogleUsageValues)[]) {
+      const candidate = next.values[field];
       const previous = this.usage[field];
-      if (previous !== null && candidate < previous) this.flags.add(`regressing_cumulative_usage:${field}`);
-      this.usage[field] = candidate;
+      if (candidate !== null && previous !== null && candidate < previous) {
+        this.flags.add(`regressing_cumulative_usage:${field}`);
+      }
+      if (authoritative || !this.sawAuthoritativeUsage) {
+        this.usage[field] = candidate;
+        if (field !== 'cached' && field !== 'total') {
+          if (candidate !== null && next.derived.has(field)) this.derivedUsageFields.add(field);
+          else this.derivedUsageFields.delete(field);
+        }
+      }
     }
+    if (authoritative) this.sawAuthoritativeUsage = true;
   }
 }
 

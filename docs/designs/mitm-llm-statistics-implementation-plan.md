@@ -50,16 +50,16 @@ Exact per-session, per-state, per-mode, and `getBudgetStatus()` accounting must 
 
 ## 3. Proposals considered
 
-| Proposal | Advantages | Decision |
-|---|---|---|
-| Extend `TokenStreamEvent.message_end` and persist bus events | Small local change; existing session subscription | Rejected as the authoritative path: content-bearing, live-only, duplicate-terminal and normalization gaps, no exchange identity or replay. |
-| Derive metrics from trajectory records | Existing exchange IDs, timestamps, and usage objects | Rejected: opt-in, body-bearing, different privacy/retention contract, incomplete protocol coverage. |
-| Add another host/path metrics classifier in `mitm-proxy.ts` | Bounded initial patch | Rejected: repeats the drift already present among token extraction, trajectory capture, and OpenRouter path classification. |
-| Content-free exchange observer + protocol/gateway adapters + durable repository | Correct provider semantics, privacy boundary, future query surface | **Selected.** |
-| Accept mutable fan-out attribution and label it best-effort | Avoids runtime plumbing | Rejected for session statistics. Bundle-only rows may be retained as explicitly ambiguous degradation, but are excluded from per-session claims and totals. |
-| Immutable per-invocation attribution lease | Correct across concurrent lanes and reverse-order completions | **Selected and release-gating.** |
-| Per-session JSONL | No new storage runtime | Rejected as the primary store: expensive longitudinal queries, awkward multi-process discovery/indexing, and more server work for visualizations. |
-| SQLite behind a repository interface | Indexed raw exchange data, WAL readers/writers, migrations, future charts | **Selected.** Use a worker and bounded queue; never run synchronous database work on the proxy event loop. |
+| Proposal                                                                        | Advantages                                                                | Decision                                                                                                                                                    |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Extend `TokenStreamEvent.message_end` and persist bus events                    | Small local change; existing session subscription                         | Rejected as the authoritative path: content-bearing, live-only, duplicate-terminal and normalization gaps, no exchange identity or replay.                  |
+| Derive metrics from trajectory records                                          | Existing exchange IDs, timestamps, and usage objects                      | Rejected: opt-in, body-bearing, different privacy/retention contract, incomplete protocol coverage.                                                         |
+| Add another host/path metrics classifier in `mitm-proxy.ts`                     | Bounded initial patch                                                     | Rejected: repeats the drift already present among token extraction, trajectory capture, and OpenRouter path classification.                                 |
+| Content-free exchange observer + protocol/gateway adapters + durable repository | Correct provider semantics, privacy boundary, future query surface        | **Selected.**                                                                                                                                               |
+| Accept mutable fan-out attribution and label it best-effort                     | Avoids runtime plumbing                                                   | Rejected for session statistics. Bundle-only rows may be retained as explicitly ambiguous degradation, but are excluded from per-session claims and totals. |
+| Immutable per-invocation attribution lease                                      | Correct across concurrent lanes and reverse-order completions             | **Selected and release-gating.**                                                                                                                            |
+| Per-session JSONL                                                               | No new storage runtime                                                    | Rejected as the primary store: expensive longitudinal queries, awkward multi-process discovery/indexing, and more server work for visualizations.           |
+| SQLite behind a repository interface                                            | Indexed raw exchange data, WAL readers/writers, migrations, future charts | **Selected.** Use a worker and bounded queue; never run synchronous database work on the proxy event loop.                                                  |
 
 ### 3.1 Review record
 
@@ -151,10 +151,7 @@ interface CompletionEndpoint extends EndpointPattern {
   readonly protocol: LlmProtocolId;
   readonly capabilities: {
     readonly metricsSupport: 'full' | 'partial' | 'unsupported';
-    readonly streamingUsageNegotiation?:
-      | 'client_or_agent_adapter'
-      | 'rewrite_if_already_buffered'
-      | 'none';
+    readonly streamingUsageNegotiation?: 'client_or_agent_adapter' | 'rewrite_if_already_buffered' | 'none';
   };
 }
 
@@ -312,13 +309,13 @@ The implementation was qualified on this branch with:
 
 Never collapse model identity into one field:
 
-| Field | Meaning | Authority |
-|---|---|---|
-| `requested_model` | Model in the agent-facing request before IronCurtain rewrites | Exact when request parsing succeeds |
-| `forwarded_model` | Model in the final body IronCurtain actually sent to the upstream/gateway | Exact when outgoing parsing succeeds |
-| `response_model` | Normal protocol model identifier reported in the response | Provider-reported |
-| `served_model` | Backend model selected by a router/gateway | Only router/provider metadata; nullable |
-| `served_provider` | Backend provider selected by a router/gateway | Only router/provider metadata; nullable |
+| Field             | Meaning                                                                   | Authority                               |
+| ----------------- | ------------------------------------------------------------------------- | --------------------------------------- |
+| `requested_model` | Model in the agent-facing request before IronCurtain rewrites             | Exact when request parsing succeeds     |
+| `forwarded_model` | Model in the final body IronCurtain actually sent to the upstream/gateway | Exact when outgoing parsing succeeds    |
+| `response_model`  | Normal protocol model identifier reported in the response                 | Provider-reported                       |
+| `served_model`    | Backend model selected by a router/gateway                                | Only router/provider metadata; nullable |
+| `served_provider` | Backend provider selected by a router/gateway                             | Only router/provider metadata; nullable |
 
 Each reported identity has a source enum such as `request`, `forwarded_request`, `protocol_response`, `router_metadata`, `trusted_gateway_header`, or `not_exposed`.
 
@@ -342,11 +339,7 @@ interface NormalizedUsage {
   toolUseInputTokens: number | null;
 
   outputTokensReported: number | null;
-  outputTokenSemantics:
-    | 'includes_thinking'
-    | 'excludes_thinking'
-    | 'no_thinking_breakdown'
-    | 'unknown';
+  outputTokenSemantics: 'includes_thinking' | 'excludes_thinking' | 'no_thinking_breakdown' | 'unknown';
   outputTokensTotal: number | null; // normalized inclusive generated output
   thinkingTokens: number | null;
   nonThinkingOutputTokens: number | null;
@@ -459,7 +452,6 @@ Primary tables:
 - `llm_exchanges`: one immutable finalized row per `exchange_id`;
 - `llm_transport_attempts`: MITM upstream/auth attempts keyed by exchange and transport ordinal;
 - `llm_gateway_route_attempts`: gateway backend/model attempts keyed by exchange and gateway ordinal, with metadata authority/source;
-- `llm_metrics_gaps`: bounded operational gap counts/windows, not request content;
 - SQLite `user_version` plus explicit transactional migrations.
 
 Start with indexes on completion time, session/time, and provider plus served/routed model/time. Add workflow, profile, mode, outcome, and quality indexes only when query-plan/load benchmarks justify their write amplification.
@@ -480,7 +472,7 @@ Use `node:sqlite` in a dedicated worker and raise the Node engine floor from `>=
 - Retention is an elected/idempotent chunked job; processes do not concurrently vacuum or run unbounded deletes.
 - Multiple IronCurtain processes writing while the web UI reads must be supported and tested.
 
-The queue is intentionally not a durable journal. A hard process crash can lose its bounded in-memory tail. Before enabling durable observation, synchronously persist a process-run start marker; durably checkpoint monotonically increasing observed/finalized/enqueued counters at bounded intervals; and write a clean-end marker on flush. A crash then indicates possible loss since the last durable checkpoint, not exact missing rows. If the start marker cannot be written, persistence is visibly unhealthy and makes no durable-gap claim. The durability contract is transaction atomicity and idempotent duplicate insertion—not crash replay. Health during database/worker failure remains available in memory and rate-limited logs; `llm_metrics_gaps` is best-effort and cannot be the sole record of a failed database.
+The queue is intentionally not a durable journal. A hard process crash can lose its bounded in-memory tail. Before enabling durable observation, synchronously persist a process-run start marker; durably checkpoint monotonically increasing observed/finalized/enqueued counters at bounded intervals; and write a clean-end marker on flush. A crash then indicates possible loss since the last durable checkpoint, not exact missing rows. If the start marker cannot be written, persistence is visibly unhealthy and makes no durable-gap claim. The durability contract is transaction atomicity and idempotent duplicate insertion—not crash replay. Health during database/worker failure remains available in memory and rate-limited logs; the failed database cannot be the sole durable record of its own outage.
 
 There is no automatic backfill from trajectories or agent transcripts. Existing sessions legitimately have no records. A future offline importer must be explicit, versioned, and idempotent.
 

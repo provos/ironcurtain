@@ -109,6 +109,22 @@ describe('Anthropic Messages metrics adapter', () => {
     expect(accumulator.snapshot()).toMatchObject({ providerRequestId: 'request_123', providerResponseId: 'msg_123' });
   });
 
+  it('accepts Anthropic standard_only requests and treats pause_turn as a provider pause, not tool use', () => {
+    const adapter = new AnthropicMessagesAdapter();
+    expect(adapter.inspectRequest({ model: 'claude-opus-5', service_tier: 'standard_only' })).toMatchObject({
+      requestedServiceTier: 'standard_only',
+      qualityFlags: [],
+    });
+
+    const accumulator = adapter.createAccumulator();
+    accumulator.observeJsonResponse({ stop_reason: 'pause_turn' });
+    expect(accumulator.snapshot().outcome).toMatchObject({
+      providerStopReason: 'pause_turn',
+      termination: 'stop',
+      refusal: false,
+    });
+  });
+
   it('keeps unknown additive stop reasons out of the refusal denominator', () => {
     const accumulator = new AnthropicMessagesAdapter().createAccumulator();
     accumulator.observeJsonResponse({ stop_reason: 'future_stop_reason' });
@@ -505,6 +521,110 @@ describe('Google GenerateContent metrics adapter', () => {
     });
     expect(result.qualityFlags).toContain('regressing_cumulative_usage:prompt');
     expect(result.qualityFlags).toContain('regressing_cumulative_usage:candidates');
+  });
+
+  it('derives omitted zero-valued Google additive counters from an exact provider total', () => {
+    const accumulator = new GoogleGenerateContentAdapter().createAccumulator();
+    accumulator.observeJsonResponse({
+      candidates: [{ finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3, totalTokenCount: 7 },
+    });
+
+    expect(accumulator.snapshot().usage).toMatchObject({
+      inputTokensReported: 4,
+      inputTokensTotal: 4,
+      inputTokensUncached: null,
+      cacheReadInputTokens: null,
+      toolUseInputTokens: 0,
+      outputTokensReported: 3,
+      outputTokensTotal: 3,
+      thinkingTokens: 0,
+      thinkingTokensAccuracy: 'derived_exact',
+      nonThinkingOutputTokens: 3,
+      nonThinkingOutputTokensAccuracy: 'reported_exact',
+      providerTotalTokens: 7,
+      canonicalTotalTokens: 7,
+      usageCompleteness: 'complete',
+    });
+  });
+
+  it('derives one missing Google component but preserves ambiguous missing components as partial', () => {
+    const soleMissing = new GoogleGenerateContentAdapter().createAccumulator();
+    soleMissing.observeJsonResponse({
+      candidates: [{ finishReason: 'STOP' }],
+      usageMetadata: {
+        promptTokenCount: 4,
+        candidatesTokenCount: 3,
+        toolUsePromptTokenCount: 1,
+        totalTokenCount: 10,
+      },
+    });
+    expect(soleMissing.snapshot().usage).toMatchObject({
+      inputTokensTotal: 5,
+      outputTokensTotal: 5,
+      thinkingTokens: 2,
+      thinkingTokensAccuracy: 'derived_exact',
+      canonicalTotalTokens: 10,
+      usageCompleteness: 'complete',
+    });
+
+    const ambiguous = new GoogleGenerateContentAdapter().createAccumulator();
+    ambiguous.observeJsonResponse({
+      candidates: [{ finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3, totalTokenCount: 10 },
+    });
+    expect(ambiguous.snapshot().usage).toMatchObject({
+      toolUseInputTokens: null,
+      thinkingTokens: null,
+      inputTokensTotal: null,
+      outputTokensTotal: null,
+      canonicalTotalTokens: null,
+      providerTotalTokens: 10,
+      usageCompleteness: 'partial',
+    });
+  });
+
+  it('gives a terminal Google cumulative snapshot precedence over earlier and later non-terminal usage', () => {
+    const accumulator = new GoogleGenerateContentAdapter().createAccumulator();
+    accumulator.observeStreamEvent({
+      data: {
+        usageMetadata: {
+          promptTokenCount: 4,
+          candidatesTokenCount: 2,
+          thoughtsTokenCount: 2,
+          toolUsePromptTokenCount: 0,
+          totalTokenCount: 8,
+        },
+      },
+    });
+    accumulator.observeStreamEvent({
+      data: {
+        candidates: [{ finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3, totalTokenCount: 7 },
+      },
+    });
+    accumulator.observeStreamEvent({
+      data: {
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 100,
+          thoughtsTokenCount: 100,
+          toolUsePromptTokenCount: 100,
+          totalTokenCount: 400,
+        },
+      },
+    });
+
+    const result = accumulator.snapshot();
+    expect(result.usage).toMatchObject({
+      inputTokensTotal: 4,
+      outputTokensTotal: 3,
+      thinkingTokens: 0,
+      toolUseInputTokens: 0,
+      providerTotalTokens: 7,
+      canonicalTotalTokens: 7,
+    });
+    expect(result.qualityFlags).toContain('regressing_cumulative_usage:thoughts');
   });
 
   it('classifies prompt blocking without retaining block messages', () => {

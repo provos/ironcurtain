@@ -9,6 +9,7 @@ import { Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { LlmStatisticsQueryService } from '../src/llm-metrics/query-service.js';
+import { LlmMetricsRepositoryUnavailableError } from '../src/llm-metrics/persistence/repository.js';
 import { SqliteLlmMetricsRepository } from '../src/llm-metrics/persistence/sqlite-repository.js';
 import type { LlmExchangeCompleted } from '../src/llm-metrics/types.js';
 
@@ -275,6 +276,15 @@ describe('SQLite LLM metrics repository', () => {
         { value, count: 1 },
       ]);
     }
+    await expect(opened.repository.dimensionValues('streaming', { ...range, limit: 10 })).resolves.toEqual([
+      { value: true, count: 1 },
+    ]);
+    await expect(opened.repository.dimensionValues('refusal', { ...range, limit: 10 })).resolves.toEqual([
+      { value: false, count: 1 },
+    ]);
+    await expect(
+      opened.repository.scan({ ...range, limit: 10, filters: { streaming: [true], refusal: [false] } }),
+    ).resolves.toMatchObject([{ exchangeId: 'exchange-query-facts' }]);
 
     const service = new LlmStatisticsQueryService(opened.repository);
     await expect(
@@ -309,6 +319,90 @@ describe('SQLite LLM metrics repository', () => {
       },
     ]);
     await opened.repository.close();
+  });
+
+  it('rejects hostile SQLite query inputs without changing query structure or storage', async () => {
+    let readerWorkers = 0;
+    const opened = await repository({
+      readWorkerFactory: (url, options) => {
+        readerWorkers++;
+        return new Worker(url, {
+          ...options,
+          ...(url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {}),
+        });
+      },
+    });
+    opened.repository.enqueue(exchange('exchange-safe-query'));
+    const providerRecord = exchange('exchange-parameterized-provider');
+    opened.repository.enqueue({
+      ...providerRecord,
+      identity: {
+        ...providerRecord.identity,
+        servedProvider: { value: 'Google (SELECT FROM) & Co', source: 'router_metadata' },
+      },
+    });
+    await opened.repository.flush();
+    const range = { fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 };
+
+    await expect(
+      opened.repository.scan({
+        ...range,
+        filters: { servedProvider: ['Google (SELECT FROM) & Co'] },
+      }),
+    ).resolves.toMatchObject([{ exchangeId: 'exchange-parameterized-provider' }]);
+
+    await expect(
+      opened.repository.scan({
+        ...range,
+        filters: { servedModel: ["served-model' OR 1=1 --"] },
+      }),
+    ).rejects.toThrow(/Invalid servedModel filter/);
+    await expect(
+      opened.repository.scan({
+        ...range,
+        filters: { ['served_model) OR 1=1; DROP TABLE llm_exchanges; --']: ['served-model'] } as never,
+      }),
+    ).rejects.toThrow(/Invalid statistics filter/);
+    await expect(
+      opened.repository.dimensionValues('served_model) FROM llm_exchanges; --' as never, range),
+    ).rejects.toThrow(/Invalid statistics dimension/);
+
+    await expect(opened.repository.scan(range)).resolves.toHaveLength(2);
+    expect(readerWorkers).toBe(1);
+    await opened.repository.close();
+
+    const database = new DatabaseSync(opened.databasePath, { readOnly: true });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM llm_exchanges').get()).toMatchObject({ count: 2 });
+    database.close();
+  });
+
+  it('rejects response and attempt HTTP statuses outside 100 through 599', async () => {
+    const invalidRecords: LlmExchangeCompleted[] = [];
+    const response = exchange('invalid-response-status');
+    invalidRecords.push({ ...response, outcome: { ...response.outcome, responseStatus: 99 } });
+    const transport = exchange('invalid-transport-status');
+    invalidRecords.push({
+      ...transport,
+      transportAttempts: [{ ...transport.transportAttempts[0], responseStatus: 600 }],
+    });
+    const gateway = exchange('invalid-gateway-status');
+    invalidRecords.push({
+      ...gateway,
+      gatewayRouteAttempts: [{ ...gateway.gatewayRouteAttempts[0], status: 700 }],
+    });
+
+    for (const record of invalidRecords) {
+      const opened = await repository();
+      opened.repository.enqueue(record);
+      await opened.repository.flush();
+      expect(opened.repository.health()).toMatchObject({
+        state: 'degraded',
+        persisted: 0,
+        dropped: 1,
+        lastError: expect.stringMatching(/Invalid .*status/i),
+      });
+      await opened.repository.close();
+    }
   });
 
   it('persists bounded OpenRouter provider labels and the full adapter attempt cap', async () => {
@@ -446,6 +540,57 @@ describe('SQLite LLM metrics repository', () => {
     await opened.repository.close();
   });
 
+  it('prunes bounded orphaned retention metadata', async () => {
+    const opened = await repository();
+    const database = new DatabaseSync(opened.databasePath);
+    const insertRun = database.prepare(
+      `INSERT INTO llm_process_runs (
+         process_run_id, started_at_ms, last_checkpoint_at_ms,
+         observed_count, finalized_count, enqueued_count, clean_ended_at_ms
+       ) VALUES (?, 1, 2, 0, 0, 0, 3)`,
+    );
+    insertRun.run('orphaned-run');
+    database
+      .prepare(
+        `INSERT INTO llm_maintenance_leases (lease_name, owner_id, expires_at_ms)
+         VALUES ('expired-lease', 'old-owner', 1)`,
+      )
+      .run();
+    database.close();
+
+    await expect(opened.repository.deleteBefore(BASE_TIME)).resolves.toMatchObject({ status: 'complete' });
+
+    const verification = new DatabaseSync(opened.databasePath, { readOnly: true });
+    expect(
+      verification
+        .prepare("SELECT COUNT(*) AS count FROM llm_process_runs WHERE process_run_id = 'orphaned-run'")
+        .get(),
+    ).toMatchObject({ count: 0 });
+    expect(
+      verification
+        .prepare("SELECT COUNT(*) AS count FROM llm_maintenance_leases WHERE lease_name = 'expired-lease'")
+        .get(),
+    ).toMatchObject({ count: 0 });
+    verification.close();
+    await opened.repository.close();
+  });
+
+  it('indexes exchanges by process run for bounded metadata pruning', async () => {
+    const opened = await repository();
+    await opened.repository.close();
+
+    const database = new DatabaseSync(opened.databasePath, { readOnly: true });
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM pragma_index_list('llm_exchanges') WHERE name = ?")
+        .get('llm_exchanges_process_run_idx'),
+    ).toMatchObject({ count: 1 });
+    expect(
+      database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'llm_metrics_gaps'").get(),
+    ).toMatchObject({ count: 0 });
+    database.close();
+  });
+
   it('uses a stable deletion snapshot and a cross-process lease while writers continue', async () => {
     const opened = await repository({ processRunId: 'retention-owner-a' });
     const secondRepository = await SqliteLlmMetricsRepository.open({
@@ -523,6 +668,106 @@ describe('SQLite LLM metrics repository', () => {
       opened.repository.deleteBefore(BASE_TIME, { maxDurationMs: 1_000, leaseDurationMs: 999 }),
     ).rejects.toThrow(/must cover maxDurationMs/);
     expect(opened.repository.health().state).toBe('ready');
+    await opened.repository.close();
+  });
+
+  it('isolates a stalled reader from writer flushes and restarts reads lazily', async () => {
+    let readerWorkers = 0;
+    const opened = await repository({
+      readTimeoutMs: 50,
+      readWorkerFactory: (url, options) => {
+        readerWorkers++;
+        if (readerWorkers === 1) {
+          return new Worker(
+            `const { parentPort } = require('node:worker_threads');
+             parentPort.postMessage({ kind: 'ready', schemaVersion: 1 });
+             parentPort.on('message', () => {});`,
+            { eval: true },
+          );
+        }
+        return new Worker(url, {
+          ...options,
+          ...(url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {}),
+        });
+      },
+    });
+
+    expect(readerWorkers).toBe(0);
+    const stalledRead = opened.repository.scan({ fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 });
+    await delay(10);
+    expect(opened.repository.enqueue(exchange('exchange-during-stalled-read'))).toBe(true);
+    await expect(opened.repository.flush()).resolves.toBeUndefined();
+    expect(opened.repository.health()).toMatchObject({ state: 'ready', persisted: 1, dropped: 0 });
+    await expect(stalledRead).rejects.toBeInstanceOf(LlmMetricsRepositoryUnavailableError);
+    await expect(stalledRead).rejects.toThrow(/reader request timed out/);
+
+    await expect(
+      opened.repository.scan({ fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 }),
+    ).resolves.toMatchObject([{ exchangeId: 'exchange-during-stalled-read' }]);
+    expect(readerWorkers).toBe(2);
+    await opened.repository.close();
+  });
+
+  it('retires a reader after an operational failure without disabling writes', async () => {
+    let readerWorkers = 0;
+    const opened = await repository({
+      readWorkerFactory: (url, options) => {
+        readerWorkers++;
+        if (readerWorkers === 1) {
+          return new Worker(
+            `const { parentPort } = require('node:worker_threads');
+             parentPort.postMessage({ kind: 'ready', schemaVersion: 1 });
+             parentPort.on('message', (request) => parentPort.postMessage({
+               kind: 'error', id: request.id, message: 'simulated SQLite I/O failure', category: 'unavailable'
+             }));`,
+            { eval: true },
+          );
+        }
+        return new Worker(url, {
+          ...options,
+          ...(url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {}),
+        });
+      },
+    });
+    const query = { fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 };
+
+    await expect(opened.repository.scan(query)).rejects.toBeInstanceOf(LlmMetricsRepositoryUnavailableError);
+    await expect(new LlmStatisticsQueryService(opened.repository).capabilities()).resolves.toMatchObject({
+      available: false,
+      health: { readerState: 'unavailable', readerLastError: expect.stringMatching(/I\/O failure/) },
+    });
+    expect(opened.repository.enqueue(exchange('exchange-after-reader-failure'))).toBe(true);
+    await expect(opened.repository.flush()).resolves.toBeUndefined();
+    await expect(opened.repository.scan(query)).resolves.toMatchObject([
+      { exchangeId: 'exchange-after-reader-failure' },
+    ]);
+    expect(readerWorkers).toBe(2);
+    expect(opened.repository.health()).toMatchObject({ state: 'ready', persisted: 1, dropped: 0 });
+    await expect(new LlmStatisticsQueryService(opened.repository).capabilities()).resolves.toMatchObject({
+      available: true,
+      health: { readerState: 'ready', readerLastError: null },
+    });
+    await opened.repository.close();
+  });
+
+  it('bounds reader admissions while its worker is stalled', async () => {
+    const opened = await repository({
+      readTimeoutMs: 50,
+      readWorkerFactory: () =>
+        new Worker(
+          `const { parentPort } = require('node:worker_threads');
+           parentPort.postMessage({ kind: 'ready', schemaVersion: 1 });
+           parentPort.on('message', () => {});`,
+          { eval: true },
+        ),
+    });
+    const query = { fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 };
+    const admitted = Array.from({ length: 64 }, () => opened.repository.scan(query));
+    const settlements = Promise.allSettled(admitted);
+
+    await expect(opened.repository.scan(query)).rejects.toThrow(/reader request limit reached/);
+    expect((await settlements).every((result) => result.status === 'rejected')).toBe(true);
+    expect(opened.repository.health()).toMatchObject({ state: 'ready', dropped: 0 });
     await opened.repository.close();
   });
 
@@ -701,6 +946,13 @@ describe('LLM statistics query service', () => {
           dimension: 'servedModel',
         }),
       ).toEqual([{ value: 'served-model', count: 2 }]);
+      expect(await service.dimensions({ fromMs: BASE_TIME, toMs: BASE_TIME + 2_000, dimension: 'streaming' })).toEqual([
+        { value: true, count: 2 },
+      ]);
+      expect(await service.dimensions({ fromMs: BASE_TIME, toMs: BASE_TIME + 2_000, dimension: 'refusal' })).toEqual([
+        { value: false, count: 1 },
+        { value: true, count: 1 },
+      ]);
       expect(await service.sessionTotals('session-1')).toMatchObject({
         exchanges: 2,
         inputTokens: 200,

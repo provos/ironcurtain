@@ -11,12 +11,28 @@ import type {
   StoredLlmExchange,
 } from './repository.js';
 import { LLM_METRICS_SCHEMA_VERSION, migrateLlmMetricsDatabase } from './migrations.js';
+import { SQLITE_BUSY_TIMEOUT_MS, withSqliteBusyRetry } from './sqlite-busy-retry.js';
+import {
+  MAX_STATISTICS_FILTER_VALUES,
+  STATISTICS_IDENTIFIER_MAX_LENGTH,
+  STATISTICS_IDENTIFIER_PATTERN,
+  STATISTICS_PROVIDER_IDENTIFIER_MAX_LENGTH,
+  STATISTICS_PROVIDER_IDENTIFIER_PATTERN,
+} from '../query-contract.js';
 
-export interface SqliteWorkerData {
+export interface SqliteWriterWorkerData {
+  readonly role: 'writer';
   readonly databasePath: string;
   readonly processRunId: string;
   readonly startedAtMs: number;
 }
+
+export interface SqliteReaderWorkerData {
+  readonly role: 'reader';
+  readonly databasePath: string;
+}
+
+export type SqliteWorkerData = SqliteWriterWorkerData | SqliteReaderWorkerData;
 
 export interface SqliteDeleteLeaseResult {
   readonly acquired: boolean;
@@ -73,6 +89,13 @@ export type SqliteWorkerRequest =
       readonly enqueued: number;
     };
 
+export type SqliteReaderWorkerRequest = Extract<
+  SqliteWorkerRequest,
+  { readonly kind: 'snapshotMaxSequence' | 'scan' | 'dimensionValues' }
+>;
+
+type SqliteWriterWorkerRequest = Exclude<SqliteWorkerRequest, SqliteReaderWorkerRequest>;
+
 export type SqliteWorkerResponse =
   | { readonly kind: 'ready'; readonly schemaVersion: number }
   | {
@@ -87,10 +110,14 @@ export type SqliteWorkerResponse =
         | readonly LlmDimensionCount[]
         | null;
     }
-  | { readonly kind: 'error'; readonly id?: number; readonly message: string };
+  | {
+      readonly kind: 'error';
+      readonly id?: number;
+      readonly message: string;
+      /** Reader errors distinguish rejected queries from broken storage. */
+      readonly category?: 'invalid_request' | 'unavailable';
+    };
 
-const MAX_IDENTIFIER_LENGTH = 256;
-const MAX_PROVIDER_IDENTIFIER_LENGTH = 128;
 const MAX_QUALITY_FLAGS = 64;
 /** Must match the bounded gateway-adapter contract. */
 const MAX_ATTEMPTS = 64;
@@ -100,9 +127,7 @@ const MAX_DELETE_CHUNK_SIZE = 1_000;
 const MIN_MAINTENANCE_LEASE_MS = 100;
 const MAX_MAINTENANCE_LEASE_MS = 60_000;
 const MAINTENANCE_BUSY_TIMEOUT_MS = 250;
-const NORMAL_BUSY_TIMEOUT_MS = 5_000;
-const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
-const SAFE_PROVIDER_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9 ._:/@()+&-]*$/;
+const NORMAL_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_MS;
 const ATTRIBUTION_QUALITIES = ['exact', 'bundle_only', 'unattributed'] as const;
 const GATEWAY_KINDS = ['direct', 'openrouter', 'ironcurtain', 'opaque'] as const;
 const IDENTITY_SOURCES = [
@@ -182,34 +207,7 @@ const FILTER_COLUMNS: Readonly<Record<keyof NonNullable<LlmExchangeScanQuery['fi
   bundleId: 'bundle_id',
 };
 
-const DIMENSION_COLUMNS: Readonly<Record<LlmStatisticsDimension, string>> = {
-  agent: 'agent_name',
-  logicalProvider: 'logical_provider',
-  gateway: 'gateway_kind',
-  protocol: 'protocol',
-  providerProfile: 'provider_profile_id',
-  requestedModel: 'requested_model',
-  forwardedModel: 'forwarded_model',
-  responseModel: 'response_model',
-  servedModel: 'served_model',
-  servedProvider: 'served_provider',
-  reasoningMode: 'reasoning_mode',
-  requestedServiceTier: 'requested_service_tier',
-  actualServiceTier: 'actual_service_tier',
-  inputMeasurementProvenance: 'input_measurement_provenance',
-  outputMeasurementProvenance: 'output_measurement_provenance',
-  thinkingMeasurementProvenance: 'thinking_measurement_provenance',
-  nonThinkingMeasurementProvenance: 'non_thinking_measurement_provenance',
-  speedMode: 'speed_mode',
-  streaming: 'streaming',
-  outcome: 'termination_category',
-  refusal: 'refusal',
-  usageCompleteness: 'usage_completeness',
-  attributionQuality: 'attribution_quality',
-  sessionId: 'session_id',
-  workflowRunId: 'workflow_run_id',
-  bundleId: 'bundle_id',
-};
+const DIMENSION_COLUMNS: Readonly<Record<LlmStatisticsDimension, string>> = FILTER_COLUMNS;
 
 const EXCHANGE_COLUMNS = `
   exchange_id AS exchangeId,
@@ -284,7 +282,7 @@ const EXCHANGE_COLUMNS = `
 `;
 
 const INSERT_EXCHANGE_SQL = `
-  INSERT OR IGNORE INTO llm_exchanges (
+  INSERT INTO llm_exchanges (
     exchange_id, schema_version, completed_at_ms, request_received_at_ms,
     session_id, turn_id, agent_conversation_id, bundle_id, workflow_run_id, state_id, persona_id,
     attribution_quality, agent_name, logical_provider, provider_profile_id, protocol, gateway_kind,
@@ -330,13 +328,17 @@ const INSERT_EXCHANGE_SQL = `
     $firstOutputOffsetMs, $lastOutputOffsetMs, $protocolTerminalOffsetMs,
     $upstreamResponseEndOffsetMs, $clientDeliveryEndOffsetMs, $clientDeliveryStatus,
     $qualityFlagsJson, $processRunId
-  )
+  ) ON CONFLICT(exchange_id) DO NOTHING
 `;
 
 type SqlParameters = Record<string, SQLInputValue>;
 
 function requiredIdentifier(value: string, field: string): string {
-  if (typeof value !== 'string' || value.length > MAX_IDENTIFIER_LENGTH || !SAFE_IDENTIFIER.test(value)) {
+  if (
+    typeof value !== 'string' ||
+    value.length > STATISTICS_IDENTIFIER_MAX_LENGTH ||
+    !STATISTICS_IDENTIFIER_PATTERN.test(value)
+  ) {
     throw new Error(`Invalid ${field}`);
   }
   return value;
@@ -355,8 +357,8 @@ function optionalProviderIdentifier(value: string | null, field: string): string
   if (value === null) return null;
   if (
     typeof value !== 'string' ||
-    value.length > MAX_PROVIDER_IDENTIFIER_LENGTH ||
-    !SAFE_PROVIDER_IDENTIFIER.test(value)
+    value.length > STATISTICS_PROVIDER_IDENTIFIER_MAX_LENGTH ||
+    !STATISTICS_PROVIDER_IDENTIFIER_PATTERN.test(value)
   ) {
     throw new Error(`Invalid ${field}`);
   }
@@ -626,12 +628,40 @@ function storedExchange(row: Record<string, SQLOutputValue>): StoredLlmExchange 
   };
 }
 
+class StatisticsQueryValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StatisticsQueryValidationError';
+  }
+}
+
+function invalidQuery(message: string): never {
+  throw new StatisticsQueryValidationError(message);
+}
+
+function queryIdentifier(value: string, field: string): string {
+  try {
+    return requiredIdentifier(value, field);
+  } catch {
+    return invalidQuery(`Invalid ${field}`);
+  }
+}
+
+function queryProviderIdentifier(value: string, field: string): string {
+  try {
+    return optionalProviderIdentifier(value, field) ?? invalidQuery(`Invalid ${field}`);
+  } catch (error) {
+    if (error instanceof StatisticsQueryValidationError) throw error;
+    return invalidQuery(`Invalid ${field}`);
+  }
+}
+
 function appendFilters(
   query: Pick<LlmExchangeScanQuery, 'fromMs' | 'toMs' | 'filters'>,
   params: SQLInputValue[],
 ): string[] {
   if (!Number.isSafeInteger(query.fromMs) || !Number.isSafeInteger(query.toMs) || query.fromMs > query.toMs) {
-    throw new Error('Invalid query time range');
+    invalidQuery('Invalid query time range');
   }
   const clauses = ['completed_at_ms >= ?', 'completed_at_ms <= ?'];
   params.push(query.fromMs, query.toMs);
@@ -640,19 +670,26 @@ function appendFilters(
     keyof NonNullable<LlmExchangeScanQuery['filters']>,
     readonly (string | boolean)[],
   ][]) {
-    if (values.length === 0) continue;
-    if (values.length > 20) throw new Error(`Too many ${filter} filter values`);
+    const untrustedValues: unknown = values;
+    if (!Array.isArray(untrustedValues)) invalidQuery(`Invalid ${filter} filter values`);
+    const filterValues = untrustedValues as readonly unknown[];
+    if (filterValues.length === 0) continue;
+    if (filterValues.length > MAX_STATISTICS_FILTER_VALUES) invalidQuery(`Too many ${filter} filter values`);
+    if (!Object.hasOwn(FILTER_COLUMNS, filter)) invalidQuery('Invalid statistics filter');
     const column = FILTER_COLUMNS[filter];
-    clauses.push(`${column} IN (${values.map(() => '?').join(', ')})`);
-    for (const value of values) {
+    clauses.push(`${column} IN (${filterValues.map(() => '?').join(', ')})`);
+    for (const value of filterValues) {
+      if (typeof value !== 'string' && typeof value !== 'boolean') {
+        invalidQuery(`Invalid ${filter} filter value`);
+      }
       params.push(
         typeof value === 'boolean'
           ? value
             ? 1
             : 0
           : filter === 'servedProvider'
-            ? optionalProviderIdentifier(value, `${filter} filter`)
-            : requiredIdentifier(value, `${filter} filter`),
+            ? queryProviderIdentifier(value, `${filter} filter`)
+            : queryIdentifier(value, `${filter} filter`),
       );
     }
   }
@@ -661,24 +698,24 @@ function appendFilters(
 
 function scan(database: DatabaseSync, query: LlmExchangeScanQuery): readonly StoredLlmExchange[] {
   if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > MAX_SCAN_LIMIT) {
-    throw new Error('Invalid scan limit');
+    invalidQuery('Invalid scan limit');
   }
   const params: SQLInputValue[] = [];
   const clauses = appendFilters(query, params);
   if (query.snapshotMaxSequence !== undefined) {
     if (!Number.isSafeInteger(query.snapshotMaxSequence) || query.snapshotMaxSequence < 0) {
-      throw new Error('Invalid snapshot sequence');
+      invalidQuery('Invalid snapshot sequence');
     }
     clauses.push('ingestion_sequence <= ?');
     params.push(query.snapshotMaxSequence);
   }
   if (query.cursor !== undefined) {
-    if (!Number.isSafeInteger(query.cursor.completedAtMs)) throw new Error('Invalid cursor timestamp');
+    if (!Number.isSafeInteger(query.cursor.completedAtMs)) invalidQuery('Invalid cursor timestamp');
     clauses.push('(completed_at_ms < ? OR (completed_at_ms = ? AND exchange_id < ?))');
     params.push(
       query.cursor.completedAtMs,
       query.cursor.completedAtMs,
-      requiredIdentifier(query.cursor.exchangeId, 'cursor exchangeId'),
+      queryIdentifier(query.cursor.exchangeId, 'cursor exchangeId'),
     );
   }
   params.push(query.limit);
@@ -698,8 +735,9 @@ function dimensionValues(
   query: Omit<LlmExchangeScanQuery, 'cursor'>,
 ): readonly LlmDimensionCount[] {
   if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > MAX_DIMENSION_LIMIT) {
-    throw new Error('Invalid dimension limit');
+    invalidQuery('Invalid dimension limit');
   }
+  if (!Object.hasOwn(DIMENSION_COLUMNS, dimension)) invalidQuery('Invalid statistics dimension');
   const column = DIMENSION_COLUMNS[dimension];
   const params: SQLInputValue[] = [];
   const clauses = appendFilters(query, params);
@@ -710,13 +748,23 @@ function dimensionValues(
         `WHERE ${clauses.join(' AND ')} GROUP BY ${column} ORDER BY count DESC, ${column} ASC LIMIT ?`,
     )
     .all(...params);
-  return rows.map((row) => ({
-    value: asNullableString(row.value, 'dimension value'),
-    count: asNumber(row.count, 'dimension count'),
-  }));
+  const booleanDimension = dimension === 'streaming' || dimension === 'refusal';
+  return rows.map((row) => {
+    let value: string | boolean | null;
+    if (!booleanDimension) {
+      value = asNullableString(row.value, 'dimension value');
+    } else if (row.value === null) {
+      value = null;
+    } else if (row.value === 0 || row.value === 1) {
+      value = row.value === 1;
+    } else {
+      throw new Error('Invalid boolean dimension value');
+    }
+    return { value, count: asNumber(row.count, 'dimension count') };
+  });
 }
 
-function initialize(data: SqliteWorkerData): { database: DatabaseSync; schemaVersion: number } {
+function initializeWriter(data: SqliteWriterWorkerData): { database: DatabaseSync; schemaVersion: number } {
   mkdirSync(dirname(data.databasePath), { recursive: true, mode: 0o700 });
   chmodSync(dirname(data.databasePath), 0o700);
   const database = new DatabaseSync(data.databasePath, {
@@ -726,15 +774,17 @@ function initialize(data: SqliteWorkerData): { database: DatabaseSync; schemaVer
   });
   try {
     const schemaVersion = migrateLlmMetricsDatabase(database);
-    database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
-    database
-      .prepare(
-        `INSERT INTO llm_process_runs (
-          process_run_id, started_at_ms, last_checkpoint_at_ms,
-          observed_count, finalized_count, enqueued_count, clean_ended_at_ms
-        ) VALUES (?, ?, ?, 0, 0, 0, NULL)`,
-      )
-      .run(requiredIdentifier(data.processRunId, 'processRunId'), data.startedAtMs, data.startedAtMs);
+    withSqliteBusyRetry(() => database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;'));
+    withSqliteBusyRetry(() =>
+      database
+        .prepare(
+          `INSERT INTO llm_process_runs (
+            process_run_id, started_at_ms, last_checkpoint_at_ms,
+            observed_count, finalized_count, enqueued_count, clean_ended_at_ms
+          ) VALUES (?, ?, ?, 0, 0, 0, NULL)`,
+        )
+        .run(requiredIdentifier(data.processRunId, 'processRunId'), data.startedAtMs, data.startedAtMs),
+    );
     chmodSync(data.databasePath, 0o600);
     for (const suffix of ['-wal', '-shm']) {
       try {
@@ -744,6 +794,23 @@ function initialize(data: SqliteWorkerData): { database: DatabaseSync; schemaVer
       }
     }
     return { database, schemaVersion };
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+}
+
+function initializeReader(data: SqliteReaderWorkerData): { database: DatabaseSync; schemaVersion: number } {
+  const database = new DatabaseSync(data.databasePath, {
+    readOnly: true,
+    enableForeignKeyConstraints: true,
+    enableDoubleQuotedStringLiterals: false,
+    allowExtension: false,
+  });
+  try {
+    assertCompatibleSchema(database);
+    database.exec(`PRAGMA query_only = ON; PRAGMA busy_timeout = ${NORMAL_BUSY_TIMEOUT_MS};`);
+    return { database, schemaVersion: LLM_METRICS_SCHEMA_VERSION };
   } catch (error) {
     database.close();
     throw error;
@@ -776,24 +843,53 @@ function withMaintenanceBusyTimeout<Value>(database: DatabaseSync, operation: ()
 }
 
 function immediateTransaction<Value>(database: DatabaseSync, operation: () => Value): Value {
-  database.exec('BEGIN IMMEDIATE');
-  try {
-    const value = operation();
-    database.exec('COMMIT');
-    return value;
-  } catch (error) {
+  return withSqliteBusyRetry(() => {
+    database.exec('BEGIN IMMEDIATE');
     try {
-      database.exec('ROLLBACK');
-    } catch {
-      // Preserve the operation error.
+      const value = operation();
+      database.exec('COMMIT');
+      return value;
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // Preserve the operation error.
+      }
+      throw error;
     }
-    throw error;
-  }
+  });
+}
+
+function pruneOrphanedRetentionMetadata(database: DatabaseSync, cutoffMs: number, nowMs: number): void {
+  database
+    .prepare(
+      `DELETE FROM llm_process_runs WHERE process_run_id IN (
+         SELECT run.process_run_id FROM llm_process_runs AS run
+         WHERE run.clean_ended_at_ms IS NOT NULL
+           AND run.clean_ended_at_ms < ?
+           AND NOT EXISTS (
+             SELECT 1 FROM llm_exchanges AS exchange WHERE exchange.process_run_id = run.process_run_id
+           )
+         ORDER BY run.clean_ended_at_ms ASC
+         LIMIT ?
+       )`,
+    )
+    .run(cutoffMs, MAX_DELETE_CHUNK_SIZE);
+  database
+    .prepare(
+      `DELETE FROM llm_maintenance_leases WHERE lease_name IN (
+         SELECT lease_name FROM llm_maintenance_leases
+         WHERE expires_at_ms <= ?
+         ORDER BY expires_at_ms ASC
+         LIMIT ?
+       )`,
+    )
+    .run(nowMs, MAX_DELETE_CHUNK_SIZE);
 }
 
 function beginDeleteBefore(
   database: DatabaseSync,
-  data: SqliteWorkerData,
+  data: SqliteWriterWorkerData,
   request: Extract<SqliteWorkerRequest, { kind: 'beginDeleteBefore' }>,
 ): SqliteDeleteLeaseResult {
   assertCompatibleSchema(database);
@@ -850,6 +946,8 @@ function beginDeleteBefore(
         .get(leaseName);
       if (lease?.ownerId !== data.processRunId) return { acquired: false, snapshotMaxSequence: null };
 
+      pruneOrphanedRetentionMetadata(database, cutoffMs, now);
+
       const snapshot =
         requestedSnapshot ??
         database
@@ -871,7 +969,7 @@ function beginDeleteBefore(
 
 function deleteBeforeChunk(
   database: DatabaseSync,
-  data: SqliteWorkerData,
+  data: SqliteWriterWorkerData,
   request: Extract<SqliteWorkerRequest, { kind: 'deleteBeforeChunk' }>,
 ): SqliteDeleteChunkResult {
   assertCompatibleSchema(database);
@@ -936,15 +1034,17 @@ function deleteBeforeChunk(
 
 function releaseMaintenanceLease(
   database: DatabaseSync,
-  data: SqliteWorkerData,
+  data: SqliteWriterWorkerData,
   request: Extract<SqliteWorkerRequest, { kind: 'releaseMaintenanceLease' }>,
 ): void {
   assertCompatibleSchema(database);
   const leaseName = requiredIdentifier(request.leaseName, 'maintenance lease name');
   withMaintenanceBusyTimeout(database, () => {
-    database
-      .prepare('DELETE FROM llm_maintenance_leases WHERE lease_name = ? AND owner_id = ?')
-      .run(leaseName, data.processRunId);
+    withSqliteBusyRetry(() =>
+      database
+        .prepare('DELETE FROM llm_maintenance_leases WHERE lease_name = ? AND owner_id = ?')
+        .run(leaseName, data.processRunId),
+    );
   });
 }
 
@@ -965,10 +1065,9 @@ function insertBatch(
       (exchange_id, ordinal, provider, model, status_code, selected, source)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
-  let inserted = 0;
-  let duplicates = 0;
-  database.exec('BEGIN IMMEDIATE');
-  try {
+  return immediateTransaction(database, () => {
+    let inserted = 0;
+    let duplicates = 0;
     for (const exchange of exchanges) {
       const result = insertExchange.run(exchangeParameters(exchange, processRunId));
       const changes = typeof result.changes === 'bigint' ? Number(result.changes) : result.changes;
@@ -1001,30 +1100,24 @@ function insertBatch(
         );
       }
     }
-    database.exec('COMMIT');
-  } catch (error) {
-    try {
-      database.exec('ROLLBACK');
-    } catch {
-      // Preserve the insertion error.
-    }
-    throw error;
-  }
-  return { inserted, duplicates };
+    return { inserted, duplicates };
+  });
 }
 
 function checkpoint(
   database: DatabaseSync,
-  data: SqliteWorkerData,
+  data: SqliteWriterWorkerData,
   request: Extract<SqliteWorkerRequest, { kind: 'checkpoint' }>,
 ): void {
-  database
-    .prepare(
-      `UPDATE llm_process_runs SET
-        last_checkpoint_at_ms = ?, observed_count = ?, finalized_count = ?, enqueued_count = ?
-       WHERE process_run_id = ?`,
-    )
-    .run(request.checkpointAtMs, request.observed, request.finalized, request.enqueued, data.processRunId);
+  withSqliteBusyRetry(() =>
+    database
+      .prepare(
+        `UPDATE llm_process_runs SET
+          last_checkpoint_at_ms = ?, observed_count = ?, finalized_count = ?, enqueued_count = ?
+         WHERE process_run_id = ?`,
+      )
+      .run(request.checkpointAtMs, request.observed, request.finalized, request.enqueued, data.processRunId),
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -1032,12 +1125,12 @@ function errorMessage(error: unknown): string {
   return message.substring(0, 500);
 }
 
-function startWorker(data: SqliteWorkerData): void {
+function startWriterWorker(data: SqliteWriterWorkerData): void {
   if (parentPort === null) throw new Error('SQLite metrics worker has no parent port');
   const port = parentPort;
   let database: DatabaseSync;
   try {
-    const initialized = initialize(data);
+    const initialized = initializeWriter(data);
     database = initialized.database;
     port.postMessage({ kind: 'ready', schemaVersion: initialized.schemaVersion } satisfies SqliteWorkerResponse);
   } catch (error) {
@@ -1046,7 +1139,7 @@ function startWorker(data: SqliteWorkerData): void {
   }
 
   let chain = Promise.resolve();
-  port.on('message', (request: SqliteWorkerRequest) => {
+  port.on('message', (request: SqliteWriterWorkerRequest) => {
     chain = chain.then(() => {
       try {
         let value: Extract<SqliteWorkerResponse, { kind: 'result' }>['value'];
@@ -1054,13 +1147,6 @@ function startWorker(data: SqliteWorkerData): void {
           case 'insert':
             value = insertBatch(database, data.processRunId, request.exchanges);
             break;
-          case 'snapshotMaxSequence': {
-            const row = database
-              .prepare('SELECT COALESCE(MAX(ingestion_sequence), 0) AS value FROM llm_exchanges')
-              .get();
-            value = asNumber(row?.value, 'snapshot sequence');
-            break;
-          }
           case 'beginDeleteBefore':
             value = beginDeleteBefore(database, data, request);
             break;
@@ -1070,12 +1156,6 @@ function startWorker(data: SqliteWorkerData): void {
           case 'releaseMaintenanceLease':
             releaseMaintenanceLease(database, data, request);
             value = null;
-            break;
-          case 'scan':
-            value = scan(database, request.query);
-            break;
-          case 'dimensionValues':
-            value = dimensionValues(database, request.dimension, request.query);
             break;
           case 'checkpoint':
             checkpoint(database, data, request);
@@ -1090,12 +1170,16 @@ function startWorker(data: SqliteWorkerData): void {
               enqueued: request.enqueued,
               checkpointAtMs: request.cleanEndedAtMs,
             });
-            database
-              .prepare('UPDATE llm_process_runs SET clean_ended_at_ms = ? WHERE process_run_id = ?')
-              .run(request.cleanEndedAtMs, data.processRunId);
+            withSqliteBusyRetry(() =>
+              database
+                .prepare('UPDATE llm_process_runs SET clean_ended_at_ms = ? WHERE process_run_id = ?')
+                .run(request.cleanEndedAtMs, data.processRunId),
+            );
             database.close();
             value = null;
             break;
+          default:
+            throw new Error('Invalid SQLite metrics writer request');
         }
         port.postMessage({ kind: 'result', id: request.id, value } satisfies SqliteWorkerResponse);
       } catch (error) {
@@ -1107,6 +1191,59 @@ function startWorker(data: SqliteWorkerData): void {
       }
     });
   });
+}
+
+function startReaderWorker(data: SqliteReaderWorkerData): void {
+  if (parentPort === null) throw new Error('SQLite metrics worker has no parent port');
+  const port = parentPort;
+  let database: DatabaseSync;
+  try {
+    const initialized = initializeReader(data);
+    database = initialized.database;
+    port.postMessage({ kind: 'ready', schemaVersion: initialized.schemaVersion } satisfies SqliteWorkerResponse);
+  } catch (error) {
+    port.postMessage({ kind: 'error', message: errorMessage(error) } satisfies SqliteWorkerResponse);
+    return;
+  }
+
+  let chain = Promise.resolve();
+  port.on('message', (request: SqliteReaderWorkerRequest) => {
+    chain = chain.then(() => {
+      try {
+        let value: Extract<SqliteWorkerResponse, { kind: 'result' }>['value'];
+        switch (request.kind) {
+          case 'snapshotMaxSequence': {
+            const row = database
+              .prepare('SELECT COALESCE(MAX(ingestion_sequence), 0) AS value FROM llm_exchanges')
+              .get();
+            value = asNumber(row?.value, 'snapshot sequence');
+            break;
+          }
+          case 'scan':
+            value = scan(database, request.query);
+            break;
+          case 'dimensionValues':
+            value = dimensionValues(database, request.dimension, request.query);
+            break;
+          default:
+            throw new Error('Invalid SQLite metrics reader request');
+        }
+        port.postMessage({ kind: 'result', id: request.id, value } satisfies SqliteWorkerResponse);
+      } catch (error) {
+        port.postMessage({
+          kind: 'error',
+          id: request.id,
+          message: errorMessage(error),
+          category: error instanceof StatisticsQueryValidationError ? 'invalid_request' : 'unavailable',
+        } satisfies SqliteWorkerResponse);
+      }
+    });
+  });
+}
+
+function startWorker(data: SqliteWorkerData): void {
+  if (data.role === 'reader') startReaderWorker(data);
+  else startWriterWorker(data);
 }
 
 if (!isMainThread) {

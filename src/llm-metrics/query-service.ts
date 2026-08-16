@@ -5,8 +5,10 @@ import type {
   LlmMetricsRepository,
   LlmMetricsRepositoryHealth,
   LlmStatisticsDimension,
+  LlmStatisticsDimensionValue,
   StoredLlmExchange,
 } from './persistence/repository.js';
+import { STATISTICS_BUCKET_SIZES_MS } from './query-contract.js';
 
 const DTO_VERSION = 1;
 const FORMULA_VERSION = 1;
@@ -19,7 +21,7 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_TIME_SERIES_BUCKETS = 1_000;
 const MAX_CURSOR_BYTES = 1_024;
 const MAX_RANGE_MS = 366 * 24 * 60 * 60 * 1_000;
-const ALLOWED_BUCKETS_MS = new Set([60_000, 300_000, 900_000, 3_600_000, 86_400_000]);
+const ALLOWED_BUCKETS_MS = new Set<number>(STATISTICS_BUCKET_SIZES_MS);
 const OUTPUT_CARDINALITY_ERROR = 'Statistics response exceeds the output-cardinality limit';
 const OUTPUT_BYTES_ERROR = 'Statistics response exceeds the output-byte limit';
 
@@ -164,7 +166,7 @@ export interface DimensionQuery extends StatisticsRangeQuery {
 }
 
 export interface DimensionValue {
-  readonly value: string | null;
+  readonly value: LlmStatisticsDimensionValue;
   readonly count: number;
 }
 
@@ -217,7 +219,9 @@ interface CursorPayload {
   readonly exchangeId: string;
 }
 
-const DIMENSION_VALUE: Readonly<Record<LlmStatisticsDimension, (row: StoredLlmExchange) => string | boolean | null>> = {
+const DIMENSION_VALUE: Readonly<
+  Record<LlmStatisticsDimension, (row: StoredLlmExchange) => LlmStatisticsDimensionValue>
+> = {
   agent: (row) => row.agent,
   logicalProvider: (row) => row.logicalProvider,
   gateway: (row) => row.gateway,
@@ -674,7 +678,10 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
   capabilities(): Promise<StatisticsCapabilities> {
     const health = this.repository.health();
     return Promise.resolve({
-      available: health.state === 'ready' || health.state === 'degraded',
+      available:
+        (health.state === 'ready' || health.state === 'degraded') &&
+        health.readerState !== 'unavailable' &&
+        health.readerState !== 'closed',
       dtoVersion: DTO_VERSION,
       formulaVersion: FORMULA_VERSION,
       schemaVersion: health.schemaVersion,

@@ -1,5 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+import { SQLITE_BUSY_TIMEOUT_MS, withSqliteBusyRetry } from './sqlite-busy-retry.js';
+
 export const LLM_METRICS_SCHEMA_VERSION = 1;
 
 /**
@@ -132,15 +134,6 @@ const MIGRATION_1 = `
     PRIMARY KEY (exchange_id, ordinal)
   ) STRICT;
 
-  CREATE TABLE IF NOT EXISTS llm_metrics_gaps (
-    process_run_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    window_started_at_ms INTEGER NOT NULL,
-    window_ended_at_ms INTEGER NOT NULL,
-    occurrence_count INTEGER NOT NULL,
-    PRIMARY KEY (process_run_id, kind, window_started_at_ms)
-  ) STRICT;
-
   CREATE TABLE IF NOT EXISTS llm_maintenance_leases (
     lease_name TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL,
@@ -155,6 +148,8 @@ const MIGRATION_1 = `
     ON llm_exchanges (logical_provider, served_model, completed_at_ms DESC);
   CREATE INDEX IF NOT EXISTS llm_exchanges_protocol_idx
     ON llm_exchanges (protocol, completed_at_ms DESC);
+  CREATE INDEX IF NOT EXISTS llm_exchanges_process_run_idx
+    ON llm_exchanges (process_run_id);
 `;
 
 const MIGRATIONS: Readonly<Partial<Record<number, string>>> = {
@@ -176,7 +171,7 @@ function readUserVersion(database: DatabaseSync): number {
  * both apply the same migration.
  */
 export function migrateLlmMetricsDatabase(database: DatabaseSync): number {
-  database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  database.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
 
   let version = readUserVersion(database);
   if (version > LLM_METRICS_SCHEMA_VERSION) {
@@ -186,36 +181,36 @@ export function migrateLlmMetricsDatabase(database: DatabaseSync): number {
   }
 
   while (version < LLM_METRICS_SCHEMA_VERSION) {
-    database.exec('BEGIN IMMEDIATE');
-    try {
-      version = readUserVersion(database);
-      if (version > LLM_METRICS_SCHEMA_VERSION) {
-        throw new Error(
-          `LLM metrics database schema ${version} is newer than supported schema ${LLM_METRICS_SCHEMA_VERSION}`,
-        );
-      }
-      if (version === LLM_METRICS_SCHEMA_VERSION) {
-        database.exec('COMMIT');
-        break;
-      }
-
-      const nextVersion = version + 1;
-      const sql = MIGRATIONS[nextVersion];
-      if (sql === undefined) {
-        throw new Error(`Missing LLM metrics migration ${nextVersion}`);
-      }
-      database.exec(sql);
-      database.exec(`PRAGMA user_version = ${nextVersion}`);
-      database.exec('COMMIT');
-      version = nextVersion;
-    } catch (error) {
+    version = withSqliteBusyRetry(() => {
+      database.exec('BEGIN IMMEDIATE');
       try {
-        database.exec('ROLLBACK');
-      } catch {
-        // Preserve the migration error; the rollback may fail when BEGIN did.
+        const lockedVersion = readUserVersion(database);
+        if (lockedVersion > LLM_METRICS_SCHEMA_VERSION) {
+          throw new Error(
+            `LLM metrics database schema ${lockedVersion} is newer than supported schema ${LLM_METRICS_SCHEMA_VERSION}`,
+          );
+        }
+        if (lockedVersion === LLM_METRICS_SCHEMA_VERSION) {
+          database.exec('COMMIT');
+          return lockedVersion;
+        }
+
+        const nextVersion = lockedVersion + 1;
+        const sql = MIGRATIONS[nextVersion];
+        if (sql === undefined) throw new Error(`Missing LLM metrics migration ${nextVersion}`);
+        database.exec(sql);
+        database.exec(`PRAGMA user_version = ${nextVersion}`);
+        database.exec('COMMIT');
+        return nextVersion;
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK');
+        } catch {
+          // Preserve the migration error; BEGIN may not have acquired the lock.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   return version;

@@ -4,6 +4,7 @@ import type {
   LlmExchangeFilters,
   LlmStatisticsDimension,
   StatisticsExchangeDto,
+  StatisticsDimensionValueDto,
 } from '../packages/web-ui/src/lib/types.js';
 
 describe('statistics frontend DTO types', () => {
@@ -50,5 +51,14 @@ describe('statistics frontend DTO types', () => {
     };
 
     expect(fields).toMatchObject({ gatewayGenerationId: 'generation-1', firstUpstreamBodyByteOffsetMs: 12.5 });
+  });
+
+  it('preserves boolean dimension values without string coercion', () => {
+    const values: readonly StatisticsDimensionValueDto[] = [
+      { value: true, count: 3 },
+      { value: false, count: 2 },
+      { value: null, count: 1 },
+    ];
+    expect(values.map((entry) => entry.value)).toEqual([true, false, null]);
   });
 });

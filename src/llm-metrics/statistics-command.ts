@@ -25,7 +25,7 @@ const STATISTICS_COMMAND_SPEC: CommandSpec = {
   description: 'Manage locally persisted LLM statistics',
   usage: ['ironcurtain statistics delete --before <ISO-date-or-epoch-ms>', 'ironcurtain statistics delete --all'],
   options: [
-    { flag: 'before', placeholder: '<time>', description: 'Delete rows completed before this time' },
+    { flag: 'before', placeholder: '<time>', description: 'Delete before epoch-ms or an ISO date with timezone' },
     { flag: 'all', description: 'Delete all rows present at command start' },
     { flag: 'help', short: 'h', description: 'Show this help' },
   ],
@@ -35,12 +35,28 @@ function usage(): string {
   return (
     `${formatHelp(STATISTICS_COMMAND_SPEC)}\n\n` +
     'Deletion is chunked and uses a start-of-command snapshot; newer rows are preserved.\n' +
+    'This performs logical SQLite row deletion, not secure erasure of free pages, WAL files, snapshots, or backups.\n' +
     'The statistics identity key is not deleted or rotated by this command.\n'
   );
 }
 
+function hasValidCalendarDate(value: string): boolean {
+  const [yearText, monthText, dayText] = value.slice(0, 10).split('-');
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
 function parseCutoff(value: string): number {
-  const numeric = /^\d+$/.test(value) ? Number(value) : Date.parse(value);
+  const isEpochMilliseconds = /^\d+$/.test(value);
+  const isUnambiguousIso = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(
+    value,
+  );
+  let numeric = Number.NaN;
+  if (isEpochMilliseconds) numeric = Number(value);
+  else if (isUnambiguousIso && hasValidCalendarDate(value)) numeric = Date.parse(value);
   if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > MAX_DATE_MS) {
     throw new Error(`Invalid statistics cutoff: ${value}`);
   }

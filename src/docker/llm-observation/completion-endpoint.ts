@@ -71,9 +71,15 @@ function segmentPatternsMayOverlap(left: string, right: string): boolean {
   if (!leftGlob && !rightGlob) return left === right;
   if (!leftGlob) return patternMatchesPath(right, left);
   if (!rightGlob) return patternMatchesPath(left, right);
-  // Exact glob-intersection is unnecessary for the small startup registry.
-  // Conservatively reject two wildcard segments unless another fixed segment
-  // proves their complete paths disjoint.
+  // Every built-in descriptor has at most one wildcard per segment. Two such
+  // patterns can overlap only when both their fixed prefixes and suffixes are
+  // compatible. Keep a conservative fallback for custom multi-wildcard
+  // descriptors rather than pretending to prove their intersection empty.
+  if (left.indexOf('*') !== left.lastIndexOf('*') || right.indexOf('*') !== right.lastIndexOf('*')) return true;
+  const [leftPrefix = '', leftSuffix = ''] = left.split('*');
+  const [rightPrefix = '', rightSuffix = ''] = right.split('*');
+  if (!leftPrefix.startsWith(rightPrefix) && !rightPrefix.startsWith(leftPrefix)) return false;
+  if (!leftSuffix.endsWith(rightSuffix) && !rightSuffix.endsWith(leftSuffix)) return false;
   return true;
 }
 

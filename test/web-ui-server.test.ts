@@ -325,6 +325,31 @@ describe('WebUiServer', () => {
       releaseSummaries?.();
       await vi.waitFor(() => expect(responses.filter((response) => response.ok)).toHaveLength(2));
     });
+
+    it('serves statistics.series through an authenticated WebSocket', async () => {
+      const buckets = [{ fromMs: 0, toMs: 60_000, summaries: [] }];
+      const statisticsReader = {
+        capabilities: vi.fn().mockResolvedValue({ available: true }),
+        summarize: vi.fn().mockResolvedValue([]),
+        timeSeries: vi.fn().mockResolvedValue(buckets),
+        listExchanges: vi.fn().mockResolvedValue({ items: [], nextCursor: null, snapshotMaxSequence: 0 }),
+        dimensions: vi.fn().mockResolvedValue([]),
+        sessionTotals: vi.fn().mockResolvedValue({}),
+      } as unknown as LlmStatisticsReader;
+      const srv = createServer({ statisticsReader });
+      const url = await srv.start();
+      const ws = createWs(`ws://127.0.0.1:${extractPort(url)}/ws?token=${extractToken(url)}`);
+      await new Promise<void>((resolve) => ws.on('open', resolve));
+
+      const responsePromise = new Promise<Record<string, unknown>>((resolve) => {
+        ws.on('message', (data: Buffer) => resolve(JSON.parse(data.toString()) as Record<string, unknown>));
+      });
+      const params = { fromMs: 0, toMs: 60_000, measures: ['requestCount'], bucketMs: 60_000 };
+      ws.send(JSON.stringify({ id: 'stats-series', method: 'statistics.series', params }));
+
+      await expect(responsePromise).resolves.toMatchObject({ id: 'stats-series', ok: true, payload: buckets });
+      expect(statisticsReader.timeSeries).toHaveBeenCalledWith(params);
+    });
   });
 
   describe('event broadcasting', () => {

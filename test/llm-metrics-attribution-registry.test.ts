@@ -39,6 +39,10 @@ describe('MetricsAttributionRegistry', () => {
     const registry = new MetricsAttributionRegistry();
     expect(() => registry.createLease('https://proxy.test', { sessionId: 'invalid' })).toThrow(/must use http/);
     expect(registry.registeredLeaseCount()).toBe(0);
+    expect(() => registry.createLease('http://proxy.test', { sessionId: 'invalid-timeout' }, -1)).toThrow(
+      /nonnegative finite/,
+    );
+    expect(registry.registeredLeaseCount()).toBe(0);
 
     const lease = registry.createLease('http://proxy.test', { sessionId: 'timed-out' }, 1);
     const handle = registry.acquire(new URL(lease.proxyUrl).password);

@@ -31,6 +31,21 @@ import { BoundedContentDecoder, type ContentDecoderFailure } from './llm-observa
 const EMPTY_BODY = Buffer.alloc(0);
 
 /**
+ * Trajectory capture predates the bounded metrics observer and deliberately
+ * records a whole exchange or poisons the whole session. Do not silently
+ * inherit metrics' smaller per-response limits here: a partial training record
+ * is not useful. These deliberately generous finite caps still protect the
+ * process from an unbounded response or a decompressor that falls behind.
+ */
+const TRAJECTORY_DECODER_LIMITS = Object.freeze({
+  maxCompressedBytes: 64 * 1024 * 1024,
+  maxDecodedBytes: 128 * 1024 * 1024,
+  maxExpansionRatio: 4_096,
+  expansionRatioSlackBytes: 4 * 1024 * 1024,
+  maxPendingInputBytes: 8 * 1024 * 1024,
+});
+
+/**
  * Decode a Buffer as UTF-8 if it round-trips losslessly, otherwise
  * fall back to base64. Mirrors the §6 invariant #6 ("bodyUtf8 honesty"):
  * never silently corrupt bytes by lossily decoding compressed or non-text
@@ -450,9 +465,13 @@ export function createResponseCaptureInlet(args: {
 
   const decoder = new BoundedContentDecoder({
     contentEncoding: encoding,
+    limits: TRAJECTORY_DECODER_LIMITS,
     onDecodedChunk(chunk) {
-      // Observation never applies backpressure to the real forwarding path.
-      if (!args.captureTap.write(chunk)) throw new Error('trajectory capture tap requested backpressure');
+      // Writable.write(false) is advisory and the tap has accepted the bytes.
+      // Production taps install their synchronous data consumer before this
+      // inlet is created, so honoring that signal must not poison capture or
+      // feed back into the independent forwarding path.
+      args.captureTap.write(chunk);
     },
     onEnd() {
       if (!args.captureTap.destroyed && !args.captureTap.writableEnded) args.captureTap.end();

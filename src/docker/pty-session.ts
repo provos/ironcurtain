@@ -22,6 +22,7 @@ import ora from 'ora';
 import type { IronCurtainConfig } from '../config/types.js';
 import { createSessionId, getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
 import { buildSessionConfig } from '../session/index.js';
+import { loadSessionMetadata } from '../session/session-metadata.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
@@ -262,6 +263,11 @@ async function runPtySessionAttempt(
   // the persisted snapshot name wins over any passed flag (which is
   // warn-ignored upstream). Fresh sessions use the passed flag.
   const providerProfileName = isResume ? resumeSnapshot.providerProfileName : options.providerProfileName;
+  // New snapshots carry persona directly. Session metadata is the backwards-
+  // compatible source for resumable PTYs created before that field existed.
+  const persona = isResume
+    ? (resumeSnapshot.persona ?? loadSessionMetadata(effectiveSessionId)?.persona)
+    : options.persona;
 
   // Delegate to shared buildSessionConfig() so PTY sessions get the same
   // config patching as standard Docker sessions (persona, memory MCP server
@@ -269,7 +275,7 @@ async function runPtySessionAttempt(
   const dirConfig = buildSessionConfig(options.config, effectiveSessionId, sessionId, {
     resumeSessionId: options.resumeSessionId,
     workspacePath: isResume ? resumeSnapshot.workspacePath : options.workspacePath,
-    persona: options.persona,
+    persona,
     providerProfileName,
     mode: options.mode,
   });
@@ -346,7 +352,7 @@ async function runPtySessionAttempt(
   let userExited = false;
 
   const claudeMdContent = buildDockerClaudeMd({
-    personaName: options.persona,
+    personaName: persona,
     memoryEnabled: dirConfig.memoryEnabled,
   });
 
@@ -385,6 +391,7 @@ async function runPtySessionAttempt(
     metricsLease = infra.beginMetricsInvocation?.({
       sessionId: captureSessionId,
       bundleId: infra.bundleId,
+      personaId: persona,
       agentId: infra.adapter.id,
     });
     invocationProxyUrl = metricsLease?.proxyUrl;
@@ -894,6 +901,7 @@ async function runPtySessionAttempt(
           exitCode: ptyExitCode,
           lastActivity: new Date().toISOString(),
           workspacePath: sandboxDir,
+          ...(persona !== undefined ? { persona } : {}),
           providerProfileName: resolvedProviderProfileName,
           agent: adapterIdForSnapshot,
           label: `${adapterDisplayNameForSnapshot ?? adapterIdForSnapshot} (interactive)`,

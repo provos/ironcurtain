@@ -46,6 +46,8 @@ const EMPTY_USAGE: AnthropicUsageState = {
   sawUsage: false,
 };
 
+const ANTHROPIC_REQUEST_SERVICE_TIERS = [...SERVICE_TIERS, 'standard_only'] as const;
+
 function stopReason(reason: unknown): {
   normalized: NormalizedStopReason;
   termination: NormalizedTermination;
@@ -62,7 +64,9 @@ function stopReason(reason: unknown): {
     case 'tool_use':
       return { normalized: 'tool_use', termination: 'tool' };
     case 'pause_turn':
-      return { normalized: 'pause_turn', termination: 'tool' };
+      // Anthropic paused the response for a continuation; it did not request
+      // a client tool. `stop` is the closest normalized terminal category.
+      return { normalized: 'pause_turn', termination: 'stop' };
     case 'refusal':
       return { normalized: 'refusal', termination: 'refusal' };
     case undefined:
@@ -280,7 +284,7 @@ export class AnthropicMessagesAdapter implements LlmProtocolAdapter {
   readonly id = 'anthropic-messages' as const;
 
   inspectRequest(value: unknown): LlmRequestFacts {
-    return inspectCommonRequest(value);
+    return inspectCommonRequest(value, ANTHROPIC_REQUEST_SERVICE_TIERS);
   }
 
   createAccumulator(): LlmProtocolAccumulator {

@@ -91,6 +91,8 @@ export type MethodName =
   // on the daemon's `--allow-policy-mutation` kill switch (POLICY_MUTATION_FORBIDDEN).
   | 'config.getModelProviders'
   | 'config.setModelProviders'
+  | 'config.getStatistics'
+  | 'config.setStatistics'
   // OpenRouter model-slug catalog for autocomplete/validation. Ungated read of
   // PUBLIC data (mirrors `config.getModelProviders`); no secret, no mutation.
   | 'config.listOpenrouterModels'
@@ -657,6 +659,12 @@ export interface GetModelProvidersDto {
 export interface SetModelProvidersDto {
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+/** Resolved local statistics settings. Collection defaults on; null disables automatic retention. */
+export interface StatisticsConfigDto {
+  readonly enabled: boolean;
+  readonly retentionDays: number | null;
 }
 
 /**

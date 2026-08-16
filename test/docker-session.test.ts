@@ -455,6 +455,9 @@ describe('DockerAgentSession', () => {
     deps = {
       ...deps,
       agentConversationId: 'conversation-test' as import('../src/session/types.js').AgentConversationId,
+      metricsStateId: 'review',
+      metricsPersonaId: 'security-reviewer',
+      metricsWorkflowRunId: 'workflow-exact',
       config: {
         ...deps.config,
         userConfig: {
@@ -474,6 +477,9 @@ describe('DockerAgentSession', () => {
         sessionId: 'test-session-id',
         agentConversationId: 'conversation-test',
         bundleId: 'test-session-id',
+        stateId: 'review',
+        personaId: 'security-reviewer',
+        workflowRunId: 'workflow-exact',
         turnId: expect.any(String),
       }),
     );

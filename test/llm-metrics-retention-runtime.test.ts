@@ -20,6 +20,8 @@ const repositoryMocks = vi.hoisted(() => {
     queuedRecords: 0,
     queuedBytes: 0,
     lastError: null,
+    readerState: 'idle',
+    readerLastError: null,
   };
   const repository: LlmMetricsRepository = {
     enqueue: vi.fn(() => true),

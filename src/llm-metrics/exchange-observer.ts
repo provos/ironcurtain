@@ -6,7 +6,7 @@ import type {
   ObservationConsumerDetached,
   ResponseObservationConsumer,
 } from '../docker/llm-observation/response-observation-hub.js';
-import type { SseEventFrame } from '../docker/llm-observation/sse-event-framer.js';
+import { DEFAULT_SSE_EVENT_FRAMER_LIMITS, type SseEventFrame } from '../docker/llm-observation/sse-event-framer.js';
 import type {
   GatewayResponseHeaders,
   IdentitySource,
@@ -146,7 +146,7 @@ export class LlmMetricsExchangeObserver {
   responseConsumer(streaming: boolean): ResponseObservationConsumer {
     return {
       id: `llm-metrics:${this.exchangeId}`,
-      maxDecodedBytes: MAX_JSON_RESPONSE_BYTES,
+      maxDecodedBytes: streaming ? DEFAULT_SSE_EVENT_FRAMER_LIMITS.maxStreamBytes : MAX_JSON_RESPONSE_BYTES,
       maxSseEvents: 100_000,
       ...(streaming
         ? { onSseEvent: (frame: SseEventFrame) => this.observeSseEvent(frame) }

@@ -17,6 +17,7 @@ describe('statistics management command', () => {
     const openRepository = vi.fn();
     await runStatisticsCommand(['--help'], { write, openRepository });
     expect(write).toHaveBeenCalledWith(expect.stringContaining('statistics delete --before'));
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('not secure erasure'));
     expect(openRepository).not.toHaveBeenCalled();
   });
 
@@ -77,6 +78,12 @@ describe('statistics management command', () => {
       runStatisticsCommand(['delete', '--all', '--before', '2026-08-15'], { openRepository }),
     ).rejects.toThrow(/either --before or --all/);
     await expect(runStatisticsCommand(['delete', '--before', 'not-a-date'], { openRepository })).rejects.toThrow(
+      /Invalid statistics cutoff/,
+    );
+    await expect(
+      runStatisticsCommand(['delete', '--before', '2026-08-15T12:00:00'], { openRepository }),
+    ).rejects.toThrow(/Invalid statistics cutoff/);
+    await expect(runStatisticsCommand(['delete', '--before', '2026-02-30'], { openRepository })).rejects.toThrow(
       /Invalid statistics cutoff/,
     );
     await expect(

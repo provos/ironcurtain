@@ -1,6 +1,7 @@
 import type { LlmExchangeCompleted } from '../types.js';
 
 export type LlmMetricsRepositoryState = 'starting' | 'ready' | 'degraded' | 'disabled' | 'closed';
+export type LlmMetricsReaderState = 'idle' | 'starting' | 'ready' | 'unavailable' | 'closed';
 
 export interface LlmMetricsRepositoryHealth {
   readonly state: LlmMetricsRepositoryState;
@@ -14,6 +15,8 @@ export interface LlmMetricsRepositoryHealth {
   readonly queuedRecords: number;
   readonly queuedBytes: number;
   readonly lastError: string | null;
+  readonly readerState: LlmMetricsReaderState;
+  readonly readerLastError: string | null;
 }
 
 export type LlmStatisticsDimension =
@@ -43,6 +46,8 @@ export type LlmStatisticsDimension =
   | 'sessionId'
   | 'workflowRunId'
   | 'bundleId';
+
+export type LlmStatisticsDimensionValue = string | boolean | null;
 
 export interface LlmExchangeFilters {
   readonly agent?: readonly string[];
@@ -162,7 +167,7 @@ export interface StoredLlmExchange {
 }
 
 export interface LlmDimensionCount {
-  readonly value: string | null;
+  readonly value: LlmStatisticsDimensionValue;
   readonly count: number;
 }
 

@@ -11,13 +11,16 @@ import {
   type LlmExchangeScanQuery,
   type LlmMetricsRepository,
   type LlmMetricsRepositoryHealth,
+  type LlmMetricsReaderState,
   type LlmStatisticsDimension,
   type StoredLlmExchange,
 } from './repository.js';
 import type {
   SqliteDeleteChunkResult,
   SqliteDeleteLeaseResult,
-  SqliteWorkerData,
+  SqliteReaderWorkerData,
+  SqliteReaderWorkerRequest,
+  SqliteWriterWorkerData,
   SqliteWorkerRequest,
   SqliteWorkerResponse,
 } from './sqlite-worker.js';
@@ -31,6 +34,7 @@ const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const DEFAULT_FLUSH_TIMEOUT_MS = 10_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
+const DEFAULT_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_DELETE_CHUNK_SIZE = 250;
 const DEFAULT_DELETE_MAX_ROWS = 10_000;
 const DEFAULT_DELETE_MAX_DURATION_MS = 5_000;
@@ -48,7 +52,13 @@ const MAX_PENDING_WORKER_REQUESTS = 64;
 
 type WorkerFactory = (url: URL, options: WorkerOptions) => Worker;
 type WorkerResult = Extract<SqliteWorkerResponse, { kind: 'result' }>['value'];
-type WorkerRequestWithoutId = SqliteWorkerRequest extends infer Request
+type WriterRequestWithoutId =
+  Exclude<SqliteWorkerRequest, SqliteReaderWorkerRequest> extends infer Request
+    ? Request extends { readonly id: number }
+      ? Omit<Request, 'id'>
+      : never
+    : never;
+type ReaderRequestWithoutId = SqliteReaderWorkerRequest extends infer Request
   ? Request extends { readonly id: number }
     ? Omit<Request, 'id'>
     : never
@@ -75,9 +85,12 @@ export interface SqliteLlmMetricsRepositoryOptions {
   readonly checkpointIntervalMs?: number;
   readonly startupTimeoutMs?: number;
   readonly flushTimeoutMs?: number;
+  readonly readTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
-  /** Test seam; production callers should use the default worker implementation. */
+  /** Writer test seam; production callers should use the default worker implementation. */
   readonly workerFactory?: WorkerFactory;
+  /** Reader test seam; production callers should use the default worker implementation. */
+  readonly readWorkerFactory?: WorkerFactory;
 }
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
@@ -142,12 +155,195 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+class SqliteReadWorkerClient {
+  private worker: Worker | null = null;
+  private readonly pending = new Map<number, PendingRequest>();
+  private startPromise: Promise<void> | null = null;
+  private resolveReady: (() => void) | null = null;
+  private rejectReady: ((error: Error) => void) | null = null;
+  private nextRequestId = 1;
+  private admittedRequests = 0;
+  private ready = false;
+  private closed = false;
+  private state: LlmMetricsReaderState = 'idle';
+  private lastError: string | null = null;
+
+  constructor(
+    private readonly databasePath: string,
+    private readonly workerFactory: WorkerFactory,
+    private readonly startupTimeoutMs: number,
+    private readonly requestTimeoutMs: number,
+  ) {}
+
+  async request(request: ReaderRequestWithoutId): Promise<WorkerResult> {
+    if (this.closed) throw new LlmMetricsRepositoryUnavailableError('LLM metrics reader is closed');
+    if (this.admittedRequests >= MAX_PENDING_WORKER_REQUESTS) {
+      throw new LlmMetricsRepositoryUnavailableError('LLM metrics reader request limit reached');
+    }
+    this.admittedRequests++;
+    try {
+      await this.ensureReady();
+      const worker = this.worker;
+      if (worker === null || !this.ready) {
+        throw new LlmMetricsRepositoryUnavailableError('LLM metrics reader is unavailable');
+      }
+
+      const id = this.nextRequestId++;
+      const result = new Promise<WorkerResult>((resolve, reject) => {
+        this.pending.set(id, { resolve, reject });
+        try {
+          worker.postMessage({ ...request, id } satisfies SqliteReaderWorkerRequest);
+        } catch (error) {
+          this.pending.delete(id);
+          reject(error instanceof Error ? error : new Error('Failed to send LLM metrics reader request'));
+        }
+      });
+      const timeoutMessage = 'LLM metrics reader request timed out';
+      try {
+        return await withTimeout(result, this.requestTimeoutMs, timeoutMessage);
+      } catch (error) {
+        if (error instanceof Error && error.message === timeoutMessage) {
+          const failure = this.unavailable(error);
+          this.fail(worker, failure);
+          throw failure;
+        }
+        throw error;
+      }
+    } finally {
+      this.admittedRequests--;
+    }
+  }
+
+  close(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    this.closed = true;
+    this.state = 'closed';
+    const worker = this.worker;
+    if (worker === null) return Promise.resolve();
+    this.detach(worker, new LlmMetricsRepositoryUnavailableError('LLM metrics reader is closed'));
+    return worker.terminate().then(() => undefined);
+  }
+
+  health(): { readonly state: LlmMetricsReaderState; readonly lastError: string | null } {
+    return { state: this.state, lastError: this.lastError };
+  }
+
+  private ensureReady(): Promise<void> {
+    if (this.ready && this.worker !== null) return Promise.resolve();
+    this.startPromise ??= this.start().finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
+  }
+
+  private async start(): Promise<void> {
+    if (this.closed) throw new LlmMetricsRepositoryUnavailableError('LLM metrics reader is closed');
+    this.state = 'starting';
+    const workerData: SqliteReaderWorkerData = { role: 'reader', databasePath: this.databasePath };
+    let worker: Worker;
+    try {
+      worker = this.workerFactory(workerUrl(), { workerData });
+    } catch (error) {
+      const failure = this.unavailable(error);
+      this.state = 'unavailable';
+      this.lastError = sanitizeError(failure);
+      throw failure;
+    }
+    this.worker = worker;
+    const ready = new Promise<void>((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+    worker.on('message', (message: unknown) => this.onMessage(worker, message));
+    worker.on('error', (error) => this.fail(worker, error));
+    worker.on('exit', (code) => {
+      if (!this.closed) this.fail(worker, new Error(`LLM metrics reader exited with code ${code}`));
+    });
+    const timeoutMessage = 'LLM metrics reader startup timed out';
+    try {
+      await withTimeout(ready, this.startupTimeoutMs, timeoutMessage);
+    } catch (error) {
+      const failure = this.unavailable(error);
+      this.fail(worker, failure);
+      throw failure;
+    }
+  }
+
+  private onMessage(worker: Worker, message: unknown): void {
+    if (worker !== this.worker) return;
+    if (typeof message !== 'object' || message === null || !('kind' in message)) {
+      this.fail(worker, new Error('Invalid response from LLM metrics reader'));
+      return;
+    }
+    const response = message as SqliteWorkerResponse;
+    if (response.kind === 'ready') {
+      if (!Number.isSafeInteger(response.schemaVersion) || response.schemaVersion < 1) {
+        this.fail(worker, new Error('Invalid schema response from LLM metrics reader'));
+        return;
+      }
+      this.ready = true;
+      this.state = 'ready';
+      this.lastError = null;
+      this.resolveReady?.();
+      this.resolveReady = null;
+      this.rejectReady = null;
+      return;
+    }
+    if (response.kind === 'error' && response.id === undefined) {
+      this.fail(worker, new Error(response.message));
+      return;
+    }
+    const id = response.id;
+    if (id === undefined) {
+      this.fail(worker, new Error('LLM metrics reader response is missing a request ID'));
+      return;
+    }
+    const pending = this.pending.get(id);
+    if (pending === undefined) return;
+    if (response.kind === 'error' && response.category !== 'invalid_request') {
+      this.fail(worker, new Error(response.message));
+      return;
+    }
+    this.pending.delete(id);
+    if (response.kind === 'error') pending.reject(new Error(response.message));
+    else pending.resolve(response.value);
+  }
+
+  private fail(worker: Worker, error: unknown): void {
+    if (worker !== this.worker) return;
+    this.detach(worker, error);
+    void worker.terminate();
+  }
+
+  private detach(worker: Worker, error: unknown): void {
+    if (worker !== this.worker) return;
+    const failure = this.unavailable(error);
+    this.worker = null;
+    this.ready = false;
+    if (!this.closed) {
+      this.state = 'unavailable';
+      this.lastError = sanitizeError(failure);
+    }
+    this.rejectReady?.(failure);
+    this.resolveReady = null;
+    this.rejectReady = null;
+    for (const request of this.pending.values()) request.reject(failure);
+    this.pending.clear();
+  }
+
+  private unavailable(error: unknown): LlmMetricsRepositoryUnavailableError {
+    if (error instanceof LlmMetricsRepositoryUnavailableError) return error;
+    return new LlmMetricsRepositoryUnavailableError(sanitizeError(error));
+  }
+}
+
 /**
  * Main-thread half of the SQLite repository. All SQLite work runs in a worker;
  * enqueue is bounded, synchronous in-memory work and deliberately fail-open.
  */
 export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   private readonly worker: Worker;
+  private readonly reader: SqliteReadWorkerClient;
   private readonly queue: QueuedExchange[] = [];
   private readonly pending = new Map<number, PendingRequest>();
   private readonly maxQueuedRecords: number;
@@ -157,6 +353,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   private readonly flushIntervalMs: number;
   private readonly checkpointIntervalMs: number;
   private readonly flushTimeoutMs: number;
+  private readonly readTimeoutMs: number;
   private readonly closeTimeoutMs: number;
   private readonly startupTimeoutMs: number;
   private readonly readyPromise: Promise<void>;
@@ -195,12 +392,21 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     );
     this.startupTimeoutMs = positiveInteger(options.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS, 'startupTimeoutMs');
     this.flushTimeoutMs = positiveInteger(options.flushTimeoutMs, DEFAULT_FLUSH_TIMEOUT_MS, 'flushTimeoutMs');
+    this.readTimeoutMs = positiveInteger(options.readTimeoutMs, DEFAULT_READ_TIMEOUT_MS, 'readTimeoutMs');
     this.closeTimeoutMs = positiveInteger(options.closeTimeoutMs, DEFAULT_CLOSE_TIMEOUT_MS, 'closeTimeoutMs');
+
+    this.reader = new SqliteReadWorkerClient(
+      options.databasePath,
+      options.readWorkerFactory ?? defaultWorkerFactory,
+      this.startupTimeoutMs,
+      this.readTimeoutMs,
+    );
 
     this.readyPromise = new Promise<void>((resolve) => {
       this.resolveReady = resolve;
     });
-    const workerData: SqliteWorkerData = {
+    const workerData: SqliteWriterWorkerData = {
+      role: 'writer',
       databasePath: options.databasePath,
       processRunId: options.processRunId ?? randomUUID(),
       startedAtMs: Date.now(),
@@ -272,7 +478,9 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   }
 
   private async performClose(): Promise<void> {
+    const startedAt = performance.now();
     this.closing = true;
+    const readerClose = this.reader.close().catch(() => undefined);
     this.clearFlushTimer();
     if (this.checkpointTimer !== null) clearInterval(this.checkpointTimer);
     this.checkpointTimer = null;
@@ -295,12 +503,15 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     } catch (error) {
       this.disable(error);
     }
+    const remainingCloseMs = Math.max(1, Math.floor(this.closeTimeoutMs - (performance.now() - startedAt)));
+    await withTimeout(readerClose, remainingCloseMs, 'LLM metrics reader close timed out').catch(() => undefined);
     this.rejectPending(new LlmMetricsRepositoryUnavailableError('LLM metrics repository closed'));
     void this.worker.terminate();
     this.state = 'closed';
   }
 
   health(): LlmMetricsRepositoryHealth {
+    const readerHealth = this.reader.health();
     return {
       state: this.state,
       schemaVersion: this.schemaVersion,
@@ -313,12 +524,14 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
       queuedRecords: this.queue.length + this.inFlightRecords,
       queuedBytes: this.queuedBytes + this.inFlightBytes,
       lastError: this.lastError,
+      readerState: readerHealth.state,
+      readerLastError: readerHealth.lastError,
     };
   }
 
   async snapshotMaxSequence(): Promise<number> {
     this.assertReadable();
-    const value = await this.request({ kind: 'snapshotMaxSequence' });
+    const value = await this.reader.request({ kind: 'snapshotMaxSequence' });
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
       throw new Error('Invalid snapshot response from LLM metrics worker');
     }
@@ -327,7 +540,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
 
   async scan(query: LlmExchangeScanQuery): Promise<readonly StoredLlmExchange[]> {
     this.assertReadable();
-    const value = await this.request({ kind: 'scan', query });
+    const value = await this.reader.request({ kind: 'scan', query });
     if (!Array.isArray(value)) throw new Error('Invalid scan response from LLM metrics worker');
     return value as readonly StoredLlmExchange[];
   }
@@ -337,7 +550,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     query: Omit<LlmExchangeScanQuery, 'cursor'>,
   ): Promise<readonly LlmDimensionCount[]> {
     this.assertReadable();
-    const value = await this.request({ kind: 'dimensionValues', dimension, query });
+    const value = await this.reader.request({ kind: 'dimensionValues', dimension, query });
     if (!Array.isArray(value)) throw new Error('Invalid dimension response from LLM metrics worker');
     return value as readonly LlmDimensionCount[];
   }
@@ -517,7 +730,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   }
 
   private async boundedMaintenanceRequest(
-    request: WorkerRequestWithoutId,
+    request: WriterRequestWithoutId,
     timeoutMs: number,
     timeoutMessage: string,
   ): Promise<WorkerResult> {
@@ -632,7 +845,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     }
   }
 
-  private request(request: WorkerRequestWithoutId): Promise<WorkerResult> {
+  private request(request: WriterRequestWithoutId): Promise<WorkerResult> {
     this.assertReadable();
     if (this.pending.size >= MAX_PENDING_WORKER_REQUESTS) {
       return Promise.reject(new LlmMetricsRepositoryUnavailableError('LLM metrics worker request limit reached'));
@@ -693,6 +906,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     this.rejectPending(new LlmMetricsRepositoryUnavailableError(this.lastError));
     this.resolveReady?.();
     this.resolveReady = null;
+    void this.reader.close();
     void this.worker.terminate();
   }
 

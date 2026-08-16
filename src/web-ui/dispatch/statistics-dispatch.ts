@@ -3,6 +3,13 @@
 import { z } from 'zod';
 
 import { LlmMetricsRepositoryUnavailableError } from '../../llm-metrics/persistence/repository.js';
+import {
+  MAX_STATISTICS_FILTER_VALUES,
+  STATISTICS_BUCKET_SIZES_MS,
+  STATISTICS_IDENTIFIER_PATTERN,
+  STATISTICS_PROVIDER_IDENTIFIER_MAX_LENGTH,
+  STATISTICS_PROVIDER_IDENTIFIER_PATTERN,
+} from '../../llm-metrics/query-contract.js';
 import type { WorkflowDispatchContext } from './workflow-dispatch.js';
 import { validateParams } from './types.js';
 import { InvalidParamsError, MethodNotFoundError, RpcError } from '../web-ui-types.js';
@@ -59,35 +66,43 @@ const measureSchema = z.enum([
   'effectiveOutputTokensPerSecond',
 ]);
 
-const stringList = z.array(z.string().min(1).max(256)).max(100);
+const identifierSchema = z.string().regex(STATISTICS_IDENTIFIER_PATTERN);
+const providerIdentifierSchema = z
+  .string()
+  .max(STATISTICS_PROVIDER_IDENTIFIER_MAX_LENGTH)
+  .regex(STATISTICS_PROVIDER_IDENTIFIER_PATTERN);
+const identifierList = z.array(identifierSchema).max(MAX_STATISTICS_FILTER_VALUES);
+const providerIdentifierList = z.array(providerIdentifierSchema).max(MAX_STATISTICS_FILTER_VALUES);
+const booleanList = z.array(z.boolean()).max(2);
+const bucketSizeSchema = z.union(STATISTICS_BUCKET_SIZES_MS.map((bucketMs) => z.literal(bucketMs)));
 const filtersSchema = z
   .object({
-    agent: stringList.optional(),
-    logicalProvider: stringList.optional(),
-    gateway: stringList.optional(),
-    protocol: stringList.optional(),
-    providerProfile: stringList.optional(),
-    requestedModel: stringList.optional(),
-    forwardedModel: stringList.optional(),
-    responseModel: stringList.optional(),
-    servedModel: stringList.optional(),
-    servedProvider: stringList.optional(),
-    reasoningMode: stringList.optional(),
-    requestedServiceTier: stringList.optional(),
-    actualServiceTier: stringList.optional(),
-    inputMeasurementProvenance: stringList.optional(),
-    outputMeasurementProvenance: stringList.optional(),
-    thinkingMeasurementProvenance: stringList.optional(),
-    nonThinkingMeasurementProvenance: stringList.optional(),
-    speedMode: stringList.optional(),
-    streaming: z.array(z.boolean()).max(2).optional(),
-    outcome: stringList.optional(),
-    refusal: z.array(z.boolean()).max(2).optional(),
-    usageCompleteness: stringList.optional(),
-    attributionQuality: stringList.optional(),
-    sessionId: stringList.optional(),
-    workflowRunId: stringList.optional(),
-    bundleId: stringList.optional(),
+    agent: identifierList.optional(),
+    logicalProvider: identifierList.optional(),
+    gateway: identifierList.optional(),
+    protocol: identifierList.optional(),
+    providerProfile: identifierList.optional(),
+    requestedModel: identifierList.optional(),
+    forwardedModel: identifierList.optional(),
+    responseModel: identifierList.optional(),
+    servedModel: identifierList.optional(),
+    servedProvider: providerIdentifierList.optional(),
+    reasoningMode: identifierList.optional(),
+    requestedServiceTier: identifierList.optional(),
+    actualServiceTier: identifierList.optional(),
+    inputMeasurementProvenance: identifierList.optional(),
+    outputMeasurementProvenance: identifierList.optional(),
+    thinkingMeasurementProvenance: identifierList.optional(),
+    nonThinkingMeasurementProvenance: identifierList.optional(),
+    speedMode: identifierList.optional(),
+    streaming: booleanList.optional(),
+    outcome: identifierList.optional(),
+    refusal: booleanList.optional(),
+    usageCompleteness: identifierList.optional(),
+    attributionQuality: identifierList.optional(),
+    sessionId: identifierList.optional(),
+    workflowRunId: identifierList.optional(),
+    bundleId: identifierList.optional(),
   })
   .strict();
 
@@ -137,7 +152,7 @@ export async function statisticsDispatch(
         maxPageSize: 500,
         maxScannedRows: 10_000,
         maxGroups: 500,
-        allowedBucketSizesMs: [60_000, 300_000, 900_000, 3_600_000, 86_400_000],
+        allowedBucketSizesMs: [...STATISTICS_BUCKET_SIZES_MS],
         health: {
           state: 'disabled',
           schemaVersion: null,
@@ -150,6 +165,8 @@ export async function statisticsDispatch(
           queuedRecords: 0,
           queuedBytes: 0,
           lastError: null,
+          readerState: 'closed',
+          readerLastError: null,
         },
       };
     }
@@ -163,7 +180,7 @@ export async function statisticsDispatch(
       return mapQueryError(() => reader.summarize(query));
     }
     case 'statistics.series': {
-      const query = validateParams(summarySchema.extend({ bucketMs: z.number().int().positive() }), params);
+      const query = validateParams(summarySchema.extend({ bucketMs: bucketSizeSchema }), params);
       return mapQueryError(() => reader.timeSeries(query));
     }
     case 'statistics.exchanges': {
