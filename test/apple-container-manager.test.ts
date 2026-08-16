@@ -18,7 +18,7 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process';
 type ExecCall = {
   cmd: string;
   args: readonly string[];
-  opts: { timeout?: number; maxBuffer?: number };
+  opts: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv };
 };
 
 type MockResponse =
@@ -410,6 +410,26 @@ describe('AppleContainerManager', () => {
       mock.setResponse('');
       await manager().exec('c1', ['id'], undefined, null);
       expect(mock.calls[0]?.args).toEqual(['exec', 'c1', 'id']);
+    });
+
+    it('passes workdir and per-exec environment overrides', async () => {
+      mock.setResponse('');
+      await manager().exec('c1', ['id'], undefined, 'codespace', '/workspace', {
+        HTTPS_PROXY: 'http://lease:opaque-token@127.0.0.1:18080',
+      });
+      expect(mock.calls[0]?.args).toEqual([
+        'exec',
+        '--user',
+        'codespace',
+        '--workdir',
+        '/workspace',
+        '--env',
+        'HTTPS_PROXY',
+        'c1',
+        'id',
+      ]);
+      expect(mock.calls[0]?.opts.env?.HTTPS_PROXY).toBe('http://lease:opaque-token@127.0.0.1:18080');
+      expect(mock.calls[0]?.args.join(' ')).not.toContain('opaque-token');
     });
 
     it('maps non-zero exits to the result instead of throwing', async () => {

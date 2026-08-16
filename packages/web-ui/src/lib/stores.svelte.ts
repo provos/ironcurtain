@@ -29,17 +29,37 @@ import type {
   ArtifactContentDto,
   MessageLogResponseDto,
   GetModelProvidersDto,
+  StatisticsConfigDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
   DockerWorkloadSettingsDto,
   PtySink,
   CreateSessionOptions,
+  StatisticsCapabilitiesDto,
+  StatisticsSummaryQuery,
+  StatisticsMetricSummaryDto,
+  StatisticsSeriesQuery,
+  StatisticsTimeBucketDto,
+  StatisticsDistributionQuery,
+  StatisticsMetricDistributionDto,
+  StatisticsExchangeQuery,
+  StatisticsExchangePageDto,
+  StatisticsDimensionQuery,
+  StatisticsDimensionValueDto,
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
-export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas' | 'settings';
+export type ViewId =
+  | 'dashboard'
+  | 'statistics'
+  | 'sessions'
+  | 'escalations'
+  | 'jobs'
+  | 'workflows'
+  | 'personas'
+  | 'settings';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -837,6 +857,14 @@ export async function setModelProviders(input: SetModelProvidersDto): Promise<Ge
   });
 }
 
+export async function getStatisticsConfig(): Promise<StatisticsConfigDto> {
+  return getWsClient().request<StatisticsConfigDto>('config.getStatistics', {});
+}
+
+export async function setStatisticsConfig(input: StatisticsConfigDto): Promise<StatisticsConfigDto> {
+  return getWsClient().request<StatisticsConfigDto>('config.setStatistics', { ...input });
+}
+
 /**
  * Fetch the OpenRouter model-slug catalog for autocomplete/validation. `source`
  * tells the caller whether the list is authoritative (`live`/`cache` → hard-block
@@ -864,6 +892,38 @@ export async function setDockerWorkloadSettings(input: DockerWorkloadSettingsDto
     enabled: input.enabled,
     allowPublicRegistryPulls: input.allowPublicRegistryPulls,
   });
+}
+
+// ── Read-only LLM statistics RPC actions ─────────────────────────────
+
+export async function getStatisticsCapabilities(): Promise<StatisticsCapabilitiesDto> {
+  return getWsClient().request<StatisticsCapabilitiesDto>('statistics.capabilities', {});
+}
+
+export async function getStatisticsSummary(
+  query: StatisticsSummaryQuery,
+): Promise<readonly StatisticsMetricSummaryDto[]> {
+  return getWsClient().request<readonly StatisticsMetricSummaryDto[]>('statistics.summary', { ...query });
+}
+
+export async function getStatisticsSeries(query: StatisticsSeriesQuery): Promise<readonly StatisticsTimeBucketDto[]> {
+  return getWsClient().request<readonly StatisticsTimeBucketDto[]>('statistics.series', { ...query });
+}
+
+export async function getStatisticsDistribution(
+  query: StatisticsDistributionQuery,
+): Promise<StatisticsMetricDistributionDto> {
+  return getWsClient().request<StatisticsMetricDistributionDto>('statistics.distribution', { ...query });
+}
+
+export async function getStatisticsExchanges(query: StatisticsExchangeQuery): Promise<StatisticsExchangePageDto> {
+  return getWsClient().request<StatisticsExchangePageDto>('statistics.exchanges', { ...query });
+}
+
+export async function getStatisticsDimensions(
+  query: StatisticsDimensionQuery,
+): Promise<readonly StatisticsDimensionValueDto[]> {
+  return getWsClient().request<readonly StatisticsDimensionValueDto[]>('statistics.dimensions', { ...query });
 }
 
 export async function connectWithToken(token: string): Promise<void> {

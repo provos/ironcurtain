@@ -18,7 +18,6 @@
  */
 
 import { PassThrough, Writable } from 'node:stream';
-import * as zlib from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { type Reassembler, redactHeaders } from './trajectory-types.js';
@@ -26,9 +25,25 @@ import type { ExchangeRecord, PoisonReason } from './trajectory-types.js';
 import { createReassembler, providerForHost, ReassemblyError, TruncatedStreamError } from './trajectory-reassembler.js';
 import type { SessionId } from '../session/types.js';
 import * as logger from '../logger.js';
+import { BoundedContentDecoder, type ContentDecoderFailure } from './llm-observation/content-decoder.js';
 
 /** Reused for the (ignored) responseBody arg on the reassembler path. */
 const EMPTY_BODY = Buffer.alloc(0);
+
+/**
+ * Trajectory capture predates the bounded metrics observer and deliberately
+ * records a whole exchange or poisons the whole session. Do not silently
+ * inherit metrics' smaller per-response limits here: a partial training record
+ * is not useful. These deliberately generous finite caps still protect the
+ * process from an unbounded response or a decompressor that falls behind.
+ */
+const TRAJECTORY_DECODER_LIMITS = Object.freeze({
+  maxCompressedBytes: 64 * 1024 * 1024,
+  maxDecodedBytes: 128 * 1024 * 1024,
+  maxExpansionRatio: 4_096,
+  expansionRatioSlackBytes: 4 * 1024 * 1024,
+  maxPendingInputBytes: 8 * 1024 * 1024,
+});
 
 /**
  * Decode a Buffer as UTF-8 if it round-trips losslessly, otherwise
@@ -259,7 +274,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       // rejection warning never fires; the dispatcher consumes it via
       // `Promise.allSettled`.
       completion.catch(() => {});
-      inputs.writer.trackInFlight(inputs.sessionId, completion);
+      inputs.writer.trackInFlight(inputs.sessionId, exchangeId, completion);
 
       const finishCompletion = (ok: boolean, err?: Error): void => {
         if (ok) {
@@ -403,9 +418,6 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
   };
 }
 
-/** Encodings handled natively by `node:zlib`. Anything else poisons the session. */
-const SUPPORTED_ENCODINGS = new Set(['identity', '', 'gzip', 'x-gzip', 'deflate', 'br']);
-
 /**
  * Build the head of the capture pipeline for a response body. The
  * caller writes raw upstream bytes to the returned `Writable`; the
@@ -413,8 +425,8 @@ const SUPPORTED_ENCODINGS = new Set(['identity', '', 'gzip', 'x-gzip', 'deflate'
  * to `captureTap`.
  *
  * For `identity` (or absent header) the captureTap is returned directly
- * — no decompressor is inserted, no extra copy. For supported encodings
- * (`gzip`, `deflate`, `br`) a `node:zlib` transform is inserted. For
+ * — no decoder is inserted, no extra copy. For supported encodings
+ * (`gzip`, `deflate`, `br`) the generic bounded content decoder is used. For
  * unsupported encodings (`zstd`, etc.) the session is poisoned with
  * `unsupported-encoding`, the captureTap is detached, and the returned
  * sink discards any bytes the caller still pushes — the forwarding path
@@ -439,54 +451,55 @@ export function createResponseCaptureInlet(args: {
     return args.captureTap;
   }
 
-  if (!SUPPORTED_ENCODINGS.has(encoding)) {
-    logger.warn(`[trajectory-tap] unsupported content-encoding: ${encoding}; poisoning session`);
-    args.onPoison('unsupported-encoding');
+  let failed = false;
+  const failCapture = (failure: ContentDecoderFailure): void => {
+    if (failed) return;
+    failed = true;
+    const poisonReason: PoisonReason =
+      failure.reason === 'unsupported-encoding' ? 'unsupported-encoding' : 'reassembly-failure';
+    logger.warn(`[trajectory-tap] response decoder detached (${encoding}): ${failure.message}`);
+    args.onPoison(poisonReason);
     args.captureHandle.abort();
-    // Detach the tap so it doesn't sit waiting for bytes that never come,
-    // and return a sink that silently drops further chunks the caller
-    // may still push.
-    args.captureTap.destroy();
-    return new Writable({
-      write(_chunk, _enc, cb) {
-        cb();
-      },
-      final(cb) {
-        cb();
-      },
-    });
-  }
+    if (!args.captureTap.destroyed) args.captureTap.destroy(new Error(failure.message));
+  };
 
-  const decompressor = createDecompressor(encoding);
-  decompressor.on('error', (err: Error) => {
-    logger.warn(`[trajectory-tap] decompressor error (${encoding}): ${err.message}`);
-    args.onPoison('reassembly-failure');
-    args.captureHandle.abort();
-    // Close the captureTap so its `_flush` does not fire on a half-
-    // decompressed stream; the in-flight promise will reject via the
-    // tap's `close` handler.
-    if (!args.captureTap.destroyed) {
-      args.captureTap.destroy(err);
-    }
+  const decoder = new BoundedContentDecoder({
+    contentEncoding: encoding,
+    limits: TRAJECTORY_DECODER_LIMITS,
+    onDecodedChunk(chunk) {
+      // Writable.write(false) is advisory and the tap has accepted the bytes.
+      // Production taps install their synchronous data consumer before this
+      // inlet is created, so honoring that signal must not poison capture or
+      // feed back into the independent forwarding path.
+      args.captureTap.write(chunk);
+    },
+    onEnd() {
+      if (!args.captureTap.destroyed && !args.captureTap.writableEnded) args.captureTap.end();
+    },
+    onFailure: failCapture,
   });
-  // Decompressor → captureTap. End-propagation is the default for pipe.
-  decompressor.pipe(args.captureTap);
-  return decompressor;
-}
 
-function createDecompressor(encoding: string): zlib.Gunzip | zlib.Inflate | zlib.BrotliDecompress {
-  switch (encoding) {
-    case 'gzip':
-    case 'x-gzip':
-      return zlib.createGunzip();
-    case 'deflate':
-      return zlib.createInflate();
-    case 'br':
-      return zlib.createBrotliDecompress();
-    default:
-      // Should be unreachable — SUPPORTED_ENCODINGS guarded this.
-      throw new Error(`createDecompressor called with unsupported encoding: ${encoding}`);
-  }
+  let inputEnded = false;
+  return new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      decoder.write(chunk);
+      callback();
+    },
+    final(callback) {
+      inputEnded = true;
+      decoder.end();
+      callback();
+    },
+    destroy(error, callback) {
+      // Writable auto-destroys after a successful `_final`; zlib may still be
+      // asynchronously draining at that point, so only explicit/error
+      // teardown detaches the decoder.
+      if ((error || !inputEnded) && decoder.snapshot().state === 'active') {
+        decoder.detach('decoder-error', error?.message ?? 'trajectory response inlet destroyed');
+      }
+      callback(error);
+    },
+  });
 }
 
 // Re-export for callers that want a single import surface.

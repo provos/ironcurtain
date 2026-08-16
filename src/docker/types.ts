@@ -253,6 +253,9 @@ export interface ContainerRuntime {
    *     `bbernhard/signal-cli-rest-api` image).
    * @param workdir - optional working directory passed via
    *   `docker exec --workdir <dir>`.
+   * @param environment - optional per-process environment overrides. Keys are
+   *   validated and passed as bare `--env KEY` argv entries. Values are inherited
+   *   through the child environment and never exposed in the command line.
    */
   exec(
     nameOrId: string,
@@ -260,6 +263,7 @@ export interface ContainerRuntime {
     timeoutMs?: number,
     execUser?: string | null,
     workdir?: string,
+    environment?: Readonly<Record<string, string>>,
   ): Promise<DockerExecResult>;
 
   /** Stop a running container (SIGTERM, then SIGKILL after grace period). */

@@ -46,6 +46,7 @@ import {
   makeRunStreamed,
   type CreateDockerManagerOptions,
 } from './docker-manager.js';
+import { buildContainerExecEnvironmentArgs } from './container-exec-environment.js';
 import { createDockerProgressSink } from './docker-progress-sink.js';
 
 /** Grace period for `container stop` before the runtime kills the VM. */
@@ -464,17 +465,26 @@ export function createAppleContainerManager(
       command: readonly string[],
       timeoutMs?: number,
       execUser?: string | null,
+      workdir?: string,
+      environment?: Readonly<Record<string, string>>,
     ): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
       // Same --user resolution contract as the Docker implementation (see
       // ContainerRuntime.exec JSDoc): undefined → 'codespace', null → omit.
       const resolvedUser = execUser === undefined ? 'codespace' : execUser;
       const userArgs = resolvedUser === null ? [] : (['--user', resolvedUser] as const);
+      const workdirArgs = workdir === undefined ? [] : (['--workdir', workdir] as const);
+      const environmentArgs = buildContainerExecEnvironmentArgs(environment);
       try {
-        const { stdout, stderr } = await exec('container', ['exec', ...userArgs, nameOrId, ...command], {
-          timeout,
-          maxBuffer: 50 * 1024 * 1024,
-        });
+        const { stdout, stderr } = await exec(
+          'container',
+          ['exec', ...userArgs, ...workdirArgs, ...environmentArgs, nameOrId, ...command],
+          {
+            timeout,
+            maxBuffer: 50 * 1024 * 1024,
+            ...(environment ? { env: { ...process.env, ...environment } } : {}),
+          },
+        );
         return { exitCode: 0, stdout, stderr };
       } catch (err: unknown) {
         if (isExecError(err)) {

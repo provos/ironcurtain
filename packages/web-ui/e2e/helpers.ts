@@ -1,8 +1,10 @@
 import { expect, type Page, type APIRequestContext, type Locator } from '@playwright/test';
 import { WebSocket } from 'ws';
+import { parsePort } from '../scripts/parse-port.js';
 
 export const PTY_BANNER_TEXT = 'Type to send keystrokes';
 export const PTY_LIVE_FRAME_TEXT = '[mock] agent working';
+const MOCK_RESET_PORT = parsePort(process.env.IRONCURTAIN_MOCK_RESET_PORT, 7401);
 
 /**
  * Reset the mock server's mutable state so tests are isolated. Pass
@@ -11,10 +13,12 @@ export const PTY_LIVE_FRAME_TEXT = '[mock] agent working';
  */
 export async function resetMockServer(
   request: APIRequestContext,
-  opts?: { allowPolicyMutation?: boolean },
+  opts?: {
+    allowPolicyMutation?: boolean;
+    statisticsScenario?: 'mixed' | 'empty' | 'disabled' | 'degraded' | 'reader-unavailable';
+  },
 ): Promise<void> {
-  const resetPort = process.env.MOCK_RESET_PORT ?? '7401';
-  await request.post(`http://localhost:${resetPort}/__reset`, opts ? { data: opts } : undefined);
+  await request.post(`http://127.0.0.1:${MOCK_RESET_PORT}/__reset`, opts ? { data: opts } : undefined);
 }
 
 /**
@@ -36,7 +40,7 @@ export async function connectWithToken(page: Page): Promise<void> {
  */
 export async function navigateTo(
   page: Page,
-  view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs' | 'Workflows' | 'Personas' | 'Settings',
+  view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs' | 'Workflows' | 'Personas' | 'Statistics' | 'Settings',
 ): Promise<void> {
   await page.getByTestId('sidebar-nav').getByRole('button', { name: view }).click();
 }

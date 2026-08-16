@@ -179,11 +179,17 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
 
     // State 1: fetch, visit 1 -> fetch.1
     expect(capturedOptions[0].workflow?.stateSlug).toBe('fetch.1');
+    expect(capturedOptions[0].workflow?.workflowRunId).toBe(workflowId);
+    expect(capturedOptions[0].workflow?.stateId).toBe('fetch');
+    expect(capturedOptions[0].workflow?.personaId).toBe('global');
     expect(capturedOptions[0].workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'fetch.1'));
     expect(existsSync(capturedOptions[0].workflow?.stateDir as string)).toBe(true);
 
     // State 2: summarize, visit 1 -> summarize.1
     expect(capturedOptions[1].workflow?.stateSlug).toBe('summarize.1');
+    expect(capturedOptions[1].workflow?.workflowRunId).toBe(workflowId);
+    expect(capturedOptions[1].workflow?.stateId).toBe('summarize');
+    expect(capturedOptions[1].workflow?.personaId).toBe('global');
     expect(capturedOptions[1].workflow?.stateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'summarize.1'));
     expect(existsSync(capturedOptions[1].workflow?.stateDir as string)).toBe(true);
 

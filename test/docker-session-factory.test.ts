@@ -289,6 +289,28 @@ describe('createDockerSession borrow path', () => {
     }
   });
 
+  it('rejects a workflow ID that disagrees with borrowed infrastructure', async () => {
+    const infra = {
+      ...createMockInfra(tempDir, 'workflow-mismatch'),
+      workflowId: 'workflow-a',
+    } as DockerInfrastructure;
+    const borrowedClaudeMd = join(infra.conversationStateDir!, 'CLAUDE.md');
+    writeFileSync(borrowedClaudeMd, 'borrowed workflow sentinel');
+
+    await expect(
+      createSession({
+        config: createTestConfig(),
+        mode: { kind: 'docker', agent: 'claude-code' as never },
+        workflow: {
+          infrastructure: infra,
+          workflowRunId: 'workflow-b' as import('../src/workflow/types.js').WorkflowId,
+        },
+        agentConversationId: createAgentConversationId(),
+      }),
+    ).rejects.toThrow(/workflow run ID does not match/);
+    expect(readFileSync(borrowedClaudeMd, 'utf8')).toBe('borrowed workflow sentinel');
+  });
+
   it('workflow.stateDir without workflow.infrastructure is rejected', async () => {
     const workflowStateDir = join(tempDir, 'orphan-state');
     mkdirSync(workflowStateDir, { recursive: true });

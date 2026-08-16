@@ -448,7 +448,11 @@ export async function runRunState(args: string[]): Promise<void> {
       ...(settings.maxSessionSeconds != null
         ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
         : {}),
-      workflow: resolveWorkflowSkillsOptions(stateConfig.skills, workflowSkillsDir),
+      workflow: {
+        stateId: parsed.stateId,
+        personaId: stateConfig.persona,
+        ...resolveWorkflowSkillsOptions(stateConfig.skills, workflowSkillsDir),
+      },
     });
   } catch (err) {
     writeStderr(`${RED}Session creation failed: ${err instanceof Error ? err.message : String(err)}${RESET}`);

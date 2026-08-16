@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           # Node 24 has an isolated-vm 7.0.0 prebuild; Node 22 does not (the root
           # `npm ci` below would source-compile it via node-gyp on the release

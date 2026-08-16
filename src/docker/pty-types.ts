@@ -35,6 +35,8 @@ export interface SessionSnapshot {
   readonly lastActivity: string;
   /** Host-side workspace path. */
   readonly workspacePath: string;
+  /** Persona restored on resume and attached to metrics attribution. */
+  readonly persona?: string;
   /**
    * Resolved provider-profile name active for this session (`'native'` or a
    * configured profile). Restored on resume so a later `modelProviders.default`

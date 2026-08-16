@@ -6,6 +6,7 @@ import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
 import type { AgentId, TransientFailureKind } from '../docker/agent-adapter.js';
 import type { AgentImageResolution, DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
+import type { WorkflowId } from '../workflow/types.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -200,6 +201,12 @@ export interface ConversationTurn {
     totalTokens: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
+    /** Provider-reported thinking/reasoning subset when available. */
+    thinkingTokens?: number | null;
+    /** Whether the numeric values cover every observed exchange in the turn. */
+    usageCompleteness?: 'complete' | 'partial' | 'unavailable';
+    observedExchanges?: number;
+    incompleteExchanges?: number;
   };
 
   /** ISO 8601 timestamp when this turn started. */
@@ -251,6 +258,10 @@ export interface BudgetStatus {
 
   /** False for Docker sessions where token usage is not observable. */
   readonly tokenTrackingAvailable: boolean;
+  /** Separates unavailable tracking from partial lower-bound totals. */
+  readonly tokenTrackingStatus?: 'complete' | 'partial' | 'unavailable';
+  readonly observedExchanges?: number;
+  readonly incompleteExchanges?: number;
 }
 
 /**
@@ -311,6 +322,11 @@ export interface EscalationRequest {
  * bundle while any session is still holding it.
  */
 export interface WorkflowBorrowOptions {
+  /** Workflow run and logical state used to attribute LLM statistics. */
+  readonly workflowRunId?: WorkflowId;
+  readonly stateId?: string;
+  readonly personaId?: string;
+
   /**
    * Pre-built Docker infrastructure bundle. When set, the session
    * factory borrows this bundle instead of creating its own, and the

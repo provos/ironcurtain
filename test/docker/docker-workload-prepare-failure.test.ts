@@ -238,6 +238,7 @@ async function prepare(
       modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
       dockerWorkload: resolveDockerWorkloadConfig({ enabled: true, imageIngress }),
       packageInstall: { enabled: false },
+      statistics: { enabled: true, retentionDays: 90 },
       containerRuntime: 'auto',
     },
   } as unknown as IronCurtainConfig;

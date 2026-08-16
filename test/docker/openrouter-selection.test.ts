@@ -27,6 +27,7 @@ describe('G13 resume — SessionMetadata (batch path) round-trips providerProfil
       const metadata: SessionMetadata = {
         createdAt: new Date().toISOString(),
         workspacePath: '/ws',
+        persona: 'reviewer',
         providerProfileName: 'kimi',
       };
       saveSessionMetadataTo(path, metadata);
@@ -113,6 +114,7 @@ describe('G13 resume — SessionSnapshot (PTY path) carries providerProfileName'
         exitCode: 0,
         lastActivity: new Date().toISOString(),
         workspacePath: '/ws',
+        persona: 'reviewer',
         providerProfileName: 'kimi',
         agent: 'claude-code',
         label: 'Claude Code (interactive)',
@@ -122,6 +124,7 @@ describe('G13 resume — SessionSnapshot (PTY path) carries providerProfileName'
       saveSessionMetadataTo(path, snapshot as unknown as SessionMetadata);
       const loaded = loadSessionMetadataFromPath(path) as unknown as SessionSnapshot;
       expect(loaded.providerProfileName).toBe('kimi');
+      expect(loaded.persona).toBe('reviewer');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -77,12 +77,13 @@ describe('isCapturableEndpoint: capture-endpoint allowlist', () => {
   });
 
   it('captures Google generateContent / streamGenerateContent globs', () => {
-    // The built-in glob `/v1beta/models/*/generateContent` matches a single
-    // model-name path segment followed by the literal action segment.
-    expect(isCapturableEndpoint(googleProvider, 'POST', '/v1beta/models/gemini-2.0-flash/generateContent')).toBe(true);
-    expect(isCapturableEndpoint(googleProvider, 'POST', '/v1beta/models/gemini-2.0-flash/streamGenerateContent')).toBe(
+    // The built-in glob matches one model-name path segment followed by the
+    // official colon-delimited Google action suffix.
+    expect(isCapturableEndpoint(googleProvider, 'POST', '/v1beta/models/gemini-2.0-flash:generateContent')).toBe(true);
+    expect(isCapturableEndpoint(googleProvider, 'POST', '/v1beta/models/gemini-2.0-flash:streamGenerateContent')).toBe(
       true,
     );
+    expect(isCapturableEndpoint(googleProvider, 'POST', '/v1beta/models/gemini-2.0-flash/generateContent')).toBe(false);
     expect(isCapturableEndpoint(googleProvider, 'POST', '/v1beta/models')).toBe(false);
   });
 

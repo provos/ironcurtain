@@ -22,6 +22,9 @@ export interface BudgetSummaryDto {
   readonly elapsedSeconds: number;
   readonly estimatedCostUsd: number;
   readonly tokenTrackingAvailable: boolean;
+  readonly tokenTrackingStatus?: 'complete' | 'partial' | 'unavailable';
+  readonly observedExchanges?: number;
+  readonly incompleteExchanges?: number;
   readonly limits: {
     readonly maxTotalTokens: number | null;
     readonly maxSteps: number | null;
@@ -59,6 +62,11 @@ export interface ConversationTurn {
     totalTokens: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
+    /** Null when the provider did not expose a thinking/reasoning split. */
+    thinkingTokens?: number | null;
+    usageCompleteness?: 'complete' | 'partial' | 'unavailable';
+    observedExchanges?: number;
+    incompleteExchanges?: number;
   };
 }
 
@@ -159,6 +167,299 @@ export interface EventFrame {
   readonly event: string;
   readonly payload: unknown;
   readonly seq: number;
+}
+
+// ---------------------------------------------------------------------------
+// Read-only LLM statistics DTOs. Mirror src/llm-metrics query contracts.
+// ---------------------------------------------------------------------------
+
+export type LlmStatisticsDimension =
+  | 'agent'
+  | 'logicalProvider'
+  | 'gateway'
+  | 'protocol'
+  | 'providerProfile'
+  | 'requestedModel'
+  | 'forwardedModel'
+  | 'responseModel'
+  | 'servedModel'
+  | 'servedProvider'
+  | 'reasoningMode'
+  | 'requestedServiceTier'
+  | 'actualServiceTier'
+  | 'inputMeasurementProvenance'
+  | 'outputMeasurementProvenance'
+  | 'thinkingMeasurementProvenance'
+  | 'nonThinkingMeasurementProvenance'
+  | 'speedMode'
+  | 'streaming'
+  | 'outcome'
+  | 'refusal'
+  | 'usageCompleteness'
+  | 'attributionQuality'
+  | 'sessionId'
+  | 'workflowRunId'
+  | 'stateId'
+  | 'personaId'
+  | 'bundleId';
+
+export type LlmStatisticsMeasure =
+  | 'requestCount'
+  | 'refusalCount'
+  | 'refusalRate'
+  | 'errorCount'
+  | 'errorRate'
+  | 'inputTokens'
+  | 'uncachedInputTokens'
+  | 'cacheReadInputTokens'
+  | 'cacheWriteInputTokens'
+  | 'toolUseInputTokens'
+  | 'thinkingTokens'
+  | 'nonThinkingOutputTokens'
+  | 'outputTokens'
+  | 'totalTokens'
+  | 'costUsd'
+  | 'ttftMs'
+  | 'upstreamLatencyMs'
+  | 'clientLatencyMs'
+  | 'observableOutputTokensPerSecond'
+  | 'effectiveOutputTokensPerSecond';
+
+export type LlmStatisticsDistributionMeasure = Exclude<
+  LlmStatisticsMeasure,
+  'requestCount' | 'refusalCount' | 'refusalRate' | 'errorCount' | 'errorRate'
+>;
+
+export type StatisticsIdentitySource =
+  | 'request'
+  | 'forwarded_request'
+  | 'protocol_response'
+  | 'protocol_response_direct'
+  | 'router_metadata'
+  | 'trusted_gateway_header'
+  | 'configured_route'
+  | 'not_exposed';
+
+export interface LlmExchangeFilters {
+  readonly agent?: readonly string[];
+  readonly logicalProvider?: readonly string[];
+  readonly gateway?: readonly string[];
+  readonly protocol?: readonly string[];
+  readonly providerProfile?: readonly string[];
+  readonly requestedModel?: readonly string[];
+  readonly forwardedModel?: readonly string[];
+  readonly responseModel?: readonly string[];
+  readonly servedModel?: readonly string[];
+  readonly servedProvider?: readonly string[];
+  readonly reasoningMode?: readonly string[];
+  readonly requestedServiceTier?: readonly string[];
+  readonly actualServiceTier?: readonly string[];
+  readonly inputMeasurementProvenance?: readonly string[];
+  readonly outputMeasurementProvenance?: readonly string[];
+  readonly thinkingMeasurementProvenance?: readonly string[];
+  readonly nonThinkingMeasurementProvenance?: readonly string[];
+  readonly speedMode?: readonly string[];
+  readonly streaming?: readonly boolean[];
+  readonly outcome?: readonly string[];
+  readonly refusal?: readonly boolean[];
+  readonly usageCompleteness?: readonly string[];
+  readonly attributionQuality?: readonly string[];
+  readonly sessionId?: readonly string[];
+  readonly workflowRunId?: readonly string[];
+  readonly stateId?: readonly string[];
+  readonly personaId?: readonly string[];
+  readonly bundleId?: readonly string[];
+}
+
+export interface StatisticsRangeQuery {
+  readonly fromMs: number;
+  readonly toMs: number;
+  readonly filters?: LlmExchangeFilters;
+}
+
+export interface StatisticsSummaryQuery extends StatisticsRangeQuery {
+  readonly measures: readonly LlmStatisticsMeasure[];
+  readonly groupBy?: readonly LlmStatisticsDimension[];
+  readonly topGroups?: number;
+}
+
+export type StatisticsSeriesQuery = StatisticsSummaryQuery &
+  (
+    | { readonly bucketMs: number; readonly calendarBucket?: never }
+    | {
+        readonly bucketMs?: never;
+        readonly calendarBucket: {
+          readonly unit: 'day';
+          readonly timeZone: string;
+        };
+      }
+  );
+
+export interface StatisticsDistributionQuery extends StatisticsRangeQuery {
+  readonly measure: LlmStatisticsDistributionMeasure;
+  readonly maxBins?: number;
+}
+
+export interface StatisticsExchangeQuery extends StatisticsRangeQuery {
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+export interface StatisticsDimensionQuery extends StatisticsRangeQuery {
+  readonly dimension: LlmStatisticsDimension;
+  readonly limit?: number;
+}
+
+export interface StatisticsMetricSummaryDto {
+  readonly dimensions: Readonly<Record<string, string | boolean | null>>;
+  readonly measure: LlmStatisticsMeasure;
+  readonly value: number | null;
+  readonly sampleCount: number;
+  readonly sampleSessionCount: number;
+  readonly eligibleCount: number;
+  readonly coverage: number;
+  readonly median: number | null;
+  readonly lowerQuartile: number | null;
+  readonly upperQuartile: number | null;
+  readonly formulaVersion: number;
+}
+
+export interface StatisticsTimeBucketDto {
+  readonly fromMs: number;
+  readonly toMs: number;
+  readonly summaries: readonly StatisticsMetricSummaryDto[];
+}
+
+export interface StatisticsDimensionValueDto {
+  readonly value: string | boolean | null;
+  readonly count: number;
+}
+
+export interface StatisticsDistributionBinDto {
+  readonly lower: number;
+  readonly upper: number;
+  readonly count: number;
+}
+
+export interface StatisticsMetricDistributionDto {
+  readonly measure: LlmStatisticsDistributionMeasure;
+  readonly bins: readonly StatisticsDistributionBinDto[];
+  readonly sampleCount: number;
+  readonly eligibleCount: number;
+  readonly coverage: number;
+  readonly minimum: number | null;
+  readonly maximum: number | null;
+  readonly formulaVersion: number;
+}
+
+export interface StatisticsRepositoryHealthDto {
+  readonly state: 'starting' | 'ready' | 'degraded' | 'disabled' | 'closed';
+  readonly schemaVersion: number | null;
+  readonly observed: number;
+  readonly finalized: number;
+  readonly enqueued: number;
+  readonly persisted: number;
+  readonly duplicates: number;
+  readonly dropped: number;
+  readonly queuedRecords: number;
+  readonly queuedBytes: number;
+  readonly lastError: string | null;
+  readonly readerState: 'idle' | 'starting' | 'ready' | 'unavailable' | 'closed';
+  readonly readerLastError: string | null;
+}
+
+export interface StatisticsCapabilitiesDto {
+  readonly available: boolean;
+  readonly dtoVersion: number;
+  readonly formulaVersion: number;
+  readonly schemaVersion: number | null;
+  readonly maxPageSize: number;
+  readonly maxScannedRows: number;
+  readonly maxGroups: number;
+  readonly allowedBucketSizesMs: readonly number[];
+  readonly allowedCalendarBucketUnits: readonly 'day'[];
+  readonly health: StatisticsRepositoryHealthDto;
+}
+
+/** Content-free flattened exchange returned by statistics.exchanges. */
+export interface StatisticsExchangeDto {
+  readonly exchangeId: string;
+  readonly schemaVersion: number;
+  readonly completedAtMs: number;
+  readonly requestReceivedAtMs: number;
+  readonly sessionId: string | null;
+  readonly turnId: string | null;
+  readonly agentConversationId: string | null;
+  readonly bundleId: string | null;
+  readonly workflowRunId: string | null;
+  readonly stateId: string | null;
+  readonly personaId: string | null;
+  readonly attributionQuality: string;
+  readonly agent: string | null;
+  readonly logicalProvider: string;
+  readonly providerProfile: string | null;
+  readonly protocol: string;
+  readonly gateway: string;
+  readonly clientRouteId: string | null;
+  readonly upstreamRouteId: string | null;
+  readonly requestedModel: string | null;
+  readonly forwardedModel: string | null;
+  readonly responseModel: string | null;
+  readonly servedModel: string | null;
+  readonly servedModelSource: StatisticsIdentitySource;
+  readonly servedProvider: string | null;
+  readonly servedProviderSource: StatisticsIdentitySource;
+  readonly providerRequestId: string | null;
+  readonly providerResponseId: string | null;
+  readonly gatewayGenerationId: string | null;
+  readonly streaming: boolean | null;
+  readonly requestedServiceTier: string | null;
+  readonly actualServiceTier: string | null;
+  readonly reasoningMode: string;
+  readonly reasoningEffort: string | null;
+  readonly thinkingBudgetTokens: number | null;
+  readonly speedMode: string | null;
+  readonly responseStatus: number | null;
+  readonly outcome: string;
+  readonly providerStopReason: string;
+  readonly refusal: boolean | null;
+  readonly refusalCategory: string | null;
+  readonly inputTokens: number | null;
+  readonly uncachedInputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
+  readonly cacheWriteInputTokens: number | null;
+  readonly toolUseInputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly thinkingTokens: number | null;
+  readonly nonThinkingOutputTokens: number | null;
+  readonly providerTotalTokens: number | null;
+  readonly totalTokens: number | null;
+  readonly costUsd: number | null;
+  readonly usageCompleteness: string;
+  readonly usageSemanticsVersion: number;
+  readonly inputMeasurementProvenance: string;
+  readonly outputMeasurementProvenance: string;
+  readonly thinkingMeasurementProvenance: string;
+  readonly nonThinkingMeasurementProvenance: string;
+  readonly requestBodyCompleteOffsetMs: number | null;
+  readonly responseHeadersOffsetMs: number | null;
+  readonly firstUpstreamBodyByteOffsetMs: number | null;
+  readonly firstProtocolEventOffsetMs: number | null;
+  readonly firstReasoningOffsetMs: number | null;
+  readonly lastReasoningOffsetMs: number | null;
+  readonly firstOutputOffsetMs: number | null;
+  readonly lastOutputOffsetMs: number | null;
+  readonly protocolTerminalOffsetMs: number | null;
+  readonly upstreamResponseEndOffsetMs: number | null;
+  readonly clientDeliveryEndOffsetMs: number | null;
+  readonly clientAborted: boolean;
+  readonly qualityFlags: readonly string[];
+}
+
+export interface StatisticsExchangePageDto {
+  readonly items: readonly StatisticsExchangeDto[];
+  readonly nextCursor: string | null;
+  readonly snapshotMaxSequence: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +920,11 @@ export interface GetModelProvidersDto {
 export interface SetModelProvidersDto {
   readonly default?: string;
   readonly profiles: Readonly<Record<string, ProfileDto>>;
+}
+
+export interface StatisticsConfigDto {
+  readonly enabled: boolean;
+  readonly retentionDays: number | null;
 }
 
 /**

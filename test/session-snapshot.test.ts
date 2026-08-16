@@ -58,6 +58,11 @@ describe('SessionSnapshot type', () => {
     const snapshot = makeSnapshot({ exitCode: null });
     expect(snapshot.exitCode).toBeNull();
   });
+
+  it('round-trips persona for resumed PTY attribution', () => {
+    const snapshot = makeSnapshot({ persona: 'security-reviewer' });
+    expect(JSON.parse(JSON.stringify(snapshot))).toMatchObject({ persona: 'security-reviewer' });
+  });
 });
 
 describe('loadSessionSnapshot', () => {

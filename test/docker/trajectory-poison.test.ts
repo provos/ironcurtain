@@ -397,7 +397,7 @@ describe('Trajectory poison: failure modes', () => {
     const inflight = new Promise<void>((r) => {
       resolveInflight = r;
     });
-    writer.trackInFlight(sid, inflight);
+    writer.trackInFlight(sid, 'ex-inflight', inflight);
 
     const endPromise = writer.endSession(sid).then(() => {
       expect(settled).toBe(true); // endSession only fires AFTER the in-flight settles
@@ -420,6 +420,40 @@ describe('Trajectory poison: failure modes', () => {
     if (end?.event === 'session-end') {
       expect(end.exchanges).toBe(1);
     }
+  });
+
+  it('allows a tracked exchange to finish writing after endSession starts', async () => {
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-inflight-write');
+    writer.beginSession({ sessionId: sid });
+
+    let resolveInflight!: () => void;
+    const inflight = new Promise<void>((resolve) => {
+      resolveInflight = resolve;
+    });
+    writer.trackInFlight(sid, 'ex-1', inflight);
+
+    const endPromise = writer.endSession(sid);
+    writer.write(buildRecord(sid, 1));
+    resolveInflight();
+    await endPromise;
+
+    expect(writer.stats()).toMatchObject({ written: 1, dropped: 0, openSessions: 0 });
+    const end = readManifest(dir).find((entry) => entry.event === 'session-end' && entry.sessionId === sid);
+    expect(end).toMatchObject({ exchanges: 1, poisoned: false });
+  });
+
+  it('rejects an exchange first tracked after endSession starts', async () => {
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-late-inflight-write');
+    writer.beginSession({ sessionId: sid });
+
+    const endPromise = writer.endSession(sid);
+    writer.trackInFlight(sid, 'ex-1', Promise.resolve());
+    writer.write(buildRecord(sid, 1));
+    await endPromise;
+
+    expect(writer.stats()).toMatchObject({ written: 0, dropped: 1, openSessions: 0 });
   });
 
   it('lifecycle: Anthropic message_stop-then-close writes a record and does NOT poison', async () => {
@@ -869,7 +903,7 @@ describe('Trajectory poison: failure modes', () => {
     writer.beginSession({ sessionId: sid });
 
     // A promise that never settles, registered as in-flight.
-    writer.trackInFlight(sid, new Promise<void>(() => {}));
+    writer.trackInFlight(sid, 'ex-never-settles', new Promise<void>(() => {}));
 
     await writer.endSession(sid);
 

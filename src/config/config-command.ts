@@ -230,11 +230,12 @@ export function computeDiff(
     'memory',
     'dockerResources',
     'snapshot',
+    'statistics',
   ] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
     if (!pendingSection) continue;
-    const resolvedSection = resolved[section] as unknown as Record<string, unknown>;
+    const resolvedSection = resolved[section] as Record<string, unknown>;
     for (const [subKey, subValue] of Object.entries(pendingSection)) {
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: runtime data from spread objects
       if (subValue !== undefined && subValue !== resolvedSection[subKey]) {
@@ -682,6 +683,51 @@ async function handleSnapshot(resolved: ResolvedUserConfig, pending: UserConfig)
       const newVal = Number(input);
       if (newVal !== currentSweep) {
         pending.snapshot = { ...pending.snapshot, sweepIntervalHours: newVal };
+      }
+    }
+  }
+}
+
+async function handleStatistics(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentEnabled = pending.statistics?.enabled ?? resolved.statistics.enabled;
+    const currentRetention =
+      pending.statistics?.retentionDays !== undefined
+        ? pending.statistics.retentionDays
+        : resolved.statistics.retentionDays;
+    const field = await p.select({
+      message: 'Local LLM Statistics',
+      options: [
+        { value: 'enabled', label: 'Collect content-free usage statistics', hint: currentEnabled ? 'on' : 'off' },
+        {
+          value: 'retentionDays',
+          label: 'Automatic retention (days)',
+          hint: currentRetention === null ? 'disabled' : String(currentRetention),
+        },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'enabled') {
+      const enabled = await p.confirm({
+        message: 'Collect content-free local LLM usage statistics?',
+        initialValue: currentEnabled,
+      });
+      if (!isCancelled(enabled) && enabled !== currentEnabled) {
+        pending.statistics = { ...pending.statistics, enabled: enabled as boolean };
+      }
+    } else if (field === 'retentionDays') {
+      const next = await promptNullableNumber({
+        message: 'Delete statistics older than this many days',
+        current: currentRetention,
+        validate: (value) =>
+          Number.isInteger(value) && value > 0 ? undefined : 'Must be a positive whole number of days',
+        format: (value) => (value === null ? 'automatic retention disabled' : `${value} day(s)`),
+      });
+      if (next !== undefined && next !== currentRetention) {
+        pending.statistics = { ...pending.statistics, retentionDays: next };
       }
     }
   }
@@ -1893,6 +1939,16 @@ function snapshotHint(resolved: ResolvedUserConfig, pending: UserConfig): string
   return `on, max age: ${maxAge === null ? 'unbounded' : `${maxAge}d`}`;
 }
 
+function statisticsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const enabled = pending.statistics?.enabled ?? resolved.statistics.enabled;
+  const retention =
+    pending.statistics?.retentionDays !== undefined
+      ? pending.statistics.retentionDays
+      : resolved.statistics.retentionDays;
+  if (!enabled) return 'off';
+  return `on, retention: ${retention === null ? 'disabled' : `${retention}d`}`;
+}
+
 function dockerAgentHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const agent = DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
   return `${agent}, ${dockerResourcesSummary(resolved, pending)}`;
@@ -1951,6 +2007,7 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'modelProviders', label: `Model Providers (${modelProvidersHint(resolved, pending)})` },
         { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
         { value: 'memory', label: `Memory (${memoryHint(resolved, pending)})` },
+        { value: 'statistics', label: `LLM Statistics (${statisticsHint(resolved, pending)})` },
         { value: 'snapshots', label: `Container Snapshots (${snapshotHint(resolved, pending)})` },
         { value: 'sessionMode', label: `Session Mode (${sessionModeHint(resolved, pending)})` },
         { value: 'dockerAgent', label: `Docker Agent (${dockerAgentHint(resolved, pending)})` },
@@ -1991,6 +2048,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'memory':
         await handleMemory(resolved, pending);
+        break;
+      case 'statistics':
+        await handleStatistics(resolved, pending);
         break;
       case 'snapshots':
         await handleSnapshot(resolved, pending);

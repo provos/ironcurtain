@@ -50,6 +50,21 @@ export function getSessionsDir(): string {
   return resolve(getIronCurtainHome(), 'sessions');
 }
 
+/** Returns the private host-global statistics directory. */
+export function getStatisticsDir(): string {
+  return resolve(getIronCurtainHome(), 'statistics');
+}
+
+/** Returns the host-global SQLite database used for content-free LLM usage statistics. */
+export function getLlmStatisticsDatabasePath(): string {
+  return resolve(getStatisticsDir(), 'llm-usage.sqlite3');
+}
+
+/** Returns the local key used to derive opaque identifiers in statistics rows. */
+export function getLlmStatisticsIdentityKeyPath(statisticsDirectory = getStatisticsDir()): string {
+  return resolve(statisticsDirectory, 'identity.key');
+}
+
 /**
  * Characters permitted in any identifier that gets embedded in a
  * filesystem path by this module (session IDs, workflow IDs, persona

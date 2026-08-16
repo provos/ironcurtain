@@ -141,6 +141,28 @@ Controls automatic redaction of sensitive data in audit log entries.
 | ------------------------ | ------- | ------- | ---------------------------------------------------------------------------------------- |
 | `auditRedaction.enabled` | boolean | `true`  | Redact credit cards, SSNs, and API keys in `audit.jsonl` entries before writing to disk. |
 
+## Local LLM Statistics
+
+Content-free usage collection is enabled by default. Configure it with `ironcurtain config` → **LLM Statistics**, the
+web UI Settings view, or JSON:
+
+| Field                      | Type            | Default | Description                                                     |
+| -------------------------- | --------------- | ------- | --------------------------------------------------------------- |
+| `statistics.enabled`       | boolean         | `true`  | Collect and persist content-free LLM usage statistics locally.  |
+| `statistics.retentionDays` | integer \| null | `90`    | Delete older exchanges asynchronously; `null` disables pruning. |
+
+Restart a long-running daemon after changing these settings so its statistics runtime is reconfigured.
+
+The database is `~/.ironcurtain/statistics/llm-usage.sqlite3`; its local HMAC pseudonymization key is
+`~/.ironcurtain/statistics/identity.key`. Stored fields include token counts, timing, provider/protocol/model routing,
+outcomes, refusals, and provider-reported cost metadata. Prompt, completion, thinking, and tool content; HTTP bodies;
+credentials; and arbitrary headers are not stored. User/config-derived labels and non-public routes are HMACed;
+bounded provider and model identifiers remain readable so statistics can be grouped usefully.
+
+Use `ironcurtain statistics delete --before <ISO-date-or-epoch-ms>` or `ironcurtain statistics delete --all` for manual
+deletion. These commands perform logical SQLite row deletion, not secure erasure: bytes may remain in free pages, WAL
+files, filesystem snapshots, or backups. They do not rotate or delete `identity.key`.
+
 ## Web Search
 
 Configure a web search provider so the agent can search the web via the `web_search` tool.

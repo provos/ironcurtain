@@ -61,6 +61,7 @@ describe('loadUserConfig', () => {
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     expect(config.anthropicApiKey).toBe('');
     expect(config.dockerWorkload).toEqual({ enabled: false });
+    expect(config.statistics).toEqual({ enabled: true, retentionDays: 90 });
   });
 
   it('reads the validated requested Docker-workload block without creating or resolving config', () => {
@@ -161,6 +162,11 @@ describe('loadUserConfig', () => {
     }
   });
 
+  it('preserves an explicit statistics disable toggle', () => {
+    writeConfigFile({ statistics: { enabled: false, retentionDays: null } });
+    expect(loadUserConfig().statistics).toEqual({ enabled: false, retentionDays: null });
+  });
+
   it('auto-creates config file with defaults when missing', () => {
     loadUserConfig();
 
@@ -169,6 +175,7 @@ describe('loadUserConfig', () => {
     expect(content.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
     expect(content.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(content.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
+    expect(content.statistics).toEqual(USER_CONFIG_DEFAULTS.statistics);
     // anthropicApiKey intentionally omitted from auto-created file
     expect(content.anthropicApiKey).toBeUndefined();
   });

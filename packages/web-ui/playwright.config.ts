@@ -1,8 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import { parsePort } from './scripts/parse-port.js';
 
-const webUiPort = parseInt(process.env.WEB_UI_PORT ?? '5173', 10);
-const mockWsPort = parseInt(process.env.MOCK_WS_PORT ?? '7400', 10);
-const mockResetPort = parseInt(process.env.MOCK_RESET_PORT ?? '7401', 10);
+const webUiPort = parsePort(process.env.IRONCURTAIN_WEB_UI_PORT, 5173);
+const mockPort = parsePort(process.env.IRONCURTAIN_MOCK_PORT, 7400);
+const resetPort = parsePort(process.env.IRONCURTAIN_MOCK_RESET_PORT, 7401);
 
 export default defineConfig({
   testDir: 'e2e',
@@ -22,12 +23,12 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [
     {
-      command: `PORT=${mockWsPort} RESET_PORT=${mockResetPort} npx tsx scripts/mock-ws-server.ts`,
-      port: mockWsPort,
+      command: `PORT=${mockPort} RESET_PORT=${resetPort} npx tsx scripts/mock-ws-server.ts`,
+      url: `http://127.0.0.1:${resetPort}/__ready`,
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: 'npx vite dev',
+      command: `IRONCURTAIN_WEB_UI_PORT=${webUiPort} IRONCURTAIN_WEB_UI_DAEMON_PORT=${mockPort} npx vite dev`,
       port: webUiPort,
       reuseExistingServer: !process.env.CI,
     },

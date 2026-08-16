@@ -5,6 +5,7 @@ import type {
   GetModelProvidersDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
+  StatisticsConfigDto,
 } from '$lib/types.js';
 
 // ---------------------------------------------------------------------------
@@ -19,6 +20,8 @@ const mockSet = vi.fn<(input: SetModelProvidersDto) => Promise<GetModelProviders
 const mockList = vi.fn<() => Promise<OpenrouterModelsDto>>();
 const mockGetDockerWorkload = vi.fn<() => Promise<DockerWorkloadSettingsDto>>();
 const mockSetDockerWorkload = vi.fn<(input: DockerWorkloadSettingsDto) => Promise<DockerWorkloadSettingsDto>>();
+const mockGetStatistics = vi.fn<() => Promise<StatisticsConfigDto>>();
+const mockSetStatistics = vi.fn<(input: StatisticsConfigDto) => Promise<StatisticsConfigDto>>();
 
 // A realistic catalog covering every fixture slug (incl. z-ai/glm-5.2) plus a
 // few glm variants for the filter/keyboard test. Used as the SAFE default so the
@@ -43,6 +46,8 @@ vi.mock('$lib/stores.svelte.js', () => ({
   setDockerWorkloadSettings: (...args: unknown[]) => mockSetDockerWorkload(...(args as [DockerWorkloadSettingsDto])),
   setModelProviders: (...args: unknown[]) => mockSet(...(args as [SetModelProvidersDto])),
   listOpenrouterModels: (...args: unknown[]) => mockList(...(args as [])),
+  getStatisticsConfig: (...args: unknown[]) => mockGetStatistics(...(args as [])),
+  setStatisticsConfig: (...args: unknown[]) => mockSetStatistics(...(args as [StatisticsConfigDto])),
   get appState() {
     return appStateMock;
   },
@@ -83,6 +88,8 @@ describe('Settings', () => {
     mockList.mockReset();
     mockGetDockerWorkload.mockReset();
     mockSetDockerWorkload.mockReset();
+    mockGetStatistics.mockReset();
+    mockSetStatistics.mockReset();
     appStateMock.daemonStatus = { allowPolicyMutation: true };
     connectionGenerationMock.value = 0;
     configChangedGenerationMock.value = 0;
@@ -93,6 +100,8 @@ describe('Settings', () => {
     mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'bundled' });
     mockGetDockerWorkload.mockResolvedValue({ enabled: false, allowPublicRegistryPulls: true });
     mockSetDockerWorkload.mockImplementation((input) => Promise.resolve(input));
+    mockGetStatistics.mockResolvedValue({ enabled: true, retentionDays: 90 });
+    mockSetStatistics.mockImplementation((input) => Promise.resolve(input));
   });
 
   it('shows the narrow nested-Docker controls and explains their boundary', async () => {
@@ -170,6 +179,21 @@ describe('Settings', () => {
         allowPublicRegistryPulls: false,
       }),
     );
+  });
+
+  it('shows default-on statistics and saves an explicit opt-out', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('statistics-settings')).toBeTruthy());
+    const enabled = screen.getByTestId('statistics-enabled') as HTMLInputElement;
+    const retention = screen.getByTestId('statistics-retention') as HTMLInputElement;
+    expect(enabled.checked).toBe(true);
+    expect(retention.value).toBe('90');
+
+    await fireEvent.click(enabled);
+    await fireEvent.input(retention, { target: { value: '' } });
+    await fireEvent.click(screen.getByTestId('save-statistics'));
+
+    await vi.waitFor(() => expect(mockSetStatistics).toHaveBeenCalledWith({ enabled: false, retentionDays: null }));
   });
 
   it('renders the profile list with native first and non-deletable', async () => {

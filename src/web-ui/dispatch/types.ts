@@ -13,6 +13,7 @@ import type { SessionMode } from '../../session/types.js';
 import type { TokenStreamBridge } from '../token-stream-bridge.js';
 import type { PtySessionManager, PtyWebSession } from '../pty-session-manager.js';
 import type { WebEventBus } from '../web-event-bus.js';
+import type { LlmStatisticsReader } from '../../llm-metrics/query-service.js';
 import { type SessionDto, type BudgetSummaryDto, type DaemonStatusDto, InvalidParamsError } from '../web-ui-types.js';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ export interface DispatchContext {
    * hides mutation controls. Off by default, CLI-only, not config-persisted.
    */
   readonly allowPolicyMutation?: boolean;
+  /** Read-only content-free LLM statistics exposed over this WebSocket server. */
+  readonly statisticsReader?: LlmStatisticsReader;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +127,7 @@ export function zeroedBudgetDto(): BudgetSummaryDto {
     elapsedSeconds: 0,
     estimatedCostUsd: 0,
     tokenTrackingAvailable: false,
+    tokenTrackingStatus: 'unavailable',
     limits: { maxTotalTokens: null, maxSteps: null, maxSessionSeconds: null, maxEstimatedCostUsd: null },
   };
 }
@@ -136,6 +140,9 @@ export function toBudgetDto(managed: ManagedSession): BudgetSummaryDto {
     elapsedSeconds: status.elapsedSeconds,
     estimatedCostUsd: status.estimatedCostUsd,
     tokenTrackingAvailable: status.tokenTrackingAvailable,
+    tokenTrackingStatus: status.tokenTrackingStatus,
+    observedExchanges: status.observedExchanges,
+    incompleteExchanges: status.incompleteExchanges,
     limits: {
       maxTotalTokens: status.limits.maxTotalTokens,
       maxSteps: status.limits.maxSteps,

@@ -7,6 +7,8 @@
  *     persists the WHOLE section via `saveUserConfig`, emits `config.changed`.
  *   - `config.getDockerWorkload` — read; returns the two supported UX controls.
  *   - `config.setDockerWorkload` — gated mutation; persists only those controls.
+ *   - `config.getStatistics` / `config.setStatistics` — resolved statistics
+ *     settings, with the same mutation gate and change event.
  *
  * Mirrors the `personas.*` gated-mutation pattern for the gate + change-event
  * (persona-dispatch.ts:219,286). Unlike personas, the mutation persists to
@@ -22,6 +24,7 @@ import {
   type DockerWorkloadSettingsDto,
   type OpenrouterModelsDto,
   type ProfileDto,
+  type StatisticsConfigDto,
   RpcError,
   MethodNotFoundError,
 } from '../web-ui-types.js';
@@ -91,6 +94,9 @@ const setModelProvidersSchema = z.object({
 const getModelProvidersSchema = z.object({});
 
 const listOpenrouterModelsSchema = z.object({ forceRefresh: z.boolean().optional() });
+const statisticsConfigSchema = z
+  .object({ enabled: z.boolean(), retentionDays: z.number().int().positive().nullable() })
+  .strict();
 
 const getDockerWorkloadSchema = z.object({});
 
@@ -133,6 +139,17 @@ export async function configDispatch(
       return setDockerWorkload(ctx, input);
     }
 
+    case 'config.getStatistics': {
+      validateParams(z.object({}).strict(), params);
+      return getStatistics();
+    }
+
+    case 'config.setStatistics': {
+      requirePolicyMutation(ctx);
+      const input = validateParams(statisticsConfigSchema, params);
+      return setStatistics(ctx, input);
+    }
+
     // Ungated read of the PUBLIC OpenRouter catalog (mirrors getModelProviders).
     case 'config.listOpenrouterModels': {
       const input = validateParams(listOpenrouterModelsSchema, params);
@@ -143,6 +160,24 @@ export async function configDispatch(
     default:
       throw new MethodNotFoundError(method);
   }
+}
+
+function getStatistics(): StatisticsConfigDto {
+  const statistics = loadUserConfig({ readOnly: true }).statistics;
+  return {
+    enabled: statistics.enabled,
+    retentionDays: statistics.retentionDays,
+  };
+}
+
+function setStatistics(ctx: WorkflowDispatchContext, input: StatisticsConfigDto): StatisticsConfigDto {
+  try {
+    saveUserConfig({ statistics: { enabled: input.enabled, retentionDays: input.retentionDays } });
+  } catch (err) {
+    throw new RpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+  }
+  ctx.eventBus.emit('config.changed', {});
+  return getStatistics();
 }
 
 // ---------------------------------------------------------------------------

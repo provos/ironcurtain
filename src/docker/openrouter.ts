@@ -252,11 +252,31 @@ function allowedEndpointsFor(kind: OpenRouterEndpointKind): EndpointPattern[] {
  */
 export function makeOpenRouterProvider(kind: OpenRouterEndpointKind, rewriter: RequestBodyRewriter): ProviderConfig {
   const completionPath = COMPLETION_PATH[kind];
+  const protocol =
+    kind === 'messages'
+      ? ('anthropic-messages' as const)
+      : kind === 'responses'
+        ? ('openai-responses' as const)
+        : ('openai-chat-completions' as const);
   return {
+    id: 'openrouter',
     host: OPENROUTER_HOST,
     displayName: `OpenRouter (${kind})`,
     allowedEndpoints: allowedEndpointsFor(kind),
     captureEndpoints: [{ method: 'POST', path: completionPath }],
+    completionEndpoints: [
+      {
+        method: 'POST',
+        path: completionPath,
+        protocol,
+        capabilities: {
+          metricsSupport: kind === 'chat' ? 'partial' : 'full',
+          streamingUsageNegotiation: kind === 'chat' ? 'client_or_agent_adapter' : 'none',
+          trajectoryCapture: true,
+        },
+      },
+    ],
+    gatewayAdapterId: 'openrouter',
     keyInjection: { type: 'bearer' },
     fakeKeyPrefix: OPENROUTER_FAKE_KEY_PREFIX,
     requestRewriter: rewriter,

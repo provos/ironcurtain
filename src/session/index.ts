@@ -309,7 +309,7 @@ async function createDockerSession(
         sessionConfig.sandboxDir,
         sessionConfig.escalationDir,
         bundleId,
-        undefined,
+        options.workflow?.workflowRunId,
         undefined,
         sessionConfig.resolvedSkills,
         {
@@ -349,6 +349,18 @@ async function createDockerSession(
       }
     }
 
+    const metricsWorkflowRunId = options.workflow?.workflowRunId ?? infra.workflowId;
+    if (
+      options.workflow?.workflowRunId !== undefined &&
+      infra.workflowId !== undefined &&
+      options.workflow.workflowRunId !== infra.workflowId
+    ) {
+      throw new SessionError(
+        'workflow run ID does not match the borrowed Docker infrastructure',
+        'SESSION_INIT_FAILED',
+      );
+    }
+
     const claudeMdContent = buildDockerClaudeMd({
       personaName: options.persona,
       memoryEnabled: sessionConfig.memoryEnabled,
@@ -384,6 +396,9 @@ async function createDockerSession(
       // the external orchestrator.
       ownsInfra: builtInfra,
       agentModelOverride: options.agentModelOverride,
+      metricsStateId: options.workflow?.stateId,
+      metricsPersonaId: options.workflow?.personaId ?? options.persona,
+      metricsWorkflowRunId,
       onEscalation: options.onEscalation,
       onEscalationExpired: options.onEscalationExpired,
       onEscalationResolved: options.onEscalationResolved,
