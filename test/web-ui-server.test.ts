@@ -350,6 +350,46 @@ describe('WebUiServer', () => {
       await expect(responsePromise).resolves.toMatchObject({ id: 'stats-series', ok: true, payload: buckets });
       expect(statisticsReader.timeSeries).toHaveBeenCalledWith(params);
     });
+
+    it('serves statistics.distribution through an authenticated WebSocket', async () => {
+      const histogram = {
+        measure: 'effectiveOutputTokensPerSecond',
+        bins: [{ lower: 0, upper: 100, count: 2 }],
+        sampleCount: 2,
+        eligibleCount: 3,
+        coverage: 2 / 3,
+        minimum: 25,
+        maximum: 75,
+        formulaVersion: 1,
+      } as const;
+      const statisticsReader = {
+        capabilities: vi.fn().mockResolvedValue({ available: true }),
+        summarize: vi.fn().mockResolvedValue([]),
+        timeSeries: vi.fn().mockResolvedValue([]),
+        distribution: vi.fn().mockResolvedValue(histogram),
+        listExchanges: vi.fn().mockResolvedValue({ items: [], nextCursor: null, snapshotMaxSequence: 0 }),
+        dimensions: vi.fn().mockResolvedValue([]),
+        sessionTotals: vi.fn().mockResolvedValue({}),
+      } as unknown as LlmStatisticsReader;
+      const srv = createServer({ statisticsReader });
+      const url = await srv.start();
+      const ws = createWs(`ws://127.0.0.1:${extractPort(url)}/ws?token=${extractToken(url)}`);
+      await new Promise<void>((resolve) => ws.on('open', resolve));
+
+      const responsePromise = new Promise<Record<string, unknown>>((resolve) => {
+        ws.on('message', (data: Buffer) => resolve(JSON.parse(data.toString()) as Record<string, unknown>));
+      });
+      const params = {
+        fromMs: 0,
+        toMs: 60_000,
+        measure: 'effectiveOutputTokensPerSecond',
+        maxBins: 20,
+      };
+      ws.send(JSON.stringify({ id: 'stats-distribution', method: 'statistics.distribution', params }));
+
+      await expect(responsePromise).resolves.toMatchObject({ id: 'stats-distribution', ok: true, payload: histogram });
+      expect(statisticsReader.distribution).toHaveBeenCalledWith(params);
+    });
   });
 
   describe('event broadcasting', () => {

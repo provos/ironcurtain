@@ -1,4 +1,5 @@
-import type { LlmExchangeCompleted } from '../types.js';
+import type { IdentitySource, LlmExchangeCompleted } from '../types.js';
+import type { StatisticsDimension } from '../query-contract.js';
 
 export type LlmMetricsRepositoryState = 'starting' | 'ready' | 'degraded' | 'disabled' | 'closed';
 export type LlmMetricsReaderState = 'idle' | 'starting' | 'ready' | 'unavailable' | 'closed';
@@ -19,35 +20,7 @@ export interface LlmMetricsRepositoryHealth {
   readonly readerLastError: string | null;
 }
 
-export type LlmStatisticsDimension =
-  | 'agent'
-  | 'logicalProvider'
-  | 'gateway'
-  | 'protocol'
-  | 'providerProfile'
-  | 'requestedModel'
-  | 'forwardedModel'
-  | 'responseModel'
-  | 'servedModel'
-  | 'servedProvider'
-  | 'reasoningMode'
-  | 'requestedServiceTier'
-  | 'actualServiceTier'
-  | 'inputMeasurementProvenance'
-  | 'outputMeasurementProvenance'
-  | 'thinkingMeasurementProvenance'
-  | 'nonThinkingMeasurementProvenance'
-  | 'speedMode'
-  | 'streaming'
-  | 'outcome'
-  | 'refusal'
-  | 'usageCompleteness'
-  | 'attributionQuality'
-  | 'sessionId'
-  | 'workflowRunId'
-  | 'stateId'
-  | 'personaId'
-  | 'bundleId';
+export type LlmStatisticsDimension = StatisticsDimension;
 
 export type LlmStatisticsDimensionValue = string | boolean | null;
 
@@ -122,7 +95,9 @@ export interface StoredLlmExchange {
   readonly forwardedModel: string | null;
   readonly responseModel: string | null;
   readonly servedModel: string | null;
+  readonly servedModelSource: IdentitySource;
   readonly servedProvider: string | null;
+  readonly servedProviderSource: IdentitySource;
   readonly providerRequestId: string | null;
   readonly providerResponseId: string | null;
   readonly gatewayGenerationId: string | null;

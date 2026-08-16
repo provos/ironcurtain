@@ -225,6 +225,21 @@ export type LlmStatisticsMeasure =
   | 'observableOutputTokensPerSecond'
   | 'effectiveOutputTokensPerSecond';
 
+export type LlmStatisticsDistributionMeasure = Exclude<
+  LlmStatisticsMeasure,
+  'requestCount' | 'refusalCount' | 'refusalRate' | 'errorCount' | 'errorRate'
+>;
+
+export type StatisticsIdentitySource =
+  | 'request'
+  | 'forwarded_request'
+  | 'protocol_response'
+  | 'protocol_response_direct'
+  | 'router_metadata'
+  | 'trusted_gateway_header'
+  | 'configured_route'
+  | 'not_exposed';
+
 export interface LlmExchangeFilters {
   readonly agent?: readonly string[];
   readonly logicalProvider?: readonly string[];
@@ -265,10 +280,24 @@ export interface StatisticsRangeQuery {
 export interface StatisticsSummaryQuery extends StatisticsRangeQuery {
   readonly measures: readonly LlmStatisticsMeasure[];
   readonly groupBy?: readonly LlmStatisticsDimension[];
+  readonly topGroups?: number;
 }
 
-export interface StatisticsSeriesQuery extends StatisticsSummaryQuery {
-  readonly bucketMs: number;
+export type StatisticsSeriesQuery = StatisticsSummaryQuery &
+  (
+    | { readonly bucketMs: number; readonly calendarBucket?: never }
+    | {
+        readonly bucketMs?: never;
+        readonly calendarBucket: {
+          readonly unit: 'day';
+          readonly timeZone: string;
+        };
+      }
+  );
+
+export interface StatisticsDistributionQuery extends StatisticsRangeQuery {
+  readonly measure: LlmStatisticsDistributionMeasure;
+  readonly maxBins?: number;
 }
 
 export interface StatisticsExchangeQuery extends StatisticsRangeQuery {
@@ -286,6 +315,7 @@ export interface StatisticsMetricSummaryDto {
   readonly measure: LlmStatisticsMeasure;
   readonly value: number | null;
   readonly sampleCount: number;
+  readonly sampleSessionCount: number;
   readonly eligibleCount: number;
   readonly coverage: number;
   readonly median: number | null;
@@ -303,6 +333,23 @@ export interface StatisticsTimeBucketDto {
 export interface StatisticsDimensionValueDto {
   readonly value: string | boolean | null;
   readonly count: number;
+}
+
+export interface StatisticsDistributionBinDto {
+  readonly lower: number;
+  readonly upper: number;
+  readonly count: number;
+}
+
+export interface StatisticsMetricDistributionDto {
+  readonly measure: LlmStatisticsDistributionMeasure;
+  readonly bins: readonly StatisticsDistributionBinDto[];
+  readonly sampleCount: number;
+  readonly eligibleCount: number;
+  readonly coverage: number;
+  readonly minimum: number | null;
+  readonly maximum: number | null;
+  readonly formulaVersion: number;
 }
 
 export interface StatisticsRepositoryHealthDto {
@@ -330,6 +377,7 @@ export interface StatisticsCapabilitiesDto {
   readonly maxScannedRows: number;
   readonly maxGroups: number;
   readonly allowedBucketSizesMs: readonly number[];
+  readonly allowedCalendarBucketUnits: readonly 'day'[];
   readonly health: StatisticsRepositoryHealthDto;
 }
 
@@ -358,7 +406,9 @@ export interface StatisticsExchangeDto {
   readonly forwardedModel: string | null;
   readonly responseModel: string | null;
   readonly servedModel: string | null;
+  readonly servedModelSource: StatisticsIdentitySource;
   readonly servedProvider: string | null;
+  readonly servedProviderSource: StatisticsIdentitySource;
   readonly providerRequestId: string | null;
   readonly providerResponseId: string | null;
   readonly gatewayGenerationId: string | null;

@@ -14,6 +14,16 @@ function reader(): LlmStatisticsReader {
     capabilities: vi.fn().mockResolvedValue({ available: true }),
     summarize: vi.fn().mockResolvedValue([{ measure: 'totalTokens', value: 42 }]),
     timeSeries: vi.fn().mockResolvedValue([]),
+    distribution: vi.fn().mockResolvedValue({
+      measure: 'effectiveOutputTokensPerSecond',
+      bins: [],
+      sampleCount: 0,
+      eligibleCount: 0,
+      coverage: 0,
+      minimum: null,
+      maximum: null,
+      formulaVersion: 1,
+    }),
     listExchanges: vi.fn().mockResolvedValue({ items: [], nextCursor: null, snapshotMaxSequence: 0 }),
     dimensions: vi.fn().mockResolvedValue([]),
     sessionTotals: vi.fn().mockResolvedValue({}),
@@ -24,6 +34,9 @@ describe('statistics WebSocket dispatch', () => {
   it('reports disabled capabilities without requiring a repository', async () => {
     await expect(dispatch(context(), 'statistics.capabilities', {})).resolves.toMatchObject({
       available: false,
+      dtoVersion: 2,
+      maxScannedRows: 100_000,
+      allowedCalendarBucketUnits: ['day'],
       health: { state: 'disabled' },
     });
   });
@@ -57,6 +70,29 @@ describe('statistics WebSocket dispatch', () => {
       { fromMs: 0, toMs: 60_000, summaries: [] },
     ]);
     expect(timeSeries).toHaveBeenCalledWith(query);
+  });
+
+  it('dispatches calendar-day series and bounded distributions', async () => {
+    const statisticsReader = reader();
+    const timeSeries = vi.spyOn(statisticsReader, 'timeSeries');
+    const distribution = vi.spyOn(statisticsReader, 'distribution');
+    const calendarQuery = {
+      fromMs: 0,
+      toMs: 60_000,
+      measures: ['requestCount'] as const,
+      calendarBucket: { unit: 'day' as const, timeZone: 'America/Los_Angeles' },
+    };
+    const distributionQuery = {
+      fromMs: 0,
+      toMs: 60_000,
+      measure: 'effectiveOutputTokensPerSecond' as const,
+      maxBins: 20,
+    };
+
+    await dispatch(context(statisticsReader), 'statistics.series', calendarQuery);
+    await dispatch(context(statisticsReader), 'statistics.distribution', distributionQuery);
+    expect(timeSeries).toHaveBeenCalledWith(calendarQuery);
+    expect(distribution).toHaveBeenCalledWith(distributionQuery);
   });
 
   it('accepts boolean filters and provider labels returned by dimensions', async () => {
@@ -109,6 +145,38 @@ describe('statistics WebSocket dispatch', () => {
     expect(summarize).toHaveBeenCalledWith(query);
   });
 
+  it('accepts bounded top-group selection only for grouped queries', async () => {
+    const statisticsReader = reader();
+    const summarize = vi.spyOn(statisticsReader, 'summarize');
+    const timeSeries = vi.spyOn(statisticsReader, 'timeSeries');
+    const query = {
+      fromMs: 1,
+      toMs: 2,
+      measures: ['requestCount'] as const,
+      groupBy: ['servedProvider', 'servedModel'] as const,
+      topGroups: 8,
+    };
+
+    await dispatch(context(statisticsReader), 'statistics.summary', query);
+    expect(summarize).toHaveBeenCalledWith(query);
+    await dispatch(context(statisticsReader), 'statistics.series', { ...query, bucketMs: 60_000 });
+    expect(timeSeries).toHaveBeenCalledWith({ ...query, bucketMs: 60_000 });
+    await expect(
+      dispatch(context(statisticsReader), 'statistics.summary', {
+        fromMs: 1,
+        toMs: 2,
+        measures: ['requestCount'],
+        topGroups: 8,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      dispatch(context(statisticsReader), 'statistics.summary', {
+        ...query,
+        topGroups: 21,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+  });
+
   it('rejects unbounded or structurally invalid input before the reader', async () => {
     await expect(
       dispatch(context(reader()), 'statistics.exchanges', { fromMs: 0, toMs: 1, limit: 501 }),
@@ -127,6 +195,30 @@ describe('statistics WebSocket dispatch', () => {
         toMs: 1,
         measures: ['requestCount'],
         bucketMs: 1,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      dispatch(context(reader()), 'statistics.series', {
+        fromMs: 0,
+        toMs: 1,
+        measures: ['requestCount'],
+        bucketMs: 60_000,
+        calendarBucket: { unit: 'day', timeZone: 'UTC' },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    const invalidTimeZone = dispatch(context(reader()), 'statistics.series', {
+      fromMs: 0,
+      toMs: 1,
+      measures: ['requestCount'],
+      calendarBucket: { unit: 'day', timeZone: 'not/a-real-zone' },
+    });
+    await expect(invalidTimeZone).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(invalidTimeZone).rejects.toThrow('timeZone must be a valid IANA time zone');
+    await expect(
+      dispatch(context(reader()), 'statistics.distribution', {
+        fromMs: 0,
+        toMs: 1,
+        measure: 'requestCount',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(

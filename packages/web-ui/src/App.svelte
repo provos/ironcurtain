@@ -19,6 +19,7 @@
     type ThemeId,
   } from './lib/stores.svelte.js';
   import Dashboard from './routes/Dashboard.svelte';
+  import Statistics from './routes/Statistics.svelte';
   import Sessions from './routes/Sessions.svelte';
   import Escalations from './routes/Escalations.svelte';
   import Jobs from './routes/Jobs.svelte';
@@ -36,6 +37,7 @@
 
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck';
   import House from 'phosphor-svelte/lib/House';
+  import ChartLineUp from 'phosphor-svelte/lib/ChartLineUp';
   import ChatCircle from 'phosphor-svelte/lib/ChatCircle';
   import Warning from 'phosphor-svelte/lib/Warning';
   import Clock from 'phosphor-svelte/lib/Clock';
@@ -165,6 +167,7 @@
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: House },
+    { id: 'statistics', label: 'Statistics', icon: ChartLineUp },
     { id: 'sessions', label: 'Sessions', icon: ChatCircle },
     { id: 'escalations', label: 'Escalations', icon: Warning },
     { id: 'jobs', label: 'Jobs', icon: Clock },
@@ -391,6 +394,8 @@
     <main class="flex-1 min-h-0 overflow-y-auto">
       {#if appState.currentView === 'dashboard'}
         <Dashboard />
+      {:else if appState.currentView === 'statistics'}
+        <Statistics />
       {:else if appState.currentView === 'sessions'}
         <Sessions />
       {:else if appState.currentView === 'escalations'}

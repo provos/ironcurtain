@@ -17,8 +17,15 @@ import { resolve, dirname } from 'path';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { parseArgs } from 'util';
+import { parsePort } from './parse-port.js';
 import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
 import { makeAgentSessionEndedPayload } from './agent-session-events.js';
+import {
+  createStatisticsFixtureEngine,
+  type FixtureSeriesQuery,
+  type StatisticsFixtureScenario,
+  type StatisticsFixtureEngine,
+} from './statistics-fixtures.js';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the daemon protocol without importing from src/)
@@ -77,7 +84,7 @@ interface MockEscalation {
 // State
 // ---------------------------------------------------------------------------
 
-const PORT = parseInt(process.env.PORT ?? '7400', 10);
+const PORT = parsePort(process.env.PORT, 7400);
 const MOCK_TOKEN = 'mock-dev-token';
 const startTime = Date.now();
 
@@ -91,6 +98,7 @@ const startTime = Date.now();
 
 interface ResetOptions {
   allowPolicyMutation?: boolean;
+  statisticsScenario?: StatisticsFixtureScenario;
 }
 
 /** base64 of the UTF-8 bytes of a terminal string (matches the daemon framing). */
@@ -627,6 +635,10 @@ let modelProviders: MockModelProviders = {
 };
 
 const ORIGINAL_MODEL_PROVIDERS: MockModelProviders = structuredClone(modelProviders);
+
+let statisticsScenario: StatisticsFixtureScenario = 'mixed';
+let statisticsFixture: StatisticsFixtureEngine = createStatisticsFixtureEngine(statisticsScenario);
+let statisticsConfig: { enabled: boolean; retentionDays: number | null } = { enabled: true, retentionDays: 90 };
 
 // ---------------------------------------------------------------------------
 // OpenRouter model catalog (config.listOpenrouterModels).
@@ -1352,6 +1364,9 @@ function resetState(opts?: ResetOptions): void {
   clearCompileState();
   // Restore the model-provider registry so a set-mutating e2e starts fresh.
   modelProviders = structuredClone(ORIGINAL_MODEL_PROVIDERS);
+  statisticsScenario = opts?.statisticsScenario ?? 'mixed';
+  statisticsFixture = createStatisticsFixtureEngine(statisticsScenario);
+  statisticsConfig = { enabled: statisticsScenario !== 'disabled', retentionDays: 90 };
   // clearCompileState resets allowPolicyMutation to true (the default); honor a
   // per-test override AFTER it so a flag-OFF e2e (controls hidden) is real.
   if (opts?.allowPolicyMutation !== undefined) {
@@ -1652,6 +1667,17 @@ function simulateCompile(op: MockCompileOperation): void {
 // ---------------------------------------------------------------------------
 // Method dispatch
 // ---------------------------------------------------------------------------
+
+function runStatisticsQuery<T>(operation: () => T): T | RpcErrorResult {
+  if (!statisticsFixture.capabilities().available) {
+    return errorResult('STATISTICS_UNAVAILABLE', 'LLM statistics are temporarily unavailable');
+  }
+  try {
+    return operation();
+  } catch (err) {
+    return errorResult('INVALID_PARAMS', err instanceof Error ? err.message : 'Invalid statistics query');
+  }
+}
 
 function handleMethod(ws: WebSocket, method: string, params: Record<string, unknown>): unknown {
   switch (method) {
@@ -2087,11 +2113,59 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       return buildModelProvidersDto();
     }
 
+    case 'config.getStatistics':
+      return { ...statisticsConfig };
+
+    case 'config.setStatistics': {
+      const gate = requireMutation();
+      if (gate) return gate;
+      const enabled = params.enabled;
+      const retentionDays = params.retentionDays;
+      if (
+        typeof enabled !== 'boolean' ||
+        (retentionDays !== null &&
+          (typeof retentionDays !== 'number' || !Number.isSafeInteger(retentionDays) || retentionDays < 1))
+      ) {
+        return errorResult('INVALID_PARAMS', 'Statistics settings are invalid');
+      }
+      statisticsConfig = { enabled, retentionDays };
+      statisticsScenario = enabled ? 'mixed' : 'disabled';
+      statisticsFixture = createStatisticsFixtureEngine(statisticsScenario);
+      broadcast('config.changed', {});
+      return { ...statisticsConfig };
+    }
+
     // Ungated read of the OpenRouter catalog. Source is env-toggled (see
     // MOCK_OPENROUTER_SOURCE near MOCK_SLUGS) so both validation modes are
     // reachable offline; defaults to 'live' (hard-block path).
     case 'config.listOpenrouterModels':
       return { models: MOCK_SLUGS, source: resolveMockOpenrouterSource() };
+
+    case 'statistics.capabilities':
+      return statisticsFixture.capabilities();
+
+    case 'statistics.summary':
+      return runStatisticsQuery(() =>
+        statisticsFixture.summary(params as unknown as Parameters<StatisticsFixtureEngine['summary']>[0]),
+      );
+
+    case 'statistics.series':
+      return runStatisticsQuery(() => statisticsFixture.series(params as unknown as FixtureSeriesQuery));
+
+    case 'statistics.dimensions':
+      return runStatisticsQuery(() =>
+        statisticsFixture.dimensions(params as unknown as Parameters<StatisticsFixtureEngine['dimensions']>[0]),
+      );
+
+    case 'statistics.exchanges':
+      return runStatisticsQuery(() =>
+        statisticsFixture.exchanges(params as unknown as Parameters<StatisticsFixtureEngine['exchanges']>[0]),
+      );
+
+    case 'statistics.distribution':
+      return runStatisticsQuery(() =>
+        statisticsFixture.distribution(params as unknown as Parameters<StatisticsFixtureEngine['distribution']>[0]),
+      );
 
     // Workflow methods
     case 'workflows.listDefinitions':
@@ -2518,9 +2592,12 @@ wss.on('connection', (ws) => {
 });
 
 // HTTP server for test-only endpoints (e.g., state reset, workflow event injection)
-const RESET_PORT = parseInt(process.env.RESET_PORT ?? '7401', 10);
+const RESET_PORT = parsePort(process.env.RESET_PORT, 7401);
 const httpServer = createServer((req, res) => {
-  if (req.method === 'POST' && req.url === '/__reset') {
+  if (req.method === 'GET' && req.url === '/__ready') {
+    res.writeHead(204);
+    res.end();
+  } else if (req.method === 'POST' && req.url === '/__reset') {
     let body = '';
     req.on('data', (chunk: Buffer) => {
       body += chunk.toString();

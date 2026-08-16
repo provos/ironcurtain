@@ -4,69 +4,28 @@ import { z } from 'zod';
 
 import { LlmMetricsRepositoryUnavailableError } from '../../llm-metrics/persistence/repository.js';
 import {
+  isValidStatisticsTimeZone,
+  MAX_STATISTICS_AGGREGATION_ROWS,
+  MAX_STATISTICS_DISTRIBUTION_BINS,
   MAX_STATISTICS_FILTER_VALUES,
+  MAX_STATISTICS_TOP_GROUPS,
   STATISTICS_BUCKET_SIZES_MS,
+  STATISTICS_CALENDAR_BUCKET_UNITS,
+  STATISTICS_DIMENSIONS,
+  STATISTICS_DISTRIBUTION_MEASURES,
   STATISTICS_IDENTIFIER_PATTERN,
+  STATISTICS_MEASURES,
   STATISTICS_PROVIDER_IDENTIFIER_MAX_LENGTH,
   STATISTICS_PROVIDER_IDENTIFIER_PATTERN,
+  STATISTICS_TIME_ZONE_MAX_LENGTH,
 } from '../../llm-metrics/query-contract.js';
 import type { WorkflowDispatchContext } from './workflow-dispatch.js';
 import { validateParams } from './types.js';
 import { InvalidParamsError, MethodNotFoundError, RpcError } from '../web-ui-types.js';
 
-const dimensionSchema = z.enum([
-  'agent',
-  'logicalProvider',
-  'gateway',
-  'protocol',
-  'providerProfile',
-  'requestedModel',
-  'forwardedModel',
-  'responseModel',
-  'servedModel',
-  'servedProvider',
-  'reasoningMode',
-  'requestedServiceTier',
-  'actualServiceTier',
-  'inputMeasurementProvenance',
-  'outputMeasurementProvenance',
-  'thinkingMeasurementProvenance',
-  'nonThinkingMeasurementProvenance',
-  'speedMode',
-  'streaming',
-  'outcome',
-  'refusal',
-  'usageCompleteness',
-  'attributionQuality',
-  'sessionId',
-  'workflowRunId',
-  'stateId',
-  'personaId',
-  'bundleId',
-]);
-
-const measureSchema = z.enum([
-  'requestCount',
-  'refusalCount',
-  'refusalRate',
-  'errorCount',
-  'errorRate',
-  'inputTokens',
-  'uncachedInputTokens',
-  'cacheReadInputTokens',
-  'cacheWriteInputTokens',
-  'toolUseInputTokens',
-  'thinkingTokens',
-  'nonThinkingOutputTokens',
-  'outputTokens',
-  'totalTokens',
-  'costUsd',
-  'ttftMs',
-  'upstreamLatencyMs',
-  'clientLatencyMs',
-  'observableOutputTokensPerSecond',
-  'effectiveOutputTokensPerSecond',
-]);
+const dimensionSchema = z.enum(STATISTICS_DIMENSIONS);
+const measureSchema = z.enum(STATISTICS_MEASURES);
+const distributionMeasureSchema = z.enum(STATISTICS_DISTRIBUTION_MEASURES);
 
 const identifierSchema = z.string().regex(STATISTICS_IDENTIFIER_PATTERN);
 const providerIdentifierSchema = z
@@ -118,9 +77,43 @@ const rangeSchema = z
   })
   .strict();
 
-const summarySchema = rangeSchema.extend({
-  measures: z.array(measureSchema).min(1).max(20),
-  groupBy: z.array(dimensionSchema).max(3).optional(),
+const summarySchema = rangeSchema
+  .extend({
+    measures: z.array(measureSchema).min(1).max(20),
+    groupBy: z.array(dimensionSchema).max(3).optional(),
+    topGroups: z.number().int().positive().max(MAX_STATISTICS_TOP_GROUPS).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.topGroups !== undefined && (value.groupBy === undefined || value.groupBy.length === 0)) {
+      context.addIssue({ code: 'custom', message: 'topGroups requires at least one grouping dimension' });
+    }
+  });
+
+const calendarBucketSchema = z
+  .object({
+    unit: z.literal('day'),
+    timeZone: z
+      .string()
+      .min(1)
+      .max(STATISTICS_TIME_ZONE_MAX_LENGTH)
+      .refine(isValidStatisticsTimeZone, { message: 'timeZone must be a valid IANA time zone' }),
+  })
+  .strict();
+
+const seriesSchema = summarySchema
+  .extend({
+    bucketMs: bucketSizeSchema.optional(),
+    calendarBucket: calendarBucketSchema.optional(),
+  })
+  .superRefine((value, context) => {
+    if ((value.bucketMs === undefined) === (value.calendarBucket === undefined)) {
+      context.addIssue({ code: 'custom', message: 'Exactly one statistics bucket form is required' });
+    }
+  });
+
+const distributionSchema = rangeSchema.extend({
+  measure: distributionMeasureSchema,
+  maxBins: z.number().int().positive().max(MAX_STATISTICS_DISTRIBUTION_BINS).optional(),
 });
 
 function requireReader(ctx: WorkflowDispatchContext) {
@@ -152,13 +145,14 @@ export async function statisticsDispatch(
     if (!ctx.statisticsReader) {
       return {
         available: false,
-        dtoVersion: 1,
+        dtoVersion: 2,
         formulaVersion: 1,
         schemaVersion: null,
         maxPageSize: 500,
-        maxScannedRows: 10_000,
+        maxScannedRows: MAX_STATISTICS_AGGREGATION_ROWS,
         maxGroups: 500,
         allowedBucketSizesMs: [...STATISTICS_BUCKET_SIZES_MS],
+        allowedCalendarBucketUnits: [...STATISTICS_CALENDAR_BUCKET_UNITS],
         health: {
           state: 'disabled',
           schemaVersion: null,
@@ -186,8 +180,12 @@ export async function statisticsDispatch(
       return mapQueryError(() => reader.summarize(query));
     }
     case 'statistics.series': {
-      const query = validateParams(summarySchema.extend({ bucketMs: bucketSizeSchema }), params);
+      const query = validateParams(seriesSchema, params);
       return mapQueryError(() => reader.timeSeries(query));
+    }
+    case 'statistics.distribution': {
+      const query = validateParams(distributionSchema, params);
+      return mapQueryError(() => reader.distribution(query));
     }
     case 'statistics.exchanges': {
       const query = validateParams(
