@@ -109,7 +109,7 @@ export function toPtySessionDto(session: PtyWebSession): SessionDto {
   return {
     label: session.label,
     source: { kind: 'web-pty', ...(persona ? { persona } : {}) },
-    status: session.alive ? 'ready' : 'closed',
+    status: session.ending ? 'stopping' : session.alive ? 'ready' : 'closed',
     turnCount: 0,
     createdAt: session.createdAt,
     hasPendingEscalation: session.listEscalationDtos().length > 0,

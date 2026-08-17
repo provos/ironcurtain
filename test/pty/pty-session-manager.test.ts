@@ -89,6 +89,11 @@ class StubBridge {
   }
 }
 
+/** Bridge whose kill request is accepted but does not terminate the child. */
+class NonExitingBridge extends StubBridge {
+  override readonly kill = vi.fn(() => {});
+}
+
 interface SenderCall {
   clients: Set<WsWebSocket>;
   event: string;
@@ -415,6 +420,30 @@ describe('PtySessionManager', () => {
       expect((ended[0].payload as { reason: string }).reason).toBe('idle_reaped');
     });
 
+    it('keeps a live session listed when the idle kill request does not exit the bridge', async () => {
+      const bridge = new NonExitingBridge();
+      const h = makeHarness({
+        idleTtlMs: 1000,
+        createBridge: async () => bridge as unknown as PtyBridge,
+      });
+      const { label } = await h.manager.create();
+
+      vi.advanceTimersByTime(1000);
+
+      expect(bridge.kill).toHaveBeenCalledTimes(1);
+      expect(bridge.alive).toBe(true);
+      expect(h.manager.has(label)).toBe(true);
+      expect(h.manager.listDtos()[0].status).toBe('stopping');
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
+
+      bridge.emitExit(0);
+
+      expect(h.manager.has(label)).toBe(false);
+      const ended = h.events.filter((e) => e.event === 'session.ended');
+      expect(ended).toHaveLength(1);
+      expect((ended[0].payload as { reason: string }).reason).toBe('idle_reaped');
+    });
+
     it('attach cancels the idle timer; detach re-arms it', async () => {
       const h = makeHarness({ idleTtlMs: 1000 });
       const { label } = await h.manager.create();
@@ -523,6 +552,53 @@ describe('PtySessionManager', () => {
       const ended = h.events.filter((e) => e.event === 'session.ended');
       expect(ended).toHaveLength(1);
       expect((ended[0].payload as { reason: string }).reason).toBe('user_ended');
+    });
+
+    it('keeps a live session listed when an explicit end request does not exit the bridge', async () => {
+      const bridge = new NonExitingBridge();
+      const h = makeHarness({ createBridge: async () => bridge as unknown as PtyBridge });
+      const { label } = await h.manager.create();
+
+      h.manager.end(label);
+      h.manager.end(label);
+
+      expect(bridge.kill).toHaveBeenCalledTimes(1);
+      expect(h.manager.has(label)).toBe(true);
+      expect(h.manager.listDtos()[0].status).toBe('stopping');
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
+      const updated = h.events.filter((e) => e.event === 'session.updated');
+      expect((updated[updated.length - 1].payload as { status: string }).status).toBe('stopping');
+
+      h.manager.input(label, b64('ignored'));
+      h.manager.sendPrompt(label, 'also ignored');
+      expect(bridge.write).not.toHaveBeenCalled();
+
+      bridge.emitExit(0);
+
+      expect(h.manager.has(label)).toBe(false);
+      const ended = h.events.filter((e) => e.event === 'session.ended');
+      expect(ended).toHaveLength(1);
+      expect((ended[0].payload as { reason: string }).reason).toBe('user_ended');
+    });
+
+    it('rolls back a failed kill request so explicit end can be retried', async () => {
+      const bridge = new NonExitingBridge();
+      bridge.kill.mockImplementationOnce(() => {
+        throw new Error('signal failed');
+      });
+      const h = makeHarness({ createBridge: async () => bridge as unknown as PtyBridge });
+      const { label } = await h.manager.create();
+
+      h.manager.end(label);
+
+      expect(h.manager.has(label)).toBe(true);
+      expect(h.manager.listDtos()[0].status).toBe('ready');
+      expect(h.events.filter((e) => e.event === 'session.ended')).toHaveLength(0);
+
+      h.manager.end(label);
+
+      expect(bridge.kill).toHaveBeenCalledTimes(2);
+      expect(h.manager.listDtos()[0].status).toBe('stopping');
     });
 
     it('a child exit reaps the session and emits session.ended', async () => {
