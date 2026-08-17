@@ -444,6 +444,29 @@ describe('PtySessionManager', () => {
       expect((ended[0].payload as { reason: string }).reason).toBe('idle_reaped');
     });
 
+    it('re-arms idle cleanup when an idle kill request throws', async () => {
+      const bridge = new NonExitingBridge();
+      bridge.kill.mockImplementationOnce(() => {
+        throw new Error('signal failed');
+      });
+      const h = makeHarness({
+        idleTtlMs: 1000,
+        createBridge: async () => bridge as unknown as PtyBridge,
+      });
+      const { label } = await h.manager.create();
+
+      vi.advanceTimersByTime(1000);
+
+      expect(bridge.kill).toHaveBeenCalledTimes(1);
+      expect(h.manager.listDtos()[0].status).toBe('ready');
+
+      vi.advanceTimersByTime(1000);
+
+      expect(bridge.kill).toHaveBeenCalledTimes(2);
+      expect(h.manager.has(label)).toBe(true);
+      expect(h.manager.listDtos()[0].status).toBe('stopping');
+    });
+
     it('attach cancels the idle timer; detach re-arms it', async () => {
       const h = makeHarness({ idleTtlMs: 1000 });
       const { label } = await h.manager.create();

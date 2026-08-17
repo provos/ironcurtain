@@ -702,6 +702,7 @@ export class PtySessionManager {
         `[WebUI] PTY session #${label}: termination request failed (${error instanceof Error ? error.message : String(error)})`,
       );
       this.eventBus.emit('session.updated', toPtySessionDto(session));
+      if (!session.hasSubscribers()) this.startIdleTimer(label);
       return;
     }
 
