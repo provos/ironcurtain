@@ -22,6 +22,7 @@ import {
   type PtyStreamSender,
   type PtySessionManagerOptions,
 } from '../../src/web-ui/pty-session-manager.js';
+import { PTY_KILL_GRACE_MS } from '../../src/pty/pty-bridge.js';
 import type { PtyBridge, PtyBridgeOptions } from '../../src/pty/pty-bridge.js';
 import type { PtySessionRegistration } from '../../src/docker/pty-types.js';
 import type { EscalationRequest } from '../../src/session/types.js';
@@ -158,6 +159,24 @@ function makeHarness(overrides: Partial<PtySessionManagerOptions> = {}): Harness
 
 const ptyOutputs = (calls: SenderCall[]) => calls.filter((c) => c.event === 'session.pty_output');
 const ptyReplays = (calls: SenderCall[]) => calls.filter((c) => c.event === 'session.pty_replay');
+
+/** Harness whose bridge accepts kill requests but only exits when driven. */
+function makeNonExitingHarness(opts: { idleTtlMs?: number; failFirstKill?: boolean } = {}): {
+  h: Harness;
+  bridge: NonExitingBridge;
+} {
+  const bridge = new NonExitingBridge();
+  if (opts.failFirstKill) {
+    bridge.kill.mockImplementationOnce(() => {
+      throw new Error('signal failed');
+    });
+  }
+  const h = makeHarness({
+    ...(opts.idleTtlMs !== undefined ? { idleTtlMs: opts.idleTtlMs } : {}),
+    createBridge: async () => bridge as unknown as PtyBridge,
+  });
+  return { h, bridge };
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -421,11 +440,7 @@ describe('PtySessionManager', () => {
     });
 
     it('keeps a live session listed when the idle kill request does not exit the bridge', async () => {
-      const bridge = new NonExitingBridge();
-      const h = makeHarness({
-        idleTtlMs: 1000,
-        createBridge: async () => bridge as unknown as PtyBridge,
-      });
+      const { h, bridge } = makeNonExitingHarness({ idleTtlMs: 1000 });
       const { label } = await h.manager.create();
 
       vi.advanceTimersByTime(1000);
@@ -445,14 +460,7 @@ describe('PtySessionManager', () => {
     });
 
     it('re-arms idle cleanup when an idle kill request throws', async () => {
-      const bridge = new NonExitingBridge();
-      bridge.kill.mockImplementationOnce(() => {
-        throw new Error('signal failed');
-      });
-      const h = makeHarness({
-        idleTtlMs: 1000,
-        createBridge: async () => bridge as unknown as PtyBridge,
-      });
+      const { h, bridge } = makeNonExitingHarness({ idleTtlMs: 1000, failFirstKill: true });
       const { label } = await h.manager.create();
 
       vi.advanceTimersByTime(1000);
@@ -578,8 +586,7 @@ describe('PtySessionManager', () => {
     });
 
     it('keeps a live session listed when an explicit end request does not exit the bridge', async () => {
-      const bridge = new NonExitingBridge();
-      const h = makeHarness({ createBridge: async () => bridge as unknown as PtyBridge });
+      const { h, bridge } = makeNonExitingHarness();
       const { label } = await h.manager.create();
 
       h.manager.end(label);
@@ -605,11 +612,7 @@ describe('PtySessionManager', () => {
     });
 
     it('rolls back a failed kill request so explicit end can be retried', async () => {
-      const bridge = new NonExitingBridge();
-      bridge.kill.mockImplementationOnce(() => {
-        throw new Error('signal failed');
-      });
-      const h = makeHarness({ createBridge: async () => bridge as unknown as PtyBridge });
+      const { h, bridge } = makeNonExitingHarness({ failFirstKill: true });
       const { label } = await h.manager.create();
 
       h.manager.end(label);
@@ -676,6 +679,62 @@ describe('PtySessionManager', () => {
       expect(b1.kill).toHaveBeenCalledTimes(1);
       expect(b2.kill).toHaveBeenCalledTimes(1);
       expect(h.manager.size).toBe(0);
+    });
+
+    it('attempts later bridge kills when an earlier kill throws', async () => {
+      const first = new StubBridge();
+      first.kill.mockImplementationOnce(() => {
+        throw new Error('signal unavailable');
+      });
+      const second = new StubBridge();
+      const bridges = [first, second];
+      const h = makeHarness({
+        createBridge: async () => bridges.shift()! as unknown as PtyBridge,
+      });
+
+      await h.manager.create();
+      await h.manager.create();
+      await h.manager.close();
+
+      expect(first.kill).toHaveBeenCalledTimes(1);
+      expect(second.kill).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('clears the close timeout after immediate exits', async () => {
+      const h = makeHarness();
+      await h.manager.create();
+
+      await h.manager.close();
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not leave a close timeout when there are no sessions', async () => {
+      const h = makeHarness();
+
+      await h.manager.close();
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('waits through the SIGKILL grace boundary before close timeout wins', async () => {
+      const { h, bridge } = makeNonExitingHarness();
+      await h.manager.create();
+
+      let resolved = false;
+      const closePromise = h.manager.close().then(() => {
+        resolved = true;
+      });
+      setTimeout(() => bridge.emitExit(0), PTY_KILL_GRACE_MS);
+
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS - 1);
+      expect(resolved).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await closePromise;
+      expect(resolved).toBe(true);
+      expect(bridge.kill).toHaveBeenCalledTimes(1);
     });
   });
 

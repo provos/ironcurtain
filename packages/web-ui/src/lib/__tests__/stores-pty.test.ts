@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { JobListDto, PtySink, SessionDto } from '../types.js';
+import { deferred, mockSession } from './fixtures.js';
 
 // ---------------------------------------------------------------------------
 // Mock the WS client dependency so getWsClient() returns a spyable client.
@@ -81,42 +82,6 @@ describe('PTY store actions', () => {
     expect(mockRequest).toHaveBeenCalledWith('sessions.ptyPrompt', { label: 5, text: 'approve the write' });
   });
 });
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: unknown) => void } {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-function mockSession(label: number, overrides: Partial<SessionDto> = {}): SessionDto {
-  return {
-    label,
-    source: { kind: 'web' },
-    status: 'ready',
-    turnCount: 0,
-    createdAt: '2026-01-01T00:00:00Z',
-    hasPendingEscalation: false,
-    messageInFlight: false,
-    budget: {
-      totalTokens: 0,
-      stepCount: 0,
-      elapsedSeconds: 0,
-      estimatedCostUsd: 0,
-      tokenTrackingAvailable: true,
-      limits: {
-        maxTotalTokens: null,
-        maxSteps: null,
-        maxSessionSeconds: null,
-        maxEstimatedCostUsd: null,
-      },
-    },
-    ...overrides,
-  };
-}
 
 describe('connection refresh ordering', () => {
   beforeEach(() => {

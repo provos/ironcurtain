@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import SessionSidebar from './session-sidebar.svelte';
+import { mockSession } from '../../__tests__/fixtures.js';
 import type { CreateSessionOptions, PersonaListItem, SessionDto } from '$lib/types.js';
 
 function makePersona(overrides: Partial<PersonaListItem> = {}): PersonaListItem {
@@ -8,32 +9,6 @@ function makePersona(overrides: Partial<PersonaListItem> = {}): PersonaListItem 
     name: 'coder',
     description: 'Code-focused persona',
     compiled: true,
-    ...overrides,
-  };
-}
-
-function makeSession(overrides: Partial<SessionDto> = {}): SessionDto {
-  return {
-    label: 1,
-    source: { kind: 'web-pty' },
-    status: 'ready',
-    turnCount: 0,
-    createdAt: '2026-01-01T00:00:00Z',
-    hasPendingEscalation: false,
-    messageInFlight: false,
-    budget: {
-      totalTokens: 0,
-      stepCount: 0,
-      elapsedSeconds: 0,
-      estimatedCostUsd: 0,
-      tokenTrackingAvailable: true,
-      limits: {
-        maxTotalTokens: null,
-        maxSteps: null,
-        maxSessionSeconds: null,
-        maxEstimatedCostUsd: null,
-      },
-    },
     ...overrides,
   };
 }
@@ -153,7 +128,7 @@ describe('SessionSidebar', () => {
     const onselect = vi.fn();
     render(SessionSidebar, {
       props: makeProps({
-        sessions: new Map([[3, makeSession({ label: 3 })]]),
+        sessions: new Map([[3, mockSession(3, { source: { kind: 'web-pty' } })]]),
         onselect,
       }),
     });
@@ -161,5 +136,19 @@ describe('SessionSidebar', () => {
     await fireEvent.click(screen.getByTestId('session-item-3'));
 
     expect(onselect).toHaveBeenCalledWith(3);
+  });
+
+  it('shows a live stopping state for sessions awaiting process exit', () => {
+    render(SessionSidebar, {
+      props: makeProps({
+        selectedLabel: 4,
+        sessions: new Map([[4, mockSession(4, { source: { kind: 'web-pty' }, status: 'stopping' })]]),
+      }),
+    });
+
+    const stoppingStatus = screen.getByTestId('session-stopping-status');
+    expect(stoppingStatus.textContent).toContain('Stopping…');
+    expect(stoppingStatus.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

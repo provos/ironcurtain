@@ -7,14 +7,25 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { buildSpawnArgs, createPtyBridge, type PtyBridgeOptions } from '../src/pty/pty-bridge.js';
+import * as logger from '../src/logger.js';
+import {
+  buildSpawnArgs,
+  createPtyBridge,
+  PTY_KILL_GRACE_MS,
+  PTY_KILL_RETRY_MS,
+  type PtyBridgeOptions,
+} from '../src/pty/pty-bridge.js';
 
 /** Shared, mutable fake-child state reachable from the hoisted node-pty mock. */
 const ptyMock = vi.hoisted(() => {
   const state: {
     dataCb?: (d: string) => void;
     exitCb?: (e: { exitCode: number }) => void;
+    killCalls: string[];
+    killExits: boolean;
   } = {};
+  state.killCalls = [];
+  state.killExits = true;
   return { state };
 });
 
@@ -29,7 +40,12 @@ vi.mock('node-pty', () => {
     },
     write: vi.fn(),
     resize: vi.fn(),
-    kill: vi.fn(() => ptyMock.state.exitCb?.({ exitCode: 0 })),
+    kill: (signal: string) => {
+      ptyMock.state.killCalls.push(signal);
+      if (ptyMock.state.killExits) {
+        ptyMock.state.exitCb?.({ exitCode: signal === 'SIGTERM' ? 143 : 137 });
+      }
+    },
   });
   return { default: { spawn }, spawn };
 });
@@ -154,6 +170,8 @@ describe('createPtyBridge — output wiring (onData / serialize)', () => {
   beforeEach(() => {
     ptyMock.state.dataCb = undefined;
     ptyMock.state.exitCb = undefined;
+    ptyMock.state.killCalls = [];
+    ptyMock.state.killExits = true;
   });
 
   it('onData fires with the chunk AFTER the headless buffer reflects it', async () => {
@@ -217,6 +235,139 @@ describe('createPtyBridge — output wiring (onData / serialize)', () => {
     const snap = bridge.serialize({ scrollback: 0 });
     expect(typeof snap).toBe('string');
     bridge.kill();
+  });
+});
+
+describe('createPtyBridge — termination escalation', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    ptyMock.state.dataCb = undefined;
+    ptyMock.state.exitCb = undefined;
+    ptyMock.state.killCalls = [];
+    ptyMock.state.killExits = false;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('escalates from SIGTERM to SIGKILL after the grace period', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const forceKillSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      ptyMock.state.exitCb?.({ exitCode: 137 });
+      return true;
+    });
+
+    try {
+      bridge.kill();
+      expect(ptyMock.state.killCalls).toEqual(['SIGTERM']);
+
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS - 1);
+      expect(ptyMock.state.killCalls).toEqual(['SIGTERM']);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ptyMock.state.killCalls).toEqual(['SIGTERM']);
+      expect(forceKillSpy).toHaveBeenCalledWith(424242, 'SIGKILL');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`pid=424242`));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`${PTY_KILL_GRACE_MS}ms`));
+    } finally {
+      warnSpy.mockRestore();
+      forceKillSpy.mockRestore();
+    }
+  });
+
+  it('cancels SIGKILL when the child exits during the grace period', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const forceKillSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    try {
+      bridge.kill();
+      ptyMock.state.exitCb?.({ exitCode: 143 });
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS);
+
+      expect(bridge.alive).toBe(false);
+      expect(ptyMock.state.killCalls).toEqual(['SIGTERM']);
+      expect(forceKillSpy).not.toHaveBeenCalled();
+    } finally {
+      forceKillSpy.mockRestore();
+    }
+  });
+
+  it('makes repeated kill calls idempotent while termination is pending', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const forceKillSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      ptyMock.state.exitCb?.({ exitCode: 137 });
+      return true;
+    });
+
+    try {
+      bridge.kill();
+      bridge.kill();
+      expect(ptyMock.state.killCalls).toEqual(['SIGTERM']);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS);
+      expect(forceKillSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      forceKillSpy.mockRestore();
+    }
+  });
+
+  it('retries a failed direct SIGKILL until onExit confirms termination', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const forceKillSpy = vi
+      .spyOn(process, 'kill')
+      .mockImplementationOnce(() => {
+        throw new Error('force kill failed');
+      })
+      .mockImplementation(() => {
+        ptyMock.state.exitCb?.({ exitCode: 137 });
+        return true;
+      });
+
+    try {
+      bridge.kill();
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS);
+      expect(forceKillSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pid=424242'));
+
+      await vi.advanceTimersByTimeAsync(PTY_KILL_RETRY_MS);
+      expect(forceKillSpy).toHaveBeenCalledTimes(2);
+      expect(bridge.alive).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+      forceKillSpy.mockRestore();
+    }
+  });
+
+  it('throttles persistent force-kill failure logs while continuing retries', async () => {
+    const bridge = await createPtyBridge(baseOptions());
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const forceKillSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('EPERM');
+    });
+
+    try {
+      bridge.kill();
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS);
+      expect(forceKillSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(9 * PTY_KILL_RETRY_MS);
+      expect(forceKillSpy).toHaveBeenCalledTimes(10);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(PTY_KILL_RETRY_MS);
+      expect(forceKillSpy).toHaveBeenCalledTimes(11);
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+
+      ptyMock.state.exitCb?.({ exitCode: 137 });
+    } finally {
+      errorSpy.mockRestore();
+      forceKillSpy.mockRestore();
+    }
   });
 });
 

@@ -49,7 +49,7 @@ import type {
 } from './types.js';
 import { PHASE } from './types.js';
 import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
-import { handleEvent as handleEventPure } from './event-handler.js';
+import { handleEvent as handleEventPure, SESSION_MUTATION_EVENTS } from './event-handler.js';
 
 export type ViewId =
   | 'dashboard'
@@ -323,24 +323,15 @@ export async function verifyAuthToken(token: string, fetchImpl: typeof fetch = f
   }
 }
 
-type SessionMutationEventName = 'session.created' | 'session.updated' | 'session.ended';
-
 type BufferedSessionEvent = {
-  event: SessionMutationEventName;
+  event: string;
   payload: unknown;
 };
 
-type SessionRefreshBarrier = {
-  buffered: BufferedSessionEvent[];
-};
-
-let activeSessionRefresh: SessionRefreshBarrier | null = null;
-const queuedSessionRefreshes: Array<{ client: WsClient; barrier: SessionRefreshBarrier }> = [];
+/** Replay buffer of the sessions.list refresh currently in flight (if any). */
+let activeSessionBuffer: BufferedSessionEvent[] | null = null;
+const queuedSessionRefreshes: Array<{ client: WsClient; buffered: BufferedSessionEvent[] }> = [];
 let sessionRefreshQueueRunning = false;
-
-function isSessionMutationEvent(event: string): event is SessionMutationEventName {
-  return event === 'session.created' || event === 'session.updated' || event === 'session.ended';
-}
 
 function applyWebEvent(client: WsClient, event: string, payload: unknown): void {
   handleEventPure(
@@ -378,8 +369,8 @@ function wireEventHandlers(client: WsClient): void {
 
   client.onEvent((event, payload) => {
     applyWebEvent(client, event, payload);
-    if (isSessionMutationEvent(event)) {
-      activeSessionRefresh?.buffered.push({ event, payload });
+    if (SESSION_MUTATION_EVENTS.has(event)) {
+      activeSessionBuffer?.push({ event, payload });
     }
   });
 }
@@ -401,22 +392,22 @@ function applySessionsSnapshot(sessions: SessionDto[]): void {
   appState.sessions = newSessions;
 }
 
-function completeSessionRefresh(client: WsClient, barrier: SessionRefreshBarrier, sessions: SessionDto[]): void {
+function completeSessionRefresh(client: WsClient, buffered: BufferedSessionEvent[], sessions: SessionDto[]): void {
   applySessionsSnapshot(sessions);
-  activeSessionRefresh = null;
-  for (const event of barrier.buffered) {
+  activeSessionBuffer = null;
+  for (const event of buffered) {
     applyWebEvent(client, event.event, event.payload);
   }
 }
 
-async function runSessionRefresh(client: WsClient, barrier: SessionRefreshBarrier): Promise<void> {
+async function runSessionRefresh(client: WsClient, buffered: BufferedSessionEvent[]): Promise<void> {
   try {
     const sessions = await client.request<SessionDto[]>('sessions.list');
-    completeSessionRefresh(client, barrier, sessions);
+    completeSessionRefresh(client, buffered, sessions);
   } catch (err) {
     // Session events were already applied live. Dropping only the replay
     // buffer preserves those mutations while allowing the next queued refresh.
-    activeSessionRefresh = null;
+    activeSessionBuffer = null;
     console.error('Failed to refresh sessions:', err);
   }
 }
@@ -425,19 +416,20 @@ async function drainSessionRefreshQueue(): Promise<void> {
   while (queuedSessionRefreshes.length > 0) {
     const next = queuedSessionRefreshes.shift();
     if (!next) continue;
-    activeSessionRefresh = next.barrier;
-    await runSessionRefresh(next.client, next.barrier);
+    activeSessionBuffer = next.buffered;
+    await runSessionRefresh(next.client, next.buffered);
   }
-  activeSessionRefresh = null;
   sessionRefreshQueueRunning = false;
 }
 
 function enqueueSessionRefresh(client: WsClient): void {
-  const barrier: SessionRefreshBarrier = { buffered: [] };
-  queuedSessionRefreshes.push({ client, barrier });
+  const buffered: BufferedSessionEvent[] = [];
+  queuedSessionRefreshes.push({ client, buffered });
   if (!sessionRefreshQueueRunning) {
     sessionRefreshQueueRunning = true;
-    activeSessionRefresh = barrier;
+    // The drain loop runs synchronously up to its first await, so the first
+    // buffer becomes active before this returns — events delivered in the
+    // same tick as the connect that queued the refresh are captured too.
     void drainSessionRefreshQueue();
   }
 }

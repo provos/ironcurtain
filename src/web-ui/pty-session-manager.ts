@@ -30,7 +30,7 @@ import type { WebSocket as WsWebSocket } from 'ws';
 import type { SessionManager } from '../session/session-manager.js';
 import type { SessionMode, EscalationRequest } from '../session/types.js';
 import type { WebEventBus } from './web-event-bus.js';
-import { createPtyBridge, type PtyBridge, type PtyBridgeOptions } from '../pty/pty-bridge.js';
+import { createPtyBridge, PTY_KILL_GRACE_MS, type PtyBridge, type PtyBridgeOptions } from '../pty/pty-bridge.js';
 import { resolveIroncurtainBin } from '../pty/resolve-ironcurtain-bin.js';
 import { createEscalationWatcher, type EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { writeTrustedUserContext } from '../escalation/trusted-input.js';
@@ -75,8 +75,12 @@ const PTY_BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 /** Replayed scrollback tail cap (§11 Q2): keeps a pty_replay frame under maxPayload. */
 const PTY_REPLAY_SCROLLBACK = 1000;
 
-/** Bounded await for child exits on daemon shutdown (mirrors mux doShutdown). */
-const PTY_CLOSE_TIMEOUT_MS = 5000;
+/**
+ * Bounded await for child exits on daemon shutdown. It outlasts SIGTERM's
+ * grace period so the bridge's SIGKILL crash recovery can fire before close()
+ * falls back to its timeout.
+ */
+const PTY_CLOSE_TIMEOUT_MS = PTY_KILL_GRACE_MS + 5_000;
 
 /**
  * Delay before the injected Enter (`\r`) on a trusted message, so Claude Code's
@@ -566,7 +570,7 @@ export class PtySessionManager {
     session.bridge.resize(cols, rows);
   }
 
-  /** Explicitly ends a session (kills the child -> container teardown). */
+  /** Explicitly requests termination; removal waits for the observed PTY exit. */
   end(label: number): void {
     this.endInternal(label, 'user_ended');
   }
@@ -586,8 +590,19 @@ export class PtySessionManager {
           session.bridge.kill();
         }),
     );
-    const timeout = new Promise<void>((resolve) => setTimeout(resolve, PTY_CLOSE_TIMEOUT_MS));
-    await Promise.race([Promise.allSettled(exits), timeout]);
+    let closeTimeout: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, PTY_CLOSE_TIMEOUT_MS);
+      closeTimeout = timer;
+      timer.unref();
+    });
+    try {
+      await Promise.race([Promise.allSettled(exits), timeout]);
+    } finally {
+      if (closeTimeout !== undefined) {
+        clearTimeout(closeTimeout);
+      }
+    }
   }
 
   /** SessionDto snapshots for `sessions.list`. */
