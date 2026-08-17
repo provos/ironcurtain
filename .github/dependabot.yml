@@ -7,8 +7,15 @@ updates:
     groups:
       production:
         dependency-type: production
+        # Keep routine updates together, but review breaking majors individually.
+        update-types:
+          - minor
+          - patch
       development:
         dependency-type: development
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
