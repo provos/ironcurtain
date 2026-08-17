@@ -49,7 +49,7 @@ const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
 /**
  * Claude Code streaming-watchdog tuning vars forwarded from the host env into
- * the container when set (see `buildEnv`). Curated allowlist — these govern
+ * batch containers when set (see `buildBatchEnv`). Curated allowlist — these govern
  * the idle-stream abort ("Response stalled mid-stream", issue #367) and let it
  * be exercised against the MITM stream-delay knob without rebuilding the image.
  */
@@ -297,38 +297,7 @@ exit $STATUS
         CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
         // Node.js does not use the system CA store -- must set this explicitly
         NODE_EXTRA_CA_CERTS: CONTAINER_RUNTIME_CA_CERT,
-        // Force subagents (Agent/Task tool) and `run_in_background` to run in the
-        // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
-        // Code v2.1.198 subagents run in the *background* by default: the tool
-        // returns immediately and the parent is "notified automatically when it
-        // completes" via a persistent supervisor that re-fires the session. We
-        // invoke `claude -p` as a one-shot subprocess with no such supervisor, so
-        // when a workflow agent (e.g. vuln-discovery `analyze`) fans out to
-        // parallel subagents, the turn never receives their completions and stalls
-        // ("Response stalled mid-stream" / no `agent_status` block). This env var
-        // restores the pre-2.1.198 synchronous behavior, which the FSM's
-        // one-turn=one-result model requires. See docs/en/env-vars.
-        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
-        // Disable the streaming idle watchdog (on by default since Claude
-        // Code v2.1.196). Behind the MITM proxy, long tool-use turns and
-        // SSE re-buffering trip the watchdog's idle threshold, which
-        // aborts the request with "API Error: Response stalled
-        // mid-stream" — the actual root cause of issue #367 (PR #372's
-        // background-task fix alone did not resolve it). Turning the
-        // watchdog off restores the pre-2.1.196 behavior; the workflow
-        // orchestrator already enforces its own wall-clock/step budgets.
-        CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
       };
-
-      // DEBUG / operability (issue #367 watchdog harness): forward a curated
-      // allowlist of Claude Code streaming-watchdog tuning vars from the host
-      // env into the container when set. Lets the streaming idle watchdog be
-      // exercised against the MITM stream-delay knob (see stream-delay.ts)
-      // without rebuilding the image. No-op unless the host sets them.
-      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
-        const value = process.env[key];
-        if (value !== undefined) env[key] = value;
-      }
 
       if (modelId) {
         env.IRONCURTAIN_MODEL = modelId;
@@ -383,6 +352,43 @@ exit $STATUS
         env.IRONCURTAIN_API_KEY = fakeKey;
       }
 
+      return env;
+    },
+
+    buildBatchEnv(): Record<string, string> {
+      const env: Record<string, string> = {
+        // Force subagents (Agent/Task tool) and `run_in_background` to run in the
+        // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
+        // Code v2.1.198 subagents run in the *background* by default: the tool
+        // returns immediately and the parent is "notified automatically when it
+        // completes" via a persistent supervisor that re-fires the session. We
+        // invoke `claude -p` as a one-shot subprocess with no such supervisor, so
+        // when a workflow agent (e.g. vuln-discovery `analyze`) fans out to
+        // parallel subagents, the turn never receives their completions and stalls
+        // ("Response stalled mid-stream" / no `agent_status` block). This env var
+        // restores the pre-2.1.198 synchronous behavior, which the FSM's
+        // one-turn=one-result model requires. See docs/en/env-vars.
+        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+        // Disable the streaming idle watchdog (on by default since Claude
+        // Code v2.1.196). Behind the MITM proxy, long tool-use turns and
+        // SSE re-buffering trip the watchdog's idle threshold, which
+        // aborts the request with "API Error: Response stalled
+        // mid-stream" — the actual root cause of issue #367 (PR #372's
+        // background-task fix alone did not resolve it). Turning the
+        // watchdog off restores the pre-2.1.196 behavior; the workflow
+        // orchestrator already enforces its own wall-clock/step budgets.
+        CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
+      };
+
+      // DEBUG / operability (issue #367 watchdog harness): forward a curated
+      // allowlist of Claude Code streaming-watchdog tuning vars from the host
+      // env into the container when set. Lets the streaming idle watchdog be
+      // exercised against the MITM stream-delay knob (see stream-delay.ts)
+      // without rebuilding the image. No-op unless the host sets them.
+      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
+      }
       return env;
     },
 

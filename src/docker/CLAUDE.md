@@ -72,7 +72,7 @@ The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `r
 
 ## Agent adapters
 
-- `agent-adapter.ts` - `AgentAdapter` interface. `getProviders(authKind?)` returns required LLM providers (OAuth or API key). `buildEnv(config, fakeKeys)` builds container env vars with fake keys instead of real ones.
+- `agent-adapter.ts` - `AgentAdapter` interface. `getProviders(authKind?)` returns required LLM providers (OAuth or API key). `buildEnv(config, fakeKeys)` builds common container env vars with fake keys instead of real ones; optional `buildBatchEnv(config, fakeKeys)` adds one-shot-only overrides and is never applied to interactive PTY sessions.
 - `agent-registry.ts` - Simple `Map`-based registry of agent adapters. `registerBuiltinAdapters()` lazily loads Claude Code and Goose adapters.
 - `adapters/claude-code.ts` - Claude Code adapter. Auth-aware `buildEnv()` sets `CLAUDE_CODE_OAUTH_TOKEN` or API key. `getProviders()` returns OAuth or API key providers based on `authKind`.
 - `adapters/goose.ts` - Goose adapter. Generates Goose YAML config for MCP extension discovery, orientation scripts for PTY mode, and provider-specific env vars (Anthropic, OpenAI, Google).

@@ -305,6 +305,15 @@ export interface AgentAdapter {
   buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Readonly<Record<string, string>>;
 
   /**
+   * Constructs additional environment variables for batch-mode containers.
+   *
+   * These variables are merged on top of {@link buildEnv} only for the
+   * one-shot execution path driven by {@link buildCommand}. Interactive PTY
+   * sessions intentionally do not receive them.
+   */
+  buildBatchEnv?(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Readonly<Record<string, string>>;
+
+  /**
    * Parses the agent's output to extract the response and optional cost.
    *
    * IMPORTANT: adapters are the sole place where CLI-specific error

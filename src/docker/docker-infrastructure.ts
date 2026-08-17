@@ -1843,6 +1843,7 @@ async function createSessionContainersAttempt(
     }
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
+      ...core.adapter.buildBatchEnv?.(config, core.fakeKeys),
       ...buildRuntimeTrustEnv(),
       ...nestedDaemonAgentEnv(nestedDaemon),
     };

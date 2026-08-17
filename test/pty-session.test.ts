@@ -142,6 +142,16 @@ describe('Claude Code adapter PTY orientation files', () => {
     claudeCodeAdapter = createClaudeCodeAdapter();
   });
 
+  it('keeps one-shot workflow overrides out of the interactive environment', () => {
+    const env = claudeCodeAdapter.buildEnv(
+      { userConfig: { anthropicApiKey: 'sk-test' } } as import('../src/config/types.js').IronCurtainConfig,
+      new Map([['api.anthropic.com', 'sk-ant-fake']]),
+    );
+
+    expect(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBeUndefined();
+    expect(env.CLAUDE_ENABLE_STREAM_WATCHDOG).toBeUndefined();
+  });
+
   it('start-claude.sh includes stty initialization from env vars', () => {
     const files = claudeCodeAdapter.generateOrientationFiles();
     const startScript = files.find((f) => f.path === 'start-claude.sh');

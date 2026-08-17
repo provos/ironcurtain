@@ -361,19 +361,18 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
     }
   });
 
-  it('Claude Code buildEnv (API-key mode) matches the pre-OpenRouter env exactly', () => {
+  it('Claude Code scopes workflow-only overrides to batch mode', () => {
     const adapter = createClaudeCodeAdapter();
     const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-api03-ironcurtain-FAKE']]);
     const env = adapter.buildEnv(nativeConfig, fakeKeys);
     expect(env).toEqual({
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
       NODE_EXTRA_CA_CERTS: '/etc/ironcurtain/ca-cert.pem',
-      // Forces subagents synchronous (issue #367); set on every path — native
-      // and OpenRouter — not an OpenRouter-specific var.
-      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
-      // Disables the streaming idle watchdog (issue #367); set on every path.
-      CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
       IRONCURTAIN_API_KEY: 'sk-ant-api03-ironcurtain-FAKE',
+    });
+    expect(adapter.buildBatchEnv?.(nativeConfig, fakeKeys)).toEqual({
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
     });
     // No OpenRouter vars leaked in.
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
