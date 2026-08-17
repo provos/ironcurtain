@@ -142,7 +142,18 @@ describe('Claude Code adapter PTY orientation files', () => {
     claudeCodeAdapter = createClaudeCodeAdapter();
   });
 
+  afterEach(() => vi.unstubAllEnvs());
+
   it('keeps one-shot workflow overrides out of the interactive environment', () => {
+    for (const key of [
+      'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
+      'CLAUDE_ENABLE_STREAM_WATCHDOG',
+      'CLAUDE_ENABLE_BYTE_WATCHDOG',
+      'API_FORCE_IDLE_TIMEOUT',
+      'API_TIMEOUT_MS',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
     const env = claudeCodeAdapter.buildEnv(
       { userConfig: { anthropicApiKey: 'sk-test' } } as import('../src/config/types.js').IronCurtainConfig,
       new Map([['api.anthropic.com', 'sk-ant-fake']]),
@@ -150,6 +161,20 @@ describe('Claude Code adapter PTY orientation files', () => {
 
     expect(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBeUndefined();
     expect(env.CLAUDE_ENABLE_STREAM_WATCHDOG).toBeUndefined();
+  });
+
+  it('preserves watchdog tuning as an explicit PTY escape hatch', () => {
+    vi.stubEnv('CLAUDE_ENABLE_STREAM_WATCHDOG', '1');
+    vi.stubEnv('API_TIMEOUT_MS', '3000000');
+    const config = { userConfig: { anthropicApiKey: 'sk-test' } } as import('../src/config/types.js').IronCurtainConfig;
+    const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-fake']]);
+
+    const commonEnv = claudeCodeAdapter.buildEnv(config, fakeKeys);
+    const batchEnv = claudeCodeAdapter.buildBatchEnv?.(config, fakeKeys);
+
+    expect(commonEnv.CLAUDE_ENABLE_STREAM_WATCHDOG).toBe('1');
+    expect(commonEnv.API_TIMEOUT_MS).toBe('3000000');
+    expect(batchEnv?.CLAUDE_ENABLE_STREAM_WATCHDOG).toBe('0');
   });
 
   it('start-claude.sh includes stty initialization from env vars', () => {
@@ -161,6 +186,12 @@ describe('Claude Code adapter PTY orientation files', () => {
     expect(startScript!.content).toContain('stty cols');
   });
 
+  it('start-claude.sh reloads the mounted prompt for runtime-native PTY exec', () => {
+    const files = claudeCodeAdapter.generateOrientationFiles();
+    const startScript = files.find((f) => f.path === 'start-claude.sh');
+    expect(startScript?.content).toContain('IRONCURTAIN_SYSTEM_PROMPT=$(cat /etc/ironcurtain/system-prompt.txt)');
+  });
+
   it('start-claude.sh quotes $IRONCURTAIN_SYSTEM_PROMPT to prevent word-splitting', () => {
     const files = claudeCodeAdapter.generateOrientationFiles();
     const startScript = files.find((f) => f.path === 'start-claude.sh')!;
@@ -168,7 +199,9 @@ describe('Claude Code adapter PTY orientation files', () => {
     // Unquoted expansion causes bash to word-split the prompt text,
     // injecting individual words as separate arguments to claude.
     const lines = startScript.content.split('\n');
-    const promptUsages = lines.filter((l) => l.includes('IRONCURTAIN_SYSTEM_PROMPT') && !l.trimStart().startsWith('#'));
+    const promptUsages = lines.filter(
+      (l) => l.includes('$IRONCURTAIN_SYSTEM_PROMPT') && !l.trimStart().startsWith('#'),
+    );
     expect(promptUsages.length).toBeGreaterThan(0);
     for (const line of promptUsages) {
       // Must appear as "$IRONCURTAIN_SYSTEM_PROMPT" (quoted), not bare

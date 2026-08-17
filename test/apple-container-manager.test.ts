@@ -437,6 +437,21 @@ describe('AppleContainerManager', () => {
       const result = await manager().exec('c1', ['false']);
       expect(result).toEqual({ exitCode: 3, stdout: 'partial', stderr: 'boom' });
     });
+
+    it('attaches runtime-native PTY exec to the host terminal', async () => {
+      const spawned = createMockSpawn();
+      spawned.exitNext(7);
+      const runtime = createAppleContainerManager(mock.mockExec, availableProbe, { spawn: spawned.spawn });
+
+      await expect(runtime.execPty?.('c1', ['/etc/ironcurtain/start-claude.sh'])).resolves.toBe(7);
+      expect(spawned.calls).toEqual([
+        {
+          cmd: 'container',
+          args: ['exec', '--interactive', '--tty', '--user', 'codespace', 'c1', '/etc/ironcurtain/start-claude.sh'],
+          options: { stdio: 'inherit' },
+        },
+      ]);
+    });
   });
 
   describe('stop / remove', () => {

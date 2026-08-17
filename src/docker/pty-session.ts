@@ -442,9 +442,11 @@ async function runPtySessionAttempt(
         recordedAgentName: options.mode.agent,
       },
       undefined, // scriptsDir
-      providerProfileName,
-      options.preparedImageResolution,
-      'pty',
+      {
+        providerProfileName,
+        preparedImageResolution: options.preparedImageResolution,
+        proxyAgentKind: 'pty',
+      },
     );
     // Publish every cleanup-owned resource before any subsequent callback can
     // throw. In particular, capture hooks are extension points; a failure in
@@ -541,8 +543,13 @@ async function runPtySessionAttempt(
     adapterDisplayNameForSnapshot = adapter.displayName;
     conversationStateDirForSnapshot = conversationStateDir;
 
-    // Validate adapter supports PTY mode
-    if (!adapter.buildPtyCommand) {
+    // Validate adapter supports PTY mode. Apple Container prefers its native
+    // interactive exec because the 1.1.0 host-published socket relay can
+    // accept and immediately close a connection without reaching guest socat.
+    const socketPtyCommand = adapter.buildPtyCommand?.bind(adapter);
+    const nativePtyExec = infra.runtimeKind === 'apple-container' ? docker.execPty?.bind(docker) : undefined;
+    const nativePtyCommand = nativePtyExec ? adapter.buildPtyExecCommand?.() : undefined;
+    if (!socketPtyCommand && nativePtyCommand === undefined) {
       throw new Error(`Agent ${adapter.id} does not support PTY mode.`);
     }
 
@@ -552,19 +559,29 @@ async function runPtySessionAttempt(
     // Write the effective system prompt to the session directory for debugging
     writeFileSync(resolve(sessionDir, 'system-prompt.txt'), systemPrompt);
 
-    // Determine PTY connection target. On apple-container the guest
-    // listens under /tmp (see APPLE_PTY_GUEST_SOCK) and the runtime's
-    // --publish-socket bridges it to <socketsDir>/pty.sock on the host,
-    // so the host-side ptyTarget below is identical to Linux.
-    const ptySockPath = useTcp
+    // Determine PTY connection target. Apple Container uses runtime-native
+    // interactive exec; the retained socket branch is a compatibility path
+    // for injected runtimes that do not implement execPty.
+    const ptySockPath = nativePtyCommand
       ? undefined
-      : infra.runtimeKind === 'apple-container'
-        ? APPLE_PTY_GUEST_SOCK
-        : `/run/ironcurtain/${PTY_SOCK_NAME}`;
-    const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;
+      : useTcp
+        ? undefined
+        : infra.runtimeKind === 'apple-container'
+          ? APPLE_PTY_GUEST_SOCK
+          : `/run/ironcurtain/${PTY_SOCK_NAME}`;
+    const ptyPort = nativePtyCommand ? undefined : useTcp ? DEFAULT_PTY_PORT : undefined;
 
-    // Build the PTY command
-    const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
+    // Native interactive exec needs a stable outer process to attach to. The
+    // Docker transports still run their socat listener as PID 1 exactly as
+    // before.
+    let ptyCommand: readonly string[];
+    if (nativePtyCommand !== undefined) {
+      ptyCommand = ['sleep', 'infinity'];
+    } else if (socketPtyCommand !== undefined) {
+      ptyCommand = socketPtyCommand(systemPrompt, ptySockPath, ptyPort);
+    } else {
+      throw new Error(`Agent ${adapter.id} does not support PTY mode.`);
+    }
     const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
     const dockerWorkloadBootstrap = infra.dockerWorkloadBootstrap;
     if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
@@ -731,12 +748,10 @@ async function runPtySessionAttempt(
         // share when a file inside that directory is ALSO -v-mounted, so
         // the apt config (which lives under orientationDir) is written
         // via exec after start instead of bind-mounted. Bridge the
-        // guest's PTY listener back to the host via a vsock relay; the
-        // host-side socket materializes when the guest bind()s, so
-        // waitForPtyReady's existence poll below is a valid readiness
-        // signal on both runtimes.
+        // compatibility PTY path publishes the guest listener back to the
+        // host only when runtime-native exec is unavailable.
         execAptProxyUrl = udsProxyUrl;
-        if (ptySockPath !== undefined) {
+        if (nativePtyCommand === undefined && ptySockPath !== undefined) {
           publishSockets = [{ hostPath: resolve(socketsDir, PTY_SOCK_NAME), containerPath: ptySockPath }];
         }
       } else {
@@ -836,7 +851,9 @@ async function runPtySessionAttempt(
           'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
           'AUDIT_WRITE', // sudo audit logging
         ],
-        tty: true,
+        // Apple Container allocates the agent TTY on `container exec -it`;
+        // the outer `sleep infinity` process does not need a second TTY.
+        tty: nativePtyCommand === undefined,
       });
 
     // §8.2 step 1: ledger the agent container before create when a
@@ -912,8 +929,11 @@ async function runPtySessionAttempt(
     // does NOT use `fork`, so it only accepts one connection. A readiness probe
     // would consume that slot and cause the real attachPty connection to fail.
     // Instead, attachPty retries internally for TCP targets.
-    let ptyTarget: PtyTarget;
-    if (infra.topology === 'tcp-hostonly') {
+    let ptyTarget: PtyTarget | undefined;
+    if (nativePtyCommand !== undefined) {
+      // Runtime-native exec does not expose a host socket or TCP port.
+      ptyTarget = undefined;
+    } else if (infra.topology === 'tcp-hostonly') {
       // The host-only network routes host→container traffic natively:
       // connect straight to the container's IP at the fixed PTY port.
       // attachPty retries TCP targets, covering the window before the
@@ -932,7 +952,7 @@ async function runPtySessionAttempt(
       ptyTarget = resolve(socketsDir, PTY_SOCK_NAME);
     }
 
-    if (!useTcp) {
+    if (!useTcp && ptyTarget !== undefined) {
       // When `uidRemap.user` is set (Linux non-1000 host, issue #232) the
       // entrypoint runs usermod/groupmod and a recursive chown before
       // exec'ing the agent, so socat — and therefore the UDS — appears
@@ -948,13 +968,18 @@ async function runPtySessionAttempt(
 
     // Attach terminal via Node.js PTY proxy. Tests inject a stub via
     // `options.attach` to drive assertions against the live container.
-    const attachFn = options.attach ?? attachPty;
-    const exitCode = await attachFn({
-      target: ptyTarget,
-      containerId,
-      runtime: docker,
-      signal: shutdownController.signal,
-    });
+    let exitCode: number;
+    if (nativePtyCommand !== undefined && nativePtyExec !== undefined) {
+      exitCode = await nativePtyExec(containerId, nativePtyCommand, shutdownController.signal);
+    } else {
+      if (ptyTarget === undefined) throw new Error('PTY session misconfiguration: no attach target was assigned');
+      exitCode = await (options.attach ?? attachPty)({
+        target: ptyTarget,
+        containerId,
+        runtime: docker,
+        signal: shutdownController.signal,
+      });
+    }
     ptyExitCode = exitCode;
     userExited = exitCode === 0;
     logger.info(`PTY attach returned with exit code ${exitCode}`);

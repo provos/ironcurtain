@@ -387,7 +387,7 @@ describe('OpenRouter ProviderKeyMapping assembly (G4 / §7.5, §9.5)', () => {
           undefined,
           undefined,
           undefined,
-          'glm',
+          { providerProfileName: 'glm' },
         ),
       ).rejects.toThrow(
         'Provider profile "glm" is OpenRouter but no API key is configured. ' +

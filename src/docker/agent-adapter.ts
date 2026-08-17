@@ -351,6 +351,13 @@ export interface AgentAdapter {
   ): readonly string[];
 
   /**
+   * Returns the agent command for a runtime-native interactive exec.
+   * Apple Container uses this instead of exposing a guest socat listener;
+   * runtimes without native PTY exec continue to use {@link buildPtyCommand}.
+   */
+  buildPtyExecCommand?(): readonly string[];
+
+  /**
    * Detects available credentials for this agent.
    *
    * When not implemented — OR when it returns `undefined` —

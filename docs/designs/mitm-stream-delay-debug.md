@@ -43,7 +43,9 @@ loud `NOT FOR PRODUCTION` warning is logged when active.
 
 To exercise the watchdog knobs without rebuilding the container image, the
 Claude Code adapter forwards a curated allowlist of streaming-watchdog tuning
-vars from the host env into the container when set (no-op otherwise):
+vars from the host env into both one-shot and PTY containers when set (no-op
+otherwise). One-shot mode subsequently forces `CLAUDE_ENABLE_STREAM_WATCHDOG=0`;
+PTY mode preserves an explicit host value as an operability escape hatch:
 
 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`, `CLAUDE_ENABLE_STREAM_WATCHDOG`,
 `CLAUDE_ENABLE_BYTE_WATCHDOG`, `API_FORCE_IDLE_TIMEOUT`, `API_TIMEOUT_MS`.

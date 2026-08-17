@@ -463,6 +463,13 @@ export type AgentImageResolution = {
   readonly artifact?: SelectedAgentArtifact;
 };
 
+export interface PrepareDockerInfrastructureOptions {
+  readonly providerProfileName?: string;
+  readonly preparedImageResolution?: AgentImageResolution;
+  /** Explicit request-rewriter mode for this container lifecycle. */
+  readonly proxyAgentKind?: AgentKind;
+}
+
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
   mode: SessionMode & { kind: 'docker' },
@@ -475,10 +482,9 @@ export async function prepareDockerInfrastructure(
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
-  providerProfileName?: string,
-  preparedImageResolution?: AgentImageResolution,
-  proxyAgentKind?: AgentKind,
+  options: PrepareDockerInfrastructureOptions = {},
 ): Promise<PreContainerInfrastructure> {
+  const { providerProfileName, preparedImageResolution, proxyAgentKind } = options;
   // Secure nested Docker resolves the effective runtime and rejects every
   // unsupported variant before feature-attributable runtime, image, artifact,
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
@@ -1164,9 +1170,11 @@ export async function createDockerInfrastructure(
     resolvedSkills,
     captureInput,
     scriptsDir,
-    providerProfileName,
-    options?.preparedImageResolution,
-    workflowId !== undefined ? 'workflow' : 'batch',
+    {
+      providerProfileName,
+      preparedImageResolution: options?.preparedImageResolution,
+      proxyAgentKind: workflowId !== undefined ? 'workflow' : 'batch',
+    },
   );
 
   return assembleDockerInfrastructure(core, config, options);

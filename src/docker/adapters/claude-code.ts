@@ -49,7 +49,7 @@ const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
 /**
  * Claude Code streaming-watchdog tuning vars forwarded from the host env into
- * batch containers when set (see `buildBatchEnv`). Curated allowlist — these govern
+ * all Claude containers when set (see `buildEnv`). Curated allowlist — these govern
  * the idle-stream abort ("Response stalled mid-stream", issue #367) and let it
  * be exercised against the MITM stream-delay knob without rebuilding the image.
  */
@@ -176,6 +176,13 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
       // via `skills.batchArgs`; the PTY driver merges `skills.ptyEnv`
       // into the container environment, which is how this var arrives here.
       const startScript = `#!/bin/bash
+# Runtime-native PTY exec does not inherit variables exported by PID 1.
+# Read the mounted prompt here as well as in the image entrypoint.
+if [ -f /etc/ironcurtain/system-prompt.txt ]; then
+  export IRONCURTAIN_SYSTEM_PROMPT
+  IRONCURTAIN_SYSTEM_PROMPT=$(cat /etc/ironcurtain/system-prompt.txt)
+fi
+
 # Set initial terminal size from host env vars
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
   stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
@@ -303,6 +310,16 @@ exit $STATUS
         env.IRONCURTAIN_MODEL = modelId;
       }
 
+      // DEBUG / operability (issue #367 watchdog harness): forward a curated
+      // allowlist of Claude Code streaming-watchdog tuning vars from the host
+      // env into every Claude container when explicitly set. One-shot mode
+      // still forces its required stream-watchdog default in buildBatchEnv,
+      // while PTY users retain an escape hatch for long interactive turns.
+      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
+      }
+
       const profile = config.activeProviderProfile;
       if (profile?.type === 'openrouter') {
         // B2c: OpenRouter mode auth-var exclusivity. Claude Code sends its
@@ -356,7 +373,7 @@ exit $STATUS
     },
 
     buildBatchEnv(): Record<string, string> {
-      const env: Record<string, string> = {
+      return {
         // Force subagents (Agent/Task tool) and `run_in_background` to run in the
         // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
         // Code v2.1.198 subagents run in the *background* by default: the tool
@@ -379,17 +396,6 @@ exit $STATUS
         // orchestrator already enforces its own wall-clock/step budgets.
         CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
       };
-
-      // DEBUG / operability (issue #367 watchdog harness): forward a curated
-      // allowlist of Claude Code streaming-watchdog tuning vars from the host
-      // env into the container when set. Lets the streaming idle watchdog be
-      // exercised against the MITM stream-delay knob (see stream-delay.ts)
-      // without rebuilding the image. No-op unless the host sets them.
-      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
-        const value = process.env[key];
-        if (value !== undefined) env[key] = value;
-      }
-      return env;
     },
 
     extractResponse(exitCode: number, stdout: string): AgentResponse {
@@ -457,6 +463,10 @@ exit $STATUS
       // prompt from an env var set by the entrypoint. This avoids shell quoting
       // issues that occur when embedding large prompts in socat EXEC: strings.
       return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
+    },
+
+    buildPtyExecCommand(): readonly string[] {
+      return ['/etc/ironcurtain/start-claude.sh'];
     },
 
     getConversationStateConfig(): ConversationStateConfig {

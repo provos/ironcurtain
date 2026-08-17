@@ -7,7 +7,8 @@
  * Docker's bridge + sidecar arrangement.
  *
  * This module is the only place allowed to spawn the `container` binary,
- * always via execFile with argument arrays (no shell strings).
+ * always with argument arrays (no shell strings). Ordinary operations use
+ * execFile; runtime-native PTY exec inherits the host terminal via spawn.
  *
  * CLI semantics verified against `container` 1.0.0:
  *   - `create`/`start`/`exec`/`stop`/`delete` mirror the Docker verbs;
@@ -23,6 +24,7 @@
  */
 
 import { arch, platform, release } from 'node:os';
+import { spawn as spawnChild } from 'node:child_process';
 import type {
   ContainerRuntime,
   DockerContainerConfig,
@@ -407,6 +409,7 @@ export function createAppleContainerManager(
   };
   const progressSinkFactory = spawnOpts?.progressSinkFactory ?? createDockerProgressSink;
   const runStreamed = makeRunStreamed('container', streamOpts, progressSinkFactory);
+  const spawnPty = spawnOpts?.spawn ?? spawnChild;
 
   const inspectContainer = async (nameOrId: string, timeout: number): Promise<AppleContainerInspect | undefined> => {
     const { stdout } = await exec('container', ['inspect', nameOrId], { timeout });
@@ -502,6 +505,44 @@ export function createAppleContainerManager(
         }
         throw err;
       }
+    },
+
+    execPty(
+      nameOrId: string,
+      command: readonly string[],
+      signal?: AbortSignal,
+      execUser?: string | null,
+    ): Promise<number> {
+      if (signal?.aborted) return Promise.resolve(0);
+
+      // Keep the argument shape explicit instead of routing through execFile:
+      // this process must inherit the real terminal for Apple Container's
+      // runtime-managed PTY and remain attached until the interactive agent
+      // exits. The container itself stays on `--network none`.
+      const resolvedUser = execUser === undefined ? 'codespace' : execUser;
+      const userArgs = resolvedUser === null ? [] : ['--user', resolvedUser];
+      const child = spawnPty('container', ['exec', '--interactive', '--tty', ...userArgs, nameOrId, ...command], {
+        stdio: 'inherit',
+      });
+
+      return new Promise<number>((resolve, reject) => {
+        let settled = false;
+        const settle = (result: { readonly code?: number; readonly error?: Error }): void => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          if (result.error !== undefined) reject(result.error);
+          else resolve(result.code ?? 1);
+        };
+        const onAbort = (): void => {
+          child.kill('SIGTERM');
+        };
+
+        signal?.addEventListener('abort', onAbort, { once: true });
+        child.once('error', (error) => settle({ error }));
+        child.once('close', (code) => settle({ code: signal?.aborted ? 0 : (code ?? 1) }));
+        if (signal?.aborted) onAbort();
+      });
     },
 
     async stop(nameOrId: string): Promise<void> {
