@@ -1,10 +1,21 @@
-FROM node:22-trixie
+# Client-only Docker toolchain source. Pinned to the exact digest the
+# nested-daemon image uses so both roles carry byte-identical binaries.
+FROM docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255 AS docker-toolchain
+
+FROM node:22-trixie@sha256:8433642fe11d391a7ff1f702352ac1b0ea3e378d3fb2c22de2b292036d79cd2c
 
 # Replicate the 'codespace' user (uid 1000) from the devcontainers/universal
 # image so Dockerfile.claude-code works unchanged on both platforms.
 # The node base image ships node:node at uid/gid 1000 — rename it.
+# usermod does not rewrite /etc/subuid or /etc/subgid, so the inherited
+# `node:100000:65536` ranges are re-pointed at codespace here (delete then
+# append, so the layer is idempotent). rootlesskit hard-fails without a
+# subordinate range for the runtime user.
 RUN usermod -l codespace -d /home/codespace -m node && \
-    groupmod -n codespace node
+    groupmod -n codespace node && \
+    sed -i -e '/^node:/d' -e '/^codespace:/d' /etc/subuid /etc/subgid && \
+    echo 'codespace:100000:65536' >> /etc/subuid && \
+    echo 'codespace:100000:65536' >> /etc/subgid
 
 USER root
 RUN apt-get update && \
@@ -24,7 +35,30 @@ RUN apt-get update && \
     libffi-dev libssl-dev zlib1g-dev libxml2-dev libxslt1-dev \
     # Fonts (Qt needs at least one font)
     fontconfig fonts-dejavu-core \
+    # Rootless nested-daemon prerequisites: newuidmap/newgidmap (re-capped
+    # below), setcap to re-cap them, the `ip` binary rootlesskit invokes for
+    # loopback setup even with --net=none, and the legacy iptables backend
+    # Moby's per-sandbox embedded DNS resolver requires. Docker-wide iptables
+    # management remains disabled; the bootstrap selects only this exact
+    # legacy helper on its private PATH. The package's absolute helper paths
+    # remain bundle-visible and are not treated as an authority boundary.
+    uidmap iproute2 iptables libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
+
+# Re-cap the id-map helpers: file capabilities, NOT setuid-root.
+# Writing a multi-range /proc/PID/uid_map needs CAP_SYS_ADMIN *in the target
+# user namespace*, and the kernel grants every capability in a namespace to a
+# process whose euid owns it. rootlesskit creates the namespace as uid 1000, so
+# a helper that keeps euid 1000 inherits that grant. Debian ships these setuid
+# root (4755): euid 0 forfeits the grant and then needs real CAP_SYS_ADMIN,
+# which the agent VM's clamped bounding set (CAP_SETUID/CAP_SETGID only) does
+# not have — the observed failure is `write to uid_map failed: Operation not
+# permitted`. Dropping the setuid bit is required, not cosmetic: with both
+# present the setuid bit still changes euid and re-breaks the grant. This
+# matches the frozen nested-daemon image (mode 755 + cap_setuid/cap_setgid+ep).
+RUN setcap cap_setuid+ep /usr/bin/newuidmap && \
+    setcap cap_setgid+ep /usr/bin/newgidmap && \
+    chmod u-s /usr/bin/newuidmap /usr/bin/newgidmap
 
 # Grant passwordless sudo to codespace (matches devcontainers/universal behavior)
 RUN echo "codespace ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/codespace && \
@@ -32,11 +66,6 @@ RUN echo "codespace ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/codespace && \
 
 # Initialize git-lfs
 RUN git lfs install --system
-
-# IronCurtain CA (for MITM proxy trust)
-# This file is copied into a temporary build context by ensureImage().
-COPY ironcurtain-ca-cert.pem /usr/local/share/ca-certificates/ironcurtain-ca.crt
-RUN update-ca-certificates
 
 # Python tooling: uv (fast package manager) and ruff (linter)
 # curl is available from the apt-get install above.
@@ -49,9 +78,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # Pre-install Python 3.12 so uv never needs to download it at runtime.
 # Containers run with --network=none, so runtime downloads would fail.
 # Install to a shared location so the codespace user can find it.
-# uv uses rustls by default, which doesn't read system CA certs.
-# UV_NATIVE_TLS makes it use the system TLS stack (OpenSSL) instead,
-# so it trusts the IronCurtain MITM CA installed above.
+# uv uses rustls by default. Runtime sessions supply a CA-neutral image with
+# a read-only per-session trust bundle and UV_NATIVE_TLS/SSL_CERT_FILE wiring.
 ENV UV_NATIVE_TLS=1
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN uv python install 3.12
@@ -85,8 +113,32 @@ RUN npx playwright install-deps chromium && \
     npx playwright install chromium && \
     chmod -R o+rx /opt/playwright-browsers
 
+# Docker toolchain, copied verbatim from the pinned stage so the shipped bytes
+# stay auditable against the source image. Only the CLI is placed on PATH; the
+# daemon-side binaries (dockerd, rootlesskit, containerd, runc) stay off it and
+# are reached by the in-VM bootstrap through an explicit PATH.
+#
+# --chown=root:root is required, not cosmetic: COPY --from preserves the source
+# image's ownership, and `rootlesskit`/`vpnkit` are owned 1001:1001 there. On a
+# Linux host that remaps the agent to uid 1001 the runtime user would otherwise
+# OWN shipped toolchain binaries and could rewrite them.
+#
+# The plugins land in /usr/local/libexec/docker/cli-plugins to match the source
+# layout: the copied /usr/local/bin/docker-compose is a symlink into that exact
+# path, and it is one of the CLI's default system plugin directories, so both
+# the symlink and plugin discovery resolve.
+COPY --from=docker-toolchain --chown=root:root /usr/local/bin/ /usr/local/lib/ironcurtain-docker/bin/
+COPY --from=docker-toolchain --chown=root:root /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker && \
+    ln -s /usr/sbin/iptables-legacy /usr/local/lib/ironcurtain-docker/bin/iptables
+
+# /run is ext4 in the agent VM, not a tmpfs, so directories created here survive
+# into the runtime. The nested-daemon API directory MUST be image-provided: the
+# VM's bounding set has no CAP_CHOWN, so no runtime step can hand a 0700
+# directory to the runtime user.
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
-    chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
+    chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain && \
+    install -d -o codespace -g codespace -m 0700 /run/ironcurtain-docker
 
 WORKDIR /workspace
 USER codespace

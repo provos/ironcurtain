@@ -1,10 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   createAppleContainerManager,
   buildAppleCreateArgs,
   checkAppleContainerAvailable,
+  parseAppleContainerInfo,
+  parseAppleImageInfo,
   type AppleContainerHostInfo,
 } from '../src/docker/apple-container-manager.js';
 import { type ExecFileFn } from '../src/docker/docker-manager.js';
@@ -21,7 +23,14 @@ type ExecCall = {
 
 type MockResponse =
   | { stdout: string; stderr?: string }
-  | { error: true; code: number; stdout?: string; stderr?: string };
+  | {
+      error: true;
+      code: number | string | null;
+      stdout?: string;
+      stderr?: string;
+      killed?: boolean;
+      signal?: string;
+    };
 
 /** Creates a mock exec function that records calls and returns configured results. */
 function createMockExec(): {
@@ -42,6 +51,8 @@ function createMockExec(): {
         code: response.code,
         stdout: response.stdout ?? '',
         stderr: response.stderr ?? '',
+        killed: response.killed,
+        signal: response.signal,
       });
     }
     return { stdout: response.stdout, stderr: response.stderr ?? '' };
@@ -190,6 +201,14 @@ describe('buildAppleCreateArgs', () => {
     expect(without.join(' ')).not.toContain('ironcurtain.scope');
   });
 
+  it('emits generic ownership labels used by exact Docker-workload revocation', () => {
+    const args = buildAppleCreateArgs({
+      ...sampleConfig,
+      labels: { 'com.ironcurtain.docker-workload.generation': 'gen-apple-fixture' },
+    });
+    expect(args.join(' ')).toContain('--label com.ironcurtain.docker-workload.generation=gen-apple-fixture');
+  });
+
   it('emits capability re-adds, ports, entrypoint, tty, and user', () => {
     const args = buildAppleCreateArgs({
       ...sampleConfig,
@@ -217,6 +236,10 @@ describe('buildAppleCreateArgs', () => {
     expect(() => buildAppleCreateArgs({ ...sampleConfig, restartPolicy: 'unless-stopped' })).toThrow(
       /restart policies/,
     );
+  });
+
+  it('throws on Docker-only static IPv4 addressing', () => {
+    expect(() => buildAppleCreateArgs({ ...sampleConfig, ipv4Address: '172.31.44.2' })).toThrow(/static IPv4/u);
   });
 
   it("emits '--network none' for the uds topology", () => {
@@ -475,6 +498,30 @@ describe('AppleContainerManager', () => {
   });
 
   describe('images', () => {
+    const appleImage = {
+      configuration: {
+        creationDate: '2026-07-20T12:00:00Z',
+        descriptor: { digest: `sha256:${'a'.repeat(64)}` },
+        name: 'localhost/ironcurtain-fixture:latest',
+      },
+      id: 'a'.repeat(64),
+      variants: [
+        {
+          platform: { architecture: 'amd64', os: 'linux' },
+          config: { architecture: 'amd64', os: 'linux', config: { Labels: { platform: 'wrong' } } },
+        },
+        {
+          platform: { architecture: 'arm64', os: 'linux' },
+          config: {
+            architecture: 'arm64',
+            os: 'linux',
+            created: '2026-07-20T12:00:01Z',
+            config: { Labels: { 'ironcurtain.build-hash': 'abc123', platform: 'right' } },
+          },
+        },
+      ],
+    };
+
     it('imageExists follows the image inspect exit code', async () => {
       mock.setResponse('[{}]');
       expect(await manager().imageExists('img')).toBe(true);
@@ -482,17 +529,71 @@ describe('AppleContainerManager', () => {
       expect(await manager().imageExists('img')).toBe(false);
     });
 
+    it('tags an image to an exact capture reference', async () => {
+      mock.setResponse('');
+
+      await manager().tagImage?.('ironcurtain-claude-code:latest', 'ironcurtain-capture-123:latest');
+
+      expect(mock.calls[0]).toEqual({
+        cmd: 'container',
+        args: ['image', 'tag', 'ironcurtain-claude-code:latest', 'ironcurtain-capture-123:latest'],
+        opts: expect.objectContaining({ timeout: 60_000 }),
+      });
+    });
+
     it('getImageLabel reads variant config labels', async () => {
-      mock.setResponse(
-        JSON.stringify([
-          {
-            id: 'f3d286',
-            variants: [{ config: { config: { Labels: { 'ironcurtain.build-hash': 'abc123' } } } }],
-          },
-        ]),
-      );
+      mock.setResponse(JSON.stringify([appleImage]));
       expect(await manager().getImageLabel('img', 'ironcurtain.build-hash')).toBe('abc123');
       expect(await manager().getImageLabel('img', 'missing')).toBeUndefined();
+    });
+
+    it('normalizes the top-level index digest and selects only the linux/arm64 labels', () => {
+      expect(parseAppleImageInfo(appleImage)).toEqual({
+        id: `sha256:${'a'.repeat(64)}`,
+        repoTags: ['localhost/ironcurtain-fixture:latest'],
+        labels: { 'ironcurtain.build-hash': 'abc123', platform: 'right' },
+        created: '2026-07-20T12:00:00Z',
+      });
+    });
+
+    it('fails closed when image metadata has no linux/arm64 variant', () => {
+      expect(() => parseAppleImageInfo({ ...appleImage, variants: appleImage.variants.slice(0, 1) })).toThrow(
+        /linux\/arm64 variant/,
+      );
+    });
+
+    it('inspects images and preserves the immutable index digest', async () => {
+      mock.setResponse(JSON.stringify([appleImage]));
+      await expect(manager().inspectImage('fixture')).resolves.toMatchObject({
+        id: `sha256:${'a'.repeat(64)}`,
+        labels: { platform: 'right' },
+      });
+      expect(mock.calls[0]?.args).toEqual(['image', 'inspect', 'fixture']);
+    });
+
+    it('returns missing only for a not-found image inspection', async () => {
+      mock.setError(1, '', 'image not found: fixture');
+      await expect(manager().inspectImage('fixture')).resolves.toBeUndefined();
+
+      mock.setError(1, '', 'permission denied');
+      await expect(manager().inspectImage('fixture')).rejects.toThrow(/Command failed/);
+    });
+
+    it('lists images and applies Docker-compatible label filters locally', async () => {
+      mock.setResponse(JSON.stringify([appleImage]));
+      await expect(manager().listImages({ labelFilter: 'platform=right' })).resolves.toHaveLength(1);
+      await expect(manager().listImages({ labelFilter: 'platform=wrong' })).resolves.toEqual([]);
+      await expect(manager().listImages({ labelFilter: 'ironcurtain.build-hash' })).resolves.toHaveLength(1);
+      expect(mock.calls[0]?.args).toEqual(['image', 'list', '--format', 'json']);
+    });
+
+    it('deletes images and distinguishes already-absent images', async () => {
+      mock.setResponse('');
+      await expect(manager().removeImage('fixture')).resolves.toBe(true);
+      expect(mock.calls[0]?.args).toEqual(['image', 'delete', '--force', 'fixture']);
+
+      mock.setError(1, '', 'image not found: fixture');
+      await expect(manager().removeImage('fixture')).resolves.toBe(false);
     });
 
     it('getImageId normalizes image digests', async () => {
@@ -508,6 +609,91 @@ describe('AppleContainerManager', () => {
         },
       ]);
       expect(await manager().getImageId('c1')).toBe('f3d28607ddd7');
+    });
+  });
+
+  describe('container inventory', () => {
+    const listedContainer = {
+      id: 'ic-daemon-fixture',
+      configuration: {
+        id: 'ic-daemon-fixture',
+        creationDate: '2026-07-20T12:00:00Z',
+        labels: { 'com.ironcurtain.docker-workload.generation': 'generation-fixture-001' },
+      },
+      status: { state: 'running' },
+    };
+
+    it('normalizes immutable VM identity, state, creation time, and labels', () => {
+      expect(parseAppleContainerInfo(listedContainer)).toEqual({
+        id: 'ic-daemon-fixture',
+        name: 'ic-daemon-fixture',
+        created: '2026-07-20T12:00:00Z',
+        running: true,
+        labels: { 'com.ironcurtain.docker-workload.generation': 'generation-fixture-001' },
+      });
+    });
+
+    it('lists all VMs and applies the same exact label filter as Docker inventory', async () => {
+      mock.setResponse(JSON.stringify([listedContainer]));
+      await expect(
+        manager().listContainers?.({
+          labelFilter: 'com.ironcurtain.docker-workload.generation=generation-fixture-001',
+        }),
+      ).resolves.toHaveLength(1);
+      expect(mock.calls[0]?.args).toEqual(['list', '--all', '--format', 'json']);
+
+      mock.setResponse(JSON.stringify([listedContainer]));
+      await expect(manager().listContainers?.({ labelFilter: 'missing' })).resolves.toEqual([]);
+    });
+
+    it('rejects malformed inventory rather than silently losing owned VMs', async () => {
+      mock.setResponse(JSON.stringify([{ status: { state: 'running' } }]));
+      await expect(manager().listContainers?.()).rejects.toThrow(/missing container ID/u);
+      expect(mock.calls).toHaveLength(1);
+    });
+
+    it('retries one killed-by-timeout inventory process and parses the complete retry result', async () => {
+      vi.useFakeTimers();
+      try {
+        mock.setSequence([
+          { error: true, code: null, killed: true, signal: 'SIGTERM' },
+          { stdout: JSON.stringify([listedContainer]) },
+        ]);
+        const inventory = manager().listContainers?.();
+        await vi.runAllTimersAsync();
+        await expect(inventory).resolves.toEqual([parseAppleContainerInfo(listedContainer)]);
+        expect(mock.calls).toHaveLength(2);
+        expect(mock.calls.map((call) => call.args)).toEqual([
+          ['list', '--all', '--format', 'json'],
+          ['list', '--all', '--format', 'json'],
+        ]);
+        expect(mock.calls.map((call) => call.opts.timeout)).toEqual([30_000, 30_000]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('propagates an exhausted timeout retry without converting it to an empty inventory', async () => {
+      vi.useFakeTimers();
+      try {
+        mock.setSequence([
+          { error: true, code: null, killed: true, signal: 'SIGTERM' },
+          { error: true, code: null, killed: true, signal: 'SIGTERM' },
+        ]);
+        const inventory = manager().listContainers?.();
+        const rejection = expect(inventory).rejects.toMatchObject({ killed: true, signal: 'SIGTERM' });
+        await vi.runAllTimersAsync();
+        await rejection;
+        expect(mock.calls).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not retry a non-timeout inventory failure', async () => {
+      mock.setError(1, '', 'XPC permission denied');
+      await expect(manager().listContainers?.()).rejects.toMatchObject({ code: 1 });
+      expect(mock.calls).toHaveLength(1);
     });
   });
 
@@ -613,6 +799,37 @@ describe('AppleContainerManager', () => {
         '--label',
         'ironcurtain.build-hash=abc',
         '/ctx',
+      ]);
+    });
+
+    it('loads only from the explicit verified OCI archive path', async () => {
+      const spawn = createMockSpawn();
+      const m = createAppleContainerManager(mock.mockExec, availableProbe, {
+        spawn: spawn.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+      await m.loadImageArchive('/trusted/catalog/agent.oci.tar');
+      expect(spawn.calls[0]?.args).toEqual(['image', 'load', '--input', '/trusted/catalog/agent.oci.tar']);
+    });
+
+    it('exports one explicit platform image to an OCI archive path', async () => {
+      const spawn = createMockSpawn();
+      const m = createAppleContainerManager(mock.mockExec, availableProbe, {
+        spawn: spawn.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+      expect(m.saveImageArchive).toBeDefined();
+      await m.saveImageArchive?.('ironcurtain-claude-code:latest', '/trusted/artifact/apple.oci.tar', 'linux/arm64');
+      expect(spawn.calls[0]?.args).toEqual([
+        'image',
+        'save',
+        '--platform',
+        'linux/arm64',
+        '--output',
+        '/trusted/artifact/apple.oci.tar',
+        'ironcurtain-claude-code:latest',
       ]);
     });
 

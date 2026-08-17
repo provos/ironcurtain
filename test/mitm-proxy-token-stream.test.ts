@@ -260,6 +260,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         initialTokenSessionId: sessionId,
       });
       await proxy.start();
@@ -317,6 +318,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         initialTokenSessionId: sessionId,
       });
       await proxy.start();
@@ -377,6 +379,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         // No sessionId — extractor is skipped
       });
       await proxy.start();
@@ -437,6 +440,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         initialTokenSessionId: sessionId,
       });
       await proxy.start();
@@ -499,6 +503,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         initialTokenSessionId: sessionId,
       });
       await proxy.start();
@@ -634,6 +639,7 @@ describe('MitmProxy.setTokenSessionId dynamic routing', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
       });
       await proxy.start();
 
@@ -682,6 +688,7 @@ describe('MitmProxy.setTokenSessionId dynamic routing', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
+        allowPrivateDestinationsForTests: true,
         initialTokenSessionId: 'initial-sid' as SessionId,
       });
       await proxy.start();

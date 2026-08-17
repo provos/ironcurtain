@@ -43,7 +43,12 @@ import { createJobId } from '../cron/types.js';
 import { loadJob } from '../cron/job-store.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from '../types/errors.js';
-import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
+import {
+  saveSessionMetadata,
+  saveSessionMetadataTo,
+  loadSessionMetadata,
+  updateSessionMetadata,
+} from './session-metadata.js';
 import { bundleIdFromSessionId, createAgentConversationId, createSessionId } from './types.js';
 import type {
   AgentConversationId,
@@ -126,6 +131,13 @@ function applyResumeMetadata(options: SessionOptions): SessionOptions {
   if (!options.resumeSessionId) return options;
   const metadata = loadSessionMetadata(options.resumeSessionId);
   if (!metadata) return options;
+  if (metadata.dockerWorkload !== undefined) {
+    throw new SessionError(
+      `Cannot resume session "${options.resumeSessionId}": secure nested Docker-workload sessions have ephemeral ` +
+        `daemon state and are not resumable`,
+      'SESSION_INIT_FAILED',
+    );
+  }
   return {
     ...options,
     // Only spread defined metadata fields so undefined doesn't overwrite
@@ -284,7 +296,8 @@ async function createDockerSession(
       // the deterministic `ironcurtain-<sessionId[0:12]>` container
       // name for prior-crash recovery.
       const bundleId = bundleIdFromSessionId(sessionId);
-      const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+      const { createDockerInfrastructure, dockerWorkloadSessionMetadata } =
+        await import('../docker/docker-infrastructure.js');
       // Trajectory-capture: pass the RAW override; the infra layer is the
       // single place that resolves it against userConfig. Writer is only
       // constructed when enabled — zero cost when disabled. See
@@ -305,7 +318,9 @@ async function createDockerSession(
           recordedAgentName: agentId,
         },
         undefined, // scriptsDir
-        undefined, // options (CreateDockerInfrastructureOptions)
+        options.preparedDockerImageResolution
+          ? { preparedImageResolution: options.preparedDockerImageResolution }
+          : undefined,
         options.providerProfileName,
       );
       // Standalone sessions use their bundle for the session's entire
@@ -314,6 +329,24 @@ async function createDockerSession(
       // destroyed by `session.close()` (ownsInfra=true).
       infra.setTokenSessionId(sessionId);
       builtInfra = true;
+
+      // §8.4: persist the Docker-workload lease identity + watchdog-policy binding
+      // for audit/inspection. Merged into the metadata `buildSessionConfig`
+      // already wrote — the lease tuple is only known after admission, which
+      // runs inside `createDockerInfrastructure`. Inert for ordinary sessions
+      // (handle present only for an admitted variant); a Docker-workload
+      // bundle is ephemeral and never resumed, so overwriting here is safe.
+      const resolvedDockerWorkload = sessionConfig.config.userConfig.dockerWorkload;
+      if (infra.dockerWorkload && !options.resumeSessionId && resolvedDockerWorkload?.enabled === true) {
+        const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
+        updateSessionMetadata(sessionId, {
+          dockerWorkload: dockerWorkloadSessionMetadata(
+            infra.dockerWorkload,
+            dockerWorkloadConfigHash(resolvedDockerWorkload),
+            infra.runtimeKind,
+          ),
+        });
+      }
     }
 
     const metricsWorkflowRunId = options.workflow?.workflowRunId ?? infra.workflowId;

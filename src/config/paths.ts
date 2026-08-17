@@ -685,7 +685,7 @@ export function getBundleControlSocketPath(bundleId: BundleId): string {
 //
 // Three locations per bundle:
 //   run/<bid12>/ctrl.sock             → coordinator control socket
-//   run/<bid12>/sockets/              → bind-mounted as /run/ironcurtain/
+//   run/<bid12>/sockets/              → selected files mounted into the container
 //   run/<bid12>/host/                 → host-local only (MITM control)
 // The `sockets/` vs `host/` split keeps the bind-mounted endpoints
 // separate from host-only endpoints so `isEndpointAllowed` is not the
@@ -708,12 +708,13 @@ export function getBundleRuntimeRoot(bundleId: BundleId): string {
  * Returns the per-bundle container-visible sockets directory:
  *   {home}/run/{bundleId[0:12]}/sockets/
  *
- * Two UDS files live here:
+ * Up to three UDS files live here:
  *  - `proxy.sock`      (Code Mode proxy — bind-mounted into container)
  *  - `mitm-proxy.sock` (MITM proxy      — bind-mounted into container)
+ *  - `registry-egress.sock` (public workload-image pulls; strict opt-in)
  *
  * This directory is what `prepareDockerInfrastructure()` bind-mounts as
- * `/run/ironcurtain/` inside the container (read-write). Only these two
+ * `/run/ironcurtain/` inside the container (read-write). Only container-facing
  * socket files live here — no audit logs, escalation files, or other
  * session artifacts.
  */
@@ -757,6 +758,18 @@ export function getBundleMitmProxySocketPath(bundleId: BundleId): string {
 }
 
 /**
+ * Public-registry egress UDS path for an admitted Docker-workload bundle.
+ *
+ * This is deliberately a third, exact per-bundle socket rather than another
+ * mode on the ordinary MITM listener. It is bound only for the explicit
+ * `public-registry` variant and Apple mounts only this file into that bundle's
+ * VM. `preloaded-only` therefore has no listener and no guest-visible path.
+ */
+export function getBundleRegistryEgressSocketPath(bundleId: BundleId): string {
+  return resolve(getBundleSocketsDir(bundleId), 'registry-egress.sock');
+}
+
+/**
  * MITM control UDS path for a bundle:
  *   {home}/run/{bundleId[0:12]}/host/mitm-control.sock
  *
@@ -766,4 +779,66 @@ export function getBundleMitmProxySocketPath(bundleId: BundleId): string {
  */
 export function getBundleMitmControlSocketPath(bundleId: BundleId): string {
   return resolve(getBundleHostOnlyDir(bundleId), 'mitm-control.sock');
+}
+
+// ---------------------------------------------------------------------------
+// Secure nested Docker-workload host-only layout
+// ---------------------------------------------------------------------------
+//
+// The control tree (`docker-workload/leases/<leaseId>/`) and the revocable
+// state tree (`docker-workload/state/<leaseId>/`) are deliberate SIBLINGS
+// under `docker-workload/`. This separation is load-bearing: the watchdog
+// supervisor refuses to run control files that live inside the deletable
+// state root, and the bundle-lease refuses host-only paths that live inside
+// the workspace. Both trees are owner-only (`0o700`); neither is ever mounted
+// into the untrusted bundle.
+
+/**
+ * Lowercase, path-safe leaseId. Stricter than the lease-JSON identifier
+ * schema (which also permits `.`/`:`) so a leaseId can never introduce a
+ * path traversal or an unexpected separator into the host-only layout.
+ */
+function assertDockerWorkloadLeaseId(leaseId: string): void {
+  assertPathSafeSlug('docker-workload lease ID', leaseId);
+}
+
+/**
+ * Returns the Docker-workload root directory: {home}/docker-workload/
+ * Parent of the sibling `leases/` (control) and `state/` (revocable) trees.
+ */
+export function getDockerWorkloadRoot(): string {
+  return resolve(getIronCurtainHome(), 'docker-workload');
+}
+
+/**
+ * Returns the Docker-workload leases (control) root:
+ *   {home}/docker-workload/leases/
+ */
+export function getDockerWorkloadLeasesRoot(): string {
+  return resolve(getDockerWorkloadRoot(), 'leases');
+}
+
+/**
+ * Returns the host-only control directory for one lease:
+ *   {home}/docker-workload/leases/<leaseId>/
+ *
+ * Holds the control files (`lease.json`, `policy.json`, `status.json`,
+ * `stop.json`) and the `evidence/` subtree. Never mounted into the bundle.
+ */
+export function getDockerWorkloadLeaseDir(leaseId: string): string {
+  assertDockerWorkloadLeaseId(leaseId);
+  return resolve(getDockerWorkloadLeasesRoot(), leaseId);
+}
+
+/**
+ * Returns the revocable per-session state root:
+ *   {home}/docker-workload/state/<leaseId>/
+ *
+ * Its `daemon/`, `api/`, `exchange/`, and `staging/` subdirectories are the
+ * watchdog state classes and the exact tree teardown removes. A sibling of
+ * the control directory so the supervisor never deletes its own control files.
+ */
+export function getDockerWorkloadStateRoot(leaseId: string): string {
+  assertDockerWorkloadLeaseId(leaseId);
+  return resolve(getDockerWorkloadRoot(), 'state', leaseId);
 }

@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { DockerInfrastructure, PreContainerInfrastructure } from '../src/docker/docker-infrastructure.js';
+import type {
+  AgentImageResolution,
+  DockerInfrastructure,
+  PreContainerInfrastructure,
+} from '../src/docker/docker-infrastructure.js';
 import {
   buildAgentUidRemap,
   prepareConversationStateDir,
@@ -14,7 +18,7 @@ import {
   computeWorkflowDependencyHash,
   buildWorkflowExecCommand,
   checkDockerContainerWritableStorage,
-  ensureImage,
+  resolveAgentImage,
 } from '../src/docker/docker-infrastructure.js';
 import type { AgentAdapter, AgentId, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
@@ -44,6 +48,7 @@ import {
   createMockAdapter,
   createMockCA,
   createMockDocker,
+  createMockRuntimeTrust,
   type CreateMockDockerOptions,
   type DockerCallTracker,
 } from './helpers/docker-mocks.js';
@@ -122,6 +127,7 @@ describe('DockerInfrastructure interface', () => {
         certPath: '/tmp/ca-cert.pem',
         keyPath: '/tmp/ca-key.pem',
       },
+      runtimeTrust: createMockRuntimeTrust(),
       fakeKeys: new Map(),
       orientationDir: '/tmp/test/sessions/test-session-id/orientation',
       systemPrompt: 'Test system prompt',
@@ -646,6 +652,7 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     docker: opts.docker,
     adapter: opts.adapter ?? createMockAdapter(),
     ca: createMockCA(opts.tempDir),
+    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
     orientationDir,
     systemPrompt: 'You are a test agent.',
@@ -661,6 +668,28 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     restageSkills: () => {},
     beginCaptureSession: () => {},
     endCaptureSession: async () => {},
+  };
+}
+
+function makeAppleArtifactResolution(logicalName: string, immutableImageId: string): AgentImageResolution {
+  const buildHash = 'a'.repeat(64);
+  return {
+    mode: 'selected-agent-artifact',
+    logicalName,
+    imageRef: logicalName,
+    immutableImageId,
+    buildHash,
+    artifact: {
+      logicalName,
+      buildHash,
+      architecture: 'arm64',
+      appleImageId: immutableImageId,
+      dockerImageId: `sha256:${'b'.repeat(64)}`,
+      manifestDigest: `sha256:${'c'.repeat(64)}`,
+      archivePath: '/artifacts/selected-agent.oci.tar',
+      archiveSha256: 'd'.repeat(64),
+      archiveSizeBytes: 1024,
+    },
   };
 }
 
@@ -733,6 +762,8 @@ describe('createSessionContainers', () => {
     const main = createCalls[0];
     expect(main.network).toBe('none');
     expect(main.env.HTTPS_PROXY).toBe('http://127.0.0.1:18080');
+    expect(main.env.NODE_EXTRA_CA_CERTS).toBe('/etc/ironcurtain/ca-cert.pem');
+    expect(main.env.SSL_CERT_FILE).toBe('/etc/ironcurtain/ca-bundle.pem');
     // No Linux UID remap on apple-container.
     expect(main.user).toBeUndefined();
     expect(main.env.IRONCURTAIN_AGENT_UID).toBeUndefined();
@@ -751,6 +782,60 @@ describe('createSessionContainers', () => {
     // Security invariant carries over: bundle/escalation/audit never mounted.
     expect(mounts.some((m) => m.source === core.bundleDir)).toBe(false);
     expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
+  });
+
+  it('creates Apple by the prepared logical tag and verifies the stopped descriptor before start', async () => {
+    const tracker = createDockerCallTracker();
+    const events: string[] = [];
+    const immutableImageId = `sha256:${'a'.repeat(64)}`;
+    const docker = createMockDocker({
+      tracker,
+      create: async () => {
+        events.push('create');
+        return 'apple-vm-id';
+      },
+    });
+    docker.getImageId = async (id) => {
+      expect(id).toBe('apple-vm-id');
+      events.push('inspect-stopped');
+      return immutableImageId;
+    };
+    docker.start = async (id) => {
+      expect(id).toBe('apple-vm-id');
+      events.push('start');
+    };
+    const logicalName = 'ironcurtain-claude-code:latest';
+    const core = {
+      ...makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker }),
+      image: logicalName,
+      imageResolution: makeAppleArtifactResolution(logicalName, immutableImageId),
+    };
+
+    await createSessionContainers(core, makeMockConfig());
+
+    expect(tracker.createCalls[0].image).toBe(logicalName);
+    expect(events).toEqual(['create', 'inspect-stopped', 'start']);
+  });
+
+  it('removes a mismatched stopped Apple create and does not start it', async () => {
+    const tracker = createDockerCallTracker();
+    const immutableImageId = `sha256:${'a'.repeat(64)}`;
+    const docker = createMockDocker({ tracker, create: async () => 'apple-vm-id' });
+    docker.getImageId = async () => `sha256:${'f'.repeat(64)}`;
+    const logicalName = 'ironcurtain-claude-code:latest';
+    const core = {
+      ...makeMockCore({ tempDir, useTcp: false, runtimeKind: 'apple-container', docker }),
+      image: logicalName,
+      imageResolution: makeAppleArtifactResolution(logicalName, immutableImageId),
+    };
+
+    await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(
+      /Apple stopped-create image mismatch/u,
+    );
+
+    expect(tracker.createCalls[0].image).toBe(logicalName);
+    expect(tracker.startCalls).toEqual([]);
+    expect(tracker.removedContainers).toEqual(['apple-vm-id']);
   });
 
   // --- Skills mount tests ---
@@ -1020,6 +1105,7 @@ describe('createSessionContainers', () => {
     const aptWrite = execTargets.find((t) => t.includes('/etc/apt/apt.conf.d/90-ironcurtain-proxy'));
     expect(aptWrite).toBeDefined();
     expect(aptWrite).toContain(`http://${HOST_ONLY.gateway}:8443`);
+    expect(aptWrite).toContain('Acquire::https::CaInfo "/etc/ironcurtain/ca-bundle.pem";');
     expect(execTargets.some((t) => t.includes(`TCP:${HOST_ONLY.gateway}:9123`))).toBe(true);
     expect(execTargets.some((t) => t.includes('TCP:1.1.1.1:443'))).toBe(true);
   });
@@ -1382,6 +1468,12 @@ describe('ensureImage builds no per-workflow image', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  // The shared agent-image materialization is `resolveAgentImage` in the default
+  // build-if-stale mode; the build hash it returns is what these tests assert on.
+  async function ensureImage(image: string, docker: ContainerRuntime): Promise<string> {
+    return (await resolveAgentImage(image, docker)).buildHash;
+  }
+
   // The mock Docker stamps build labels per tag; capture every built tag so we
   // can assert no per-workflow image tag (`ironcurtain-wf-*`) is produced.
   function trackBuiltTags(docker: ContainerRuntime): string[] {
@@ -1396,10 +1488,9 @@ describe('ensureImage builds no per-workflow image', () => {
 
   it('returns the shared agent image and builds only the agent + base images', async () => {
     const docker = createMockDocker();
-    const ca = createMockCA(tempDir);
     const built = trackBuiltTags(docker);
 
-    const buildHash = await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    const buildHash = await ensureImage('ironcurtain-claude-code:latest', docker);
 
     expect(typeof buildHash).toBe('string');
     expect(buildHash.length).toBeGreaterThan(0);
@@ -1409,12 +1500,11 @@ describe('ensureImage builds no per-workflow image', () => {
 
   it('skips the rebuild when images are already up to date (content-hash labels)', async () => {
     const docker = createMockDocker();
-    const ca = createMockCA(tempDir);
 
     // First call builds; second call must be a no-op (labels already stamped).
-    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    await ensureImage('ironcurtain-claude-code:latest', docker);
     const built = trackBuiltTags(docker);
-    await ensureImage('ironcurtain-claude-code:latest', docker, ca);
+    await ensureImage('ironcurtain-claude-code:latest', docker);
 
     expect(built).toEqual([]);
   });

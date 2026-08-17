@@ -26,6 +26,7 @@ import {
   createMockDocker,
   createMockMitmProxy,
   createMockProxy,
+  createMockRuntimeTrust,
   scriptedExec,
 } from './helpers/docker-mocks.js';
 
@@ -76,6 +77,7 @@ function buildDeps(
     docker,
     adapter: createClaudeCodeAdapter(),
     ca: createMockCA(tempDir),
+    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.anthropic.com', 'sk-fake']]),
     orientationDir: join(sessionDir, 'orientation'),
     systemPrompt: 'You are a test agent.',

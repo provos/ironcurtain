@@ -139,6 +139,26 @@ describe('Claude Code Adapter', () => {
     expect(prompt).toContain('NO direct internet access');
     expect(prompt).toContain('When to use `execute_code`');
     expect(prompt).toContain('Policy Enforcement');
+    expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
+  });
+
+  it('orients admitted nested-Docker sessions to the managed network', () => {
+    const prompt = claudeCodeAdapter.buildSystemPrompt({
+      ...sampleContext,
+      nestedDocker: { networkName: 'ironcurtain' },
+    });
+
+    expect(prompt).toContain('### Nested Docker');
+    expect(prompt).toContain('IRONCURTAIN_DOCKER_NETWORK');
+    expect(prompt).toContain('`ironcurtain`');
+    expect(prompt).toContain('--network "$IRONCURTAIN_DOCKER_NETWORK"');
+    expect(prompt).toContain('http://target:<port>/');
+    expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
+    expect(prompt).toContain('no default bridge');
+    expect(prompt).toContain('`-p`/`--publish`');
+    expect(prompt).toContain('`--network host`');
+    expect(prompt).toContain('agent shell cannot reach an inner service through `localhost`');
+    expect(prompt).toContain('supported service topology, not a security boundary');
   });
 
   it('returns providers including anthropic', () => {
@@ -159,7 +179,7 @@ describe('Claude Code Adapter', () => {
     const env = claudeCodeAdapter.buildEnv(config, fakeKeys);
     expect(env.IRONCURTAIN_API_KEY).toBe('sk-ant-api03-ironcurtain-FAKE');
     expect(env.CLAUDE_CODE_DISABLE_UPDATE_CHECK).toBe('1');
-    expect(env.NODE_EXTRA_CA_CERTS).toBe('/usr/local/share/ca-certificates/ironcurtain-ca.crt');
+    expect(env.NODE_EXTRA_CA_CERTS).toBe('/etc/ironcurtain/ca-cert.pem');
   });
 
   it('extracts response and cost from valid JSON output', () => {
@@ -573,6 +593,27 @@ describe('prepareSession', () => {
 
     // System prompt should be non-empty
     expect(systemPrompt.length).toBeGreaterThan(100);
+    expect(systemPrompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
+  });
+
+  it('passes an admitted nested-Docker capability to the adapter', () => {
+    const config = {
+      mcpServers: {},
+      userConfig: { anthropicApiKey: 'sk-test' },
+    } as IronCurtainConfig;
+
+    const { systemPrompt } = prepareSession(
+      claudeCodeAdapter,
+      sampleServerListings,
+      sessionDir,
+      config,
+      '/host/sandbox',
+      undefined,
+      { networkName: 'ironcurtain' },
+    );
+
+    expect(systemPrompt).toContain('IRONCURTAIN_DOCKER_NETWORK');
+    expect(systemPrompt).toContain('`ironcurtain`');
   });
 });
 

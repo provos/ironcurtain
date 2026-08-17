@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createCodexAdapter } from '../src/docker/adapters/codex.js';
@@ -37,6 +38,61 @@ describe('CodexAdapter', () => {
   it('generates TCP MCP config for macOS bridge mode', () => {
     const files = adapter.generateMcpConfig('host.docker.internal:12345', {} as IronCurtainConfig);
     expect(files[0].content).toContain('"TCP:host.docker.internal:12345"');
+  });
+
+  it('passes the mounted PTY orientation as one inert Codex developer-instructions argument', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'codex-pty-wrapper-'));
+    try {
+      const startScript = adapter
+        .generateOrientationFiles(sampleContext)
+        .find((file) => file.path === 'start-codex.sh');
+      expect(startScript).toBeDefined();
+
+      const scriptPath = join(tempDir, 'start-codex.sh');
+      const fakeCodexPath = join(tempDir, 'codex');
+      const capturedArgsPath = join(tempDir, 'captured-args');
+      const substitutionSentinel = join(tempDir, 'substitution-ran');
+      const backtickSentinel = join(tempDir, 'backtick-ran');
+      writeFileSync(scriptPath, startScript!.content, { mode: 0o755 });
+      writeFileSync(
+        fakeCodexPath,
+        `#!/bin/bash
+: > "$CAPTURE_FILE"
+for arg in "$@"; do
+  printf '%s\\0' "$arg" >> "$CAPTURE_FILE"
+done
+`,
+        { mode: 0o755 },
+      );
+
+      const prompt = [
+        'Nested Docker says "quoted".',
+        `Do not run: $(touch "${substitutionSentinel}")`,
+        `Nor this: \`touch "${backtickSentinel}"\``,
+        'Keep literal variables: $HOME and ${PATH}',
+      ].join('\n');
+      const result = spawnSync('/bin/bash', [scriptPath], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          CAPTURE_FILE: capturedArgsPath,
+          IRONCURTAIN_MODEL: '',
+          IRONCURTAIN_SYSTEM_PROMPT: prompt,
+          PATH: `${tempDir}:${process.env.PATH ?? ''}`,
+        },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      const capturedArgs = readFileSync(capturedArgsPath).toString('utf8').split('\0').slice(0, -1);
+      const configIndex = capturedArgs.indexOf('-c');
+      expect(configIndex).toBeGreaterThanOrEqual(0);
+      expect(capturedArgs.filter((arg) => arg === '-c')).toHaveLength(1);
+      expect(capturedArgs[configIndex + 1]).toBe(`developer_instructions=${JSON.stringify(prompt)}`);
+      expect(existsSync(substitutionSentinel)).toBe(false);
+      expect(existsSync(backtickSentinel)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('builds a non-interactive codex exec command with approvals disabled', () => {
@@ -79,6 +135,20 @@ describe('CodexAdapter', () => {
     expect(prompt).toContain('/workspace');
     expect(prompt).toContain('NO direct internet access');
     expect(prompt).toContain('Policy Enforcement');
+    expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
+  });
+
+  it('includes managed-network guidance only for admitted nested Docker', () => {
+    const prompt = adapter.buildSystemPrompt({
+      ...sampleContext,
+      nestedDocker: { networkName: 'ironcurtain' },
+    });
+
+    expect(prompt).toContain('### Nested Docker');
+    expect(prompt).toContain('--network "$IRONCURTAIN_DOCKER_NETWORK"');
+    expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
+    expect(prompt).toContain('`--network host`');
+    expect(prompt).toContain('supported service topology, not a security boundary');
   });
 
   it('returns Codex ChatGPT OAuth providers', () => {
@@ -97,7 +167,8 @@ describe('CodexAdapter', () => {
     expect(env.CODEX_HOME).toBe('/home/codespace/.codex');
     expect(env.IRONCURTAIN_CODEX_ACCESS_TOKEN).toBe('codex-fake-token');
     expect(env.IRONCURTAIN_CODEX_ID_TOKEN).toMatch(/^[^.]+\.[^.]+\.[^.]+$/);
-    expect(env.CODEX_CA_CERTIFICATE).toBe('/usr/local/share/ca-certificates/ironcurtain-ca.crt');
+    expect(env.CODEX_CA_CERTIFICATE).toBe('/etc/ironcurtain/ca-cert.pem');
+    expect(env.SSL_CERT_FILE).toBe('/etc/ironcurtain/ca-bundle.pem');
     expect(env.CODEX_ACCESS_TOKEN).toBeUndefined();
     expect(env.OPENAI_API_KEY).toBeUndefined();
   });

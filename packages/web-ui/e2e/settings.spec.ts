@@ -27,6 +27,27 @@ test.describe('Settings — Model Providers', () => {
     await expect(page.getByTestId('default-badge-glm-5.2')).toBeVisible();
   });
 
+  test('enables nested Docker with mediated public image pulls by default', async ({ page }) => {
+    await navigateTo(page, 'Settings');
+    await expect(page.getByRole('heading', { name: 'Runtime', exact: true })).toBeVisible({ timeout: 10_000 });
+
+    const enabled = page.getByTestId('docker-workload-enabled');
+    const publicPulls = page.getByTestId('docker-workload-public-registry');
+    await expect(enabled).not.toBeChecked();
+    await expect(publicPulls).toBeChecked();
+    await expect(publicPulls).toBeDisabled();
+
+    await enabled.check();
+    await page.getByTestId('save-runtime-settings').click();
+    await expect(page.getByTestId('runtime-settings-saved')).toBeVisible();
+
+    await page.reload();
+    await connectWithToken(page);
+    await navigateTo(page, 'Settings');
+    await expect(page.getByTestId('docker-workload-enabled')).toBeChecked();
+    await expect(page.getByTestId('docker-workload-public-registry')).toBeChecked();
+  });
+
   test('edits a profile and saves; the masked key round-trips without clobbering', async ({ page }) => {
     await navigateTo(page, 'Settings');
     await expect(page.getByRole('heading', { name: 'Model Providers', exact: true })).toBeVisible({ timeout: 10_000 });
@@ -77,5 +98,7 @@ test.describe('Settings — Model Providers', () => {
     await expect(page.getByTestId('add-profile-button')).toHaveCount(0);
     await expect(page.getByTestId('edit-profile-glm-5.2')).toHaveCount(0);
     await expect(page.getByTestId('delete-profile-glm-5.2')).toHaveCount(0);
+    await expect(page.getByTestId('save-runtime-settings')).toHaveCount(0);
+    await expect(page.getByTestId('docker-workload-enabled')).toBeDisabled();
   });
 });

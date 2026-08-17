@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { saveSessionMetadata, loadSessionMetadata } from '../src/session/session-metadata.js';
+import { saveSessionMetadata, loadSessionMetadata, updateSessionMetadata } from '../src/session/session-metadata.js';
 import { getSessionMetadataPath } from '../src/config/paths.js';
 import type { SessionMetadata } from '../src/session/types.js';
 
@@ -146,5 +146,37 @@ describe('loadSessionMetadata', () => {
     const loaded = loadSessionMetadata(TEST_SESSION_ID);
 
     expect(loaded?.agentConversationId).toBe(convoId);
+  });
+});
+
+describe('updateSessionMetadata', () => {
+  it('atomically adds post-admission fields without losing creation metadata', () => {
+    saveSessionMetadata(TEST_SESSION_ID, {
+      createdAt: '2026-03-08T12:00:00.000Z',
+      persona: 'coder',
+      workspacePath: '/workspace',
+    });
+    const dockerWorkload = {
+      leaseId: 'lease-001',
+      generation: 'generation-001',
+      configHash: '1'.repeat(64),
+      watchdogPolicySha256: '2'.repeat(64),
+      backend: 'apple-container' as const,
+    };
+
+    updateSessionMetadata(TEST_SESSION_ID, { dockerWorkload });
+
+    expect(loadSessionMetadata(TEST_SESSION_ID)).toEqual({
+      createdAt: '2026-03-08T12:00:00.000Z',
+      persona: 'coder',
+      workspacePath: '/workspace',
+      dockerWorkload,
+    });
+  });
+
+  it('refuses to fabricate metadata when the create-once record is absent', () => {
+    expect(() => updateSessionMetadata('missing-session', { persona: 'coder' })).toThrow(
+      /cannot update missing or invalid session metadata/u,
+    );
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import type {
+  DockerWorkloadSettingsDto,
   GetModelProvidersDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
@@ -17,6 +18,8 @@ import type {
 const mockGet = vi.fn<() => Promise<GetModelProvidersDto>>();
 const mockSet = vi.fn<(input: SetModelProvidersDto) => Promise<GetModelProvidersDto>>();
 const mockList = vi.fn<() => Promise<OpenrouterModelsDto>>();
+const mockGetDockerWorkload = vi.fn<() => Promise<DockerWorkloadSettingsDto>>();
+const mockSetDockerWorkload = vi.fn<(input: DockerWorkloadSettingsDto) => Promise<DockerWorkloadSettingsDto>>();
 const mockGetStatistics = vi.fn<() => Promise<StatisticsConfigDto>>();
 const mockSetStatistics = vi.fn<(input: StatisticsConfigDto) => Promise<StatisticsConfigDto>>();
 
@@ -38,7 +41,9 @@ const connectionGenerationMock = { value: 0 };
 const configChangedGenerationMock = { value: 0 };
 
 vi.mock('$lib/stores.svelte.js', () => ({
+  getDockerWorkloadSettings: (...args: unknown[]) => mockGetDockerWorkload(...(args as [])),
   getModelProviders: (...args: unknown[]) => mockGet(...(args as [])),
+  setDockerWorkloadSettings: (...args: unknown[]) => mockSetDockerWorkload(...(args as [DockerWorkloadSettingsDto])),
   setModelProviders: (...args: unknown[]) => mockSet(...(args as [SetModelProvidersDto])),
   listOpenrouterModels: (...args: unknown[]) => mockList(...(args as [])),
   getStatisticsConfig: (...args: unknown[]) => mockGetStatistics(...(args as [])),
@@ -81,6 +86,8 @@ describe('Settings', () => {
     mockGet.mockReset();
     mockSet.mockReset();
     mockList.mockReset();
+    mockGetDockerWorkload.mockReset();
+    mockSetDockerWorkload.mockReset();
     mockGetStatistics.mockReset();
     mockSetStatistics.mockReset();
     appStateMock.daemonStatus = { allowPolicyMutation: true };
@@ -91,8 +98,87 @@ describe('Settings', () => {
     // SAFE default: bundled (warn-only) AND a list covering every fixture slug —
     // so opening/saving existing profiles never spuriously hard-blocks.
     mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'bundled' });
+    mockGetDockerWorkload.mockResolvedValue({ enabled: false, allowPublicRegistryPulls: true });
+    mockSetDockerWorkload.mockImplementation((input) => Promise.resolve(input));
     mockGetStatistics.mockResolvedValue({ enabled: true, retentionDays: 90 });
     mockSetStatistics.mockImplementation((input) => Promise.resolve(input));
+  });
+
+  it('shows the narrow nested-Docker controls and explains their boundary', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('docker-workload-settings')).toBeTruthy());
+
+    expect((screen.getByTestId('docker-workload-enabled') as HTMLInputElement).checked).toBe(false);
+    const publicPulls = screen.getByTestId('docker-workload-public-registry') as HTMLInputElement;
+    expect(publicPulls.checked).toBe(true);
+    expect(publicPulls.disabled).toBe(true);
+    expect(screen.getByText(/Docker Hub and GHCR/)).toBeTruthy();
+    expect(screen.getByText(/Changes apply to new agent sessions/)).toBeTruthy();
+    expect(screen.getByText(/macOS on Apple silicon with Apple Container installed/)).toBeTruthy();
+    expect((screen.getByTestId('save-runtime-settings') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText(/backend/i)).toBeNull();
+  });
+
+  it('does not render editable defaults or Save when the runtime read fails', async () => {
+    mockGetDockerWorkload.mockRejectedValue(new Error('config unavailable'));
+    render(Settings);
+
+    await vi.waitFor(() => expect(screen.getByTestId('runtime-settings-load-error')).toBeTruthy());
+    expect(screen.getByText(/config unavailable/)).toBeTruthy();
+    expect(screen.queryByTestId('docker-workload-settings')).toBeNull();
+    expect(screen.queryByTestId('docker-workload-enabled')).toBeNull();
+    expect(screen.queryByTestId('save-runtime-settings')).toBeNull();
+    expect(mockSetDockerWorkload).not.toHaveBeenCalled();
+  });
+
+  it('enables nested Docker with mediated public pulls on by default', async () => {
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('docker-workload-enabled')).toBeTruthy());
+
+    await fireEvent.click(screen.getByTestId('docker-workload-enabled'));
+    expect((screen.getByTestId('docker-workload-public-registry') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(screen.getByTestId('save-runtime-settings'));
+
+    await vi.waitFor(() =>
+      expect(mockSetDockerWorkload).toHaveBeenCalledWith({
+        enabled: true,
+        allowPublicRegistryPulls: true,
+      }),
+    );
+    expect(screen.getByTestId('runtime-settings-saved')).toBeTruthy();
+  });
+
+  it('allows mediated public pulls to be explicitly disabled', async () => {
+    mockGetDockerWorkload.mockResolvedValue({ enabled: true, allowPublicRegistryPulls: true });
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('docker-workload-public-registry')).toBeTruthy());
+
+    await fireEvent.click(screen.getByTestId('docker-workload-public-registry'));
+    await fireEvent.click(screen.getByTestId('save-runtime-settings'));
+
+    await vi.waitFor(() =>
+      expect(mockSetDockerWorkload).toHaveBeenCalledWith({
+        enabled: true,
+        allowPublicRegistryPulls: false,
+      }),
+    );
+  });
+
+  it('preserves a remembered public-pull opt-out when re-enabling Docker', async () => {
+    mockGetDockerWorkload.mockResolvedValue({ enabled: false, allowPublicRegistryPulls: false });
+    render(Settings);
+    await vi.waitFor(() => expect(screen.getByTestId('docker-workload-enabled')).toBeTruthy());
+
+    expect((screen.getByTestId('docker-workload-public-registry') as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(screen.getByTestId('docker-workload-enabled'));
+    await fireEvent.click(screen.getByTestId('save-runtime-settings'));
+
+    await vi.waitFor(() =>
+      expect(mockSetDockerWorkload).toHaveBeenCalledWith({
+        enabled: true,
+        allowPublicRegistryPulls: false,
+      }),
+    );
   });
 
   it('shows default-on statistics and saves an explicit opt-out', async () => {
@@ -143,6 +229,10 @@ describe('Settings', () => {
     expect(screen.queryByTestId('edit-profile-glm')).toBeNull();
     expect(screen.queryByTestId('delete-profile-glm')).toBeNull();
     expect(screen.queryByTestId('set-default-native')).toBeNull();
+    expect(screen.queryByTestId('save-runtime-settings')).toBeNull();
+    expect((screen.getByTestId('docker-workload-enabled') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByTestId('runtime-settings-readonly')).toBeTruthy();
+    expect(screen.getByTestId('runtime-settings-readonly').textContent).toContain('ironcurtain config');
   });
 
   it('opens the editor pre-filled with every field of the selected profile', async () => {

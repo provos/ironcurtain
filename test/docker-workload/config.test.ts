@@ -1,0 +1,120 @@
+import { describe, expect, it } from 'vitest';
+import {
+  dockerWorkloadConfigHash,
+  dockerWorkloadRequestedSchema,
+  formatDockerWorkloadStatus,
+  resolveDockerWorkloadConfig,
+} from '../../src/docker-workload/config.js';
+
+describe('secure nested Docker configuration', () => {
+  it('resolves absence, an empty object, and explicit false to the same authority-free value', () => {
+    const disabled = { enabled: false } as const;
+    expect(resolveDockerWorkloadConfig(undefined)).toEqual(disabled);
+    expect(resolveDockerWorkloadConfig({})).toEqual(disabled);
+    expect(resolveDockerWorkloadConfig({ enabled: false, backend: 'apple-container' })).toEqual(disabled);
+    expect(dockerWorkloadConfigHash(disabled)).toBe(dockerWorkloadConfigHash(resolveDockerWorkloadConfig(undefined)));
+  });
+
+  it('materializes the admitted Apple developer policy when explicitly enabled', () => {
+    expect(resolveDockerWorkloadConfig({ enabled: true })).toEqual({
+      enabled: true,
+      imageIngress: 'public-registry',
+      buildEgress: 'disabled',
+      acceptObservedDiskRisk: true,
+      resources: {
+        memoryMb: 4096,
+        cpus: 2,
+        pids: { desired: 512, required: false },
+        diskMb: null,
+      },
+    });
+  });
+
+  it('defaults to mediated public pulls while preserving preloaded-only as an explicit opt-out', () => {
+    expect(resolveDockerWorkloadConfig({ enabled: true })).toMatchObject({ imageIngress: 'public-registry' });
+    expect(resolveDockerWorkloadConfig({ enabled: true, imageIngress: 'preloaded-only' })).toMatchObject({
+      imageIngress: 'preloaded-only',
+    });
+    // Any value outside the reviewed union is rejected before resolution.
+    expect(dockerWorkloadRequestedSchema.safeParse({ enabled: true, imageIngress: 'any-registry' }).success).toBe(
+      false,
+    );
+  });
+
+  it('accepts and removes safe legacy implementation defaults', () => {
+    expect(
+      dockerWorkloadRequestedSchema.parse({
+        enabled: true,
+        tier: 'developer-only',
+        backend: 'apple-container',
+        imageMode: 'preloaded-catalog',
+        imageIngress: 'preloaded-only',
+        daemonState: 'ephemeral',
+        hostPortPublishing: false,
+        buildEgress: 'disabled',
+        acceptObservedDiskRisk: true,
+        resources: { pids: { desired: 512, required: false }, diskMb: null },
+      }),
+    ).toEqual({ enabled: true, imageIngress: 'preloaded-only' });
+  });
+
+  it('rejects unsupported legacy intent with an actionable replacement', () => {
+    for (const [request, replacement] of [
+      [{ enabled: true, backend: 'docker' }, 'Apple Container'],
+      [{ enabled: true, buildEgress: 'ironcurtain-dockerfiles' }, 'build egress'],
+      [{ enabled: true, acceptObservedDiskRisk: false }, 'observed-disk policy'],
+      [{ enabled: true, resources: { memoryMb: 8192 } }, 'dockerResources.memoryMb'],
+      [{ enabled: true, resources: { cpus: 4 } }, 'dockerResources.cpus'],
+      [{ enabled: true, resources: { pids: { desired: 1024 } } }, 'PID targets'],
+      [{ enabled: true, resources: { pids: { required: true } } }, 'PID enforcement'],
+      [{ enabled: true, resources: { diskMb: 8192 } }, 'disk limits'],
+    ] as const) {
+      const result = dockerWorkloadRequestedSchema.safeParse(request);
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error('expected unsupported legacy intent to fail');
+      expect(result.error.issues.map((issue) => issue.message).join('\n')).toContain(replacement);
+    }
+  });
+
+  it('rejects raw runtime authority', () => {
+    for (const forbidden of [
+      { image: 'docker:latest' },
+      { mounts: ['/var/run/docker.sock:/docker.sock'] },
+      { capAdd: ['SYS_ADMIN'] },
+      { securityOpt: ['unconfined'] },
+      { relayTarget: 'attacker.example:443' },
+      { runtimeArgs: ['--privileged'] },
+    ]) {
+      expect(dockerWorkloadRequestedSchema.safeParse({ enabled: true, ...forbidden }).success).toBe(false);
+    }
+  });
+
+  it('clamps inherited ordinary resources to the nested resource envelope', () => {
+    expect(resolveDockerWorkloadConfig({ enabled: true }, { memoryMb: 6, cpus: 0.01 })).toMatchObject({
+      resources: { memoryMb: 512, cpus: 0.25 },
+    });
+    expect(resolveDockerWorkloadConfig({ enabled: true }, { memoryMb: 2_000_000, cpus: 2048 })).toMatchObject({
+      resources: { memoryMb: 1024 * 1024, cpus: 1024 },
+    });
+  });
+
+  it('formats effective enabled-state pull status for user-visible entrypoints', () => {
+    expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig(undefined))).toBeUndefined();
+    expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true }))).toBe(
+      'Nested Docker: enabled · pulls: Docker Hub/GHCR via mediated proxy',
+    );
+    expect(
+      formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true, imageIngress: 'preloaded-only' })),
+    ).toBe('Nested Docker: enabled · pulls: off (local images only)');
+  });
+
+  it('absorbs the safe legacy disk defaults without hidden risk configuration', () => {
+    expect(
+      dockerWorkloadRequestedSchema.safeParse({
+        enabled: true,
+        resources: { diskMb: null },
+      }).success,
+    ).toBe(true);
+    expect(resolveDockerWorkloadConfig({ enabled: true }).resources.diskMb).toBeNull();
+  });
+});

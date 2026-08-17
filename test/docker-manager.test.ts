@@ -343,6 +343,15 @@ describe('DockerManager', () => {
       const args = buildCreateArgs(sampleConfig);
       expect(args).not.toContain('--user');
     });
+
+    it('pins a trusted static IPv4 address on a named network', () => {
+      const args = buildCreateArgs({ ...sampleConfig, ipv4Address: '172.31.44.2' });
+      expect(args[args.indexOf('--ip') + 1]).toBe('172.31.44.2');
+      expect(() => buildCreateArgs({ ...sampleConfig, network: 'none', ipv4Address: '172.31.44.2' })).toThrow(
+        /named network/u,
+      );
+      expect(() => buildCreateArgs({ ...sampleConfig, ipv4Address: 'relay.internal' })).toThrow(/IPv4 literal/u);
+    });
   });
 
   describe('preflight', () => {
@@ -618,14 +627,20 @@ describe('DockerManager', () => {
       await expect(manager.createNetwork('ironcurtain-abc')).resolves.toBeUndefined();
     });
 
-    it('passes --internal, --subnet, --gateway, and ownership labels', async () => {
+    it('passes --internal, --subnet, --gateway, IPv6, driver options, and ownership labels', async () => {
       mock.setResponse('');
       const manager = createDockerManager(mock.mockExec);
 
       await manager.createNetwork('ironcurtain-internal', {
         internal: true,
         subnet: '172.30.0.0/24',
+        ipv6Subnet: 'fd00:1c:44::/64',
         gateway: '172.30.0.1',
+        enableIPv6: true,
+        driverOptions: {
+          'com.docker.network.bridge.gateway_mode_ipv4': 'isolated',
+          'com.docker.network.bridge.gateway_mode_ipv6': 'isolated',
+        },
         labels: { 'ironcurtain.managed': 'true' },
       });
 
@@ -633,8 +648,13 @@ describe('DockerManager', () => {
       expect(args).toContain('--internal');
       expect(args).toContain('--subnet');
       expect(args[args.indexOf('--subnet') + 1]).toBe('172.30.0.0/24');
+      expect(args.filter((value) => value === '--subnet')).toHaveLength(2);
+      expect(args).toContain('fd00:1c:44::/64');
       expect(args).toContain('--gateway');
       expect(args[args.indexOf('--gateway') + 1]).toBe('172.30.0.1');
+      expect(args).toContain('--ipv6');
+      expect(args).toContain('com.docker.network.bridge.gateway_mode_ipv4=isolated');
+      expect(args).toContain('com.docker.network.bridge.gateway_mode_ipv6=isolated');
       expect(args).toContain('--label');
       expect(args[args.indexOf('--label') + 1]).toBe('ironcurtain.managed=true');
       expect(args[args.length - 1]).toBe('ironcurtain-internal');
@@ -834,6 +854,25 @@ describe('DockerManager', () => {
       spawnMock.handles[0].exit(1);
 
       await expect(promise).rejects.toThrow(/docker build .*exited with code 1.*Dockerfile syntax error/s);
+    });
+  });
+
+  describe('loadImageArchive', () => {
+    it('loads only from the explicit verified archive path', async () => {
+      const spawnMock = createMockSpawn();
+      const manager = createDockerManager(mock.mockExec, undefined, {
+        spawn: spawnMock.spawn,
+        stdoutSink: nullSink(),
+        stderrSink: nullSink(),
+      });
+
+      const promise = manager.loadImageArchive('/trusted/catalog/agent.oci.tar');
+      await Promise.resolve();
+      spawnMock.handles[0].exit(0);
+      await promise;
+
+      expect(spawnMock.calls[0].cmd).toBe('docker');
+      expect(spawnMock.calls[0].args).toEqual(['image', 'load', '--input', '/trusted/catalog/agent.oci.tar']);
     });
   });
 

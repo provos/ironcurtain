@@ -937,6 +937,12 @@ export interface OpenrouterModelsDto {
   readonly source: 'live' | 'cache' | 'bundled';
 }
 
+/** Narrow runtime settings exposed by the web UI. */
+export interface DockerWorkloadSettingsDto {
+  readonly enabled: boolean;
+  readonly allowPublicRegistryPulls: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Persona streamed-compile types (Phase 1b). Mirror src/web-ui/web-ui-types.ts.
 // ---------------------------------------------------------------------------

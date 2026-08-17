@@ -26,6 +26,7 @@ import { arch, platform, release } from 'node:os';
 import type {
   ContainerRuntime,
   DockerContainerConfig,
+  DockerContainerInfo,
   DockerExecResult,
   DockerImageInfo,
   DockerNetworkCreateOptions,
@@ -52,6 +53,14 @@ import { createDockerProgressSink } from './docker-progress-sink.js';
 const STOP_TIMEOUT_SECONDS = 10;
 
 /**
+ * Apple Container's XPC-backed inventory can transiently hang after deleting
+ * a VM. Retry one killed-by-timeout list process, but keep the total bounded:
+ * an unsuccessful attempt is never treated as absence evidence.
+ */
+const CONTAINER_INVENTORY_TIMEOUT_MS = 30_000;
+const CONTAINER_INVENTORY_RETRY_DELAY_MS = 250;
+
+/**
  * Minimum supported `container` CLI version. 1.1.0 is the floor for the
  * `uds` topology this backend now uses: it adds working per-file UDS
  * relays via `-v <host.sock>:<guest.sock>` (host-listens / guest-connects
@@ -69,7 +78,10 @@ const MIN_DARWIN_MAJOR = 25;
 
 /** Shape of one element of `container inspect` JSON output (1.0.0). */
 interface AppleContainerInspect {
+  readonly id?: string;
   readonly configuration?: {
+    readonly id?: string;
+    readonly creationDate?: string;
     readonly labels?: Readonly<Record<string, string>>;
     readonly image?: { readonly descriptor?: { readonly digest?: string } };
   };
@@ -79,11 +91,41 @@ interface AppleContainerInspect {
   };
 }
 
+/** Normalize one `container list --format json` entry for host reconciliation. */
+export function parseAppleContainerInfo(raw: unknown): DockerContainerInfo {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Unexpected apple-container list result: expected object');
+  }
+  const entry = raw as AppleContainerInspect;
+  const id = entry.id ?? entry.configuration?.id;
+  if (typeof id !== 'string' || id === '') {
+    throw new Error('Unexpected apple-container list result: missing container ID');
+  }
+  return {
+    id,
+    name: entry.configuration?.id ?? id,
+    created: entry.configuration?.creationDate ?? '',
+    running: entry.status?.state === 'running',
+    labels: stringRecord(entry.configuration?.labels),
+  };
+}
+
 /** Shape of one element of `container image inspect` JSON output (1.0.0). */
 interface AppleImageInspect {
+  readonly configuration?: {
+    readonly creationDate?: string;
+    readonly descriptor?: { readonly digest?: string };
+    readonly name?: string;
+  };
   readonly id?: string;
   readonly variants?: ReadonlyArray<{
-    readonly config?: { readonly config?: { readonly Labels?: Readonly<Record<string, string>> } };
+    readonly platform?: { readonly architecture?: string; readonly os?: string };
+    readonly config?: {
+      readonly architecture?: string;
+      readonly created?: string;
+      readonly os?: string;
+      readonly config?: { readonly Labels?: Readonly<Record<string, string>> };
+    };
   }>;
 }
 
@@ -95,6 +137,63 @@ function firstInspectEntry(stdout: string): unknown {
 /** Digests appear both bare and `sha256:`-prefixed; compare normalized. */
 function normalizeDigest(digest: string): string {
   return digest.startsWith('sha256:') ? digest.slice('sha256:'.length) : digest;
+}
+
+function canonicalSha256Digest(digest: string): string {
+  const normalized = normalizeDigest(digest).toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(normalized)) {
+    throw new Error(`Unexpected apple-container image digest: ${digest}`);
+  }
+  return `sha256:${normalized}`;
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
+}
+
+/** Normalize Apple Container's index-oriented image metadata for shared callers. */
+export function parseAppleImageInfo(raw: unknown): DockerImageInfo {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Unexpected apple-container image inspect result: expected object');
+  }
+  const entry = raw as AppleImageInspect;
+  const rawDigest = entry.configuration?.descriptor?.digest ?? entry.id;
+  if (rawDigest === undefined) {
+    throw new Error('Unexpected apple-container image inspect result: missing immutable image digest');
+  }
+
+  // Apple Container only runs on Apple silicon. Select the arm64 variant
+  // explicitly so labels from another member of a multi-platform index can
+  // never qualify the local image.
+  const variant = entry.variants?.find(
+    (candidate) =>
+      (candidate.platform?.architecture ?? candidate.config?.architecture) === 'arm64' &&
+      (candidate.platform?.os ?? candidate.config?.os) === 'linux',
+  );
+  if (variant === undefined) {
+    throw new Error('Unexpected apple-container image inspect result: missing linux/arm64 variant');
+  }
+
+  return {
+    // Unlike Docker, Apple Container identifies an image by the top-level OCI
+    // index/manifest descriptor rather than the config digest.
+    id: canonicalSha256Digest(rawDigest),
+    repoTags: typeof entry.configuration?.name === 'string' ? [entry.configuration.name] : [],
+    labels: stringRecord(variant.config?.config?.Labels),
+    created: entry.configuration?.creationDate ?? variant.config?.created ?? '',
+  };
+}
+
+function imageMatchesLabelFilter(
+  image: { readonly labels: Readonly<Record<string, string>> },
+  filter: string,
+): boolean {
+  const separator = filter.indexOf('=');
+  if (separator === -1) return Object.hasOwn(image.labels, filter);
+  return image.labels[filter.slice(0, separator)] === filter.slice(separator + 1);
 }
 
 /** Rejects with a consistent "feature is Docker-only" error for unsupported runtime ops. */
@@ -198,6 +297,9 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   if (config.restartPolicy) {
     throw new Error('apple-container does not support restart policies');
   }
+  if (config.ipv4Address !== undefined) {
+    throw new Error('apple-container does not support coordinator-selected static IPv4 addresses');
+  }
 
   const args = ['create'];
 
@@ -229,6 +331,9 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   }
   if (config.scopeLabel !== undefined) {
     args.push('--label', `${IRONCURTAIN_LABEL_SCOPE}=${config.scopeLabel}`);
+  }
+  for (const [key, value] of Object.entries(config.labels ?? {})) {
+    args.push('--label', `${key}=${value}`);
   }
 
   if (config.resources?.memoryMb) {
@@ -306,6 +411,27 @@ export function createAppleContainerManager(
   const inspectContainer = async (nameOrId: string, timeout: number): Promise<AppleContainerInspect | undefined> => {
     const { stdout } = await exec('container', ['inspect', nameOrId], { timeout });
     return firstInspectEntry(stdout) as AppleContainerInspect | undefined;
+  };
+
+  const listContainersJsonOnce = async (): Promise<string> => {
+    const { stdout } = await exec('container', ['list', '--all', '--format', 'json'], {
+      timeout: CONTAINER_INVENTORY_TIMEOUT_MS,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    return stdout;
+  };
+  const listContainersJsonWithRetry = async (): Promise<string> => {
+    try {
+      return await listContainersJsonOnce();
+    } catch (error) {
+      if (!isExecError(error) || !isExecTimeout(error)) throw error;
+      logger.warn(
+        `[apple-container-manager] container inventory timed out after ${CONTAINER_INVENTORY_TIMEOUT_MS}ms; ` +
+          `retrying once after ${CONTAINER_INVENTORY_RETRY_DELAY_MS}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, CONTAINER_INVENTORY_RETRY_DELAY_MS));
+      return listContainersJsonOnce();
+    }
   };
 
   return {
@@ -414,6 +540,29 @@ export function createAppleContainerManager(
       }
     },
 
+    async loadImageArchive(archivePath: string): Promise<void> {
+      await runStreamed({
+        operation: 'container image load',
+        args: ['image', 'load', '--input', archivePath],
+        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
+      });
+    },
+
+    async tagImage(sourceRef: string, targetRef: string): Promise<void> {
+      await exec('container', ['image', 'tag', sourceRef, targetRef], {
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+      });
+    },
+
+    async saveImageArchive(ref: string, archivePath: string, platform = 'linux/arm64'): Promise<void> {
+      await runStreamed({
+        operation: 'container image save',
+        args: ['image', 'save', '--platform', platform, '--output', archivePath, ref],
+        idleTimeoutMs: BUILD_IDLE_TIMEOUT_MS,
+      });
+    },
+
     async buildImage(
       tag: string,
       dockerfilePath: string,
@@ -451,24 +600,57 @@ export function createAppleContainerManager(
     async getImageLabel(image: string, label: string): Promise<string | undefined> {
       try {
         const { stdout } = await exec('container', ['image', 'inspect', image], { timeout: 10_000 });
-        const entry = firstInspectEntry(stdout) as AppleImageInspect | undefined;
-        for (const variant of entry?.variants ?? []) {
-          const value = variant.config?.config?.Labels?.[label];
-          if (value !== undefined) return value;
-        }
-        return undefined;
+        return parseAppleImageInfo(firstInspectEntry(stdout)).labels[label];
       } catch {
         return undefined;
       }
     },
 
-    // Workflow snapshot/image management (commit, removeImage, listImages,
-    // inspectImage) is runtime-capability gated. Reject loudly if these methods
-    // are reached on the apple-container backend instead of degrading silently.
+    // Workflow snapshot creation remains Docker-only. Generic image inventory
+    // operations support selected-image transport and cleanup on Apple
+    // Container even though supportsImageSnapshots is false.
     commit: (): Promise<string> => unsupported('image commit (workflow snapshots)'),
-    removeImage: (): Promise<boolean> => unsupported('image removal'),
-    listImages: (): Promise<readonly DockerImageInfo[]> => unsupported('image listing'),
-    inspectImage: (): Promise<DockerImageInfo | undefined> => unsupported('image inspection'),
+
+    async removeImage(ref: string): Promise<boolean> {
+      try {
+        await exec('container', ['image', 'delete', '--force', ref], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+        return true;
+      } catch (err: unknown) {
+        if (isExecError(err) && /not found|does not exist|no such image/i.test(err.stderr)) return false;
+        const detail = isExecError(err) ? err.stderr.trim() || err.message : String(err);
+        logger.warn(`[apple-container-manager] failed to remove image ${ref}: ${detail}`);
+        return false;
+      }
+    },
+
+    async listImages(options?: { readonly labelFilter?: string }): Promise<readonly DockerImageInfo[]> {
+      const { stdout } = await exec('container', ['image', 'list', '--format', 'json'], {
+        timeout: 30_000,
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      const parsed = JSON.parse(stdout) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new Error('Unexpected apple-container image list result: expected array');
+      }
+      const images = parsed.map(parseAppleImageInfo);
+      const labelFilter = options?.labelFilter;
+      return labelFilter === undefined ? images : images.filter((image) => imageMatchesLabelFilter(image, labelFilter));
+    },
+
+    async inspectImage(ref: string): Promise<DockerImageInfo | undefined> {
+      try {
+        const { stdout } = await exec('container', ['image', 'inspect', ref], {
+          timeout: 10_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        const parsed = JSON.parse(stdout) as unknown;
+        if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+        return parseAppleImageInfo(parsed[0]);
+      } catch (err: unknown) {
+        if (isExecError(err) && /not found|does not exist|no such image/i.test(err.stderr)) return undefined;
+        throw err;
+      }
+    },
 
     async getContainerLabel(container: string, label: string): Promise<string | undefined> {
       try {
@@ -479,12 +661,32 @@ export function createAppleContainerManager(
       }
     },
 
+    async listContainers(options?: { readonly labelFilter?: string }): Promise<readonly DockerContainerInfo[]> {
+      const stdout = await listContainersJsonWithRetry();
+      const parsed = JSON.parse(stdout) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new Error('Unexpected apple-container list result: expected array');
+      }
+      const containers = parsed.map(parseAppleContainerInfo);
+      const labelFilter = options?.labelFilter;
+      return labelFilter === undefined
+        ? containers
+        : containers.filter((container) => imageMatchesLabelFilter(container, labelFilter));
+    },
+
     async createNetwork(name: string, options?: DockerNetworkCreateOptions): Promise<void> {
       if (options?.gateway) {
         throw new Error('apple-container networks do not support an explicit gateway; the runtime assigns it');
       }
       if (options?.labels && Object.keys(options.labels).length > 0) {
         throw new Error('apple-container networks do not support labels');
+      }
+      if (
+        options?.ipv6Subnet ||
+        options?.enableIPv6 ||
+        (options?.driverOptions && Object.keys(options.driverOptions).length > 0)
+      ) {
+        throw new Error('apple-container networks do not support Docker bridge driver options');
       }
       try {
         const args = ['network', 'create'];

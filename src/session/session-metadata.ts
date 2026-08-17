@@ -7,6 +7,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { getSessionMetadataPath } from '../config/paths.js';
+import { writeStableJsonAtomic } from '../hardened-fs.js';
 import type { SessionMetadata } from './types.js';
 
 /**
@@ -32,6 +33,23 @@ export function saveSessionMetadataTo(path: string, metadata: SessionMetadata): 
  */
 export function saveSessionMetadata(sessionId: string, metadata: SessionMetadata): void {
   saveSessionMetadataTo(getSessionMetadataPath(sessionId), metadata);
+}
+
+/**
+ * Merge fields learned after initial session creation, then atomically replace
+ * the file while preserving {@link saveSessionMetadata}'s create-once API.
+ * Session setup is the single writer; this is not a concurrent merge primitive.
+ */
+export function updateSessionMetadata(
+  sessionId: string,
+  update: Partial<Omit<SessionMetadata, 'createdAt'>>,
+): SessionMetadata {
+  const path = getSessionMetadataPath(sessionId);
+  const existing = loadSessionMetadataFromPath(path);
+  if (existing === undefined) throw new Error(`cannot update missing or invalid session metadata: ${path}`);
+  const merged: SessionMetadata = { ...existing, ...update };
+  writeStableJsonAtomic(path, merged);
+  return merged;
 }
 
 /**

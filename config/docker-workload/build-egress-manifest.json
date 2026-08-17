@@ -1,0 +1,440 @@
+{
+  "schemaVersion": 1,
+  "policyId": "build-egress-current-dockerfiles-arm64-v1",
+  "sourceDockerfiles": [
+    {
+      "path": "docker/Dockerfile.base.arm64",
+      "sha256": "20d3c68aec61b44e1822e3bf3e558867846bf6213d2579292ac0304ebaf255c9"
+    },
+    {
+      "path": "docker/Dockerfile.claude-code",
+      "sha256": "4f03d3d07786e327751e683e9c32c8b715baa1e6e82fba60a80e72227bd7bb71"
+    },
+    {
+      "path": "docker/Dockerfile.codex",
+      "sha256": "f2497d6838ccc37273d47504a2c3b4dbd12326d5db8c63b972c19089a012ce49"
+    },
+    {
+      "path": "docker/Dockerfile.goose",
+      "sha256": "1dd8def5115561c6b4e55c618d0f5c5b52afd6351dc5a02091034d421d4f9f88"
+    }
+  ],
+  "rules": [
+    {
+      "id": "deb-debian",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "http:",
+        "hostname": "deb.debian.org",
+        "port": 80,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/debian/",
+          "allowQuery": false
+        },
+        {
+          "kind": "prefix",
+          "value": "/debian-security/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "astral-sh",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "astral.sh",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "exact",
+          "value": "/uv/install.sh",
+          "allowQuery": false
+        },
+        {
+          "kind": "exact",
+          "value": "/ruff/install.sh",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "releases-astral-sh",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "releases.astral.sh",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/installers/",
+          "allowQuery": true
+        },
+        {
+          "kind": "prefix",
+          "value": "/github/",
+          "allowQuery": true
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "sh-rustup-rs",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "sh.rustup.rs",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "exact",
+          "value": "/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "static-rust-lang",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "static.rust-lang.org",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/dist/",
+          "allowQuery": false
+        },
+        {
+          "kind": "prefix",
+          "value": "/rustup/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "index-crates-io",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "index.crates.io",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "static-crates-io",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "static.crates.io",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/crates/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "registry-npmjs",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "registry.npmjs.org",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      },
+      "allowEncodedSlash": true
+    },
+    {
+      "id": "nodejs-org",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "nodejs.org",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/download/release/",
+          "allowQuery": false
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "cdn-playwright",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "cdn.playwright.dev",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/dbazure/download/",
+          "allowQuery": true
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "playwright-download",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "playwright.download.prss.microsoft.com",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/dbazure/download/",
+          "allowQuery": true
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "github-com",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "github.com",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/block/goose/releases/download/",
+          "allowQuery": true
+        },
+        {
+          "kind": "prefix",
+          "value": "/aaif-goose/goose/releases/download/",
+          "allowQuery": true
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    },
+    {
+      "id": "release-assets-ghusercontent",
+      "seams": ["run"],
+      "destination": {
+        "protocol": "https:",
+        "hostname": "release-assets.githubusercontent.com",
+        "port": 443,
+        "addressPolicy": "fixed-parent-only"
+      },
+      "methods": ["GET", "HEAD"],
+      "paths": [
+        {
+          "kind": "prefix",
+          "value": "/github-production-release-asset/",
+          "allowQuery": true
+        }
+      ],
+      "redirects": {
+        "maxHops": 0,
+        "allowedRuleIds": []
+      },
+      "requestHeaders": {
+        "allow": ["accept", "accept-encoding", "user-agent", "range", "if-none-match", "if-modified-since"],
+        "strip": ["authorization", "cookie", "proxy-authorization"]
+      },
+      "limits": {
+        "responseBytes": 2147483648,
+        "timeoutMs": 600000
+      }
+    }
+  ]
+}

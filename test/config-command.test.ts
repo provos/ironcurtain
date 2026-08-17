@@ -58,6 +58,7 @@ import {
 import type { ModelCatalogResult, ModelCatalogSource } from '../src/config/openrouter-catalog.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
 import { USER_CONFIG_DEFAULTS, loadUserConfig, maskApiKey } from '../src/config/user-config.js';
+import { resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
 
 describe('config-command', () => {
   let env: ConfigTestEnv;
@@ -370,6 +371,89 @@ describe('config-command', () => {
     expect(() => loadUserConfig()).not.toThrow();
   });
 
+  it('enables nested Docker from the Docker Agent settings with the simple config shape', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+    });
+
+    mocks.select
+      .mockResolvedValueOnce('dockerAgent')
+      .mockResolvedValueOnce('nestedDocker')
+      .mockResolvedValueOnce('enabled')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm
+      .mockResolvedValueOnce(true) // enable nested Docker
+      .mockResolvedValueOnce(true); // save changes
+
+    await runConfigCommand();
+
+    expect(readConfig(env.testHome).dockerWorkload).toEqual({
+      enabled: true,
+      imageIngress: 'public-registry',
+    });
+    expect(loadUserConfig().dockerWorkload).toMatchObject({
+      enabled: true,
+      imageIngress: 'public-registry',
+      acceptObservedDiskRisk: true,
+      resources: { diskMb: null },
+    });
+  });
+
+  it('preserves an explicit pull opt-out while disabled and when re-enabling nested Docker', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      dockerWorkload: { enabled: false, imageIngress: 'preloaded-only' },
+    });
+
+    mocks.select
+      .mockResolvedValueOnce('dockerAgent')
+      .mockResolvedValueOnce('nestedDocker')
+      .mockResolvedValueOnce('enabled')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+
+    await runConfigCommand();
+
+    expect(readConfig(env.testHome).dockerWorkload).toEqual({
+      enabled: true,
+      imageIngress: 'preloaded-only',
+    });
+    const pendingNote = mocks.note.mock.calls.find((call) => call[1] === 'Pending changes');
+    expect(pendingNote?.[0]).toBe('  dockerWorkload.enabled: off -> on');
+  });
+
+  it('persists preloaded-only as the public-pulls opt-out', async () => {
+    seedConfig(env.testHome, {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      dockerWorkload: { enabled: true },
+    });
+
+    mocks.select
+      .mockResolvedValueOnce('dockerAgent')
+      .mockResolvedValueOnce('nestedDocker')
+      .mockResolvedValueOnce('publicPulls')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('back')
+      .mockResolvedValueOnce('save');
+    mocks.confirm
+      .mockResolvedValueOnce(false) // disable public pulls
+      .mockResolvedValueOnce(true); // save changes
+
+    await runConfigCommand();
+
+    expect(readConfig(env.testHome).dockerWorkload).toEqual({
+      enabled: true,
+      imageIngress: 'preloaded-only',
+    });
+  });
+
   it('non-TTY exits with error', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
@@ -488,6 +572,28 @@ describe('computeDiff', () => {
     const diffs = computeDiff(resolved, pending);
     expect(diffs.some(([path]) => path === 'webSearch.provider')).toBe(true);
     expect(diffs.some(([path]) => path === 'webSearch.brave.apiKey')).toBe(true);
+  });
+
+  it('diffs only the user-facing nested Docker choices', () => {
+    expect(computeDiff(resolved, { dockerWorkload: { enabled: true } })).toEqual([
+      ['dockerWorkload.enabled', { from: false, to: true }],
+    ]);
+
+    const enabled = {
+      ...resolved,
+      dockerWorkload: resolveDockerWorkloadConfig({ enabled: true }),
+    } as ResolvedUserConfig;
+    expect(computeDiff(enabled, { dockerWorkload: { imageIngress: 'preloaded-only' } })).toEqual([
+      ['dockerWorkload.publicPulls', { from: true, to: false }],
+    ]);
+
+    expect(
+      computeDiff(
+        resolved,
+        { dockerWorkload: { enabled: true, imageIngress: 'preloaded-only' } },
+        { enabled: false, imageIngress: 'preloaded-only' },
+      ),
+    ).toEqual([['dockerWorkload.enabled', { from: false, to: true }]]);
   });
 
   it('masks API keys in webSearch diff', () => {

@@ -1,10 +1,12 @@
 /**
  * Config-related JSON-RPC method dispatch.
  *
- * Handles the Settings view's provider-profile and local-statistics sections:
+ * Handles the user-config sections exposed in the web Settings view:
  *   - `config.getModelProviders` — read; masks every openrouter profile's key.
  *   - `config.setModelProviders` — mutation; gated on `ctx.allowPolicyMutation`,
  *     persists the WHOLE section via `saveUserConfig`, emits `config.changed`.
+ *   - `config.getDockerWorkload` — read; returns the two supported UX controls.
+ *   - `config.setDockerWorkload` — gated mutation; persists only those controls.
  *   - `config.getStatistics` / `config.setStatistics` — resolved statistics
  *     settings, with the same mutation gate and change event.
  *
@@ -19,6 +21,7 @@ import { validateParams } from './types.js';
 import type { WorkflowDispatchContext } from './workflow-dispatch.js';
 import {
   type GetModelProvidersDto,
+  type DockerWorkloadSettingsDto,
   type OpenrouterModelsDto,
   type ProfileDto,
   type StatisticsConfigDto,
@@ -27,6 +30,7 @@ import {
 } from '../web-ui-types.js';
 import {
   loadUserConfig,
+  loadRequestedDockerWorkloadConfig,
   saveUserConfig,
   maskApiKey,
   cloneProviderPreference,
@@ -94,6 +98,15 @@ const statisticsConfigSchema = z
   .object({ enabled: z.boolean(), retentionDays: z.number().int().positive().nullable() })
   .strict();
 
+const getDockerWorkloadSchema = z.object({});
+
+const setDockerWorkloadSchema = z
+  .object({
+    enabled: z.boolean(),
+    allowPublicRegistryPulls: z.boolean(),
+  })
+  .strict();
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -113,6 +126,17 @@ export async function configDispatch(
       requirePolicyMutation(ctx);
       const input = validateParams(setModelProvidersSchema, params);
       return setModelProviders(ctx, input);
+    }
+
+    case 'config.getDockerWorkload': {
+      validateParams(getDockerWorkloadSchema, params);
+      return getDockerWorkload();
+    }
+
+    case 'config.setDockerWorkload': {
+      requirePolicyMutation(ctx);
+      const input = validateParams(setDockerWorkloadSchema, params);
+      return setDockerWorkload(ctx, input);
     }
 
     case 'config.getStatistics': {
@@ -168,6 +192,19 @@ function setStatistics(ctx: WorkflowDispatchContext, input: StatisticsConfigDto)
 function getModelProviders(): GetModelProvidersDto {
   const resolved = loadUserConfig({ readOnly: true }).modelProviders;
   return toGetDto(resolved);
+}
+
+/**
+ * Returns only the product-level choices. The raw requested ingress value is
+ * consulted while disabled so an explicit offline preference survives a
+ * disable/re-enable cycle; an absent preference keeps the ergonomic default.
+ */
+function getDockerWorkload(): DockerWorkloadSettingsDto {
+  const requested = loadRequestedDockerWorkloadConfig();
+  return {
+    enabled: requested?.enabled === true,
+    allowPublicRegistryPulls: requested?.imageIngress !== 'preloaded-only',
+  };
 }
 
 /** Maps a resolved registry to the masked wire DTO. */
@@ -275,6 +312,26 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
 
   ctx.eventBus.emit('config.changed', {});
   return getModelProviders();
+}
+
+/**
+ * Persists the two fields owned by the web UI. Compatibility-only legacy
+ * implementation fields are normalized away by `saveUserConfig`.
+ */
+function setDockerWorkload(ctx: WorkflowDispatchContext, input: DockerWorkloadSettingsDto): DockerWorkloadSettingsDto {
+  try {
+    saveUserConfig({
+      dockerWorkload: {
+        enabled: input.enabled,
+        imageIngress: input.allowPublicRegistryPulls ? 'public-registry' : 'preloaded-only',
+      },
+    });
+  } catch (err) {
+    throw new RpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+  }
+
+  ctx.eventBus.emit('config.changed', {});
+  return getDockerWorkload();
 }
 
 type OpenrouterInput = NonNullable<NonNullable<UserConfig['modelProviders']>['profiles']>[string];

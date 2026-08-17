@@ -489,4 +489,147 @@ describe('attachPty (UDS)', () => {
 
     await expect(attachPty({ target: sockPath, containerId: 'unused' })).rejects.toThrow(/no listener/);
   });
+
+  it('throws when the listener closes before sending any output', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'zero-byte-close.sock');
+    const { createServer } = await import('node:net');
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+
+    try {
+      await expect(attachPty({ target: sockPath, containerId: 'unused' })).rejects.toThrow(/before sending any output/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('reports a launcher or relay failure when the outer container remains running', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'zc-run.sock');
+    const { createServer } = await import('node:net');
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+    const runtime = {
+      isRunning: vi.fn(async () => true),
+      containerExists: vi.fn(async () => true),
+    };
+
+    try {
+      await expect(attachPty({ target: sockPath, containerId: 'outer-id', runtime: runtime as never })).rejects.toThrow(
+        /outer container is still running.*relay or agent launcher child failed/,
+      );
+      expect(runtime.isRunning).toHaveBeenCalledWith('outer-id');
+      expect(runtime.containerExists).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('reports that the outer container stopped before agent startup', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'zc-stop.sock');
+    const { createServer } = await import('node:net');
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+    const runtime = {
+      isRunning: vi.fn(async () => false),
+      containerExists: vi.fn(async () => true),
+    };
+
+    try {
+      await expect(attachPty({ target: sockPath, containerId: 'outer-id', runtime: runtime as never })).rejects.toThrow(
+        /outer container stopped.*entrypoint or socat listener exited/,
+      );
+      expect(runtime.isRunning).toHaveBeenCalledWith('outer-id');
+      expect(runtime.containerExists).toHaveBeenCalledWith('outer-id');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('reports unavailable state when runtime inspection itself fails', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'zc-inspect.sock');
+    const { createServer } = await import('node:net');
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+    const runtime = {
+      isRunning: vi.fn(async () => {
+        throw new Error('untrusted runtime detail must not be reflected');
+      }),
+      containerExists: vi.fn(async () => true),
+    };
+
+    try {
+      await expect(attachPty({ target: sockPath, containerId: 'outer-id', runtime: runtime as never })).rejects.toThrow(
+        /state could not be inspected before teardown/,
+      );
+      expect(runtime.containerExists).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('treats an abort after connect and before output as a graceful shutdown', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'aborted-before-output.sock');
+    const { createServer } = await import('node:net');
+    let accepted!: () => void;
+    const acceptedPromise = new Promise<void>((resolve) => {
+      accepted = resolve;
+    });
+    const server = createServer(() => accepted());
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+
+    const controller = new AbortController();
+    const attached = attachPty({ target: sockPath, containerId: 'unused', signal: controller.signal });
+    await acceptedPromise;
+    controller.abort();
+
+    try {
+      await expect(attached).resolves.toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('does not connect when shutdown was already requested', async () => {
+    const { attachPty } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'pre-aborted.sock');
+    const { createServer } = await import('node:net');
+    let connections = 0;
+    const server = createServer(() => {
+      connections += 1;
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(sockPath, () => resolve());
+    });
+
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await expect(attachPty({ target: sockPath, containerId: 'unused', signal: controller.signal })).resolves.toBe(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(connections).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });

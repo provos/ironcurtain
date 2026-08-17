@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   loadUserConfig,
+  loadRequestedDockerWorkloadConfig,
   saveUserConfig,
   userConfigSchema,
   validateModelId,
@@ -59,7 +60,106 @@ describe('loadUserConfig', () => {
     expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     expect(config.anthropicApiKey).toBe('');
+    expect(config.dockerWorkload).toEqual({ enabled: false });
     expect(config.statistics).toEqual({ enabled: true, retentionDays: 90 });
+  });
+
+  it('reads the validated requested Docker-workload block without creating or resolving config', () => {
+    const configPath = resolve(testHome, 'config.json');
+    expect(loadRequestedDockerWorkloadConfig()).toBeUndefined();
+    expect(existsSync(configPath)).toBe(false);
+
+    writeConfigFile({
+      dockerWorkload: { enabled: false, imageIngress: 'preloaded-only' },
+    });
+    expect(loadRequestedDockerWorkloadConfig()).toEqual({
+      enabled: false,
+      imageIngress: 'preloaded-only',
+    });
+  });
+
+  it('keeps nested Docker authority off by default and makes the simple opt-in usable', () => {
+    writeConfigFile({
+      dockerWorkload: { enabled: true },
+    });
+    expect(loadUserConfig().dockerWorkload).toMatchObject({
+      enabled: true,
+      imageIngress: 'public-registry',
+      acceptObservedDiskRisk: true,
+      resources: { memoryMb: USER_CONFIG_DEFAULTS.dockerResources.memoryMb, diskMb: null },
+    });
+  });
+
+  it('inherits numeric Docker resources while keeping safe nested fallbacks for unlimited values', () => {
+    writeConfigFile({
+      dockerResources: { memoryMb: 6144, cpus: 3 },
+      dockerWorkload: { enabled: true },
+    });
+    expect(loadUserConfig().dockerWorkload).toMatchObject({
+      enabled: true,
+      resources: { memoryMb: 6144, cpus: 3 },
+    });
+
+    writeConfigFile({
+      dockerResources: { memoryMb: null, cpus: null },
+      dockerWorkload: { enabled: true },
+    });
+    expect(loadUserConfig().dockerWorkload).toMatchObject({
+      enabled: true,
+      resources: { memoryMb: 4096, cpus: 2 },
+    });
+  });
+
+  it('rejects legacy nested resource overrides with their supported replacements', () => {
+    writeConfigFile({
+      dockerResources: { memoryMb: 6144, cpus: 3 },
+      dockerWorkload: { enabled: true, resources: { memoryMb: 10_240, cpus: 6 } },
+    });
+    expect(() => loadUserConfig()).toThrow(/dockerResources\.memoryMb/u);
+    expect(() => loadUserConfig()).toThrow(/dockerResources\.cpus/u);
+  });
+
+  it('migrates safe legacy nested-Docker defaults to the canonical two-choice request', () => {
+    writeConfigFile({
+      dockerWorkload: {
+        enabled: true,
+        tier: 'developer-only',
+        backend: 'apple-container',
+        imageMode: 'preloaded-catalog',
+        imageIngress: 'preloaded-only',
+        daemonState: 'ephemeral',
+        hostPortPublishing: false,
+        buildEgress: 'disabled',
+        acceptObservedDiskRisk: true,
+        resources: { pids: { desired: 512, required: false }, diskMb: null },
+      },
+    });
+
+    expect(loadUserConfig().dockerWorkload).toMatchObject({ enabled: true, imageIngress: 'preloaded-only' });
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.dockerWorkload).toEqual({ enabled: true, imageIngress: 'preloaded-only' });
+  });
+
+  it('accepts safe legacy nested-Docker defaults without rewriting during read-only loads', () => {
+    const legacy = {
+      enabled: false,
+      backend: 'apple-container',
+      imageMode: 'preloaded-catalog',
+      imageIngress: 'preloaded-only',
+    } as const;
+    writeConfigFile({ dockerWorkload: legacy });
+    const configPath = resolve(testHome, 'config.json');
+    const before = readFileSync(configPath, 'utf-8');
+
+    expect(loadUserConfig({ readOnly: true }).dockerWorkload).toEqual({ enabled: false });
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('rejects raw nested Docker mounts, images, capabilities, and runtime arguments', () => {
+    for (const field of ['mounts', 'image', 'capAdd', 'runtimeArgs']) {
+      writeConfigFile({ dockerWorkload: { enabled: true, [field]: ['unsafe'] } });
+      expect(() => loadUserConfig()).toThrow(/dockerWorkload/u);
+    }
   });
 
   it('preserves an explicit statistics disable toggle', () => {

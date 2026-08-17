@@ -38,6 +38,7 @@
   "files": [
     "dist/",
     "docker/",
+    "config/docker-workload/",
     "src/config/constitution.md",
     "src/config/constitution-user-base.md",
     "src/config/mcp-servers.json",
@@ -52,7 +53,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.mjs && npm run build:web-ui --if-present",
+    "clean:dist": "node scripts/clean-dist.mjs",
+    "build": "npm run clean:dist && tsc && node scripts/copy-assets.mjs && npm run build:web-ui --if-present",
     "build:web-ui": "npm run build -w packages/web-ui",
     "start": "tsx src/cli.ts start",
     "annotate-tools": "tsx src/cli.ts annotate-tools",
@@ -65,6 +67,10 @@
     "prepublishOnly": "npm run build",
     "test": "bash scripts/test.sh",
     "openrouter-live-check": "node scripts/openrouter-live-check.mjs",
+    "qualify:apple": "tsx scripts/qualify-backend.ts --backend apple",
+    "smoke:nested:apple": "npm run build && tsx scripts/smoke-nested-apple.ts",
+    "smoke:nested:apple:pty": "npm run build && tsx scripts/smoke-nested-apple.ts --pty",
+    "smoke:nested:apple:public-registry": "npm run build && tsx scripts/smoke-nested-apple.ts --public-registry",
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",

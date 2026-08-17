@@ -251,6 +251,20 @@ describe('GooseAdapter.buildSystemPrompt', () => {
   it('contains NO direct internet access warning', () => {
     const prompt = adapter.buildSystemPrompt(sampleContext);
     expect(prompt).toContain('NO direct internet access');
+    expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
+  });
+
+  it('includes managed-network guidance only for admitted nested Docker', () => {
+    const prompt = adapter.buildSystemPrompt({
+      ...sampleContext,
+      nestedDocker: { networkName: 'ironcurtain' },
+    });
+
+    expect(prompt).toContain('### Nested Docker');
+    expect(prompt).toContain('--network "$IRONCURTAIN_DOCKER_NETWORK"');
+    expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
+    expect(prompt).toContain('`--network host`');
+    expect(prompt).toContain('supported service topology, not a security boundary');
   });
 });
 
@@ -331,7 +345,7 @@ describe('GooseAdapter.buildEnv', () => {
     const adapter = createGooseAdapter();
     const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-api03-ironcurtain-FAKE']]);
     const env = adapter.buildEnv(config, fakeKeys);
-    expect(env.SSL_CERT_FILE).toBe('/etc/ssl/certs/ca-certificates.crt');
+    expect(env.SSL_CERT_FILE).toBe('/etc/ironcurtain/ca-bundle.pem');
     expect(env.SSL_CERT_DIR).toBe('/etc/ssl/certs');
   });
 

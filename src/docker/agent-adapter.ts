@@ -190,6 +190,14 @@ export interface OrientationContext {
   readonly allowedDomains: string[];
   /** Container network mode: 'none' (Linux UDS) or 'bridge' (macOS TCP). */
   readonly networkMode: 'none' | 'bridge';
+  /**
+   * Admitted nested-Docker capability for this session. Absent for ordinary
+   * sessions and for configured workloads that failed admission.
+   */
+  readonly nestedDocker?: {
+    /** Bundle-local managed network used for sibling service discovery. */
+    readonly networkName: string;
+  };
 }
 
 /**

@@ -13,8 +13,8 @@
  *   decrypted connections via emit('connection', tlsSocket)
  */
 
+import * as dns from 'node:dns';
 import * as http from 'node:http';
-import * as https from 'node:https';
 import * as tls from 'node:tls';
 import * as net from 'node:net';
 import type { Socket } from 'node:net';
@@ -44,6 +44,10 @@ import { OPENROUTER_HOST } from '../config/user-config.js';
 import { openRouterWireForPath } from './openrouter.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
+import { createDirectOutboundTransport, createGuardedLookup, type OutboundTransport } from './outbound-transport.js';
+import { connectionNominatedHeaderNames, HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
+import { handleBuildEgressRequest, type BuildEgressGuard, type BuildEgressSeam } from './build-egress-proxy.js';
+import { handleRegistryEgressRequest, type RegistryEgressGuard } from './registry-egress-proxy.js';
 import {
   MetricsAttributionRegistry,
   parseMetricsProxyAuthorization,
@@ -200,8 +204,51 @@ export interface MitmProxyOptions {
   /**
    * Custom DNS lookup function for outbound connections.
    * Used in tests to avoid real DNS resolution.
+   *
+   * Supplying a resolver does NOT relax the destination-address policy: the
+   * answers it returns are screened exactly like real ones. A fixture that
+   * resolves to loopback must also set `allowPrivateDestinationsForTests`.
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
+  /**
+   * Destination-bound upstream transport. Nested runtimes inject the fixed
+   * parent-proxy implementation so no request can fall back to direct egress
+   * or acquire a caller-selected generic CONNECT tunnel.
+   */
+  readonly outboundTransport?: OutboundTransport;
+  /** Test-only escape hatch for loopback provider and registry fixtures. */
+  readonly allowPrivateDestinationsForTests?: boolean;
+  /**
+   * Narrow current-Dockerfile build-egress mode. When present, this proxy
+   * serves ONLY the nested bundle's build path: it has no LLM providers,
+   * package registries, or dynamic passthrough. Every CONNECT is TLS-terminated
+   * and every decrypted (or plain-HTTP) request is authorized against the frozen
+   * manifest via the guard before forwarding through `outboundTransport`. See
+   * `build-egress-proxy.ts` for the seam design. Foundation code — inert behind
+   * the docker-workload admission fuse until a later phase constructs a session
+   * with a nested build path.
+   */
+  readonly buildEgress?: {
+    readonly guard: BuildEgressGuard;
+    readonly seam: BuildEgressSeam;
+  };
+  /**
+   * Public workload-image registry-egress mode (§6.4). When present, this proxy
+   * serves ONLY the nested bundle's `public-registry` image-pull path: it has no LLM
+   * providers, package registries, or dynamic passthrough. Every CONNECT is
+   * TLS-terminated and every decrypted request is authorized against the frozen
+   * registry manifest via the guard, then streamed through `outboundTransport` under
+   * per-request / per-session transfer ceilings. Workload image content is untrusted
+   * bundle state and is never hashed or verified (§16.6); authority is constrained by
+   * URL/operation gating, exact derived-redirect authorization, credential handling,
+   * and the ceilings. See `registry-egress-proxy.ts` for the seam design. Mutually
+   * exclusive with `buildEgress`. Production constructs it only for an admitted
+   * `public-registry` session; a
+   * `preloaded-only` session sets no guard, so registry traffic has no route.
+   */
+  readonly registryEgress?: {
+    readonly guard: RegistryEgressGuard;
+  };
   /**
    * Connection-source filter for TCP mode. When set, sockets whose
    * remote address fails the predicate are destroyed before any request
@@ -276,6 +323,44 @@ export interface ProviderKeyMapping {
   realKey: string;
   /** Optional token manager for OAuth providers — enables proactive refresh and 401 retry. */
   readonly tokenManager?: OAuthTokenManager;
+}
+
+/**
+ * The single mode this proxy's listener operates in for its entire lifetime.
+ *
+ * `createMitmProxy` resolves exactly one of these once at construction (see
+ * `resolveListenerMode`) and reads it from the closure at every dispatch site.
+ * Connection metadata does not echo the mode — the listener-level mode is
+ * fixed, so per-connection routing only distinguishes hosts within `standard`.
+ *
+ * - `standard`: normal proxy; per-connection routing picks provider /
+ *   package-registry / dynamic-passthrough by host.
+ * - `build-egress`: serves ONLY the nested build path; TLS-terminates every
+ *   host and authorizes decrypted (and plain-HTTP) requests via `guard`/`seam`.
+ * - `registry-egress`: serves ONLY the `public-registry` image-pull path;
+ *   TLS-terminates every host and authorizes decrypted pulls via `guard`.
+ */
+type ListenerMode =
+  | { readonly kind: 'standard' }
+  | { readonly kind: 'build-egress'; readonly guard: BuildEgressGuard; readonly seam: BuildEgressSeam }
+  | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
+
+/**
+ * Resolve the single listener mode from the proxy options. `buildEgress` and
+ * `registryEgress` are mutually exclusive; a proxy configured for neither runs
+ * in standard provider / registry / passthrough routing mode.
+ */
+function resolveListenerMode(options: MitmProxyOptions): ListenerMode {
+  if (options.buildEgress && options.registryEgress) {
+    throw new Error('MitmProxyOptions: build-egress and registry-egress modes are mutually exclusive');
+  }
+  if (options.buildEgress) {
+    return { kind: 'build-egress', guard: options.buildEgress.guard, seam: options.buildEgress.seam };
+  }
+  if (options.registryEgress) {
+    return { kind: 'registry-egress', guard: options.registryEgress.guard };
+  }
+  return { kind: 'standard' };
 }
 
 /** Connection reset errors are routine during proxy shutdown or client disconnect. */
@@ -462,6 +547,30 @@ const MAX_TOOL_RESULT_CONTENT_LEN = 500;
  * and 502 every allowed package and metadata request.
  */
 const REGISTRY_UPSTREAM_HTTPS_PORT = 443;
+
+interface RegistryConnectAuthority {
+  readonly hostname: string;
+  readonly port: number;
+}
+
+/**
+ * Registry mode accepts only a canonical DNS `host:decimal-port` authority.
+ * The ordinary proxy retains its legacy parser; this stricter boundary runs
+ * before registry CONNECT acknowledgement or certificate generation.
+ */
+function parseRegistryConnectAuthority(authority: string): RegistryConnectAuthority | undefined {
+  const match = /^([^:]+):([1-9][0-9]{0,4})$/u.exec(authority);
+  if (match === null) return undefined;
+  const hostname = match[1];
+  if (hostname.length > 253) return undefined;
+  const labels = hostname.split('.');
+  if (labels.some((label) => label.length > 63 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u.test(label))) {
+    return undefined;
+  }
+  const port = Number(match[2]);
+  if (!Number.isSafeInteger(port) || port > 65_535) return undefined;
+  return { hostname: hostname.toLowerCase(), port };
+}
 
 /** Truncate tool result content to MAX_TOOL_RESULT_CONTENT_LEN, appending ellipsis if needed. */
 function truncateToolResult(text: string): string {
@@ -706,10 +815,29 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   let capturePersona: string | undefined;
 
   const agentKind: AgentKind | undefined = options.agentKind;
+  const listenerMode = resolveListenerMode(options);
   const captureWriter = options.capture;
   const captureRecordedAgentName = options.recordedAgentName;
   const captureWorkflowRunId = options.workflowRunId;
   const captureBundleId = options.bundleId;
+  // The resolver seam and the address policy are independent options: a test
+  // may substitute a resolver without silently disabling the check that its
+  // answers are public. Relaxing the policy takes its own explicit opt-in.
+  const allowPrivateDestinations = options.allowPrivateDestinationsForTests === true;
+  const dnsLookup = options.dnsLookup as typeof dns.lookup | undefined;
+  const outboundTransport =
+    options.outboundTransport ??
+    createDirectOutboundTransport({
+      lookup: dnsLookup,
+      allowPrivateDestinationsForTests: allowPrivateDestinations,
+    });
+  /**
+   * Address screen for the raw passthrough tunnel, which bypasses the
+   * destination-bound transport entirely. Without it a passthrough host that
+   * resolves to a private or link-local address would be tunneled straight
+   * into the host network.
+   */
+  const passthroughLookup = createGuardedLookup(dnsLookup ?? dns.lookup, allowPrivateDestinations);
 
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -740,6 +868,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // egress filtering for unknown hosts; only use in trusted environments.
   const allowAllHosts =
     process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === '1' || process.env.IRONCURTAIN_MITM_ALLOW_ALL_HOSTS === 'true';
+
+  /**
+   * Passthrough is a `standard`-mode-only mechanism, because it forwards
+   * without ever consulting a guard. The egress listener modes have no
+   * providers and no registries, so `isKnownStaticHost` is false for *every*
+   * host there: under `IRONCURTAIN_MITM_ALLOW_ALL_HOSTS` that would make every
+   * host wildcard-eligible and hand the nested daemon a raw tunnel around the
+   * frozen manifest. Those modes TLS-terminate instead, so an unlisted host
+   * reaches the guard and is refused there. No effect on standard mode.
+   */
+  const passthroughEligible = listenerMode.kind === 'standard';
 
   // DEBUG (issue #367): optional stream-delay injection config, parsed once.
   // Null (zero-cost) unless IRONCURTAIN_MITM_STREAM_DELAY_MS is set.
@@ -903,6 +1042,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           validator: options.packageValidation?.validator ?? DENY_ALL_VALIDATOR,
           cache: allowedVersionCache,
           auditLogPath: options.packageValidation?.auditLogPath,
+          outboundTransport,
         })
         .catch((err: unknown) => {
           logger.info(`[mitm-proxy] registry request error: ${err instanceof Error ? err.message : String(err)}`);
@@ -943,6 +1083,45 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const { host: targetHost, port: targetPort } = meta;
+
+    // Listener-level egress modes short-circuit here; standard mode falls
+    // through to the per-host provider / registry / passthrough dispatch below.
+    // A future ListenerMode kind is a compile error at the `default` guard.
+    switch (listenerMode.kind) {
+      case 'build-egress':
+        // Authorize every decrypted request against the frozen manifest, then
+        // forward through the destination-bound transport.
+        handleBuildEgressRequest(clientReq, clientRes, {
+          guard: listenerMode.guard,
+          seam: listenerMode.seam,
+          transport: outboundTransport,
+          scheme: 'https:',
+          targetHost,
+          targetPort,
+          requestTarget: clientReq.url ?? '/',
+        });
+        return;
+      case 'registry-egress':
+        // Authorize each decrypted pull against the frozen registry manifest and
+        // stream it through the destination-bound transport under the per-request
+        // / per-session ceilings (content is not hashed — §16.6). Registry v2 is
+        // https-only, so there is no plain-HTTP registry path.
+        handleRegistryEgressRequest(clientReq, clientRes, {
+          guard: listenerMode.guard,
+          transport: outboundTransport,
+          scheme: 'https:',
+          targetHost,
+          targetPort,
+          requestTarget: clientReq.url ?? '/',
+        });
+        return;
+      case 'standard':
+        break;
+      default: {
+        const _exhaustive: never = listenerMode;
+        throw new Error(`Unknown listener mode: ${String(_exhaustive)}`);
+      }
+    }
 
     // Dispatch: registry connections are handled separately from provider connections
     if (meta.registry) {
@@ -1232,14 +1411,21 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       // Route to custom upstream gateway when configured; path prefix is
       // prepended AFTER endpoint filtering (which runs on the original path).
       const upstreamPath = upstreamPathPrefix ? `${upstreamPathPrefix}${path}` : path;
-      const requestFn = upstreamUseTls ? https.request : http.request;
       const metricsAttempt = metricsObserver?.beginTransportAttempt();
-      const upstreamReq = requestFn(
+      const upstreamReq = outboundTransport.request(
         {
-          hostname: upstreamHost,
-          port: upstreamPort,
+          destination: {
+            protocol: upstreamUseTls ? 'https:' : 'http:',
+            hostname: upstreamHost,
+            port: upstreamPort,
+          },
+          // `upstream` is resolved exclusively from trusted host provider
+          // configuration (for example ANTHROPIC_BASE_URL). It may name a
+          // loopback/private LiteLLM gateway. Agent-selected passthrough and
+          // redirect destinations never receive this policy.
+          addressPolicy: upstream === undefined ? 'public-only' : 'trusted-provider-override',
           method,
-          path: upstreamPath,
+          path: upstreamPath ?? '/',
           headers: finalHeaders,
         },
         (upstreamRes) => {
@@ -1700,24 +1886,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     logger.info(`[mitm-proxy] ${method} http://${host}:${port}${path} -> PASSTHROUGH (plain HTTP)`);
 
     // Strip proxy-only and hop-by-hop headers so they are not leaked upstream
-    const hopByHop = new Set([
-      'connection',
-      'proxy-authorization',
-      'proxy-connection',
-      'keep-alive',
-      'upgrade',
-      'transfer-encoding',
-      'te',
-      'trailer',
-    ]);
+    const hopByHop = new Set(HOP_BY_HOP_HEADERS);
     // Also strip any headers named in the Connection header
-    const connectionHeader = headers['connection'];
-    if (typeof connectionHeader === 'string') {
-      for (const token of connectionHeader.split(',')) {
-        const name = token.trim().toLowerCase();
-        if (name) hopByHop.add(name);
-      }
-    }
+    for (const name of connectionNominatedHeaderNames(headers.connection)) hopByHop.add(name);
     const forwardHeaders: Record<string, string | string[] | undefined> = {
       host: port === 80 ? host : `${host}:${port}`,
     };
@@ -1727,34 +1898,40 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
     }
 
-    const reqOpts: http.RequestOptions = {
-      hostname: host,
-      port,
-      method,
-      path,
-      headers: forwardHeaders,
-    };
-    if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup;
+    let upstreamReq: http.ClientRequest;
+    try {
+      upstreamReq = outboundTransport.request(
+        {
+          destination: { protocol: 'http:', hostname: host, port },
+          method,
+          path,
+          headers: forwardHeaders,
+        },
+        (upstreamRes) => {
+          upstreamRes.on('error', (err) => {
+            const log = isConnectionReset(err) ? logger.debug : logger.info;
+            log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+              clientRes.end(`Upstream response error: ${err.message}`);
+            } else {
+              clientRes.socket?.destroy();
+            }
+          });
+
+          clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+          clientRes.flushHeaders();
+          clientRes.socket?.setNoDelay(true);
+          upstreamRes.pipe(clientRes);
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.info(`[mitm-proxy] upstream request rejected (plain HTTP passthrough): ${message}`);
+      clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+      clientRes.end(`Upstream request rejected: ${message}`);
+      return;
     }
-
-    const upstreamReq = http.request(reqOpts, (upstreamRes) => {
-      upstreamRes.on('error', (err) => {
-        const log = isConnectionReset(err) ? logger.debug : logger.info;
-        log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
-        if (!clientRes.headersSent) {
-          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-          clientRes.end(`Upstream response error: ${err.message}`);
-        } else {
-          clientRes.socket?.destroy();
-        }
-      });
-
-      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      clientRes.flushHeaders();
-      clientRes.socket?.setNoDelay(true);
-      upstreamRes.pipe(clientRes);
-    });
 
     activeUpstreamRequests.add(upstreamReq);
     upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
@@ -1811,6 +1988,27 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       res.end('IRONCURTAIN_OK/1\n');
       return;
     }
+    // Build-egress mode: plain-HTTP proxy requests (apt speaks HTTP) are
+    // authorized against the frozen manifest and forwarded, same as the
+    // TLS-terminated HTTPS path. No registry/passthrough dispatch applies.
+    if (listenerMode.kind === 'build-egress') {
+      const target = req.url ? tryParseProxyUrl(req.url) : null;
+      if (!target) {
+        res.writeHead(405, { 'Content-Type': 'text/plain' });
+        res.end('Method Not Allowed');
+        return;
+      }
+      handleBuildEgressRequest(req, res, {
+        guard: listenerMode.guard,
+        seam: listenerMode.seam,
+        transport: outboundTransport,
+        scheme: 'http:',
+        targetHost: target.hostname,
+        targetPort: target.port,
+        requestTarget: target.path,
+      });
+      return;
+    }
     // Handle plain HTTP proxy requests. HTTP proxy clients send absolute URLs:
     // "GET http://host:port/path HTTP/1.1". We parse the absolute URL into
     // hostname, port, and origin-form path before dispatching.
@@ -1825,7 +2023,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // content inspection (no package validation, no credential swap).
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const debianRegistry = parsed ? registriesByHost.get(parsed.hostname) : undefined;
-    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    const isWildcardEligible = passthroughEligible && !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
 
     // Debian registry: route through package validation and audit logging.
     // Rewrite absolute URL to origin-form path so registry handlers can read it.
@@ -1837,7 +2035,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
-    if (parsed && (passthroughHosts.has(parsed.hostname) || isWildcardEligible)) {
+    if (parsed && passthroughEligible && (passthroughHosts.has(parsed.hostname) || isWildcardEligible)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }
@@ -1854,14 +2052,15 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
   outerServer.on('connect', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const url = req.url ?? '';
+    const registryAuthority = listenerMode.kind === 'registry-egress' ? parseRegistryConnectAuthority(url) : undefined;
     const colonIndex = url.lastIndexOf(':');
-    const rawHost = colonIndex > 0 ? url.substring(0, colonIndex) : url;
+    const rawHost = registryAuthority?.hostname ?? (colonIndex > 0 ? url.substring(0, colonIndex) : url);
     // Normalize so the allowlist is case-insensitive (RFC 1035 §2.3.3).
     // Critical when the wildcard escape hatch is enabled — without this,
     // `CONNECT API.TEST.COM:443` would miss the provider map and be treated
     // as an unknown host, opening a raw tunnel that bypasses MITM.
     const host = normalizeHost(rawHost);
-    const port = colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443;
+    const port = registryAuthority?.port ?? (colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443);
     const connId = ++connectionId;
     const metricsLeaseToken = parseMetricsProxyAuthorization(req.headers['proxy-authorization']);
 
@@ -1876,36 +2075,67 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     activeClientSockets.add(clientSocket);
     clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
-    // 1. Check allowlist (providers, registries, and dynamic passthrough)
+    if (listenerMode.kind === 'registry-egress' && registryAuthority === undefined) {
+      logger.info(`[mitm-proxy] #${connId} DENIED malformed registry-egress CONNECT authority`);
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+
+    // 1. Check allowlist (providers, registries, and dynamic passthrough).
+    // Build-egress and registry-egress modes have none of these — every host is
+    // TLS-terminated so the request layer can authorize it against the frozen
+    // manifest (or 403 it).
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
-    const isDynamicPassthrough = passthroughHosts.has(host);
-    const isWildcardEligible = allowAllHosts && !isKnownStaticHost(host);
+    const isDynamicPassthrough = passthroughEligible && passthroughHosts.has(host);
+    const isWildcardEligible = passthroughEligible && allowAllHosts && !isKnownStaticHost(host);
     const isPassthrough = !provider && !registry && (isDynamicPassthrough || isWildcardEligible);
-    if (!provider && !registry && !isPassthrough) {
+    if (listenerMode.kind === 'standard' && !provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+    if (
+      listenerMode.kind === 'registry-egress' &&
+      !listenerMode.guard.manifest?.origins.some((origin) => origin.hostname === host && origin.port === port)
+    ) {
+      logger.info(`[mitm-proxy] #${connId} DENIED registry-egress CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       clientSocket.destroy();
       return;
     }
 
     const passthroughKind = isDynamicPassthrough ? 'passthrough' : 'passthrough-wildcard';
-    const connType = provider ? 'provider' : registry ? 'registry' : passthroughKind;
+    const connType =
+      listenerMode.kind === 'standard'
+        ? provider
+          ? 'provider'
+          : registry
+            ? 'registry'
+            : passthroughKind
+        : listenerMode.kind;
 
-    // 2. For passthrough domains, create a raw TCP tunnel (no MITM).
-    //    The proxy just pipes bytes bidirectionally — this supports both
-    //    plain HTTP and WebSocket connections through CONNECT.
-    if (isPassthrough) {
+    // 2. Direct outer proxies may use a raw TCP tunnel for passthrough
+    //    domains, and only in `standard` mode: the tunnel never consults a
+    //    guard, so an egress listener must never reach it (`passthroughEligible`).
+    //    Nested proxies must not expose a caller-selected CONNECT
+    //    primitive through the fixed parent transport, so they terminate TLS
+    //    below and re-originate HTTP(S) with the destination bound separately
+    //    from request headers. WSS on that nested path is intentionally
+    //    rejected by innerServer's upgrade handler.
+    if (listenerMode.kind === 'standard' && isPassthrough && outboundTransport.kind === 'direct') {
       logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → TUNNEL (${connType})`);
 
       // Acknowledge immediately per standard proxy behavior — the client
       // will discover upstream failures itself once it tries to send data.
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
-      const connectOpts: net.NetConnectOpts = { host, port };
-      if (options.dnsLookup) {
-        connectOpts.lookup = options.dnsLookup;
-      }
+      // The tunnel bypasses the destination-bound transport, so it carries its
+      // own copy of the address policy: a passthrough name resolving to a
+      // private or link-local address is refused, not relayed.
+      const connectOpts: net.NetConnectOpts = { host, port, lookup: passthroughLookup };
 
       const upstreamSocket = net.connect(connectOpts, () => {
         // Write any buffered data from the CONNECT request
@@ -1959,8 +2189,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const tlsSocket = new tls.TLSSocket(clientSocket, {
       isServer: true,
       SNICallback: (servername, cb) => {
-        const ctx = getOrCreateSecureContext(servername);
-        cb(null, ctx);
+        const normalizedServername = normalizeHost(servername);
+        if (listenerMode.kind === 'registry-egress' && normalizedServername !== host) {
+          cb(new Error('registry-egress TLS SNI must match the authorized CONNECT host'));
+          return;
+        }
+        cb(null, getOrCreateSecureContext(normalizedServername));
       },
     });
 
@@ -1977,7 +2211,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     socketMetadata.set(tlsSocket, {
       provider: provider ?? undefined,
       registry,
-      passthrough: false,
+      passthrough: isPassthrough,
       host,
       port,
       metricsLeaseToken,
@@ -2003,8 +2237,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    const isWildcardEligible = !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
-    if (!parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
+    const isWildcardEligible = passthroughEligible && !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
+    if (!passthroughEligible || !parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
@@ -2037,34 +2271,31 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     const forwardHeaders = { ...headers, host };
 
-    const requestFn = useHttps ? https.request : http.request;
-    const reqOpts: http.RequestOptions = {
-      hostname: host,
-      port,
-      method,
-      path,
-      headers: forwardHeaders,
-    };
-    if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup;
-    }
-    const upstreamReq = requestFn(reqOpts, (upstreamRes) => {
-      upstreamRes.on('error', (err) => {
-        const log = isConnectionReset(err) ? logger.debug : logger.info;
-        log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
-        if (!clientRes.headersSent) {
-          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-          clientRes.end(`Upstream response error: ${err.message}`);
-        } else {
-          clientRes.socket?.destroy();
-        }
-      });
+    const upstreamReq = outboundTransport.request(
+      {
+        destination: { protocol: useHttps ? 'https:' : 'http:', hostname: host, port },
+        method,
+        path: path ?? '/',
+        headers: forwardHeaders,
+      },
+      (upstreamRes) => {
+        upstreamRes.on('error', (err) => {
+          const log = isConnectionReset(err) ? logger.debug : logger.info;
+          log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end(`Upstream response error: ${err.message}`);
+          } else {
+            clientRes.socket?.destroy();
+          }
+        });
 
-      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      clientRes.flushHeaders();
-      clientRes.socket?.setNoDelay(true);
-      upstreamRes.pipe(clientRes);
-    });
+        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        clientRes.flushHeaders();
+        clientRes.socket?.setNoDelay(true);
+        upstreamRes.pipe(clientRes);
+      },
+    );
 
     activeUpstreamRequests.add(upstreamReq);
     upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
@@ -2128,37 +2359,34 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       const lower = key.toLowerCase();
       if (lower === 'host') continue;
 
-      // Strip hop-by-hop and proxy-only headers (but preserve
-      // Connection/Upgrade and Sec-WebSocket-* for the handshake)
-      if (
-        lower === 'proxy-authorization' ||
-        lower === 'proxy-authenticate' ||
-        lower === 'proxy-connection' ||
-        lower === 'keep-alive' ||
-        lower === 'transfer-encoding' ||
-        lower === 'te' ||
-        lower === 'trailer'
-      ) {
+      // Strip hop-by-hop and proxy-only headers, but preserve Connection/Upgrade
+      // (and Sec-WebSocket-*) so the upgrade handshake reaches the upstream.
+      if (lower !== 'connection' && lower !== 'upgrade' && HOP_BY_HOP_HEADERS.has(lower)) {
         continue;
       }
 
       forwardHeaders[key] = value;
     }
 
-    const requestFn = http.request;
-    const reqOpts: http.RequestOptions = {
-      hostname: targetHost,
-      port: targetPort,
-      method: 'GET',
-      path,
-      headers: forwardHeaders,
-      timeout: 30_000,
-    };
-    if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup;
+    let upstreamReq: http.ClientRequest;
+    try {
+      upstreamReq = outboundTransport.request({
+        destination: { protocol: 'http:', hostname: targetHost, port: targetPort },
+        method: 'GET',
+        path,
+        headers: forwardHeaders,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.info(`[mitm-proxy] WebSocket upgrade request rejected: ${message}`);
+      if (!clientSocket.destroyed) {
+        clientSocket.end(
+          'HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+        );
+      }
+      return;
     }
-
-    const upstreamReq = requestFn(reqOpts);
+    upstreamReq.setTimeout(30_000);
     activeUpstreamRequests.add(upstreamReq);
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {

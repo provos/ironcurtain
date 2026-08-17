@@ -20,6 +20,8 @@ import { formatModeLine, resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
 import { shouldAutoSaveMemory } from './memory/auto-save.js';
 import type { AgentId } from './docker/agent-adapter.js';
+import type { AgentImageResolution } from './docker/docker-infrastructure.js';
+import { formatDockerWorkloadStatus } from './docker-workload/config.js';
 
 const startSpec: CommandSpec = {
   name: 'ironcurtain start',
@@ -168,6 +170,11 @@ export async function main(args?: string[]): Promise<void> {
 
   const mode = preflight.mode;
 
+  if (mode.kind === 'docker') {
+    const nestedDockerStatus = formatDockerWorkloadStatus(config.userConfig.dockerWorkload);
+    if (nestedDockerStatus) process.stderr.write(chalk.dim(`${nestedDockerStatus}\n`));
+  }
+
   // F4: --provider-profile only affects container agent mode; the builtin
   // (Code Mode) agent never reaches profile resolution. Warn on a harmless
   // no-op rather than silently ignoring the flag. Skip on resume (already
@@ -191,12 +198,14 @@ export async function main(args?: string[]): Promise<void> {
 
   // Pre-flight the Docker image before starting the init spinner: the
   // progress sink and the spinner both render to stderr, so they fight for
-  // the same line if they run concurrently. The inner ensureImage call
-  // during session init is content-hash cached, so it's a cheap no-op.
+  // the same line if they run concurrently. Thread the exact resolution into
+  // session setup so the selected nested-Docker artifact is not re-resolved
+  // or re-exported behind the spinner.
+  let preparedDockerImageResolution: AgentImageResolution | undefined;
   if (mode.kind === 'docker') {
     const { ensureDockerImage } = await import('./docker/docker-infrastructure.js');
     try {
-      await ensureDockerImage(mode.agent, config.userConfig);
+      preparedDockerImageResolution = await ensureDockerImage(mode.agent, config.userConfig);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`\n${chalk.red('Docker image setup failed:')} ${message}\n`);
@@ -231,6 +240,7 @@ export async function main(args?: string[]): Promise<void> {
       persona: resumeSessionId ? undefined : personaName,
       providerProfileName: resumeSessionId ? undefined : providerProfileName,
       captureTracesOverride,
+      preparedImageResolution: preparedDockerImageResolution,
     });
     process.exit(0);
   }
@@ -259,6 +269,7 @@ export async function main(args?: string[]): Promise<void> {
       persona: resumeSessionId ? undefined : personaName,
       providerProfileName: resumeSessionId ? undefined : providerProfileName,
       captureTracesOverride,
+      preparedDockerImageResolution,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),

@@ -11,7 +11,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
@@ -19,6 +19,7 @@ import * as logger from '../logger.js';
 import { isExecError } from '../utils/exec-error.js';
 import type { BundleId } from '../session/types.js';
 import type { ContainerRuntime, DockerNetworkInfo } from './types.js';
+import { acquireProcessLock, ProcessLockBusyError } from '../docker-workload/process-lock.js';
 
 export const IRONCURTAIN_MANAGED_LABEL = 'ironcurtain.managed';
 export const IRONCURTAIN_OWNER_PID_LABEL = 'ironcurtain.owner-pid';
@@ -227,40 +228,21 @@ async function withReconcileLock<T>(
   const root = leaseRoot();
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const lockPath = resolve(root, 'reconcile.lock');
-  let fd: number | undefined;
+  let lock: ReturnType<typeof acquireProcessLock> | undefined;
   try {
-    try {
-      fd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) }));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        const owner = JSON.parse(readFileSync(lockPath, 'utf8')) as {
-          pid?: unknown;
-          identity?: Partial<ProcessIdentity>;
-        };
-        const currentIdentity = typeof owner.pid === 'number' ? processIdentity(owner.pid) : undefined;
-        if (
-          typeof owner.pid === 'number' &&
-          defaultPidAlive(owner.pid) &&
-          currentIdentity !== undefined &&
-          owner.identity !== undefined &&
-          currentIdentity.bootId === owner.identity.bootId &&
-          currentIdentity.startedAt === owner.identity.startedAt
-        ) {
-          return undefined;
-        }
-      } catch {
-        // Invalid/stale lock: replace it below.
-      }
-      rmSync(lockPath, { force: true });
-      fd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) }));
-    }
+    lock = acquireProcessLock(lockPath, {
+      attempts: 2,
+      processIdentityForPid: (pid) => {
+        const identity = processIdentity(pid);
+        return identity === undefined ? undefined : `${identity.bootId}:${identity.startedAt}`;
+      },
+    });
     return await fn();
+  } catch (error) {
+    if (error instanceof ProcessLockBusyError) return undefined;
+    throw error;
   } finally {
-    if (fd !== undefined) closeSync(fd);
-    if (fd !== undefined) rmSync(lockPath, { force: true });
+    lock?.release();
   }
 }
 

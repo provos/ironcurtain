@@ -16,6 +16,7 @@ import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync
 import { join } from 'node:path';
 import * as logger from '../src/logger.js';
 import { getSessionsDir } from '../src/config/paths.js';
+import { createMockRuntimeTrust } from './helpers/docker-mocks.js';
 
 // --- Module mocks (hoisted) ---
 
@@ -60,6 +61,8 @@ vi.mock('../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: vi.fn(),
   createSessionContainers: vi.fn(),
   prepareConversationStateDir: vi.fn(),
+  // Only invoked on the Docker-workload path (handle present); harmless here.
+  dockerWorkloadSessionMetadata: vi.fn(),
 }));
 
 // Mock claude-md-seed so we can exercise the error path by making the
@@ -166,6 +169,7 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     docker: createMockDocker(),
     adapter: createMockAdapter(),
     ca: createMockCA(rootDir),
+    runtimeTrust: createMockRuntimeTrust(),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake']]),
     orientationDir,
     systemPrompt: 'You are a borrowed test agent.',

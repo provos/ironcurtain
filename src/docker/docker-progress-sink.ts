@@ -22,7 +22,14 @@
 import { Writable } from 'node:stream';
 import chalk from 'chalk';
 
-export type DockerProgressOperation = 'docker pull' | 'docker build' | 'container pull' | 'container build';
+export type DockerProgressOperation =
+  | 'docker pull'
+  | 'docker build'
+  | 'docker image load'
+  | 'container pull'
+  | 'container build'
+  | 'container image load'
+  | 'container image save';
 
 export interface DockerProgressSink {
   /** Writable that the child's stdout pipes into. */

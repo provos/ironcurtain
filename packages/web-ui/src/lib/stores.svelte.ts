@@ -32,6 +32,7 @@ import type {
   StatisticsConfigDto,
   SetModelProvidersDto,
   OpenrouterModelsDto,
+  DockerWorkloadSettingsDto,
   PtySink,
   CreateSessionOptions,
   StatisticsCapabilitiesDto,
@@ -185,10 +186,9 @@ export const personasChangedGeneration = $state({ value: 0 });
 
 /**
  * Monotonically increasing counter bumped on every `config.changed` server-push
- * event (for example a provider or statistics settings write). The Settings view reads `.value`
- * as a $effect dependency to refresh its locally-held provider-profile view,
- * mirroring `personasChangedGeneration`. Kept off appState because the config
- * view state lives in the route component, not the global store.
+ * event. The Settings view reads `.value` as an $effect dependency to refresh
+ * its locally-held provider-profile and runtime views. Kept off appState because
+ * the config view state lives in the route component, not the global store.
  */
 export const configChangedGeneration = $state({ value: 0 });
 
@@ -828,7 +828,7 @@ export async function hydratePersonaCompiles(): Promise<Set<string>> {
   return new Set(next.keys());
 }
 
-// ── Config (modelProviders) RPC actions ────────────────────────────────
+// ── Config RPC actions ─────────────────────────────────────────────────
 //
 // Config reads are ungated; writes are gated server-side on the daemon's
 // `--allow-policy-mutation` flag (rejects with POLICY_MUTATION_FORBIDDEN when
@@ -876,6 +876,22 @@ export async function listOpenrouterModels(forceRefresh = false): Promise<Openro
     'config.listOpenrouterModels',
     forceRefresh ? { forceRefresh: true } : {},
   );
+}
+
+/** Read the two supported nested-Docker settings. */
+export async function getDockerWorkloadSettings(): Promise<DockerWorkloadSettingsDto> {
+  return getWsClient().request<DockerWorkloadSettingsDto>('config.getDockerWorkload', {});
+}
+
+/**
+ * Update only nested-Docker enablement and mediated public registry pulls.
+ * Advanced runtime fields are deliberately absent from this wire contract.
+ */
+export async function setDockerWorkloadSettings(input: DockerWorkloadSettingsDto): Promise<DockerWorkloadSettingsDto> {
+  return getWsClient().request<DockerWorkloadSettingsDto>('config.setDockerWorkload', {
+    enabled: input.enabled,
+    allowPublicRegistryPulls: input.allowPublicRegistryPulls,
+  });
 }
 
 // ── Read-only LLM statistics RPC actions ─────────────────────────────

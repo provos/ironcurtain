@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { configDispatch } from '../dispatch/config-dispatch.js';
 import type { WorkflowDispatchContext } from '../dispatch/workflow-dispatch.js';
 import { WebEventBus } from '../web-event-bus.js';
-import { RpcError, type GetModelProvidersDto } from '../web-ui-types.js';
+import { RpcError, type DockerWorkloadSettingsDto, type GetModelProvidersDto } from '../web-ui-types.js';
 import { loadUserConfig } from '../../config/user-config.js';
 
 // Env vars that affect config loading; save/restore between tests.
@@ -58,6 +58,17 @@ async function set(ctx: WorkflowDispatchContext, params: Record<string, unknown>
   return (await configDispatch(ctx, 'config.setModelProviders', params)) as GetModelProvidersDto;
 }
 
+async function getDockerWorkload(ctx: WorkflowDispatchContext): Promise<DockerWorkloadSettingsDto> {
+  return (await configDispatch(ctx, 'config.getDockerWorkload', {})) as DockerWorkloadSettingsDto;
+}
+
+async function setDockerWorkload(
+  ctx: WorkflowDispatchContext,
+  params: Record<string, unknown>,
+): Promise<DockerWorkloadSettingsDto> {
+  return (await configDispatch(ctx, 'config.setDockerWorkload', params)) as DockerWorkloadSettingsDto;
+}
+
 const SK_GLM = 'sk-or-v1-glmkeyREDACTED0000000000end';
 const SK_KIMI = 'sk-or-v1-kimikeyREDACTED000000000end';
 const MASK_GLM = 'sk-...end';
@@ -77,6 +88,120 @@ afterEach(() => {
     else Reflect.deleteProperty(process.env, key);
   }
   rmSync(testHome, { recursive: true, force: true });
+});
+
+describe('config.getDockerWorkload', () => {
+  it('returns disabled with public pulls ready as the ergonomic default', async () => {
+    writeConfig({ preferredMode: 'container' });
+    await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
+      enabled: false,
+      allowPublicRegistryPulls: true,
+    });
+    expect(readConfig().dockerWorkload).toBeUndefined();
+  });
+
+  it('maps the resolved image-ingress policy to the narrow DTO', async () => {
+    writeConfig({
+      dockerWorkload: {
+        enabled: true,
+        imageIngress: 'preloaded-only',
+        acceptObservedDiskRisk: true,
+        resources: { diskMb: null },
+      },
+    });
+    await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
+      enabled: true,
+      allowPublicRegistryPulls: false,
+    });
+  });
+
+  it('preserves an explicit offline preference while nested Docker is disabled', async () => {
+    writeConfig({
+      dockerWorkload: {
+        enabled: false,
+        imageIngress: 'preloaded-only',
+        backend: 'apple-container',
+      },
+    });
+    await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
+      enabled: false,
+      allowPublicRegistryPulls: false,
+    });
+  });
+});
+
+describe('config.setDockerWorkload', () => {
+  it('uses the policy-mutation gate before writing', async () => {
+    writeConfig({});
+    await expect(
+      setDockerWorkload(makeCtx(false), { enabled: true, allowPublicRegistryPulls: true }),
+    ).rejects.toMatchObject({ code: 'POLICY_MUTATION_FORBIDDEN' });
+    expect(readConfig().dockerWorkload).toBeUndefined();
+  });
+
+  it('sets mediated public pulls and migrates safe legacy implementation defaults', async () => {
+    writeConfig({
+      dockerWorkload: {
+        enabled: false,
+        tier: 'developer-only',
+        backend: 'apple-container',
+        imageMode: 'preloaded-catalog',
+        imageIngress: 'preloaded-only',
+        daemonState: 'ephemeral',
+        hostPortPublishing: false,
+        buildEgress: 'disabled',
+        acceptObservedDiskRisk: true,
+        resources: { pids: { desired: 512, required: false }, diskMb: null },
+      },
+    });
+    const ctx = makeCtx(true);
+    const emitSpy = vi.spyOn(ctx.eventBus, 'emit');
+
+    await expect(setDockerWorkload(ctx, { enabled: true, allowPublicRegistryPulls: true })).resolves.toEqual({
+      enabled: true,
+      allowPublicRegistryPulls: true,
+    });
+
+    expect(emitSpy).toHaveBeenCalledWith('config.changed', {});
+    expect(readConfig().dockerWorkload).toEqual({
+      enabled: true,
+      imageIngress: 'public-registry',
+    });
+  });
+
+  it('rejects unsupported legacy intent without rewriting it', async () => {
+    const dockerWorkload = { enabled: false, resources: { memoryMb: 7168 } };
+    writeConfig({ dockerWorkload });
+
+    let error: unknown;
+    try {
+      await setDockerWorkload(makeCtx(true), { enabled: true, allowPublicRegistryPulls: true });
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(RpcError);
+    if (!(error instanceof RpcError)) throw new Error('expected config mutation to fail');
+    expect(error.code).toBe('INVALID_PARAMS');
+    expect(error.message).toContain('dockerResources.memoryMb');
+    expect(readConfig().dockerWorkload).toEqual(dockerWorkload);
+  });
+
+  it('maps an unchecked registry control to preloaded-only', async () => {
+    writeConfig({});
+    await expect(setDockerWorkload(makeCtx(true), { enabled: true, allowPublicRegistryPulls: false })).resolves.toEqual(
+      { enabled: true, allowPublicRegistryPulls: false },
+    );
+    expect(readConfig().dockerWorkload).toEqual({ enabled: true, imageIngress: 'preloaded-only' });
+  });
+
+  it('rejects incomplete or expanded write payloads', async () => {
+    writeConfig({});
+    const ctx = makeCtx(true);
+    await expect(setDockerWorkload(ctx, { enabled: true })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      setDockerWorkload(ctx, { enabled: true, allowPublicRegistryPulls: true, backend: 'docker' }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+  });
 });
 
 describe('config.getModelProviders', () => {

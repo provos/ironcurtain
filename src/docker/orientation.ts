@@ -60,6 +60,7 @@ export function prepareSession(
   config: IronCurtainConfig,
   hostSandboxDir: string,
   proxyAddress?: string,
+  nestedDocker?: OrientationContext['nestedDocker'],
 ): { systemPrompt: string } {
   const orientationDir = resolve(sessionDir, 'orientation');
   mkdirSync(orientationDir, { recursive: true });
@@ -70,6 +71,7 @@ export function prepareSession(
     serverListings,
     allowedDomains: extractAllowedDomains(config),
     networkMode: proxyAddress ? 'bridge' : 'none',
+    ...(nestedDocker === undefined ? {} : { nestedDocker }),
   };
 
   // proxyAddress is either a TCP host:port (macOS) or defaults to the UDS path (Linux)
