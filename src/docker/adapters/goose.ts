@@ -293,7 +293,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
               host: url.hostname,
             },
           ];
-        } catch (err) {
+        } catch {
           throw new Error(`Invalid AZURE_OPENAI_ENDPOINT: ${endpoint}`);
         }
       }
