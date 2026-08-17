@@ -444,6 +444,7 @@ async function runPtySessionAttempt(
       undefined, // scriptsDir
       providerProfileName,
       options.preparedImageResolution,
+      'pty',
     );
     // Publish every cleanup-owned resource before any subsequent callback can
     // throw. In particular, capture hooks are extension points; a failure in

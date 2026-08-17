@@ -10,14 +10,13 @@ import { isPlainObject } from '../utils/is-plain-object.js';
 import { matchesEndpointPattern, resolveCompletionEndpoint } from './llm-observation/completion-endpoint.js';
 
 /**
- * Discriminator for the agent invoking the proxy. Set at proxy construction
- * time via `MitmProxyOptions.agentKind`. Currently the only named kind is
- * `'workflow'`, which opts the request-body rewriter into workflow-only
- * strips (e.g. removing the schedule built-in skill's tools). `undefined`
- * means standalone / interactive / unknown — no agent-kind-conditional
+ * Discriminator for the execution mode invoking the proxy. Set at proxy
+ * construction time via `MitmProxyOptions.agentKind`. Batch and workflow
+ * agents invoke their CLI as one-shot subprocesses; PTY agents retain the
+ * interactive CLI runtime. `undefined` means unknown, so no mode-conditional
  * rewrites apply.
  */
-export type AgentKind = 'workflow';
+export type AgentKind = 'batch' | 'workflow' | 'pty';
 
 /**
  * Result from a RequestBodyRewriter when modifications were made.
@@ -441,10 +440,10 @@ function scrubToolResultEntry(rawEntry: unknown): EntryResult | null {
 /**
  * Combined rewriter for Anthropic /v1/messages requests. Always strips
  * server-side tools; additionally strips the schedule built-in skill's tools
- * and any dangling history references to them when the originating agent is
- * a workflow agent. Agent kinds other than 'workflow' (including `undefined`)
- * do not strip the schedule tools, so interactive and standalone sessions
- * are unaffected.
+ * and any dangling history references to them for one-shot batch and workflow
+ * agents. PTY agents retain those tools because their interactive Claude Code
+ * runtime can dispatch scheduled work. Unknown callers also retain them as a
+ * conservative fallback.
  */
 export function anthropicRequestRewriter(
   body: Record<string, unknown>,
@@ -454,7 +453,7 @@ export function anthropicRequestRewriter(
   let current = serverSide ? serverSide.modified : body;
   const stripped: string[] = serverSide ? [...serverSide.stripped] : [];
 
-  if (context.agentKind === 'workflow') {
+  if (context.agentKind === 'batch' || context.agentKind === 'workflow') {
     const toolsStrip = stripScheduleSkillTools(current);
     if (toolsStrip) {
       current = toolsStrip.modified;

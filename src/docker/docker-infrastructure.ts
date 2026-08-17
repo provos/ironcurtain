@@ -477,6 +477,7 @@ export async function prepareDockerInfrastructure(
   scriptsDir?: string,
   providerProfileName?: string,
   preparedImageResolution?: AgentImageResolution,
+  proxyAgentKind?: AgentKind,
 ): Promise<PreContainerInfrastructure> {
   // Secure nested Docker resolves the effective runtime and rejects every
   // unsupported variant before feature-attributable runtime, image, artifact,
@@ -796,9 +797,10 @@ export async function prepareDockerInfrastructure(
     // so the bundleId default is only an initial placeholder. Double-cast
     // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
     const routingId = bundleId as unknown as SessionId;
-    // A workflow bundle serves only workflow agents for its entire lifetime,
-    // so agentKind is fixed at construction time.
-    const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
+    // The proxy execution mode is immutable over a bundle's lifetime. Legacy
+    // direct callers that omit it still identify workflow bundles via their
+    // workflow ID; otherwise they get the conservative undefined behavior.
+    const agentKind: AgentKind | undefined = proxyAgentKind ?? (workflowId !== undefined ? 'workflow' : undefined);
 
     // Single resolution point for trajectory-capture enablement. The raw
     // CLI/RPC override wins; otherwise fall through to config; otherwise
@@ -1164,6 +1166,7 @@ export async function createDockerInfrastructure(
     scriptsDir,
     providerProfileName,
     options?.preparedImageResolution,
+    workflowId !== undefined ? 'workflow' : 'batch',
   );
 
   return assembleDockerInfrastructure(core, config, options);

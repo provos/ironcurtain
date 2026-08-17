@@ -275,11 +275,12 @@ export interface MitmProxyOptions {
   readonly initialTokenSessionId?: import('../session/types.js').SessionId;
 
   /**
-   * Kind of agent driving this proxy, used by request-body rewriters to
-   * apply agent-kind-conditional transforms (currently: stripping the
-   * schedule built-in skill's tools when set to `'workflow'`). Immutable
-   * over the proxy's lifetime — a single bundle serves a single agent kind.
-   * `undefined` means rewriters fall back to the most conservative behavior.
+   * Execution mode driving this proxy, used by request-body rewriters to
+   * apply mode-conditional transforms (currently: stripping the schedule
+   * built-in skill's tools for one-shot `batch` and `workflow` agents while
+   * preserving them for `pty`). Immutable over the proxy's lifetime — a
+   * single bundle serves a single execution mode. `undefined` means rewriters
+   * fall back to the most conservative behavior.
    */
   readonly agentKind?: AgentKind;
 
@@ -294,8 +295,8 @@ export interface MitmProxyOptions {
 
   /**
    * Human-readable agent name (e.g. `'claude-code'`) stamped onto every
-   * captured ExchangeRecord. Distinct from `agentKind` (which is the
-   * closed `'workflow' | undefined` enum used by the request rewriter).
+   * captured ExchangeRecord. Distinct from `agentKind`, which identifies the
+   * execution mode used by the request rewriter.
    */
   readonly recordedAgentName?: string;
 
