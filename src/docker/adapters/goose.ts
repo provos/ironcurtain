@@ -275,27 +275,29 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       }
       // Goose uses exactly one provider based on user config.
       // The authKind parameter is ignored because Goose does not support OAuth.
-      
+
       // Azure OpenAI requires dynamic host resolution from AZURE_OPENAI_ENDPOINT
       if (gooseProvider === 'azure_openai') {
         const endpoint = config.userConfig.azureOpenAIEndpoint;
         if (!endpoint) {
           throw new Error(
             'Azure OpenAI provider selected but AZURE_OPENAI_ENDPOINT is not configured. ' +
-            'Set it via environment variable or config file.',
+              'Set it via environment variable or config file.',
           );
         }
         try {
           const url = new URL(endpoint);
-          return [{
-            ...azureOpenAIProvider,
-            host: url.hostname,
-          }];
+          return [
+            {
+              ...azureOpenAIProvider,
+              host: url.hostname,
+            },
+          ];
         } catch (err) {
           throw new Error(`Invalid AZURE_OPENAI_ENDPOINT: ${endpoint}`);
         }
       }
-      
+
       return [getProviderConfig(gooseProvider)];
     },
 
@@ -343,27 +345,27 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
           throw new Error('Azure OpenAI provider requires AZURE_OPENAI_ENDPOINT');
         }
         providerHost = new URL(endpoint).hostname;
-        
+
         // Azure OpenAI requires additional environment variables
         env.AZURE_OPENAI_ENDPOINT = endpoint;
-        
+
         // Deployment name and API version are essential for Azure OpenAI
         const deploymentName = config.userConfig.azureOpenAIDeploymentName;
         const apiVersion = config.userConfig.azureOpenAIApiVersion;
-        
+
         if (!deploymentName) {
           throw new Error(
             'Azure OpenAI provider requires AZURE_OPENAI_DEPLOYMENT_NAME. ' +
-            'Set it via environment variable or config file.',
+              'Set it via environment variable or config file.',
           );
         }
         if (!apiVersion) {
           throw new Error(
             'Azure OpenAI provider requires AZURE_OPENAI_API_VERSION. ' +
-            'Set it via environment variable or config file.',
+              'Set it via environment variable or config file.',
           );
         }
-        
+
         env.AZURE_OPENAI_DEPLOYMENT_NAME = deploymentName;
         env.AZURE_OPENAI_API_VERSION = apiVersion;
       } else {
@@ -446,14 +448,14 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       // goose provider's API-key detection.
       const openRouter = openRouterCredential(config);
       if (openRouter) return openRouter;
-      
+
       // Azure OpenAI uses a separate API key field
       if (gooseProvider === 'azure_openai') {
         const key = config.userConfig.azureOpenAIApiKey;
         if (key) return { kind: 'apikey', key };
         return { kind: 'none' };
       }
-      
+
       const key = resolveApiKeyForProvider(gooseProvider, config.userConfig);
       if (key) return { kind: 'apikey', key };
       return { kind: 'none' };

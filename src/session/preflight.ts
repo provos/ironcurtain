@@ -107,9 +107,10 @@ async function detectCredentialState(
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
     // Azure OpenAI uses a separate API key field
-    const key = provider === 'azure_openai' 
-      ? config.userConfig.azureOpenAIApiKey
-      : resolveApiKeyForProvider(provider, config.userConfig);
+    const key =
+      provider === 'azure_openai'
+        ? config.userConfig.azureOpenAIApiKey
+        : resolveApiKeyForProvider(provider, config.userConfig);
     if (key) return { credKind: 'apikey', anthropicOAuthOnly: false };
 
     const auth = await detectAuthMethod(config, sources);
