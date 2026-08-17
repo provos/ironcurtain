@@ -13,7 +13,7 @@
  * G13; the D6 cost-accumulation test is G6. Neither is covered here.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { parse as parseToml } from 'smol-toml';
 import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -353,6 +353,8 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
   const nativeConfig = configWithProfile({ type: 'native' });
   const absentConfig = { userConfig: { anthropicApiKey: 'sk-test' } } as unknown as IronCurtainConfig;
 
+  afterEach(() => vi.unstubAllEnvs());
+
   it('Claude Code getProviders returns the native anthropic providers', () => {
     const adapter = createClaudeCodeAdapter();
     for (const config of [nativeConfig, absentConfig]) {
@@ -361,19 +363,27 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
     }
   });
 
-  it('Claude Code buildEnv (API-key mode) matches the pre-OpenRouter env exactly', () => {
+  it('Claude Code scopes workflow-only overrides to batch mode', () => {
+    for (const key of [
+      'CLAUDE_STREAM_IDLE_TIMEOUT_MS',
+      'CLAUDE_ENABLE_STREAM_WATCHDOG',
+      'CLAUDE_ENABLE_BYTE_WATCHDOG',
+      'API_FORCE_IDLE_TIMEOUT',
+      'API_TIMEOUT_MS',
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
     const adapter = createClaudeCodeAdapter();
     const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-api03-ironcurtain-FAKE']]);
     const env = adapter.buildEnv(nativeConfig, fakeKeys);
     expect(env).toEqual({
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
       NODE_EXTRA_CA_CERTS: '/etc/ironcurtain/ca-cert.pem',
-      // Forces subagents synchronous (issue #367); set on every path — native
-      // and OpenRouter — not an OpenRouter-specific var.
-      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
-      // Disables the streaming idle watchdog (issue #367); set on every path.
-      CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
       IRONCURTAIN_API_KEY: 'sk-ant-api03-ironcurtain-FAKE',
+    });
+    expect(adapter.buildBatchEnv?.(nativeConfig, fakeKeys)).toEqual({
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+      CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
     });
     // No OpenRouter vars leaked in.
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
@@ -429,7 +439,7 @@ describe('OpenRouter — m5 fail-fast on missing key', () => {
         undefined,
         undefined,
         undefined,
-        'glm',
+        { providerProfileName: 'glm' },
       ),
     ).rejects.toThrow(/is OpenRouter but no API key is configured/);
   });

@@ -256,8 +256,7 @@ async function prepare(
     undefined,
     undefined,
     undefined,
-    undefined,
-    preparedImageResolution,
+    { preparedImageResolution },
   );
 }
 

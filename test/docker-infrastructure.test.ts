@@ -387,7 +387,7 @@ describe('OpenRouter ProviderKeyMapping assembly (G4 / §7.5, §9.5)', () => {
           undefined,
           undefined,
           undefined,
-          'glm',
+          { providerProfileName: 'glm' },
         ),
       ).rejects.toThrow(
         'Provider profile "glm" is OpenRouter but no API key is configured. ' +
@@ -712,6 +712,21 @@ describe('createSessionContainers', () => {
   });
 
   // --- Test A (security-relevant) ---
+  it('merges adapter batch-only environment into one-shot containers', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const adapter: AgentAdapter = {
+      ...createMockAdapter(),
+      buildBatchEnv: () => ({ BATCH_ONLY: '1' }),
+    };
+    const core = makeMockCore({ tempDir, useTcp: false, docker, adapter });
+
+    await createSessionContainers(core, makeMockConfig());
+
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].env.TEST_KEY).toBe('test-value');
+    expect(createCalls[0].env.BATCH_ONLY).toBe('1');
+  });
+
   it('mounts only sockets subdirectory in UDS mode, not the full session dir', async () => {
     const { docker, createCalls } = makeMockDocker();
     const core = makeMockCore({ tempDir, useTcp: false, docker });

@@ -8,11 +8,15 @@ import type { DockerContainerConfig } from '../../src/docker/types.js';
 const state = vi.hoisted<{
   infrastructure: unknown;
   startAppleVmDockerWorkload: ReturnType<typeof vi.fn<(options: unknown) => Promise<void>>>;
+  execPty: ReturnType<typeof vi.fn<(containerId: string, command: readonly string[]) => Promise<number>>>;
   createdConfigs: DockerContainerConfig[];
+  prepareOptions: unknown;
 }>(() => ({
   infrastructure: undefined,
   startAppleVmDockerWorkload: vi.fn<(options: unknown) => Promise<void>>(),
+  execPty: vi.fn<(containerId: string, command: readonly string[]) => Promise<number>>(),
   createdConfigs: [],
+  prepareOptions: undefined,
 }));
 
 vi.mock('ora', () => ({
@@ -47,7 +51,15 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     sessionDir: string,
     sandboxDir: string,
     escalationDir: string,
+    _bundleId: unknown,
+    _workflowId: unknown,
+    _scope: unknown,
+    _resolvedSkills: unknown,
+    _captureInput: unknown,
+    _scriptsDir: unknown,
+    options: unknown,
   ) => {
+    state.prepareOptions = options;
     mkdirSync(sessionDir, { recursive: true });
     mkdirSync(sandboxDir, { recursive: true });
     mkdirSync(escalationDir, { recursive: true });
@@ -120,6 +132,9 @@ describe('Apple nested Docker PTY startup ordering', () => {
     process.env.IRONCURTAIN_HOME = homeDir;
     state.createdConfigs.length = 0;
     state.startAppleVmDockerWorkload.mockReset();
+    state.execPty.mockReset();
+    state.execPty.mockResolvedValue(0);
+    state.prepareOptions = undefined;
 
     ptyServer = createServer();
     await new Promise<void>((resolve, reject) => {
@@ -148,6 +163,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
       }),
       start: vi.fn(async () => {}),
       exec: vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' })),
+      execPty: state.execPty,
     };
     state.infrastructure = {
       docker,
@@ -176,6 +192,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
         displayName: 'Claude Code',
         buildEnv: () => ({}),
         buildPtyCommand: () => [...EXPECTED_PTY_COMMAND],
+        buildPtyExecCommand: () => ['/etc/ironcurtain/start-claude.sh'],
       },
       fakeKeys: {},
       orientationDir,
@@ -196,7 +213,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
     } as never;
   }
 
-  it('uses the ordinary socat command and attaches only after workload activation completes', async () => {
+  it('uses runtime-native exec and attaches only after workload activation completes', async () => {
     const events: string[] = [];
     const workload = { status: 'admitted', teardown: vi.fn(async () => {}) };
     installInfrastructure(workload);
@@ -210,7 +227,8 @@ describe('Apple nested Docker PTY startup ordering', () => {
       workload.status = 'active';
       events.push('activation-complete');
     });
-    const attach = vi.fn<PtyAttachFn>(async () => {
+    const attach = vi.fn<PtyAttachFn>(async () => 0);
+    state.execPty.mockImplementation(async () => {
       expect(workload.status).toBe('active');
       events.push('attach');
       return 0;
@@ -228,9 +246,18 @@ describe('Apple nested Docker PTY startup ordering', () => {
     await session;
 
     expect(state.createdConfigs).toHaveLength(1);
-    expect(state.createdConfigs[0].command).toEqual(EXPECTED_PTY_COMMAND);
+    expect(state.createdConfigs[0].command).toEqual(['sleep', 'infinity']);
+    expect(state.createdConfigs[0].publishSockets).toBeUndefined();
+    expect(state.createdConfigs[0].tty).toBe(false);
     expect(state.createdConfigs[0].env.DOCKER_HOST).toBe('unix:///run/ironcurtain-docker/docker.sock');
     expect(state.createdConfigs[0].env.IRONCURTAIN_DOCKER_NETWORK).toBe('ironcurtain');
+    expect(state.execPty).toHaveBeenCalledWith(
+      'apple-container-id',
+      ['/etc/ironcurtain/start-claude.sh'],
+      expect.any(AbortSignal),
+    );
+    expect(state.prepareOptions).toEqual(expect.objectContaining({ proxyAgentKind: 'pty' }));
+    expect(attach).not.toHaveBeenCalled();
     expect(events).toEqual(['activation-start', 'activation-complete', 'attach']);
   });
 
@@ -249,6 +276,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
       }),
     ).rejects.toThrow(/scripted daemon adjudication failure/);
     expect(attach).not.toHaveBeenCalled();
+    expect(state.execPty).not.toHaveBeenCalled();
   });
 
   it('mounts and selects public-registry transport before PTY attach', async () => {

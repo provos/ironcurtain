@@ -49,7 +49,7 @@ const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
 /**
  * Claude Code streaming-watchdog tuning vars forwarded from the host env into
- * the container when set (see `buildEnv`). Curated allowlist — these govern
+ * all Claude containers when set (see `buildEnv`). Curated allowlist — these govern
  * the idle-stream abort ("Response stalled mid-stream", issue #367) and let it
  * be exercised against the MITM stream-delay knob without rebuilding the image.
  */
@@ -176,6 +176,13 @@ export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentA
       // via `skills.batchArgs`; the PTY driver merges `skills.ptyEnv`
       // into the container environment, which is how this var arrives here.
       const startScript = `#!/bin/bash
+# Runtime-native PTY exec does not inherit variables exported by PID 1.
+# Read the mounted prompt here as well as in the image entrypoint.
+if [ -f /etc/ironcurtain/system-prompt.txt ]; then
+  export IRONCURTAIN_SYSTEM_PROMPT
+  IRONCURTAIN_SYSTEM_PROMPT=$(cat /etc/ironcurtain/system-prompt.txt)
+fi
+
 # Set initial terminal size from host env vars
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
   stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
@@ -297,41 +304,20 @@ exit $STATUS
         CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
         // Node.js does not use the system CA store -- must set this explicitly
         NODE_EXTRA_CA_CERTS: CONTAINER_RUNTIME_CA_CERT,
-        // Force subagents (Agent/Task tool) and `run_in_background` to run in the
-        // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
-        // Code v2.1.198 subagents run in the *background* by default: the tool
-        // returns immediately and the parent is "notified automatically when it
-        // completes" via a persistent supervisor that re-fires the session. We
-        // invoke `claude -p` as a one-shot subprocess with no such supervisor, so
-        // when a workflow agent (e.g. vuln-discovery `analyze`) fans out to
-        // parallel subagents, the turn never receives their completions and stalls
-        // ("Response stalled mid-stream" / no `agent_status` block). This env var
-        // restores the pre-2.1.198 synchronous behavior, which the FSM's
-        // one-turn=one-result model requires. See docs/en/env-vars.
-        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
-        // Disable the streaming idle watchdog (on by default since Claude
-        // Code v2.1.196). Behind the MITM proxy, long tool-use turns and
-        // SSE re-buffering trip the watchdog's idle threshold, which
-        // aborts the request with "API Error: Response stalled
-        // mid-stream" — the actual root cause of issue #367 (PR #372's
-        // background-task fix alone did not resolve it). Turning the
-        // watchdog off restores the pre-2.1.196 behavior; the workflow
-        // orchestrator already enforces its own wall-clock/step budgets.
-        CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
       };
-
-      // DEBUG / operability (issue #367 watchdog harness): forward a curated
-      // allowlist of Claude Code streaming-watchdog tuning vars from the host
-      // env into the container when set. Lets the streaming idle watchdog be
-      // exercised against the MITM stream-delay knob (see stream-delay.ts)
-      // without rebuilding the image. No-op unless the host sets them.
-      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
-        const value = process.env[key];
-        if (value !== undefined) env[key] = value;
-      }
 
       if (modelId) {
         env.IRONCURTAIN_MODEL = modelId;
+      }
+
+      // DEBUG / operability (issue #367 watchdog harness): forward a curated
+      // allowlist of Claude Code streaming-watchdog tuning vars from the host
+      // env into every Claude container when explicitly set. One-shot mode
+      // still forces its required stream-watchdog default in buildBatchEnv,
+      // while PTY users retain an escape hatch for long interactive turns.
+      for (const key of WATCHDOG_ENV_PASSTHROUGH) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
       }
 
       const profile = config.activeProviderProfile;
@@ -384,6 +370,32 @@ exit $STATUS
       }
 
       return env;
+    },
+
+    buildBatchEnv(): Record<string, string> {
+      return {
+        // Force subagents (Agent/Task tool) and `run_in_background` to run in the
+        // FOREGROUND (synchronously), disabling auto-backgrounding. As of Claude
+        // Code v2.1.198 subagents run in the *background* by default: the tool
+        // returns immediately and the parent is "notified automatically when it
+        // completes" via a persistent supervisor that re-fires the session. We
+        // invoke `claude -p` as a one-shot subprocess with no such supervisor, so
+        // when a workflow agent (e.g. vuln-discovery `analyze`) fans out to
+        // parallel subagents, the turn never receives their completions and stalls
+        // ("Response stalled mid-stream" / no `agent_status` block). This env var
+        // restores the pre-2.1.198 synchronous behavior, which the FSM's
+        // one-turn=one-result model requires. See docs/en/env-vars.
+        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+        // Disable the streaming idle watchdog (on by default since Claude
+        // Code v2.1.196). Behind the MITM proxy, long tool-use turns and
+        // SSE re-buffering trip the watchdog's idle threshold, which
+        // aborts the request with "API Error: Response stalled
+        // mid-stream" — the actual root cause of issue #367 (PR #372's
+        // background-task fix alone did not resolve it). Turning the
+        // watchdog off restores the pre-2.1.196 behavior; the workflow
+        // orchestrator already enforces its own wall-clock/step budgets.
+        CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
+      };
     },
 
     extractResponse(exitCode: number, stdout: string): AgentResponse {
@@ -451,6 +463,10 @@ exit $STATUS
       // prompt from an env var set by the entrypoint. This avoids shell quoting
       // issues that occur when embedding large prompts in socat EXEC: strings.
       return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
+    },
+
+    buildPtyExecCommand(): readonly string[] {
+      return ['/etc/ironcurtain/start-claude.sh'];
     },
 
     getConversationStateConfig(): ConversationStateConfig {

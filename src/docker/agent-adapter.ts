@@ -305,6 +305,15 @@ export interface AgentAdapter {
   buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Readonly<Record<string, string>>;
 
   /**
+   * Constructs additional environment variables for batch-mode containers.
+   *
+   * These variables are merged on top of {@link buildEnv} only for the
+   * one-shot execution path driven by {@link buildCommand}. Interactive PTY
+   * sessions intentionally do not receive them.
+   */
+  buildBatchEnv?(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Readonly<Record<string, string>>;
+
+  /**
    * Parses the agent's output to extract the response and optional cost.
    *
    * IMPORTANT: adapters are the sole place where CLI-specific error
@@ -340,6 +349,13 @@ export interface AgentAdapter {
     ptySockPath: string | undefined,
     ptyPort: number | undefined,
   ): readonly string[];
+
+  /**
+   * Returns the agent command for a runtime-native interactive exec.
+   * Apple Container uses this instead of exposing a guest socat listener;
+   * runtimes without native PTY exec continue to use {@link buildPtyCommand}.
+   */
+  buildPtyExecCommand?(): readonly string[];
 
   /**
    * Detects available credentials for this agent.

@@ -463,6 +463,13 @@ export type AgentImageResolution = {
   readonly artifact?: SelectedAgentArtifact;
 };
 
+export interface PrepareDockerInfrastructureOptions {
+  readonly providerProfileName?: string;
+  readonly preparedImageResolution?: AgentImageResolution;
+  /** Explicit request-rewriter mode for this container lifecycle. */
+  readonly proxyAgentKind?: AgentKind;
+}
+
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
   mode: SessionMode & { kind: 'docker' },
@@ -475,9 +482,9 @@ export async function prepareDockerInfrastructure(
   resolvedSkills?: readonly ResolvedSkill[],
   captureInput?: CaptureSetupInput,
   scriptsDir?: string,
-  providerProfileName?: string,
-  preparedImageResolution?: AgentImageResolution,
+  options: PrepareDockerInfrastructureOptions = {},
 ): Promise<PreContainerInfrastructure> {
+  const { providerProfileName, preparedImageResolution, proxyAgentKind } = options;
   // Secure nested Docker resolves the effective runtime and rejects every
   // unsupported variant before feature-attributable runtime, image, artifact,
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
@@ -796,9 +803,10 @@ export async function prepareDockerInfrastructure(
     // so the bundleId default is only an initial placeholder. Double-cast
     // bridges the BundleId → SessionId brand gap on MitmProxyOptions.
     const routingId = bundleId as unknown as SessionId;
-    // A workflow bundle serves only workflow agents for its entire lifetime,
-    // so agentKind is fixed at construction time.
-    const agentKind: AgentKind | undefined = workflowId !== undefined ? 'workflow' : undefined;
+    // The proxy execution mode is immutable over a bundle's lifetime. Legacy
+    // direct callers that omit it still identify workflow bundles via their
+    // workflow ID; otherwise they get the conservative undefined behavior.
+    const agentKind: AgentKind | undefined = proxyAgentKind ?? (workflowId !== undefined ? 'workflow' : undefined);
 
     // Single resolution point for trajectory-capture enablement. The raw
     // CLI/RPC override wins; otherwise fall through to config; otherwise
@@ -1162,8 +1170,11 @@ export async function createDockerInfrastructure(
     resolvedSkills,
     captureInput,
     scriptsDir,
-    providerProfileName,
-    options?.preparedImageResolution,
+    {
+      providerProfileName,
+      preparedImageResolution: options?.preparedImageResolution,
+      proxyAgentKind: workflowId !== undefined ? 'workflow' : 'batch',
+    },
   );
 
   return assembleDockerInfrastructure(core, config, options);
@@ -1843,6 +1854,7 @@ async function createSessionContainersAttempt(
     }
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
+      ...core.adapter.buildBatchEnv?.(config, core.fakeKeys),
       ...buildRuntimeTrustEnv(),
       ...nestedDaemonAgentEnv(nestedDaemon),
     };

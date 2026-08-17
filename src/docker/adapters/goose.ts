@@ -160,6 +160,13 @@ ${buildAttributionSection()}`;
 
 function buildStartScript(): string {
   return `#!/bin/bash
+# Runtime-native PTY exec does not inherit variables exported by PID 1.
+# Read the mounted prompt here as well as in the image entrypoint.
+if [ -f /etc/ironcurtain/system-prompt.txt ]; then
+  export IRONCURTAIN_SYSTEM_PROMPT
+  IRONCURTAIN_SYSTEM_PROMPT=$(cat /etc/ironcurtain/system-prompt.txt)
+fi
+
 # Set initial terminal size from host env vars
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
   stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
@@ -381,6 +388,10 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       const listenArg = ptySockPath ? `UNIX-LISTEN:${ptySockPath},fork` : `TCP-LISTEN:${ptyPort},reuseaddr`;
 
       return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-goose.sh,pty,setsid,ctty,stderr,rawer'];
+    },
+
+    buildPtyExecCommand(): readonly string[] {
+      return ['/etc/ironcurtain/start-goose.sh'];
     },
 
     detectCredential(config: IronCurtainConfig): AuthMethod {

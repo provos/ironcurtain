@@ -266,6 +266,22 @@ export interface ContainerRuntime {
     environment?: Readonly<Record<string, string>>,
   ): Promise<DockerExecResult>;
 
+  /**
+   * Execute an interactive command with the host terminal attached directly
+   * to a runtime-managed PTY. Optional because Docker sessions use the
+   * existing socat transport; Apple Container implements this to avoid its
+   * unreliable host-published socket relay while preserving `--network none`.
+   *
+   * Returns the process exit code. An abort requested by the caller is treated
+   * as a graceful exit and returns 0.
+   */
+  execPty?(
+    nameOrId: string,
+    command: readonly string[],
+    signal?: AbortSignal,
+    execUser?: string | null,
+  ): Promise<number>;
+
   /** Stop a running container (SIGTERM, then SIGKILL after grace period). */
   stop(nameOrId: string): Promise<void>;
 
