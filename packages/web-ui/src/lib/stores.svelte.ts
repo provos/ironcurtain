@@ -323,6 +323,44 @@ export async function verifyAuthToken(token: string, fetchImpl: typeof fetch = f
   }
 }
 
+type SessionMutationEventName = 'session.created' | 'session.updated' | 'session.ended';
+
+type BufferedSessionEvent = {
+  event: SessionMutationEventName;
+  payload: unknown;
+};
+
+type SessionRefreshBarrier = {
+  buffered: BufferedSessionEvent[];
+};
+
+let activeSessionRefresh: SessionRefreshBarrier | null = null;
+const queuedSessionRefreshes: Array<{ client: WsClient; barrier: SessionRefreshBarrier }> = [];
+let sessionRefreshQueueRunning = false;
+
+function isSessionMutationEvent(event: string): event is SessionMutationEventName {
+  return event === 'session.created' || event === 'session.updated' || event === 'session.ended';
+}
+
+function applyWebEvent(client: WsClient, event: string, payload: unknown): void {
+  handleEventPure(
+    appState,
+    {
+      refreshJobs: () => refreshJobs(client),
+      refreshPersonas: () => {
+        personasChangedGeneration.value++;
+      },
+      refreshConfig: () => {
+        configChangedGeneration.value++;
+      },
+      assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
+      getPtySink: (label: number) => ptySinks.get(label),
+    },
+    event,
+    payload,
+  );
+}
+
 function wireEventHandlers(client: WsClient): void {
   client.onConnectionChange((connected) => {
     appState.connected = connected;
@@ -339,22 +377,10 @@ function wireEventHandlers(client: WsClient): void {
   });
 
   client.onEvent((event, payload) => {
-    handleEventPure(
-      appState,
-      {
-        refreshJobs: () => refreshJobs(client),
-        refreshPersonas: () => {
-          personasChangedGeneration.value++;
-        },
-        refreshConfig: () => {
-          configChangedGeneration.value++;
-        },
-        assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
-        getPtySink: (label: number) => ptySinks.get(label),
-      },
-      event,
-      payload,
-    );
+    applyWebEvent(client, event, payload);
+    if (isSessionMutationEvent(event)) {
+      activeSessionRefresh?.buffered.push({ event, payload });
+    }
   });
 }
 
@@ -367,11 +393,60 @@ function handleAuthError(): void {
 
 let isInitialConnect = true;
 
-async function refreshAll(client: WsClient): Promise<void> {
+function applySessionsSnapshot(sessions: SessionDto[]): void {
+  const newSessions = new Map<number, SessionDto>();
+  for (const session of sessions) {
+    newSessions.set(session.label, session);
+  }
+  appState.sessions = newSessions;
+}
+
+function completeSessionRefresh(client: WsClient, barrier: SessionRefreshBarrier, sessions: SessionDto[]): void {
+  applySessionsSnapshot(sessions);
+  activeSessionRefresh = null;
+  for (const event of barrier.buffered) {
+    applyWebEvent(client, event.event, event.payload);
+  }
+}
+
+async function runSessionRefresh(client: WsClient, barrier: SessionRefreshBarrier): Promise<void> {
   try {
-    const [status, sessions, jobs, escalations, workflowsList, personaCompiles] = await Promise.all([
+    const sessions = await client.request<SessionDto[]>('sessions.list');
+    completeSessionRefresh(client, barrier, sessions);
+  } catch (err) {
+    // Session events were already applied live. Dropping only the replay
+    // buffer preserves those mutations while allowing the next queued refresh.
+    activeSessionRefresh = null;
+    console.error('Failed to refresh sessions:', err);
+  }
+}
+
+async function drainSessionRefreshQueue(): Promise<void> {
+  while (queuedSessionRefreshes.length > 0) {
+    const next = queuedSessionRefreshes.shift();
+    if (!next) continue;
+    activeSessionRefresh = next.barrier;
+    await runSessionRefresh(next.client, next.barrier);
+  }
+  activeSessionRefresh = null;
+  sessionRefreshQueueRunning = false;
+}
+
+function enqueueSessionRefresh(client: WsClient): void {
+  const barrier: SessionRefreshBarrier = { buffered: [] };
+  queuedSessionRefreshes.push({ client, barrier });
+  if (!sessionRefreshQueueRunning) {
+    sessionRefreshQueueRunning = true;
+    activeSessionRefresh = barrier;
+    void drainSessionRefreshQueue();
+  }
+}
+
+async function refreshAll(client: WsClient): Promise<void> {
+  enqueueSessionRefresh(client);
+  try {
+    const [status, jobs, escalations, workflowsList, personaCompiles] = await Promise.all([
       client.request<DaemonStatusDto>('status'),
-      client.request<SessionDto[]>('sessions.list'),
       client.request<JobListDto[]>('jobs.list'),
       client.request<EscalationDto[]>('escalations.list'),
       client.request<WorkflowSummaryDto[]>('workflows.list').catch(() => [] as WorkflowSummaryDto[]),
@@ -381,13 +456,6 @@ async function refreshAll(client: WsClient): Promise<void> {
     ]);
 
     appState.daemonStatus = status;
-
-    const newSessions = new Map<number, SessionDto>();
-    for (const session of sessions) {
-      newSessions.set(session.label, session);
-    }
-    appState.sessions = newSessions;
-
     appState.jobs = jobs;
 
     const newWorkflows = new Map<string, WorkflowSummaryDto>();

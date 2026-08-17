@@ -307,10 +307,10 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
         const budgetSessionId = managed.session.getInfo().id;
-        ctx.eventBus.emit('session.ended', { label, reason: `Budget exhausted: ${err.message}` });
         await ctx.sessionManager.end(label);
         getTokenStreamBus().endSession(budgetSessionId);
         cleanupSessionQueue(ctx, label);
+        ctx.eventBus.emit('session.ended', { label, reason: `Budget exhausted: ${err.message}` });
       } else {
         const message = err instanceof Error ? err.message : String(err);
         ctx.eventBus.emit('session.output', { label, text: `Error: ${message}`, turnNumber });
