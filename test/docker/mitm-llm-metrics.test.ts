@@ -189,6 +189,19 @@ function proxyAuthorization(lease: MetricsInvocationLease): string {
   return `Basic ${Buffer.from(credentials).toString('base64')}`;
 }
 
+/**
+ * Byte-identity for response payloads.
+ *
+ * `toEqual` deep-compares Buffers element-by-element, which costs ~5s per
+ * assertion on the multi-MiB bodies below; `Buffer.equals` is a single memcmp.
+ * Take the cheap path when the bytes match and fall back to `toEqual` only on
+ * mismatch, so a real failure still gets vitest's readable diff.
+ */
+function expectBytesEqual(actual: Buffer, expected: Buffer): void {
+  if (actual.equals(expected)) return;
+  expect(actual).toEqual(expected);
+}
+
 interface BufferResponse {
   readonly statusCode: number;
   readonly headers: Readonly<Record<string, string>>;
@@ -442,7 +455,7 @@ describe('MITM LLM metrics integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-encoding']).toBe('gzip');
-    expect(response.body).toEqual(compressed);
+    expectBytesEqual(response.body, compressed);
     await expect.poll(() => exchanges.length).toBe(1);
     expect(exchanges[0]?.attribution).toMatchObject({ quality: 'bundle_only', bundleId: 'bundle-fallback' });
     expect(exchanges[0]?.usage).toMatchObject({ inputTokensTotal: 130, outputTokensTotal: 50, thinkingTokens: 30 });
@@ -477,7 +490,7 @@ describe('MITM LLM metrics integration', () => {
       apiKey: GOOGLE_FAKE_KEY,
     });
 
-    expect(response.body).toEqual(responseBody);
+    expectBytesEqual(response.body, responseBody);
     await expect.poll(() => exchanges.length).toBe(1);
     expect(exchanges[0]?.route).toMatchObject({ logicalProvider: 'google', protocol: 'google-generate-content' });
     expect(exchanges[0]?.identity.requestedModel).toEqual({ value: 'gemini-2.5-flash', source: 'request' });
@@ -559,7 +572,7 @@ describe('MITM LLM metrics integration', () => {
     const requestBody = Buffer.from(JSON.stringify({ model: 'claude-requested', stream: true, messages: [] }));
     const capturedConnect = await sendConnect(socketPath, CLIENT_HOST, 443);
     const capturedResponse = await makeHttpsBufferRequest(capturedConnect.socket as Socket, ca, requestBody);
-    expect(capturedResponse.body).toEqual(compressed);
+    expectBytesEqual(capturedResponse.body, compressed);
     await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(1);
     expect(exchanges[0]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
     expect(exchanges[0]?.qualityFlags).not.toContain('consumer-decoded-byte-limit');
@@ -569,7 +582,7 @@ describe('MITM LLM metrics integration', () => {
     proxy.setCaptureSessionId(undefined);
     const uncapturedConnect = await sendConnect(socketPath, CLIENT_HOST, 443);
     const uncapturedResponse = await makeHttpsBufferRequest(uncapturedConnect.socket as Socket, ca, requestBody);
-    expect(uncapturedResponse.body).toEqual(compressed);
+    expectBytesEqual(uncapturedResponse.body, compressed);
     await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(2);
     expect(exchanges[1]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
   }, 60_000);

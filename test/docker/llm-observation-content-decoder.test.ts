@@ -61,7 +61,7 @@ describe('BoundedContentDecoder', () => {
 
     expect(result.failure).toBeUndefined();
     expect(result.state).toBe('ended');
-    expect(result.body).toEqual(largeBody);
+    expect(result.body.equals(largeBody)).toBe(true);
   });
 
   it('detaches when synchronous writes outrun the compressed-input backlog bound', async () => {
