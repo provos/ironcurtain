@@ -143,7 +143,7 @@
   $effect(() => {
     void appState.escalationDismissedAt;
     if (selectedPtyLabel === null) return;
-    tick().then(() => terminalRef?.focus());
+    tick().then(() => terminalRef?.focus?.());
   });
 </script>
 
@@ -172,9 +172,31 @@
             <Badge variant="secondary">terminal</Badge>
           </div>
           <div class="flex items-center gap-4">
+            {#if ptySession.status === 'stopping'}
+              <span
+                id="pty-stopping-message"
+                class="inline-flex max-w-xs items-center gap-1.5 text-right text-xs text-warning"
+                role="status"
+                aria-live="polite"
+                aria-label="Stopping. Input is unavailable while shutdown completes."
+              >
+                <span
+                  class="h-3 w-3 shrink-0 rounded-full border-2 border-warning/30 border-t-warning animate-spin"
+                  aria-hidden="true"
+                ></span>
+                Stopping… Input is unavailable while shutdown completes.
+              </span>
+            {/if}
             <span class="text-xs text-muted-foreground hidden sm:inline">Resizing affects all viewers</span>
-            <Button variant="destructive" size="sm" loading={endingSession === ptySession.label} onclick={handleEnd}>
-              {endingSession === ptySession.label ? 'Ending' : 'End'}
+            <Button
+              variant="destructive"
+              size="sm"
+              loading={ptySession.status === 'stopping' || endingSession === ptySession.label}
+              disabled={ptySession.status === 'stopping'}
+              aria-describedby={ptySession.status === 'stopping' ? 'pty-stopping-message' : undefined}
+              onclick={handleEnd}
+            >
+              {ptySession.status === 'stopping' ? 'Stopping…' : endingSession === ptySession.label ? 'Ending' : 'End'}
             </Button>
           </div>
         </div>
@@ -186,9 +208,11 @@
             bind:this={terminalRef}
             onready={(handle) => {
               connectPtyTerminal(ptySession.label, handle);
-              terminalRef?.focus();
+              terminalRef?.focus?.();
             }}
-            oninput={(dataB64) => sendPtyInput(ptySession.label, dataB64)}
+            oninput={(dataB64) => {
+              if (ptySession.status !== 'stopping') sendPtyInput(ptySession.label, dataB64);
+            }}
             onresize={(cols, rows) => sendPtyResize(ptySession.label, cols, rows)}
           />
         {/key}

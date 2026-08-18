@@ -23,6 +23,7 @@ const { SerializeAddon } = serializeAddonPkg;
 import { getPtyRegistryDir } from '../config/paths.js';
 import { readActiveRegistrations } from '../escalation/session-registry.js';
 import type { PtySessionRegistration } from '../docker/pty-types.js';
+import * as logger from '../logger.js';
 
 export interface PtyBridge {
   /** The headless terminal instance for reading buffer state. */
@@ -34,7 +35,11 @@ export interface PtyBridge {
   /** The escalation directory path for this session. */
   readonly escalationDir: string | undefined;
 
-  /** Whether the child process is still running. */
+  /**
+   * Whether the child process is still running. Flips to false only inside
+   * the exit-notification path, before `onExit` callbacks run — see `onExit`
+   * for the full contract.
+   */
   readonly alive: boolean;
 
   /** The child process exit code, if exited. */
@@ -55,7 +60,9 @@ export interface PtyBridge {
   resize(cols: number, rows: number): void;
 
   /**
-   * Kills the child process and cleans up resources.
+   * Requests child termination and schedules SIGKILL crash recovery if needed.
+   * Does not itself complete the lifecycle: termination is always reported
+   * through `onExit`, never by synchronously flipping `alive` to false.
    */
   kill(): void;
 
@@ -85,7 +92,11 @@ export interface PtyBridge {
   serialize(options?: { scrollback?: number }): string;
 
   /**
-   * Registers a callback invoked when the child process exits.
+   * Registers a callback invoked when the child process exits. Exit is ALWAYS
+   * reported through this callback, whether the child died on its own or was
+   * killed; `alive` flips to false only as part of that same notification.
+   * Consumers should treat `onExit` as the sole lifecycle boundary — mux tab
+   * teardown and the web-ui session reaper both rely on this.
    */
   onExit(callback: (exitCode: number) => void): void;
 
@@ -168,6 +179,18 @@ export function buildSpawnArgs(options: PtyBridgeOptions): string[] {
 const DISCOVERY_POLL_MS = 200;
 /** Headless scrollback cap (lines). Bounds daemon memory on long-running sessions. */
 const SCROLLBACK_LINES = 5000;
+/**
+ * Grace period between requesting termination and SIGKILL crash recovery.
+ *
+ * Capture finalization can consume 30 seconds before Docker/snapshot cleanup
+ * starts. Allow another bounded cleanup window before SIGKILL crash recovery,
+ * so normal shutdown is not mistaken for a wedged child.
+ */
+export const PTY_KILL_GRACE_MS = 60_000;
+/** Retry interval for direct SIGKILL crash recovery while onExit is pending. */
+export const PTY_KILL_RETRY_MS = 1_000;
+/** Avoid flooding logs when a force-kill remains unavailable. */
+const PTY_KILL_ERROR_LOG_INTERVAL_MS = 10_000;
 
 /**
  * Spawns a new `ironcurtain start --pty` child process via node-pty
@@ -210,6 +233,63 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   let _alive = true;
   let _exitCode: number | undefined;
   let _registration: PtySessionRegistration | null | undefined;
+  let terminationRequested = false;
+  let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
+  let killRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let forceKillAttempt = 0;
+  let lastForceKillErrorLogAt: number | undefined;
+
+  const clearKillTimers = (): void => {
+    if (killEscalationTimer !== undefined) {
+      clearTimeout(killEscalationTimer);
+      killEscalationTimer = undefined;
+    }
+    if (killRetryTimer !== undefined) {
+      clearTimeout(killRetryTimer);
+      killRetryTimer = undefined;
+    }
+  };
+
+  const scheduleKillRetry = (): void => {
+    if (!_alive || killRetryTimer !== undefined) return;
+    killRetryTimer = setTimeout(() => {
+      killRetryTimer = undefined;
+      attemptForceKill(true);
+    }, PTY_KILL_RETRY_MS);
+    killRetryTimer.unref();
+  };
+
+  const attemptForceKill = (retry: boolean): void => {
+    if (!_alive) return;
+    if (!retry) {
+      logger.warn(
+        `[PTY] Child pid=${child.pid} did not exit after SIGTERM; attempting SIGKILL crash recovery after ${PTY_KILL_GRACE_MS}ms`,
+      );
+    }
+    forceKillAttempt += 1;
+
+    // node-pty's Unix kill() wrapper can swallow signal errors. Use the OS
+    // process API for the force-kill request, then retry until the bridge's
+    // onExit notification confirms the lifecycle transition.
+    try {
+      if (process.platform === 'win32') {
+        // Windows has no Unix SIGKILL semantics. node-pty maps this native
+        // termination request to the platform's process termination API.
+        child.kill('SIGKILL');
+      } else {
+        process.kill(child.pid, 'SIGKILL');
+      }
+    } catch (error) {
+      const now = Date.now();
+      if (lastForceKillErrorLogAt === undefined || now - lastForceKillErrorLogAt >= PTY_KILL_ERROR_LOG_INTERVAL_MS) {
+        lastForceKillErrorLogAt = now;
+        logger.error(
+          `[PTY] SIGKILL crash recovery${retry ? ' retry' : ''} failed for child pid=${child.pid} (attempt ${forceKillAttempt}): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    scheduleKillRetry();
+  };
 
   // Wire child output to the headless terminal. Both sinks fire from INSIDE the
   // write callback so the buffer already reflects `data`: the grid sink
@@ -225,6 +305,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   const discoveryAbort = new AbortController();
 
   child.onExit(({ exitCode }: { exitCode: number }) => {
+    clearKillTimers();
     _alive = false;
     _exitCode = exitCode;
     discoveryAbort.abort();
@@ -275,7 +356,26 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
     },
 
     kill(): void {
-      if (_alive) child.kill('SIGTERM');
+      if (!_alive || terminationRequested) return;
+
+      terminationRequested = true;
+
+      killEscalationTimer = setTimeout(() => {
+        killEscalationTimer = undefined;
+        if (!_alive) return;
+        attemptForceKill(false);
+      }, PTY_KILL_GRACE_MS);
+      killEscalationTimer.unref();
+
+      try {
+        // Keep the synchronous throw observable: PtySessionManager uses it to
+        // roll back its stopping state when the initial signal cannot be sent.
+        child.kill('SIGTERM');
+      } catch (error) {
+        clearKillTimers();
+        terminationRequested = false;
+        throw error;
+      }
     },
 
     onOutput(callback: () => void): void {

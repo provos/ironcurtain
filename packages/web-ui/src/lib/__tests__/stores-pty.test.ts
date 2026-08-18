@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PtySink } from '../types.js';
+import type { JobListDto, PtySink, SessionDto } from '../types.js';
+import { deferred, mockSession } from './fixtures.js';
 
 // ---------------------------------------------------------------------------
 // Mock the WS client dependency so getWsClient() returns a spyable client.
@@ -10,6 +11,7 @@ import type { PtySink } from '../types.js';
 
 const mockRequest = vi.fn<(method: string, params?: Record<string, unknown>) => Promise<unknown>>();
 let capturedOnEvent: ((event: string, payload: unknown) => void) | undefined;
+let capturedOnConnectionChange: ((connected: boolean) => void) | undefined;
 
 const mockClient = {
   request: mockRequest,
@@ -17,7 +19,10 @@ const mockClient = {
     capturedOnEvent = handler;
     return () => {};
   }),
-  onConnectionChange: vi.fn(() => () => {}),
+  onConnectionChange: vi.fn((handler: (connected: boolean) => void) => {
+    capturedOnConnectionChange = handler;
+    return () => {};
+  }),
   onAuthError: vi.fn(() => () => {}),
   get isConnected() {
     return false;
@@ -43,6 +48,7 @@ import {
   connectPtyTerminal,
   disconnectPtyTerminal,
   getWsClient,
+  appState,
 } from '../stores.svelte.js';
 
 describe('PTY store actions', () => {
@@ -74,6 +80,115 @@ describe('PTY store actions', () => {
   it('sendPtyPrompt sends sessions.ptyPrompt with PLAIN text (not base64)', async () => {
     await sendPtyPrompt(5, 'approve the write');
     expect(mockRequest).toHaveBeenCalledWith('sessions.ptyPrompt', { label: 5, text: 'approve the write' });
+  });
+});
+
+describe('connection refresh ordering', () => {
+  beforeEach(() => {
+    mockRequest.mockReset();
+    appState.sessions = new Map();
+    appState.jobs = [];
+    appState.sessionOutputs = new Map();
+    appState.selectedSessionLabel = null;
+  });
+
+  function configureRefresh(
+    sessionLists: Array<{ promise: Promise<SessionDto[]> }>,
+    jobsList: Promise<JobListDto[]> = Promise.resolve([{} as JobListDto]),
+  ): { sessionRequestCount: () => number } {
+    let sessionRequestCount = 0;
+    mockRequest.mockImplementation((method) => {
+      if (method === 'sessions.list') {
+        sessionRequestCount++;
+        return sessionLists.shift()?.promise ?? Promise.resolve([]);
+      }
+      if (method === 'jobs.list') return jobsList;
+      if (method === 'status') return Promise.resolve({});
+      if (method === 'escalations.list') return Promise.resolve([]);
+      if (method === 'workflows.list') return Promise.resolve([]);
+      if (method === 'personas.listCompiles') {
+        return Promise.resolve({ active: [], recent: [], queueDepth: 0 });
+      }
+      return Promise.resolve(undefined);
+    });
+    return { sessionRequestCount: () => sessionRequestCount };
+  }
+
+  it('replays a session event received before a stale sessions.list response', async () => {
+    const sessionsList = deferred<SessionDto[]>();
+    const existingSession = mockSession(1);
+    appState.sessions = new Map([[existingSession.label, existingSession]]);
+    configureRefresh([sessionsList]);
+
+    getWsClient();
+    capturedOnConnectionChange?.(true);
+
+    capturedOnEvent?.('session.ended', { label: existingSession.label, reason: 'budget_exhausted' });
+    expect(appState.sessions.has(existingSession.label)).toBe(false);
+
+    // The response was generated before the ended event and is stale.
+    sessionsList.resolve([existingSession]);
+    await vi.waitFor(() => expect(appState.jobs).toHaveLength(1));
+    expect(appState.sessions.has(existingSession.label)).toBe(false);
+  });
+
+  it('keeps a session event received after the snapshot while another refresh RPC is pending', async () => {
+    const sessionsList = deferred<SessionDto[]>();
+    const jobsList = deferred<JobListDto[]>();
+    const snapshotSession = mockSession(1);
+    const eventSession = mockSession(2);
+    configureRefresh([sessionsList], jobsList.promise);
+
+    getWsClient();
+    capturedOnConnectionChange?.(true);
+
+    sessionsList.resolve([snapshotSession]);
+    await vi.waitFor(() => expect(appState.sessions.has(snapshotSession.label)).toBe(true));
+
+    // The snapshot has arrived, but jobs.list is still pending. This event is
+    // later on the same socket and must remain authoritative after refreshAll.
+    capturedOnEvent?.('session.created', eventSession);
+    expect(appState.sessions.has(eventSession.label)).toBe(true);
+
+    jobsList.resolve([{} as JobListDto]);
+    await vi.waitFor(() => expect(appState.jobs).toHaveLength(1));
+    expect(appState.sessions.has(eventSession.label)).toBe(true);
+  });
+
+  it('applies the session snapshot when an unrelated refresh RPC rejects first', async () => {
+    const sessionsList = deferred<SessionDto[]>();
+    const jobsList = deferred<JobListDto[]>();
+    const snapshotSession = mockSession(1);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    configureRefresh([sessionsList], jobsList.promise);
+
+    getWsClient();
+    capturedOnConnectionChange?.(true);
+    jobsList.reject(new Error('jobs unavailable'));
+    sessionsList.resolve([snapshotSession]);
+
+    await vi.waitFor(() => expect(appState.sessions.get(snapshotSession.label)).toEqual(snapshotSession));
+    errorSpy.mockRestore();
+  });
+
+  it('queues a second session refresh behind a failing first request', async () => {
+    const firstSessionsList = deferred<SessionDto[]>();
+    const secondSessionsList = deferred<SessionDto[]>();
+    const newerSession = mockSession(1, { status: 'completed', turnCount: 2 });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refreshes = configureRefresh([firstSessionsList, secondSessionsList]);
+
+    getWsClient();
+    capturedOnConnectionChange?.(true);
+    capturedOnConnectionChange?.(true);
+    await vi.waitFor(() => expect(refreshes.sessionRequestCount()).toBe(1));
+
+    firstSessionsList.reject(new Error('stale connection'));
+    await vi.waitFor(() => expect(refreshes.sessionRequestCount()).toBe(2));
+    secondSessionsList.resolve([newerSession]);
+
+    await vi.waitFor(() => expect(appState.sessions.get(newerSession.label)).toEqual(newerSession));
+    errorSpy.mockRestore();
   });
 });
 

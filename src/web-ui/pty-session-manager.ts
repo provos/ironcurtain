@@ -12,8 +12,9 @@
  * PTY sessions are a distinct session kind. They are NOT `ManagedSession`s (they
  * have no Session/Transport); they only borrow a label via
  * `sessionManager.reserveLabel()`. Lifecycle: created via `sessions.create` in
- * docker mode, reaped on explicit `sessions.end`, on child exit, on an idle-TTL
- * backstop ({@link PTY_IDLE_TTL_MS}), or on daemon shutdown (`close()`).
+ * docker mode, removed after child exit for natural or requested termination,
+ * requested for termination by explicit `sessions.end` or the idle-TTL
+ * backstop ({@link PTY_IDLE_TTL_MS}), or shut down by `close()`.
  *
  * Escalation bridging (Phase 4): once `bridge.onSessionDiscovered` yields an
  * `escalationDir`, an {@link EscalationWatcher} (the same file-watch primitive
@@ -29,7 +30,7 @@ import type { WebSocket as WsWebSocket } from 'ws';
 import type { SessionManager } from '../session/session-manager.js';
 import type { SessionMode, EscalationRequest } from '../session/types.js';
 import type { WebEventBus } from './web-event-bus.js';
-import { createPtyBridge, type PtyBridge, type PtyBridgeOptions } from '../pty/pty-bridge.js';
+import { createPtyBridge, PTY_KILL_GRACE_MS, type PtyBridge, type PtyBridgeOptions } from '../pty/pty-bridge.js';
 import { resolveIroncurtainBin } from '../pty/resolve-ironcurtain-bin.js';
 import { createEscalationWatcher, type EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { writeTrustedUserContext } from '../escalation/trusted-input.js';
@@ -74,8 +75,12 @@ const PTY_BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 /** Replayed scrollback tail cap (§11 Q2): keeps a pty_replay frame under maxPayload. */
 const PTY_REPLAY_SCROLLBACK = 1000;
 
-/** Bounded await for child exits on daemon shutdown (mirrors mux doShutdown). */
-const PTY_CLOSE_TIMEOUT_MS = 5000;
+/**
+ * Bounded await for child exits on daemon shutdown. It outlasts SIGTERM's
+ * grace period so the bridge's SIGKILL crash recovery can fire before close()
+ * falls back to its timeout.
+ */
+const PTY_CLOSE_TIMEOUT_MS = PTY_KILL_GRACE_MS + 5_000;
 
 /**
  * Delay before the injected Enter (`\r`) on a trusted message, so Claude Code's
@@ -126,6 +131,8 @@ export interface PtyStreamSender {
 /** Factory seam so tests can inject a stub bridge instead of spawning a child. */
 export type CreateBridge = (options: PtyBridgeOptions) => Promise<PtyBridge>;
 
+type PtyEndReason = 'user_ended' | 'idle_reaped';
+
 /**
  * Thrown by `create()` when the PTY runtime is unavailable (node-pty fails to
  * load, or the serialize addon is missing). Surfaced as a clean RPC error so a
@@ -175,6 +182,8 @@ export class PtyWebSession {
   private readonly subscribers = new Set<WsWebSocket>();
   /** Clients skipped due to backpressure; resynced with a fresh snapshot on drain. */
   private readonly desynced = new Set<WsWebSocket>();
+  /** End reason to use once a requested termination is confirmed by onExit. */
+  private pendingEndReason: PtyEndReason | undefined;
   private buffer = '';
   private bufferBytes = 0;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -194,6 +203,30 @@ export class PtyWebSession {
 
   get subscriberCount(): number {
     return this.subscribers.size;
+  }
+
+  /**
+   * Records a termination request without claiming that the child has exited.
+   * A bridge may accept a kill request but remain alive, and that live session
+   * must stay observable through sessions.list until onExit confirms the
+   * transition.
+   */
+  requestEnd(reason: PtyEndReason): boolean {
+    if (this.pendingEndReason !== undefined) return false;
+    this.pendingEndReason = reason;
+    return true;
+  }
+
+  get endReason(): PtyEndReason | undefined {
+    return this.pendingEndReason;
+  }
+
+  get ending(): boolean {
+    return this.pendingEndReason !== undefined;
+  }
+
+  cancelEnd(): void {
+    this.pendingEndReason = undefined;
   }
 
   hasSubscribers(): boolean {
@@ -490,6 +523,7 @@ export class PtySessionManager {
   /** Forwards decoded keystroke bytes to the child PTY stdin. */
   input(label: number, dataB64: string): void {
     const session = this.requireSession(label);
+    if (session.ending) return;
     session.bridge.write(decodeBytes(dataB64));
   }
 
@@ -505,7 +539,7 @@ export class PtySessionManager {
    */
   sendPrompt(label: number, text: string): void {
     const session = this.requireSession(label);
-    if (!session.bridge.alive) return;
+    if (session.ending || !session.bridge.alive) return;
     if (session.escalationDir) {
       try {
         writeTrustedUserContext(session.escalationDir, text);
@@ -536,7 +570,7 @@ export class PtySessionManager {
     session.bridge.resize(cols, rows);
   }
 
-  /** Explicitly ends a session (kills the child -> container teardown). */
+  /** Explicitly requests termination; removal waits for the observed PTY exit. */
   end(label: number): void {
     this.endInternal(label, 'user_ended');
   }
@@ -556,8 +590,19 @@ export class PtySessionManager {
           session.bridge.kill();
         }),
     );
-    const timeout = new Promise<void>((resolve) => setTimeout(resolve, PTY_CLOSE_TIMEOUT_MS));
-    await Promise.race([Promise.allSettled(exits), timeout]);
+    let closeTimeout: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, PTY_CLOSE_TIMEOUT_MS);
+      closeTimeout = timer;
+      timer.unref();
+    });
+    try {
+      await Promise.race([Promise.allSettled(exits), timeout]);
+    } finally {
+      if (closeTimeout !== undefined) {
+        clearTimeout(closeTimeout);
+      }
+    }
   }
 
   /** SessionDto snapshots for `sessions.list`. */
@@ -643,26 +688,43 @@ export class PtySessionManager {
   }
 
   private handleExit(label: number): void {
-    // On explicit end()/idle reap the session is already removed; this fires
-    // for a child that exited on its own (agent quit / crash).
+    // This fires for a child that exited on its own (agent quit / crash) or
+    // after a requested termination. In both cases, onExit is the truthful
+    // lifecycle boundary.
     const session = this.sessions.get(label);
     if (!session) return;
     this.sessions.delete(label);
     this.clearIdleTimer(label);
     session.dispose();
-    this.eventBus.emit('session.ended', { label, reason: 'pty_exited' });
+    const reason = session.endReason ?? 'pty_exited';
+    logger.info(
+      `[WebUI] PTY session #${label}: exit observed (pid=${session.bridge.pid}, code=${session.bridge.exitCode ?? 'unknown'}, reason=${reason})`,
+    );
+    this.eventBus.emit('session.ended', { label, reason });
   }
 
-  private endInternal(label: number, reason: string): void {
+  private endInternal(label: number, reason: PtyEndReason): void {
     const session = this.sessions.get(label);
-    if (!session) return;
-    // Remove before killing so the bridge's onExit -> handleExit is a no-op
-    // (no duplicate session.ended, whether kill fires onExit sync or async).
-    this.sessions.delete(label);
+    if (!session || !session.requestEnd(reason)) return;
     this.clearIdleTimer(label);
-    session.dispose();
-    session.bridge.kill();
-    this.eventBus.emit('session.ended', { label, reason });
+    logger.info(`[WebUI] PTY session #${label}: ${reason} termination requested; waiting for PTY exit`);
+    this.eventBus.emit('session.updated', toPtySessionDto(session));
+    try {
+      session.bridge.kill();
+    } catch (error) {
+      session.cancelEnd();
+      logger.error(
+        `[WebUI] PTY session #${label}: termination request failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+      this.eventBus.emit('session.updated', toPtySessionDto(session));
+      if (!session.hasSubscribers()) this.startIdleTimer(label);
+      return;
+    }
+
+    // A bridge normally reports termination through onExit. Keep this fallback
+    // for a bridge that marks itself dead without invoking its callback; it is
+    // still truthful because the liveness probe has already changed to false.
+    if (!session.bridge.alive) this.handleExit(label);
   }
 
   private startIdleTimer(label: number): void {

@@ -7,7 +7,6 @@ import {
   type EventSideEffects,
 } from '../event-handler.js';
 import type {
-  SessionDto,
   EscalationDto,
   BudgetSummaryDto,
   OutputLine,
@@ -16,40 +15,11 @@ import type {
   LiveWorkflowPhase,
   PtySink,
 } from '../types.js';
+import { mockBudget, mockSession } from './fixtures.js';
 
 // ---------------------------------------------------------------------------
 // Factories
 // ---------------------------------------------------------------------------
-
-function mockBudget(): BudgetSummaryDto {
-  return {
-    totalTokens: 0,
-    stepCount: 0,
-    elapsedSeconds: 0,
-    estimatedCostUsd: 0,
-    tokenTrackingAvailable: true,
-    limits: {
-      maxTotalTokens: null,
-      maxSteps: null,
-      maxSessionSeconds: null,
-      maxEstimatedCostUsd: null,
-    },
-  };
-}
-
-function mockSession(label: number, overrides: Partial<SessionDto> = {}): SessionDto {
-  return {
-    label,
-    source: { kind: 'web' },
-    status: 'ready',
-    turnCount: 0,
-    createdAt: '2026-01-01T00:00:00Z',
-    hasPendingEscalation: false,
-    messageInFlight: false,
-    budget: mockBudget(),
-    ...overrides,
-  };
-}
 
 function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> } {
   const outputs = new Map<number, OutputLine[]>();

@@ -159,15 +159,17 @@ export interface SessionMetadata {
 }
 
 /**
- * The possible states a session can be in. Linear progression:
- * initializing -> ready -> (processing <-> ready) -> closed.
+ * The possible states a session can be in. Conversational sessions progress
+ * from initializing -> ready -> (processing <-> ready) -> closed; process-backed
+ * sessions may enter stopping while awaiting confirmed process exit.
  *
  * - initializing: sandbox and resources being set up
  * - ready: accepting messages
  * - processing: a message is being processed (generateText in flight)
+ * - stopping: termination requested, awaiting confirmed process exit
  * - closed: resources released, no more messages accepted
  */
-export type SessionStatus = 'initializing' | 'ready' | 'processing' | 'closed';
+export type SessionStatus = 'initializing' | 'ready' | 'processing' | 'stopping' | 'closed';
 
 /**
  * Selects the session implementation.
