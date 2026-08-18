@@ -61,7 +61,7 @@ Confirmed reuse points (plumbing review, 9/9 core claims verified):
 | Escalation dir watch + resolve-by-response-file | `createEscalationWatcher` / `.resolve` | `escalation-watcher.ts:60,131` | as-is (same leaf mux uses at `mux-escalation-manager.ts:134`) |
 | PTY registration (sessionId + escalationDir) | registry file | `pty-session.ts:1207-1219` → `~/.ironcurtain/pty-registry/session-<id>.json` | as-is |
 | Container resize all the way down | `bridge.resize` → SIGWINCH → `attachPty` `stdout.on('resize')` → `resize-pty.sh` | `pty-bridge.ts:238`, `pty-session.ts:973,927` | as-is |
-| Container teardown + resume snapshot on kill | `runPtySession` finally | `pty-session.ts:734` | as-is (SIGTERM via `bridge.kill()`) |
+| Container teardown + resume snapshot on normal termination | `runPtySession` finally | `pty-session.ts:734` | SIGTERM gets cleanup grace; force-kill may interrupt; reconcile/GC backstop |
 | Per-session targeted WS streaming + subscribe + `removeAllForClient` | `sendToSubscribers`, token-stream pattern | `web-ui-server.ts:241`, `token-stream-dispatch.ts` | pattern reused |
 | Shared label space (distinct kind) | `reserveLabel()` | `session-manager.ts:119` | as-is (same as workflow-agent labels) |
 | Escalation event + DTO consumed by UI | `escalation.created`, `EscalationDto` | `web-event-bus.ts:42`, `web-ui-types.ts` | as-is → zero escalation-UI change |
@@ -267,10 +267,19 @@ feature.**
 **Ruling — mux-faithful with a guarded backstop:**
 1. PTY sessions are **not** subject to the existing 60s turn-based orphan sweep. A transient
    disconnect detaches the client only; the child + container keep running and reconnect replays.
-2. Guaranteed reaping happens on **explicit `sessions.end`** (`bridge.kill()` → child `finally`
-   tears down container + writes resume snapshot) and on **daemon shutdown**
-   (`PtySessionManager.close()` kills all bridges with a bounded await, mirroring mux `doShutdown`,
-   `mux-app.ts:533`).
+2. **`sessions.end` is a termination request, not proof of reaping.** It asks the bridge to begin
+   shutdown and marks the session as stopping; the session is removed and `session.ended` is emitted
+   only after the lifecycle observes the child's `onExit`. The normal **SIGTERM** path receives a
+   60-second grace period for capture finalization and Docker/snapshot cleanup. If it still has not
+   exited, the bridge/lifecycle may escalate to **SIGKILL** as crash recovery. SIGKILL is not a
+   cleanup path:
+   it may interrupt the child's `finally`, so owned resources are reclaimed by later startup
+   reconciliation or explicit garbage collection. The observed-`onExit` boundary remains
+   authoritative for a tracked session: neither the SIGTERM nor force-kill request itself removes
+   the session or emits `session.ended`. **Daemon shutdown is a distinct best-effort path:**
+   `PtySessionManager.close()` clears its tracking map first, disposes the sessions, attempts all
+   kills, and waits only for a bounded shutdown window. Force-kill may interrupt cleanup, so owned
+   resources may require later startup reconciliation or explicit garbage collection.
 3. Add a **generous idle-TTL** as the leak backstop — no-clients-for-N, distinct from the 60s
    turn-based sweep. **v1: hard-code a named constant (`PTY_IDLE_TTL_MS`, 30 min)** — do NOT wire a
    config schema / Settings surface for it. A backstop that is rarely tuned does not justify the

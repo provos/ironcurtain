@@ -30,6 +30,7 @@ import { loadConfig } from '../../config/index.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
 import { BudgetExhaustedError } from '../../types/errors.js';
+import type { SessionId } from '../../session/types.js';
 import { getTokenStreamBus } from '../../docker/token-stream-bus.js';
 import * as logger from '../../logger.js';
 
@@ -107,11 +108,7 @@ export async function sessionDispatch(
         return;
       }
       const endManaged = ctx.sessionManager.get(label);
-      const endSessionId = endManaged?.session.getInfo().id;
-      await ctx.sessionManager.end(label);
-      if (endSessionId) getTokenStreamBus().endSession(endSessionId);
-      cleanupSessionQueue(ctx, label);
-      ctx.eventBus.emit('session.ended', { label, reason: 'user_ended' });
+      await endManagedSession(ctx, label, endManaged?.session.getInfo().id, 'user_ended');
       return;
     }
     case 'sessions.send': {
@@ -155,6 +152,23 @@ export async function sessionDispatch(
 /** Clean up session queue entry when session ends. */
 function cleanupSessionQueue(ctx: DispatchContext, label: number): void {
   ctx.sessionQueues.delete(label);
+}
+
+/**
+ * Ends a managed session through the full teardown sequence. `session.ended`
+ * is emitted last, after the session is gone from the manager, per the
+ * ordering contract on `WebEventMap['session.ended']`.
+ */
+async function endManagedSession(
+  ctx: DispatchContext,
+  label: number,
+  sessionId: SessionId | undefined,
+  reason: string,
+): Promise<void> {
+  await ctx.sessionManager.end(label);
+  if (sessionId) getTokenStreamBus().endSession(sessionId);
+  cleanupSessionQueue(ctx, label);
+  ctx.eventBus.emit('session.ended', { label, reason });
 }
 
 function listSessions(ctx: DispatchContext): SessionDto[] {
@@ -306,11 +320,7 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
       }
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
-        const budgetSessionId = managed.session.getInfo().id;
-        ctx.eventBus.emit('session.ended', { label, reason: `Budget exhausted: ${err.message}` });
-        await ctx.sessionManager.end(label);
-        getTokenStreamBus().endSession(budgetSessionId);
-        cleanupSessionQueue(ctx, label);
+        await endManagedSession(ctx, label, managed.session.getInfo().id, `Budget exhausted: ${err.message}`);
       } else {
         const message = err instanceof Error ? err.message : String(err);
         ctx.eventBus.emit('session.output', { label, text: `Error: ${message}`, turnNumber });

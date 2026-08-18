@@ -1,18 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 
-const { mockAppState, mockCreateSession, mockListPersonas, mockGetModelProviders } = vi.hoisted(() => ({
-  mockAppState: {
-    daemonStatus: null as Record<string, unknown> | null,
-    sessions: new Map(),
-    selectedSessionLabel: null as number | null,
-    selectedSession: null,
-    escalationDismissedAt: 0,
-  },
-  mockCreateSession: vi.fn<(opts?: unknown) => Promise<{ label: number }>>(),
-  mockListPersonas: vi.fn<() => Promise<unknown[]>>(),
-  mockGetModelProviders: vi.fn<() => Promise<{ profiles: Record<string, unknown> }>>(),
-}));
+const { mockAppState, mockCreateSession, mockListPersonas, mockGetModelProviders, mockSendPtyInput } = vi.hoisted(
+  () => ({
+    mockAppState: {
+      daemonStatus: null as Record<string, unknown> | null,
+      sessions: new Map(),
+      selectedSessionLabel: null as number | null,
+      selectedSession: null as {
+        label: number;
+        source: { kind: string };
+        status: string;
+        persona?: string;
+        turnCount: number;
+        budget: { estimatedCostUsd: number };
+      } | null,
+      escalationDismissedAt: 0,
+    },
+    mockCreateSession: vi.fn<(opts?: unknown) => Promise<{ label: number }>>(),
+    mockListPersonas: vi.fn<() => Promise<unknown[]>>(),
+    mockGetModelProviders: vi.fn<() => Promise<{ profiles: Record<string, unknown> }>>(),
+    mockSendPtyInput: vi.fn<(label: number, dataB64: string) => Promise<void>>(),
+  }),
+);
 
 vi.mock('../lib/stores.svelte.js', () => ({
   appState: mockAppState,
@@ -21,7 +31,7 @@ vi.mock('../lib/stores.svelte.js', () => ({
   listPersonas: mockListPersonas,
   attachPty: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   detachPty: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-  sendPtyInput: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  sendPtyInput: mockSendPtyInput,
   sendPtyResize: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   sendPtyPrompt: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   registerPtySink: vi.fn(),
@@ -60,6 +70,57 @@ describe('Sessions create flow guards', () => {
     mockListPersonas.mockResolvedValue([]);
     mockGetModelProviders.mockReset();
     mockGetModelProviders.mockResolvedValue({ profiles: { native: { type: 'native' } } });
+    mockSendPtyInput.mockReset();
+    mockSendPtyInput.mockResolvedValue(undefined);
+  });
+
+  it('explains PTY shutdown and disables ending it again while stopping', () => {
+    const stoppingSession = {
+      label: 4,
+      source: { kind: 'web-pty' },
+      status: 'stopping',
+      persona: undefined,
+      turnCount: 0,
+      budget: { estimatedCostUsd: 0 },
+    };
+    mockAppState.sessions = new Map([[4, stoppingSession]]);
+    mockAppState.selectedSessionLabel = 4;
+    mockAppState.selectedSession = stoppingSession;
+
+    render(Sessions);
+
+    expect(
+      screen.getByRole('status', { name: 'Stopping. Input is unavailable while shutdown completes.' }),
+    ).toBeTruthy();
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Stopping…' })).toHaveProperty('disabled', true);
+    expect(screen.getByTestId('pty-prompt-input')).toHaveProperty('disabled', true);
+    expect(screen.getByTestId('pty-prompt-send')).toHaveProperty('disabled', true);
+  });
+
+  it('suppresses terminal input while stopping but forwards it when ready', async () => {
+    const stoppingSession = {
+      label: 4,
+      source: { kind: 'web-pty' },
+      status: 'stopping',
+      persona: undefined,
+      turnCount: 0,
+      budget: { estimatedCostUsd: 0 },
+    };
+    mockAppState.sessions = new Map([[4, stoppingSession]]);
+    mockAppState.selectedSessionLabel = 4;
+    mockAppState.selectedSession = stoppingSession;
+
+    const { unmount } = render(Sessions);
+    await fireEvent.click(screen.getByTestId('test-stub-input'));
+    expect(mockSendPtyInput).not.toHaveBeenCalled();
+    unmount();
+
+    mockAppState.sessions = new Map([[4, { ...stoppingSession, status: 'ready' }]]);
+    mockAppState.selectedSession = { ...stoppingSession, status: 'ready' };
+    render(Sessions);
+    await fireEvent.click(screen.getByTestId('test-stub-input'));
+    expect(mockSendPtyInput).toHaveBeenCalledWith(4, 'AQ==');
   });
 
   it('does not create duplicate sessions from repeated native form submits while create is in flight', async () => {

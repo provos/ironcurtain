@@ -184,6 +184,19 @@
             {session.source.kind}{#if session.persona}&nbsp;&middot; {session.persona}{/if}
           </span>
         </div>
+        {#if session.status === 'stopping'}
+          <div
+            data-testid="session-stopping-status"
+            class="mt-1 inline-flex items-center gap-1.5 text-xs text-warning"
+            aria-hidden={selectedLabel === session.label ? 'true' : undefined}
+          >
+            <span
+              class="h-3 w-3 rounded-full border-2 border-warning/30 border-t-warning animate-spin"
+              aria-hidden="true"
+            ></span>
+            Stopping…
+          </div>
+        {/if}
         <div class="text-xs text-muted-foreground mt-1">
           {session.turnCount} turns &middot; {session.budget.estimatedCostUsd.toFixed(2)}
         </div>

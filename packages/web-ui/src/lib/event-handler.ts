@@ -203,6 +203,20 @@ export type WebEvent =
   | { event: 'session.pty_replay'; payload: PtyReplayEvent };
 
 /**
+ * Session-lifecycle events that carry the authoritative session state and are
+ * idempotent against the `sessions` map. The refresh barrier in
+ * stores.svelte.ts buffers these while a `sessions.list` snapshot is in flight
+ * and replays them after the snapshot lands, so a stale snapshot can never
+ * clobber a fresher event. Append-only stream events (session.output,
+ * session.pty_*) must NOT be listed — replaying those is not idempotent.
+ */
+export const SESSION_MUTATION_EVENTS: ReadonlySet<string> = new Set([
+  'session.created',
+  'session.updated',
+  'session.ended',
+]);
+
+/**
  * Parse a raw event name + payload into a typed WebEvent.
  * Returns undefined for unrecognized events.
  */

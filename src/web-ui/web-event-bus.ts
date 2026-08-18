@@ -30,6 +30,13 @@ import { TypedEventBus, type EventHandler } from '../event-bus/typed-event-bus.j
  */
 export interface WebEventMap {
   'session.created': SessionDto;
+  /**
+   * Ordering contract: emitted only AFTER the session has been removed from
+   * its manager (SessionManager / PtySessionManager), so a client that lists
+   * sessions on receipt never sees the ended session. All emitters must
+   * preserve this (see `endManagedSession` in dispatch/session-dispatch.ts
+   * and `handleExit` in pty-session-manager.ts).
+   */
   'session.ended': { label: number; reason: string };
   'session.updated': SessionDto;
   'session.thinking': { label: number; turnNumber: number };

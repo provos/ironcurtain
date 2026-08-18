@@ -19,6 +19,7 @@ import { SessionManager, type PendingEscalationData } from '../src/session/sessi
 import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
 import type { Session, SessionInfo, BudgetStatus } from '../src/session/types.js';
 import type { Transport } from '../src/session/transport.js';
+import { BudgetExhaustedError } from '../src/types/errors.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -225,6 +226,31 @@ describe('json-rpc-dispatch', () => {
       await dispatch(ctx, 'sessions.end', { label: 1 });
 
       expect(handler).toHaveBeenCalledWith('session.ended', { label: 1, reason: 'user_ended' });
+    });
+
+    it('removes a budget-exhausted session before emitting session.ended', async () => {
+      const ctx = makeCtx();
+      const transport = {
+        ...stubTransport(),
+        forwardMessage: vi.fn(),
+      } as Transport & { forwardMessage: ReturnType<typeof vi.fn> };
+      const label = ctx.sessionManager.register(stubSession(), transport, { kind: 'web' });
+      transport.forwardMessage.mockRejectedValue(new BudgetExhaustedError('tokens', 'token limit reached'));
+
+      let sessionAtEndedEvent: unknown = 'event-not-emitted';
+      ctx.eventBus.subscribe((event, payload) => {
+        if (event === 'session.ended' && payload.label === label) {
+          sessionAtEndedEvent = ctx.sessionManager.get(label);
+        }
+      });
+
+      await dispatch(ctx, 'sessions.send', { label, text: 'hello' });
+      const queuedSend = ctx.sessionQueues.get(label);
+      expect(queuedSend).toBeDefined();
+      await queuedSend;
+
+      expect(sessionAtEndedEvent).toBeUndefined();
+      expect(ctx.sessionManager.get(label)).toBeUndefined();
     });
 
     it('sessions.budget returns budget DTO', async () => {
