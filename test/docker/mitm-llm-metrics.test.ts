@@ -190,6 +190,21 @@ function proxyAuthorization(lease: MetricsInvocationLease): string {
 }
 
 /**
+ * Usage assertion that names the exchange's quality flags in its failure
+ * message.
+ *
+ * A detached or truncated observation surfaces as `outputTokensTotal: null`
+ * with no indication of why, which is exactly how the intermittent macOS
+ * failure in #427 presents. The detach reason is recorded in `qualityFlags`
+ * (see ExchangeObserver's onDetach), so carry it into the message: the next
+ * occurrence then reports the cause instead of only the symptom. This does not
+ * change what passes -- it only makes a failure legible.
+ */
+function expectUsage(exchange: LlmExchangeCompleted | undefined, expected: Record<string, unknown>): void {
+  expect(exchange?.usage, `qualityFlags: ${JSON.stringify(exchange?.qualityFlags ?? null)}`).toMatchObject(expected);
+}
+
+/**
  * Byte-identity for response payloads.
  *
  * `toEqual` deep-compares Buffers element-by-element, which costs ~5s per
@@ -574,7 +589,7 @@ describe('MITM LLM metrics integration', () => {
     const capturedResponse = await makeHttpsBufferRequest(capturedConnect.socket as Socket, ca, requestBody);
     expectBytesEqual(capturedResponse.body, compressed);
     await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(1);
-    expect(exchanges[0]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
+    expectUsage(exchanges[0], { inputTokensTotal: 8, outputTokensTotal: 4242 });
     expect(exchanges[0]?.qualityFlags).not.toContain('consumer-decoded-byte-limit');
     await captureWriter.endSession(captureSessionId);
     expect(captureWriter.stats()).toMatchObject({ written: 1, dropped: 0, openSessions: 0 });
@@ -584,7 +599,7 @@ describe('MITM LLM metrics integration', () => {
     const uncapturedResponse = await makeHttpsBufferRequest(uncapturedConnect.socket as Socket, ca, requestBody);
     expectBytesEqual(uncapturedResponse.body, compressed);
     await expect.poll(() => exchanges.length, { timeout: 10_000 }).toBe(2);
-    expect(exchanges[1]?.usage).toMatchObject({ inputTokensTotal: 8, outputTokensTotal: 4242 });
+    expectUsage(exchanges[1], { inputTokensTotal: 8, outputTokensTotal: 4242 });
   }, 60_000);
 
   it('finalizes once when the client aborts a live upstream stream', async () => {
