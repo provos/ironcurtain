@@ -163,9 +163,19 @@ function buildConfig(overrides: Partial<IronCurtainConfig> = {}): IronCurtainCon
 
 describe('checkNodeVersion', () => {
   it('passes for supported (even-numbered) major versions', () => {
-    expect(checkNodeVersion('22.13.0').status).toBe('ok');
+    expect(checkNodeVersion('22.15.0').status).toBe('ok');
     expect(checkNodeVersion('24.0.0').status).toBe('ok');
     expect(checkNodeVersion('26.0.0').status).toBe('ok');
+  });
+
+  it('fails below the 22.15 minor floor (module.registerHooks)', () => {
+    const result = checkNodeVersion('22.13.0');
+    expect(result.status).toBe('fail');
+    expect(result.hint).toMatch(/registerHooks/);
+    expect(checkNodeVersion('22.14.9').status).toBe('fail');
+    expect(checkNodeVersion('22.15.0').status).toBe('ok');
+    // The floor applies only to the oldest major, not to later lines.
+    expect(checkNodeVersion('24.0.0').status).toBe('ok');
   });
 
   it('warns for in-range non-LTS (odd) major versions', () => {
@@ -908,7 +918,7 @@ describe('checkAgentApiRoundtrip', () => {
 describe('CheckResult shape', () => {
   it('all unit checks return a name, status, and message', () => {
     const samples: CheckResult[] = [
-      checkNodeVersion('22.13.0'),
+      checkNodeVersion('22.15.0'),
       checkAnnotationDrift({ generatedAt: '', servers: {} }, {}),
     ];
     for (const r of samples) {

@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixes
+
+- **LLM-metrics SQLite workers boot without `tsx` on Node 22** — the persistence workers were spawned with `execArgv: ['--import', 'tsx']` for source runs, but tsx's loader hooks do not take effect inside worker threads on Node 22, so the worker failed to load its TypeScript sources. Source runs now boot through a self-contained ESM entry shim that registers a `.js` → `.ts` specifier remap hook in-thread and relies on Node's native type stripping; compiled runs load the emitted `.js` worker directly and spawn no shim.
+
+### Behavior changes
+
+- **Node.js engine floor raised to 22.15.0** (from 22.13.0). The SQLite worker entry shim registers its resolve hook via `module.registerHooks`, the synchronous module-customization API added in Node 22.15; the older async `module.register()` API cannot express the hook correctly and is now deprecated (`DEP0205`). Node 22.13/22.14 are the only versions dropped — 22.15+, 24, and 26 are unaffected, and `ironcurtain doctor` now reports sub-22.15 as a failure rather than an `ok`. CI additionally gained a `workflow_dispatch` trigger so the Node 22 job (otherwise master-push-only) can be run on demand against a PR branch.
 
 ## [0.13.0] - 2026-07-11
 

@@ -121,13 +121,27 @@ function sanitizeError(error: unknown): string {
 }
 
 function workerUrl(): URL {
-  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
-  return new URL(`./sqlite-worker.${extension}`, import.meta.url);
+  // Source runs boot through the .mjs entry shim, which registers the
+  // .js -> .ts specifier remap hook itself; compiled runs load the .js worker.
+  return import.meta.url.endsWith('.ts')
+    ? new URL('./sqlite-worker-entry.mjs', import.meta.url)
+    : new URL('./sqlite-worker.js', import.meta.url);
 }
 
-function defaultWorkerFactory(url: URL, options: WorkerOptions): Worker {
-  const tsOptions = url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {};
-  return new Worker(url, { ...options, ...tsOptions });
+/**
+ * Default worker spawn. Exported so tests that wrap the factory (to count or
+ * fault-inject spawns) delegate here instead of re-implementing the spawn and
+ * silently drifting from the flags production actually uses.
+ */
+export function defaultWorkerFactory(url: URL, options: WorkerOptions): Worker {
+  // The entry shim loads .ts sources via native type stripping, which is
+  // flag-gated before Node 22.18 and a silent no-op afterwards. The worker
+  // must be self-contained: tsx's loader hooks do not take effect inside
+  // worker threads on Node 22, so inheriting the parent's loaders is unsafe.
+  if (url.pathname.endsWith('.mjs')) {
+    return new Worker(url, { ...options, execArgv: ['--experimental-strip-types'] });
+  }
+  return new Worker(url, options);
 }
 
 function estimateBytes(exchange: LlmExchangeCompleted): number {

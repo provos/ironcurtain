@@ -13,6 +13,10 @@ on:
       - '**/*.md'
       - 'docs/**'
       - 'LICENSE'
+  # Manual trigger: the Node 22 job is otherwise master-push-only, so a PR can
+  # never validate a Node-22-specific fix before merge. Run this workflow from
+  # the Actions tab on the PR branch to get the full matrix, Node 22 included.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -30,10 +34,11 @@ jobs:
         node-version: [24, 26]
         # Node 22 has NO isolated-vm 7.0.0 prebuild → it source-compiles via
         # node-gyp during `npm ci` (~tens of seconds on CI). Run it on master
-        # pushes only, and ubuntu-only, to keep that cost off every PR and off
-        # the ~10x-pricier macOS runners. `push` here fires only on master (see
-        # trigger above), so github.event_name == 'push' means "a master push".
-        include: ${{ github.event_name == 'push' && fromJSON('[{"os":"ubuntu-latest","node-version":22}]') || fromJSON('[]') }}
+        # pushes and on manual dispatch only, and ubuntu-only, to keep that cost
+        # off every PR and off the ~10x-pricier macOS runners. `push` here fires
+        # only on master (see trigger above), so github.event_name == 'push'
+        # means "a master push"; workflow_dispatch lets a PR opt in on demand.
+        include: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && fromJSON('[{"os":"ubuntu-latest","node-version":22}]') || fromJSON('[]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
