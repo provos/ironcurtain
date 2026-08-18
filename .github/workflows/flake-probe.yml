@@ -47,6 +47,10 @@ jobs:
           echo "isolate dispose-race patch applied: $(grep -c 'await Promise.allSettled(\[runPromise\])' node_modules/@utcp/code-mode/dist/index.js || echo 0)"
       - name: Loop and count worker deaths
         run: |
+          # NOTE: GitHub runs `run:` steps under `bash -e`. A non-zero vitest
+          # exit -- the very event this loop exists to count -- would abort the
+          # step, so every vitest invocation is wrapped in an `if` (exempt from
+          # errexit) and its status captured explicitly.
           set -uo pipefail
           ISOLATED_VM_FILES="test/workflow-policy-cycling.integration.test.ts test/help-integration.test.ts test/docker-code-mode.integration.test.ts test/sandbox-tool-errors.integration.test.ts"
           case "${{ inputs.target }}" in
@@ -55,26 +59,36 @@ jobs:
             full)                ARGS="" ;;
           esac
           SIG='Worker exited unexpectedly|prevents Vite server from exiting|close timed out after [0-9]+ms'
-          hits=0; testfails=0; n=${{ inputs.iterations }}
+          hits=0; testfails=0; other=0; n=${{ inputs.iterations }}
           for i in $(seq 1 "$n"); do
-            out="$(npx vitest run $ARGS 2>&1 | perl -pe 's/\x1b\[[0-9;]*m//g')"
+            if out="$(npx vitest run $ARGS 2>&1 | perl -pe 's/\x1b\[[0-9;]*m//g')"; then ec=0; else ec=$?; fi
+            tag="ok"
             if printf '%s\n' "$out" | grep -qE "$SIG"; then
-              hits=$((hits+1)); echo "::warning::attempt $i/$n: WORKER DEATH"
-              printf '%s\n' "$out" | grep -E "$SIG" | head -3
+              hits=$((hits+1)); tag="WORKER-DEATH"
+              echo "::warning::attempt $i/$n: worker death"
+              printf '%s\n' "$out" | grep -E "$SIG" | head -2
+            elif printf '%s\n' "$out" | grep -qE '(Test Files|Tests)[[:space:]]+[0-9]+ failed'; then
+              testfails=$((testfails+1)); tag="TEST-FAILURE"
+              echo "::warning::attempt $i/$n: real test failure"
+              printf '%s\n' "$out" | grep -E "^ *FAIL " | head -5
+            elif [ "$ec" -ne 0 ]; then
+              other=$((other+1)); tag="OTHER-NONZERO(ec=$ec)"
+              printf '%s\n' "$out" | tail -15
             fi
-            if printf '%s\n' "$out" | grep -qE '(Test Files|Tests)[[:space:]]+[0-9]+ failed'; then
-              testfails=$((testfails+1)); echo "::warning::attempt $i/$n: REAL TEST FAILURE"
-              printf '%s\n' "$out" | grep -E "FAIL |(Test Files|Tests)[[:space:]]+[0-9]+ failed" | head -5
-            fi
-            echo "attempt $i/$n done (worker-deaths=$hits real-failures=$testfails)"
+            summary="$(printf '%s\n' "$out" | grep -E '^ *(Test Files|Tests) ' | tr '\n' ' ' | sed 's/  */ /g')"
+            echo "attempt $i/$n [$tag] ec=$ec | $summary"
+            echo "  running totals: worker-deaths=$hits test-failures=$testfails other=$other"
           done
-          echo "### Flake probe result" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| field | value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| target | ${{ inputs.target }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| runner / node | ${{ inputs.os }} / ${{ inputs.node-version }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| attempts | $n |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| worker deaths | $hits |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| real test failures | $testfails |" >> "$GITHUB_STEP_SUMMARY"
-          echo "worker-deaths=$hits real-failures=$testfails out of $n attempts"
+          {
+            echo "### Flake probe result"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| target | ${{ inputs.target }} |"
+            echo "| runner / node | ${{ inputs.os }} / ${{ inputs.node-version }} |"
+            echo "| attempts | $n |"
+            echo "| worker deaths | $hits |"
+            echo "| real test failures | $testfails |"
+            echo "| other non-zero exits | $other |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "RESULT worker-deaths=$hits test-failures=$testfails other=$other out of $n attempts"
