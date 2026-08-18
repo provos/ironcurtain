@@ -395,6 +395,11 @@ exit $STATUS
         // watchdog off restores the pre-2.1.196 behavior; the workflow
         // orchestrator already enforces its own wall-clock/step budgets.
         CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
+        // DGX-backed gateway requests can have a long quiet prefill or
+        // reasoning interval before the first response byte. Extend Claude
+        // Code's byte-idle watchdog to its documented 30-minute maximum for
+        // batch/workflow containers only.
+        CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: '1800000',
       };
     },
 

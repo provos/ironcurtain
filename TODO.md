@@ -14,6 +14,13 @@ Other Omnigent-inspired candidates (security-aligned extensions to the trust bou
 - Two-person / quorum approval for high-risk escalations (separation of duties) — a security-flavored take on Omnigent's collaboration, riding on the existing escalation flow. NOT general free-form multi-human steering.
 - Explicitly NOT a fit: remote/cloud execution backends (Modal/Daytona) — breaks IronCurtain's co-located trust model (host-side proxies, credentials on host); would be a trust-boundary redesign, not a feature.
 
+- allow harness design review to return to the orchestrator
+- switch to CVSS 4.0
+- test persona constitution and policy feature
+- need to create memory for each session
+- need to compile policy for each server separately.
+- need to override agent loop memory with new memory system
+
 Done:
 
 - implement memory-mcp-server.md

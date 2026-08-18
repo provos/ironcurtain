@@ -18,6 +18,8 @@ confirm it still exists before acting.
 - [memory-mcp-server](memory-mcp-server.md) — MemoryEngine/EngineModules seam, store/insert/merge internals (updateMemoryContent stamps updated_at=now & MAX importance), real-embedder+mocked-LLM test pattern, memory-ingest §5.4/§11 updated_at inconsistency.
 - [Web UI testing](web-ui-testing.md) — Svelte 5 stub-component `vi.mock` pattern, App.svelte mocking, drawer query pattern; stubs in `packages/web-ui/src/__test_stubs__/`.
 - [Web-UI PTY terminal frontend](web-ui-pty-frontend.md) — web-pty protocol/DTO; pure event-handler -> per-label sink registry seam (`EventSideEffects.getPtySink`, forwards raw base64; component decodes at term.write); pty-codec UTF-8 base64; features/ may import pure leaves (not stores); non-churning `$derived`-primitive attach pattern; `{#key label}` remount; D2 guard; xterm@6/addon-fit@0.11 pins; mock `MOCK_SESSION_MODE=docker`.
+- [Docker agent adapters](docker-agent-adapters.md) — extractResponse quota/transient contract, Codex JSONL envelope assumptions, resolveRealKey/canRefreshOAuth helpers, prepareConversationStateDir cred scrub, MITM bearer 401-retry.
+- [Trajectory reassemblers](trajectory-reassemblers.md) — AbstractSseReassembler base + Anthropic/ChatCompletions/Responses; canFinalize lifecycle; byte-fidelity splice rules; Responses assembles from output_item.done (NOT response.completed envelope which is empty).
 
 ## Tooling / build / infra
 - [scripts dir tooling](scripts-dir-tooling.md) — `scripts/*.ts` are tsx-run and OUTSIDE eslint+all tsconfigs; how to verify out-of-band; driver-owns-db corpus pattern incl. `NaN as_of` created_at-corruption trap + determinism recipe.
