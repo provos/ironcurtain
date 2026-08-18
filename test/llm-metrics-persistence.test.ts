@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { LlmStatisticsQueryService } from '../src/llm-metrics/query-service.js';
 import { LlmMetricsRepositoryUnavailableError } from '../src/llm-metrics/persistence/repository.js';
-import { SqliteLlmMetricsRepository } from '../src/llm-metrics/persistence/sqlite-repository.js';
+import { defaultWorkerFactory, SqliteLlmMetricsRepository } from '../src/llm-metrics/persistence/sqlite-repository.js';
 import type { LlmExchangeCompleted } from '../src/llm-metrics/types.js';
 
 const BASE_TIME = Date.parse('2026-08-15T12:00:00.000Z');
@@ -332,10 +332,7 @@ describe('SQLite LLM metrics repository', () => {
     const opened = await repository({
       readWorkerFactory: (url, options) => {
         readerWorkers++;
-        return new Worker(url, {
-          ...options,
-          ...(url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {}),
-        });
+        return defaultWorkerFactory(url, options);
       },
     });
     opened.repository.enqueue(exchange('exchange-safe-query'));
@@ -692,10 +689,7 @@ describe('SQLite LLM metrics repository', () => {
             { eval: true },
           );
         }
-        return new Worker(url, {
-          ...options,
-          ...(url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {}),
-        });
+        return defaultWorkerFactory(url, options);
       },
     });
 
@@ -730,10 +724,7 @@ describe('SQLite LLM metrics repository', () => {
             { eval: true },
           );
         }
-        return new Worker(url, {
-          ...options,
-          ...(url.pathname.endsWith('.ts') ? { execArgv: ['--import', 'tsx'] } : {}),
-        });
+        return defaultWorkerFactory(url, options);
       },
     });
     const query = { fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 };

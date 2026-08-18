@@ -65,6 +65,17 @@ export default tseslint.config(
       ],
     },
   },
+  // Plain-ESM runtime shims under src/ (worker entry points, loader hooks).
+  // They ship as .mjs because they must run without tsc, so they are outside
+  // the tsconfig.eslint project — lint them with the untyped ruleset rather
+  // than skipping them entirely.
+  {
+    files: ['src/**/*.mjs'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      parserOptions: { project: null, projectService: false },
+    },
+  },
   // Relaxed rules for test files — mocking patterns, deprecated API testing,
   // and vitest callbacks make strict unsafe-* rules too noisy.
   {
