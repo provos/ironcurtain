@@ -8,7 +8,11 @@ settings:
   sharedContainer: true
   model: anthropic:claude-opus-4-8[1m]
   maxRounds: 12
-  maxSessionSeconds: 10800
+  # Per-turn wall clock (becomes the docker-exec timeout). Sized for
+  # self-hosted gateways: with the agent's byte-idle watchdog disabled,
+  # this budget is the only backstop against a wedged upstream, so it
+  # must exceed the slowest legitimate turn rather than truncate it.
+  maxSessionSeconds: 21600
   unversionedArtifacts:
     - journal
   systemPrompt: |

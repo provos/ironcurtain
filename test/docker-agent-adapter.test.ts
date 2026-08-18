@@ -505,6 +505,94 @@ describe('Claude Code Adapter', () => {
     expect(claudeCodeAdapter.extractResponse(1, noFlag).transientFailure).toBeUndefined();
   });
 
+  /**
+   * Verbatim shape of the envelope Claude Code emits when its byte-stream
+   * idle watchdog aborts a request ("the response stopped arriving").
+   * Captured from workflow run a822c784 — all six aborts in that run had
+   * this shape, and every one of them fell through every detector.
+   */
+  function makeTerminalApiErrorEnvelope(extras: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: null,
+      stop_reason: 'stop_sequence',
+      usage: { input_tokens: 467920, output_tokens: 83614 },
+      result: 'API Error: The response stopped arriving. The response above may be incomplete.',
+      ...extras,
+    });
+  }
+
+  it('surfaces transientFailure as upstream_api_error on the captured idle-watchdog envelope (exit=1)', () => {
+    const response = claudeCodeAdapter.extractResponse(1, makeTerminalApiErrorEnvelope());
+    expect(response.transientFailure).toBeDefined();
+    expect(response.transientFailure!.kind).toBe('upstream_api_error');
+    expect(response.text).toContain('The response stopped arriving');
+    // Must NOT be a hardFailure: rotating the conversation id would discard
+    // the state's partial transcript for an upstream that simply went quiet.
+    expect(response.hardFailure).toBeUndefined();
+    expect(response.quotaExhausted).toBeUndefined();
+  });
+
+  it('classifies the stall envelope regardless of how much output was already yielded', () => {
+    // The two sibling detectors both key off output volume / stop_reason;
+    // the stall is orthogonal to both. Real captures ranged 0..83614 tokens.
+    for (const outputTokens of [0, 405, 12283, 83614]) {
+      const envelope = makeTerminalApiErrorEnvelope({
+        usage: { input_tokens: 1000, output_tokens: outputTokens },
+      });
+      expect(claudeCodeAdapter.extractResponse(1, envelope).transientFailure?.kind).toBe('upstream_api_error');
+    }
+  });
+
+  it('classifies a failed-connection envelope the same way (not just idle stalls)', () => {
+    // Captured verbatim from a Claude Code run against an unreachable base URL.
+    // Byte-idle stall and connection failure are indistinguishable at this
+    // layer: same type/is_error/terminal_reason/api_error_status/stop_reason.
+    const envelope = makeTerminalApiErrorEnvelope({
+      usage: { input_tokens: 0, output_tokens: 0 },
+      result: 'API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.transientFailure?.kind).toBe('upstream_api_error');
+    expect(response.hardFailure).toBeUndefined();
+  });
+
+  it('does not flag upstream_api_error when terminal_reason is absent or "completed"', () => {
+    // `terminal_reason` is a closed enum in practice (completed | api_error).
+    // A `completed` run that merely exited non-zero must stay on the generic
+    // path so real errors are not swallowed into a resumable abort.
+    for (const terminal_reason of [undefined, 'completed', 'cancelled']) {
+      const envelope = makeTerminalApiErrorEnvelope({ terminal_reason });
+      expect(claudeCodeAdapter.extractResponse(1, envelope).transientFailure).toBeUndefined();
+    }
+  });
+
+  it('does not flag upstream_api_error when is_error is false (predicate strictness)', () => {
+    const envelope = makeTerminalApiErrorEnvelope({ is_error: false });
+    expect(claudeCodeAdapter.extractResponse(1, envelope).transientFailure).toBeUndefined();
+  });
+
+  it('prefers upstream_5xx over upstream_api_error when both signals are present', () => {
+    // A real 5xx envelope also carries terminal_reason: api_error. The more
+    // specific classification (numeric HTTP status) must win, so the 5xx
+    // detector has to run first.
+    const envelope = makeTerminalApiErrorEnvelope({ api_error_status: 503 });
+    expect(claudeCodeAdapter.extractResponse(1, envelope).transientFailure?.kind).toBe('upstream_5xx');
+  });
+
+  it('prefers quotaExhausted over upstream_api_error when both signals are present', () => {
+    const envelope = makeTerminalApiErrorEnvelope({
+      api_error_status: 429,
+      result: 'Usage limit reached for 5 hour. Your limit will reset at 2026-05-16 22:00:00',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.quotaExhausted).toBeDefined();
+    expect(response.transientFailure).toBeUndefined();
+  });
+
   it('does not break the existing 429 (quota) path — 429 must still route to quotaExhausted', () => {
     // Mutual-exclusion regression guard: the new 5xx detector must run
     // AFTER the quota check so a 429 envelope (which would also pass
