@@ -177,6 +177,32 @@ describe('Claude Code adapter PTY orientation files', () => {
     expect(batchEnv?.CLAUDE_ENABLE_STREAM_WATCHDOG).toBe('0');
   });
 
+  it('disables the byte-stream idle watchdog for batch/workflow containers', () => {
+    // Both watchdogs must be off for one-shot runs. Disabling only the
+    // stream watchdog leaves the byte watchdog owning the idle deadline,
+    // and that deadline is hard-clamped to 30 minutes inside the CLI —
+    // unreachable for a self-hosted gateway whose single responses can run
+    // longer than that, or that answers non-streaming (no bytes at all
+    // until generation completes).
+    const config = { userConfig: { anthropicApiKey: 'sk-test' } } as import('../src/config/types.js').IronCurtainConfig;
+    const batchEnv = claudeCodeAdapter.buildBatchEnv?.(config, new Map([['api.anthropic.com', 'sk-ant-fake']]));
+
+    expect(batchEnv?.CLAUDE_ENABLE_BYTE_WATCHDOG).toBe('0');
+    expect(batchEnv?.CLAUDE_ENABLE_STREAM_WATCHDOG).toBe('0');
+    // Ceiling retained so a re-enabled watchdog gets the most generous
+    // deadline the CLI allows rather than the 3-minute first-party default.
+    expect(batchEnv?.CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS).toBe('1800000');
+  });
+
+  it('leaves the byte watchdog untouched for interactive PTY sessions', () => {
+    vi.stubEnv('CLAUDE_ENABLE_BYTE_WATCHDOG', undefined);
+    const env = claudeCodeAdapter.buildEnv(
+      { userConfig: { anthropicApiKey: 'sk-test' } } as import('../src/config/types.js').IronCurtainConfig,
+      new Map([['api.anthropic.com', 'sk-ant-fake']]),
+    );
+    expect(env.CLAUDE_ENABLE_BYTE_WATCHDOG).toBeUndefined();
+  });
+
   it('start-claude.sh includes stty initialization from env vars', () => {
     const files = claudeCodeAdapter.generateOrientationFiles();
     const startScript = files.find((f) => f.path === 'start-claude.sh');

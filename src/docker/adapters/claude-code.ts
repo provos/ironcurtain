@@ -395,10 +395,27 @@ exit $STATUS
         // watchdog off restores the pre-2.1.196 behavior; the workflow
         // orchestrator already enforces its own wall-clock/step budgets.
         CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
-        // DGX-backed gateway requests can have a long quiet prefill or
-        // reasoning interval before the first response byte. Extend Claude
-        // Code's byte-idle watchdog to its documented 30-minute maximum for
-        // batch/workflow containers only.
+        // Disable the BYTE-stream idle watchdog for batch/workflow
+        // containers. This is separate from CLAUDE_ENABLE_STREAM_WATCHDOG
+        // above: turning that one off leaves the byte watchdog in charge of
+        // the idle deadline, and the byte deadline is HARD-CLAMPED to 30
+        // minutes inside the CLI (floor 10s, ceiling 1_800_000ms; the
+        // default is 180_000ms — 3 min — whenever the base URL resolves to
+        // api.anthropic.com, which is exactly what the MITM presents).
+        //
+        // A self-hosted gateway (e.g. a DGX-backed vLLM lane) can legitimately
+        // take longer than 30 minutes to produce a single response, and some
+        // requests arrive NON-streaming, where no bytes at all reach the client
+        // until generation completes. For those, no idle value below the full
+        // generation time can ever pass — the ceiling is unreachable by
+        // construction. Turning the watchdog off is the only setting that
+        // tolerates them; the orchestrator's per-turn wall-clock budget
+        // (`resourceBudget.maxSessionSeconds`, applied as the docker-exec
+        // timeout) remains the backstop against a genuinely wedged upstream.
+        CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
+        // Kept at the ceiling so that if the watchdog is ever re-enabled
+        // (host env / future default flip), the deadline is as generous as
+        // the CLI permits rather than the 3-minute first-party default.
         CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: '1800000',
       };
     },
@@ -434,6 +451,10 @@ exit $STATUS
         const transient = parsed ? detectTransientFailure(parsed, stdout) : undefined;
         if (transient) {
           return asTransientFailure('degenerate_response', transient.rawMessage);
+        }
+        const apiError = parsed ? detectTerminalApiError(parsed, stdout) : undefined;
+        if (apiError) {
+          return asTransientFailure('upstream_api_error', apiError.rawMessage);
         }
         // Zero output on non-zero exit indicates the claude process was
         // killed (SIGTERM) or crashed before producing any assistant text —
@@ -580,6 +601,42 @@ function detectUpstreamFiveXx(parsed: Record<string, unknown>, stdout: string): 
   const status = parsed.api_error_status;
   if (typeof status !== 'number') return undefined;
   if (status < 500 || status >= 600) return undefined;
+  return { rawMessage: stdout.trim() };
+}
+
+/**
+ * Detects the terminal API-error envelope: Claude Code's API layer gave up on
+ * the turn after exhausting its internal retries, and the CLI finalized
+ * whatever partial content it had.
+ *
+ * Recognizable ONLY by `terminal_reason === 'api_error'`. This covers more
+ * than one underlying cause — the byte-stream idle watchdog firing ("the
+ * response stopped arriving") and a failed connection ("Connection refused")
+ * both produce it, with an identical envelope shape — so the kind is named
+ * for the signal, not for a mechanism it cannot actually distinguish.
+ *
+ * The sibling detectors cannot see this envelope:
+ *   - `detectUpstreamFiveXx` requires a numeric `api_error_status`; this
+ *     envelope carries `null` (there is no HTTP status — no response ever
+ *     completed).
+ *   - `detectTransientFailure` requires `output_tokens === 0` and a null
+ *     `stop_reason`; an abort that interrupts a partially-yielded response
+ *     reports the tokens already emitted, and the CLI *synthesizes* a
+ *     `stop_reason` (observed: `"stop_sequence"`) for the partial message.
+ *
+ * Without this branch the envelope falls through to the generic
+ * `Agent exited with code N` text, and the orchestrator mistakes a dead turn
+ * for one that merely forgot its `agent_status` block — burning its single
+ * reprompt on a conversation the CLI can no longer continue.
+ *
+ * `terminal_reason` is a closed enum in practice (`completed` | `api_error`
+ * across every captured run), so gating on it has no false-positive surface
+ * beyond the `is_error === true` guard that already precedes it.
+ */
+function detectTerminalApiError(parsed: Record<string, unknown>, stdout: string): { rawMessage: string } | undefined {
+  if (parsed.type !== 'result') return undefined;
+  if (parsed.is_error !== true) return undefined;
+  if (parsed.terminal_reason !== 'api_error') return undefined;
   return { rawMessage: stdout.trim() };
 }
 

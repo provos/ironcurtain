@@ -384,6 +384,7 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
     expect(adapter.buildBatchEnv?.(nativeConfig, fakeKeys)).toEqual({
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
       CLAUDE_ENABLE_STREAM_WATCHDOG: '0',
+      CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
       CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: '1800000',
     });
     // No OpenRouter vars leaked in.

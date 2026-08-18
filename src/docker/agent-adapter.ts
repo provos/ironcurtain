@@ -104,7 +104,7 @@ export interface AgentResponse {
  * Discriminant for the `transientFailure.kind` field. Exported as a single
  * source of truth so adding a new kind only requires editing one file.
  */
-export type TransientFailureKind = 'degenerate_response' | 'upstream_5xx';
+export type TransientFailureKind = 'degenerate_response' | 'upstream_5xx' | 'upstream_api_error';
 
 /**
  * Human-readable description of a transient-failure kind, used in
@@ -118,6 +118,8 @@ export function describeTransientFailureKind(kind: TransientFailureKind): string
       return 'agent returned no content (output_tokens=0, stop_reason=null)';
     case 'upstream_5xx':
       return 'upstream returned a 5xx error after SDK retries exhausted';
+    case 'upstream_api_error':
+      return "agent's API layer aborted the turn after internal retries (stalled stream or failed connection)";
   }
 }
 
