@@ -78,6 +78,7 @@
     "check:cycles": "madge --circular --extensions ts --ts-config tsconfig.json src",
     "format": "prettier --log-level=warn --write 'src/**/*.ts' 'src/**/*.mjs' 'test/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'src/**/*.mjs' 'test/**/*.ts'",
+    "prepare": "patch-package",
     "pre-commit": "lint-staged",
     "setup-hooks": "cp .hooks/pre-commit .git/hooks/pre-commit && cp .hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-commit .git/hooks/pre-push && echo 'Pre-commit and pre-push hooks installed.'"
   },
@@ -152,6 +153,7 @@
     "eslint-config-prettier": "^10.1.8",
     "lint-staged": "^17.0.8",
     "madge": "^8.0.0",
+    "patch-package": "^8.0.1",
     "prettier": "^3.8.4",
     "smol-toml": "^1.4.2",
     "tsx": "^4.22.4",

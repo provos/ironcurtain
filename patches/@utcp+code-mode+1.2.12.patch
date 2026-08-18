@@ -1,0 +1,60 @@
+diff --git a/node_modules/@utcp/code-mode/dist/index.cjs b/node_modules/@utcp/code-mode/dist/index.cjs
+index a2108fc..07810c4 100644
+--- a/node_modules/@utcp/code-mode/dist/index.cjs
++++ b/node_modules/@utcp/code-mode/dist/index.cjs
+@@ -190,6 +190,7 @@ ${interfaces.join("\n\n")}`;
+     const logs = [];
+     const isolate = new import_isolated_vm.default.Isolate({ memoryLimit });
+     let timeoutHandle;
++    let runPromise;
+     try {
+       const context = await isolate.createContext();
+       const jail = context.global;
+@@ -235,7 +236,8 @@ ${interfaces.join("\n\n")}`;
+       timeoutPromise.catch(() => {
+       });
+       const script = await isolate.compileScript(wrappedCode);
+-      script.run(context, { timeout }).catch(() => {
++      runPromise = script.run(context, { timeout });
++      runPromise.catch(() => {
+       });
+       const resultJson = await settledPromise;
+       const result = JSON.parse(resultJson).__result;
+@@ -248,6 +250,7 @@ ${interfaces.join("\n\n")}`;
+       };
+     } finally {
+       if (timeoutHandle) clearTimeout(timeoutHandle);
++      if (runPromise) await Promise.allSettled([runPromise]);
+       isolate.dispose();
+     }
+   }
+diff --git a/node_modules/@utcp/code-mode/dist/index.js b/node_modules/@utcp/code-mode/dist/index.js
+index c5788fd..19f1d3c 100644
+--- a/node_modules/@utcp/code-mode/dist/index.js
++++ b/node_modules/@utcp/code-mode/dist/index.js
+@@ -154,6 +154,7 @@ ${interfaces.join("\n\n")}`;
+     const logs = [];
+     const isolate = new ivm.Isolate({ memoryLimit });
+     let timeoutHandle;
++    let runPromise;
+     try {
+       const context = await isolate.createContext();
+       const jail = context.global;
+@@ -199,7 +200,8 @@ ${interfaces.join("\n\n")}`;
+       timeoutPromise.catch(() => {
+       });
+       const script = await isolate.compileScript(wrappedCode);
+-      script.run(context, { timeout }).catch(() => {
++      runPromise = script.run(context, { timeout });
++      runPromise.catch(() => {
+       });
+       const resultJson = await settledPromise;
+       const result = JSON.parse(resultJson).__result;
+@@ -212,6 +214,7 @@ ${interfaces.join("\n\n")}`;
+       };
+     } finally {
+       if (timeoutHandle) clearTimeout(timeoutHandle);
++      if (runPromise) await Promise.allSettled([runPromise]);
+       isolate.dispose();
+     }
+   }
