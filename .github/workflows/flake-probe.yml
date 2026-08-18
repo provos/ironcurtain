@@ -1,0 +1,80 @@
+# Manual instrument for issue #363: the macOS vitest teardown flake.
+#
+# Runs one slice of the suite in a loop and counts how many attempts hit the
+# worker-death signature. Deliberately calls `npx vitest run` directly rather
+# than `npm test`, because scripts/test.sh retries on exactly this signature
+# and would mask what we are trying to measure.
+#
+# Measured baseline (issue #363): ~10.2% of macOS root-suite attempts, 0% on
+# Linux. At that rate ~40 attempts distinguishes "fixed" from "unchanged".
+name: Flake probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which slice to loop
+        type: choice
+        default: isolated-vm
+        options: [isolated-vm, exclude-isolated-vm, full]
+      iterations:
+        description: Number of attempts
+        type: string
+        default: '40'
+      node-version:
+        description: Node major version
+        type: string
+        default: '26'
+      os:
+        description: Runner
+        type: choice
+        default: macos-latest
+        options: [macos-latest, ubuntu-latest]
+
+jobs:
+  probe:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci --foreground-scripts
+      - name: Report patch state
+        run: |
+          echo "isolate dispose-race patch applied: $(grep -c 'await Promise.allSettled(\[runPromise\])' node_modules/@utcp/code-mode/dist/index.js || echo 0)"
+      - name: Loop and count worker deaths
+        run: |
+          set -uo pipefail
+          ISOLATED_VM_FILES="test/workflow-policy-cycling.integration.test.ts test/help-integration.test.ts test/docker-code-mode.integration.test.ts test/sandbox-tool-errors.integration.test.ts"
+          case "${{ inputs.target }}" in
+            isolated-vm)         ARGS="$ISOLATED_VM_FILES" ;;
+            exclude-isolated-vm) ARGS=""; for f in $ISOLATED_VM_FILES; do ARGS="$ARGS --exclude $f"; done ;;
+            full)                ARGS="" ;;
+          esac
+          SIG='Worker exited unexpectedly|prevents Vite server from exiting|close timed out after [0-9]+ms'
+          hits=0; testfails=0; n=${{ inputs.iterations }}
+          for i in $(seq 1 "$n"); do
+            out="$(npx vitest run $ARGS 2>&1 | perl -pe 's/\x1b\[[0-9;]*m//g')"
+            if printf '%s\n' "$out" | grep -qE "$SIG"; then
+              hits=$((hits+1)); echo "::warning::attempt $i/$n: WORKER DEATH"
+              printf '%s\n' "$out" | grep -E "$SIG" | head -3
+            fi
+            if printf '%s\n' "$out" | grep -qE '(Test Files|Tests)[[:space:]]+[0-9]+ failed'; then
+              testfails=$((testfails+1)); echo "::warning::attempt $i/$n: REAL TEST FAILURE"
+              printf '%s\n' "$out" | grep -E "FAIL |(Test Files|Tests)[[:space:]]+[0-9]+ failed" | head -5
+            fi
+            echo "attempt $i/$n done (worker-deaths=$hits real-failures=$testfails)"
+          done
+          echo "### Flake probe result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| field | value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| target | ${{ inputs.target }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| runner / node | ${{ inputs.os }} / ${{ inputs.node-version }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| attempts | $n |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| worker deaths | $hits |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| real test failures | $testfails |" >> "$GITHUB_STEP_SUMMARY"
+          echo "worker-deaths=$hits real-failures=$testfails out of $n attempts"
