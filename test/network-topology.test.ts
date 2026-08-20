@@ -49,7 +49,7 @@ function makeNetworkRuntime(behavior: {
 }
 
 describe('resolveNetworkTopology', () => {
-  it('always picks uds for apple-container (>= 1.1.0 floor)', () => {
+  it('always picks uds for apple-container (>= 1.2.1 floor)', () => {
     expect(resolveNetworkTopology('apple-container', true)).toBe('uds');
     expect(resolveNetworkTopology('apple-container', false)).toBe('uds');
   });

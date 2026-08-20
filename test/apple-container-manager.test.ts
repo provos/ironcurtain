@@ -185,6 +185,31 @@ describe('buildAppleCreateArgs', () => {
     expect(args.slice(-3)).toEqual(['ironcurtain-claude-code:latest', 'sleep', 'infinity']);
   });
 
+  it('omits the proc-visibility opt-out for an ordinary session', () => {
+    const args = buildAppleCreateArgs(sampleConfig);
+    expect(args).not.toContain('--read-only-path');
+    expect(args).not.toContain('--masked-path');
+  });
+
+  // All-or-nothing on purpose: any covering mount under /proc (read-only bind
+  // OR masked path) leaves no fully-visible proc mount, and the kernel then
+  // refuses the nested container's procfs mount with "Mount too revealing".
+  // A narrowed read-only set that keeps /proc/sys/net writable fixes the
+  // daemon bootstrap and still breaks every inner container create.
+  it('opts out of BOTH path sets for a nested-Docker agent container', () => {
+    const args = buildAppleCreateArgs({ ...sampleConfig, fullyVisibleProc: true });
+
+    expect(args.join(' ')).toContain('--read-only-path NONE');
+    expect(args.join(' ')).toContain('--masked-path NONE');
+
+    // Exactly the reset sentinel and nothing else: a single stray path would
+    // re-cover /proc and silently reintroduce the runc failure.
+    const readOnly = args.filter((_, i) => args[i - 1] === '--read-only-path');
+    const masked = args.filter((_, i) => args[i - 1] === '--masked-path');
+    expect(readOnly).toEqual(['NONE']);
+    expect(masked).toEqual(['NONE']);
+  });
+
   it('never emits --add-host or --restart flags', () => {
     const args = buildAppleCreateArgs(sampleConfig);
     expect(args.join(' ')).not.toContain('--add-host');
@@ -332,14 +357,35 @@ describe('checkAppleContainerAvailable', () => {
     const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
     expect(result.available).toBe(false);
     if (!result.available) {
-      expect(result.reason).toMatch(/>= 1\.1\.0/);
+      expect(result.reason).toMatch(/>= 1\.2\.1/);
       expect(result.detailedMessage).toMatch(/Unix-domain-socket/);
     }
   });
 
+  it('reports unavailable on 1.1.x (no --read-only-path override)', async () => {
+    mock.setResponse('container CLI version 1.1.0 (build: release, commit: 5973b9c)');
+    const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
+    expect(result.available).toBe(false);
+    if (!result.available) {
+      expect(result.reason).toMatch(/>= 1\.2\.1/);
+      expect(result.detailedMessage).toMatch(/read-only-path/);
+    }
+  });
+
+  // 1.2.0 applies the OCI readonlyPaths default (which covers /proc/sys) but
+  // predates the flags that can override it, so the nested daemon cannot be
+  // made to boot on it at all. The floor is a patch-level comparison for
+  // exactly this reason.
+  it('reports unavailable on 1.2.0 (readonlyPaths applied, not yet overridable)', async () => {
+    mock.setResponse('container CLI version 1.2.0 (build: release, commit: abc)');
+    const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
+    expect(result.available).toBe(false);
+    if (!result.available) expect(result.reason).toMatch(/>= 1\.2\.1/);
+  });
+
   it('reports unavailable when system services are not running', async () => {
     mock.setSequence([
-      { stdout: 'container CLI version 1.1.0 (build: release, commit: 5973b9c)' },
+      { stdout: 'container CLI version 1.2.2 (build: release, commit: 5973b9c)' },
       { error: true, code: 1, stderr: 'apiserver not running' },
     ]);
     const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
@@ -349,13 +395,25 @@ describe('checkAppleContainerAvailable', () => {
 
   it('reports available when all checks pass', async () => {
     mock.setSequence([
-      { stdout: 'container CLI version 1.1.0 (build: release, commit: 5973b9c)' },
+      { stdout: 'container CLI version 1.2.2 (build: release, commit: 5973b9c)' },
       { stdout: 'status running' },
     ]);
     const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
     expect(result).toEqual({ available: true });
     expect(mock.calls[0]?.args).toEqual(['--version']);
     expect(mock.calls[1]?.args).toEqual(['system', 'status']);
+  });
+
+  it('accepts the exact floor release', async () => {
+    mock.setSequence([{ stdout: 'container CLI version 1.2.1' }, { stdout: 'status running' }]);
+    const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
+    expect(result).toEqual({ available: true });
+  });
+
+  it('accepts a future minor version', async () => {
+    mock.setSequence([{ stdout: 'container CLI version 1.3.0' }, { stdout: 'status running' }]);
+    const result = await checkAppleContainerAvailable(mock.mockExec, darwinHost);
+    expect(result).toEqual({ available: true });
   });
 
   it('accepts a future major version', async () => {

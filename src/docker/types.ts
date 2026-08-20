@@ -100,6 +100,26 @@ export interface DockerContainerConfig {
   readonly capAdd?: readonly string[];
 
   /**
+   * Leave `/proc` fully visible inside the container by opting out of the OCI
+   * masked-path and read-only-path sets (`container create --masked-path NONE
+   * --read-only-path NONE`).
+   *
+   * Apple `container` only, and set ONLY for the agent container of an
+   * admitted secure nested Docker bundle. Two things need it: the rootless
+   * dockerd bootstrap writes `/proc/sys/net/ipv4/ip_forward` in its own
+   * network namespace, and — the binding constraint — the kernel refuses a
+   * fresh procfs mount in a user namespace unless an existing proc mount has
+   * no locked children covering it, so runc inside the nested daemon cannot
+   * create any container while ANY path under `/proc` is masked or read-only
+   * bound. See `APPLE_FULLY_VISIBLE_PROC_ARGS` in `apple-container-manager.ts`
+   * for the measurements and the security rationale.
+   *
+   * Ignored by the Docker backend, where the nested daemon topology is not
+   * implemented at all.
+   */
+  readonly fullyVisibleProc?: boolean;
+
+  /**
    * Allocate a pseudo-TTY for the container (-t flag).
    * Required for PTY mode where the container runs an interactive process.
    * Optional. Defaults to false (no TTY allocated).

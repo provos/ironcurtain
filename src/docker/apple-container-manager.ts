@@ -10,7 +10,9 @@
  * always with argument arrays (no shell strings). Ordinary operations use
  * execFile; runtime-native PTY exec inherits the host terminal via spawn.
  *
- * CLI semantics verified against `container` 1.0.0:
+ * CLI semantics verified against `container` 1.0.0 (with the 1.1.0 UDS and
+ * 1.2.1 read-only-path deltas recorded in
+ * docs/designs/apple-container-runtime.md):
  *   - `create`/`start`/`exec`/`stop`/`delete` mirror the Docker verbs;
  *     `--init`, `--cap-drop ALL`, `--label`, `--cpus`/`--memory`, `--user`,
  *     `--entrypoint`, `-t` all exist with Docker-compatible meanings.
@@ -63,14 +65,73 @@ const CONTAINER_INVENTORY_TIMEOUT_MS = 30_000;
 const CONTAINER_INVENTORY_RETRY_DELAY_MS = 250;
 
 /**
- * Minimum supported `container` CLI version. 1.1.0 is the floor for the
- * `uds` topology this backend now uses: it adds working per-file UDS
- * relays via `-v <host.sock>:<guest.sock>` (host-listens / guest-connects
- * over vsock) and a functional `--network none`. 1.0.x lacks both and
- * would need the retired `tcp-hostonly` topology.
+ * Minimum supported `container` CLI version.
+ *
+ * 1.1.0 was the original floor for the `uds` topology this backend uses: it
+ * adds working per-file UDS relays via `-v <host.sock>:<guest.sock>`
+ * (host-listens / guest-connects over vsock) and a functional
+ * `--network none`. 1.0.x lacks both and would need the retired
+ * `tcp-hostonly` topology.
+ *
+ * The floor is now 1.2.1 because of a hard conflict introduced by 1.2.0: it
+ * bumped apple/containerization to 0.40.x, where the OCI `readonlyPaths`
+ * default sets are APPLIED rather than merely available. Both cover paths
+ * under `/proc`, which breaks the nested daemon at boot (EROFS writing
+ * `/proc/sys/net/ipv4/ip_forward`) and, independently, breaks every inner
+ * container create (`VFS: Mount too revealing`) — see
+ * {@link APPLE_FULLY_VISIBLE_PROC_ARGS}. 1.2.1 is the first release that can
+ * express the opt-out — it added `--read-only-path`/`--masked-path` to
+ * `container run`/`create` — so 1.2.0 is a version the secure nested Docker
+ * runtime cannot be made to work on at all, and 1.1.0 predates the flags.
  */
 const MIN_MAJOR_VERSION = 1;
-const MIN_MINOR_VERSION = 1;
+const MIN_MINOR_VERSION = 2;
+const MIN_PATCH_VERSION = 1;
+
+/**
+ * Path-masking opt-out applied ONLY to the agent container of a secure nested
+ * Docker bundle: it restores a **fully visible** `/proc`, which the kernel
+ * requires before a nested container can mount its own procfs.
+ *
+ * `container` 1.2.0+ (apple/containerization 0.40.x) applies the OCI
+ * `maskedPaths`/`readonlyPaths` default sets instead of leaving them to the
+ * caller. Both are implemented as mounts that COVER paths under `/proc`
+ * (read-only proc binds, and devtmpfs binds over the masked entries), and
+ * every one of them is locked from the perspective of the user namespace
+ * rootlesskit creates. That breaks the nested daemon twice over:
+ *
+ *  1. `/proc/sys` read-only means the rootless dockerd bootstrap cannot write
+ *     `/proc/sys/net/ipv4/ip_forward` in its own network namespace — EROFS.
+ *  2. `mnt_already_visible()` refuses a fresh procfs mount in a user namespace
+ *     unless some existing proc mount is fully visible, i.e. has no locked
+ *     children covering it. Any covering mount disqualifies it, so runc inside
+ *     the nested daemon fails every container create with
+ *     `VFS: Mount too revealing`.
+ *
+ * (2) is why this is an all-or-nothing opt-out rather than a narrowed list.
+ * Measured on 1.2.2 / kernel 6.18.15: 6 covering mounts (defaults) and 2
+ * (masks only) both deny, as does a hand-narrowed 12-entry read-only set that
+ * leaves `/proc/sys/net` writable — it fixes (1) and leaves (2) broken. Only
+ * an empty set on BOTH options lets the nested daemon run containers.
+ *
+ * The `NONE` sentinel (case-insensitive) is how the CLI expresses "empty": the
+ * flags otherwise APPEND to the defaults.
+ *
+ * Security note: this restores exactly the `/proc` exposure the backend had on
+ * 1.1.0, which is the configuration the nested runtime was qualified against —
+ * it is not a new concession, and it is scoped to the one opt-in container
+ * that needs it. Ordinary sessions pass none of this and keep the full 1.2.x
+ * hardening. The residual exposure is small in any case: the agent holds
+ * neither CAP_SYS_ADMIN nor CAP_NET_ADMIN, so it cannot write the sysctls a
+ * writable `/proc/sys` nominally offers, and the VM is single-tenant per
+ * session.
+ */
+export const APPLE_FULLY_VISIBLE_PROC_ARGS: readonly string[] = Object.freeze([
+  '--read-only-path',
+  'NONE',
+  '--masked-path',
+  'NONE',
+]);
 
 /**
  * Minimum Darwin kernel major for macOS 26. The `container network`
@@ -259,13 +320,16 @@ export async function checkAppleContainerAvailable(
   const match = /version\s+(\d+)\.(\d+)\.(\d+)/.exec(versionLine);
   const major = match ? Number.parseInt(match[1], 10) : 0;
   const minor = match ? Number.parseInt(match[2], 10) : 0;
-  if (!match || major < MIN_MAJOR_VERSION || (major === MIN_MAJOR_VERSION && minor < MIN_MINOR_VERSION)) {
+  const patch = match ? Number.parseInt(match[3], 10) : 0;
+  const minimumVersion = `${MIN_MAJOR_VERSION}.${MIN_MINOR_VERSION}.${MIN_PATCH_VERSION}`;
+  if (!match || !isAtLeastMinimumVersion(major, minor, patch)) {
     return {
       available: false,
-      reason: `container CLI too old (need >= ${MIN_MAJOR_VERSION}.${MIN_MINOR_VERSION}.0)`,
+      reason: `container CLI too old (need >= ${minimumVersion})`,
       detailedMessage:
-        `Found "${versionLine}" but IronCurtain requires >= ${MIN_MAJOR_VERSION}.${MIN_MINOR_VERSION}.0 ` +
-        '(Unix-domain-socket relays and `--network none` for the UDS topology). ' +
+        `Found "${versionLine}" but IronCurtain requires >= ${minimumVersion} ` +
+        '(Unix-domain-socket relays and `--network none` for the UDS topology; ' +
+        '`--read-only-path`/`--masked-path` so the secure nested Docker runtime can leave `/proc` fully visible). ' +
         'Upgrade from https://github.com/apple/container/releases.',
     };
   }
@@ -281,6 +345,13 @@ export async function checkAppleContainerAvailable(
   }
 
   return { available: true };
+}
+
+/** Ordered major/minor/patch comparison against the supported floor. */
+function isAtLeastMinimumVersion(major: number, minor: number, patch: number): boolean {
+  if (major !== MIN_MAJOR_VERSION) return major > MIN_MAJOR_VERSION;
+  if (minor !== MIN_MINOR_VERSION) return minor > MIN_MINOR_VERSION;
+  return patch >= MIN_PATCH_VERSION;
 }
 
 /**
@@ -318,6 +389,13 @@ export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
   args.push('--cap-drop', 'ALL');
   for (const cap of config.capAdd ?? []) {
     args.push('--cap-add', cap);
+  }
+
+  // Nested-Docker agent containers only: leave `/proc` fully visible so the
+  // rootless daemon can boot and its runc can mount procfs for inner
+  // containers. See APPLE_FULLY_VISIBLE_PROC_ARGS.
+  if (config.fullyVisibleProc === true) {
+    args.push(...APPLE_FULLY_VISIBLE_PROC_ARGS);
   }
 
   for (const port of config.ports ?? []) {
