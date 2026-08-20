@@ -75,13 +75,13 @@ const CONTAINER_INVENTORY_RETRY_DELAY_MS = 250;
  *
  * The floor is now 1.2.1 because of a hard conflict introduced by 1.2.0: it
  * bumped apple/containerization to 0.40.x, where the OCI `readonlyPaths`
- * default set is APPLIED rather than merely available, and that set contains
- * `/proc/sys`. rootlesskit does not remount `/proc`, so the read-only bind is
- * inherited by the nested daemon's mount namespace and the rootless dockerd
- * bootstrap dies with EROFS on `/proc/sys/net/ipv4/ip_forward`
- * (see {@link APPLE_NESTED_DAEMON_READONLY_PATHS}). 1.2.1 is the first release
- * that can express the override — it added `--read-only-path`/`--masked-path`
- * to `container run`/`create` — so 1.2.0 is a version the secure nested Docker
+ * default sets are APPLIED rather than merely available. Both cover paths
+ * under `/proc`, which breaks the nested daemon at boot (EROFS writing
+ * `/proc/sys/net/ipv4/ip_forward`) and, independently, breaks every inner
+ * container create (`VFS: Mount too revealing`) — see
+ * {@link APPLE_FULLY_VISIBLE_PROC_ARGS}. 1.2.1 is the first release that can
+ * express the opt-out — it added `--read-only-path`/`--masked-path` to
+ * `container run`/`create` — so 1.2.0 is a version the secure nested Docker
  * runtime cannot be made to work on at all, and 1.1.0 predates the flags.
  */
 const MIN_MAJOR_VERSION = 1;
@@ -329,7 +329,7 @@ export async function checkAppleContainerAvailable(
       detailedMessage:
         `Found "${versionLine}" but IronCurtain requires >= ${minimumVersion} ` +
         '(Unix-domain-socket relays and `--network none` for the UDS topology; ' +
-        '`--read-only-path` so the secure nested Docker runtime can keep `/proc/sys/net` writable). ' +
+        '`--read-only-path`/`--masked-path` so the secure nested Docker runtime can leave `/proc` fully visible). ' +
         'Upgrade from https://github.com/apple/container/releases.',
     };
   }
