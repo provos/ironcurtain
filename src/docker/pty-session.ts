@@ -851,6 +851,11 @@ async function runPtySessionAttempt(
           'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
           'AUDIT_WRITE', // sudo audit logging
         ],
+        // Only an admitted nested-Docker bundle opts out of the OCI
+        // masked/read-only path sets; a fully visible /proc is what lets the
+        // nested daemon boot AND lets its runc mount procfs for inner
+        // containers.
+        fullyVisibleProc: nestedDaemon !== undefined,
         // Apple Container allocates the agent TTY on `container exec -it`;
         // the outer `sleep infinity` process does not need a second TTY.
         tty: nativePtyCommand === undefined,

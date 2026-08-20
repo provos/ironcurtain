@@ -398,7 +398,12 @@ describe('nested daemon — feature-off equivalence', () => {
         JSON.stringify(enabled.config()[key as keyof DockerContainerConfig]) !==
         JSON.stringify(off.config()[key as keyof DockerContainerConfig]),
     );
-    expect(differing.sort()).toEqual(['env', 'labels', 'mounts', 'name']);
+    expect(differing.sort()).toEqual(['env', 'fullyVisibleProc', 'labels', 'mounts', 'name']);
+    // The proc-visibility opt-out is one of the differences the feature is
+    // allowed to introduce, and ONLY when admitted: an ordinary session must
+    // keep the runtime's masked/read-only path hardening.
+    expect(enabled.config().fullyVisibleProc).toBe(true);
+    expect(off.config().fullyVisibleProc).not.toBe(true);
     expect(Object.keys(off.config().env)).not.toContain('DOCKER_HOST');
     expect(Object.keys(off.config().env)).not.toContain(APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV);
     expect(off.config().mounts).not.toContainEqual(

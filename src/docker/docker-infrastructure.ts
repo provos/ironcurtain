@@ -2084,6 +2084,11 @@ async function createSessionContainersAttempt(
           'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
           'AUDIT_WRITE', // sudo audit logging
         ],
+        // Only an admitted nested-Docker bundle opts out of the OCI
+        // masked/read-only path sets; a fully visible /proc is what lets the
+        // nested daemon boot AND lets its runc mount procfs for inner
+        // containers.
+        fullyVisibleProc: nestedDaemon !== undefined,
       });
 
     // §8.2 step 1: ledger the agent container before create when a

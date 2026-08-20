@@ -129,3 +129,43 @@ Implementation deltas vs the Linux `uds` path:
 - **UID remap stays Linux-only.** `buildAgentUidRemap` is skipped when `runtimeKind === 'apple-container'` (it was previously keyed on `useTcp`, which is now `false` here).
 
 The container-side wiring is unchanged: the entrypoints' `[ -S /run/ironcurtain/mitm-proxy.sock ]` gate sees the vsock-relayed socket as type `s`, and the `socat TCP-LISTEN:18080 → UNIX-CONNECT` bridge / `HTTPS_PROXY=http://127.0.0.1:18080` env work identically to Linux.
+
+## 1.2.1 — OCI `readonlyPaths` and the nested-daemon floor bump
+
+`container` 1.2.0 (July 2026) bumped apple/containerization to 0.40.x, where the OCI `maskedPaths`/`readonlyPaths` sets moved from "available to the caller" to **applied by default** (`LinuxContainer.Configuration.readonlyPaths = defaultReadonlyPaths()`). `defaultReadonlyPaths()` is `/proc/bus`, `/proc/fs`, `/proc/irq`, **`/proc/sys`**, `/proc/sysrq-trigger`.
+
+That read-only bind on `/proc/sys` breaks the secure nested Docker runtime. rootlesskit does not remount `/proc`, so the bind is inherited by the daemon's mount namespace, and `APPLE_VM_DAEMON_NETWORK_PREREQUISITES` (`docker-workload/apple-vm-daemon.ts`) dies on its one namespace-local prerequisite:
+
+```
+sh: 4: cannot create /proc/sys/net/ipv4/ip_forward: Read-only file system
+[rootlesskit:child ] error: command [sh -c set -e …] exited: exit status 2
+```
+
+**EROFS, not EACCES** — the distinction matters when triaging, because the privilege-shaped failures in this path (the `newuidmap` setuid/fcaps trap) report `Operation not permitted` instead. Reproduced deterministically by re-binding `/proc/sys` read-only inside a rootlesskit child on 1.1.0, which yields the identical message; the same bootstrap on an untouched 1.1.0 guest writes the sysctl successfully.
+
+1.2.1 added `--read-only-path` / `--masked-path` to `container run`/`create`, which is the only way to express the override. The CLI **appends** values to the defaults; the literal `NONE` sentinel (case-insensitive) resets the accumulated list, so a leading `NONE` makes the remaining values the complete set.
+
+Worse, the read-only binds are only half the problem. The masked-path set is also implemented as covering mounts under `/proc` (devtmpfs over `/proc/keys`, `/proc/timer_list`, …), and `mnt_already_visible()` refuses a fresh procfs mount in a user namespace unless some existing proc mount has **no locked children covering it**. Every one of these binds is locked from the perspective of rootlesskit's user namespace, so the nested daemon boots but its runc cannot create a single container:
+
+```
+OCI runtime create failed: runc create failed: error during container init:
+error mounting "proc" to rootfs at "/proc": operation not permitted
+```
+
+Measured on 1.2.2 / guest kernel 6.18.15, mounting procfs in a fresh pidns inside rootlesskit:
+
+| container path config                      | covering mounts under `/proc` | nested procfs mount            |
+| ------------------------------------------ | ----------------------------- | ------------------------------ |
+| 1.2.x defaults                             | 6                             | denied                         |
+| `--read-only-path NONE` only               | 2 (masks remain)              | denied                         |
+| narrowed read-only set, `net` rw           | 12                            | denied — "Mount too revealing" |
+| `--read-only-path NONE --masked-path NONE` | 0                             | **OK**                         |
+
+The narrowed variant is the trap: it fixes the EROFS bootstrap failure and leaves every inner `docker run` broken, so a daemon-readiness check passes and the feature is still dead. The opt-out has to be all-or-nothing.
+
+Consequences for this backend:
+
+- **The floor is 1.2.1, not 1.2.0.** 1.2.0 applies the default and cannot override it, so it is a release the nested daemon cannot boot on at all. The availability probe therefore compares major/minor/**patch** (`isAtLeastMinimumVersion`), where it previously compared major/minor only. 1.1.0 — the release the UDS topology above was qualified on — is dropped.
+- **The opt-out is scoped to nested-Docker agent containers.** `DockerContainerConfig.fullyVisibleProc` is set only when `resolveNestedDaemonBundle` returns a bundle, and `buildAppleCreateArgs` then emits `APPLE_FULLY_VISIBLE_PROC_ARGS` (`--read-only-path NONE --masked-path NONE`). Ordinary sessions pass neither flag and keep the full 1.2.x hardening.
+- **This restores the 1.1.0 `/proc` exposure, it does not invent a new concession.** 1.1.0 applied no masked or read-only paths at all, and that is the configuration the nested runtime was qualified against. The residual exposure is small regardless: the agent holds neither CAP_SYS_ADMIN nor CAP_NET_ADMIN, so it cannot write the sysctls a writable `/proc/sys` nominally offers, and the VM is single-tenant per session.
+- **`NONE` is the reset sentinel.** The flags append to the defaults; a bare `NONE` (case-insensitive) empties the accumulated list. Emitting any path alongside it would re-cover `/proc` and silently reintroduce the runc failure, which is what the unit test pins.

@@ -59,7 +59,7 @@ export function resetRuntimeKindResolutionForTests(): void {
  * Precedence: `IRONCURTAIN_CONTAINER_RUNTIME` env override > the
  * `containerRuntime` config field > 'auto'. 'auto' picks apple-container
  * when its availability probe passes (Apple silicon, macOS 26+,
- * container CLI >= 1.0 with services running) and Docker otherwise.
+ * container CLI >= 1.2.1 with services running) and Docker otherwise.
  * See docs/designs/apple-container-runtime.md, design decision 6.
  */
 export async function resolveRuntimeKind(

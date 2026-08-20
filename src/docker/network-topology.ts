@@ -4,7 +4,7 @@
  * Docker Agent Mode reaches host-side proxies through one of three
  * topologies (see docs/designs/apple-container-runtime.md §2):
  *
- *  - `uds`          — Linux Docker AND Apple `container` (>= 1.1.0):
+ *  - `uds`          — Linux Docker AND Apple `container` (>= 1.2.1):
  *                     `--network none` + Unix-domain-socket proxies. On
  *                     Linux the sockets directory is bind-mounted; on
  *                     Apple `container` each socket file is mounted via
@@ -37,7 +37,7 @@ export type NetworkTopology = 'uds' | 'tcp-sidecar' | 'tcp-hostonly';
 
 /**
  * Resolves the proxy-transport topology for a runtime kind on the current
- * platform. Apple `container` (floor 1.1.0) uses the `uds` topology;
+ * platform. Apple `container` (floor 1.2.1) uses the `uds` topology;
  * Docker keeps its platform split (`dockerUsesTcp` is injectable for
  * tests, defaulting to the live platform check). `tcp-hostonly` is never
  * returned here — it exists only as a retained code path.
