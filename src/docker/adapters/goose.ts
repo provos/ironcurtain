@@ -24,7 +24,7 @@ import type { ProviderConfig } from '../provider-config.js';
 import type { AuthMethod } from '../oauth-credentials.js';
 import type { ResolvedUserConfig, GooseProvider } from '../../config/user-config.js';
 import { DEFAULT_GLM_SLUG, OPENROUTER_HOST } from '../../config/user-config.js';
-import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
+import { anthropicProvider, openaiProvider, googleProvider, azureOpenAIProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { makeOpenRouterProviderForProfile, openRouterCredential, resolveMappedModel } from '../openrouter.js';
 import { CONTAINER_RUNTIME_CA_BUNDLE } from '../runtime-trust.js';
@@ -56,6 +56,8 @@ export function getProviderConfig(provider: GooseProvider): ProviderConfig {
       return openaiProvider;
     case 'google':
       return googleProvider;
+    case 'azure_openai':
+      return azureOpenAIProvider;
   }
 }
 
@@ -283,6 +285,29 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       }
       // Goose uses exactly one provider based on user config.
       // The authKind parameter is ignored because Goose does not support OAuth.
+
+      // Azure OpenAI requires dynamic host resolution from AZURE_OPENAI_ENDPOINT
+      if (gooseProvider === 'azure_openai') {
+        const endpoint = config.userConfig.azureOpenAIEndpoint;
+        if (!endpoint) {
+          throw new Error(
+            'Azure OpenAI provider selected but AZURE_OPENAI_ENDPOINT is not configured. ' +
+              'Set it via environment variable or config file.',
+          );
+        }
+        try {
+          const url = new URL(endpoint);
+          return [
+            {
+              ...azureOpenAIProvider,
+              host: url.hostname,
+            },
+          ];
+        } catch {
+          throw new Error(`Invalid AZURE_OPENAI_ENDPOINT: ${endpoint}`);
+        }
+      }
+
       return [getProviderConfig(gooseProvider)];
     },
 
@@ -322,7 +347,41 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         SSL_CERT_DIR: '/etc/ssl/certs',
       };
 
-      const providerHost = getProviderConfig(gooseProvider).host;
+      // For Azure OpenAI, resolve the actual hostname from the endpoint
+      let providerHost: string;
+      if (gooseProvider === 'azure_openai') {
+        const endpoint = config.userConfig.azureOpenAIEndpoint;
+        if (!endpoint) {
+          throw new Error('Azure OpenAI provider requires AZURE_OPENAI_ENDPOINT');
+        }
+        providerHost = new URL(endpoint).hostname;
+
+        // Azure OpenAI requires additional environment variables
+        env.AZURE_OPENAI_ENDPOINT = endpoint;
+
+        // Deployment name and API version are essential for Azure OpenAI
+        const deploymentName = config.userConfig.azureOpenAIDeploymentName;
+        const apiVersion = config.userConfig.azureOpenAIApiVersion;
+
+        if (!deploymentName) {
+          throw new Error(
+            'Azure OpenAI provider requires AZURE_OPENAI_DEPLOYMENT_NAME. ' +
+              'Set it via environment variable or config file.',
+          );
+        }
+        if (!apiVersion) {
+          throw new Error(
+            'Azure OpenAI provider requires AZURE_OPENAI_API_VERSION. ' +
+              'Set it via environment variable or config file.',
+          );
+        }
+
+        env.AZURE_OPENAI_DEPLOYMENT_NAME = deploymentName;
+        env.AZURE_OPENAI_API_VERSION = apiVersion;
+      } else {
+        providerHost = getProviderConfig(gooseProvider).host;
+      }
+
       const fakeKey = fakeKeys.get(providerHost);
       if (!fakeKey) {
         throw new Error(`No fake key generated for ${providerHost}`);
@@ -337,6 +396,9 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
           break;
         case 'google':
           env.GOOGLE_API_KEY = fakeKey;
+          break;
+        case 'azure_openai':
+          env.AZURE_OPENAI_API_KEY = fakeKey;
           break;
       }
 
@@ -400,6 +462,14 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       // goose provider's API-key detection.
       const openRouter = openRouterCredential(config);
       if (openRouter) return openRouter;
+
+      // Azure OpenAI uses a separate API key field
+      if (gooseProvider === 'azure_openai') {
+        const key = config.userConfig.azureOpenAIApiKey;
+        if (key) return { kind: 'apikey', key };
+        return { kind: 'none' };
+      }
+
       const key = resolveApiKeyForProvider(gooseProvider, config.userConfig);
       if (key) return { kind: 'apikey', key };
       return { kind: 'none' };
