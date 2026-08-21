@@ -327,14 +327,16 @@ This sits alongside `audit.jsonl` at the bundle root (matching `getBundleAuditLo
 ```
 
 Fields:
-- `event`: `"session-start" | "session-end"`
+- `event`: `"session-start" | "session-poisoned" | "session-end"`
 - `seq`: monotonic counter scoped to the captures directory (defines session ordering)
 - `sessionId`, `fsmState` (optional), `persona` (optional), `ts` (ISO 8601)
+- on `session-poisoned` only (emitted the moment a session is poisoned, so the condition is durable on disk without waiting for teardown — a mid-flight poisoned session must never look healthy on disk): `poisonReason` (same taxonomy as below), plus `exchanges` / `bytesWritten` as of the poison. The eventual `session-end` still carries `poisoned: true`; this entry is strictly an earlier, redundant-by-design signal.
 - on `session-end` only:
   - `exchanges` (record count, computed at write-time per §9.6)
   - `bytesWritten`
-  - **`poisoned: boolean`** — `true` when any exchange in this session failed to be captured completely (reassembly aborted, disk write error, queue pathology, agent abort mid-stream, etc.). Downstream tooling discards every session with `poisoned: true`.
-  - **`poisonReason: 'reassembly-failure' | 'disk-error' | 'queue-overflow' | 'mid-stream-abort' | 'infrastructure-teardown' | 'unknown'`** — present iff `poisoned: true`. Diagnostic, not load-bearing.
+  - **`abortedExchanges: number`** — exchanges lost to an upstream transport truncation (§9.7). The session stays usable; the field makes the gap explicit instead of silent. `0` means verifiably gap-free.
+  - **`poisoned: boolean`** — `true` when this session's capture pipeline itself became untrustworthy (reassembler failed, disk write error, queue pathology, undecodable body, unclean teardown). Downstream tooling discards every session with `poisoned: true`. An upstream transport truncation does NOT set this — see `abortedExchanges` above and §9.7.
+  - **`poisonReason: 'reassembly-failure' | 'disk-error' | 'queue-overflow' | 'unsupported-encoding' | 'infrastructure-teardown' | 'unknown'`** — present iff `poisoned: true`. Diagnostic, not load-bearing. (`'mid-stream-abort'` remains in the type for manifests written before transport truncation was demoted to exchange scope; the current writer never emits it — see §9.7.)
   - optional `closedReason: 'infrastructure-teardown'` when the entry was emitted by `close()` as the synthetic safety-net end-marker rather than by an explicit `endSession()` call. Such sessions are implicitly poisoned (the orchestrator's `finally` did not run cleanly), so `poisoned: true` and `poisonReason: 'infrastructure-teardown'` are set on the same entry.
 - Append-only JSONL, same crash-safety story as the trajectory files. Downstream tolerates a truncated trailing line.
 
@@ -422,7 +424,7 @@ export interface TrajectoryCaptureWriter {
 - **Phase A (synchronous, at call site)**: flip a per-session `endRequested = true` flag. Any subsequent `write()` for that sessionId is rejected (no-op + one-shot log; this should not normally happen). Crucially, **the captureTap for any in-flight response keyed to this sessionId is allowed to complete** — `endRequested` only blocks **new** writes, not the finalization of in-flight reassembly.
 - **Phase B (async, returns `Promise<void>`)**: await `Promise.all` of two things:
   1. the records-queue cursor has advanced past every record tagged with this sessionId that was already enqueued at the moment of the flip, **and**
-  2. every in-flight `captureTap → reassembler` Promise for this sessionId has either resolved (normal `_flush`) or rejected/aborted (which would have already poisoned the session via the `mid-stream-abort` path).
+  2. every in-flight `captureTap → reassembler` Promise for this sessionId has either resolved (normal `_flush`) or rejected/aborted (which would have already counted the exchange via the `mid-stream-abort` path, without poisoning the session).
 
   Once both settle, enqueue the `session-end` manifest entry. This entry is the **only** place the per-session counter snapshot is materialized.
 
@@ -446,14 +448,17 @@ The reassembler MUST expose its per-session in-flight Promises so the dispatcher
 6. **Counters on `session-end` are incremented at write-time, not enqueue time.** `exchanges` and `bytesWritten` on the `session-end` manifest entry are computed inside the `fs.appendFile` callback for each record — only when a record has actually been written to disk is the per-session counter bumped. If the writer is destroyed mid-drain, the synthetic `session-end` from `close()` reflects only the records that actually reached disk, and the file's line count matches the manifest's `exchanges` field by construction. (Such sessions are also poisoned via `closedReason: 'infrastructure-teardown'` — see §9 lifecycle hooks.)
 7. **Poison sources** (any of these mark the session poisoned and set the matching `poisonReason` on `session-end`):
    - `reassembly-failure` — SSE reassembler aborts (orphan `content_block_stop`, unknown delta type, mid-stream truncation in a way that prevents valid byte-equality reassembly). Sets `capture.reassemblyOk: false` on whatever record was being assembled; that record is **not** written.
-   - `mid-stream-abort` — agent disconnects or upstream resets before `message_stop` arrives. Detection is bound to the captureTap's lifecycle:
-     - The captureTap is implemented as a Node `Transform` whose **`_flush()` is the only "completed cleanly" signal** — `_flush` runs iff the upstream side closed cleanly after a final chunk.
-     - Any `'close'` event arriving on the captureTap before `_flush` runs, or any `'error'` event on `upstreamRes` (mitm-proxy.ts:791) or on the captureTap itself, is treated as `mid-stream-abort`: the dispatcher poisons the session for the captureTap's `captureSessionId` and drops the in-flight record without writing. `clientRes.on('close')` (mitm-proxy.ts:887) triggers `upstreamReq.destroy()` (line 889), which propagates as an `error`/`close` on `upstreamRes` and thence on the captureTap — the unified detection point handles agent disconnect and upstream reset uniformly.
-     - **401-retry interaction**: the captureTap is attached only to the **second** (successful) `forwardRequest` invocation, per resolved §13 item 10. The drained 401 response is invisible to capture and is **not** an abort signal — the captureTap's lifecycle is bound to the successful attempt only.
    - `disk-error` — any `fs.appendFile` callback error on the records or manifest file.
    - `queue-overflow` — records queue crossed the high-watermark (default 1024); the dispatcher poisons every currently-open session in the bundle, rejects new `write()` calls until the queue drains below the low-watermark (default 256), and forwarding continues uninterrupted. See §9 step 2 for full semantics. **Sessions are poisoned in whole, never individual records.**
+   - `unsupported-encoding` — a response body arrived in an encoding Node's `zlib` cannot decode (zstd); the capture pipeline itself is untrustworthy for this session.
    - `infrastructure-teardown` — synthetic `session-end` from `close()` for any session whose `endSession` was not called by the orchestrator.
    - `unknown` — write to a session that was never started (`beginSession` missing).
+
+   **NOT a poison source: `mid-stream-abort`** *(revised — it used to be)*. An agent disconnect or upstream reset before `message_stop` is a **transport** event scoped to exactly one exchange; the agent's SDK retries the request milliseconds later and the session continues normally. Poisoning the whole session for it was a category error that destroyed hours of good training data from one transient reset (measured: 30 of 384 production sessions, 7.8%; one session lost 104 of 116 exchanges). The truncated exchange is still **never** written (no partial records), but the loss is bounded to it: the tap calls `TrajectoryCaptureWriter.noteAbortedExchange(sessionId)` and the count surfaces as `session-end.abortedExchanges`. The "no silent gaps" contract is satisfied by making the gap explicit and counted, not by discarding everything after it. Detection is unchanged and still bound to the captureTap's lifecycle:
+     - The captureTap's `_flush` (a clean `'end'`) is the only "completed cleanly" signal.
+     - Any `'close'` or `'error'` arriving on the captureTap before that, with no terminal SSE event parsed (`Reassembler.canFinalize()` false), is an aborted exchange. `clientRes.on('close')` triggers `upstreamReq.destroy()`, which propagates as an `error`/`close` on `upstreamRes` and thence on the captureTap — one detection point covers agent disconnect and upstream reset uniformly. When `canFinalize()` IS true the stream was complete-but-socket-aborted and a faithful record is written.
+     - `endSession` applies the same accounting to a tap still in flight when its teardown timeout expires.
+     - **401-retry interaction**: the captureTap is attached only to the **second** (successful) `forwardRequest` invocation, per resolved §13 item 10. The drained 401 response is invisible to capture and is **not** an abort signal — the captureTap's lifecycle is bound to the successful attempt only.
 8. Append-only. No truncation. A crash mid-write leaves at most one truncated final line in either the trajectory file or the manifest, which downstream consumers discard via standard JSONL trailing-line-tolerant parsing. The session containing the truncated line is inherently poisoned (no `session-end` matching `session-start`) and is filtered downstream by the same poison-filter mechanism.
 
 **Never block the proxy thread**: every operation on the writer's hot path (`write`, `setPersona`) is O(1) synchronous (map lookup, push to queue). Disk I/O is exclusively in the drain loop. Listener errors are swallowed (same contract as `SseExtractorTransform.emitSafe`).

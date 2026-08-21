@@ -9,9 +9,13 @@
  *
  * Design priorities (in order):
  *   1. Never block the proxy thread. `write()` is O(1) synchronous.
- *   2. Binary session model — sessions are complete-and-usable or
- *      poisoned wholesale. Individual records are never dropped from a
- *      healthy session.
+ *   2. Binary session model for CORRECTNESS hazards — a session whose
+ *      writer or parser proved untrustworthy (`disk-error`,
+ *      `queue-overflow`, `reassembly-failure`) is poisoned wholesale.
+ *      An upstream transport truncation is NOT such a hazard: it costs
+ *      exactly one exchange, which is dropped and counted in
+ *      `abortedExchanges` so the gap is explicit rather than silent.
+ *      Records are never dropped silently from a healthy session.
  *   3. Crash safety — append-only JSONL, write-time counters, synthetic
  *      session-end on infrastructure teardown.
  */
@@ -35,11 +39,12 @@ const HIGH_WATERMARK = 1024;
 const LOW_WATERMARK = 256;
 /**
  * Upper bound on how long `endSession` waits for a session's in-flight
- * reassemblies to settle before forcibly poisoning them as
- * `mid-stream-abort`. A never-terminating stream that also never aborts
- * would otherwise hang teardown forever. `endSession` is only called
- * after the agent process (and its client socket) has terminated, so a
- * still-pending tap at that point is genuinely stuck.
+ * reassemblies to settle before abandoning them. A never-terminating
+ * stream that also never aborts would otherwise hang teardown forever.
+ * `endSession` is only called after the agent process (and its client
+ * socket) has terminated, so a still-pending tap at that point is
+ * genuinely stuck. Stuck taps are counted into `abortedExchanges`, NOT
+ * poisoned: records already durable for that session stay valid.
  */
 const DEFAULT_TEARDOWN_TIMEOUT_MS = 30_000;
 
@@ -54,8 +59,12 @@ interface SessionFileState {
   ended: boolean;
   exchanges: number;
   bytesWritten: number;
+  /** Exchanges lost to an upstream transport truncation (session stays usable). */
+  abortedExchanges: number;
   poisoned: boolean;
   poisonReason?: PoisonReason;
+  /** Records discarded because the session was already poisoned. */
+  droppedAfterPoison: number;
 }
 
 interface PendingWrite {
@@ -93,7 +102,7 @@ export interface TrajectoryCaptureWriterOptions {
   readonly fs?: WriterFsDep;
   /**
    * Bound on the `endSession` in-flight wait before still-pending taps
-   * are poisoned `mid-stream-abort`. Defaults to
+   * are abandoned and counted into `abortedExchanges`. Defaults to
    * {@link DEFAULT_TEARDOWN_TIMEOUT_MS}. Tests override it to a few ms.
    */
   readonly teardownTimeoutMs?: number;
@@ -113,12 +122,26 @@ export interface TrajectoryCaptureWriter {
   stats(): CaptureStats;
   /**
    * Flip a per-session poison flag from outside the dispatcher's I/O
-   * loop. Used by the trajectory tap to mark `mid-stream-abort` when the
-   * upstream tap closes before `_flush` runs, or by tests / future
-   * callers that detect a poison condition without going through the
-   * write pipeline. Idempotent; first reason wins.
+   * loop. Reserved for correctness hazards that make the WHOLE session
+   * untrustworthy — a parser that failed (`reassembly-failure`), an
+   * undecodable body (`unsupported-encoding`), or a writer that cannot
+   * keep up (`disk-error`, `queue-overflow`). A transport-level
+   * truncation is not one of those: use {@link
+   * TrajectoryCaptureWriter.noteAbortedExchange} instead. Idempotent;
+   * first reason wins, and the flip emits a `session-poisoned` manifest
+   * entry so the condition is durable immediately.
    */
   markSessionPoisoned(sessionId: SessionId, reason: PoisonReason): void;
+  /**
+   * Record that one exchange was lost to an upstream transport
+   * truncation (the stream ended before its terminal event, so no
+   * faithful record could be built). Exchange-scoped on purpose: the
+   * remaining records in the session are unaffected, so the session
+   * keeps capturing and the gap is surfaced as
+   * `session-end.abortedExchanges` instead of poisoning everything that
+   * follows. Idempotence is the caller's business — each call counts.
+   */
+  noteAbortedExchange(sessionId: SessionId): void;
   /**
    * Register an in-flight reassembly Promise and its exchange identity.
    * The exchange remains authorized to write after `endSession` starts;
@@ -165,6 +188,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
   let seqCounter = 0;
   let totalWritten = 0;
   let totalDropped = 0;
+  let totalAbortedExchanges = 0;
   let totalBytes = 0;
   let closed = false;
   let closing = false;
@@ -292,6 +316,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       if (session.poisoned) {
         // Already poisoned — counters frozen.
         totalDropped++;
+        noteDropForPoisonedSession(session);
         continue;
       }
       try {
@@ -384,16 +409,67 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       ts: new Date().toISOString(),
       exchanges: session.exchanges,
       bytesWritten: session.bytesWritten,
+      abortedExchanges: session.abortedExchanges,
       poisoned: session.poisoned,
       ...(session.poisonReason !== undefined ? { poisonReason: session.poisonReason } : {}),
       ...(opts?.closedReason !== undefined ? { closedReason: opts.closedReason } : {}),
     };
   }
 
+  /**
+   * Flip the poison flag AND make it durable immediately. Without the
+   * manifest entry a mid-flight poisoned session is indistinguishable on
+   * disk from a healthy one until teardown writes `session-end` — which
+   * is how a permanently-poisoned session stayed invisible for two full
+   * runs. First reason wins; the entry is emitted once.
+   *
+   * (On the bundle-wide `disk-error` path `failBundleDisk` clears the
+   * manifest queue right after poisoning every session — those entries
+   * are intentionally not written, because the manifest itself is
+   * unwritable and `manifest.poisoned` is the signal instead.)
+   */
   function markSessionPoisonedInternal(session: SessionFileState, reason: PoisonReason): void {
     if (session.poisoned) return;
     session.poisoned = true;
     session.poisonReason = reason;
+    logger.warn(
+      `[trajectory-capture] session poisoned: sessionId=${session.sessionId} reason=${reason} ` +
+        `exchangesOnDisk=${session.exchanges} bytesWritten=${session.bytesWritten}`,
+    );
+    const entry: ManifestEntry = {
+      schemaVersion: 1,
+      event: 'session-poisoned',
+      seq: session.seq,
+      sessionId: session.sessionId,
+      ...(session.persona !== undefined ? { persona: session.persona } : {}),
+      ...(session.fsmState !== undefined ? { fsmState: session.fsmState } : {}),
+      ts: new Date().toISOString(),
+      poisonReason: reason,
+      exchanges: session.exchanges,
+      bytesWritten: session.bytesWritten,
+    };
+    manifestQueue.push({ line: serializeJsonl(entry) });
+    void scheduleDrain();
+  }
+
+  /**
+   * Log the first record dropped for a poisoned session, then every
+   * hundredth after it. A poisoned session silently swallowing hours of
+   * traffic is exactly the failure this counter exists to expose.
+   */
+  function noteDropForPoisonedSession(session: SessionFileState): void {
+    session.droppedAfterPoison += 1;
+    const dropped = session.droppedAfterPoison;
+    if (dropped !== 1 && dropped % 100 !== 0) return;
+    logger.warn(
+      `[trajectory-capture] dropping records for poisoned session ${session.sessionId} ` +
+        `(reason=${session.poisonReason ?? 'unknown'}, droppedForSession=${dropped})`,
+    );
+  }
+
+  function noteAbortedExchangeInternal(session: SessionFileState, count: number): void {
+    session.abortedExchanges += count;
+    totalAbortedExchanges += count;
   }
 
   function poisonAllOpenSessions(reason: PoisonReason): void {
@@ -499,7 +575,9 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         ended: false,
         exchanges: 0,
         bytesWritten: 0,
+        abortedExchanges: 0,
         poisoned: false,
+        droppedAfterPoison: 0,
       };
       sessions.set(opts.sessionId, state);
       const entry: ManifestEntry = {
@@ -526,9 +604,14 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         logger.warn(`[trajectory-capture] write() before beginSession for ${sid}`);
         return;
       }
+      if (session.poisoned) {
+        totalDropped += 1;
+        noteDropForPoisonedSession(session);
+        return;
+      }
       const finishingTrackedExchange =
         session.endRequested && inFlightExchangeIds.get(sid)?.has(record.exchangeId) === true;
-      if ((session.endRequested && !finishingTrackedExchange) || session.poisoned) {
+      if (session.endRequested && !finishingTrackedExchange) {
         totalDropped += 1;
         return;
       }
@@ -562,9 +645,11 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       void scheduleDrain();
       // Wait for inflight reassemblies to settle (Phase B condition 2),
       // but bound the wait: a never-terminating stream that also never
-      // aborts would otherwise hang teardown forever. On timeout, poison
-      // the session `mid-stream-abort` and force the still-pending taps
-      // to settle so the drain can emit the session-end marker.
+      // aborts would otherwise hang teardown forever. On timeout, count
+      // the stuck taps as aborted exchanges (they never produced a
+      // record) and force them to settle so the drain can emit the
+      // session-end marker. The records already on disk are untouched —
+      // a hung tap says nothing about their fidelity.
       const inflightSet = inFlight.get(sessionId);
       if (inflightSet && inflightSet.size > 0) {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -575,12 +660,20 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
         const outcome = await Promise.race([settled, timeout]);
         if (timer) clearTimeout(timer);
         if (outcome === 'timeout') {
-          const session2 = sessions.get(sessionId);
-          if (session2 && !session2.poisoned) {
-            markSessionPoisonedInternal(session2, 'mid-stream-abort');
+          const stuckSession = sessions.get(sessionId);
+          const stuck = inFlight.get(sessionId)?.size ?? 0;
+          if (stuckSession && stuck > 0) {
+            logger.warn(
+              `[trajectory-capture] teardown timeout after ${teardownTimeoutMs}ms: ` +
+                `sessionId=${sessionId} abandoning ${stuck} stuck exchange(s); ` +
+                `${stuckSession.exchanges} record(s) already on disk are kept`,
+            );
+            noteAbortedExchangeInternal(stuckSession, stuck);
           }
           // Release the in-flight gate so the drain can emit session-end;
           // the hung tap's promise may settle later but no longer blocks.
+          // Dropping its exchangeId also de-authorizes a late write, so
+          // the on-disk line count still matches `session-end.exchanges`.
           forceClearInFlight(sessionId);
         }
       }
@@ -632,6 +725,7 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       return {
         written: totalWritten,
         dropped: totalDropped,
+        abortedExchanges: totalAbortedExchanges,
         queued: recordsQueue.length + manifestQueue.length,
         bytesWritten: totalBytes,
         openSessions: sessions.size,
@@ -642,6 +736,12 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
       const session = sessions.get(sessionId);
       if (!session) return;
       markSessionPoisonedInternal(session, reason);
+    },
+
+    noteAbortedExchange(sessionId: SessionId): void {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+      noteAbortedExchangeInternal(session, 1);
     },
 
     trackInFlight(sessionId: SessionId, exchangeId: string, promise: Promise<unknown>): void {

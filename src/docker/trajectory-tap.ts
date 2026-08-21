@@ -32,7 +32,7 @@ const EMPTY_BODY = Buffer.alloc(0);
 
 /**
  * Trajectory capture predates the bounded metrics observer and deliberately
- * records a whole exchange or poisons the whole session. Do not silently
+ * records a whole exchange or none of it. Do not silently
  * inherit metrics' smaller per-response limits here: a partial training record
  * is not useful. These deliberately generous finite caps still protect the
  * process from an unbounded response or a decompressor that falls behind.
@@ -97,10 +97,11 @@ export interface CaptureExchangeHandle {
    */
   attachResponse(args: AttachResponseInputs): PassThrough;
   /**
-   * Force-abort the capture (e.g. on upstream error / agent disconnect).
-   * Marks reassembly as failed and emits no record. The dispatcher's
-   * own poisoning machinery handles session-level fallout via
-   * mid-stream-abort detection on the captureTap.
+   * Force-abort the capture (e.g. on a decoder failure). Marks
+   * reassembly as failed and emits no record. Session-level fallout is
+   * the caller's call: `createResponseCaptureInlet` pairs this with its
+   * `onPoison` callback, because an undecodable body means the capture
+   * pipeline itself is untrustworthy.
    */
   abort(): void;
 }
@@ -230,6 +231,13 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       const tap = new PassThrough();
       const responseChunks: Buffer[] = [];
       let responseBytes = 0;
+      /**
+       * Every byte observed on this response, including the reassembler
+       * path where chunks are not retained. Diagnostics only — it is the
+       * one number that tells a truncated stream from a stream that
+       * never started.
+       */
+      let observedBytes = 0;
       // Decide whether to engage an SSE reassembler. A capturable completion
       // endpoint (the only thing reaching attachResponse) can answer either
       // as an SSE stream OR — when the client sets stream:false — as a single
@@ -286,10 +294,38 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
         completionReject = undefined;
       };
 
-      // Poison the session and reject the in-flight completion. Shared by
-      // the reassembly-failure, mid-stream-abort (close), and error paths.
+      const describeExchange = (): string =>
+        `sessionId=${inputs.sessionId} exchangeId=${exchangeId} ` +
+        `host=${inputs.host} path=${inputs.path} bytesSeen=${observedBytes}`;
+
+      /**
+       * Abandon THIS exchange and nothing else. An upstream stream that
+       * ends before its terminal event is a transport event scoped to a
+       * single request — the agent's SDK simply retries it. It says
+       * nothing about the fidelity of the session's other records, so
+       * the session keeps capturing and the gap is surfaced as
+       * `session-end.abortedExchanges`.
+       */
+      const dropExchange = (err: Error): void => {
+        aborted = true;
+        logger.warn(`[trajectory-tap] exchange dropped (mid-stream-abort): ${describeExchange()} — ${err.message}`);
+        try {
+          inputs.writer.noteAbortedExchange(inputs.sessionId);
+        } catch {
+          /* swallow — accounting is best-effort */
+        }
+        finishCompletion(false, err);
+      };
+
+      /**
+       * Poison the WHOLE session and reject the in-flight completion.
+       * Reserved for correctness hazards that make every record suspect
+       * (a parser that failed, a body we could not decode) — never for a
+       * transport truncation.
+       */
       const poisonAndAbort = (reason: PoisonReason, err: Error): void => {
         aborted = true;
+        logger.warn(`[trajectory-tap] session poisoned (${reason}): ${describeExchange()} — ${err.message}`);
         try {
           inputs.writer.markSessionPoisoned(inputs.sessionId, reason);
         } catch {
@@ -300,6 +336,7 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
 
       tap.on('data', (chunk: Buffer) => {
         if (aborted) return;
+        observedBytes += chunk.length;
         if (reassembler) {
           // On the streaming path the reassembled message is the captured
           // body, so the raw chunks are never used (see maybeWriteRecord).
@@ -351,15 +388,15 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
             // Do NOT emit a partial record. Distinguish a transport
             // truncation (stream ended before the terminal event) from a
             // genuine reassembly bug (a parse/dispatch/assembly failure):
-            // the former is an upstream abort that must NOT pollute
-            // reassembly-failure metrics. A clean `end()` with no terminal
-            // event reaches here e.g. when an upstream reset is flushed
-            // gracefully via `inlet.end()` (the gzip-tail recovery path).
+            // the former costs one exchange, the latter means the parser
+            // is untrustworthy and poisons the session. A clean `end()`
+            // with no terminal event reaches here e.g. when an upstream
+            // reset is flushed gracefully via `inlet.end()` (the
+            // gzip-tail recovery path).
             const msg = err instanceof ReassemblyError ? err.message : String(err);
             if (err instanceof TruncatedStreamError) {
-              poisonAndAbort('mid-stream-abort', err);
+              dropExchange(err);
             } else {
-              logger.warn(`[trajectory-tap] reassembly failed (${inputs.host}): ${msg}`);
               poisonAndAbort('reassembly-failure', err instanceof Error ? err : new Error(msg));
             }
           }
@@ -389,8 +426,8 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
       // `aborted || finalized`, and sets `finalized=true` synchronously
       // before any throw, so an error-then-close pair finalizes exactly
       // once). Only when the terminal event was never seen is this a
-      // GENUINELY-PARTIAL stream that poisons `mid-stream-abort`.
-      const finalizeOrPoisonOnTeardown = (err: Error): void => {
+      // GENUINELY-PARTIAL stream, and then only THIS exchange is lost.
+      const finalizeOrDropOnTeardown = (err: Error): void => {
         if (aborted || finalized) {
           finishCompletion(false);
           return;
@@ -399,15 +436,15 @@ export function beginCaptureExchange(inputs: BeginCaptureExchangeInputs): Captur
           finalize();
           return;
         }
-        poisonAndAbort('mid-stream-abort', err);
+        dropExchange(err);
       };
 
       tap.on('end', finalize);
       tap.on('close', () => {
-        finalizeOrPoisonOnTeardown(new Error('mid-stream-abort'));
+        finalizeOrDropOnTeardown(new Error('upstream stream closed before its terminal event'));
       });
       tap.on('error', (err) => {
-        finalizeOrPoisonOnTeardown(err instanceof Error ? err : new Error(String(err)));
+        finalizeOrDropOnTeardown(err instanceof Error ? err : new Error(String(err)));
       });
 
       return tap;

@@ -17,7 +17,15 @@ import type { SessionId } from '../session/types.js';
  */
 export type CaptureProvider = 'anthropic' | 'openai' | 'unknown';
 
-/** Reason a session was poisoned. See §9 for the full taxonomy. */
+/**
+ * Reason a session was poisoned. See §9 for the full taxonomy.
+ *
+ * `mid-stream-abort` is retained for backward compatibility with manifests
+ * written before transport truncation was demoted to exchange scope. The
+ * current writer never emits it as a poison reason: an upstream stream that
+ * ends before its terminal event costs exactly ONE exchange, which is
+ * dropped and counted in `session-end.abortedExchanges` instead.
+ */
 export type PoisonReason =
   | 'reassembly-failure'
   | 'disk-error'
@@ -88,7 +96,9 @@ export interface ExchangeRecord {
 /**
  * Single line in `manifest.jsonl`. Always one `session-start` paired
  * with one `session-end` (modulo crash safety nets, where the start
- * may exist without a matching end — see §9).
+ * may exist without a matching end — see §9). A `session-poisoned`
+ * entry may appear between them, emitted the moment a session is
+ * poisoned so the condition is durable on disk before teardown.
  */
 export type ManifestEntry =
   | {
@@ -102,6 +112,19 @@ export type ManifestEntry =
     }
   | {
       readonly schemaVersion: 1;
+      readonly event: 'session-poisoned';
+      readonly seq: number;
+      readonly sessionId: string;
+      readonly persona?: string;
+      readonly fsmState?: string;
+      readonly ts: string;
+      readonly poisonReason: PoisonReason;
+      /** Records already durable on disk when the session was poisoned. */
+      readonly exchanges: number;
+      readonly bytesWritten: number;
+    }
+  | {
+      readonly schemaVersion: 1;
       readonly event: 'session-end';
       readonly seq: number;
       readonly sessionId: string;
@@ -112,6 +135,15 @@ export type ManifestEntry =
       readonly bytesWritten: number;
       readonly poisoned: boolean;
       readonly poisonReason?: PoisonReason;
+      /**
+       * Exchanges lost to an upstream transport truncation (the stream
+       * ended before its terminal event, so no faithful record could be
+       * built). The rest of the session is unaffected and usable; this
+       * counter makes the gap explicit instead of silent. `0` means the
+       * session is verifiably gap-free; the field being ABSENT means the
+       * manifest predates the counter and gaps are unknown.
+       */
+      readonly abortedExchanges: number;
       readonly closedReason?: 'infrastructure-teardown';
     };
 
@@ -144,6 +176,12 @@ export interface CaptureStats {
    * this is for diagnostic visibility only.
    */
   readonly dropped: number;
+  /**
+   * Exchanges abandoned before reaching `write()` because their upstream
+   * stream truncated. Bundle-wide counterpart of
+   * `session-end.abortedExchanges`.
+   */
+  readonly abortedExchanges: number;
   readonly queued: number;
   readonly bytesWritten: number;
   readonly openSessions: number;
