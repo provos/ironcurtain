@@ -143,7 +143,7 @@ export type ManifestEntry =
        * session is verifiably gap-free; the field being ABSENT means the
        * manifest predates the counter and gaps are unknown.
        */
-      readonly abortedExchanges: number;
+      readonly abortedExchanges?: number;
       readonly closedReason?: 'infrastructure-teardown';
     };
 

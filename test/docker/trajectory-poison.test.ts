@@ -311,6 +311,54 @@ describe('Trajectory poison: failure modes', () => {
     expect(warnSpy.mock.calls[0]?.[0]).toContain('dropping records for poisoned session');
   });
 
+  it('does not append a poison marker after session-end has been serialized', async () => {
+    const sid = makeSessionId('sess-poison-after-end');
+    const manifestPath = resolve(dir, 'manifest.jsonl');
+    let notifyEndAppendStarted!: () => void;
+    const endAppendStarted = new Promise<void>((resolveStarted) => {
+      notifyEndAppendStarted = resolveStarted;
+    });
+    let releaseEndAppend!: () => void;
+    const endAppendReleased = new Promise<void>((resolveReleased) => {
+      releaseEndAppend = resolveReleased;
+    });
+    const fs: WriterFsDep = {
+      async appendFile(path, data) {
+        if (path === manifestPath && data.includes('"event":"session-end"')) {
+          notifyEndAppendStarted();
+          await endAppendReleased;
+        }
+        const { appendFile } = await import('node:fs/promises');
+        await appendFile(path, data);
+      },
+      async mkdir(path, options) {
+        const { mkdir } = await import('node:fs/promises');
+        return mkdir(path, options);
+      },
+      async writeFile(path, data) {
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(path, data);
+      },
+    };
+
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir, fs });
+    writer.beginSession({ sessionId: sid });
+
+    const endPromise = writer.endSession(sid);
+    await endAppendStarted;
+
+    // The end entry is already snapshotted as healthy but its append is
+    // deliberately pending. A late tap failure must not enqueue a poison
+    // marker behind it or mutate the state represented by that snapshot.
+    writer.markSessionPoisoned(sid, 'reassembly-failure');
+    releaseEndAppend();
+    await endPromise;
+
+    const sessionEntries = readManifest(dir).filter((entry) => entry.sessionId === sid);
+    expect(sessionEntries.map((entry) => entry.event)).toEqual(['session-start', 'session-end']);
+    expect(sessionEntries[1]).toMatchObject({ event: 'session-end', poisoned: false });
+  });
+
   it('(b.0) reassembler in isolation refuses to emit a partial body on malformed SSE', () => {
     // Sanity check the underlying invariant: the reassembler itself
     // throws on a malformed stream. Combined with the tap's

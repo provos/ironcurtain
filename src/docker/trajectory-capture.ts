@@ -429,7 +429,11 @@ export function createTrajectoryCaptureWriter(options: TrajectoryCaptureWriterOp
    * unwritable and `manifest.poisoned` is the signal instead.)
    */
   function markSessionPoisonedInternal(session: SessionFileState, reason: PoisonReason): void {
-    if (session.poisoned) return;
+    // `ended` is set at the exact point the session-end entry is built.
+    // Once that snapshot exists, mutating the poison state would either
+    // append a session-poisoned marker after session-end or make the in-memory
+    // state disagree with the already-serialized end marker.
+    if (session.poisoned || session.ended) return;
     session.poisoned = true;
     session.poisonReason = reason;
     logger.warn(
