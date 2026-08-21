@@ -149,9 +149,9 @@ export interface WorkflowSettings {
    */
   readonly sharedContainer?: boolean;
   /**
-   * When true, aborted shared-container workflow stops snapshot each live
-   * container's writable layer so resume can recreate the scope from the
-   * recorded immutable image digest. Default: false.
+   * When true, an aborted or failed shared-container workflow snapshots each
+   * live container's writable layer on stop so resume can recreate the scope
+   * from the recorded immutable image digest. Default: false.
    */
   readonly snapshotOnStop?: boolean;
 }
@@ -210,6 +210,14 @@ export interface AgentStateDefinition {
   readonly inputs: readonly string[];
   /** Output artifact names the agent is expected to produce. */
   readonly outputs: readonly string[];
+  /**
+   * Opt-in fallback for non-routing producer states. When status recovery is
+   * exhausted, the orchestrator may hand off to the sole validator edge only
+   * if every listed non-empty regular file exists under a declared output.
+   */
+  readonly artifactHandoff?: {
+    readonly requiredFiles: readonly string[];
+  };
   /** Transitions evaluated in order; first match wins. */
   readonly transitions: readonly AgentTransitionDefinition[];
   /**
@@ -653,7 +661,7 @@ export interface WorkflowCheckpoint {
    */
   readonly workflowScriptsDir?: string;
   /**
-   * Per-containerScope Docker image snapshots captured at an aborted stop.
+   * Per-containerScope Docker image snapshots captured at an aborted or failed stop.
    * `image` is the immutable sha256 image id and is the source of truth;
    * `tag` is cosmetic only.
    */

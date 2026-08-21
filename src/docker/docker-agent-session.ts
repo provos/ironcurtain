@@ -456,16 +456,14 @@ export class DockerAgentSession implements Session {
    * `firstTurnComplete` so the next turn pins the new id with
    * `--session-id` (vs. `--resume`).
    *
-   * Called by the workflow orchestrator after a hard failure (the agent
-   * CLI process was killed mid-stream without producing output). The
-   * previous id has been consumed by the CLI — a retry against it would
-   * be rejected with "Session ID is already in use" — but no resumable
-   * transcript exists either, so rotation is lossless.
+   * Called by the workflow orchestrator after a hard failure or before a
+   * fresh replacement execution when status recovery did not commit. After
+   * a hard failure, the prior id was consumed without a resumable transcript;
+   * before replacement, its transcript is intentionally abandoned so the new
+   * executor receives a clean full prompt.
    *
    * The session metadata file on disk is deliberately NOT rewritten: the
-   * stale id still points to a non-existent transcript, and
-   * `ironcurtain --resume` into a stalled-mid-stream state is not a
-   * supported path (see design plan §4).
+   * workflow persists the returned id through its invocation result instead.
    */
   rotateAgentConversationId(): AgentConversationId {
     const previousId = this.agentConversationId;
@@ -473,7 +471,7 @@ export class DockerAgentSession implements Session {
     this.firstTurnComplete = false;
     logger.info(
       `[docker-agent] rotated agentConversationId from ${previousId} to ${this.agentConversationId} ` +
-        `(previous id consumed by hard-failed turn)`,
+        `(fresh conversation requested)`,
     );
     return this.agentConversationId;
   }

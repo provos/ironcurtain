@@ -41,6 +41,21 @@ export function buildAgentCommand(
   return buildFirstVisitPrompt(stateId, stateConfig, context, definition);
 }
 
+export interface AgentReplacementContext {
+  readonly incompleteOutputExcerpts: readonly string[];
+}
+
+/** Builds a full first-visit prompt for a fresh replacement conversation. */
+export function buildAgentReplacementCommand(
+  stateId: string,
+  stateConfig: AgentStateDefinition,
+  context: WorkflowContext,
+  definition: WorkflowDefinition,
+  recovery: AgentReplacementContext,
+): string {
+  return buildFirstVisitPrompt(stateId, stateConfig, context, definition, recovery);
+}
+
 // ---------------------------------------------------------------------------
 // First-visit prompt
 // ---------------------------------------------------------------------------
@@ -66,6 +81,7 @@ function buildFirstVisitPrompt(
   stateConfig: AgentStateDefinition,
   context: WorkflowContext,
   definition: WorkflowDefinition,
+  recovery?: AgentReplacementContext,
 ): string {
   const sections: string[] = [];
   const isSameStateReEntry = context.previousStateName !== null && context.previousStateName === stateId;
@@ -90,6 +106,17 @@ function buildFirstVisitPrompt(
   const handoff = buildHandoffClause(stateConfig.transitions, definition);
   if (handoff) {
     sections.push(handoff);
+  }
+
+  if (recovery) {
+    const excerpts = recovery.incompleteOutputExcerpts
+      .map((excerpt, index) => `### Prior incomplete turn ${index + 1}\n\n${excerpt}`)
+      .join('\n\n');
+    sections.push(
+      '## Recovery handoff\n\n' +
+        'A previous executor made progress but did not commit a valid routing status. Independently inspect and finish the state, then choose the correct verdict. Do not assume the prior executor had finished. Inspect the durable workspace and expected output directories directly for any files it produced.' +
+        (excerpts ? `\n\nBounded excerpts from its incomplete output:\n\n${excerpts}` : ''),
+    );
   }
 
   sections.push(buildStatusInstructions(stateConfig.transitions));

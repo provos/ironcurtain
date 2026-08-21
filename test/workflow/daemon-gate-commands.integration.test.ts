@@ -308,14 +308,14 @@ describe('daemon gate commands (command-layer integration)', () => {
     expect(done.json.phase).toBe('completed');
   }, 30_000);
 
-  it('gate ABORT -> await reports phase:aborted with exit 3 (event name is NOT authoritative)', async () => {
+  it('gate ABORT -> failed terminal event lets await report phase:aborted with exit 3', async () => {
     harness = await boot();
 
     const workflowId = await startAndAwaitGate();
 
-    // A gate-ABORT routes to the `aborted` terminal, which emits a
-    // `workflow.completed` lifecycle event. The `await` follow-up `workflows.get`
-    // is authoritative: phase is `aborted`, and the exit code derives from THAT.
+    // A gate-ABORT routes to the `aborted` terminal and emits the terminal
+    // `workflow.failed` event. The `await` follow-up `workflows.get` remains
+    // authoritative: phase is `aborted`, and the exit code derives from that.
     const abort = await runCommand('gate', [workflowId, '--event', 'ABORT', '--json']);
     expect(abort.exitCode).toBe(0);
     expect(abort.json.ok).toBe(true);
@@ -323,7 +323,7 @@ describe('daemon gate commands (command-layer integration)', () => {
     const terminal = await runCommand('await', [workflowId, '--json']);
     expect(terminal.json.phase).toBe('aborted');
     // The critical assertion: exit 3 (EXIT_TERMINAL_FAILURE) from the phase,
-    // even though the lifecycle event that fired was `workflow.completed`.
+    // `workflow.failed` represents both failed and aborted terminal phases.
     expect(terminal.exitCode).toBe(3);
   }, 30_000);
 

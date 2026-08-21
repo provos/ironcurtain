@@ -22,6 +22,7 @@ import {
   writeDefinitionFile,
   createDeps,
   waitForCompletion,
+  waitForGate,
   stubPersonasForTest,
 } from './test-helpers.js';
 
@@ -105,6 +106,34 @@ const unconditionalDef: WorkflowDefinition = {
   },
 };
 
+const conditionalDefaultDef: WorkflowDefinition = {
+  name: 'conditional-default',
+  description: 'Status-routed state with an unconditional fallback',
+  initial: 'analyze',
+  settings: { mode: 'builtin' },
+  states: {
+    analyze: {
+      type: 'agent',
+      description: 'Analyzes the problem',
+      persona: 'analyst',
+      prompt: 'Analyze the problem.',
+      inputs: [],
+      outputs: ['analysis'],
+      transitions: [{ to: 'implement', when: { verdict: 'implement' } }, { to: 'done' }],
+    },
+    implement: {
+      type: 'agent',
+      description: 'Implements the result',
+      persona: 'coder',
+      prompt: 'Implement it.',
+      inputs: ['analysis'],
+      outputs: ['code'],
+      transitions: [{ to: 'done' }],
+    },
+    done: { type: 'terminal', description: 'Done' },
+  },
+};
+
 /**
  * Workflow with mixed when + guard transitions. The guard-only
  * transition cannot be pre-validated, so only when-clause verdicts
@@ -134,6 +163,39 @@ const mixedDef: WorkflowDefinition = {
   },
 };
 
+const gateRoutedDef: WorkflowDefinition = {
+  name: 'gate-routed',
+  description: 'Verdict route with a direct human error gate',
+  initial: 'analyze',
+  settings: { mode: 'builtin' },
+  states: {
+    analyze: {
+      type: 'agent',
+      description: 'Analyzes the problem',
+      persona: 'analyst',
+      prompt: 'Analyze the problem.',
+      inputs: [],
+      outputs: ['analysis'],
+      transitions: [
+        { to: 'gate', when: { verdict: 'escalate' } },
+        { to: 'done', when: { verdict: 'done' } },
+      ],
+    },
+    gate: {
+      type: 'human_gate',
+      description: 'Review failed analysis',
+      acceptedEvents: ['APPROVE', 'ABORT'],
+      present: ['analysis'],
+      transitions: [
+        { to: 'done', event: 'APPROVE' },
+        { to: 'aborted', event: 'ABORT' },
+      ],
+    },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Test setup
 // ---------------------------------------------------------------------------
@@ -143,7 +205,14 @@ let cleanupPersonas: () => void;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(resolve(tmpdir(), 'verdict-test-'));
-  cleanupPersonas = stubPersonasForTest(tmpDir, whenRoutedDef, unconditionalDef, mixedDef);
+  cleanupPersonas = stubPersonasForTest(
+    tmpDir,
+    whenRoutedDef,
+    unconditionalDef,
+    conditionalDefaultDef,
+    mixedDef,
+    gateRoutedDef,
+  );
 });
 
 afterEach(() => {
@@ -156,6 +225,137 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('verdict validation', () => {
+  it('preserves the newest substantive body when the valid recovery response is status-only', async () => {
+    const downstreamMessages: string[] = [];
+    let invocation = 0;
+    const deps = createDeps(tmpDir, {
+      createSession: vi.fn(async () => {
+        invocation++;
+        if (invocation === 1) {
+          let turn = 0;
+          return new MockSession({
+            responses: () => {
+              turn++;
+              if (turn === 1) {
+                simulateArtifacts(findWorkflowDir(tmpDir), ['analysis']);
+                return 'first incomplete analysis';
+              }
+              if (turn === 2) {
+                return [
+                  'newest incomplete analysis',
+                  statusBlock('done', 'stale checkpoint'),
+                  'continued after checkpoint fence',
+                ].join('\n');
+              }
+              return statusBlock('implement', 'continue with implementation');
+            },
+          });
+        }
+        return new MockSession({
+          responses: (message) => {
+            downstreamMessages.push(message);
+            simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+            return verdictResponse('done', 'implemented');
+          },
+        });
+      }),
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    const workflowId = await orchestrator.start(writeDefinitionFile(tmpDir, whenRoutedDef), 'Test task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(downstreamMessages[0]).toContain('newest incomplete analysis');
+    expect(downstreamMessages[0]).toContain('continued after checkpoint fence');
+    expect(downstreamMessages[0]).not.toContain('first incomplete analysis');
+    expect(downstreamMessages[0]).not.toContain('stale checkpoint');
+    const directive = downstreamMessages[0].split('### Directive\n\n')[1].split('\n\n---')[0];
+    expect(directive).not.toContain('agent_status');
+  });
+
+  it('runs one fresh full-prompt replacement after the bounded commit loop', async () => {
+    const sessions: MockSession[] = [];
+    const deps = createDeps(tmpDir, {
+      createSession: vi.fn(async () => {
+        const session = new MockSession({
+          responses: () => {
+            const turn = session.sentMessages.length;
+            if (turn === 1) {
+              simulateArtifacts(findWorkflowDir(tmpDir), ['analysis']);
+              return `first executor body\n${statusBlock('invalid-one', 'bad route')}`;
+            }
+            if (turn === 2) return 'second incomplete body';
+            if (turn === 3) return `third executor\0 body\n${statusBlock('invalid-two', 'still bad')}`;
+            return statusBlock('done', 'replacement committed');
+          },
+        });
+        sessions.push(session);
+        return session;
+      }),
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    const workflowId = await orchestrator.start(writeDefinitionFile(tmpDir, whenRoutedDef), 'Test task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(sessions[0].sentMessages).toHaveLength(4);
+    expect(sessions[0].rotateCalls).toEqual([3]);
+    const replacementPrompt = sessions[0].sentMessages[3];
+    expect(replacementPrompt).toContain('## Workflow Context');
+    expect(replacementPrompt).toContain('## Recovery handoff');
+    expect(replacementPrompt).toContain('Inspect the durable workspace and expected output directories directly');
+    expect(replacementPrompt).toContain('third executor\\x00 body');
+    expect(replacementPrompt).not.toContain('\0');
+  });
+
+  it('replaces a mixed conditional/default state even though any verdict can take the fallback', async () => {
+    const session = new MockSession({
+      responses: () => {
+        if (session.sentMessages.length === 1) simulateArtifacts(findWorkflowDir(tmpDir), ['analysis']);
+        if (session.sentMessages.length === 4) return statusBlock('fallback', 'replacement committed');
+        return 'incomplete analysis';
+      },
+    });
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir, { createSession: vi.fn(async () => session) }));
+
+    const workflowId = await orchestrator.start(writeDefinitionFile(tmpDir, conditionalDefaultDef), 'Test task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(session.sentMessages).toHaveLength(4);
+    expect(session.sentMessages[3]).toContain('## Recovery handoff');
+  });
+
+  it('routes a hard-failed replacement to the existing human gate with exact error and artifacts', async () => {
+    const raiseGate = vi.fn();
+    const session = new MockSession({
+      responses: () => {
+        if (session.sentMessages.length === 1) {
+          simulateArtifacts(findWorkflowDir(tmpDir), ['analysis']);
+        }
+        if (session.sentMessages.length === 4) {
+          return { text: 'Agent exited with code 143.\n\nOutput:\n', hardFailure: true };
+        }
+        return 'incomplete analysis';
+      },
+    });
+    const orchestrator = new WorkflowOrchestrator(
+      createDeps(tmpDir, { createSession: vi.fn(async () => session), raiseGate }),
+    );
+
+    const workflowId = await orchestrator.start(writeDefinitionFile(tmpDir, gateRoutedDef), 'Test task');
+    const [gate] = await waitForGate(raiseGate, 1);
+
+    expect(gate.summary).toContain('Fresh replacement execution hard-failed');
+    expect(gate.presentedArtifacts.has('analysis')).toBe(true);
+    expect(session.rotateCalls).toEqual([3, 4]);
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
+  });
+
   it('re-prompts on invalid verdict and succeeds on valid retry', async () => {
     const sentMessages: string[] = [];
     let callCount = 0;
@@ -232,7 +432,7 @@ describe('verdict validation', () => {
 
     // The error goes through XState's onError -> storeError -> terminal state.
     // The machine completes but the error is surfaced via lifecycle events.
-    expect(callCount).toBe(2);
+    expect(callCount).toBe(4);
 
     const failEvents = lifecycleEvents.filter((e) => e.kind === 'failed');
     expect(failEvents.length).toBeGreaterThanOrEqual(1);
@@ -269,13 +469,12 @@ describe('verdict validation', () => {
     const workflowId = await orchestrator.start(defPath, 'Test task');
     await waitForCompletion(orchestrator, workflowId);
 
-    expect(callCount).toBe(2);
+    expect(callCount).toBe(4);
 
     const failEvents = lifecycleEvents.filter((e) => e.kind === 'failed');
     expect(failEvents.length).toBeGreaterThanOrEqual(1);
     const errorMsg = failEvents[0].error ?? '';
-    expect(errorMsg).toContain('no-vuln');
-    expect(errorMsg).toContain('did not include a status block');
+    expect(errorMsg).toContain('Fresh replacement returned missing final agent_status block');
   });
 
   it('passes valid verdicts through without re-prompting', async () => {

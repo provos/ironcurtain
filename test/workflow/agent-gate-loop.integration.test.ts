@@ -251,7 +251,7 @@ describe('agent gate loop (integration)', () => {
     expect(phase).toBe('completed');
   }, 30_000);
 
-  it('drives start -> gate -> ABORT -> aborted (event is completed, phase is aborted)', async () => {
+  it('drives start -> gate -> ABORT -> aborted via a terminal failed event', async () => {
     const { client } = await boot();
 
     const workflowId = await startFixture(client);
@@ -260,9 +260,9 @@ describe('agent gate loop (integration)', () => {
     const atGate = await getDetail(client, workflowId);
     expect(atGate.phase).toBe('waiting_human');
 
-    // A gate-ABORT routes to the `aborted` terminal, which emits a
-    // `workflow.completed` lifecycle event — so the event name is NOT
-    // authoritative; the follow-up `workflows.get` reports `phase:'aborted'`.
+    // A gate-ABORT routes to the `aborted` terminal and emits
+    // `workflow.failed`; the follow-up `workflows.get` disambiguates the
+    // authoritative `phase:'aborted'` result.
     const abort = await client.call('workflows.resolveGate', { workflowId, event: 'ABORT' });
     expect(abort.ok).toBe(true);
 

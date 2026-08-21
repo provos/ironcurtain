@@ -3,6 +3,7 @@ import {
   parseAgentStatus,
   AgentStatusParseError,
   buildStatusBlockReprompt,
+  stripAgentStatusFences,
   stripStatusBlock,
   MINIMAL_STATUS_INSTRUCTIONS,
   buildConditionalStatusInstructions,
@@ -16,7 +17,7 @@ import type { AgentTransitionDefinition } from '../../src/workflow/types.js';
 // ---------------------------------------------------------------------------
 
 function wrapInFence(yamlContent: string): string {
-  return `Some preceding text.\n\`\`\`\n${yamlContent}\`\`\`\nSome trailing text.`;
+  return `Some preceding text.\n\`\`\`\n${yamlContent}\`\`\``;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +162,6 @@ describe('parseAgentStatus', () => {
   });
 
   it('uses the last status block when multiple exist', () => {
-    // regex finds the first match, which is fine for our use case
     const text = [
       '```',
       'agent_status:',
@@ -184,8 +184,29 @@ describe('parseAgentStatus', () => {
       '```',
     ].join('\n');
     const result = parseAgentStatus(text);
-    // First match wins with our regex
-    expect(result?.notes).toBe('first');
+    expect(result?.notes).toBe('second');
+  });
+
+  it('ignores an agent_status fence that is not the final content', () => {
+    const text = ['```', 'agent_status:', '  verdict: approved', '```', 'More work followed.'].join('\n');
+    expect(parseAgentStatus(text)).toBeUndefined();
+    expect(stripStatusBlock(text)).toBe(text);
+  });
+
+  it('does not treat an embedded fence-like substring as a status block', () => {
+    const text = 'prefix ```\nagent_status:\n  verdict: approved\n```';
+    expect(parseAgentStatus(text)).toBeUndefined();
+  });
+
+  it('accepts a longer closing Markdown fence', () => {
+    const text = ['```yaml', 'agent_status:', '  verdict: approved', '````'].join('\n');
+    expect(parseAgentStatus(text)?.verdict).toBe('approved');
+  });
+
+  it('parses and strips a final CRLF status fence', () => {
+    const text = 'Analysis complete.\r\n```\r\nagent_status:\r\n  verdict: approved\r\n```\r\n';
+    expect(parseAgentStatus(text)?.verdict).toBe('approved');
+    expect(stripStatusBlock(text)).toBe('Analysis complete.');
   });
 
   it('accepts custom verdict strings for direct routing', () => {
@@ -548,6 +569,12 @@ describe('buildConditionalStatusInstructions', () => {
 // ---------------------------------------------------------------------------
 
 describe('stripStatusBlock', () => {
+  it('sanitizes stale non-final status fences without removing later prose', () => {
+    const text = ['Before.', '```', 'agent_status:', '  verdict: stale', '```', 'After.'].join('\n');
+    expect(stripAgentStatusFences(text)).toBe('Before.\nAfter.');
+    expect(stripStatusBlock(text)).toBe(text);
+  });
+
   it('strips a backtick-fenced status block from the end of a response', () => {
     const text = [
       'I completed the analysis.',

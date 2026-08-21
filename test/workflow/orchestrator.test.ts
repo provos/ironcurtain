@@ -591,10 +591,10 @@ describe('WorkflowOrchestrator', () => {
     const workflowId = await orchestrator.start(defPath, 'write code');
     await waitForCompletion(orchestrator, workflowId);
 
-    // Error goes through onError -> terminal. The storeError action
-    // records the error but the machine still reaches 'done'.
+    // Error goes through onError -> terminal. A terminal reached with
+    // lastError is a resumable failure even when that terminal is named done.
     const status = orchestrator.getStatus(workflowId);
-    expect(status?.phase).toBe('completed');
+    expect(status?.phase).toBe('failed');
   });
 
   // -----------------------------------------------------------------------
@@ -741,6 +741,8 @@ describe('WorkflowOrchestrator', () => {
 
     const orchestrator = new WorkflowOrchestrator(deps);
     activeOrchestrator = orchestrator;
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
+    orchestrator.onEvent((event) => lifecycleEvents.push(event));
     const workflowId = await orchestrator.start(defPath, 'build a thing');
 
     // Wait for plan_gate
@@ -755,6 +757,14 @@ describe('WorkflowOrchestrator', () => {
     // Verify aborted status
     const status = orchestrator.getStatus(workflowId);
     expect(status?.phase).toBe('aborted');
+    await vi.waitFor(() => {
+      expect(lifecycleEvents).toContainEqual({
+        kind: 'failed',
+        workflowId,
+        error: 'Workflow reached aborted state',
+      });
+    });
+    expect(lifecycleEvents.some((event) => event.kind === 'completed')).toBe(false);
 
     // Planner session was closed
     expect(allSessions[0].closed).toBe(true);

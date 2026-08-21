@@ -520,9 +520,9 @@ async function runAwait(args: string[]): Promise<number> {
  *
  * Resolution triggers: the initial `get` already at a gate/terminal; a
  * `workflow.gate_raised` event; or a terminal *event*
- * (`workflow.completed` / `workflow.failed`). Because a gate-ABORT emits a
- * `completed` event while reporting `phase:'aborted'`, the event name is never
- * trusted — the follow-up `get` is authoritative.
+ * (`workflow.completed` / `workflow.failed`). The event name is never trusted:
+ * `workflow.failed` represents both `failed` and `aborted`, so the follow-up
+ * `get` is authoritative.
  */
 async function awaitDecisionPoint(
   client: DaemonClient,

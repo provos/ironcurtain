@@ -47,7 +47,7 @@ export interface AgentInvokeResult {
   readonly artifacts: Record<string, string>;
   /** SHA-256 of output artifacts, computed by the orchestrator. */
   readonly outputHash: string;
-  /** Raw response text from session.sendMessage(). */
+  /** Latest non-empty substantive response body, with status fences removed. */
   readonly responseText: string;
   /**
    * Cumulative workflow-level output-token count at the moment this

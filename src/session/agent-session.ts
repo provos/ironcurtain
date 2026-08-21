@@ -34,17 +34,19 @@ import type { ServerListing } from '../types/server-listing.js';
 import { ResourceBudgetTracker } from './resource-budget-tracker.js';
 import { StepLoopDetector } from './step-loop-detector.js';
 import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
-import type {
-  Session,
-  SessionId,
-  SessionStatus,
-  SessionInfo,
-  SessionOptions,
-  ConversationTurn,
-  DiagnosticEvent,
-  EscalationRequest,
-  SandboxFactory,
-  BudgetStatus,
+import {
+  createAgentConversationId,
+  type AgentConversationId,
+  type Session,
+  type SessionId,
+  type SessionStatus,
+  type SessionInfo,
+  type SessionOptions,
+  type ConversationTurn,
+  type DiagnosticEvent,
+  type EscalationRequest,
+  type SandboxFactory,
+  type BudgetStatus,
 } from './types.js';
 
 const MAX_AGENT_STEPS = 100;
@@ -173,6 +175,16 @@ export class AgentSession implements Session {
       turnCount: this.turns.length,
       createdAt: this.createdAt,
     };
+  }
+
+  rotateAgentConversationId(): AgentConversationId {
+    if (this.status === 'closed') throw new SessionClosedError();
+    if (this.status !== 'ready') throw new SessionNotReadyError(this.status);
+    this.messages.length = 0;
+    this.loopDetector.reset();
+    this.lastStepInputTokens = 0;
+    this.compactor.recordInputTokens(0);
+    return createAgentConversationId();
   }
 
   async sendMessage(userMessage: string): Promise<string> {

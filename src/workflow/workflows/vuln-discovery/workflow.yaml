@@ -508,6 +508,9 @@ states:
       - journal
     outputs:
       - harness_build
+    artifactHandoff:
+      requiredFiles:
+        - harness_build/README.md
     transitions:
       - to: harness_validate
 

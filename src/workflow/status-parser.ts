@@ -36,11 +36,57 @@ const agentOutputSchema = z.object({
 // Status block extraction
 // ---------------------------------------------------------------------------
 
+interface FencedBlock {
+  readonly rawBlock: string;
+  readonly start: number;
+  readonly end: number;
+}
+
 /**
- * Regex to find the agent_status YAML block within fenced code blocks.
- * Matches ``` or ~~~ fences with optional language tag.
+ * Scans discrete Markdown fences. Closing fences may be longer than their
+ * opener, per CommonMark, and CRLF offsets are preserved for exact stripping.
  */
-const STATUS_BLOCK_REGEX = /```[^\n]*\n(agent_status:\n[\s\S]*?)```|~~~[^\n]*\n(agent_status:\n[\s\S]*?)~~~/;
+function findFencedBlocks(text: string): FencedBlock[] {
+  const blocks: FencedBlock[] = [];
+  let open: { readonly marker: string; readonly start: number; readonly contentStart: number } | undefined;
+
+  for (let start = 0; start < text.length; ) {
+    const newline = text.indexOf('\n', start);
+    const end = newline === -1 ? text.length : newline + 1;
+    let contentEnd = newline === -1 ? end : newline;
+    if (contentEnd > start && text[contentEnd - 1] === '\r') contentEnd--;
+    const content = text.slice(start, contentEnd);
+
+    if (open) {
+      const closing = /^(?: {0,3})(`{3,}|~{3,})[ \t]*$/.exec(content);
+      if (closing && closing[1][0] === open.marker[0] && closing[1].length >= open.marker.length) {
+        blocks.push({
+          rawBlock: text.slice(open.contentStart, start),
+          start: open.start,
+          end,
+        });
+        open = undefined;
+      }
+    } else {
+      const opening = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(content);
+      if (opening && !(opening[1][0] === '`' && opening[2].includes('`'))) {
+        open = { marker: opening[1], start, contentStart: end };
+      }
+    }
+    start = end;
+  }
+  return blocks;
+}
+
+function isStatusFence(fence: FencedBlock): boolean {
+  return /^agent_status:(?:\r?\n|$)/.test(fence.rawBlock);
+}
+
+function extractFinalStatusFence(responseText: string): FencedBlock | undefined {
+  const finalFence = findFencedBlocks(responseText).at(-1);
+  if (!finalFence || !isStatusFence(finalFence)) return undefined;
+  return /^\s*$/.test(responseText.slice(finalFence.end)) ? finalFence : undefined;
+}
 
 /**
  * Extracts and parses an agent_status YAML block from response text.
@@ -49,12 +95,10 @@ const STATUS_BLOCK_REGEX = /```[^\n]*\n(agent_status:\n[\s\S]*?)```|~~~[^\n]*\n(
  * @throws {AgentStatusParseError} if block found but malformed
  */
 export function parseAgentStatus(responseText: string): AgentOutput | undefined {
-  const match = STATUS_BLOCK_REGEX.exec(responseText);
-  if (!match) return undefined;
+  const fence = extractFinalStatusFence(responseText);
+  if (!fence) return undefined;
 
-  // One of the two capture groups will match (regex alternation).
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  const rawBlock = match[1] ?? match[2];
+  const { rawBlock } = fence;
   let parsed: unknown;
   try {
     parsed = YAML.parse(rawBlock, { maxAliasCount: 0 });
@@ -107,13 +151,6 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
 // ---------------------------------------------------------------------------
 
 /**
- * Regex matching the entire fenced status block (including fences) at the
- * end of the response. Handles both ``` and ~~~ fences with optional
- * language tag. Anchored to end-of-string with optional trailing whitespace.
- */
-const STATUS_BLOCK_FENCE_REGEX = /(?:```[^\n]*\nagent_status:\n[\s\S]*?```|~~~[^\n]*\nagent_status:\n[\s\S]*?~~~)\s*$/;
-
-/**
  * Removes the fenced agent_status block from the end of the response text.
  * The status block is already parsed into AgentOutput by `parseAgentStatus`,
  * so passing it as raw text to the next agent is redundant noise.
@@ -121,7 +158,23 @@ const STATUS_BLOCK_FENCE_REGEX = /(?:```[^\n]*\nagent_status:\n[\s\S]*?```|~~~[^
  * @returns text with the trailing status block removed and whitespace trimmed
  */
 export function stripStatusBlock(responseText: string): string {
-  return responseText.replace(STATUS_BLOCK_FENCE_REGEX, '').trimEnd();
+  const fence = extractFinalStatusFence(responseText);
+  return fence ? responseText.slice(0, fence.start).trimEnd() : responseText;
+}
+
+/** Removes every discrete agent_status fence while retaining surrounding prose. */
+export function stripAgentStatusFences(responseText: string): string {
+  const statusFences = findFencedBlocks(responseText).filter(isStatusFence);
+  if (statusFences.length === 0) return responseText;
+
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const fence of statusFences) {
+    parts.push(responseText.slice(cursor, fence.start));
+    cursor = fence.end;
+  }
+  parts.push(responseText.slice(cursor));
+  return parts.join('').trimEnd();
 }
 
 // ---------------------------------------------------------------------------

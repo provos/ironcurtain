@@ -6,6 +6,7 @@ import {
   appendFileSync,
   readdirSync,
   statSync,
+  lstatSync,
   unlinkSync,
   cpSync,
 } from 'node:fs';
@@ -86,6 +87,7 @@ import {
 import type { ContainerRuntime } from '../docker/types.js';
 import {
   buildWorkflowMachine,
+  truncateAgentOutput,
   type AgentInvokeInput,
   type AgentInvokeResult,
   type DeterministicInvokeInput,
@@ -103,8 +105,14 @@ import {
   buildStatusBlockReprompt,
   getValidVerdicts,
   buildInvalidVerdictReprompt,
+  stripAgentStatusFences,
 } from './status-parser.js';
-import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
+import {
+  buildAgentCommand,
+  buildAgentReplacementCommand,
+  buildArtifactReprompt,
+  buildStatusInstructions,
+} from './prompt-builder.js';
 import {
   DEFAULT_EVOLVE_LANE_DIR,
   DEFAULT_EVOLVE_LANE_RELATIVE_DIR,
@@ -114,6 +122,7 @@ import {
 } from './lane-template.js';
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import {
+  isExecutableState,
   isSafeWorkspaceRelativePath,
   parseArtifactRef,
   validateDefinition,
@@ -283,6 +292,28 @@ function tryParseAgentStatus(responseText: string): ParseResult {
     }
     throw err;
   }
+}
+
+/**
+ * Conservative between-turn admission check for recovery work. Session limits
+ * remain per-turn; a completed turn may take cumulative usage past the same
+ * threshold, but no later recovery turn is launched once that is visible.
+ */
+function cumulativeBudgetExhaustionReason(session: Session): string | undefined {
+  const { cumulative, limits, tokenTrackingAvailable } = session.getBudgetStatus();
+  if (tokenTrackingAvailable && limits.maxTotalTokens != null && cumulative.totalTokens >= limits.maxTotalTokens) {
+    return `token budget exhausted (${cumulative.totalTokens}/${limits.maxTotalTokens})`;
+  }
+  if (limits.maxSteps != null && cumulative.stepCount >= limits.maxSteps) {
+    return `step budget exhausted (${cumulative.stepCount}/${limits.maxSteps})`;
+  }
+  if (limits.maxSessionSeconds != null && cumulative.activeSeconds >= limits.maxSessionSeconds) {
+    return `cumulative active-time budget exhausted (${Math.round(cumulative.activeSeconds)}s/${limits.maxSessionSeconds}s)`;
+  }
+  if (limits.maxEstimatedCostUsd != null && cumulative.estimatedCostUsd >= limits.maxEstimatedCostUsd) {
+    return `cost budget exhausted ($${cumulative.estimatedCostUsd.toFixed(2)}/$${limits.maxEstimatedCostUsd.toFixed(2)})`;
+  }
+  return undefined;
 }
 
 /**
@@ -844,12 +875,6 @@ interface WorkflowInstance {
    * Sibling of `quotaExhausted`: drives the same checkpoint-preserving
    * abort path. Survives only in-process; the checkpoint does not
    * record it.
-   *
-   * Initial-state caveat: the orchestrator only checkpoints on actual
-   * state transitions, so a transient failure on the `initial:` state
-   * has no prior checkpoint to preserve and resume will re-enter the
-   * terminal rather than the failing state. Applies to `quotaExhausted`
-   * too; closing requires a checkpoint-on-start change.
    */
   transientFailure?: { readonly kind: TransientFailureKind; readonly rawMessage: string };
 }
@@ -1584,6 +1609,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     this.setupTokenSubscription(instance);
     this.emitLifecycleEvent({ kind: 'started', workflowId, name: definition.name, taskDescription });
     this.subscribeToActor(instance);
+    // Persist the initial executable state before it can transition directly
+    // to a terminal. Terminal saves preserve this non-terminal resume point.
+    this.saveCheckpoint(instance, actor.getSnapshot() as { value: unknown; context: unknown });
     actor.start();
     return workflowId;
   }
@@ -2160,7 +2188,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
   // `waiting_human` would smuggle a ReadonlyMap (gate.presentedArtifacts) into
   // JSON.stringify, which silently emits `{}`. handleWorkflowComplete only
-  // assigns `completed` or `aborted`, so the cycle is safe today.
+  // assigns terminal completed/aborted/failed statuses, so the cycle is safe.
   private buildCheckpoint(
     instance: WorkflowInstance,
     snapshot: { value: unknown; context: unknown },
@@ -2506,24 +2534,47 @@ export class WorkflowOrchestrator implements WorkflowController {
         sessionId: agentSessionId,
       });
 
-      // Two-phase retry: (1) hard-failure retries re-send the ORIGINAL
-      // command with a rotated conversation id, (2) soft-failure reprompt
-      // asks the agent to fix a missing/malformed agent_status block.
-      //
-      // Hard failures (exitCode != 0 with empty output, e.g., upstream
-      // provider stall that kills the CLI mid-stream) leave the agent's
-      // session id consumed but no resumable transcript on disk — a retry
-      // with the same id is rejected by the CLI. Rotating and resending the
-      // original prompt is the correct recovery path; a missing-status-block
-      // reprompt into a dead session cannot possibly succeed.
+      // Hard failures re-send the original command with a rotated conversation
+      // id. Status failures stay in the live conversation for a bounded commit
+      // loop; status-routed states get one fresh replacement execution after
+      // that loop is exhausted.
       const MAX_HARD_RETRIES = 2;
+      const MAX_COMMIT_RECOVERY_TURNS = 2;
+      const MAX_RECOVERY_EXCERPTS = 3;
+      const MAX_RECOVERY_EXCERPT_CHARS = 4_000;
       let responseText = '';
+      let latestResponseText = '';
+      const incompleteOutputExcerpts: string[] = [];
+
+      const rememberResponse = (text: string) => {
+        latestResponseText = text;
+        const body = stripAgentStatusFences(text).trim();
+        if (!body) return;
+        responseText = body;
+        const safeExcerpt = truncateAgentOutput(body);
+        incompleteOutputExcerpts.push(
+          safeExcerpt.length > MAX_RECOVERY_EXCERPT_CHARS
+            ? `${safeExcerpt.slice(0, MAX_RECOVERY_EXCERPT_CHARS)}\n[excerpt truncated]`
+            : safeExcerpt,
+        );
+        if (incompleteOutputExcerpts.length > MAX_RECOVERY_EXCERPTS) incompleteOutputExcerpts.shift();
+      };
+
+      const rotateConversation = (): boolean => {
+        const rotated = session.rotateAgentConversationId?.();
+        if (!rotated) return false;
+        currentConversationId = rotated;
+        return true;
+      };
+
       for (let attempt = 0; attempt <= MAX_HARD_RETRIES; attempt++) {
         const result = await sendAgentTurn(command);
-        responseText = result.text;
-        if (!result.hardFailure) break;
+        if (!result.hardFailure) {
+          rememberResponse(result.text);
+          break;
+        }
 
-        logReceived(responseText, undefined);
+        logReceived(result.text, undefined);
         logAgentRetry(
           'upstream_stall',
           `Agent exited without producing output (attempt ${attempt + 1}/${MAX_HARD_RETRIES + 1})`,
@@ -2533,76 +2584,131 @@ export class WorkflowOrchestrator implements WorkflowController {
         if (attempt === MAX_HARD_RETRIES) {
           throw new Error(`Agent failed to produce output after ${MAX_HARD_RETRIES + 1} attempts (upstream stall)`);
         }
-        const rotated = session.rotateAgentConversationId?.();
-        if (rotated) currentConversationId = rotated;
+        const budgetReason = cumulativeBudgetExhaustionReason(session);
+        if (budgetReason) throw new Error(`Cannot retry upstream stall: ${budgetReason}`);
+        rotateConversation();
       }
 
-      let parseResult = tryParseAgentStatus(responseText);
-      logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
+      const validVerdicts = getValidVerdicts(stateConfig.transitions);
+      const routesOnStatus = stateConfig.transitions.some((transition) => transition.when !== undefined);
+      type CommitResult = ParseResult | { readonly kind: 'invalid'; readonly output: AgentOutput };
+
+      const evaluateCommit = (text: string): CommitResult => {
+        const parsed = tryParseAgentStatus(text);
+        if (parsed.kind !== 'ok') return parsed;
+        if (validVerdicts && !validVerdicts.has(parsed.output.verdict)) {
+          return { kind: 'invalid', output: parsed.output };
+        }
+        return parsed;
+      };
+
+      const commitRetry = (result: Exclude<CommitResult, { readonly kind: 'ok' }>) => {
+        if (result.kind === 'invalid') {
+          return {
+            reason: 'invalid_verdict' as const,
+            details: `Verdict "${result.output.verdict}" not in valid set: ${[...(validVerdicts ?? [])].join(', ')}`,
+            message: buildInvalidVerdictReprompt(result.output.verdict, stateConfig.transitions),
+          };
+        }
+        const malformed = result.kind === 'malformed' ? result.error : undefined;
+        return {
+          reason: malformed ? ('malformed_status_block' as const) : ('missing_status_block' as const),
+          details: malformed
+            ? `Malformed agent_status block: ${malformed.message}`
+            : 'Response did not contain a final agent_status block',
+          message: buildStatusBlockReprompt(statusInstructions, malformed),
+        };
+      };
+
+      const commitFailureDescription = (result: Exclude<CommitResult, { readonly kind: 'ok' }>): string => {
+        if (result.kind === 'invalid') {
+          return `invalid verdict "${result.output.verdict}" (expected one of: ${[...(validVerdicts ?? [])].join(', ')})`;
+        }
+        return result.kind === 'malformed'
+          ? `malformed agent_status block: ${result.error.message}`
+          : 'missing final agent_status block';
+      };
+
+      let commit = evaluateCommit(latestResponseText);
+      logReceived(latestResponseText, commit.kind === 'ok' ? commit.output : undefined);
+      let recoveryFailure: string | undefined;
+      let recoveryConversationRotated = false;
+
+      for (let recoveryTurn = 0; commit.kind !== 'ok' && recoveryTurn < MAX_COMMIT_RECOVERY_TURNS; recoveryTurn++) {
+        const budgetReason = cumulativeBudgetExhaustionReason(session);
+        if (budgetReason) {
+          recoveryFailure = `Status recovery stopped: ${budgetReason}`;
+          break;
+        }
+
+        const retry = commitRetry(commit);
+        logAgentRetry(retry.reason, retry.details, retry.message);
+        const result = await sendAgentTurn(retry.message);
+        if (result.hardFailure) {
+          logReceived(result.text, undefined);
+          logAgentRetry('upstream_stall', 'Status recovery turn exited without producing output', retry.message);
+          recoveryConversationRotated = rotateConversation();
+          recoveryFailure = 'Status recovery failed because the agent conversation hard-failed';
+          break;
+        }
+
+        rememberResponse(result.text);
+        commit = evaluateCommit(result.text);
+        logReceived(result.text, commit.kind === 'ok' ? commit.output : undefined);
+      }
+
+      if (commit.kind !== 'ok' && routesOnStatus) {
+        const budgetReason = cumulativeBudgetExhaustionReason(session);
+        if (budgetReason) {
+          recoveryFailure = `Replacement execution skipped: ${budgetReason}`;
+        } else if (recoveryConversationRotated || rotateConversation()) {
+          const replacementPrompt = buildAgentReplacementCommand(stateId, stateConfig, context, definition, {
+            incompleteOutputExcerpts,
+          });
+          const retry = commitRetry(commit);
+          logAgentRetry(
+            retry.reason,
+            `Fresh replacement after recovery exhaustion: ${retry.details}`,
+            replacementPrompt,
+          );
+          const replacement = await sendAgentTurn(replacementPrompt);
+          if (replacement.hardFailure) {
+            logReceived(replacement.text, undefined);
+            rotateConversation();
+            recoveryFailure = 'Fresh replacement execution hard-failed';
+          } else {
+            rememberResponse(replacement.text);
+            commit = evaluateCommit(replacement.text);
+            logReceived(replacement.text, commit.kind === 'ok' ? commit.output : undefined);
+            if (commit.kind !== 'ok') {
+              recoveryFailure = `Fresh replacement returned ${commitFailureDescription(commit)}`;
+            }
+          }
+        } else {
+          recoveryFailure = 'Cannot start fresh replacement because this session cannot rotate conversations';
+        }
+      }
 
       let agentOutput: AgentOutput;
-      if (parseResult.kind === 'ok') {
-        agentOutput = parseResult.output;
+      if (commit.kind === 'ok') {
+        agentOutput = commit.output;
+      } else if (stateConfig.artifactHandoff && this.artifactHandoffSatisfied(stateConfig, instance.artifactDir)) {
+        const handoff =
+          'Required artifacts are present; handing them to the configured validator for independent validation.';
+        responseText = handoff;
+        agentOutput = {
+          completed: true,
+          verdict: 'artifact_handoff',
+          confidence: 'high',
+          escalation: null,
+          testCount: null,
+          notes: handoff,
+        };
       } else {
-        const malformed = parseResult.kind === 'malformed' ? parseResult.error : undefined;
-        const retryMsg = buildStatusBlockReprompt(statusInstructions, malformed);
-        logAgentRetry(
-          malformed ? 'malformed_status_block' : 'missing_status_block',
-          malformed
-            ? `Malformed agent_status block: ${malformed.message}`
-            : 'Response did not contain an agent_status block',
-          retryMsg,
+        throw new Error(
+          recoveryFailure ??
+            `Agent did not commit a routable status after ${MAX_COMMIT_RECOVERY_TURNS} recovery turns: ${commitFailureDescription(commit)}`,
         );
-
-        responseText = (await sendAgentTurn(retryMsg)).text;
-        parseResult = tryParseAgentStatus(responseText);
-        logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
-
-        if (parseResult.kind !== 'ok') {
-          throw new Error(
-            parseResult.kind === 'malformed'
-              ? `Agent produced a malformed agent_status block after retry: ${parseResult.error.message}`
-              : 'Agent failed to provide agent_status block after retry',
-          );
-        }
-        agentOutput = parseResult.output;
-      }
-
-      // Validate verdict against valid transitions before the result reaches XState.
-      // This prevents silent deadlocks when the agent returns a verdict that no
-      // transition's `when` clause matches.
-      const validVerdicts = getValidVerdicts(stateConfig.transitions);
-      if (validVerdicts && !validVerdicts.has(agentOutput.verdict)) {
-        const retryMsg = buildInvalidVerdictReprompt(agentOutput.verdict, stateConfig.transitions);
-        logAgentRetry(
-          'invalid_verdict',
-          `Verdict "${agentOutput.verdict}" not in valid set: ${[...validVerdicts].join(', ')}`,
-          retryMsg,
-        );
-
-        responseText = (await sendAgentTurn(retryMsg)).text;
-        const retryParse = tryParseAgentStatus(responseText);
-        logReceived(responseText, retryParse.kind === 'ok' ? retryParse.output : undefined);
-
-        if (retryParse.kind !== 'ok') {
-          const suffix =
-            retryParse.kind === 'malformed'
-              ? `retry produced a malformed status block: ${retryParse.error.message}`
-              : 'retry did not include a status block';
-          throw new Error(
-            `Agent verdict "${agentOutput.verdict}" is not valid for this state ` +
-              `(expected one of: ${[...validVerdicts].join(', ')}), and ${suffix}`,
-          );
-        }
-
-        if (!validVerdicts.has(retryParse.output.verdict)) {
-          throw new Error(
-            `Agent returned invalid verdict "${retryParse.output.verdict}" after retry ` +
-              `(expected one of: ${[...validVerdicts].join(', ')})`,
-          );
-        }
-
-        agentOutput = retryParse.output;
       }
 
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);
@@ -2610,11 +2716,20 @@ export class WorkflowOrchestrator implements WorkflowController {
         const artifactRetryMsg = buildArtifactReprompt(missingArtifacts, stateConfig.transitions);
         logAgentRetry('missing_artifacts', `Missing: ${missingArtifacts.join(', ')}`, artifactRetryMsg);
 
-        const retryResponse = (await sendAgentTurn(artifactRetryMsg)).text;
-        const retryParse = tryParseAgentStatus(retryResponse);
-        if (retryParse.kind === 'ok') {
-          logReceived(retryResponse, retryParse.output);
-          agentOutput = retryParse.output;
+        const budgetReason = cumulativeBudgetExhaustionReason(session);
+        if (budgetReason) throw new Error(`Cannot retry missing artifacts: ${budgetReason}`);
+        const artifactResult = await sendAgentTurn(artifactRetryMsg);
+        if (artifactResult.hardFailure) {
+          logReceived(artifactResult.text, undefined);
+          rotateConversation();
+          throw new Error('Missing-artifact recovery turn hard-failed');
+        }
+        const retryResponse = artifactResult.text;
+        rememberResponse(retryResponse);
+        const retryCommit = evaluateCommit(retryResponse);
+        if (retryCommit.kind === 'ok') {
+          logReceived(retryResponse, retryCommit.output);
+          agentOutput = retryCommit.output;
         } else {
           logReceived(retryResponse, undefined);
         }
@@ -4396,7 +4511,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // are noisy).
     if (instance.finalStatus) return;
 
-    // Check if this is a normal completion or an aborted terminal.
+    // Check if this is a normal completion or a resumable failed/aborted terminal.
     // Quota exhaustion takes precedence: the error target may have
     // resolved to any terminal (including `done`-like ones), but a run
     // that died on upstream quota MUST be treated as aborted so the
@@ -4404,6 +4519,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     // window reopens. (M4 will upgrade this to a dedicated `paused`
     // phase; for now `aborted` gives us the same checkpoint retention.)
     const stateValue = instance.currentState;
+    const lastState = instance.transitionHistory.at(-1)?.from ?? stateValue;
+    const lastStateDefinition = instance.definition.states[lastState];
+    const failedDirectlyFromExecutable = context.lastError !== null && isExecutableState(lastStateDefinition);
     if (instance.quotaExhausted) {
       const resetHint = instance.quotaExhausted.resetAt
         ? ` (resets at ${instance.quotaExhausted.resetAt.toISOString()})`
@@ -4426,10 +4544,22 @@ export class WorkflowOrchestrator implements WorkflowController {
           `Transient upstream failure: ${describeTransientFailureKind(instance.transientFailure.kind)} ` +
           `(resumable — run "ironcurtain workflow resume <baseDir>" once upstream is healthy)\n${excerpt}`,
       };
+    } else if (failedDirectlyFromExecutable) {
+      instance.finalStatus = {
+        phase: 'failed',
+        error: context.lastError,
+        lastState,
+      };
     } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {
         phase: 'aborted',
-        reason: 'Workflow reached aborted state',
+        reason: context.lastError ?? 'Workflow reached aborted state',
+      };
+    } else if (stateValue === 'failed' || stateValue.includes('fail') || context.lastError) {
+      instance.finalStatus = {
+        phase: 'failed',
+        error: context.lastError ?? `Workflow reached failed state "${stateValue}"`,
+        lastState,
       };
     } else {
       const result: WorkflowResult = { finalArtifacts: { ...context.artifacts } };
@@ -4447,16 +4577,14 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     const containerSnapshots =
-      instance.finalStatus.phase === 'aborted' ? await this.snapshotResumableScopes(instance) : undefined;
+      instance.finalStatus.phase === 'completed' ? undefined : await this.snapshotResumableScopes(instance);
 
     // Persist finalStatus so isCheckpointResumable can later distinguish
     // completed (excluded) from aborted/failed (still resumable). Preserve
     // the existing on-disk machineState/context (which points at the last
-    // non-terminal state) so resume-after-abort can re-enter that state
+    // non-terminal state) so resume after abort/failure can re-enter that state
     // instead of immediately re-completing on a terminal snapshot. The
-    // fallback path covers the unusual case where no prior checkpoint
-    // exists (e.g. a workflow that transitioned straight to terminal
-    // without ever passing through a non-terminal save point).
+    // fallback path covers legacy runs or an earlier checkpoint write failure.
     this.saveTerminalCheckpoint(instance, instance.finalStatus, containerSnapshots, existing);
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
@@ -4490,10 +4618,18 @@ export class WorkflowOrchestrator implements WorkflowController {
       );
     });
 
-    this.emitLifecycleEvent({
-      kind: 'completed',
-      workflowId,
-    });
+    if (instance.finalStatus.phase === 'completed') {
+      this.emitLifecycleEvent({
+        kind: 'completed',
+        workflowId,
+      });
+    } else if (!instance.lastSurfacedError) {
+      this.emitLifecycleEvent({
+        kind: 'failed',
+        workflowId,
+        error: instance.finalStatus.phase === 'aborted' ? instance.finalStatus.reason : instance.finalStatus.error,
+      });
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -4509,6 +4645,31 @@ export class WorkflowOrchestrator implements WorkflowController {
       }
     }
     return missing;
+  }
+
+  private artifactHandoffSatisfied(stateConfig: AgentStateDefinition, artifactDir: string): boolean {
+    const policy = stateConfig.artifactHandoff;
+    if (!policy) return false;
+    return policy.requiredFiles.every((requiredFile) => {
+      try {
+        const rootStat = lstatSync(artifactDir);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return false;
+
+        let current = artifactDir;
+        const segments = requiredFile.split('/');
+        for (const segment of segments.slice(0, -1)) {
+          current = resolve(current, segment);
+          const ancestor = lstatSync(current);
+          if (!ancestor.isDirectory() || ancestor.isSymbolicLink()) return false;
+        }
+
+        const requiredPath = resolve(artifactDir, requiredFile);
+        const stat = lstatSync(requiredPath);
+        return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && isWithinDirectory(requiredPath, artifactDir);
+      } catch {
+        return false;
+      }
+    });
   }
 
   // -----------------------------------------------------------------------

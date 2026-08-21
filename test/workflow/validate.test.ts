@@ -129,6 +129,39 @@ describe('validateDefinition', () => {
 
       expect(() => validateDefinition(def)).not.toThrow();
     });
+
+    it('accepts a narrow artifact handoff to an agent validator', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.plan.artifactHandoff = { requiredFiles: ['plan/README.md'] };
+      expect(validateDefinition(def).states.plan).toMatchObject({
+        artifactHandoff: { requiredFiles: ['plan/README.md'] },
+      });
+    });
+
+    it('keeps each verdict-routed vuln-discovery recovery gate adjacent to its artifacts', () => {
+      const raw = parseYaml(
+        readFileSync(resolve('src/workflow/workflows/vuln-discovery/workflow.yaml'), 'utf-8'),
+      ) as unknown;
+      const definition = validateDefinition(raw);
+      const expected = [
+        ['orchestrator', 'human_escalation', 'journal'],
+        ['harness_design_review', 'harness_design_escalation', 'harness_design_review'],
+        ['harness_validate', 'harness_validate_escalation', 'harness_validate'],
+        ['review', 'report_review', 'report_review'],
+      ] as const;
+
+      for (const [stateId, gateId, artifact] of expected) {
+        const state = definition.states[stateId];
+        const gate = definition.states[gateId];
+        expect(state.type).toBe('agent');
+        expect(gate.type).toBe('human_gate');
+        if (state.type === 'agent' && gate.type === 'human_gate') {
+          expect(state.transitions.some((transition) => transition.to === gateId)).toBe(true);
+          expect(gate.present?.map((ref) => ref.replace(/\?$/, ''))).toContain(artifact);
+        }
+      }
+    });
   });
 
   describe('fan-out scaffolding', () => {
@@ -395,6 +428,38 @@ describe('validateDefinition', () => {
   });
 
   describe('semantic validation', () => {
+    it('restricts artifact handoff to safe declared-output files and one unconditional validator edge', () => {
+      const invalidCases: Array<(states: Record<string, Record<string, unknown>>) => void> = [
+        (states) => {
+          states.plan.artifactHandoff = { requiredFiles: ['../README.md'] };
+        },
+        (states) => {
+          states.plan.artifactHandoff = { requiredFiles: ['review/README.md'] };
+        },
+        (states) => {
+          states.plan.artifactHandoff = { requiredFiles: ['plan/README.md'] };
+          states.plan.transitions = [{ to: 'review', when: { verdict: 'approved' } }];
+        },
+        (states) => {
+          states.plan.artifactHandoff = { requiredFiles: ['plan/README.md'] };
+          states.plan.transitions = [{ to: 'done' }];
+        },
+      ];
+
+      for (const mutate of invalidCases) {
+        const def = deepClone(validDefinition());
+        mutate(def.states as Record<string, Record<string, unknown>>);
+        expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      }
+    });
+
+    it('rejects artifact handoff on non-agent states instead of silently stripping it', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.gate.artifactHandoff = { requiredFiles: ['review/README.md'] };
+      expect(() => validateDefinition(def)).toThrow(/only valid on agent states/);
+    });
+
     it('rejects definition with missing initial state', () => {
       const def = deepClone(validDefinition());
       def.initial = 'nonexistent';
