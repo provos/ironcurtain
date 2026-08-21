@@ -383,7 +383,7 @@ Downstream filtering:
    assumes turn-by-turn continuity. `abortedExchanges: 0` means verifiably
    gap-free; the field being **absent** means the manifest predates the counter,
    so gaps are unknown.
-4. JSONL is append-only and crash-tolerant: a truncated trailing line should be
+5. JSONL is append-only and crash-tolerant: a truncated trailing line should be
    skipped by a standard trailing-line-tolerant parser. The `exchanges` count on
    `session-end` equals the on-disk line count by construction (counters bump in
    the `appendFile` callback, not at enqueue).
