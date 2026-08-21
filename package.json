@@ -84,7 +84,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.85",
     "@ai-sdk/google": "^3.0.83",
-    "@ai-sdk/openai": "^3.0.74",
+    "@ai-sdk/openai": "^4.0.41",
     "@anthropic-ai/sandbox-runtime": "^0.0.59",
     "@clack/prompts": "^1.6.0",
     "@cyanheads/git-mcp-server": "^2.15.1",
