@@ -413,6 +413,39 @@ describe('Session', () => {
         await session.close();
       }
     });
+
+    it('rotates a built-in conversation without losing diagnostics or cumulative budget', async () => {
+      const capturedMessages: unknown[][] = [];
+      mockGenerateText.mockImplementation(
+        async (opts: {
+          messages: unknown[];
+          onStepFinish?: (result: { usage: ReturnType<typeof mockUsage>; toolCalls: []; text: string }) => void;
+          stopWhen?: Array<(result: { steps: Array<{ usage: ReturnType<typeof mockUsage> }> }) => boolean>;
+        }) => {
+          capturedMessages.push([...opts.messages]);
+          const usage = mockUsage(100);
+          opts.onStepFinish?.({ usage, toolCalls: [], text: '' });
+          opts.stopWhen?.[1]?.({ steps: [{ usage }] });
+          return createMockGenerateResult(`response ${capturedMessages.length}`);
+        },
+      );
+
+      const session = await createTestSession();
+      try {
+        await session.sendMessage('original executor');
+        const before = session.getBudgetStatus().cumulative.totalTokens;
+        const replacementId = session.rotateAgentConversationId?.();
+        await session.sendMessage('fresh replacement');
+
+        expect(replacementId).toBeTruthy();
+        expect(before).toBeGreaterThan(0);
+        expect(capturedMessages[1]).toEqual([{ role: 'user', content: 'fresh replacement' }]);
+        expect(session.getHistory()).toHaveLength(2);
+        expect(session.getBudgetStatus().cumulative.totalTokens).toBeGreaterThan(before);
+      } finally {
+        await session.close();
+      }
+    });
   });
 
   describe('per-session directory structure', () => {

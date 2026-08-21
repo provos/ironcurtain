@@ -71,6 +71,10 @@ const scheduleSchema = z.object({
   resources: laneResourceRequestSchema.optional(),
 });
 
+const artifactHandoffSchema = z.object({
+  requiredFiles: z.array(z.string().min(1)).min(1),
+});
+
 const agentStateSchema = z.object({
   type: z.literal('agent'),
   description: z.string().min(1),
@@ -78,6 +82,7 @@ const agentStateSchema = z.object({
   prompt: z.string().min(1),
   inputs: z.array(z.string()),
   outputs: z.array(z.string()),
+  artifactHandoff: artifactHandoffSchema.optional(),
   transitions: z.array(agentTransitionSchema).min(1),
   worktree: z.boolean().optional(),
   fanOutMember: z.boolean().optional(),
@@ -161,7 +166,7 @@ const workflowDefinitionSchema = z.object({
  * dotted-path state-node semantics (e.g., `xstate.done.actor.<stateId>`). */
 const STATE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
+const AGENT_ONLY_STATE_FIELDS = ['maxVisits', 'artifactHandoff'] as const;
 
 /**
  * Validates raw-level invariants that would otherwise be lost by Zod's default
@@ -711,6 +716,10 @@ function validateSemantics(definition: WorkflowDefinition): void {
     // When clause validation (mutual exclusivity, agent-only, keys, values, empty)
     validateWhenClauses(stateId, state, issues);
 
+    if (state.type === 'agent' && state.artifactHandoff) {
+      validateArtifactHandoff(definition, stateId, state, issues);
+    }
+
     // Human gate-specific checks
     if (state.type === 'human_gate') {
       validateHumanGate(stateId, state, issues);
@@ -737,6 +746,36 @@ function validateSemantics(definition: WorkflowDefinition): void {
 
   if (issues.length > 0) {
     throw new WorkflowValidationError(issues);
+  }
+}
+
+function validateArtifactHandoff(
+  definition: WorkflowDefinition,
+  stateId: string,
+  state: Extract<WorkflowStateDefinition, { readonly type: 'agent' }>,
+  issues: string[],
+): void {
+  const policy = state.artifactHandoff;
+  if (!policy) return;
+
+  if (state.transitions.length !== 1 || state.transitions[0].guard || state.transitions[0].when) {
+    issues.push(`State "${stateId}" artifactHandoff requires exactly one unconditional transition.`);
+  } else {
+    const target = definition.states[state.transitions[0].to] as WorkflowStateDefinition | undefined;
+    if (target && target.type !== 'agent' && target.type !== 'deterministic') {
+      issues.push(
+        `State "${stateId}" artifactHandoff target "${state.transitions[0].to}" must be an agent or deterministic validator.`,
+      );
+    }
+  }
+
+  for (const requiredFile of policy.requiredFiles) {
+    const output = state.outputs.find((name) => requiredFile.startsWith(`${name}/`));
+    if (!isSafeWorkspaceRelativePath(requiredFile) || !output) {
+      issues.push(
+        `State "${stateId}" artifactHandoff required file "${requiredFile}" must be a safe path below one of its declared outputs.`,
+      );
+    }
   }
 }
 

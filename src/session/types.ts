@@ -670,8 +670,7 @@ export interface Session {
   sendMessageDetailed?(userMessage: string): Promise<AgentTurnResult>;
 
   /**
-   * Rotates the agent-CLI conversation id to a freshly-minted one and
-   * returns the new id.
+   * Starts a fresh agent conversation and returns its freshly-minted id.
    *
    * Intended for use after a hard failure (see `AgentTurnResult.hardFailure`):
    * when the agent CLI was killed mid-stream, the prior id has been
@@ -684,9 +683,10 @@ export interface Session {
    * a later `freshSession: false` visit will try to resume a stale id
    * whose transcript never existed on disk.
    *
-   * Optional because only external-agent sessions (e.g., Claude Code
-   * in Docker) have a durable conversation id. Built-in sessions that
-   * hold all state in-memory do not implement this.
+   * External-agent sessions rotate their durable CLI id. Built-in sessions
+   * implement the same operation by clearing model-visible conversation
+   * state while retaining diagnostics, tools, sandbox, and cumulative budget.
+   * The returned id is the fresh identity callers persist for either mode.
    */
   rotateAgentConversationId?(): AgentConversationId;
 

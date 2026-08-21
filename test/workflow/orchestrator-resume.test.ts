@@ -767,8 +767,41 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Test 6: listResumable returns failed workflow IDs
+  // Test 6: direct failure and resumable discovery
   // -----------------------------------------------------------------------
+
+  it('resumes the initial agent after a direct terminal failure', async () => {
+    const checkpointStore = new FileCheckpointStore(tmpDir);
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+    const firstFactory = vi.fn(async () => {
+      return new MockSession({
+        responses: () => {
+          throw new Error('first run crashed');
+        },
+      });
+    });
+    const first = trackOrchestrator(
+      new WorkflowOrchestrator(createDeps(tmpDir, { createSession: firstFactory, checkpointStore })),
+    );
+
+    const workflowId = await first.start(defPath, 'recover initial state');
+    await waitForCompletion(first, workflowId);
+    expect(first.getStatus(workflowId)?.phase).toBe('failed');
+    expect(checkpointStore.load(workflowId)?.machineState).toBe('implement');
+
+    const resumedFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('recovered'), artifacts: ['code'] }], tmpDir);
+    });
+    const resumed = trackOrchestrator(
+      new WorkflowOrchestrator(createDeps(tmpDir, { createSession: resumedFactory, checkpointStore })),
+    );
+
+    await resumed.resume(workflowId);
+    await waitForCompletion(resumed, workflowId);
+
+    expect(resumedFactory).toHaveBeenCalledTimes(1);
+    expect(resumed.getStatus(workflowId)?.phase).toBe('completed');
+  });
 
   it('listResumable returns only failed workflow IDs, not completed ones', async () => {
     // listResumable now enumerates baseDir via discoverWorkflowRuns and
@@ -817,37 +850,8 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     // Wait for completion (machine reaches done via onError)
     await waitForCompletion(orchestrator2, failedId);
 
-    // The completed workflow's checkpoint was removed. The failed one
-    // may or may not still have a checkpoint depending on whether it
-    // reached a terminal state. For simpleAgentDef, onError goes to 'done'
-    // which is terminal, so checkpoint is removed. Let's manually create
-    // a checkpoint to represent a truly failed (non-terminal) workflow.
-    checkpointStore.save(failedId, {
-      machineState: 'implement',
-      context: {
-        taskDescription: 'failing task',
-        artifacts: {},
-        round: 0,
-        maxRounds: 4,
-        previousOutputHashes: {},
-        previousTestCount: null,
-        humanPrompt: null,
-        reviewHistory: [],
-        totalTokens: 0,
-        lastError: 'crash',
-        agentConversationsByState: {},
-        previousAgentOutput: null,
-        previousAgentNotes: null,
-        previousStateName: null,
-        visitCounts: {},
-      },
-      timestamp: new Date().toISOString(),
-      transitionHistory: [],
-      definitionPath: defPath,
-      workspacePath: resolve(tmpDir, failedId, 'workspace'),
-    });
-
-    // listResumable should return only the failed one (not currently active)
+    // Completed checkpoints are excluded by finalStatus; the failed terminal
+    // preserved its initial non-terminal checkpoint and remains resumable.
     const resumable = orchestrator.listResumable();
     expect(resumable).toContain(failedId);
     expect(resumable).not.toContain(completedId);
