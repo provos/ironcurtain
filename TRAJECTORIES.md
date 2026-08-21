@@ -139,7 +139,8 @@ interface ExchangeRecord {
   };
 
   capture: {
-    reassemblyOk: boolean;              // false ⇒ record was NOT written; session poisoned
+    reassemblyOk: boolean;              // false ⇒ record was NOT written (so never
+                                        //   observed on disk; see poison model below)
     reassemblyDiagnostic?: string;
     retried?: boolean;                  // true ⇒ response is from a 401 OAuth refresh-retry
   };
@@ -158,18 +159,34 @@ The `manifest.jsonl` entries (`ManifestEntry`) come in `session-start` /
 ```ts
 type ManifestEntry =
   | { schemaVersion: 1; event: 'session-start'; seq; sessionId; persona?; fsmState?; ts }
+  | { schemaVersion: 1; event: 'session-poisoned'; seq; sessionId; persona?; fsmState?; ts;
+      poisonReason: PoisonReason;  // emitted AT poison time, not at teardown
+      exchanges: number;           // records durable on disk at that moment
+      bytesWritten: number;
+    }
   | { schemaVersion: 1; event: 'session-end';   seq; sessionId; persona?; fsmState?; ts;
       exchanges: number;        // record count, computed at write-time
       bytesWritten: number;
+      abortedExchanges: number; // exchanges lost to an upstream truncation
       poisoned: boolean;        // true ⇒ discard the whole session downstream
       poisonReason?: 'reassembly-failure' | 'disk-error' | 'queue-overflow'
-                   | 'mid-stream-abort' | 'infrastructure-teardown'
-                   | 'unsupported-encoding' | 'unknown';
+                   | 'infrastructure-teardown' | 'unsupported-encoding' | 'unknown';
       closedReason?: 'infrastructure-teardown';   // synthetic teardown end-marker
     };
 ```
 
-A real workflow manifest (verbatim):
+A `session-poisoned` entry is emitted the moment a session is poisoned, so the
+condition is durable on disk immediately — without it, a session that stopped
+capturing an hour ago is indistinguishable from a healthy one until teardown
+writes `session-end`. It is redundant by design: the `session-end` entry still
+carries `poisoned: true`.
+
+`'mid-stream-abort'` no longer appears as a `poisonReason` (it stays in the type
+for manifests written before the change); a truncated upstream stream is counted
+in `abortedExchanges` instead. See "The binary session model" below.
+
+A real workflow manifest (verbatim; captured before `abortedExchanges` existed,
+so the field is absent from these `session-end` lines):
 
 ```jsonl
 {"schemaVersion":1,"event":"session-start","seq":1,"sessionId":"86256733-...","ts":"2026-05-28T18:48:01.627Z"}
@@ -323,20 +340,33 @@ Consequence for any trajectory builder:
 
 ## The binary session model
 
-There is no such thing as a partial-but-usable session. A session is either
-**complete-and-usable** or **`poisoned: true`** on its `session-end` manifest
-entry — discard the whole session, do not salvage it. A truncated SFT trace
-(shifted token boundaries, dangling tool IDs, an assistant message cut
-mid-content-block) is worse than no trace.
+There is no such thing as a partial-but-usable **record**. A record is either
+byte-faithful or it is never written — a truncated SFT trace (shifted token
+boundaries, dangling tool IDs, an assistant message cut mid-content-block) is
+worse than no trace.
 
-Poison sources (`PoisonReason`): SSE `reassembly-failure`, `disk-error`,
+At the **session** level the question is a different one: is the capture
+pipeline itself still trustworthy? When it is not, the session is
+**`poisoned: true`** on its `session-end` entry — discard the whole session, do
+not salvage it. Poison sources (`PoisonReason`): SSE `reassembly-failure` (the
+parser failed, so nothing it produced can be trusted), `disk-error`,
 records-queue `queue-overflow` (the high-watermark tripwire poisons every open
 session in the bundle rather than dropping individual records — see
-`trajectory-capture.ts`, `HIGH_WATERMARK`), agent/upstream `mid-stream-abort`,
-`unsupported-encoding` (zstd), and `infrastructure-teardown` (a synthetic
-`session-end` emitted by `close()` for a session whose orchestrator `finally`
-didn't run — e.g. SIGINT). On a poisoned record the in-progress exchange is
-**not written**; the flag exists for diagnostics only.
+`trajectory-capture.ts`, `HIGH_WATERMARK`), `unsupported-encoding` (zstd), and
+`infrastructure-teardown` (a synthetic `session-end` emitted by `close()` for a
+session whose orchestrator `finally` didn't run — e.g. SIGINT).
+
+**An upstream transport truncation is not one of them.** When a stream ends
+before its terminal event (`message_stop` / `[DONE]` / `response.completed`)
+that exchange is lost — but the agent's SDK retries the request milliseconds
+later, and every other record in the session is as faithful as it ever was. So
+the loss is scoped to the one exchange: no record is written for it, the session
+keeps capturing, and the count surfaces as `session-end.abortedExchanges`. The
+contract is "no silent gaps", and it is satisfied by making the gap **explicit
+and counted** — not by discarding everything that follows it. (Poisoning the
+session was the old behavior; it cost 7.8% of production sessions their entire
+post-abort history, one of them 104 of 116 exchanges, from a single transient
+reset.)
 
 Downstream filtering:
 
@@ -345,8 +375,15 @@ Downstream filtering:
 2. Otherwise walk `manifest.jsonl` in `seq` order; for each `session-end` with
    `poisoned: true`, skip that session's `{sessionId}.jsonl`.
 3. An orphan `session-start` with no matching `session-end` (crash mid-write) is
-   implicitly poisoned — the `seq` walk skips it.
-4. JSONL is append-only and crash-tolerant: a truncated trailing line should be
+   implicitly poisoned — the `seq` walk skips it. A `session-poisoned` entry
+   with no `session-end` is the same case, with the reason already known.
+4. A kept session with `abortedExchanges > 0` has a known, bounded hole in its
+   request sequence: the surviving records are individually faithful, but they
+   are not one contiguous conversation. Treat it accordingly for anything that
+   assumes turn-by-turn continuity. `abortedExchanges: 0` means verifiably
+   gap-free; the field being **absent** means the manifest predates the counter,
+   so gaps are unknown.
+5. JSONL is append-only and crash-tolerant: a truncated trailing line should be
    skipped by a standard trailing-line-tolerant parser. The `exchanges` count on
    `session-end` equals the on-disk line count by construction (counters bump in
    the `appendFile` callback, not at enqueue).

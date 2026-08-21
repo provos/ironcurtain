@@ -11,7 +11,9 @@
  *       `exchanges` in session-end (no individual records dropped)
  *
  * Plus the issue 1 / issue 2 fixes:
- *   - mid-stream-abort poison wiring (tap closes before _flush)
+ *   - mid-stream-abort wiring (tap closes before _flush) — EXCHANGE
+ *     -scoped: the truncated exchange is dropped and counted, the
+ *     session keeps capturing
  *   - in-flight tracking blocks endSession until reassembly settles
  */
 
@@ -276,6 +278,87 @@ describe('Trajectory poison: failure modes', () => {
     }
   });
 
+  it('(b.1) a poisoned session is visible on disk at poison time, not only at endSession', async () => {
+    // Observability: the poison flag used to become durable only when
+    // the session-end marker was written, so a mid-flight poisoned
+    // session was indistinguishable on disk from a healthy one — for
+    // hours. The `session-poisoned` manifest entry closes that gap.
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir });
+    const sid = makeSessionId('sess-poison-visible');
+    writer.beginSession({ sessionId: sid });
+    writer.write(buildRecord(sid, 1));
+    await new Promise<void>((r) => setTimeout(r, 25));
+
+    writer.markSessionPoisoned(sid, 'reassembly-failure');
+    await new Promise<void>((r) => setTimeout(r, 25));
+
+    // Still mid-flight: no endSession, no close.
+    const manifest = readManifest(dir);
+    expect(manifest.some((m) => m.event === 'session-end')).toBe(false);
+    const poisoned = manifest.find((m) => m.event === 'session-poisoned' && m.sessionId === sid);
+    expect(poisoned).toBeDefined();
+    if (poisoned?.event === 'session-poisoned') {
+      expect(poisoned.poisonReason).toBe('reassembly-failure');
+      // Records durable at poison time, so the salvageable prefix is known.
+      expect(poisoned.exchanges).toBe(1);
+    }
+
+    // Records written after the poison are dropped LOUDLY (first drop logs).
+    const logger = await import('../../src/logger.js');
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    writer.write(buildRecord(sid, 2));
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('dropping records for poisoned session');
+  });
+
+  it('does not append a poison marker after session-end has been serialized', async () => {
+    const sid = makeSessionId('sess-poison-after-end');
+    const manifestPath = resolve(dir, 'manifest.jsonl');
+    let notifyEndAppendStarted!: () => void;
+    const endAppendStarted = new Promise<void>((resolveStarted) => {
+      notifyEndAppendStarted = resolveStarted;
+    });
+    let releaseEndAppend!: () => void;
+    const endAppendReleased = new Promise<void>((resolveReleased) => {
+      releaseEndAppend = resolveReleased;
+    });
+    const fs: WriterFsDep = {
+      async appendFile(path, data) {
+        if (path === manifestPath && data.includes('"event":"session-end"')) {
+          notifyEndAppendStarted();
+          await endAppendReleased;
+        }
+        const { appendFile } = await import('node:fs/promises');
+        await appendFile(path, data);
+      },
+      async mkdir(path, options) {
+        const { mkdir } = await import('node:fs/promises');
+        return mkdir(path, options);
+      },
+      async writeFile(path, data) {
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(path, data);
+      },
+    };
+
+    writer = createTrajectoryCaptureWriter({ capturesDir: dir, fs });
+    writer.beginSession({ sessionId: sid });
+
+    const endPromise = writer.endSession(sid);
+    await endAppendStarted;
+
+    // The end entry is already snapshotted as healthy but its append is
+    // deliberately pending. A late tap failure must not enqueue a poison
+    // marker behind it or mutate the state represented by that snapshot.
+    writer.markSessionPoisoned(sid, 'reassembly-failure');
+    releaseEndAppend();
+    await endPromise;
+
+    const sessionEntries = readManifest(dir).filter((entry) => entry.sessionId === sid);
+    expect(sessionEntries.map((entry) => entry.event)).toEqual(['session-start', 'session-end']);
+    expect(sessionEntries[1]).toMatchObject({ event: 'session-end', poisoned: false });
+  });
+
   it('(b.0) reassembler in isolation refuses to emit a partial body on malformed SSE', () => {
     // Sanity check the underlying invariant: the reassembler itself
     // throws on a malformed stream. Combined with the tap's
@@ -331,12 +414,14 @@ describe('Trajectory poison: failure modes', () => {
     }
   });
 
-  it('mid-stream abort (tap closes before _flush) poisons the session with mid-stream-abort', async () => {
+  it('mid-stream abort (tap closes before _flush) drops only that exchange; the session keeps capturing', async () => {
     // The trajectory tap's `close` event arriving before `_flush` is
     // the §9 mid-stream-abort signal. We drive an SSE response by
     // piping into the tap, then destroy the upstream side BEFORE the
-    // reassembler sees a message_stop — the tap should mark the session
-    // poisoned via markSessionPoisoned('mid-stream-abort').
+    // reassembler sees a message_stop. That is an upstream TRANSPORT
+    // event scoped to one request (the agent's SDK just retries it), so
+    // the tap counts it via noteAbortedExchange and leaves the session
+    // healthy — records written afterwards must still land.
     writer = createTrajectoryCaptureWriter({ capturesDir: dir });
     const sid = makeSessionId('sess-midabort');
     writer.beginSession({ sessionId: sid });
@@ -371,14 +456,20 @@ describe('Trajectory poison: failure modes', () => {
     // Give the tap's lifecycle events a microtask to settle.
     await new Promise<void>((r) => setImmediate(r));
 
+    // The session survived: a record written after the abort still lands.
+    writer.write(buildRecord(sid, 1));
     await writer.endSession(sid);
 
+    expect(readJsonl(resolve(dir, `${sid}.jsonl`)).length).toBe(1);
     const manifest = readManifest(dir);
+    expect(manifest.some((m) => m.event === 'session-poisoned')).toBe(false);
     const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
     expect(end).toBeDefined();
     if (end?.event === 'session-end') {
-      expect(end.poisoned).toBe(true);
-      expect(end.poisonReason).toBe('mid-stream-abort');
+      expect(end.poisoned).toBe(false);
+      expect(end.poisonReason).toBeUndefined();
+      expect(end.exchanges).toBe(1);
+      expect(end.abortedExchanges).toBe(1);
     }
   });
 
@@ -505,9 +596,10 @@ describe('Trajectory poison: failure modes', () => {
     }
   });
 
-  it('lifecycle: Anthropic close BEFORE message_stop still poisons mid-stream-abort (no record)', async () => {
+  it('lifecycle: Anthropic close BEFORE message_stop writes no record and counts an aborted exchange', async () => {
     // Genuinely-truncated stream: abort before the terminal event. The
-    // canFinalize() path must NOT rescue this.
+    // canFinalize() path must NOT rescue this — no partial record is
+    // ever emitted — but the loss is bounded to this one exchange.
     writer = createTrajectoryCaptureWriter({ capturesDir: dir });
     const sid = makeSessionId('sess-anth-truncated');
     writer.beginSession({ sessionId: sid });
@@ -546,17 +638,18 @@ describe('Trajectory poison: failure modes', () => {
     const manifest = readManifest(dir);
     const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
     if (end?.event === 'session-end') {
-      expect(end.poisoned).toBe(true);
-      expect(end.poisonReason).toBe('mid-stream-abort');
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(0);
+      expect(end.abortedExchanges).toBe(1);
     }
   });
 
-  it('lifecycle: clean end() with no terminal event poisons mid-stream-abort, NOT reassembly-failure', async () => {
+  it('lifecycle: clean end() with no terminal event counts an aborted exchange, NOT a reassembly-failure poison', async () => {
     // The gzip-tail recovery path turns an upstream reset into a graceful
     // inlet.end() → a clean tap 'end' with no terminal event parsed. That is a
-    // transport truncation, not a reassembly bug, so it must poison
-    // mid-stream-abort. (Before the TruncatedStreamError fix this clean-end
-    // path mislabeled truncations as reassembly-failure.)
+    // transport truncation, not a reassembly bug: it must NOT poison the
+    // session as reassembly-failure (the parser is fine) and must not poison
+    // it at all (the other records are fine).
     writer = createTrajectoryCaptureWriter({ capturesDir: dir });
     const sid = makeSessionId('sess-clean-end-no-terminal');
     writer.beginSession({ sessionId: sid });
@@ -593,10 +686,12 @@ describe('Trajectory poison: failure modes', () => {
       expect(readJsonl(traceFile).length).toBe(0);
     }
     const manifest = readManifest(dir);
+    expect(manifest.some((m) => m.event === 'session-poisoned')).toBe(false);
     const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
     if (end?.event === 'session-end') {
-      expect(end.poisoned).toBe(true);
-      expect(end.poisonReason).toBe('mid-stream-abort');
+      expect(end.poisoned).toBe(false);
+      expect(end.poisonReason).toBeUndefined();
+      expect(end.abortedExchanges).toBe(1);
     }
   });
 
@@ -895,12 +990,15 @@ describe('Trajectory poison: failure modes', () => {
     }
   });
 
-  it('lifecycle: endSession teardown timeout poisons a never-settling in-flight tap', async () => {
+  it('lifecycle: endSession teardown timeout abandons a never-settling in-flight tap and counts it', async () => {
     // A stream that never terminates and never aborts would hang teardown.
-    // endSession must bound the in-flight wait and poison mid-stream-abort.
+    // endSession bounds the in-flight wait; the stuck tap is a transport
+    // casualty like any other truncation, so it is counted — the records
+    // already on disk stay usable.
     writer = createTrajectoryCaptureWriter({ capturesDir: dir, teardownTimeoutMs: 20 });
     const sid = makeSessionId('sess-hung-teardown');
     writer.beginSession({ sessionId: sid });
+    writer.write(buildRecord(sid, 1));
 
     // A promise that never settles, registered as in-flight.
     writer.trackInFlight(sid, 'ex-never-settles', new Promise<void>(() => {}));
@@ -911,8 +1009,9 @@ describe('Trajectory poison: failure modes', () => {
     const end = manifest.find((m) => m.event === 'session-end' && m.sessionId === sid);
     expect(end).toBeDefined();
     if (end?.event === 'session-end') {
-      expect(end.poisoned).toBe(true);
-      expect(end.poisonReason).toBe('mid-stream-abort');
+      expect(end.poisoned).toBe(false);
+      expect(end.exchanges).toBe(1);
+      expect(end.abortedExchanges).toBe(1);
     }
   });
 
