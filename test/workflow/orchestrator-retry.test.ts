@@ -473,6 +473,64 @@ describe('WorkflowOrchestrator retry loop', () => {
     );
   });
 
+  // Regression: `maxSessionSeconds` is a PER-TURN limit. Summing every turn's
+  // active time against it turned it into a ceiling on the state's total
+  // duration, tearing down long agent states mid-build. The between-turn
+  // admission check must ignore elapsed time entirely.
+  it('still runs status recovery when cumulative active time exceeds the per-turn maxSessionSeconds', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+    let callCount = 0;
+    const session = new MockSession({
+      responses: () => {
+        callCount++;
+        if (callCount === 1) {
+          simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+          return noStatusResponse();
+        }
+        if (callCount === 2) {
+          return approvedResponse('status block on recovery turn');
+        }
+        throw new Error(`Unexpected call ${callCount}`);
+      },
+    });
+    vi.spyOn(session, 'getBudgetStatus').mockReturnValue({
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      stepCount: 0,
+      elapsedSeconds: 0,
+      estimatedCostUsd: 0,
+      tokenTrackingAvailable: true,
+      limits: {
+        maxTotalTokens: 100_000,
+        maxSteps: 1_000,
+        maxSessionSeconds: 100,
+        maxEstimatedCostUsd: 100,
+        warnThresholdPercent: 80,
+      },
+      cumulative: {
+        totalInputTokens: 1,
+        totalOutputTokens: 1,
+        totalTokens: 2,
+        stepCount: 1,
+        // Far past the per-turn limit; no other budget is close to exhausted.
+        activeSeconds: 10_805,
+        estimatedCostUsd: 0,
+      },
+    });
+
+    const orchestrator = new WorkflowOrchestrator(createDeps(tmpDir, { createSession: vi.fn(async () => session) }));
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // The recovery turn was launched rather than refused on elapsed time.
+    expect(session.sentMessages).toHaveLength(2);
+    expect(session.sentMessages[1]).toContain('agent_status');
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+  });
+
   it('keeps exhausted status-routed recovery without a direct gate as failed and resumable', async () => {
     const checkpointStore = createCheckpointStore(tmpDir);
     const lifecycleEvents: string[] = [];

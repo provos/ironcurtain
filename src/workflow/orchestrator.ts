@@ -300,6 +300,13 @@ function tryParseAgentStatus(responseText: string): ParseResult {
  * Conservative between-turn admission check for recovery work. Session limits
  * remain per-turn; a completed turn may take cumulative usage past the same
  * threshold, but no later recovery turn is launched once that is visible.
+ *
+ * Deliberately excludes `maxSessionSeconds`. That limit is defined per-turn
+ * (`ResourceBudgetTracker` compares it against the current turn's elapsed
+ * time), so summing every turn's active time against it would silently convert
+ * a per-turn cap into a ceiling on the state's total duration. Agent states are
+ * expected to run for hours across many turns; the token, step, and cost
+ * limits already stop the pointless-retry case this check exists for.
  */
 function cumulativeBudgetExhaustionReason(session: Session): string | undefined {
   const { cumulative, limits, tokenTrackingAvailable } = session.getBudgetStatus();
@@ -308,9 +315,6 @@ function cumulativeBudgetExhaustionReason(session: Session): string | undefined 
   }
   if (limits.maxSteps != null && cumulative.stepCount >= limits.maxSteps) {
     return `step budget exhausted (${cumulative.stepCount}/${limits.maxSteps})`;
-  }
-  if (limits.maxSessionSeconds != null && cumulative.activeSeconds >= limits.maxSessionSeconds) {
-    return `cumulative active-time budget exhausted (${Math.round(cumulative.activeSeconds)}s/${limits.maxSessionSeconds}s)`;
   }
   if (limits.maxEstimatedCostUsd != null && cumulative.estimatedCostUsd >= limits.maxEstimatedCostUsd) {
     return `cost budget exhausted ($${cumulative.estimatedCostUsd.toFixed(2)}/$${limits.maxEstimatedCostUsd.toFixed(2)})`;
