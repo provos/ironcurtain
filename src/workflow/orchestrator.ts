@@ -13,7 +13,9 @@ import {
 import { resolve } from 'node:path';
 import { isWithinDirectory } from '../types/argument-roles.js';
 import { errorMessage } from '../utils/error-message.js';
+import { sha256Hex } from '../hash.js';
 import { MessageLog, type AgentRetryReason } from './message-log.js';
+import { isTerminalWorkflowPhase, terminalPhaseFromStateName } from './terminal-phase.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -898,6 +900,17 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
   }
 
+  /** Best-effort durable phase barrier for log consumers such as `workflow watch`. */
+  private appendTerminalControl(instance: WorkflowInstance): void {
+    const phase = instance.finalStatus?.phase;
+    if (!isTerminalWorkflowPhase(phase)) return;
+    try {
+      instance.messageLog.appendRunTerminal({ ...this.logBase(instance), phase });
+    } catch (err) {
+      writeStderr(`[workflow] Failed to append terminal log marker for ${instance.id}: ${toErrorMessage(err)}`);
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Pre-flight validation
   // -----------------------------------------------------------------------
@@ -1612,6 +1625,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Persist the initial executable state before it can transition directly
     // to a terminal. Terminal saves preserve this non-terminal resume point.
     this.saveCheckpoint(instance, actor.getSnapshot() as { value: unknown; context: unknown });
+    messageLog.appendRunStarted(this.logBase(instance));
     actor.start();
     return workflowId;
   }
@@ -1731,6 +1745,20 @@ export class WorkflowOrchestrator implements WorkflowController {
       taskDescription: checkpoint.context.taskDescription,
     });
     this.subscribeToActor(instance);
+    let checkpointMtimeMs: number | undefined;
+    let checkpointFingerprint: string | undefined;
+    try {
+      const checkpointPath = resolve(this.deps.baseDir, workflowId, 'checkpoint.json');
+      checkpointMtimeMs = statSync(checkpointPath).mtimeMs;
+      checkpointFingerprint = sha256Hex(readFileSync(checkpointPath));
+    } catch {
+      // Custom checkpoint stores need not use the default on-disk layout.
+    }
+    messageLog.appendRunResumed({
+      ...this.logBase(instance),
+      ...(checkpointMtimeMs !== undefined ? { checkpointMtimeMs } : {}),
+      ...(checkpointFingerprint !== undefined ? { checkpointFingerprint } : {}),
+    });
     actor.start();
 
     // XState v5's resolveState() restores *to* a state but does not *enter* it.
@@ -1967,6 +1995,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
     const containerSnapshots = await this.snapshotResumableScopes(instance);
     this.saveTerminalCheckpoint(instance, instance.finalStatus, containerSnapshots, previousCheckpoint);
+    this.appendTerminalControl(instance);
 
     // Release the token-stream bus subscription before the async infra
     // teardown so no late events land against a finalized workflow.
@@ -4550,12 +4579,12 @@ export class WorkflowOrchestrator implements WorkflowController {
         error: context.lastError,
         lastState,
       };
-    } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
+    } else if (terminalPhaseFromStateName(stateValue) === 'aborted') {
       instance.finalStatus = {
         phase: 'aborted',
         reason: context.lastError ?? 'Workflow reached aborted state',
       };
-    } else if (stateValue === 'failed' || stateValue.includes('fail') || context.lastError) {
+    } else if (terminalPhaseFromStateName(stateValue) === 'failed' || context.lastError) {
       instance.finalStatus = {
         phase: 'failed',
         error: context.lastError ?? `Workflow reached failed state "${stateValue}"`,
@@ -4586,6 +4615,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // instead of immediately re-completing on a terminal snapshot. The
     // fallback path covers legacy runs or an earlier checkpoint write failure.
     this.saveTerminalCheckpoint(instance, instance.finalStatus, containerSnapshots, existing);
+    this.appendTerminalControl(instance);
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
     instance.tab.close();

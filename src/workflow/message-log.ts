@@ -1,6 +1,7 @@
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { TransientFailureKind } from '../docker/agent-adapter.js';
+import type { TerminalWorkflowPhase } from './terminal-phase.js';
 
 // ---------------------------------------------------------------------------
 // Log entry types
@@ -10,6 +11,30 @@ interface BaseEntry {
   readonly ts: string;
   readonly workflowId: string;
   readonly state: string;
+}
+
+/** Declares that a newly-started attempt will emit a terminal phase barrier. */
+interface RunStartedControlEntry extends BaseEntry {
+  readonly type: 'run_started';
+}
+
+/**
+ * Internal attempt boundary. It deliberately is not part of MessageLogEntry:
+ * callers reading the public message history should not have to understand
+ * workflow-control records.
+ */
+interface RunResumedControlEntry extends BaseEntry {
+  readonly type: 'run_resumed';
+  /** mtime of the checkpoint being resumed, used to reject stale terminal data. */
+  readonly checkpointMtimeMs?: number;
+  /** Exact digest of the checkpoint being resumed (preferred over mtimes). */
+  readonly checkpointFingerprint?: string;
+}
+
+/** Durable ordering barrier written after the terminal checkpoint attempt. */
+interface RunTerminalControlEntry extends BaseEntry {
+  readonly type: 'run_terminal';
+  readonly phase: TerminalWorkflowPhase;
 }
 
 export interface AgentSentEntry extends BaseEntry {
@@ -116,6 +141,8 @@ export type MessageLogEntry =
   | QuotaExhaustedEntry
   | TransientFailureEntry;
 
+type MessageLogRecord = MessageLogEntry | RunStartedControlEntry | RunResumedControlEntry | RunTerminalControlEntry;
+
 // ---------------------------------------------------------------------------
 // MessageLog
 // ---------------------------------------------------------------------------
@@ -131,7 +158,22 @@ export class MessageLog {
 
   /** Append a single entry as a JSON line. */
   append(entry: MessageLogEntry): void {
-    appendFileSync(this.logPath, JSON.stringify(entry) + '\n');
+    this.appendRecord(entry);
+  }
+
+  /** Declare the terminal-barrier protocol immediately before a new actor starts. */
+  appendRunStarted(entry: Omit<RunStartedControlEntry, 'type'>): void {
+    this.appendRecord({ ...entry, type: 'run_started' });
+  }
+
+  /** Append an internal boundary immediately before a resumed actor starts. */
+  appendRunResumed(entry: Omit<RunResumedControlEntry, 'type'>): void {
+    this.appendRecord({ ...entry, type: 'run_resumed' });
+  }
+
+  /** Append the authoritative terminal phase after terminal persistence. */
+  appendRunTerminal(entry: Omit<RunTerminalControlEntry, 'type'>): void {
+    this.appendRecord({ ...entry, type: 'run_terminal' });
   }
 
   /** Read and parse all entries. Skips blank and malformed lines. */
@@ -144,11 +186,18 @@ export class MessageLog {
     for (const line of content.split('\n')) {
       if (line.trim().length === 0) continue;
       try {
-        entries.push(JSON.parse(line) as MessageLogEntry);
+        const record = JSON.parse(line) as MessageLogRecord;
+        if (record.type !== 'run_started' && record.type !== 'run_resumed' && record.type !== 'run_terminal') {
+          entries.push(record);
+        }
       } catch {
         // Skip malformed lines (e.g., truncated writes from crashes)
       }
     }
     return entries;
+  }
+
+  private appendRecord(entry: MessageLogRecord): void {
+    appendFileSync(this.logPath, JSON.stringify(entry) + '\n');
   }
 }

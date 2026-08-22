@@ -50,6 +50,7 @@ import type { StateGraphDto } from '../web-ui-types.js';
 import { isWithinDirectory } from '../../types/argument-roles.js';
 import { runPreflight } from '../../workflow/lint-integration.js';
 import * as logger from '../../logger.js';
+import { terminalPhaseFromStateName } from '../../workflow/terminal-phase.js';
 
 // ---------------------------------------------------------------------------
 // State graph cache (definition never changes during execution)
@@ -61,11 +62,6 @@ const PAST_RUN_PHASES = new Set<PastRunPhase>(['completed', 'aborted', 'failed',
 
 function isPastRunPhase(value: string | undefined): value is PastRunPhase {
   return value !== undefined && PAST_RUN_PHASES.has(value as PastRunPhase);
-}
-
-/** Map a terminal state's name to a phase using the orchestrator's name convention. */
-function phaseFromTerminalStateName(name: string): 'completed' | 'aborted' {
-  return name === 'aborted' || name.toLowerCase().includes('abort') ? 'aborted' : 'completed';
 }
 
 /** Returns the entry with the largest `ts` among `state_transition` entries, or undefined. */
@@ -603,7 +599,7 @@ export function computePastRunPhase(
   // Legacy pre-B3b path: derive from the state name.
   const stateName = extractLastState(checkpoint.machineState);
   const stateDef = getStateDef(definition, stateName);
-  if (stateDef?.type === 'terminal') return phaseFromTerminalStateName(stateName);
+  if (stateDef?.type === 'terminal') return terminalPhaseFromStateName(stateName);
   if (stateDef?.type === 'human_gate') return 'waiting_human';
   return 'interrupted';
 }
@@ -644,7 +640,7 @@ export function synthesizePhaseFromMessageLog(
   }
   if (lastTransition === undefined) return 'interrupted';
   const stateDef = getStateDef(definition, lastTransition.event);
-  if (stateDef?.type === 'terminal') return phaseFromTerminalStateName(lastTransition.event);
+  if (stateDef?.type === 'terminal') return terminalPhaseFromStateName(lastTransition.event);
   if (stateDef?.type === 'human_gate') return 'waiting_human';
   if (sawQuotaExhausted) return 'aborted';
   if (sawTransientFailure) return 'aborted';
