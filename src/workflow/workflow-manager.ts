@@ -43,6 +43,7 @@ import {
 } from './types.js';
 import { sweepContainerSnapshots } from './container-snapshots.js';
 import * as logger from '../logger.js';
+import { WorkflowResumeError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // loadPastRun result types
@@ -193,6 +194,7 @@ export class WorkflowManager {
   importExternalCheckpoint(externalBaseDir: string, workflowId?: string): WorkflowId {
     const externalStore = new FileCheckpointStore(externalBaseDir);
     let targetId: WorkflowId;
+    let checkpoint: WorkflowCheckpoint | undefined;
 
     if (workflowId) {
       targetId = workflowId as WorkflowId;
@@ -201,23 +203,60 @@ export class WorkflowManager {
       // run by `checkpoint.timestamp`. The two error paths preserve the
       // pre-refactor wording so external callers (web UI, scripts) keep
       // their existing diagnostics.
-      const latest = findLatestResumableCheckpoint(externalBaseDir, externalStore);
+      let latest;
+      try {
+        latest = findLatestResumableCheckpoint(externalBaseDir, externalStore);
+      } catch (err) {
+        throw new WorkflowResumeError(
+          'WORKFLOW_CHECKPOINT_CORRUPTED',
+          `Failed to load checkpoint from ${externalBaseDir}: ${describeError(err)}`,
+        );
+      }
       if (!latest) {
         // Distinguish "no checkpoint files at all" from "checkpoints exist
         // but none are resumable" using a single fast probe — the helper
         // already enumerated and filtered, so we re-derive the discriminator
         // by checking the store directly.
-        if (externalStore.listAll().length === 0) {
-          throw new Error(`No checkpoints found in ${externalBaseDir}`);
+        let externalIds: WorkflowId[];
+        try {
+          externalIds = externalStore.listAll();
+        } catch (err) {
+          throw new WorkflowResumeError(
+            'WORKFLOW_CHECKPOINT_CORRUPTED',
+            `Failed to inspect checkpoints in ${externalBaseDir}: ${describeError(err)}`,
+          );
         }
-        throw new Error(`No valid checkpoints found in ${externalBaseDir}`);
+        if (externalIds.length === 0) {
+          throw new WorkflowResumeError('WORKFLOW_CHECKPOINT_NOT_FOUND', `No checkpoints found in ${externalBaseDir}`);
+        }
+        throw new WorkflowResumeError('WORKFLOW_NOT_RESUMABLE', `No valid checkpoints found in ${externalBaseDir}`);
       }
       targetId = latest.workflowId;
+      checkpoint = latest.checkpoint;
     }
 
-    const checkpoint = externalStore.load(targetId);
     if (!checkpoint) {
-      throw new Error(`No checkpoint found for workflow ${targetId} in ${externalBaseDir}`);
+      try {
+        checkpoint = externalStore.load(targetId);
+      } catch (err) {
+        throw new WorkflowResumeError(
+          'WORKFLOW_CHECKPOINT_CORRUPTED',
+          `Failed to load checkpoint for workflow ${targetId}: ${describeError(err)}`,
+        );
+      }
+    }
+    if (!checkpoint) {
+      throw new WorkflowResumeError(
+        'WORKFLOW_CHECKPOINT_NOT_FOUND',
+        `No checkpoint found for workflow ${targetId} in ${externalBaseDir}`,
+      );
+    }
+    if (this.orchestrator?.listActive().includes(targetId)) {
+      throw new WorkflowResumeError('WORKFLOW_ALREADY_ACTIVE', `Workflow ${targetId} is already active`);
+    }
+    // The daemon already owns checkpoints under its own base directory.
+    if (resolve(externalBaseDir) === resolve(this.getBaseDir())) {
+      return targetId;
     }
 
     // Save into daemon's own store
@@ -452,6 +491,7 @@ export class WorkflowManager {
         this.eventBus.emit('workflow.failed', {
           workflowId: event.workflowId,
           error: event.error,
+          ...(event.phase ? { phase: event.phase } : {}),
         });
         break;
       case 'gate_raised':

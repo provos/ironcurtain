@@ -762,6 +762,7 @@ describe('WorkflowOrchestrator', () => {
         kind: 'failed',
         workflowId,
         error: 'Workflow reached aborted state',
+        phase: 'aborted',
       });
     });
     expect(lifecycleEvents.some((event) => event.kind === 'completed')).toBe(false);

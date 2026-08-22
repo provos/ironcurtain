@@ -40,7 +40,8 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain refresh-lists [--list <name>] [--with-mcp]` - re-resolve dynamic lists without full recompilation
 - `ironcurtain workflow list` - list available workflow definitions
 - `ironcurtain workflow start <name-or-path> "task" [--model <model>] [--workspace <path>]` - run a multi-agent workflow
-- `ironcurtain workflow resume <baseDir> [--state <stateName>]` - resume a checkpointed workflow
+- `ironcurtain workflow resume <workflowId|existingBaseDir> [--workflow-id <id>] [--ensure-daemon]` - resume through the daemon (and its configured model proxy)
+- `ironcurtain workflow resume-standalone <baseDir> [--state <stateName>]` - advanced local resume without the daemon
 - `ironcurtain workflow inspect <baseDir> [--all]` - inspect workflow status and message log
 - `ironcurtain workflow run <name-or-path> "task" [--ensure-daemon]` / `await <id>` / `status <id>` / `gate <id> --event <APPROVE|FORCE_REVISION|REPLAN|ABORT> [--prompt <text>]` / `show <id> --artifact <name>` - agent-driven, non-interactive gate resolution over a running daemon (`ironcurtain daemon --web-ui`): start a gated workflow, block until a human gate or terminal, and resolve gates programmatically (the agent is the decider). All support `--json`; `await`/`status` exit codes track the workflow phase (e.g. `3` for failed/aborted, `4` for `await` timeout), while `run`/`gate`/`show` exit `0`/`1`/`2` on call success/error/usage. See [`WORKFLOWS.md`](WORKFLOWS.md) and [`docs/designs/agent-driven-workflow-gates.md`](docs/designs/agent-driven-workflow-gates.md).
 - `ironcurtain daemon --web-ui` - start daemon with web UI (opens on port 7400, prints auth URL to stderr)

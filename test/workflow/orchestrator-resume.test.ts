@@ -326,6 +326,134 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     }
   });
 
+  it('rejects resume while the workflow is already active', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+    const raiseGate = vi.fn();
+    const orchestrator = trackOrchestrator(
+      new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          raiseGate,
+          createSession: async () =>
+            createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir),
+        }),
+      ),
+    );
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+    await waitForGate(raiseGate, 1);
+
+    await expect(orchestrator.resume(workflowId)).rejects.toMatchObject({ code: 'WORKFLOW_ALREADY_ACTIVE' });
+  });
+
+  it('rejects resume until abort teardown finishes, then allows it', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+    const raiseGate = vi.fn();
+    const orchestrator = trackOrchestrator(
+      new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          checkpointStore,
+          raiseGate,
+          createSession: async () =>
+            createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir),
+        }),
+      ),
+    );
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+    await waitForGate(raiseGate, 1);
+
+    let finishClose!: () => void;
+    const closeFinished = new Promise<void>((resolve) => {
+      finishClose = resolve;
+    });
+    const deferredSession = new MockSession({ responses: [] });
+    const closeSpy = vi.spyOn(deferredSession, 'close').mockReturnValue(closeFinished);
+    const instance = (
+      orchestrator as unknown as {
+        workflows: Map<WorkflowId, { activeSessions: Set<MockSession> }>;
+      }
+    ).workflows.get(workflowId)!;
+    instance.activeSessions.add(deferredSession);
+
+    const abortPromise = orchestrator.abort(workflowId);
+    expect(closeSpy).toHaveBeenCalledOnce();
+    await expect(orchestrator.resume(workflowId)).rejects.toMatchObject({ code: 'WORKFLOW_ALREADY_ACTIVE' });
+
+    finishClose();
+    await abortPromise;
+    await expect(orchestrator.resume(workflowId)).resolves.toBeUndefined();
+  });
+
+  it('rejects missing, corrupt, and completed checkpoints with stable resume codes', async () => {
+    const checkpointStore = createCheckpointStore(tmpDir);
+    const orchestrator = trackOrchestrator(
+      new WorkflowOrchestrator(createDeps(tmpDir, { checkpointStore, createSession: vi.fn() })),
+    );
+
+    await expect(orchestrator.resume('wf-missing' as WorkflowId)).rejects.toMatchObject({
+      code: 'WORKFLOW_CHECKPOINT_NOT_FOUND',
+    });
+
+    const corruptId = 'wf-corrupt' as WorkflowId;
+    const checkpointBase = resolve(tmpDir, '..', `${resolve(tmpDir).split('/').pop()!}-ckpt`);
+    mkdirSync(resolve(checkpointBase, corruptId), { recursive: true });
+    writeFileSync(resolve(checkpointBase, corruptId, 'checkpoint.json'), '{nope');
+    await expect(orchestrator.resume(corruptId)).rejects.toMatchObject({ code: 'WORKFLOW_CHECKPOINT_CORRUPTED' });
+
+    const malformedId = 'wf-malformed' as WorkflowId;
+    const malformedDefinitionPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+    mkdirSync(resolve(checkpointBase, malformedId), { recursive: true });
+    writeFileSync(
+      resolve(checkpointBase, malformedId, 'checkpoint.json'),
+      JSON.stringify({
+        machineState: 'implement',
+        timestamp: new Date().toISOString(),
+        transitionHistory: [],
+        definitionPath: malformedDefinitionPath,
+      }),
+    );
+    await expect(orchestrator.resume(malformedId)).rejects.toMatchObject({ code: 'WORKFLOW_CHECKPOINT_CORRUPTED' });
+
+    const completedId = 'wf-completed' as WorkflowId;
+    checkpointStore.save(completedId, {
+      machineState: 'implement',
+      context: {
+        taskDescription: 'done',
+        artifacts: {},
+        round: 1,
+        maxRounds: 1,
+        previousOutputHashes: {},
+        previousTestCount: null,
+        humanPrompt: null,
+        reviewHistory: [],
+        totalTokens: 0,
+        lastError: null,
+        agentConversationsByState: {},
+        previousAgentOutput: null,
+        previousAgentNotes: null,
+        previousStateName: null,
+        visitCounts: {},
+      },
+      timestamp: new Date().toISOString(),
+      transitionHistory: [],
+      definitionPath: '/unused.json',
+      finalStatus: { phase: 'completed', result: { finalArtifacts: {} } },
+    });
+    await expect(orchestrator.resume(completedId)).rejects.toMatchObject({ code: 'WORKFLOW_NOT_RESUMABLE' });
+
+    const missingDefinitionId = 'wf-missing-definition' as WorkflowId;
+    const resumableCheckpoint = checkpointStore.load(completedId)!;
+    delete resumableCheckpoint.finalStatus;
+    checkpointStore.save(missingDefinitionId, {
+      ...resumableCheckpoint,
+      definitionPath: resolve(tmpDir, 'missing-definition.json'),
+    });
+    await expect(orchestrator.resume(missingDefinitionId)).rejects.toMatchObject({
+      code: 'WORKFLOW_CHECKPOINT_CORRUPTED',
+    });
+  });
+
   // -----------------------------------------------------------------------
   // Test 2a: finalStatus persistence — completed with expected artifacts
   // -----------------------------------------------------------------------
