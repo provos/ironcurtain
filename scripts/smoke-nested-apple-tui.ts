@@ -8,7 +8,7 @@ const CLAUDE_FRAMED_TITLE = /[╭┌](?:(?:─|━|-)+)[^\r\n]{0,160}\bClaude Co
 export const MAX_TUI_EVIDENCE_BYTES = 2 * 1024 * 1024;
 
 /** Keep only a bounded UTF-8 tail so a broken TUI cannot grow the harness indefinitely. */
-export function appendBoundedTuiOutput(previous: string, chunk: string, maxBytes = MAX_TUI_EVIDENCE_BYTES): string {
+export function appendBoundedOutput(previous: string, chunk: string, maxBytes = MAX_TUI_EVIDENCE_BYTES): string {
   const combined = Buffer.from(previous + chunk);
   if (combined.length <= maxBytes) return combined.toString('utf8');
   let start = combined.length - maxBytes;

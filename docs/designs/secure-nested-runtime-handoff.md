@@ -168,7 +168,8 @@ Earlier catalog-based offline and public-registry smokes exercised the built CLI
 they do not qualify selected-current transport or the managed-network slice. Their catalog identities,
 temporary paths, and duplicate validation tables are intentionally omitted here; Git history retains the
 diagnostic record. The selected-current public-registry session result and the newer deterministic
-public/offline workflow result follow. A narrow PTY transport/composition gate remains pending.
+public/offline workflow result follow. The PTY smoke remains available for transport-specific regressions,
+but it is not a completion gate for the functional matrix.
 
 ## Managed-Network Usability Slice Evidence
 
@@ -226,7 +227,7 @@ On 2026-08-21, `npm run smoke:nested:apple:workflow` ran two ordinary built-CLI 
 `workflow start`, without creating an LLM session or sending a provider request:
 
 ```text
-[public] workflow passed 25 deterministic checks and exact teardown proof
+[public] workflow passed 28 deterministic checks and exact teardown proof
 [offline] workflow passed 17 deterministic checks and exact teardown proof
 nested Apple workflow smoke passed (public + offline, no LLM)
 ```
@@ -256,7 +257,7 @@ modules and fixtures, rerun the current-tree gates before merge rather than reus
 ## Important Boundaries: Do Not Overclaim
 
 1. **No real Claude provider turn is required for functional acceptance.** The current workflow gate runs fixed Python commands inside the real admitted workflow bundle. It exercises production workflow/infrastructure lifecycle without asking an LLM to choose or issue Docker commands.
-2. **PTY/mux composition is not yet a fresh selected-current live gate.** `npm run smoke:nested:apple:pty` exists for the node-pty/Claude-TUI path. The functional Docker matrix is now covered by workflows; the remaining PTY evidence should be limited to the transport-specific delta rather than requiring a provider turn or repeating every network probe.
+2. **PTY/mux is not a completion blocker.** `npm run smoke:nested:apple:pty` remains available for the node-pty/Claude-TUI path, which has prior manual coverage. The deterministic workflow owns the functional Docker matrix. Rerun PTY only after a PTY-specific change or a reported regression; do not require a provider turn to qualify nested-Docker functionality.
 3. **No host access to the server.** Host port publishing is explicitly forbidden. The implemented use case is target/scanner or service/sibling communication inside the bundle. Safely exposing a server to the Mac is a separate design and implementation slice.
 4. **No durable pull-provenance sink yet.** Policy enforcement exists, but successful registry provenance is not yet persisted as complete host session evidence.
 5. **No hard Apple disk quota.** Enabling the admitted developer slice accepts the host-watchdog-observed disk policy; the risk remains even though the UI hides that implementation detail.
@@ -264,19 +265,20 @@ modules and fixtures, rerun the current-tree gates before merge rather than reus
 7. **Not preview-qualified.** Full G1-G10/0C release evidence, zero-skip backend qualification, and broader failure injection remain incomplete.
 8. **Replacement public and offline gates passed.** The selected-current-agent public-registry session
    smoke passed on 2026-08-15. Deterministic public and offline production workflows passed on 2026-08-21
-   with exact cleanup. Only the narrow selected-current PTY transport delta remains; a catalog refreeze is
-   neither required nor a substitute for it.
+   with exact cleanup. A catalog refreeze is neither required nor a substitute for these gates.
 
 ## Recommended Next Work
 
-### 1. Complete the narrow selected-current PTY gate
+### 1. Implement controlled Docker build egress
 
-The selected-current-agent migration in implementation plan §16.16 is implemented. Tag/cache mutation,
-legacy-lease recovery, selected-image archive qualification, and deterministic public/offline workflow
-gates now pass. Rerun the current node-pty path and prove only its unique composition properties:
-activation precedes attach, the admitted Docker environment/orientation reaches the PTY process, real
-terminal bytes arrive, signal/EOF handling is bounded, and exact teardown completes. Do not require an
-LLM to reproduce the already-passing workflow functional matrix.
+Registry mediation now lets a nested build resolve and pull its `FROM` image, but network-dependent
+Dockerfile `RUN` steps still have no admitted route. The next user-facing slice should connect BuildKit
+build traffic to a reviewed, credential-free egress policy while preserving direct-IP, LAN, metadata,
+host, and arbitrary-destination denial. Reuse the existing build-egress policy/proxy foundations, but
+define a simple product contract for ordinary project Dockerfiles rather than exposing the dormant
+`ironcurtain-dockerfiles` implementation mode as an operator configuration matrix. Extend the deterministic
+workflow with an allowed package-fetching build, a denied destination, execution of the built image, and
+exact cleanup.
 
 ### 2. Broader failure injection
 

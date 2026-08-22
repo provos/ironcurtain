@@ -38,7 +38,7 @@ import {
 import { createPtyBridge, type PtyBridge } from '../src/pty/pty-bridge.js';
 import type { SessionMetadata } from '../src/session/types.js';
 import type { BundleId } from '../src/session/types.js';
-import { appendBoundedTuiOutput, hasClaudeTuiEvidence } from './smoke-nested-apple-tui.js';
+import { appendBoundedOutput, hasClaudeTuiEvidence } from './smoke-nested-apple-tui.js';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
   assertDefaultBridgeUnavailable,
@@ -304,8 +304,8 @@ async function mainPty(): Promise<void> {
       muxPid: process.pid,
     });
     unsubscribeOutput = bridge.onData((chunk) => {
-      diagnosticOutput = appendBoundedTuiOutput(diagnosticOutput, chunk);
-      if (collectPostActivation) postActivationOutput = appendBoundedTuiOutput(postActivationOutput, chunk);
+      diagnosticOutput = appendBoundedOutput(diagnosticOutput, chunk);
+      if (collectPostActivation) postActivationOutput = appendBoundedOutput(postActivationOutput, chunk);
     });
     process.stderr.write(
       `nested Apple PTY smoke argv=${JSON.stringify([

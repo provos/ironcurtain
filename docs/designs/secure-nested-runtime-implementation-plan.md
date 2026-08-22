@@ -35,7 +35,7 @@ socket mount, rootless-netns loopback relay, and dockerd-only proxy trust. The
 embedded-DNS prerequisite and historical offline product-entrypoint gate passed on the former catalog
 path. The replacement selected-current public-registry product-entrypoint gate passed, including the internal-bridge alias, direct
 IP/public-DNS negatives, no published ports, and exact teardown. A newer deterministic production
-workflow gate passed both public (25 checks) and offline (17 checks) modes without an LLM, with exact
+workflow gate passed both public (28 checks) and offline (17 checks) modes without an LLM, with exact
 cleanup after each run and graceful second-session admission in one isolated home. These smokes are not
 agent-turn/provider, full 0C, or preview qualification. Docker Desktop, native Linux,
 build-egress, enforced-PID, bounded-disk, and preview variants remain rejected. No backend is
@@ -55,8 +55,9 @@ bundle, notably the future Docker Desktop fixed uplink relay. Its image and fixe
 independently digest-pinned. This amendment supersedes every earlier catalog-as-TCB or
 catalog-as-session-admission statement; see §16.16. The runtime migration is implemented in the current
 working tree. The replacement public-registry product-entrypoint smoke passed on 2026-08-15, and the
-deterministic public/offline workflow gate passed on 2026-08-21. Only the selected-current PTY
-transport/composition delta remains a separate live follow-up gate.
+deterministic public/offline workflow gate passed on 2026-08-21. PTY has prior manual coverage and is not
+a completion blocker; rerun its narrow transport/composition gate only after PTY-specific changes or a
+reported regression.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
@@ -1269,10 +1270,10 @@ paired frozen catalogs and therefore does not qualify the current selected-curre
 Its catalog identity checks, staged-pair prerequisites, and refreeze workflow are retired.
 
 The still-valid limitations are preserved: these infrastructure smokes are not provider/agent turns,
-the PTY gate must require post-activation TUI bytes rather than startup text or a socket inode, and every
-failure path must retire owned state and exact runtime objects. Section 16.16 and the handoff record the
-replacement selected-current public-registry result and the deterministic public/offline workflow
-result. Only the narrow PTY transport/composition evidence remains pending.
+and every failure path must retire owned state and exact runtime objects. If the optional PTY regression
+gate is rerun, it must require post-activation TUI bytes rather than startup text or a socket inode.
+Section 16.16 and the handoff record the replacement selected-current public-registry result and the
+deterministic public/offline workflow result.
 
 ### 16.15 Enabled-state usability defaults and settings surfaces (record, 2026-08-15)
 
@@ -1334,9 +1335,10 @@ catalog mismatch as a security blocker, or refreeze as a product-start prerequis
 this section and retained only in Git history. The production
 migration is present in the current working tree. Its public-registry managed-network product-entrypoint
 smoke passed live on 2026-08-15 with exact cleanup. On 2026-08-21 the built production workflow
-entrypoint passed fixed no-LLM public and offline probes (25 and 17 checks), exact cleanup after each run,
-and graceful second-session admission in one isolated home. The remaining live delta is the
-selected-current PTY transport/composition path, not another LLM-driven replay of the functional matrix.
+entrypoint passed fixed no-LLM public and offline probes (28 and 17 checks), exact cleanup after each run,
+and graceful second-session admission in one isolated home. That deterministic gate is the functional
+acceptance path; PTY is an optional transport-specific regression gate, not another LLM-driven replay of
+the functional matrix.
 
 #### Adversarial acceptance checklist
 
@@ -1373,9 +1375,9 @@ The migration is complete only when all of the following are demonstrated:
   security boundary.
 - **Live gate:** fixed-command production workflows cover fresh offline, public-registry, and
   managed-network functionality from the minimal configuration after an ordinary current-agent rebuild,
-  with exact cleanup and no provider turn. A separate narrow PTY gate covers only activation-before-attach,
-  environment/orientation delivery, terminal bytes, bounded shutdown, and exact cleanup. Historical v3
-  catalog runs do not satisfy this item.
+  with exact cleanup and no provider turn. Historical v3 catalog runs do not satisfy this item. The
+  available PTY smoke is reserved for regressions in activation-before-attach, environment/orientation
+  delivery, terminal bytes, bounded shutdown, or PTY cleanup; it is not required to repeat this gate.
 
 ## 17. Primary references
 

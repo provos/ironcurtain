@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -8,6 +9,21 @@ import { APPLE_VM_DOCKER_WORKLOAD_NETWORK } from '../../src/docker-workload/appl
 import { WorkflowOrchestrator } from '../../src/workflow/orchestrator.js';
 import type { WorkflowId } from '../../src/workflow/types.js';
 import { createDeps, waitForCompletion } from './test-helpers.js';
+
+const PROBE_PATH = resolve(
+  process.cwd(),
+  'src',
+  'workflow',
+  'workflows',
+  'nested-docker-live-smoke',
+  'scripts',
+  'nested_docker_probe.py',
+);
+
+function runProbeAssertion(source: string): void {
+  const result = spawnSync('python3', ['-c', source, PROBE_PATH], { encoding: 'utf8' });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+}
 
 describe('nested-docker-live-smoke workflow', () => {
   let tempDir: string;
@@ -84,20 +100,57 @@ describe('nested-docker-live-smoke workflow', () => {
   });
 
   it('pins the Python probe to the production nested-Docker environment constants', () => {
-    const probe = readFileSync(
-      resolve(
-        process.cwd(),
-        'src',
-        'workflow',
-        'workflows',
-        'nested-docker-live-smoke',
-        'scripts',
-        'nested_docker_probe.py',
-      ),
-      'utf8',
-    );
+    const probe = readFileSync(PROBE_PATH, 'utf8');
 
     expect(probe).toContain(`EXPECTED_DOCKER_HOST = ${JSON.stringify(APPLE_VM_DAEMON_DOCKER_HOST)}`);
     expect(probe).toContain(`EXPECTED_NETWORK = ${JSON.stringify(APPLE_VM_DOCKER_WORKLOAD_NETWORK)}`);
+  });
+
+  it('requires explicit registry-policy denial instead of accepting connectivity failure', () => {
+    runProbeAssertion(String.raw`
+import runpy, subprocess, sys
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+assert_denied = module["assert_registry_policy_denied"]
+failure = module["ProbeFailure"]
+assert_denied(subprocess.CompletedProcess([], 1, "", "unexpected status: 403 Forbidden"))
+for output in ("lookup example.invalid: no such host", "pull access denied"):
+    try:
+        assert_denied(subprocess.CompletedProcess([], 1, "", output))
+    except failure:
+        pass
+    else:
+        raise AssertionError(f"accepted non-policy failure: {output}")
+`);
+  });
+
+  it('never cleans through an unverified Docker endpoint', () => {
+    runProbeAssertion(String.raw`
+import os, runpy, sys
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+probe = module["Probe"]()
+calls = []
+probe.docker = lambda *args, **kwargs: calls.append(args)
+os.environ["DOCKER_HOST"] = "unix:///var/run/docker.sock"
+try:
+    probe.validate_common()
+except module["ProbeFailure"]:
+    pass
+else:
+    raise AssertionError("wrong endpoint unexpectedly validated")
+probe.cleanup()
+assert calls == [], calls
+`);
+  });
+
+  it('captures an immutable container ID even when detached run stdout is empty', () => {
+    runProbeAssertion(String.raw`
+import runpy, subprocess, sys
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+probe = module["Probe"]()
+expected = "a" * 64
+probe.docker = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, expected + "\n", "")
+created = subprocess.CompletedProcess([], 0, "", "")
+assert probe._container_id(created, probe.server_name) == expected
+`);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendBoundedTuiOutput, hasClaudeTuiEvidence } from '../scripts/smoke-nested-apple-tui.js';
+import { appendBoundedOutput, hasClaudeTuiEvidence } from '../scripts/smoke-nested-apple-tui.js';
 
 describe('nested Apple PTY smoke evidence', () => {
   it('accepts a framed Claude Code screen emitted after activation', () => {
@@ -15,7 +15,7 @@ describe('nested Apple PTY smoke evidence', () => {
   );
 
   it('bounds retained output to a tail without losing the newest TUI evidence', () => {
-    const output = appendBoundedTuiOutput('x'.repeat(100), '╭── Claude Code ──╮\n╰─────────────────╯', 96);
+    const output = appendBoundedOutput('x'.repeat(100), '╭── Claude Code ──╮\n╰─────────────────╯', 96);
     expect(Buffer.byteLength(output)).toBeLessThanOrEqual(96);
     expect(hasClaudeTuiEvidence(output)).toBe(true);
   });

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -21,21 +22,38 @@ PUBLIC_IMAGE = "busybox:1.37.0-glibc"
 DENIED_IMAGE = "example.invalid/ironcurtain/denied:latest"
 EXPECTED_NETWORK = "ironcurtain"
 EXPECTED_DOCKER_HOST = "unix:///run/ironcurtain-docker/docker.sock"
+CONNECTIVITY_FAILURE = re.compile(
+    r"no such host|network is unreachable|connection refused|timed? out|i/o timeout|context deadline",
+    re.IGNORECASE,
+)
+POLICY_DENIAL = re.compile(r"(?:\b403\b|forbidden)", re.IGNORECASE)
 
 
 class ProbeFailure(RuntimeError):
     pass
 
 
+def assert_registry_policy_denied(completed: subprocess.CompletedProcess[str]) -> None:
+    """Distinguish an intentional proxy-policy denial from broken connectivity."""
+    output = f"{completed.stdout}\n{completed.stderr}"
+    if CONNECTIVITY_FAILURE.search(output):
+        raise ProbeFailure(f"denied registry probe failed for connectivity: {output.strip()}")
+    if not POLICY_DENIAL.search(output):
+        raise ProbeFailure(f"denied registry probe lacks an explicit 403/Forbidden result: {output.strip()}")
+
+
 class Probe:
-    def __init__(self, mode: str) -> None:
-        self.mode = mode
+    def __init__(self) -> None:
         self.checks: list[str] = []
         suffix = uuid.uuid4().hex[:12]
         self.server_name = f"ic-wf-server-{suffix}"
         self.published_name = f"ic-wf-published-{suffix}"
         self.host_port = 30000 + (int(suffix[:4], 16) % 8000)
         self.nonce = uuid.uuid4().hex
+        self.cleanup_armed = False
+        self.container_ids: list[str] = []
+        self.public_image_pulled = False
+        self.public_image_id: str | None = None
 
     def require(self, condition: bool, label: str, detail: str = "") -> None:
         if not condition:
@@ -114,6 +132,10 @@ class Probe:
 
         image_ids = [line for line in self.docker("image", "ls", "--quiet", "--no-trunc").stdout.splitlines() if line]
         self.require(len(image_ids) >= 1, "selected agent image is preloaded")
+        # Cleanup is safe only after the endpoint and its private-daemon profile
+        # have both been verified. Before this point an ambient DOCKER_HOST must
+        # never receive a mutating cleanup command.
+        self.cleanup_armed = True
         return image_ids[0]
 
     def validate_offline(self, selected_image_id: str) -> None:
@@ -143,13 +165,27 @@ class Probe:
         self.require(retained.returncode != 0, "failed offline pull retains no public image")
 
     def validate_public(self) -> None:
+        preexisting = self.docker("image", "inspect", PUBLIC_IMAGE, expect_success=None)
+        self.require(preexisting.returncode != 0, "public fixture image starts absent")
         self.docker("image", "pull", PUBLIC_IMAGE, timeout=240)
+        self.public_image_pulled = True
+        self.public_image_id = self.docker(
+            "image", "inspect", "--format", "{{.Id}}", PUBLIC_IMAGE
+        ).stdout.strip()
+        self.require(
+            bool(re.fullmatch(r"sha256:[a-f0-9]{64}", self.public_image_id)),
+            "pulled public fixture has an immutable image ID",
+            repr(self.public_image_id),
+        )
         self.checks.append("allowed public image pull succeeds")
-        self.docker("image", "pull", DENIED_IMAGE, expect_success=False, timeout=60)
+        denied = self.docker("image", "pull", DENIED_IMAGE, expect_success=False, timeout=60)
+        assert_registry_policy_denied(denied)
         self.checks.append("unlisted registry pull is rejected")
+        retained_denied = self.docker("image", "inspect", DENIED_IMAGE, expect_success=None)
+        self.require(retained_denied.returncode != 0, "denied registry pull retains no image")
 
         server_script = 'printf "%s" "$1" > /tmp/index.html; exec httpd -f -p 8080 -h /tmp'
-        self.docker(
+        server = self.docker(
             "container",
             "run",
             "--detach",
@@ -175,6 +211,7 @@ class Probe:
             "sh",
             self.nonce,
         )
+        self.container_ids.append(self._container_id(server, self.server_name))
         self.checks.append("server starts on managed network")
 
         server_ip = self.docker(
@@ -205,7 +242,7 @@ class Probe:
         by_ip = self._wget_from_sibling(f"http://{server_ip}:8080/")
         self.require(by_ip == self.nonce, "sibling reaches server by inner IPv4", repr(by_ip))
 
-        self.docker(
+        published = self.docker(
             "container",
             "run",
             "--rm",
@@ -246,6 +283,7 @@ class Probe:
             "sh",
             self.nonce,
         )
+        self.container_ids.append(self._container_id(published, self.published_name))
         self.checks.append("published-port fixture starts inside the private daemon")
 
         port_map = json.loads(
@@ -300,11 +338,40 @@ class Probe:
         except Exception:
             return None
 
+    def _container_id(self, completed: subprocess.CompletedProcess[str], label: str) -> str:
+        container_id = completed.stdout.strip()
+        if not re.fullmatch(r"[a-f0-9]{64}", container_id):
+            # Some daemon/CLI combinations successfully create a detached
+            # container without echoing its ID. The unique probe-owned name is
+            # then used only to inspect and capture the immutable cleanup ID.
+            container_id = self.docker(
+                "container", "inspect", "--format", "{{.Id}}", label
+            ).stdout.strip()
+        if not re.fullmatch(r"[a-f0-9]{64}", container_id):
+            raise ProbeFailure(f"{label} returned a malformed immutable container ID: {container_id!r}")
+        return container_id
+
     def cleanup(self) -> None:
-        for name in (self.published_name, self.server_name):
-            self.docker("container", "rm", "--force", name, expect_success=None, timeout=30)
-        if self.mode == "public":
-            self.docker("image", "rm", "--force", PUBLIC_IMAGE, expect_success=None, timeout=60)
+        if not self.cleanup_armed:
+            return
+
+        remaining_containers: list[str] = []
+        for container_id in reversed(self.container_ids):
+            removed = self.docker(
+                "container", "rm", "--force", container_id, expect_success=None, timeout=30
+            )
+            if removed.returncode != 0:
+                remaining_containers.append(container_id)
+        self.container_ids = list(reversed(remaining_containers))
+
+        if self.public_image_pulled:
+            # Prefer the captured immutable ID. The tag fallback is used only
+            # if inspection failed after this probe's successful pull.
+            image = self.public_image_id or PUBLIC_IMAGE
+            removed = self.docker("image", "rm", "--force", image, expect_success=None, timeout=60)
+            if removed.returncode == 0:
+                self.public_image_pulled = False
+                self.public_image_id = None
 
     def validate_final_inventory(self) -> None:
         containers = self.docker("container", "ls", "--all", "--quiet").stdout.strip()
@@ -336,7 +403,7 @@ def main() -> int:
     probe: Probe | None = None
     try:
         mode = read_mode()
-        probe = Probe(mode)
+        probe = Probe()
         selected_image_id = probe.validate_common()
         if mode == "public":
             probe.validate_public()

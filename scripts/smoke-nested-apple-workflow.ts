@@ -18,8 +18,14 @@ import {
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { loadDockerWorkloadLease, type DockerWorkloadLease } from '../src/docker-workload/bundle-lease.js';
+import {
+  assertCleanupInventoryGap,
+  loadDockerWorkloadLease,
+  type DockerWorkloadLease,
+} from '../src/docker-workload/bundle-lease.js';
 import { createContainerRuntime } from '../src/docker/container-runtime.js';
+import { isSelectedAgentCaptureAlias } from '../src/docker/selected-agent-artifact.js';
+import { appendBoundedOutput } from './smoke-nested-apple-tui.js';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..');
@@ -29,7 +35,6 @@ const WORKFLOW_NAME = 'nested-docker-live-smoke';
 const CHILD_TIMEOUT_MS = 30 * 60_000;
 const CLEANUP_TIMEOUT_MS = 5 * 60_000;
 const MAX_CAPTURED_OUTPUT_BYTES = 512 * 1024;
-const CAPTURE_TAG = /^(?:localhost\/|docker\.io\/library\/)?ironcurtain-capture-/u;
 
 type SmokeMode = 'public' | 'offline';
 
@@ -103,11 +108,11 @@ async function runMode(options: {
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk: Buffer) => {
-    stdout = appendBounded(stdout, chunk.toString('utf8'));
+    stdout = appendBoundedOutput(stdout, chunk.toString('utf8'), MAX_CAPTURED_OUTPUT_BYTES);
     process.stderr.write(chunk);
   });
   child.stderr.on('data', (chunk: Buffer) => {
-    stderr = appendBounded(stderr, chunk.toString('utf8'));
+    stderr = appendBoundedOutput(stderr, chunk.toString('utf8'), MAX_CAPTURED_OUTPUT_BYTES);
     process.stderr.write(chunk);
   });
   child.stdin.end();
@@ -179,13 +184,6 @@ function childEnvironment(home: string): NodeJS.ProcessEnv {
   };
 }
 
-function appendBounded(current: string, addition: string): string {
-  const combined = current + addition;
-  return combined.length <= MAX_CAPTURED_OUTPUT_BYTES
-    ? combined
-    : combined.slice(combined.length - MAX_CAPTURED_OUTPUT_BYTES);
-}
-
 async function waitForChild(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<ChildExit> {
   const exitPromise = new Promise<ChildExit>((resolvePromise, reject) => {
     child.once('error', reject);
@@ -238,8 +236,7 @@ async function assertClosedLease(
   if (lease.cleanup.inventories.some((inventory) => inventory.ownedResourceIds.length !== 0)) {
     throw new Error('closed lease retained generation-owned outer resources');
   }
-  const gap = Date.parse(lease.cleanup.inventories[1].capturedAt) - Date.parse(lease.cleanup.inventories[0].capturedAt);
-  if (gap < lease.cleanupInventoryGapMs) throw new Error('cleanup inventories were captured too close together');
+  assertCleanupInventoryGap(lease.cleanup.inventories, lease.cleanupInventoryGapMs, 'workflow smoke');
   if (existsSync(lease.paths.stateRoot) || existsSync(lease.paths.runtimeRoot)) {
     throw new Error('closed lease retained a host-only state or runtime root');
   }
@@ -276,7 +273,7 @@ function readProbeResult(path: string): WorkflowProbeResult {
 
 async function listCaptureTags(runtime: ReturnType<typeof createContainerRuntime>): Promise<ReadonlySet<string>> {
   const images = await runtime.listImages();
-  return new Set(images.flatMap((image) => image.repoTags).filter((tag) => CAPTURE_TAG.test(tag)));
+  return new Set(images.flatMap((image) => image.repoTags).filter(isSelectedAgentCaptureAlias));
 }
 
 function assertNoProviderRequest(home: string): void {
