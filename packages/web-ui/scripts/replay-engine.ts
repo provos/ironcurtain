@@ -601,6 +601,7 @@ export function createReplayController(
         broadcast('workflow.failed', {
           workflowId: state.workflowId,
           error: 'Workflow ended without approval',
+          phase: 'failed',
         });
       }
     }
@@ -644,6 +645,7 @@ export function createReplayController(
         broadcast('workflow.failed', {
           workflowId: state.workflowId,
           error: String(err),
+          phase: 'failed',
         });
       });
     },
@@ -667,6 +669,7 @@ export function createReplayController(
         broadcast('workflow.failed', {
           workflowId: state.workflowId,
           error: 'Workflow aborted by user',
+          phase: 'aborted',
         });
       }
 
@@ -705,6 +708,7 @@ export function createReplayController(
       broadcast('workflow.failed', {
         workflowId: state.workflowId,
         error: 'Workflow aborted by user',
+        phase: 'aborted',
       });
     },
   };

@@ -187,20 +187,25 @@ ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku
 
 ### `ironcurtain workflow resume`
 
-Resume a failed or interrupted workflow from its last checkpoint.
+Resume a failed or interrupted workflow from its last checkpoint through the running daemon. This keeps resumed agent sessions on the daemon's configured model path (including a LiteLLM proxy).
 
 ```bash
-ironcurtain workflow resume <baseDir> [options]
+ironcurtain workflow resume <workflowId|existingBaseDir> [options]
 ```
 
 Options:
 
-- `--state <stateName>` -- Resume from a specific state (synthesizes a checkpoint if none exists)
-- `--model <model>` -- Override the model for the resumed run
-- `--no-lint` -- Skip the pre-flight lint pass
-- `--strict-lint` -- Treat lint warnings as errors
+- `--workflow-id <id>` -- Select a workflow when the target is an external base directory
+- `--ensure-daemon` -- Start a detached daemon if none is running
+- `--json` -- Emit machine-readable output
 
-The same pre-flight lint pass as `start` runs before resuming (skipped if the original definition file has been moved or deleted).
+For the advanced local execution path, use `resume-standalone` explicitly:
+
+```bash
+ironcurtain workflow resume-standalone <baseDir> [--state <stateName>] [--model <model>]
+```
+
+`resume-standalone` retains the local `--state`, `--model`, `--no-lint`, and `--strict-lint` options. It bypasses the daemon and therefore also bypasses daemon model routing.
 
 ### `ironcurtain workflow inspect`
 
@@ -932,16 +937,16 @@ Every workflow produces a `messages.jsonl` file at `~/.ironcurtain/workflow-runs
 
 ## Checkpointing and resume
 
-The orchestrator saves a checkpoint after every state transition. If a workflow fails (agent error, Docker issue, Ctrl+C), you can resume from the last checkpoint:
+The orchestrator saves a checkpoint after every state transition. If a workflow fails (agent error, Docker issue, Ctrl+C), resume it through the daemon from its workflow ID:
 
 ```bash
-ironcurtain workflow resume /path/to/base-dir
+ironcurtain workflow resume <workflowId> --ensure-daemon
 ```
 
-For workflows that ran before checkpointing was added, synthesize a checkpoint at a specific state:
+For workflows that ran before checkpointing was added, the explicit standalone command can synthesize a checkpoint at a specific state:
 
 ```bash
-ironcurtain workflow resume /path/to/base-dir --state review
+ironcurtain workflow resume-standalone /path/to/base-dir --state review
 ```
 
 Artifacts and conversation state survive across resume. Docker sessions use `claude --continue` to preserve conversation history within each role.

@@ -110,6 +110,8 @@ export interface AppStateLike {
 /** Side effects that handleEvent may request. */
 export interface EventSideEffects {
   refreshJobs(): void;
+  /** Notify the workflows route that its disk-backed past-run list is stale. */
+  refreshWorkflowHistory(): void;
   /**
    * Refresh the persona list (and any open persona detail). Invoked on every
    * `personas.changed` event, mirroring `refreshJobs` for `job.list_changed`.
@@ -190,7 +192,10 @@ export type WebEvent =
       payload: { workflowId: string; stateId: string; sessionId: string };
     }
   | { event: 'workflow.completed'; payload: { workflowId: string } }
-  | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
+  | {
+      event: 'workflow.failed';
+      payload: { workflowId: string; error: string; phase?: 'failed' | 'aborted' };
+    }
   | { event: 'workflow.gate_raised'; payload: { workflowId: string; gate: HumanGateRequestDto } }
   | { event: 'workflow.gate_dismissed'; payload: { workflowId: string; gateId: string } }
   | { event: 'persona.compile.started'; payload: PersonaCompileStartedEvent }
@@ -277,7 +282,10 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'workflow.completed':
       return { event, payload: data as { workflowId: string } };
     case 'workflow.failed':
-      return { event, payload: data as { workflowId: string; error: string } };
+      return {
+        event,
+        payload: data as { workflowId: string; error: string; phase?: 'failed' | 'aborted' },
+      };
     case 'workflow.gate_raised':
       return {
         event,
@@ -502,30 +510,44 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     case 'workflow.completed': {
       const { workflowId } = parsed.payload;
       const wf = state.workflows.get(workflowId);
-      if (!wf) return true;
-      const updated = new Map(state.workflows).set(workflowId, {
-        ...wf,
-        phase: PHASE.COMPLETED,
-      });
-      state.workflows = evictTerminalIfOverCap(updated);
+      if (wf) {
+        const updated = new Map(state.workflows).set(workflowId, {
+          ...wf,
+          phase: PHASE.COMPLETED,
+        });
+        state.workflows = evictTerminalIfOverCap(updated);
+      }
       const nextGates = new Map(state.pendingGates);
       for (const [gateId, gate] of nextGates) {
         if (gate.workflowId === workflowId) nextGates.delete(gateId);
       }
       state.pendingGates = nextGates;
+      effects.refreshWorkflowHistory();
       return true;
     }
 
     case 'workflow.failed': {
-      const { workflowId, error } = parsed.payload;
+      const { workflowId, error, phase } = parsed.payload;
       const wf = state.workflows.get(workflowId);
-      if (!wf) return true;
-      const updated = new Map(state.workflows).set(workflowId, {
-        ...wf,
-        phase: PHASE.FAILED,
-        error,
-      });
-      state.workflows = evictTerminalIfOverCap(updated);
+      if (wf) {
+        const updated = new Map(state.workflows).set(workflowId, {
+          ...wf,
+          ...(phase ? { phase } : {}),
+          error,
+        });
+        state.workflows = phase ? evictTerminalIfOverCap(updated) : updated;
+      }
+      if (phase) {
+        const nextGates = new Map(state.pendingGates);
+        for (const [gateId, gate] of nextGates) {
+          if (gate.workflowId === workflowId) nextGates.delete(gateId);
+        }
+        state.pendingGates = nextGates;
+      }
+      // Older daemons do not include a terminal phase. Refresh history for
+      // every failure so their durable terminal checkpoint can still update
+      // the past-runs list without a browser reload.
+      effects.refreshWorkflowHistory();
       return true;
     }
 

@@ -39,6 +39,7 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
 function createMockEffects(): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
+    refreshWorkflowHistory: vi.fn(),
     refreshPersonas: vi.fn(),
     refreshConfig: vi.fn(),
     assignDisplayNumber: vi.fn(() => 1),
@@ -215,9 +216,24 @@ describe('workflow event handling', () => {
       handleEvent(state, effects, 'workflow.failed', {
         workflowId: 'wf-1',
         error: 'Something went wrong',
+        phase: 'failed',
       });
 
       expect(state.workflows.get('wf-1')?.phase).toBe('failed');
+      expect(effects.refreshWorkflowHistory).toHaveBeenCalledOnce();
+    });
+
+    it('keeps an early failure non-terminal until a phase-bearing event arrives', () => {
+      state.workflows.set('wf-1', mockWorkflow('wf-1'));
+
+      handleEvent(state, effects, 'workflow.failed', {
+        workflowId: 'wf-1',
+        error: 'Transient state error',
+      });
+
+      expect(state.workflows.get('wf-1')?.phase).toBe('running');
+      expect(state.workflows.get('wf-1')?.error).toBe('Transient state error');
+      expect(effects.refreshWorkflowHistory).toHaveBeenCalledOnce();
     });
   });
 

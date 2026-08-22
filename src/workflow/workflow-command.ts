@@ -3,7 +3,8 @@
  *
  * Subcommands:
  *   start   <definition> "task" [--model <model>] [--workspace <path>]
- *   resume  <baseDir> [--state <stateName>] [--model <model>]
+ *   resume  <workflowId|existingBaseDir> [--workflow-id <id>] [--json] [--ensure-daemon]
+ *   resume-standalone <baseDir> [--state <stateName>] [--model <model>]
  *   inspect <baseDir> [--all]
  *   watch   <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]
  */
@@ -69,7 +70,8 @@ const workflowSpec: CommandSpec = {
   usage: [
     'ironcurtain workflow list',
     'ironcurtain workflow start <name-or-path> "task" [--model <model>] [--workspace <path>] [--no-lint] [--strict-lint]',
-    'ironcurtain workflow resume <baseDir> [--state <stateName>] [--model <model>] [--no-lint] [--strict-lint]',
+    'ironcurtain workflow resume <workflowId|existingBaseDir> [--workflow-id <id>] [--json] [--ensure-daemon]',
+    'ironcurtain workflow resume-standalone <baseDir> [--state <stateName>] [--model <model>] [--no-lint] [--strict-lint]',
     'ironcurtain workflow inspect <baseDir> [--all]',
     'ironcurtain workflow lint <name-or-path> [--strict]',
     'ironcurtain workflow run-state <name-or-path> <state> --artifacts <dir> [options]',
@@ -83,7 +85,8 @@ const workflowSpec: CommandSpec = {
   subcommands: [
     { name: 'list', description: 'List available workflow definitions' },
     { name: 'start', description: 'Start a workflow by name or definition file path (interactive)' },
-    { name: 'resume', description: 'Resume a checkpointed workflow' },
+    { name: 'resume', description: 'Resume a checkpointed workflow through the daemon' },
+    { name: 'resume-standalone', description: 'Resume without the daemon (advanced)' },
     { name: 'inspect', description: 'Show workflow status, artifacts, and recent messages' },
     { name: 'lint', description: 'Run semantic checks on a workflow definition' },
     { name: 'run-state', description: 'Run a single agent state once against pre-staged artifacts' },
@@ -95,7 +98,7 @@ const workflowSpec: CommandSpec = {
     { name: 'show', description: 'Print a presented artifact for a gated workflow' },
   ],
   options: [
-    { flag: 'model', description: 'Override the agent model (start, resume)', placeholder: '<model-id>' },
+    { flag: 'model', description: 'Override the agent model (start, resume-standalone)', placeholder: '<model-id>' },
     {
       flag: 'workspace',
       description: 'Use an existing directory as workspace (start only)',
@@ -103,19 +106,23 @@ const workflowSpec: CommandSpec = {
     },
     {
       flag: 'state',
-      description: 'Synthesize checkpoint at this state (resume only)',
+      description: 'Synthesize checkpoint at this state (resume-standalone only)',
       placeholder: '<name>',
     },
     { flag: 'all', description: 'Show full message log (inspect only)' },
-    { flag: 'no-lint', description: 'Skip pre-flight linting (start, resume)' },
-    { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume)' },
+    { flag: 'no-lint', description: 'Skip pre-flight linting (start, resume-standalone)' },
+    { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume-standalone)' },
     { flag: 'strict', description: 'Treat lint warnings as errors (lint only)' },
     { flag: 'capture-traces', description: 'Capture LLM API traces for this run (start only)' },
-    { flag: 'json', description: 'Emit machine-readable JSON to stdout (run, status, await, watch, gate, show)' },
+    {
+      flag: 'json',
+      description: 'Emit machine-readable JSON to stdout (run, resume, status, await, watch, gate, show)',
+    },
     {
       flag: 'ensure-daemon',
-      description: 'Auto-start a detached daemon if none is running (run, status, await, gate, show)',
+      description: 'Auto-start a detached daemon if none is running (run, resume, status, await, gate, show)',
     },
+    { flag: 'workflow-id', description: 'Select a workflow within an external base directory', placeholder: '<id>' },
     {
       flag: 'event',
       description: 'Gate event: APPROVE | FORCE_REVISION | REPLAN | ABORT (gate only)',
@@ -142,9 +149,9 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow start design-and-code "Build a REST API"',
     'ironcurtain workflow start ./my-workflow.yaml "Build a REST API"',
     'ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5',
-    'ironcurtain workflow resume /tmp/workflow-abc123',
-    'ironcurtain workflow resume /tmp/workflow-abc123 --state review',
-    'ironcurtain workflow resume /tmp/workflow-abc123 --model anthropic:claude-sonnet-4-6',
+    'ironcurtain workflow resume wf-abc123 --json',
+    'ironcurtain workflow resume /tmp/workflow-runs --workflow-id wf-abc123 --ensure-daemon',
+    'ironcurtain workflow resume-standalone /tmp/workflow-runs --state review',
     'ironcurtain workflow inspect /tmp/workflow-abc123',
     'ironcurtain workflow inspect /tmp/workflow-abc123 --all',
     'ironcurtain workflow run design-and-code "Build a REST API" --json --ensure-daemon',
@@ -294,7 +301,7 @@ async function runStart(args: string[]): Promise<void> {
   process.exit(exitCode);
 }
 
-async function runResume(args: string[]): Promise<void> {
+async function runResumeStandalone(args: string[]): Promise<void> {
   const { values, positionals } = parseArgsStrict({
     args,
     options: {
@@ -314,7 +321,7 @@ async function runResume(args: string[]): Promise<void> {
 
   const baseDirArg = positionals[0];
   if (!baseDirArg) {
-    writeStderr(`${RED}Usage: ironcurtain workflow resume <baseDir> [--state <stateName>]${RESET}`);
+    writeStderr(`${RED}Usage: ironcurtain workflow resume-standalone <baseDir> [--state <stateName>]${RESET}`);
     process.exit(1);
   }
 
@@ -762,8 +769,8 @@ export async function main(args: string[]): Promise<void> {
     case 'start':
       await runStart(subArgs);
       break;
-    case 'resume':
-      await runResume(subArgs);
+    case 'resume-standalone':
+      await runResumeStandalone(subArgs);
       break;
     case 'inspect':
       runInspect(subArgs);
@@ -786,6 +793,7 @@ export async function main(args: string[]): Promise<void> {
       await runRunState(subArgs);
       break;
     case 'run':
+    case 'resume':
     case 'status':
     case 'await':
     case 'gate':

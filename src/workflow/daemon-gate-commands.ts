@@ -1,6 +1,6 @@
 /**
  * Non-interactive, machine-readable CLI surface for driving gated workflows on
- * a running daemon: `run` / `status` / `await` / `gate` / `show`.
+ * a running daemon: `run` / `resume` / `status` / `await` / `gate` / `show`.
  *
  * These commands talk to the daemon's existing WebSocket JSON-RPC interface via
  * the leaf {@link DaemonClient}; they never import the orchestrator/manager
@@ -441,6 +441,69 @@ async function runRun(args: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// `workflow resume`
+// ---------------------------------------------------------------------------
+
+async function runResume(args: string[]): Promise<number> {
+  const parsed = parseGateArgs(args, {
+    json: { type: 'boolean' },
+    'workflow-id': { type: 'string' },
+    'ensure-daemon': { type: 'boolean' },
+  });
+  if (!parsed.ok) return parsed.exitCode;
+  const { mode, values, positionals } = parsed;
+
+  const target = positionals[0];
+  if (!target || positionals.length !== 1) {
+    emitText(
+      'Usage: ironcurtain workflow resume <workflowId|existingBaseDir> [--workflow-id <id>] [--json] [--ensure-daemon]',
+    );
+    return EXIT_USAGE;
+  }
+
+  const params: Record<string, unknown> = {};
+  let targetExists = false;
+  try {
+    const stat = statSync(target, { throwIfNoEntry: false });
+    if (stat) {
+      targetExists = true;
+      if (!stat.isDirectory()) {
+        return fail(mode, 'INVALID_PARAMS', { message: `Path is not a directory: ${resolve(target)}` }, EXIT_USAGE);
+      }
+      params.baseDir = resolve(target);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return fail(
+      mode,
+      'INVALID_PARAMS',
+      { message: `Cannot inspect resume target ${resolve(target)}: ${message}` },
+      EXIT_USAGE,
+    );
+  }
+
+  const selectedId = values['workflow-id'];
+  if (targetExists) {
+    if (typeof selectedId === 'string') params.workflowId = selectedId;
+  } else {
+    if (selectedId !== undefined) {
+      return fail(mode, 'INVALID_PARAMS', { message: '--workflow-id requires an existing base directory' }, EXIT_USAGE);
+    }
+    params.workflowId = target;
+  }
+
+  return withDaemonClient(mode, values['ensure-daemon'] === true, async (client) => {
+    const result = await client.call<{ accepted: true; workflowId: string }>('workflows.resume', params);
+    if (!result.ok) return reportRpcError(mode, result);
+
+    const { workflowId } = result.payload;
+    emitJson(mode, { ok: true, workflowId, phase: 'running' });
+    emitText(`Resumed workflow ${workflowId} (use: ironcurtain workflow await ${workflowId})`);
+    return EXIT_OK;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // `workflow status`
 // ---------------------------------------------------------------------------
 
@@ -727,6 +790,8 @@ export async function runDaemonGateCommand(subcommand: string, args: string[]): 
   switch (subcommand) {
     case 'run':
       return runRun(args);
+    case 'resume':
+      return runResume(args);
     case 'status':
       return runStatus(args);
     case 'await':

@@ -192,6 +192,9 @@ export const personasChangedGeneration = $state({ value: 0 });
  */
 export const configChangedGeneration = $state({ value: 0 });
 
+/** Bumped when completion/failure events make active or past workflow history stale. */
+export const workflowHistoryGeneration = $state({ value: 0 });
+
 /**
  * Per-label terminal sink registry. A `web-pty` session's frames
  * (`session.pty_replay` / `session.pty_output`) can arrive BEFORE its
@@ -338,6 +341,9 @@ function applyWebEvent(client: WsClient, event: string, payload: unknown): void 
     appState,
     {
       refreshJobs: () => refreshJobs(client),
+      refreshWorkflowHistory: () => {
+        workflowHistoryGeneration.value++;
+      },
       refreshPersonas: () => {
         personasChangedGeneration.value++;
       },

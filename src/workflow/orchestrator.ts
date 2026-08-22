@@ -139,6 +139,7 @@ import {
   AgentInvocationError,
   WorkflowQuotaExhaustedError,
   WorkflowTransientFailureError,
+  WorkflowResumeError,
   isWorkflowQuotaExhaustedError,
   isWorkflowTransientFailureError,
 } from './errors.js';
@@ -671,7 +672,13 @@ export type WorkflowLifecycleEvent =
     }
   | { readonly kind: 'state_entered'; readonly workflowId: WorkflowId; readonly state: string }
   | { readonly kind: 'completed'; readonly workflowId: WorkflowId }
-  | { readonly kind: 'failed'; readonly workflowId: WorkflowId; readonly error: string }
+  | {
+      readonly kind: 'failed';
+      readonly workflowId: WorkflowId;
+      readonly error: string;
+      /** Present only after the terminal checkpoint and log marker are durable. */
+      readonly phase?: 'failed' | 'aborted';
+    }
   | { readonly kind: 'gate_raised'; readonly workflowId: WorkflowId; readonly gate: HumanGateRequest }
   | { readonly kind: 'gate_dismissed'; readonly workflowId: WorkflowId; readonly gateId: string }
   | {
@@ -782,6 +789,8 @@ interface WorkflowInstance {
   currentState: string;
   /** Set when the workflow reaches a terminal state. */
   finalStatus?: WorkflowStatus;
+  /** True only after terminal persistence and infrastructure teardown finish. */
+  terminalReady: boolean;
   /** Active gate ID, if the machine is waiting at a human gate. */
   activeGateId?: string;
   /** Tracks the last error surfaced to avoid emitting duplicate lifecycle events. */
@@ -1601,6 +1610,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       tab,
       transitionHistory: [],
       currentState: definition.initial,
+      terminalReady: false,
       stateEnteredAt: Date.now(),
       messageLog,
       bundlesByScope: new Map(),
@@ -1634,30 +1644,84 @@ export class WorkflowOrchestrator implements WorkflowController {
     return workflowId;
   }
 
+  // Intentionally has no await: the instance must be installed before a
+  // second resume call can observe an opening in the active-workflow guard.
+  // eslint-disable-next-line @typescript-eslint/require-await
   async resume(workflowId: WorkflowId): Promise<void> {
-    const checkpoint = await Promise.resolve(this.deps.checkpointStore.load(workflowId));
+    const existing = this.workflows.get(workflowId);
+    if (existing && (!existing.finalStatus || !existing.terminalReady)) {
+      throw new WorkflowResumeError('WORKFLOW_ALREADY_ACTIVE', `Workflow ${workflowId} is already active`);
+    }
+
+    let checkpoint: WorkflowCheckpoint | undefined;
+    try {
+      checkpoint = this.deps.checkpointStore.load(workflowId);
+    } catch (err) {
+      throw new WorkflowResumeError(
+        'WORKFLOW_CHECKPOINT_CORRUPTED',
+        `Failed to load checkpoint for workflow ${workflowId}: ${toErrorMessage(err)}`,
+      );
+    }
     if (!checkpoint) {
-      throw new Error(`No checkpoint found for workflow ${workflowId}`);
+      throw new WorkflowResumeError('WORKFLOW_CHECKPOINT_NOT_FOUND', `No checkpoint found for workflow ${workflowId}`);
+    }
+    if (!isCheckpointResumable(checkpoint)) {
+      throw new WorkflowResumeError('WORKFLOW_NOT_RESUMABLE', `Workflow ${workflowId} has already completed`);
     }
 
     const definitionCopyPath = resolve(this.deps.baseDir, workflowId, 'definition.json');
     const definitionPath = existsSync(definitionCopyPath) ? definitionCopyPath : checkpoint.definitionPath;
-    // Runtime copies are always JSON; original user files may be YAML
-    const raw = parseDefinitionFile(definitionPath);
-    const definition = validateDefinition(raw);
+    let definition: WorkflowDefinition;
+    try {
+      // Runtime copies are always JSON; original user files may be YAML.
+      definition = validateDefinition(parseDefinitionFile(definitionPath));
+    } catch (err) {
+      throw new WorkflowResumeError(
+        'WORKFLOW_CHECKPOINT_CORRUPTED',
+        `Failed to load workflow definition for ${workflowId}: ${toErrorMessage(err)}`,
+      );
+    }
 
-    const { machine, roundMachinesByState, gateStateNames, terminalStateNames } = buildWorkflowMachine(
-      definition,
-      checkpoint.context.taskDescription,
-    );
-
-    const providedMachine = this.provideActors(machine, workflowId, definition, roundMachinesByState);
-
-    const restoredSnapshot = providedMachine.resolveState({
-      value: checkpoint.machineState as string,
-      context: checkpoint.context,
-    });
-    const actor = createActor(providedMachine, { snapshot: restoredSnapshot as Snapshot<unknown> });
+    const restored = (() => {
+      try {
+        const taskDescription = checkpoint.context.taskDescription;
+        const totalTokens = checkpoint.context.totalTokens;
+        if (typeof taskDescription !== 'string' || !Number.isFinite(totalTokens)) {
+          throw new Error('Checkpoint context is missing taskDescription or totalTokens');
+        }
+        const transitionHistory = [...checkpoint.transitionHistory];
+        const { machine, roundMachinesByState, gateStateNames, terminalStateNames } = buildWorkflowMachine(
+          definition,
+          taskDescription,
+        );
+        const providedMachine = this.provideActors(machine, workflowId, definition, roundMachinesByState);
+        const restoredSnapshot = providedMachine.resolveState({
+          value: checkpoint.machineState as string,
+          context: checkpoint.context,
+        });
+        const restoredState = String(checkpoint.machineState);
+        if (!Object.hasOwn(definition.states, restoredState)) {
+          throw new Error(`Checkpoint references unknown state ${restoredState}`);
+        }
+        const stateDefinition = definition.states[restoredState];
+        return {
+          actor: createActor(providedMachine, { snapshot: restoredSnapshot as Snapshot<unknown> }),
+          roundMachinesByState,
+          gateStateNames,
+          terminalStateNames,
+          taskDescription,
+          totalTokens,
+          transitionHistory,
+          restoredState,
+          stateDefinition,
+        };
+      } catch (err) {
+        throw new WorkflowResumeError(
+          'WORKFLOW_CHECKPOINT_CORRUPTED',
+          `Failed to restore checkpoint for workflow ${workflowId}: ${toErrorMessage(err)}`,
+        );
+      }
+    })();
 
     const workspacePath = checkpoint.workspacePath ?? resolve(this.deps.baseDir, workflowId, 'workspace');
     const artifactDir = resolve(workspacePath, WORKFLOW_ARTIFACT_DIR);
@@ -1698,16 +1762,17 @@ export class WorkflowOrchestrator implements WorkflowController {
       workflowSkillsDir,
       workflowScriptsDir,
       containerSnapshots: checkpoint.containerSnapshots,
-      actor,
-      roundMachinesByState,
-      gateStateNames,
-      terminalStateNames,
+      actor: restored.actor,
+      roundMachinesByState: restored.roundMachinesByState,
+      gateStateNames: restored.gateStateNames,
+      terminalStateNames: restored.terminalStateNames,
       activeSessions: new Set(),
       artifactDir,
       workspacePath,
       tab,
-      transitionHistory: [...checkpoint.transitionHistory],
+      transitionHistory: restored.transitionHistory,
       currentState: String(checkpoint.machineState),
+      terminalReady: false,
       stateEnteredAt: Date.now(),
       messageLog,
       bundlesByScope: new Map(),
@@ -1719,7 +1784,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         // Resume picks up the checkpointed totalTokens as the accumulator's
         // starting point so post-resume message_end events keep adding to
         // the running total instead of resetting it.
-        outputTokens: checkpoint.context.totalTokens,
+        outputTokens: restored.totalTokens,
         sessionIds: new Set(),
       },
     };
@@ -1746,7 +1811,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       kind: 'started',
       workflowId,
       name: definition.name,
-      taskDescription: checkpoint.context.taskDescription,
+      taskDescription: restored.taskDescription,
     });
     this.subscribeToActor(instance);
     let checkpointMtimeMs: number | undefined;
@@ -1763,16 +1828,14 @@ export class WorkflowOrchestrator implements WorkflowController {
       ...(checkpointMtimeMs !== undefined ? { checkpointMtimeMs } : {}),
       ...(checkpointFingerprint !== undefined ? { checkpointFingerprint } : {}),
     });
-    actor.start();
+    restored.actor.start();
 
     // XState v5's resolveState() restores *to* a state but does not *enter* it.
     // Invoke services (agent/deterministic) only start on state entry via transition.
     // For invoke states, we must manually execute the service and feed the result
     // back to the actor as an xstate.done.actor / xstate.error.actor event.
-    const restoredState = String(checkpoint.machineState);
-    const stateDef = definition.states[restoredState];
-    if (stateDef.type === 'agent' || stateDef.type === 'deterministic') {
-      this.replayInvokeForRestoredState(workflowId, restoredState, stateDef, definition);
+    if (restored.stateDefinition.type === 'agent' || restored.stateDefinition.type === 'deterministic') {
+      this.replayInvokeForRestoredState(workflowId, restored.restoredState, restored.stateDefinition, definition);
     }
   }
 
@@ -1912,7 +1975,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   listActive(): readonly WorkflowId[] {
     return [...this.workflows.keys()].filter((id) => {
       const instance = this.workflows.get(id);
-      return instance && !instance.finalStatus;
+      return instance && !instance.terminalReady;
     });
   }
 
@@ -2020,11 +2083,13 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write('[aborted]');
     instance.tab.close();
+    instance.terminalReady = true;
 
     this.emitLifecycleEvent({
       kind: 'failed',
       workflowId: id,
       error: 'Workflow aborted by user',
+      phase: 'aborted',
     });
   }
 
@@ -4575,7 +4640,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         phase: 'aborted',
         reason:
           `Transient upstream failure: ${describeTransientFailureKind(instance.transientFailure.kind)} ` +
-          `(resumable — run "ironcurtain workflow resume <baseDir>" once upstream is healthy)\n${excerpt}`,
+          `(resumable — run "ironcurtain workflow resume ${workflowId}" once upstream is healthy)\n${excerpt}`,
       };
     } else if (failedDirectlyFromExecutable) {
       instance.finalStatus = {
@@ -4652,16 +4717,20 @@ export class WorkflowOrchestrator implements WorkflowController {
       );
     });
 
+    await instance.teardownPromise;
+    instance.terminalReady = true;
+
     if (instance.finalStatus.phase === 'completed') {
       this.emitLifecycleEvent({
         kind: 'completed',
         workflowId,
       });
-    } else if (!instance.lastSurfacedError) {
+    } else {
       this.emitLifecycleEvent({
         kind: 'failed',
         workflowId,
         error: instance.finalStatus.phase === 'aborted' ? instance.finalStatus.reason : instance.finalStatus.error,
+        phase: instance.finalStatus.phase,
       });
     }
   }

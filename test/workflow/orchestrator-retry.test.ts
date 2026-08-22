@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
-import { WorkflowOrchestrator } from '../../src/workflow/orchestrator.js';
+import { WorkflowOrchestrator, type WorkflowLifecycleEvent } from '../../src/workflow/orchestrator.js';
 import { isCheckpointResumable } from '../../src/workflow/checkpoint.js';
 import {
   MockSession,
@@ -533,13 +533,13 @@ describe('WorkflowOrchestrator retry loop', () => {
 
   it('keeps exhausted status-routed recovery without a direct gate as failed and resumable', async () => {
     const checkpointStore = createCheckpointStore(tmpDir);
-    const lifecycleEvents: string[] = [];
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
     const session = new MockSession({ responses: () => noStatusResponse() });
     const orchestrator = new WorkflowOrchestrator(
       createDeps(tmpDir, { createSession: vi.fn(async () => session), checkpointStore }),
     );
     activeOrchestrator = orchestrator;
-    orchestrator.onEvent((event) => lifecycleEvents.push(event.kind));
+    orchestrator.onEvent((event) => lifecycleEvents.push(event));
 
     const workflowId = await orchestrator.start(writeDefinitionFile(tmpDir, statusRoutedNoGateDef), 'review result');
     await waitForCompletion(orchestrator, workflowId);
@@ -551,8 +551,10 @@ describe('WorkflowOrchestrator retry loop', () => {
       expect(status.lastState).toBe('review');
     }
     expect(isCheckpointResumable(checkpointStore.load(workflowId)!)).toBe(true);
-    expect(lifecycleEvents.filter((kind) => kind === 'failed')).toHaveLength(1);
-    expect(lifecycleEvents).not.toContain('completed');
+    await vi.waitFor(() => {
+      expect(lifecycleEvents.filter((event) => event.kind === 'failed' && event.phase === 'failed')).toHaveLength(1);
+    });
+    expect(lifecycleEvents.some((event) => event.kind === 'completed')).toBe(false);
   });
 
   it('rotates and fails when a same-conversation status recovery turn hard-fails', async () => {
@@ -629,7 +631,7 @@ describe('WorkflowOrchestrator retry loop', () => {
   it('keeps exhausted recovery without a direct gate as a resumable failure', async () => {
     const defPath = writeDefinitionFile(tmpDir, artifactHandoffDef);
     const checkpointStore = createCheckpointStore(tmpDir);
-    const lifecycleEvents: string[] = [];
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
     const session = new MockSession({
       responses: () => {
         const readme = resolve(findWorkflowDir(tmpDir), 'workspace', '.workflow', 'harness_build', 'README.md');
@@ -642,7 +644,7 @@ describe('WorkflowOrchestrator retry loop', () => {
       createDeps(tmpDir, { createSession: vi.fn(async () => session), checkpointStore }),
     );
     activeOrchestrator = orchestrator;
-    orchestrator.onEvent((event) => lifecycleEvents.push(event.kind));
+    orchestrator.onEvent((event) => lifecycleEvents.push(event));
 
     const workflowId = await orchestrator.start(defPath, 'build harness');
     await waitForCompletion(orchestrator, workflowId);
@@ -654,8 +656,10 @@ describe('WorkflowOrchestrator retry loop', () => {
       expect(status.lastState).toBe('build');
     }
     expect(isCheckpointResumable(checkpointStore.load(workflowId)!)).toBe(true);
-    expect(lifecycleEvents.filter((kind) => kind === 'failed')).toHaveLength(1);
-    expect(lifecycleEvents).not.toContain('completed');
+    await vi.waitFor(() => {
+      expect(lifecycleEvents.filter((event) => event.kind === 'failed' && event.phase === 'failed')).toHaveLength(1);
+    });
+    expect(lifecycleEvents.some((event) => event.kind === 'completed')).toBe(false);
   });
 
   it('rejects artifact handoff through a symlinked output ancestor', async () => {

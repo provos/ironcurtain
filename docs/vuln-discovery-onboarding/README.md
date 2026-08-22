@@ -167,7 +167,7 @@ Run-level bookkeeping (audit log, message log, shared Docker bundle) lives separ
 If you close the browser, restart the daemon, or the workflow fails partway through, the **Resume workflow** panel on the Workflows page lists every run that checkpointed. Click to resume. From the CLI:
 
 ```bash
-npx tsx src/cli.ts workflow resume ~/.ironcurtain/workflow-runs/<workflowId>
+npx tsx src/cli.ts workflow resume <workflowId> --ensure-daemon
 ```
 
 ## 9. Using a non-Anthropic model via LiteLLM
