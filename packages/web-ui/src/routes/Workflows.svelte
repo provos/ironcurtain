@@ -9,6 +9,7 @@
     resumeWorkflow as rpcResumeWorkflow,
     importWorkflow as rpcImportWorkflow,
     getWorkflowReadme,
+    workflowHistoryGeneration,
   } from '../lib/stores.svelte.js';
   import type { WorkflowSummaryDto, WorkflowDefinitionDto, PastRunDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
@@ -70,6 +71,7 @@
   // workflowId so selections survive re-renders. Toggles between the 40-char
   // truncation and the full text in the same cell.
   let expandedTasks = $state<Set<string>>(new Set());
+  let resumableRequestVersion = 0;
 
   function toggleTaskExpansion(id: string): void {
     const next = new Set(expandedTasks);
@@ -133,8 +135,12 @@
   const selectedDef = $derived(definitions.find((d) => d.path === selectedDefinition));
 
   $effect(() => {
-    refreshWorkflows();
     loadDefinitions();
+  });
+
+  $effect(() => {
+    workflowHistoryGeneration.value;
+    refreshWorkflows();
     loadResumable();
   });
 
@@ -147,8 +153,10 @@
   }
 
   async function loadResumable(): Promise<void> {
+    const requestVersion = ++resumableRequestVersion;
     try {
-      resumableWorkflows = await listResumableWorkflows();
+      const result = await listResumableWorkflows();
+      if (requestVersion === resumableRequestVersion) resumableWorkflows = result;
     } catch {
       // Best-effort
     }
@@ -238,7 +246,7 @@
     actionError = '';
     try {
       await rpcAbortWorkflow(workflowId);
-      await refreshWorkflows();
+      await Promise.all([refreshWorkflows(), loadResumable()]);
     } catch (err) {
       actionError = `Failed to abort workflow: ${err instanceof Error ? err.message : String(err)}`;
     }

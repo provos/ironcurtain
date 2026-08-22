@@ -59,7 +59,7 @@ export interface WebEventMap {
   'workflow.started': { workflowId: string; name: string; taskDescription: string };
   'workflow.state_entered': { workflowId: string; state: string; previousState?: string };
   'workflow.completed': { workflowId: string };
-  'workflow.failed': { workflowId: string; error: string };
+  'workflow.failed': { workflowId: string; error: string; phase?: 'failed' | 'aborted' };
   'workflow.gate_raised': { workflowId: string; gate: HumanGateRequestDto };
   'workflow.gate_dismissed': { workflowId: string; gateId: string };
   'workflow.agent_started': {

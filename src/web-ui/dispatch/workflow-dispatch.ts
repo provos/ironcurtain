@@ -37,6 +37,7 @@ import {
   type WorkflowDefinition,
 } from '../../workflow/types.js';
 import type { WorkflowDetail } from '../../workflow/orchestrator.js';
+import { isWorkflowResumeError } from '../../workflow/errors.js';
 import { MessageLog, type MessageLogEntry, type StateTransitionEntry } from '../../workflow/message-log.js';
 import {
   discoverWorkflowRuns,
@@ -411,23 +412,31 @@ export async function workflowDispatch(
       });
       const { workflowId, baseDir } = validateParams(schema, params);
 
-      let resolvedId: WorkflowId;
-      if (baseDir) {
-        if (!existsSync(baseDir)) {
-          throw new RpcError('INVALID_PARAMS', `Directory does not exist: ${baseDir}`);
+      try {
+        let resolvedId: WorkflowId;
+        if (baseDir) {
+          if (!existsSync(baseDir)) {
+            throw new RpcError('INVALID_PARAMS', `Directory does not exist: ${baseDir}`);
+          }
+          if (!statSync(baseDir).isDirectory()) {
+            throw new RpcError('INVALID_PARAMS', `Path is not a directory: ${baseDir}`);
+          }
+          resolvedId = manager.importExternalCheckpoint(baseDir, workflowId);
+        } else if (workflowId) {
+          resolvedId = workflowId as WorkflowId;
+        } else {
+          throw new RpcError('INVALID_PARAMS', 'Either workflowId or baseDir must be provided');
         }
-        if (!statSync(baseDir).isDirectory()) {
-          throw new RpcError('INVALID_PARAMS', `Path is not a directory: ${baseDir}`);
-        }
-        resolvedId = manager.importExternalCheckpoint(baseDir, workflowId);
-      } else if (workflowId) {
-        resolvedId = workflowId as WorkflowId;
-      } else {
-        throw new RpcError('INVALID_PARAMS', 'Either workflowId or baseDir must be provided');
-      }
 
-      await controller.resume(resolvedId);
-      return { accepted: true, workflowId: resolvedId };
+        await controller.resume(resolvedId);
+        return { accepted: true, workflowId: resolvedId };
+      } catch (err) {
+        if (isWorkflowResumeError(err)) {
+          const code = err.code === 'WORKFLOW_CHECKPOINT_CORRUPTED' ? 'WORKFLOW_CORRUPTED' : err.code;
+          throw new RpcError(code, err.message);
+        }
+        throw err;
+      }
     }
 
     case 'workflows.abort': {

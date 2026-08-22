@@ -293,11 +293,14 @@ test.describe('Gate Review Panel', () => {
     // Confirm the abort
     await page.getByRole('button', { name: 'Confirm Abort' }).click();
 
-    // Gate panel should disappear and phase should change.
-    // The mock server broadcasts workflow.failed which sets phase to "failed"
-    // (the "aborted" distinction is only visible after a workflows.list refresh).
+    // Gate panel should disappear and the terminal phase should be authoritative.
     await expect(page.getByText('Review Required')).not.toBeVisible({ timeout: 5_000 });
-    await expect(page.getByText('failed')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('aborted')).toBeVisible({ timeout: 5_000 });
+
+    // Returning to the list must expose the resumable terminal checkpoint
+    // immediately; no browser reload is needed.
+    await page.getByRole('button', { name: /Back/ }).click();
+    await expect(page.getByTestId('resume-wf-mock-002')).toBeEnabled({ timeout: 5_000 });
   });
 
   test('cancelling abort confirmation returns to action buttons', async ({ page }) => {
@@ -382,10 +385,28 @@ test.describe('Workflow List Actions', () => {
     page.on('dialog', (dialog) => dialog.accept());
     await abortButton.click();
 
-    // After abort, the workflow's phase becomes 'failed' (per the front-end's
-    // workflow.failed handler), so it is filtered out of the Active workflows
-    // table. The Abort button on this row should disappear.
+    // After abort it is filtered out of the Active workflows table.
     await expect(abortButton).not.toBeVisible({ timeout: 5_000 });
+  });
+
+  test('aborted workflow becomes resumable and active again without a page reload', async ({ page }) => {
+    const runningRow = page.locator('tr', { hasText: 'design-and-code' });
+    page.on('dialog', (dialog) => dialog.accept());
+    await runningRow.getByRole('button', { name: 'Abort' }).click();
+
+    const resumeButton = page.getByTestId('resume-wf-mock-001');
+    await expect(resumeButton).toBeEnabled({ timeout: 5_000 });
+    await expect(resumeButton.locator('xpath=ancestor::tr').getByText('aborted')).toBeVisible();
+
+    await resumeButton.click();
+
+    const activeSection = page.getByTestId('active-workflows-section');
+    await expect(
+      activeSection.locator('tr', { hasText: 'design-and-code' }).filter({ hasText: 'running' }),
+    ).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(resumeButton).not.toBeVisible();
   });
 });
 

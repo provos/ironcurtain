@@ -102,3 +102,36 @@ export class WorkflowTransientFailureError extends Error {
 export function isWorkflowTransientFailureError(err: unknown): err is WorkflowTransientFailureError {
   return err instanceof WorkflowTransientFailureError;
 }
+
+/** Stable failure reasons for attempts to resume a workflow. */
+export type WorkflowResumeErrorCode =
+  | 'WORKFLOW_ALREADY_ACTIVE'
+  | 'WORKFLOW_CHECKPOINT_NOT_FOUND'
+  | 'WORKFLOW_CHECKPOINT_CORRUPTED'
+  | 'WORKFLOW_NOT_RESUMABLE';
+
+/**
+ * Domain error raised before a resume mutates orchestrator state. The `code`
+ * discriminant lets RPC callers preserve a useful error without depending on
+ * `instanceof` across module boundaries.
+ */
+export class WorkflowResumeError extends Error {
+  constructor(
+    readonly code: WorkflowResumeErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WorkflowResumeError';
+  }
+}
+
+export function isWorkflowResumeError(err: unknown): err is WorkflowResumeError {
+  if (err instanceof WorkflowResumeError) return true;
+  if (err === null || typeof err !== 'object' || !('code' in err)) return false;
+  return (
+    err.code === 'WORKFLOW_ALREADY_ACTIVE' ||
+    err.code === 'WORKFLOW_CHECKPOINT_NOT_FOUND' ||
+    err.code === 'WORKFLOW_CHECKPOINT_CORRUPTED' ||
+    err.code === 'WORKFLOW_NOT_RESUMABLE'
+  );
+}

@@ -61,6 +61,7 @@ let displayNumberCounter = 0;
 function createMockEffects(getPtySink: (label: number) => PtySink | undefined = () => undefined): EventSideEffects {
   return {
     refreshJobs: vi.fn(),
+    refreshWorkflowHistory: vi.fn(),
     refreshPersonas: vi.fn(),
     refreshConfig: vi.fn(),
     assignDisplayNumber: vi.fn(() => ++displayNumberCounter),
@@ -475,6 +476,7 @@ describe('handleEvent', () => {
       handleEvent(state, createMockEffects(), 'workflow.failed', {
         workflowId: 'wf-1',
         error: 'Agent crashed',
+        phase: 'failed',
       });
 
       expect(state.workflows.get('wf-1')?.phase).toBe('failed');
@@ -906,7 +908,7 @@ describe('handleEvent', () => {
       });
 
       const wf = state.workflows.get('wf-err');
-      expect(wf?.phase).toBe('failed');
+      expect(wf?.phase).toBe('running');
       expect(wf?.error).toBe('agent OOMed at round 3');
     });
 
@@ -1226,6 +1228,7 @@ describe('handleEvent', () => {
       handleEvent(state, createMockEffects(), 'workflow.failed', {
         workflowId: newId,
         error: 'crashed',
+        phase: 'failed',
       });
 
       expect(countTerminal(state.workflows)).toBe(MAX_TERMINAL_WORKFLOWS);

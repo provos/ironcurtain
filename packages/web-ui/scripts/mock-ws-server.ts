@@ -897,6 +897,7 @@ interface MockWorkflow {
   phase: 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
   currentState: string;
   startedAt: string;
+  lastState?: string;
 }
 
 interface MockGate {
@@ -1268,6 +1269,25 @@ function buildPastRunFixtures(): MockPastRun[] {
       workspacePath: '/tmp/smoke',
     },
   ];
+}
+
+function buildDynamicPastRuns(): MockPastRun[] {
+  return [...workflows.values()]
+    .filter((wf) => wf.phase === 'completed' || wf.phase === 'failed' || wf.phase === 'aborted')
+    .map((wf) => ({
+      workflowId: wf.workflowId,
+      name: wf.name,
+      phase: wf.phase as 'completed' | 'failed' | 'aborted',
+      currentState: wf.currentState,
+      lastState: wf.lastState ?? wf.currentState,
+      taskDescription: `Execute the ${wf.name} workflow`,
+      round: 1,
+      maxRounds: 3,
+      totalTokens: 15_000,
+      ...(wf.phase === 'aborted' ? { error: 'Workflow aborted by user' } : {}),
+      timestamp: new Date().toISOString(),
+      workspacePath: `/tmp/ironcurtain-workflow/${wf.workflowId}`,
+    }));
 }
 
 function buildMessageLogFixtures(workflowId: string): Array<Record<string, unknown> & { ts: string }> {
@@ -2219,7 +2239,9 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         return replayController ? [replayController.getStatus()] : [];
       }
       // Suppress hidden workflows' runs, mirroring the daemon.
-      return [...workflows.values()].filter((wf) => !HIDDEN_WORKFLOW_NAMES.has(wf.name));
+      return [...workflows.values()].filter(
+        (wf) => (wf.phase === 'running' || wf.phase === 'waiting_human') && !HIDDEN_WORKFLOW_NAMES.has(wf.name),
+      );
     }
 
     case 'workflows.get': {
@@ -2322,13 +2344,14 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       const abortId = params.workflowId as string;
       const abortWf = workflows.get(abortId);
       if (!abortWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${abortId} not found`);
+      abortWf.lastState = abortWf.currentState;
       abortWf.phase = 'aborted';
       abortWf.currentState = 'aborted';
       clearWorkflowTimers(abortId);
       for (const [gateId, gate] of workflowGates) {
         if (gate.workflowId === abortId) workflowGates.delete(gateId);
       }
-      broadcast('workflow.failed', { workflowId: abortId, error: 'Workflow aborted by user' });
+      broadcast('workflow.failed', { workflowId: abortId, error: 'Workflow aborted by user', phase: 'aborted' });
       return undefined;
     }
 
@@ -2355,9 +2378,14 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       }
 
       if (resolveEvent === 'ABORT') {
+        resolveWf.lastState = resolveWf.currentState;
         resolveWf.phase = 'aborted';
         resolveWf.currentState = 'aborted';
-        broadcast('workflow.failed', { workflowId: resolveWfId, error: 'Workflow aborted by user' });
+        broadcast('workflow.failed', {
+          workflowId: resolveWfId,
+          error: 'Workflow aborted by user',
+          phase: 'aborted',
+        });
       } else {
         const nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
         resolveWf.phase = 'running';
@@ -2401,7 +2429,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'workflows.listResumable': {
       if (replayConfig) return [];
       // Suppress hidden workflows' past runs, mirroring the daemon.
-      return buildPastRunFixtures().filter((r) => !HIDDEN_WORKFLOW_NAMES.has(r.name));
+      return [...buildDynamicPastRuns(), ...buildPastRunFixtures()].filter((r) => !HIDDEN_WORKFLOW_NAMES.has(r.name));
     }
 
     case 'workflows.messageLog': {
@@ -2452,8 +2480,29 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'workflows.import':
       return { workflowId: 'wf-imported-001' };
 
-    case 'workflows.resume':
-      return { accepted: true, workflowId: params.workflowId as string };
+    case 'workflows.resume': {
+      const workflowId = params.workflowId as string;
+      const wf = workflows.get(workflowId);
+      if (!wf) return errorResult('WORKFLOW_CHECKPOINT_NOT_FOUND', `No checkpoint found for ${workflowId}`);
+      if (wf.phase === 'running' || wf.phase === 'waiting_human') {
+        return errorResult('WORKFLOW_ALREADY_ACTIVE', `Workflow ${workflowId} is already active`);
+      }
+      if (wf.phase === 'completed') {
+        return errorResult('WORKFLOW_NOT_RESUMABLE', `Workflow ${workflowId} has already completed`);
+      }
+
+      wf.phase = 'running';
+      wf.currentState = wf.lastState ?? 'plan';
+      wf.lastState = undefined;
+      wf.startedAt = new Date().toISOString();
+      broadcast('workflow.started', {
+        workflowId,
+        name: wf.name,
+        taskDescription: `Execute the ${wf.name} workflow`,
+      });
+      broadcast('workflow.state_entered', { workflowId, state: wf.currentState });
+      return { accepted: true, workflowId };
+    }
 
     case 'workflows.inspect':
       return { accepted: true };

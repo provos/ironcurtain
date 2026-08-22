@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import type { PastRunDto, WorkflowDefinitionDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
+import { testWorkflowHistoryGeneration } from './__test_state__.svelte.js';
 
 // jsdom does not provide ResizeObserver -- stub it globally
 vi.stubGlobal(
@@ -43,17 +45,21 @@ const {
   };
 });
 
-vi.mock('$lib/stores.svelte.js', () => ({
-  appState: mockAppState,
-  startWorkflow: (...a: unknown[]) => mockStartWorkflow(...(a as [string, string, string | undefined])),
-  abortWorkflow: (...a: unknown[]) => mockAbortWorkflow(...(a as [string])),
-  refreshWorkflows: () => mockRefreshWorkflows(),
-  listWorkflowDefinitions: () => mockListDefinitions(),
-  listResumableWorkflows: () => mockListResumable(),
-  resumeWorkflow: (...a: unknown[]) => mockResumeWorkflow(...(a as [string])),
-  importWorkflow: (...a: unknown[]) => mockImportWorkflow(...(a as [string])),
-  getWorkflowReadme: () => Promise.resolve({ content: '# Readme' }),
-}));
+vi.mock('$lib/stores.svelte.js', async () => {
+  const { testWorkflowHistoryGeneration } = await import('./__test_state__.svelte.js');
+  return {
+    appState: mockAppState,
+    workflowHistoryGeneration: testWorkflowHistoryGeneration,
+    startWorkflow: (...a: unknown[]) => mockStartWorkflow(...(a as [string, string, string | undefined])),
+    abortWorkflow: (...a: unknown[]) => mockAbortWorkflow(...(a as [string])),
+    refreshWorkflows: () => mockRefreshWorkflows(),
+    listWorkflowDefinitions: () => mockListDefinitions(),
+    listResumableWorkflows: () => mockListResumable(),
+    resumeWorkflow: (...a: unknown[]) => mockResumeWorkflow(...(a as [string])),
+    importWorkflow: (...a: unknown[]) => mockImportWorkflow(...(a as [string])),
+    getWorkflowReadme: () => Promise.resolve({ content: '# Readme' }),
+  };
+});
 
 // WorkflowDetail pulls in workspace-browser etc. Replace with a noop stub so we
 // only render the listing surface under test.
@@ -107,6 +113,8 @@ function resetState(): void {
 beforeEach(() => {
   vi.restoreAllMocks();
   resetState();
+  testWorkflowHistoryGeneration.value = 0;
+  mockAbortWorkflow.mockResolvedValue();
   mockRefreshWorkflows.mockResolvedValue();
   mockListDefinitions.mockResolvedValue([]);
   mockListResumable.mockResolvedValue([]);
@@ -117,6 +125,22 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('Workflows route', () => {
+  it('refreshes active and past workflows on history changes without reloading definitions', async () => {
+    render(Workflows);
+    await vi.waitFor(() => {
+      expect(mockRefreshWorkflows).toHaveBeenCalledOnce();
+      expect(mockListResumable).toHaveBeenCalledOnce();
+      expect(mockListDefinitions).toHaveBeenCalledOnce();
+    });
+
+    testWorkflowHistoryGeneration.value++;
+    await tick();
+
+    expect(mockRefreshWorkflows).toHaveBeenCalledTimes(2);
+    expect(mockListResumable).toHaveBeenCalledTimes(2);
+    expect(mockListDefinitions).toHaveBeenCalledOnce();
+  });
+
   describe('Active table', () => {
     it('renders enriched fields: round, verdict badge, task', async () => {
       mockAppState.workflows = new Map([
@@ -158,6 +182,30 @@ describe('Workflows route', () => {
       ]);
       render(Workflows);
       expect(await screen.findByText(/old run on disk/)).toBeTruthy();
+    });
+
+    it('ignores an older resumable response that arrives after an abort refresh', async () => {
+      let resolveInitial!: (runs: PastRunDto[]) => void;
+      const initial = new Promise<PastRunDto[]>((resolve) => {
+        resolveInitial = resolve;
+      });
+      mockListResumable
+        .mockReturnValueOnce(initial)
+        .mockResolvedValueOnce([makePastRun({ workflowId: 'fresh', taskDescription: 'fresh-after-abort' })]);
+      mockAppState.workflows = new Map([['wf-active', makeSummary()]]);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+      render(Workflows);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Abort' }));
+      expect(await screen.findByText('fresh-after-abort')).toBeTruthy();
+
+      resolveInitial([makePastRun({ workflowId: 'stale', taskDescription: 'stale-before-abort' })]);
+      await initial;
+      await tick();
+
+      expect(screen.getByText('fresh-after-abort')).toBeTruthy();
+      expect(screen.queryByText('stale-before-abort')).toBeNull();
+      confirmSpy.mockRestore();
     });
 
     it('merges in-memory terminal entries and dedups by workflowId (in-memory wins)', async () => {

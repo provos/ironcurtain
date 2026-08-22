@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -500,9 +500,8 @@ describe('WorkflowManager.importExternalCheckpoint', () => {
   });
 
   it('explicit targetId bypass still imports regardless of phase', () => {
-    // Pre-existing contract: when the caller supplies an explicit workflowId,
-    // enumeration is skipped entirely. Even a completed run can be re-imported
-    // this way (e.g. for forensic replay of an archived completed workflow).
+    // Import is also useful independently for archived-run inspection. The
+    // orchestrator, not the copy operation, rejects an attempt to resume it.
     const completedId = `wf-completed-${randomUUID()}` as WorkflowId;
     seedCheckpointOnly(
       externalBase,
@@ -514,5 +513,22 @@ describe('WorkflowManager.importExternalCheckpoint', () => {
 
     const imported = manager.importExternalCheckpoint(externalBase, completedId);
     expect(imported).toBe(completedId);
+  });
+
+  it('does not overwrite local checkpoint bytes for an active workflow', () => {
+    const id = `wf-active-${randomUUID()}` as WorkflowId;
+    const localPath = resolve(tmpHome, 'workflow-runs', id, 'checkpoint.json');
+    mkdirSync(resolve(localPath, '..'), { recursive: true });
+    const originalBytes = '{"local":"checkpoint bytes must survive"}\n';
+    writeFileSync(localPath, originalBytes);
+    seedCheckpointOnly(externalBase, id, makeCheckpoint({ machineState: 'external-state' }));
+
+    const controller = manager.getOrchestrator();
+    vi.spyOn(controller, 'listActive').mockReturnValue([id]);
+
+    expect(() => manager.importExternalCheckpoint(externalBase, id)).toThrow(
+      expect.objectContaining({ code: 'WORKFLOW_ALREADY_ACTIVE' }),
+    );
+    expect(readFileSync(localPath, 'utf8')).toBe(originalBytes);
   });
 });

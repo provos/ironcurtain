@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -326,6 +326,38 @@ describe('daemon gate commands (command-layer integration)', () => {
     // `workflow.failed` represents both failed and aborted terminal phases.
     expect(terminal.exitCode).toBe(3);
   }, 30_000);
+
+  it('resume routes through the daemon and rejects standalone-only flags', async () => {
+    harness = await boot();
+    const workflowId = await startAndAwaitGate();
+
+    const active = await runCommand('resume', [workflowId, '--json']);
+    expect(active.exitCode).toBe(1);
+    expect(active.json.error).toBe('WORKFLOW_ALREADY_ACTIVE');
+
+    await runCommand('gate', [workflowId, '--event', 'ABORT', '--json']);
+    await runCommand('await', [workflowId, '--json']);
+    const resumed = await runCommand('resume', [workflowId, '--json']);
+    expect(resumed.exitCode).toBe(0);
+    expect(resumed.json).toMatchObject({ ok: true, workflowId, phase: 'running' });
+
+    const invalid = await runCommand('resume', [workflowId, '--model', 'anthropic:test', '--json']);
+    expect(invalid.exitCode).toBe(2);
+    expect(invalid.json.error).toBe('INVALID_USAGE');
+  }, 30_000);
+
+  it('resume reports an unreadable path instead of treating it as a workflow ID', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ic-resume-target-'));
+    const loop = join(dir, 'loop');
+    symlinkSync('loop', loop);
+    try {
+      const result = await runCommand('resume', [loop, '--json']);
+      expect(result.exitCode).toBe(2);
+      expect(result.json.error).toBe('INVALID_PARAMS');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('gate FORCE_REVISION with no --prompt fast-fails locally: exit 2, INVALID_PARAMS', async () => {
     harness = await boot();
