@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, remains open across human gates, and returns phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#439).
+- **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, while `--lines N` provides a bounded last-N snapshot for scripts. Live watches remain open across human gates and return phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#439).
 
 ### Fixes
 

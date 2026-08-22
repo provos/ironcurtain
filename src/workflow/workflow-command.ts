@@ -5,7 +5,7 @@
  *   start   <definition> "task" [--model <model>] [--workspace <path>]
  *   resume  <baseDir> [--state <stateName>] [--model <model>]
  *   inspect <baseDir> [--all]
- *   watch   <workflowId|runDir> [--json] [--since <ISO>] [--events <list>]
+ *   watch   <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -76,7 +76,7 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow run <name-or-path> "task" [--workspace <path>] [--json] [--ensure-daemon]',
     'ironcurtain workflow status <workflowId> [--json]',
     'ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]',
-    'ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>]',
+    'ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]',
     'ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]',
     'ironcurtain workflow show <workflowId> --artifact <name> [--json]',
   ],
@@ -90,7 +90,7 @@ const workflowSpec: CommandSpec = {
     { name: 'run', description: 'Start a gated workflow on the daemon (non-interactive, machine-readable)' },
     { name: 'status', description: 'Print a workflow status snapshot (poll)' },
     { name: 'await', description: 'Block until a workflow reaches a gate or terminal' },
-    { name: 'watch', description: 'Stream workflow events until a terminal outcome' },
+    { name: 'watch', description: 'Stream workflow events or replay a last-N snapshot' },
     { name: 'gate', description: 'Resolve a human gate with an event (APPROVE/FORCE_REVISION/REPLAN/ABORT)' },
     { name: 'show', description: 'Print a presented artifact for a gated workflow' },
   ],
@@ -134,6 +134,7 @@ const workflowSpec: CommandSpec = {
       description: 'Watch event filters (comma-separated, or all)',
       placeholder: '<list>',
     },
+    { flag: 'lines', description: 'Replay only the last N selected watch records', placeholder: '<N>' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
@@ -149,6 +150,7 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow run design-and-code "Build a REST API" --json --ensure-daemon',
     'ironcurtain workflow await wf-7a3 --json',
     'ironcurtain workflow watch wf-7a3 --events transition,verdict,retry,error',
+    'ironcurtain workflow watch wf-7a3 --lines 20 --json',
     'ironcurtain workflow show wf-7a3 --artifact spec --json',
     'ironcurtain workflow gate wf-7a3 --event FORCE_REVISION --prompt "tighten the intro" --json',
     'ironcurtain workflow gate wf-7a3 --event APPROVE --json',

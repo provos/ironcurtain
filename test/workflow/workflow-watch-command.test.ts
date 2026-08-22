@@ -199,6 +199,113 @@ describe('JsonlTailer', () => {
 });
 
 describe('workflow watch', () => {
+  it('prints the last N selected snapshot records without following new appends', async () => {
+    const runDir = temporaryRun();
+    const path = resolve(runDir, 'messages.jsonl');
+    const errors = [0, 1, 2].map((index) =>
+      record('error', `2026-08-21T12:00:0${String(index)}.000Z`, { error: String(index) }),
+    );
+    writeFileSync(path, `${errors.join('\n')}\n`);
+    const output: string[] = [];
+    const appended = record('error', '2026-08-21T12:00:03.000Z', { error: 'new append' });
+
+    const watching = runWorkflowWatch([runDir, '--lines', '2', '--json', '--events', 'error'], {
+      installProcessSignals: false,
+      maxRecordsPerPoll: 1,
+      writeStdout: (text) => output.push(text),
+      writeStderr: vi.fn(),
+    });
+    setTimeout(() => appendFileSync(path, `${appended}\n`), 0);
+
+    expect(await watching).toBe(0);
+    expect(output.join('')).toBe(`${errors[1]}\n${errors[2]}\n`);
+  });
+
+  it('composes --lines with filters and ignores malformed, foreign, control, and partial records', async () => {
+    const runDir = temporaryRun();
+    const at = '2026-08-21T12:00:00.000Z';
+    const before = record('error', '2026-08-21T11:59:59.999Z', { error: 'before' });
+    const selected = record('error', at, { error: 'selected' });
+    const foreign = record('error', '2026-08-21T12:00:01.000Z', {
+      workflowId: 'wf-foreign',
+      error: 'foreign',
+    });
+    const partial = record('error', '2026-08-21T12:00:02.000Z', { error: 'partial' });
+    writeFileSync(
+      resolve(runDir, 'messages.jsonl'),
+      `${before}\n${record('run_started', at)}\n{malformed}\n${foreign}\n${selected}\n${partial}`,
+    );
+    const output: string[] = [];
+    const diagnostics: string[] = [];
+
+    expect(
+      await runWorkflowWatch([runDir, '--lines', '5', '--json', '--since', at, '--events', 'error'], {
+        installProcessSignals: false,
+        writeStdout: (text) => output.push(text),
+        writeStderr: (text) => diagnostics.push(text),
+      }),
+    ).toBe(0);
+    expect(output).toEqual([`${selected}\n`]);
+    expect(diagnostics.join('')).toContain('malformed complete JSONL record');
+    expect(diagnostics.join('')).toContain('wf-foreign');
+  });
+
+  it('returns an empty successful snapshot when the message log is missing', async () => {
+    const runDir = temporaryRun();
+    const output = vi.fn();
+
+    expect(
+      await runWorkflowWatch([runDir, '--lines', '10'], {
+        installProcessSignals: false,
+        writeStdout: output,
+        writeStderr: vi.fn(),
+      }),
+    ).toBe(0);
+    expect(output).not.toHaveBeenCalled();
+  });
+
+  it('honors asynchronous output backpressure in snapshot mode', async () => {
+    const runDir = temporaryRun();
+    writeFileSync(
+      resolve(runDir, 'messages.jsonl'),
+      `${record('error', '2026-08-21T12:00:00.000Z', { error: 'snapshot' })}\n`,
+    );
+    let releaseWrite: (() => void) | undefined;
+    const writeStdout = vi.fn(
+      () =>
+        new Promise<void>((resolveWrite) => {
+          releaseWrite = resolveWrite;
+        }),
+    );
+    let settled = false;
+    const watching = runWorkflowWatch([runDir, '--lines', '1'], {
+      installProcessSignals: false,
+      writeStdout,
+      writeStderr: vi.fn(),
+    }).finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => expect(writeStdout).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    releaseWrite?.();
+    expect(await watching).toBe(0);
+  });
+
+  it.each(['0', '-1', '1.5', 'many', '9007199254740992'])('rejects invalid --lines value %s', async (value) => {
+    const runDir = temporaryRun();
+    const diagnostics: string[] = [];
+
+    expect(
+      await runWorkflowWatch([runDir, '--lines', value], {
+        installProcessSignals: false,
+        writeStdout: vi.fn(),
+        writeStderr: (text) => diagnostics.push(text),
+      }),
+    ).toBe(2);
+    expect(diagnostics.join('')).toContain('--lines');
+  });
+
   it('waits for an asynchronous output writer before continuing replay', async () => {
     const runDir = temporaryRun();
     const error = record('error', '2026-08-21T12:00:00.000Z', { error: 'boom' });

@@ -220,7 +220,7 @@ Replay and follow a single workflow's operational message log until it reaches
 a terminal outcome:
 
 ```bash
-ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>]
+ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]
 ```
 
 An ID resolves under `~/.ironcurtain/workflow-runs/`; a path must name an
@@ -231,8 +231,10 @@ gates, and fan-out joins. Agent prompts (`sent`) are excluded unless selected.
 - `--json` -- Emit each selected `messages.jsonl` record as one JSON line on stdout
 - `--since <ISO>` -- Include records whose timestamps are at or after the timestamp
 - `--events <list>` -- Comma-separated `transition,verdict,retry,error,transient,quota,gate,fanout,sent`, or `all`
+- `--lines <N>` -- Print the last N selected records from the log as it existed when invoked, then exit without following
 
-Human gates are reported but do not stop the watch. Exit codes are `0` for
+Snapshot mode (`--lines`) exits `0` after writing the selected records and does
+not contact or wait for the daemon. In live mode, human gates are reported but do not stop the watch. Exit codes are `0` for
 completed, `3` for failed/aborted/interrupted, `130` for Ctrl+C, `2` for usage
 errors, and `1` for operational errors. When invoked with an ID, watch uses the
 existing daemon's `workflows.get` and lifecycle events only to reconcile status;

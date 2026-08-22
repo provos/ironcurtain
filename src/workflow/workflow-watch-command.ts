@@ -87,6 +87,7 @@ export class JsonlTailer {
   constructor(
     private readonly path: string,
     private readonly options: TailerOptions,
+    private readonly fixedEndOffset?: number,
   ) {}
 
   async poll(maxRecords = DEFAULT_MAX_RECORDS_PER_POLL): Promise<number> {
@@ -109,16 +110,17 @@ export class JsonlTailer {
     try {
       const stats = fstatSync(fd);
       if (!stats.isFile()) throw new Error(`Message log is not a file: ${this.path}`);
+      const visibleSize = Math.min(stats.size, this.fixedEndOffset ?? stats.size);
       const identity = `${String(stats.dev)}:${String(stats.ino)}`;
       const replaced =
-        this.identity !== undefined && (!this.present || identity !== this.identity || stats.size < this.offset);
-      if (replaced && !this.hasUnchangedPrefix(fd, stats.size)) this.reset();
+        this.identity !== undefined && (!this.present || identity !== this.identity || visibleSize < this.offset);
+      if (replaced && !this.hasUnchangedPrefix(fd, visibleSize)) this.reset();
       this.identity = identity;
       this.present = true;
-      this.observedSize = stats.size;
+      this.observedSize = visibleSize;
 
-      while (this.offset < stats.size && processed < recordLimit && bytesRead < byteLimit) {
-        const wanted = Math.min(READ_CHUNK_BYTES, stats.size - this.offset, byteLimit - bytesRead);
+      while (this.offset < visibleSize && processed < recordLimit && bytesRead < byteLimit) {
+        const wanted = Math.min(READ_CHUNK_BYTES, visibleSize - this.offset, byteLimit - bytesRead);
         const chunk = Buffer.allocUnsafe(wanted);
         const read = readSync(fd, chunk, 0, wanted, this.offset);
         if (read === 0) break;
@@ -472,6 +474,7 @@ export async function runWorkflowWatch(args: string[], deps: WorkflowWatchDepend
       json: { type: 'boolean' },
       since: { type: 'string' },
       events: { type: 'string' },
+      lines: { type: 'string' },
     },
     allowPositionals: true,
   });
@@ -480,12 +483,14 @@ export async function runWorkflowWatch(args: string[], deps: WorkflowWatchDepend
 
   if (!parsed.ok) {
     diagnostic(
-      `${parsed.message}\nUsage: ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>]`,
+      `${parsed.message}\nUsage: ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]`,
     );
     return EXIT_USAGE;
   }
   if (parsed.positionals.length !== 1) {
-    diagnostic('Usage: ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>]');
+    diagnostic(
+      'Usage: ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]',
+    );
     return EXIT_USAGE;
   }
 
@@ -497,6 +502,11 @@ export async function runWorkflowWatch(args: string[], deps: WorkflowWatchDepend
   const filters = parseFilters(parsed.values.events);
   if (!filters) {
     diagnostic(`--events must be a comma-separated list of: ${EVENT_FILTERS.join(',')},all`);
+    return EXIT_USAGE;
+  }
+  const lineLimit = parseLineLimit(parsed.values.lines);
+  if (lineLimit === null) {
+    diagnostic('--lines must be a positive integer');
     return EXIT_USAGE;
   }
 
@@ -512,31 +522,53 @@ export async function runWorkflowWatch(args: string[], deps: WorkflowWatchDepend
     : async (text: string): Promise<void> => writeProcessStdout(text, ownController.signal);
   const inspector = new DiskRunInspector(target.runDir, diagnostic, deps.checkpointRecheckMs);
   const json = parsed.values.json === true;
+  const snapshotLines: string[] = [];
+  let selectedSnapshotLines = 0;
+  const rememberSnapshotLine = (line: string): void => {
+    if (lineLimit === undefined) return;
+    if (snapshotLines.length < lineLimit) snapshotLines.push(line);
+    else snapshotLines[selectedSnapshotLines % lineLimit] = line;
+    selectedSnapshotLines += 1;
+  };
   const warnedForeignWorkflowIds = new Set<string>();
-  const tailer = new JsonlTailer(resolve(target.runDir, 'messages.jsonl'), {
-    onWarning: diagnostic,
-    onLine: async ({ record, raw }) => {
-      if (record.workflowId !== target.workflowId) {
-        const foreignId = typeof record.workflowId === 'string' ? record.workflowId : '(missing)';
-        if (!warnedForeignWorkflowIds.has(foreignId)) {
-          warnedForeignWorkflowIds.add(foreignId);
-          diagnostic(`Ignoring message record for workflow ${foreignId}; expected ${target.workflowId}`);
+  const logPath = resolve(target.runDir, 'messages.jsonl');
+  let snapshotEnd: number | undefined;
+  try {
+    snapshotEnd = lineLimit === undefined ? undefined : snapshotFileEnd(logPath);
+  } catch (err) {
+    diagnostic(err instanceof Error ? err.message : String(err));
+    return EXIT_ERROR;
+  }
+  const tailer = new JsonlTailer(
+    logPath,
+    {
+      onWarning: diagnostic,
+      onLine: async ({ record, raw }) => {
+        if (record.workflowId !== target.workflowId) {
+          const foreignId = typeof record.workflowId === 'string' ? record.workflowId : '(missing)';
+          if (!warnedForeignWorkflowIds.has(foreignId)) {
+            warnedForeignWorkflowIds.add(foreignId);
+            diagnostic(`Ignoring message record for workflow ${foreignId}; expected ${target.workflowId}`);
+          }
+          return;
         }
-        return;
-      }
-      inspector.observe(record);
-      if (
-        record.type === 'run_started' ||
-        record.type === 'run_resumed' ||
-        record.type === 'run_terminal' ||
-        !recordPassesSince(record, since)
-      )
-        return;
-      const filter = filterForRecord(record.type);
-      if (!filter || !filters.has(filter)) return;
-      await stdout(json ? `${raw}\n` : `${formatHumanRecord(record)}\n`);
+        if (lineLimit === undefined) inspector.observe(record);
+        if (
+          record.type === 'run_started' ||
+          record.type === 'run_resumed' ||
+          record.type === 'run_terminal' ||
+          !recordPassesSince(record, since)
+        )
+          return;
+        const filter = filterForRecord(record.type);
+        if (!filter || !filters.has(filter)) return;
+        const output = json ? `${raw}\n` : `${formatHumanRecord(record)}\n`;
+        if (lineLimit !== undefined) rememberSnapshotLine(output);
+        else await stdout(output);
+      },
     },
-  });
+    snapshotEnd,
+  );
 
   let signalExitCode = EXIT_SIGINT;
   const onSigint = (): void => {
@@ -556,6 +588,26 @@ export async function runWorkflowWatch(args: string[], deps: WorkflowWatchDepend
   deps.signal?.addEventListener('abort', externalAbort, { once: true });
 
   try {
+    if (lineLimit !== undefined) {
+      do {
+        await tailer.poll(deps.maxRecordsPerPoll);
+        if (ownController.signal.aborted) return signalExitCode;
+        if (tailer.hasUnreadData()) await delay(0, ownController.signal);
+      } while (tailer.hasUnreadData());
+
+      const start = selectedSnapshotLines > lineLimit ? selectedSnapshotLines % lineLimit : 0;
+      const orderedLines =
+        selectedSnapshotLines > lineLimit
+          ? [...snapshotLines.slice(start), ...snapshotLines.slice(0, start)]
+          : snapshotLines;
+      for (const line of orderedLines) {
+        await stdout(line);
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- the awaited writer can receive a signal
+        if (ownController.signal.aborted) return signalExitCode;
+      }
+      return EXIT_OK;
+    }
+
     await tailer.poll(deps.maxRecordsPerPoll);
     const initialEvidence = inspector.evidence();
     if (!target.useDaemon && !tailer.hasUnreadData() && initialEvidence) {
@@ -759,6 +811,30 @@ function resolveWatchTarget(value: string): { target: WatchTarget } | { error: s
 
 function looksLikeRunDirectory(path: string): boolean {
   return ['definition.json', 'checkpoint.json', 'messages.jsonl'].some((name) => existsSync(resolve(path, name)));
+}
+
+function snapshotFileEnd(path: string): number {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw err;
+  }
+  try {
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) throw new Error(`Message log is not a file: ${path}`);
+    return stats.size;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function parseLineLimit(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^\d+$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function parseSince(value: unknown): number | undefined | null {
