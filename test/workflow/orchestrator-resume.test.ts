@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionOptions } from '../../src/session/types.js';
@@ -94,6 +94,16 @@ const simpleAgentDef: WorkflowDefinition = {
     done: { type: 'terminal', description: 'Done' },
   },
 };
+
+function terminalControlPhases(baseDir: string, workflowId: WorkflowId): string[] {
+  const lines = readFileSync(resolve(baseDir, workflowId, 'messages.jsonl'), 'utf8')
+    .trim()
+    .split('\n');
+  return lines
+    .map((line) => JSON.parse(line) as { type?: unknown; phase?: unknown })
+    .filter((entry) => entry.type === 'run_terminal' && typeof entry.phase === 'string')
+    .map((entry) => entry.phase as string);
+}
 
 /**
  * Agent definition where errors go to a human gate instead of terminal.
@@ -260,6 +270,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
 
     const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
     const workflowId = await orchestrator.start(defPath, 'build API');
+    expect(readFileSync(resolve(tmpDir, workflowId, 'messages.jsonl'), 'utf8')).toContain('"type":"run_started"');
 
     // After plan completes, machine enters plan_gate => checkpoint saved
     await waitForGate(raiseGate, 1);
@@ -302,6 +313,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     await waitForCompletion(orchestrator, workflowId);
 
     expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(terminalControlPhases(tmpDir, workflowId).at(-1)).toBe('completed');
 
     // B3b: The checkpoint is retained on disk with `finalStatus` populated
     // so the past-runs UI can surface the canonical phase and `listResumable`
@@ -411,6 +423,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     await orchestrator.abort(workflowId);
 
     expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
+    expect(terminalControlPhases(tmpDir, workflowId).at(-1)).toBe('aborted');
     const surviving = checkpointStore.load(workflowId);
     expect(surviving).toBeDefined();
     expect(surviving!.machineState).toBe('plan_gate');
@@ -787,6 +800,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     const workflowId = await first.start(defPath, 'recover initial state');
     await waitForCompletion(first, workflowId);
     expect(first.getStatus(workflowId)?.phase).toBe('failed');
+    expect(terminalControlPhases(tmpDir, workflowId).at(-1)).toBe('failed');
     expect(checkpointStore.load(workflowId)?.machineState).toBe('implement');
 
     const resumedFactory = vi.fn(async () => {

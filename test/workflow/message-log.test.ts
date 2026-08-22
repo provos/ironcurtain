@@ -98,4 +98,30 @@ describe('MessageLog', () => {
 
     expect(read).toEqual(entry);
   });
+
+  it('keeps workflow control records private from readAll callers', () => {
+    const log = new MessageLog(logPath);
+    log.append(makeEntry({ type: 'error', error: 'before resume' }));
+    log.appendRunStarted({
+      ts: '2026-08-21T11:59:00.000Z',
+      workflowId: 'test-wf-1',
+      state: 'plan',
+    });
+    log.appendRunResumed({
+      ts: '2026-08-21T12:00:00.000Z',
+      workflowId: 'test-wf-1',
+      state: 'plan',
+    });
+    log.appendRunTerminal({
+      ts: '2026-08-21T12:00:01.000Z',
+      workflowId: 'test-wf-1',
+      state: 'done',
+      phase: 'completed',
+    });
+
+    expect(log.readAll()).toHaveLength(1);
+    expect(readFileSync(logPath, 'utf8')).toContain('"type":"run_started"');
+    expect(readFileSync(logPath, 'utf8')).toContain('"type":"run_resumed"');
+    expect(readFileSync(logPath, 'utf8')).toContain('"type":"run_terminal"');
+  });
 });

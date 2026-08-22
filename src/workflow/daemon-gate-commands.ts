@@ -30,6 +30,7 @@ import {
 import { parseArgsResult, type ParseArgsResult, type ParseArgsOptions } from './cli-shared.js';
 import type { WorkflowDetailDto } from '../web-ui/web-ui-types.js';
 import type { HumanGateRequestDto } from './types.js';
+import { isTerminalWorkflowPhase } from './terminal-phase.js';
 
 // ---------------------------------------------------------------------------
 // Exit codes (stable contract for shell-only agents)
@@ -200,10 +201,6 @@ function exitCodeForPhase(phase: WorkflowPhase): number {
       // non-failure so the agent re-issues `await`.
       return EXIT_OK;
   }
-}
-
-function isTerminalPhase(phase: WorkflowPhase): boolean {
-  return phase === 'completed' || phase === 'failed' || phase === 'aborted';
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +580,7 @@ async function awaitDecisionPoint(
  * block for the full timeout waiting on an event that will never come.
  */
 function isRestingPhase(phase: WorkflowPhase): boolean {
-  return phase === 'waiting_human' || phase === 'interrupted' || isTerminalPhase(phase);
+  return phase === 'waiting_human' || phase === 'interrupted' || isTerminalWorkflowPhase(phase);
 }
 
 function isResolvingEvent(eventName: string): boolean {

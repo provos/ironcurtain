@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, while `--lines N` provides a bounded last-N snapshot for scripts. Live watches remain open across human gates and return phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#439).
+
 ### Fixes
 
 - **LLM-metrics SQLite workers boot without `tsx` on Node 22** — the persistence workers were spawned with `execArgv: ['--import', 'tsx']` for source runs, but tsx's loader hooks do not take effect inside worker threads on Node 22, so the worker failed to load its TypeScript sources. Source runs now boot through a self-contained ESM entry shim that registers a `.js` → `.ts` specifier remap hook in-thread and relies on Node's native type stripping; compiled runs load the emitted `.js` worker directly and spawn no shim.

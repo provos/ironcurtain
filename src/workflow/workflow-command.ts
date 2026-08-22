@@ -5,6 +5,7 @@
  *   start   <definition> "task" [--model <model>] [--workspace <path>]
  *   resume  <baseDir> [--state <stateName>] [--model <model>]
  *   inspect <baseDir> [--all]
+ *   watch   <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -47,6 +48,7 @@ import {
 } from './cli-support.js';
 import { runRunState } from './run-state-command.js';
 import { runDaemonGateCommand } from './daemon-gate-commands.js';
+import { runWorkflowWatch } from './workflow-watch-command.js';
 import { sweepContainerSnapshots } from './container-snapshots.js';
 import { installWorkflowShutdownSignals } from './shutdown-signals.js';
 import {
@@ -74,6 +76,7 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow run <name-or-path> "task" [--workspace <path>] [--json] [--ensure-daemon]',
     'ironcurtain workflow status <workflowId> [--json]',
     'ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]',
+    'ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]',
     'ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]',
     'ironcurtain workflow show <workflowId> --artifact <name> [--json]',
   ],
@@ -87,6 +90,7 @@ const workflowSpec: CommandSpec = {
     { name: 'run', description: 'Start a gated workflow on the daemon (non-interactive, machine-readable)' },
     { name: 'status', description: 'Print a workflow status snapshot (poll)' },
     { name: 'await', description: 'Block until a workflow reaches a gate or terminal' },
+    { name: 'watch', description: 'Stream workflow events or replay a last-N snapshot' },
     { name: 'gate', description: 'Resolve a human gate with an event (APPROVE/FORCE_REVISION/REPLAN/ABORT)' },
     { name: 'show', description: 'Print a presented artifact for a gated workflow' },
   ],
@@ -107,7 +111,7 @@ const workflowSpec: CommandSpec = {
     { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume)' },
     { flag: 'strict', description: 'Treat lint warnings as errors (lint only)' },
     { flag: 'capture-traces', description: 'Capture LLM API traces for this run (start only)' },
-    { flag: 'json', description: 'Emit machine-readable JSON to stdout (run, status, await, gate, show)' },
+    { flag: 'json', description: 'Emit machine-readable JSON to stdout (run, status, await, watch, gate, show)' },
     {
       flag: 'ensure-daemon',
       description: 'Auto-start a detached daemon if none is running (run, status, await, gate, show)',
@@ -124,6 +128,13 @@ const workflowSpec: CommandSpec = {
     },
     { flag: 'artifact', description: 'Artifact name to read (show only)', placeholder: '<name>' },
     { flag: 'timeout', description: 'Max seconds to block (await only)', placeholder: '<sec>' },
+    { flag: 'since', description: 'Replay watch records at or after an ISO timestamp', placeholder: '<ISO>' },
+    {
+      flag: 'events',
+      description: 'Watch event filters (comma-separated, or all)',
+      placeholder: '<list>',
+    },
+    { flag: 'lines', description: 'Replay only the last N selected watch records', placeholder: '<N>' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
@@ -138,6 +149,8 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow inspect /tmp/workflow-abc123 --all',
     'ironcurtain workflow run design-and-code "Build a REST API" --json --ensure-daemon',
     'ironcurtain workflow await wf-7a3 --json',
+    'ironcurtain workflow watch wf-7a3 --events transition,verdict,retry,error',
+    'ironcurtain workflow watch wf-7a3 --lines 20 --json',
     'ironcurtain workflow show wf-7a3 --artifact spec --json',
     'ironcurtain workflow gate wf-7a3 --event FORCE_REVISION --prompt "tighten the intro" --json',
     'ironcurtain workflow gate wf-7a3 --event APPROVE --json',
@@ -755,6 +768,17 @@ export async function main(args: string[]): Promise<void> {
     case 'inspect':
       runInspect(subArgs);
       break;
+    case 'watch': {
+      if (subArgs.includes('--help') || subArgs.includes('-h')) {
+        process.stderr.write(formatHelp(workflowSpec) + '\n');
+        return;
+      }
+      const code = await runWorkflowWatch(subArgs);
+      // Let Node drain stdout/stderr naturally; synchronous process.exit()
+      // can truncate the final replayed JSONL records on piped output.
+      process.exitCode = code;
+      return;
+    }
     case 'lint':
       runLintCommand(subArgs);
       break;
