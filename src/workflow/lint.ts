@@ -439,28 +439,26 @@ function describeTransition(t: AgentTransitionDefinition): string {
 }
 
 // ---------------------------------------------------------------------------
-// WF011 — container deterministic state may run before its scope is minted
+// WF011 — mixed agent/deterministic scope may run before agent population
 // ---------------------------------------------------------------------------
 
 /**
- * A `container: true` deterministic state execs into the shared-container
- * bundle for its `containerScope`. That bundle is minted lazily by the first
- * state that needs the scope, and on a fresh run only *agent* states populate
- * it (a deterministic state is a helper that runs after an agent has worked in
- * the scope — there is no valid FSM of only deterministic states; the runtime
- * exists to mediate agent runs). If such a state is reachable from `initial`
- * without first passing through an agent state in the same scope, then on a
- * fresh run it may exec against a scope whose `/workspace` was never populated
- * — a graph-ordering smell. Resume is unaffected (the bundle is re-minted with
- * the persisted workspace); the runtime keeps a soft-warning backstop, and this
- * surfaces the fresh-run case at author time.
+ * A containerized deterministic state may intentionally be the first and only
+ * consumer of a scope: `ensureBundleForScope` mints the bundle on demand, which
+ * is how no-LLM workflows run deterministic acceptance commands. When the same
+ * scope also contains agent states, however, reaching a deterministic helper
+ * before any of those agents is still a useful graph-ordering warning: the
+ * workspace may not contain the work the helper was meant to check.
  */
 function checkContainerScopePopulatedByAgent(def: WorkflowDefinition): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   for (const [stateId, state] of Object.entries(def.states)) {
     if (state.type !== 'deterministic' || state.container !== true) continue;
     const scope = state.containerScope ?? DEFAULT_CONTAINER_SCOPE;
-    if (!isReachableWithoutScopeAgent(def, stateId, scope)) continue;
+    const scopeHasAgent = Object.values(def.states).some(
+      (candidate) => candidate.type === 'agent' && (candidate.containerScope ?? DEFAULT_CONTAINER_SCOPE) === scope,
+    );
+    if (!scopeHasAgent || !isReachableWithoutScopeAgent(def, stateId, scope)) continue;
 
     diagnostics.push({
       code: 'WF011',
@@ -468,24 +466,17 @@ function checkContainerScopePopulatedByAgent(def: WorkflowDefinition): Diagnosti
       stateId,
       message:
         `Deterministic state "${stateId}" runs in container scope "${scope}" but is reachable from ` +
-        `"${def.initial}" without first passing through an agent state in that scope — on a fresh run ` +
-        `its container may not be minted yet.`,
+        `"${def.initial}" without first passing through an agent state in that scope — its workspace ` +
+        `may not contain the agent-produced work it was intended to check.`,
       hint:
-        `Place a "${scope}"-scope agent state before "${stateId}" (a deterministic state is a helper ` +
-        `that runs after an agent populates the scope), or move it onto a path that such an agent ` +
-        `state precedes.`,
+        `If "${stateId}" checks agent output, place a "${scope}"-scope agent state before it. ` +
+        `A deliberately no-LLM deterministic workflow may use a scope with no agent states.`,
     });
   }
   return diagnostics;
 }
 
-/**
- * BFS from `initial` over the transition graph, treating agent states in
- * `scope` as absorbing — their successors are not expanded, because reaching
- * one means the scope's container is minted on that path. Returns true iff
- * `target` is reachable via at least one path that never passes through such an
- * agent state, i.e. an unsafe fresh-run path exists.
- */
+/** Return true when one path reaches `target` without crossing a same-scope agent. */
 function isReachableWithoutScopeAgent(def: WorkflowDefinition, target: string, scope: string): boolean {
   const seen = new Set<string>();
   const queue: string[] = [def.initial];
@@ -496,8 +487,6 @@ function isReachableWithoutScopeAgent(def: WorkflowDefinition, target: string, s
     if (id === target) return true;
     const state = def.states[id] as WorkflowStateDefinition | undefined;
     if (!state) continue;
-    // An agent state in the target scope populates it; any continuation is
-    // safe, so stop expanding this path.
     if (state.type === 'agent' && (state.containerScope ?? DEFAULT_CONTAINER_SCOPE) === scope) continue;
     for (const next of collectTransitionTargets(state)) {
       if (!seen.has(next)) queue.push(next);

@@ -34,7 +34,9 @@ teardown. The public-registry production lifecycle now owns one per-bundle host 
 socket mount, rootless-netns loopback relay, and dockerd-only proxy trust. The
 embedded-DNS prerequisite and historical offline product-entrypoint gate passed on the former catalog
 path. The replacement selected-current public-registry product-entrypoint gate passed, including the internal-bridge alias, direct
-IP/public-DNS negatives, no published ports, and exact teardown. Neither smoke is an
+IP/public-DNS negatives, no published ports, and exact teardown. A newer deterministic production
+workflow gate passed both public (25 checks) and offline (17 checks) modes without an LLM, with exact
+cleanup after each run and graceful second-session admission in one isolated home. These smokes are not
 agent-turn/provider, full 0C, or preview qualification. Docker Desktop, native Linux,
 build-egress, enforced-PID, bounded-disk, and preview variants remain rejected. No backend is
 implementation-qualified or preview-ready.
@@ -52,8 +54,9 @@ exception in this design is a separately reviewed service that receives authorit
 bundle, notably the future Docker Desktop fixed uplink relay. Its image and fixed configuration remain
 independently digest-pinned. This amendment supersedes every earlier catalog-as-TCB or
 catalog-as-session-admission statement; see §16.16. The runtime migration is implemented in the current
-working tree. The replacement public-registry product-entrypoint smoke passed on 2026-08-15; offline and
-PTY product-entrypoint evidence remain separate follow-up gates.
+working tree. The replacement public-registry product-entrypoint smoke passed on 2026-08-15, and the
+deterministic public/offline workflow gate passed on 2026-08-21. Only the selected-current PTY
+transport/composition delta remains a separate live follow-up gate.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
@@ -1268,8 +1271,8 @@ Its catalog identity checks, staged-pair prerequisites, and refreeze workflow ar
 The still-valid limitations are preserved: these infrastructure smokes are not provider/agent turns,
 the PTY gate must require post-activation TUI bytes rather than startup text or a socket inode, and every
 failure path must retire owned state and exact runtime objects. Section 16.16 and the handoff record the
-replacement selected-current public-registry result. Fresh offline and PTY product-entrypoint evidence
-remain pending.
+replacement selected-current public-registry result and the deterministic public/offline workflow
+result. Only the narrow PTY transport/composition evidence remains pending.
 
 ### 16.15 Enabled-state usability defaults and settings surfaces (record, 2026-08-15)
 
@@ -1330,7 +1333,10 @@ Earlier text that described eight “trusted infrastructure” roles, catalog ha
 catalog mismatch as a security blocker, or refreeze as a product-start prerequisite is superseded by
 this section and retained only in Git history. The production
 migration is present in the current working tree. Its public-registry managed-network product-entrypoint
-smoke passed live on 2026-08-15 with exact cleanup; offline and PTY live gates remain pending.
+smoke passed live on 2026-08-15 with exact cleanup. On 2026-08-21 the built production workflow
+entrypoint passed fixed no-LLM public and offline probes (25 and 17 checks), exact cleanup after each run,
+and graceful second-session admission in one isolated home. The remaining live delta is the
+selected-current PTY transport/composition path, not another LLM-driven replay of the functional matrix.
 
 #### Adversarial acceptance checklist
 
@@ -1365,8 +1371,10 @@ The migration is complete only when all of the following are demonstrated:
   proxy policy, watchdog, and cleanup remain authoritative. Ordinary operator CLI, web, handoff, and
   production errors contain no catalog/refreeze prerequisite or claim that bundle image identity is a
   security boundary.
-- **Live gate:** fresh offline, public-registry, managed-network, and PTY product-entrypoint smokes pass from
-  the minimal configuration after an ordinary current-agent rebuild, with exact cleanup. Historical v3
+- **Live gate:** fixed-command production workflows cover fresh offline, public-registry, and
+  managed-network functionality from the minimal configuration after an ordinary current-agent rebuild,
+  with exact cleanup and no provider turn. A separate narrow PTY gate covers only activation-before-attach,
+  environment/orientation delivery, terminal bytes, bounded shutdown, and exact cleanup. Historical v3
   catalog runs do not satisfy this item.
 
 ## 17. Primary references

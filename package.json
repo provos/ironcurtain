@@ -71,6 +71,7 @@
     "smoke:nested:apple": "npm run build && tsx scripts/smoke-nested-apple.ts",
     "smoke:nested:apple:pty": "npm run build && tsx scripts/smoke-nested-apple.ts --pty",
     "smoke:nested:apple:public-registry": "npm run build && tsx scripts/smoke-nested-apple.ts --public-registry",
+    "smoke:nested:apple:workflow": "npm run build && tsx scripts/smoke-nested-apple-workflow.ts",
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",

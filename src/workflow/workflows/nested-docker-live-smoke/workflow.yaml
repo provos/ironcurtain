@@ -1,0 +1,31 @@
+name: nested-docker-live-smoke
+description: 'TESTING ONLY - deterministic, no-LLM live acceptance for the admitted nested Docker runtime.'
+hidden: true
+initial: probe
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  sharedContainer: true
+
+states:
+  probe:
+    type: deterministic
+    description: Exercise nested Docker using the requested public or offline mode.
+    container: true
+    timeoutMs: 900000
+    resultFile: .workflow/nested-docker-result.json
+    run:
+      - ['python3', '/workflow-scripts/nested_docker_probe.py']
+    transitions:
+      - to: done
+        when: { verdict: pass }
+      - to: failed
+
+  done:
+    type: terminal
+    description: Nested Docker acceptance passed.
+
+  failed:
+    type: terminal
+    description: Nested Docker acceptance failed.

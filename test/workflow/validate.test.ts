@@ -1288,6 +1288,7 @@ describe('shipped workflows validate unchanged', () => {
     'test-email-summary',
     'deterministic-eval-smoke',
     'deterministic-verdict-smoke',
+    'nested-docker-live-smoke',
   ]) {
     it(`${name}: workflow.yaml validates without errors`, () => {
       const manifestPath = resolve(workflowsDir, name, 'workflow.yaml');

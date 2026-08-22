@@ -36,6 +36,10 @@ The replacement live public-registry smoke passed as session
 `a4208f3a-cd33-45bd-a4ec-b9e560acd176` with outer VM
 `ic-dw-agent-6e38b54379de4a49`; post-run inventory confirmed that the exact outer VM and temporary capture
 alias were absent while unrelated pre-existing Apple containers were unchanged.
+On 2026-08-21, the built production workflow entrypoint then passed a deterministic, no-LLM follow-up:
+public mode completed 25 functional checks, offline mode completed 17, and both produced exact closed-lease
+cleanup proof. The two runs shared one isolated IronCurtain home, so the offline workflow also proved that
+a second admitted session is not blocked by the first session's graceful cleanup.
 
 The currently supported variant is deliberately singular:
 
@@ -163,8 +167,8 @@ administrator authority over its bundle-local daemon and may change inner resour
 Earlier catalog-based offline and public-registry smokes exercised the built CLI and exact cleanup, but
 they do not qualify selected-current transport or the managed-network slice. Their catalog identities,
 temporary paths, and duplicate validation tables are intentionally omitted here; Git history retains the
-diagnostic record. Fresh selected-current offline and PTY gates remain pending. The current
-public-registry result follows.
+diagnostic record. The selected-current public-registry session result and the newer deterministic
+public/offline workflow result follow. A narrow PTY transport/composition gate remains pending.
 
 ## Managed-Network Usability Slice Evidence
 
@@ -216,6 +220,31 @@ publication probes. Post-run `container list --all` contained no exact outer VM,
 contained no `ironcurtain-capture-*` alias, the isolated smoke root was removed, and unrelated pre-existing
 Apple containers were unchanged.
 
+### Deterministic no-LLM workflow live result
+
+On 2026-08-21, `npm run smoke:nested:apple:workflow` ran two ordinary built-CLI workflows through
+`workflow start`, without creating an LLM session or sending a provider request:
+
+```text
+[public] workflow passed 25 deterministic checks and exact teardown proof
+[offline] workflow passed 17 deterministic checks and exact teardown proof
+nested Apple workflow smoke passed (public + offline, no LLM)
+```
+
+The public workflow covered the admitted private daemon, rootless/vfs profile, exact exported Docker
+environment, selected image load, default-on allowlisted pull, denied registry, fixed internal bridge,
+embedded DNS, alias and inner-IP sibling routing, direct public-IP denial, ineffective nested `-p`, and
+empty final inner inventories. The offline workflow proved that the same selected image runs with
+`--pull never` while a public pull fails and retains no public image. Each foreground workflow exited
+only after its lease recorded immutable-ID absence, two separated empty inventories, and state/runtime
+root removal. The harness also proved that no new `ironcurtain-capture-*` alias survived. Public then
+offline in the same isolated home provides a graceful next-session recovery gate.
+
+This is now the preferred functional Apple acceptance path: deterministic workflow commands make the
+matrix reproducible and do not rely on an agent choosing commands. PTY testing remains valuable only for
+the transport-specific delta (activation-before-attach, environment/orientation delivery, terminal bytes,
+signal handling, and cleanup), not for duplicating the Docker functional matrix through an LLM.
+
 ### Recorded selected-current validation
 
 At the selected-current migration snapshot, the non-integration root suite, focused selected-image Apple
@@ -226,46 +255,43 @@ modules and fixtures, rerun the current-tree gates before merge rather than reus
 
 ## Important Boundaries: Do Not Overclaim
 
-1. **No real Claude provider turn was part of the public-registry gate.** The harness starts the real built session/infrastructure path and probes the admitted private daemon from trusted host test code. It does not ask Claude to issue the Docker commands.
-2. **Public registry plus PTY/mux composition is not a recorded live gate.** `npm run smoke:nested:apple:pty` exists for the node-pty/Claude-TUI path, but the latest public-registry acceptance was batch mode. The production paths share admission/bootstrap, but a combined gate remains useful evidence.
+1. **No real Claude provider turn is required for functional acceptance.** The current workflow gate runs fixed Python commands inside the real admitted workflow bundle. It exercises production workflow/infrastructure lifecycle without asking an LLM to choose or issue Docker commands.
+2. **PTY/mux composition is not yet a fresh selected-current live gate.** `npm run smoke:nested:apple:pty` exists for the node-pty/Claude-TUI path. The functional Docker matrix is now covered by workflows; the remaining PTY evidence should be limited to the transport-specific delta rather than requiring a provider turn or repeating every network probe.
 3. **No host access to the server.** Host port publishing is explicitly forbidden. The implemented use case is target/scanner or service/sibling communication inside the bundle. Safely exposing a server to the Mac is a separate design and implementation slice.
 4. **No durable pull-provenance sink yet.** Policy enforcement exists, but successful registry provenance is not yet persisted as complete host session evidence.
 5. **No hard Apple disk quota.** Enabling the admitted developer slice accepts the host-watchdog-observed disk policy; the risk remains even though the UI hides that implementation detail.
 6. **Apple only.** Docker Desktop and Linux results must be independently implemented and qualified.
 7. **Not preview-qualified.** Full G1-G10/0C release evidence, zero-skip backend qualification, and broader failure injection remain incomplete.
-8. **Replacement public-registry gate passed.** The selected-current-agent product-entrypoint smoke passed
-   live on 2026-08-15 and exact cleanup was audited. Offline and PTY product-entrypoint smokes remain
-   separate follow-up evidence; a catalog refreeze is neither required nor a substitute for those gates.
+8. **Replacement public and offline gates passed.** The selected-current-agent public-registry session
+   smoke passed on 2026-08-15. Deterministic public and offline production workflows passed on 2026-08-21
+   with exact cleanup. Only the narrow selected-current PTY transport delta remains; a catalog refreeze is
+   neither required nor a substitute for it.
 
 ## Recommended Next Work
 
-### 1. Complete the remaining post-migration live gates
+### 1. Complete the narrow selected-current PTY gate
 
 The selected-current-agent migration in implementation plan §16.16 is implemented. Tag/cache mutation,
-legacy-lease recovery, selected-image archive qualification, and the public-registry managed-network
-product-entrypoint smoke now pass. Complete the remaining offline and PTY product-entrypoint smokes and
-the broader failure-injection matrix without reintroducing catalog admission.
+legacy-lease recovery, selected-image archive qualification, and deterministic public/offline workflow
+gates now pass. Rerun the current node-pty path and prove only its unique composition properties:
+activation precedes attach, the admitted Docker environment/orientation reaches the PTY process, real
+terminal bytes arrive, signal/EOF handling is bounded, and exact teardown completes. Do not require an
+LLM to reproduce the already-passing workflow functional matrix.
 
-### 2. Combined public-registry PTY/mux acceptance
+### 2. Broader failure injection
 
-Extend the live harness so one run combines:
-
-- the production node-pty child path used by mux;
-- persisted active lease before PTY evidence;
-- real non-empty Claude TUI output;
-- public-registry listener presence;
-- the existing denied pull, allowed pull, internal bridge, server, raw-IP sibling, alias sibling, and no-egress probes; and
-- existing exact PTY teardown evidence.
-
-Keep this separate from a paid/provider turn if possible. If the goal is to prove Claude itself chooses and invokes the Docker commands, add a clearly labeled manual or hermetic-provider acceptance lane rather than weakening the infrastructure gate.
+Add deterministic prepare/create/load/probe failure cases around the workflow entrypoint and require the
+same exact cleanup proof. Keep crash recovery distinct from graceful next-session recovery.
 
 ### 3. Durable registry provenance
 
 Persist a bounded host-owned record of authorized registry requests and resolved destinations. Never store authorization headers, tokens, cookies, or unbounded query/body data. Bind the record to the lease, policy/manifest hash, and session metadata; selected-image observations may be included as provenance but are not authority.
 
-### 4. Next-session recovery gate
+### 4. Crash-recovery gate
 
-In one isolated home, close the first public-registry session, start a second session, and prove no stale listener, lease incident, runtime root, or exact Apple object blocks admission. The generic incident-recovery implementation exists; this is product-entrypoint evidence.
+Graceful next-session recovery passed when the public and offline workflows ran sequentially in one
+isolated home. The remaining recovery evidence is an injected coordinator/process death followed by a
+second workflow proving watchdog cleanup or startup reconciliation closes the old lease before admission.
 
 ### 5. Trusted outer inspect evidence
 
@@ -299,6 +325,9 @@ Acceptance and tests:
 
 - `scripts/smoke-nested-apple.ts` — offline, PTY, and public-registry Apple smoke orchestration.
 - `scripts/smoke-nested-apple-workload.ts` — pure public-registry workload plan and evidence parsing.
+- `scripts/smoke-nested-apple-workflow.ts` — deterministic public/offline workflow driver and exact cleanup verifier.
+- `src/workflow/workflows/nested-docker-live-smoke/` — packaged no-LLM workflow and fixed Python probe.
+- `test/workflow/nested-docker-live-smoke.test.ts` — deterministic-first/no-session lifecycle and constant-drift regression.
 - `test/smoke-nested-apple-workload.test.ts` — workload-plan unit coverage.
 - `test/docker/docker-workload-egress.test.ts` — listener lifecycle and policy integration.
 - `test/docker/registry-egress-policy.test.ts` — manifest authority negatives.
