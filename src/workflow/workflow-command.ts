@@ -6,6 +6,8 @@
  *   resume  <workflowId|existingBaseDir> [--workflow-id <id>] [--json] [--ensure-daemon]
  *   resume-standalone <baseDir> [--state <stateName>] [--model <model>]
  *   inspect <baseDir> [--all]
+ *   status  <workflowId> [--json] [--ensure-daemon]
+ *   await   <workflowId> [--timeout <sec>] [--json] [--ensure-daemon]
  *   watch   <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]
  */
 
@@ -76,8 +78,8 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow lint <name-or-path> [--strict]',
     'ironcurtain workflow run-state <name-or-path> <state> --artifacts <dir> [options]',
     'ironcurtain workflow run <name-or-path> "task" [--workspace <path>] [--json] [--ensure-daemon]',
-    'ironcurtain workflow status <workflowId> [--json]',
-    'ironcurtain workflow await <workflowId> [--timeout <sec>] [--json]',
+    'ironcurtain workflow status <workflowId> [--json] [--ensure-daemon]',
+    'ironcurtain workflow await <workflowId> [--timeout <sec>] [--json] [--ensure-daemon]',
     'ironcurtain workflow watch <workflowId|runDir> [--json] [--since <ISO>] [--events <list>] [--lines <N>]',
     'ironcurtain workflow gate <workflowId> --event <EVENT> [--prompt <text>] [--json]',
     'ironcurtain workflow show <workflowId> --artifact <name> [--json]',
@@ -91,9 +93,15 @@ const workflowSpec: CommandSpec = {
     { name: 'lint', description: 'Run semantic checks on a workflow definition' },
     { name: 'run-state', description: 'Run a single agent state once against pre-staged artifacts' },
     { name: 'run', description: 'Start a gated workflow on the daemon (non-interactive, machine-readable)' },
-    { name: 'status', description: 'Print a workflow status snapshot (poll)' },
-    { name: 'await', description: 'Block until a workflow reaches a gate or terminal' },
-    { name: 'watch', description: 'Stream workflow events or replay a last-N snapshot' },
+    { name: 'status', description: 'Print one status snapshot and exit; use for stateless polling' },
+    {
+      name: 'await',
+      description: 'Subscribe and exit at the next gate or terminal (not ordinary transitions); use for automation',
+    },
+    {
+      name: 'watch',
+      description: 'Continuously stream transitions/events; does not exit after one (use --lines for a snapshot)',
+    },
     { name: 'gate', description: 'Resolve a human gate with an event (APPROVE/FORCE_REVISION/REPLAN/ABORT)' },
     { name: 'show', description: 'Print a presented artifact for a gated workflow' },
   ],
@@ -134,7 +142,11 @@ const workflowSpec: CommandSpec = {
       placeholder: '<text>',
     },
     { flag: 'artifact', description: 'Artifact name to read (show only)', placeholder: '<name>' },
-    { flag: 'timeout', description: 'Max seconds to block (await only)', placeholder: '<sec>' },
+    {
+      flag: 'timeout',
+      description: 'Max seconds to await; timeout exits while the workflow keeps running',
+      placeholder: '<sec>',
+    },
     { flag: 'since', description: 'Replay watch records at or after an ISO timestamp', placeholder: '<ISO>' },
     {
       flag: 'events',
@@ -155,7 +167,7 @@ const workflowSpec: CommandSpec = {
     'ironcurtain workflow inspect /tmp/workflow-abc123',
     'ironcurtain workflow inspect /tmp/workflow-abc123 --all',
     'ironcurtain workflow run design-and-code "Build a REST API" --json --ensure-daemon',
-    'ironcurtain workflow await wf-7a3 --json',
+    'ironcurtain workflow await wf-7a3 --timeout 3600 --json --ensure-daemon',
     'ironcurtain workflow watch wf-7a3 --events transition,verdict,retry,error',
     'ironcurtain workflow watch wf-7a3 --lines 20 --json',
     'ironcurtain workflow show wf-7a3 --artifact spec --json',
