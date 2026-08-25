@@ -45,6 +45,10 @@ import {
   type ModelCatalogSource,
 } from './openrouter-catalog.js';
 import type { MCPServerConfig } from './types.js';
+import {
+  DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING,
+  type DockerWorkloadNetworkAccess,
+} from '../docker-workload/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -286,7 +290,7 @@ export function computeDiff(
   return diffs;
 }
 
-/** Compare only the two nested-Docker choices exposed by the interactive UI. */
+/** Compare only the nested-Docker choices exposed by the interactive UI. */
 function diffDockerWorkload(
   resolved: ResolvedUserConfig,
   pending: UserConfig,
@@ -303,16 +307,13 @@ function diffDockerWorkload(
     ]);
   }
 
-  if (pendingRequested.imageIngress !== undefined) {
-    const resolvedIngress =
+  if (pendingRequested.networkAccess !== undefined) {
+    const baselineNetworkAccess =
       resolved.dockerWorkload?.enabled === true
-        ? resolved.dockerWorkload.imageIngress
-        : (baselineRequested?.imageIngress ?? 'public-registry');
-    if (pendingRequested.imageIngress !== resolvedIngress) {
-      diffs.push([
-        'dockerWorkload.publicPulls',
-        { from: resolvedIngress === 'public-registry', to: pendingRequested.imageIngress === 'public-registry' },
-      ]);
+        ? resolved.dockerWorkload.networkAccess
+        : (baselineRequested?.networkAccess ?? 'packages');
+    if (pendingRequested.networkAccess !== baselineNetworkAccess) {
+      diffs.push(['dockerWorkload.networkAccess', { from: baselineNetworkAccess, to: pendingRequested.networkAccess }]);
     }
   }
 }
@@ -1603,18 +1604,36 @@ const DOCKER_AGENT_LABELS: Readonly<Record<DockerAgent, string>> = {
   codex: 'Codex CLI',
 };
 
+const DOCKER_NETWORK_ACCESS_PRESENTATION = {
+  packages: {
+    label: 'Public packages and images (recommended)',
+    hint: 'Docker Hub/GHCR plus fixed public apt, npm, PyPI, and Cargo downloads',
+  },
+  images: {
+    label: 'Public images only',
+    hint: 'Docker Hub and GHCR pulls work; Dockerfile RUN is offline',
+  },
+  offline: {
+    label: 'Offline',
+    hint: 'Only preloaded images and hermetic builds work',
+  },
+} as const satisfies Readonly<Record<DockerWorkloadNetworkAccess, { readonly label: string; readonly hint: string }>>;
+const DOCKER_NETWORK_ACCESS_OPTIONS = Object.entries(DOCKER_NETWORK_ACCESS_PRESENTATION).map(
+  ([value, presentation]) => ({ value: value as DockerWorkloadNetworkAccess, ...presentation }),
+);
+
 function currentNestedDocker(
   resolved: ResolvedUserConfig,
   pending: UserConfig,
   requested: UserConfig['dockerWorkload'],
-): { enabled: boolean; publicPulls: boolean } {
+): { enabled: boolean; networkAccess: DockerWorkloadNetworkAccess } {
   const enabled = pending.dockerWorkload?.enabled ?? resolved.dockerWorkload?.enabled ?? false;
-  const resolvedIngress =
+  const baselineNetworkAccess =
     resolved.dockerWorkload?.enabled === true
-      ? resolved.dockerWorkload.imageIngress
-      : (requested?.imageIngress ?? 'public-registry');
-  const ingress = pending.dockerWorkload?.imageIngress ?? resolvedIngress;
-  return { enabled, publicPulls: ingress === 'public-registry' };
+      ? resolved.dockerWorkload.networkAccess
+      : (requested?.networkAccess ?? 'packages');
+  const networkAccess = pending.dockerWorkload?.networkAccess ?? baselineNetworkAccess;
+  return { enabled, networkAccess };
 }
 
 function nestedDockerSummary(
@@ -1624,7 +1643,8 @@ function nestedDockerSummary(
 ): string {
   const current = currentNestedDocker(resolved, pending, requested);
   if (!current.enabled) return 'off';
-  return current.publicPulls ? 'on, public pulls on' : 'on, local images only';
+  const label = DOCKER_NETWORK_ACCESS_PRESENTATION[current.networkAccess].label;
+  return `on, ${label.replace(/ \(recommended\)$/u, '').toLowerCase()}`;
 }
 
 async function handleDockerAgent(
@@ -1693,7 +1713,7 @@ async function handleDockerAgent(
   }
 }
 
-/** Submenu for the two user-facing secure nested-Docker policy choices. */
+/** Submenu for the user-facing secure nested-Docker policy choices. */
 async function handleNestedDocker(
   resolved: ResolvedUserConfig,
   pending: UserConfig,
@@ -1703,16 +1723,19 @@ async function handleNestedDocker(
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const current = currentNestedDocker(resolved, pending, requestedDockerWorkload);
-    const options: { value: string; label: string; hint?: string }[] = [
+    const networkAccessPresentation = DOCKER_NETWORK_ACCESS_PRESENTATION[current.networkAccess];
+    const options: { value: string; label: string; hint?: string; disabled?: boolean }[] = [
       { value: 'enabled', label: 'Docker inside agent sessions', hint: current.enabled ? 'on' : 'off' },
     ];
-    if (current.enabled) {
-      options.push({
-        value: 'publicPulls',
-        label: 'Public registry pulls',
-        hint: current.publicPulls ? 'on (Docker Hub and GHCR)' : 'off (local images only)',
-      });
-    }
+    options.push({
+      value: 'networkAccess',
+      label: 'Network access',
+      hint: current.enabled
+        ? networkAccessPresentation.label
+        : `${networkAccessPresentation.label} (enable Docker to change)`,
+      disabled: !current.enabled,
+    });
+    p.note(DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING, 'Package network warning');
     options.push({ value: 'back', label: 'Back' });
 
     const field = await p.select({
@@ -1734,21 +1757,20 @@ async function handleNestedDocker(
           // Disabled resolved config intentionally carries no authority.
           // Stamp the validated raw preference shown by this editor when
           // re-enabling so saveUserConfig's merge cannot change it silently.
-          ...(enabled
-            ? { imageIngress: current.publicPulls ? ('public-registry' as const) : ('preloaded-only' as const) }
-            : {}),
+          ...(enabled ? { networkAccess: current.networkAccess } : {}),
         };
       }
-    } else if (field === 'publicPulls') {
-      const publicPulls = await p.confirm({
-        message: 'Allow public image pulls from Docker Hub and GHCR?',
-        initialValue: current.publicPulls,
+    } else if (field === 'networkAccess') {
+      const networkAccess = await p.select({
+        message: 'Network access',
+        initialValue: current.networkAccess,
+        options: [...DOCKER_NETWORK_ACCESS_OPTIONS],
       });
-      if (isCancelled(publicPulls)) continue;
-      if (publicPulls !== current.publicPulls) {
+      if (isCancelled(networkAccess)) continue;
+      if (networkAccess !== current.networkAccess) {
         pending.dockerWorkload = {
           ...pending.dockerWorkload,
-          imageIngress: (publicPulls as boolean) ? 'public-registry' : 'preloaded-only',
+          networkAccess: networkAccess as DockerWorkloadNetworkAccess,
         };
       }
     }

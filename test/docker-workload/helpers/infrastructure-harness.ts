@@ -15,6 +15,8 @@ import { acquireProcessLock, type ProcessLockHandle } from '../../../src/docker-
 import {
   APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT,
   APPLE_VM_DAEMON_API_DIR_STAT_ARGV,
+  APPLE_VM_DAEMON_DOCKER_HOST,
+  APPLE_VM_DAEMON_TOOLCHAIN_DIR,
 } from '../../../src/docker-workload/apple-vm-daemon.js';
 import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK,
@@ -33,6 +35,19 @@ import type {
   DockerNetworkInfo,
 } from '../../../src/docker/types.js';
 import { writeOciArchiveFixture } from '../../helpers/oci-archive-fixture.js';
+import {
+  DOCKER_BUILD_SHIM_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
+  DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND,
+  DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND,
+  DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE,
+  DOCKER_BUILD_TRUST_WRAPPER_PATH,
+  DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
+  DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
+  DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
+  DOCKER_BUILD_TRUST_WRAPPER_SHA256,
+} from '../../../src/docker/docker-build-shim.js';
 
 export const WATCHDOG_TEMPLATE_PATH = resolve('config/docker-workload/resource-watchdog-policy.json');
 export const WATCHDOG_ENTRYPOINT_PATH = resolve('dist/docker-workload/resource-watchdog-supervisor-main.js');
@@ -44,6 +59,18 @@ const FROZEN_CLIENT_TOOLCHAIN = loadClientToolchainManifest(
 export const TEST_CLIENT_TOOLCHAIN_MANIFEST_PATH = FROZEN_CLIENT_TOOLCHAIN.path;
 
 let activeTestArtifact: AppleVmDockerWorkloadBootstrapConfig['artifact'] | undefined;
+let activeTestImages = new Map<string, string>();
+const TEST_CANARY_OUTPUT_IMAGE_ID = `sha256:${'c'.repeat(64)}`;
+
+/** Snapshot the fake daemon's image table so lifecycle tests can prove exact residue. */
+export function snapshotTestAppleVmDockerImages(): ReadonlyMap<string, string> {
+  return new Map(activeTestImages);
+}
+
+/** Seed one fake-daemon tag for fail-closed ownership tests. */
+export function setTestAppleVmDockerImageTag(reference: string, imageId: string): void {
+  activeTestImages.set(reference, imageId);
+}
 
 /** Isolated per-test lease view whose selected archive can be safely retired. */
 export function createTestAppleVmDockerWorkloadBootstrap(
@@ -70,6 +97,7 @@ export function createTestAppleVmDockerWorkloadBootstrap(
     archiveSha256: selected.archive.sha256,
     archiveSizeBytes: selected.archive.sizeBytes,
   };
+  activeTestImages = new Map([[logicalName, activeTestArtifact.dockerImageId]]);
   return {
     hostArtifactDirectory,
     guestArtifactDirectory: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
@@ -147,6 +175,61 @@ export const MANAGED_INNER_NETWORK_ID = '8'.repeat(64);
  * API-directory contract cannot leave this harness silently asserting the old one.
  */
 export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExecResult {
+  if (argv[0] === '/bin/sh' && argv[1] === '-c' && argv[2] === 'command -v docker') {
+    return { exitCode: 0, stdout: `${DOCKER_BUILD_SHIM_PATH}\n`, stderr: '' };
+  }
+  if (argv[0] === '/bin/sh' && argv[1] === '-c' && argv[2] === 'command -v runc') {
+    return { exitCode: 0, stdout: `${DOCKER_BUILD_TRUST_WRAPPER_PATH}\n`, stderr: '' };
+  }
+  if (argv[0] === '/usr/bin/sha256sum' && argv[1] === DOCKER_BUILD_TRUST_WRAPPER_PATH) {
+    return {
+      exitCode: 0,
+      stdout: `${DOCKER_BUILD_TRUST_WRAPPER_SHA256}  ${DOCKER_BUILD_TRUST_WRAPPER_PATH}\n`,
+      stderr: '',
+    };
+  }
+  if (argv[0] === '/usr/bin/stat' && argv[2] === DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY) {
+    return { exitCode: 0, stdout: 'directory:0:0:755\n', stderr: '' };
+  }
+  if (argv[0] === '/usr/bin/stat' && argv[2] === DOCKER_BUILD_TRUST_CONTRACT_PATH) {
+    return { exitCode: 0, stdout: 'regular file:1000:1000:444:1\n', stderr: '' };
+  }
+  if (argv[0] === '/usr/bin/sha256sum' && argv[1] === DOCKER_BUILD_TRUST_CONTRACT_PATH) {
+    return {
+      exitCode: 0,
+      stdout: `${'4'.repeat(64)}  ${DOCKER_BUILD_TRUST_CONTRACT_PATH}\n`,
+      stderr: '',
+    };
+  }
+  if (argv[0] === '/usr/bin/stat' && argv[2] === DOCKER_BUILD_TRUST_REAL_RUNC_PATH) {
+    return {
+      exitCode: 0,
+      stdout: `regular file:0:0:755:1:${DOCKER_BUILD_TRUST_REAL_RUNC_SIZE}\n`,
+      stderr: '',
+    };
+  }
+  if (argv[0] === '/usr/bin/sha256sum' && argv[1] === DOCKER_BUILD_TRUST_REAL_RUNC_PATH) {
+    return {
+      exitCode: 0,
+      stdout: `${DOCKER_BUILD_TRUST_REAL_RUNC_SHA256}  ${DOCKER_BUILD_TRUST_REAL_RUNC_PATH}\n`,
+      stderr: '',
+    };
+  }
+  if (argv[0] === DOCKER_BUILD_TRUST_WRAPPER_PATH && argv[1] === '--version') {
+    return { exitCode: 0, stdout: 'runc version 1.3.4\n', stderr: '' };
+  }
+  if (argv[0] === DOCKER_BUILD_TRUST_WRAPPER_PATH && argv[1] === DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND) {
+    return { exitCode: 0, stdout: '', stderr: '' };
+  }
+  if (argv[0] === DOCKER_BUILD_TRUST_WRAPPER_PATH && argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND) {
+    return { exitCode: 0, stdout: `${DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE}\n`, stderr: '' };
+  }
+  if (isBuildTrustCanaryBuildArgv(argv)) {
+    const tagIndex = argv.indexOf('--tag');
+    const outputTag = tagIndex === -1 ? undefined : argv[tagIndex + 1];
+    if (outputTag !== undefined) activeTestImages.set(outputTag, TEST_CANARY_OUTPUT_IMAGE_ID);
+    return { exitCode: 0, stdout: 'IRONCURTAIN_BUILD_TRUST_CANARY_OK/1\n', stderr: '' };
+  }
   if (argv.includes('network') && argv.includes('create')) {
     return { exitCode: 0, stdout: `${MANAGED_INNER_NETWORK_ID}\n`, stderr: '' };
   }
@@ -198,19 +281,54 @@ export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExec
   if (argv.includes('compose')) {
     return { exitCode: 0, stdout: `${FROZEN_CLIENT_TOOLCHAIN.manifest.composeVersion}\n`, stderr: '' };
   }
+  const imageIndex = argv.indexOf('image');
+  if (imageIndex !== -1 && argv[imageIndex + 1] === 'tag') {
+    const source = argv[imageIndex + 2];
+    const target = argv[imageIndex + 3];
+    const sourceId = activeTestImages.get(source) ?? source;
+    if (![...activeTestImages.values()].some((imageId) => imageId === sourceId)) {
+      return { exitCode: 1, stdout: '', stderr: `Error: No such image: ${source}` };
+    }
+    activeTestImages.set(target, sourceId);
+    return { exitCode: 0, stdout: '', stderr: '' };
+  }
+  if (imageIndex !== -1 && argv[imageIndex + 1] === 'rm') {
+    const reference = argv.at(-1);
+    if (reference === undefined) return { exitCode: 1, stdout: '', stderr: 'missing image reference' };
+    if (reference.startsWith('sha256:')) {
+      for (const [tag, imageId] of activeTestImages) {
+        if (imageId === reference) activeTestImages.delete(tag);
+      }
+    } else {
+      activeTestImages.delete(reference);
+    }
+    return { exitCode: 0, stdout: '', stderr: '' };
+  }
   if (argv.includes('image') && argv.includes('inspect')) {
-    const logicalName = argv.at(-1);
+    const reference = argv.at(-1);
     const artifact = activeTestArtifact;
-    if (artifact === undefined || artifact.logicalName !== logicalName) {
-      return { exitCode: 1, stdout: '', stderr: `No such image: ${logicalName}` };
+    const imageId =
+      reference === undefined
+        ? undefined
+        : (activeTestImages.get(reference) ??
+          ([...activeTestImages.values()].some((candidate) => candidate === reference) ? reference : undefined));
+    if (artifact === undefined || imageId === undefined) {
+      return { exitCode: 1, stdout: '', stderr: `Error: No such image: ${reference ?? ''}` };
+    }
+    if (argv.includes('--format')) {
+      return { exitCode: 0, stdout: `${imageId}\n`, stderr: '' };
     }
     return {
       exitCode: 0,
       stdout: JSON.stringify([
         {
-          Id: artifact.dockerImageId,
-          RepoTags: [artifact.logicalName],
-          Config: { Labels: { 'ironcurtain.build-hash': artifact.buildHash } },
+          Id: imageId,
+          RepoTags: [...activeTestImages.entries()]
+            .filter(([, candidate]) => candidate === imageId)
+            .map(([tag]) => tag),
+          Config: {
+            Labels: imageId === artifact.dockerImageId ? { 'ironcurtain.build-hash': artifact.buildHash } : {},
+          },
           Created: '2026-07-20T12:00:00.000Z',
         },
       ]),
@@ -223,11 +341,23 @@ export function respondHealthyAppleVmDaemon(argv: readonly string[]): DockerExec
   return { exitCode: 0, stdout: '', stderr: '' };
 }
 
+/** Exact pinned-client prefix for the trusted startup canary build. */
+export function isBuildTrustCanaryBuildArgv(argv: readonly string[]): boolean {
+  return (
+    argv[0] === `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker` &&
+    argv[1] === '--host' &&
+    argv[2] === APPLE_VM_DAEMON_DOCKER_HOST &&
+    argv[3] === 'build'
+  );
+}
+
 export interface EventRuntime {
   readonly runtime: ContainerRuntime;
   readonly events: string[];
   /** Every exec argv in order, kept out of `events` so lifecycle assertions stay stable. */
   readonly execs: (readonly string[])[];
+  /** Exact user override paired by index with {@link execs}. */
+  readonly execUsers: (string | null | undefined)[];
   readonly containers: DockerContainerInfo[];
   readonly networks: DockerNetworkInfo[];
   setLeasePath(path: string): void;
@@ -249,14 +379,16 @@ export function createEventRuntime(initial?: CreateEventRuntimeOptions): EventRu
   const networks: DockerNetworkInfo[] = structuredClone((initial?.networks ?? []) as DockerNetworkInfo[]);
   const events: string[] = [];
   const execs: (readonly string[])[] = [];
+  const execUsers: (string | null | undefined)[] = [];
   const respond = initial?.exec ?? respondHealthyAppleVmDaemon;
   let leasePath: string | undefined;
   let sequence = 0;
 
   const runtime: ContainerRuntime = {
     ...createMockDocker(),
-    async exec(_container: string, argv: readonly string[]) {
+    async exec(_container: string, argv: readonly string[], _timeoutMs, execUser) {
       execs.push([...argv]);
+      execUsers.push(execUser);
       return respond(argv);
     },
     async create(config: DockerContainerConfig) {
@@ -317,7 +449,7 @@ export function createEventRuntime(initial?: CreateEventRuntimeOptions): EventRu
       if (index !== -1) networks.splice(index, 1);
     },
   };
-  return { runtime, events, execs, containers, networks, setLeasePath: (path) => (leasePath = path) };
+  return { runtime, events, execs, execUsers, containers, networks, setLeasePath: (path) => (leasePath = path) };
 }
 
 export interface FakeSupervisorOptions {

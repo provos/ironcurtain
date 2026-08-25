@@ -70,7 +70,7 @@ export default tseslint.config(
   // the tsconfig.eslint project — lint them with the untyped ruleset rather
   // than skipping them entirely.
   {
-    files: ['src/**/*.mjs'],
+    files: ['src/**/*.mjs', 'docker/*.mjs'],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: {
       parserOptions: { project: null, projectService: false },

@@ -6,7 +6,7 @@
  * When a session enables `imageIngress: public-registry`, the nested daemon receives
  * proxy environment plus the session public CA and can reach only the fixed proxy
  * path — there is still no direct registry route. The outer MITM runs in
- * *registry-egress mode* (`MitmProxyOptions.registryEgress`): like build-egress, this
+ * *registry-egress mode* (`MitmProxyOptions.registryEgress`): this
  * listener has no LLM providers, package registries, or dynamic passthrough, so every
  * decrypted request is registry-originated by construction and is authorized against
  * the frozen `registry-egress-manifest.json` rather than an allowlist. In
@@ -95,8 +95,11 @@ export interface RegistryEgressLease {
 export interface RegistryEgressSessionLedger {
   readonly maxTotalBytes: number;
   readonly maxConcurrentRequests: number;
+  readonly attempts: number;
   readonly totalBytes: number;
   readonly activeRequests: number;
+  /** Count an inbound request before policy or transport can reject it. */
+  recordAttempt(): void;
   /** Reserve a concurrency slot; throws once the concurrency ceiling is reached. */
   acquire(): RegistryEgressLease;
   /** Would `additional` bytes still fit within the session total? (peek, no mutation) */
@@ -137,16 +140,23 @@ export interface CreateRegistryEgressGuardOptions {
 
 /** Build a per-session cumulative ledger from the manifest's session ceilings. */
 export function createRegistryEgressSessionLedger(limits: RegistryEgressSessionLimits): RegistryEgressSessionLedger {
+  let attempts = 0;
   let totalBytes = 0;
   let activeRequests = 0;
   return {
     maxTotalBytes: limits.maxTotalBytes,
     maxConcurrentRequests: limits.maxConcurrentRequests,
+    get attempts(): number {
+      return attempts;
+    },
     get totalBytes(): number {
       return totalBytes;
     },
     get activeRequests(): number {
       return activeRequests;
+    },
+    recordAttempt(): void {
+      attempts += 1;
     },
     acquire(): RegistryEgressLease {
       if (activeRequests >= limits.maxConcurrentRequests) {
@@ -255,6 +265,7 @@ export function handleRegistryEgressRequest(
   context: RegistryEgressForwardContext,
 ): void {
   clientReq.resume();
+  context.guard.session.recordAttempt();
 
   let authorized: AuthorizedRegistryEgressRequest;
   try {

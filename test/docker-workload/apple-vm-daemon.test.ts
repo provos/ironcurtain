@@ -17,10 +17,12 @@ import {
   APPLE_VM_DAEMON_SOCKET,
   APPLE_VM_DAEMON_START_ARGV,
   APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV,
+  APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV,
+  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
   APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE,
   APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
-  APPLE_VM_REGISTRY_EGRESS_SOCKET,
   APPLE_VM_DAEMON_TOOLCHAIN_DIR,
+  APPLE_VM_EGRESS_RELAY_PATH,
   bootstrapAppleVmDaemon,
   waitForAppleVmDaemonReady,
   type AppleVmDaemonExec,
@@ -147,12 +149,16 @@ describe('Apple VM nested-daemon frozen commands', () => {
   });
 
   it('enables only namespace-local forwarding before dockerd while retaining the isolation flags', () => {
-    for (const script of [APPLE_VM_DAEMON_START_ARGV[2], APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2]]) {
+    for (const script of [
+      APPLE_VM_DAEMON_START_ARGV[2],
+      APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2],
+      APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV[2],
+    ]) {
       const resolveIptables = script.indexOf('command -v iptables');
       const verifyIptables = script.indexOf('iptables --version');
       const setForwarding = script.indexOf('/usr/bin/printf "1" > /proc/sys/net/ipv4/ip_forward');
       const verifyForwarding = script.indexOf('$(/bin/cat /proc/sys/net/ipv4/ip_forward)');
-      const startDaemon = script.indexOf('exec dockerd');
+      const startDaemon = script.lastIndexOf('dockerd --host=');
       expect(resolveIptables).toBeGreaterThanOrEqual(0);
       expect(verifyIptables).toBeGreaterThan(resolveIptables);
       expect(setForwarding).toBeGreaterThan(verifyIptables);
@@ -169,17 +175,65 @@ describe('Apple VM nested-daemon frozen commands', () => {
     }
   });
 
-  it('keeps the public-registry variant separate and shell-parseable', () => {
+  it('keeps the images variant separate and shell-parseable', () => {
     const script = APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2];
-    expect(spawnSync('sh', ['-n', '-c', script], { encoding: 'utf8' })).toMatchObject({ status: 0, stderr: '' });
-    expect(script).toContain(`/usr/bin/socat TCP-LISTEN:18081,bind=127.0.0.1`);
-    expect(script).toContain(`UNIX-CONNECT:${APPLE_VM_REGISTRY_EGRESS_SOCKET}`);
+    expect(spawnSync('/bin/bash', ['-n', '-c', script], { encoding: 'utf8' })).toMatchObject({
+      status: 0,
+      stderr: '',
+    });
+    const relayPrefix = `/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/local/bin/node ${APPLE_VM_EGRESS_RELAY_PATH}`;
+    expect(script.split('\n').filter((line) => line === `${relayPrefix} serve images &`)).toHaveLength(1);
+    expect(script.split('\n').filter((line) => line.includes(`${relayPrefix} probe images`))).toHaveLength(1);
+    expect(script).not.toContain('serve packages');
+    expect(script).not.toContain('probe packages');
     expect(script).toContain(APPLE_VM_REGISTRY_EGRESS_PROXY_URL);
     expect(script).toContain(`SSL_CERT_FILE=${APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE}`);
-    expect(script).toContain('GET http://ironcurtain.invalid/__ironcurtain/health');
+    expect(script).not.toContain('/usr/bin/socat');
     expect(script).not.toContain('0.0.0.0');
-    expect(script).toContain("sh -c 'set -e\n");
+    expect(script).toContain("/bin/bash -c 'set -e\n");
     expect([...script.matchAll(/'/gu)]).toHaveLength(2);
+  });
+
+  it('serves both fixed package-profile listeners in one process while dockerd remains registry-only', () => {
+    const script = APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV[2];
+    expect(spawnSync('/bin/bash', ['-n', '-c', script], { encoding: 'utf8' })).toMatchObject({
+      status: 0,
+      stderr: '',
+    });
+    const relayPrefix = `/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/local/bin/node ${APPLE_VM_EGRESS_RELAY_PATH}`;
+    expect(script.split('\n').filter((line) => line === `${relayPrefix} serve packages &`)).toHaveLength(1);
+    expect(script.split('\n').filter((line) => line.includes(`${relayPrefix} probe packages`))).toHaveLength(1);
+    expect(script).not.toContain('serve images');
+    expect(script).not.toContain('probe images');
+    expect(script).toContain(APPLE_VM_REGISTRY_EGRESS_PROXY_URL);
+    expect(script).toContain(`export HTTP_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`);
+    expect(script).not.toContain(`export HTTP_PROXY=${APPLE_VM_PACKAGE_EGRESS_PROXY_URL}`);
+    expect(script).not.toContain('/usr/bin/socat');
+    expect(script).not.toContain('0.0.0.0');
+    expect([...script.matchAll(/'/gu)]).toHaveLength(2);
+  });
+
+  it('supervises relay and dockerd symmetrically with bounded termination and reap', () => {
+    for (const script of [
+      APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV[2],
+      APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV[2],
+    ]) {
+      const relayStart = script.indexOf(' serve ');
+      const relayReady = script.indexOf(' probe ');
+      const daemonStart = script.lastIndexOf('dockerd --host=');
+      const wait = script.indexOf('wait -n "$relay_pid" "$dockerd_pid"');
+      expect(relayStart).toBeGreaterThanOrEqual(0);
+      expect(relayReady).toBeGreaterThan(relayStart);
+      expect(daemonStart).toBeGreaterThan(relayReady);
+      expect(wait).toBeGreaterThan(daemonStart);
+      expect(script).toContain('trap cleanup EXIT INT TERM');
+      expect(script).toContain('while [ "$cleanup_attempt" -lt 100 ]');
+      expect(script).toContain('/bin/kill -9 "$dockerd_pid"');
+      expect(script).toContain('/bin/kill -9 "$relay_pid"');
+      expect(script).toContain('wait "$dockerd_pid" 2>/dev/null || true');
+      expect(script).toContain('wait "$relay_pid" 2>/dev/null || true');
+      expect(script).not.toContain('exec dockerd');
+    }
   });
 
   it('keeps /usr/bin ahead of the toolchain dir so the image-capped newuidmap wins', () => {
@@ -219,12 +273,21 @@ describe('Apple VM nested-daemon bootstrap', () => {
     ]);
   });
 
-  it('selects the public-registry bootstrap only when trusted options request it', async () => {
+  it('selects the registry bootstrap only for images network access', async () => {
     const { exec, calls } = recordingExec(healthyBootstrap);
-    await bootstrapAppleVmDaemon(exec, { registryEgress: true });
+    await bootstrapAppleVmDaemon(exec, { networkAccess: 'images' });
     expect(calls.map((call) => call.argv)).toEqual([
       [...APPLE_VM_DAEMON_API_DIR_STAT_ARGV],
       [...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV],
+    ]);
+  });
+
+  it('selects the dual-relay bootstrap only for packages network access', async () => {
+    const { exec, calls } = recordingExec(healthyBootstrap);
+    await bootstrapAppleVmDaemon(exec, { networkAccess: 'packages' });
+    expect(calls.map((call) => call.argv)).toEqual([
+      [...APPLE_VM_DAEMON_API_DIR_STAT_ARGV],
+      [...APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV],
     ]);
   });
 

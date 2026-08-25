@@ -15,6 +15,18 @@
   },
   "generation": "docker-rootless-29.2.1-mac-arm64-v1",
   "platform": "linux",
+  "realRunc": {
+    "path": "/usr/local/lib/ironcurtain-docker/bin/runc",
+    "sha256": "f0ed2d355945fe2697f11f89773e07b48de0ef239962c4a0e0ae900161a23b12",
+    "size": 16641104,
+    "uid": 0,
+    "gid": 0,
+    "mode": "0755",
+    "nlink": 1,
+    "version": "1.3.4",
+    "commit": "d6d73eb",
+    "specVersion": "1.2.1"
+  },
   "schemaVersion": 1,
   "source": {
     "daemonImage": "docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255",

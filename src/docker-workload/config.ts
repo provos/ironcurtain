@@ -5,6 +5,13 @@ import { computeHash } from '../hash.js';
 
 const LEGACY_DOCKER_WORKLOAD_BACKENDS = ['auto', 'docker', 'apple-container'] as const;
 
+export const DOCKER_WORKLOAD_NETWORK_ACCESS = ['offline', 'images', 'packages'] as const;
+export type DockerWorkloadNetworkAccess = (typeof DOCKER_WORKLOAD_NETWORK_ACCESS)[number];
+export const DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING =
+  'Packages permits any process in this nested-Docker session to send bounded workspace or build data through allowed package paths, permitted request metadata, and timing to fixed public repositories, and to download untrusted content. IronCurtain does not inject credentials and rejects recognized credential fields and request bodies. It screens the immediate peer, but a public repository may relay or hairpin elsewhere; use Images only or Offline to remove this route.';
+
+const STORED_DOCKER_WORKLOAD_NETWORK_ACCESS = [...DOCKER_WORKLOAD_NETWORK_ACCESS, 'public'] as const;
+
 const DOCKER_WORKLOAD_MEMORY_MIN_MB = 512;
 const DOCKER_WORKLOAD_MEMORY_MAX_MB = 1024 * 1024;
 const DOCKER_WORKLOAD_CPU_MIN = 0.25;
@@ -35,7 +42,7 @@ const legacyRequestedResourcesSchema = z
 /**
  * Existing configs may contain the old implementation-policy fields. Accept
  * only values equivalent to today's admitted developer slice, then transform
- * them away so every caller sees the canonical two-choice request. Legacy
+ * them away so every caller sees the canonical network-access request. Legacy
  * values that expressed unsupported intent fail with an actionable message
  * instead of being silently weakened.
  */
@@ -46,6 +53,7 @@ export const dockerWorkloadRequestedSchema = z
     backend: z.enum(LEGACY_DOCKER_WORKLOAD_BACKENDS).optional(),
     imageMode: z.literal('preloaded-catalog').optional(),
     imageIngress: z.enum(['preloaded-only', 'public-registry']).optional(),
+    networkAccess: z.enum(STORED_DOCKER_WORKLOAD_NETWORK_ACCESS).optional(),
     daemonState: z.literal('ephemeral').optional(),
     hostPortPublishing: z.literal(false).optional(),
     buildEgress: z.enum(['disabled', 'ironcurtain-dockerfiles']).optional(),
@@ -54,6 +62,14 @@ export const dockerWorkloadRequestedSchema = z
   })
   .strict()
   .superRefine((request, context) => {
+    if (request.imageIngress !== undefined && request.networkAccess !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['networkAccess'],
+        message:
+          'dockerWorkload.imageIngress and dockerWorkload.networkAccess cannot be combined; remove imageIngress and keep the explicit networkAccess choice',
+      });
+    }
     if (request.backend === 'docker') {
       context.addIssue({
         code: 'custom',
@@ -114,10 +130,21 @@ export const dockerWorkloadRequestedSchema = z
       });
     }
   })
-  .transform((request) => ({
-    ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
-    ...(request.imageIngress === undefined ? {} : { imageIngress: request.imageIngress }),
-  }));
+  .transform((request) => {
+    const networkAccess =
+      (request.networkAccess === 'public' ? 'packages' : request.networkAccess) ??
+      (request.imageIngress === 'public-registry'
+        ? 'images'
+        : request.imageIngress === 'preloaded-only'
+          ? 'offline'
+          : request.enabled === true
+            ? 'images'
+            : undefined);
+    return {
+      ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
+      ...(networkAccess === undefined ? {} : { networkAccess }),
+    };
+  });
 
 export type DockerWorkloadRequestedConfig = z.infer<typeof dockerWorkloadRequestedSchema>;
 
@@ -125,8 +152,7 @@ export type ResolvedDockerWorkloadConfig =
   | { readonly enabled: false }
   | {
       readonly enabled: true;
-      readonly imageIngress: 'preloaded-only' | 'public-registry';
-      readonly buildEgress: 'disabled' | 'ironcurtain-dockerfiles';
+      readonly networkAccess: DockerWorkloadNetworkAccess;
       readonly acceptObservedDiskRisk: boolean;
       readonly resources: {
         readonly memoryMb: number;
@@ -157,8 +183,7 @@ export function resolveDockerWorkloadConfig(
   );
   return {
     enabled: true,
-    imageIngress: validated.imageIngress ?? 'public-registry',
-    buildEgress: 'disabled',
+    networkAccess: validated.networkAccess ?? 'images',
     // The currently admitted Apple developer slice uses an observed-only
     // disk ceiling guarded by the host watchdog. Keep that implementation
     // detail out of the ordinary opt-in: `{ enabled: true }` must resolve to
@@ -184,9 +209,14 @@ function clampInheritedResourceDefault(value: number | undefined, min: number, m
 /** Concise user-visible status for Docker-agent entrypoints and session logs. */
 export function formatDockerWorkloadStatus(config: ResolvedDockerWorkloadConfig | undefined): string | undefined {
   if (config?.enabled !== true) return undefined;
-  const pulls =
-    config.imageIngress === 'public-registry' ? 'Docker Hub/GHCR via mediated proxy' : 'off (local images only)';
-  return `Nested Docker: enabled · pulls: ${pulls}`;
+  switch (config.networkAccess) {
+    case 'packages':
+      return 'Nested Docker: enabled · network: public packages + Docker Hub/GHCR (strict proxy)';
+    case 'images':
+      return 'Nested Docker: enabled · network: Docker Hub/GHCR images only';
+    case 'offline':
+      return 'Nested Docker: enabled · network: offline';
+  }
 }
 
 export function dockerWorkloadConfigHash(config: ResolvedDockerWorkloadConfig): string {
@@ -207,13 +237,12 @@ export function assertDockerWorkloadVariantAdmitted(
   if (config?.enabled !== true) return;
   const admitted =
     resolvedRuntimeKind === 'apple-container' &&
-    config.buildEgress === 'disabled' &&
     !config.resources.pids.required &&
     config.resources.diskMb === null &&
     config.acceptObservedDiskRisk;
   if (!admitted) {
     throw new Error(
-      'secure nested Docker currently admits only the Apple Container developer slice with mediated public pulls or local-only image ingress; no image, relay, daemon, or lease action was performed',
+      'secure nested Docker currently admits only the Apple Container developer slice with offline, mediated images-only, or fixed public package access; no image, relay, daemon, or lease action was performed',
     );
   }
 }

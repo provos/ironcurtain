@@ -58,6 +58,26 @@ working tree. The replacement public-registry product-entrypoint smoke passed on
 deterministic public/offline workflow gate passed on 2026-08-21. PTY has prior manual coverage and is not
 a completion blocker; rerun its narrow transport/composition gate only after PTY-specific changes or a
 reported regression.
+**Amendment (2026-08-22, governing package-network design):** the next Apple nested-Docker network slice
+is governed exclusively by
+[`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md). It supersedes the
+future current-Dockerfile hash/path manifest, TLS-MITM build-egress design, and the later generic-public
+opaque-CONNECT design everywhere below. The final contract has one `offline | images | packages` Network
+access control; conservatively migrates existing public-registry configurations to `images`; makes fresh
+settings enablement explicitly persist recommended `packages`; and grants bounded bundle-wide GET/HEAD
+authority only for fixed apt, npm, PyPI, and Cargo host/path grammars through a dedicated TLS-terminating
+MITM on UDS/`18082`. There is no product generic-public or opaque-CONNECT route. Superseded `public`
+narrows to `packages` only at the final admission gate. The generic route must be removed first, and new
+package modules remain unreachable until configuration, lifecycle, wrapper, residue, and live acceptance
+close atomically. The checked-in redacted
+[`CA-injection runc-PATH spike evidence`](./evidence/ca-injection-runc-path-spike.md) is feasibility
+evidence; its machine-readable full argv vector is the wrapper-test oracle, and it retains the raw
+`passed: false`/later-reconciliation split. It is not qualification. The startup canary loads the immutable
+selected image first, then uses exact `--pull=false --network=none --no-cache` and must leave registry and
+package ledgers unchanged. Every
+older public-network/build-egress statement below is historical and non-normative where it conflicts with
+the governing design. Package-network implementation and admission status are recorded in the governing
+design and handoff, never inferred from those historical sections.
 **Scope:** Docker-capable IronCurtain bundles on macOS Docker Desktop, macOS Apple `container`, and Linux Docker
 **Supersedes:** The broker-first design formerly in this file and the runtime recommendation in [`docs/brainstorm/ironcurtain-in-ironcurtain.md`](../brainstorm/ironcurtain-in-ironcurtain.md)
 
@@ -103,7 +123,9 @@ The earlier semantic broker is removed from the critical path. It may return lat
 - Run IronCurtain's real Docker integration tests from an IronCurtain session.
 - Exercise edited `DockerManager`, `docker-infrastructure.ts`, image build/load, network allocation, lifecycle, and integration behavior rather than a substitute runtime contract.
 - Launch a deliberately vulnerable target and one or more scanners on an inner-only Docker network.
-- Build hermetic workspace Dockerfiles offline from preloaded bases; rebuild current network-dependent IronCurtain Dockerfiles only through the frozen 0F narrow build-egress profile.
+- Build hermetic workspace Dockerfiles offline from preloaded bases today; after the governing package-
+  network slice passes its stop-gate and acceptance, build ordinary project Dockerfiles through fixed
+  public package repository grammars without presenting source identity as host authority.
 - Use normal Docker tooling, including Compose-compatible clients where their required images are staged.
 - Pull public workload images from reviewed registries by digest or tag through the mediated registry-egress path (§6.4) when the session enables `public-registry` ingress; infrastructure images are never pulled.
 - Keep the host runtime API and host credentials outside the untrusted bundle.
@@ -376,11 +398,14 @@ qualification.
 
 ### 6.3 Build-egress split
 
-Preloaded mode is offline except for 0F's narrow current-IronCurtain-Dockerfile profile, which fixes reviewed apt/npm/GitHub/toolchain origins through the outer MITM and rejects all client-selected targets. Phase 4 may later add generic reviewed workload/package destinations. Neither mode is a generic TCP relay, and no credential is injected into Dockerfile arguments, build secrets, environment, or layers.
+This section records retired design history. The current-Dockerfile source/hash profile and its listener
+are deleted. The governing package-network design permits only fixed apt, npm, PyPI, and Cargo GET/HEAD
+grammars in `packages`; `offline` and `images` have no package listener. It explicitly does not provide
+generic public HTTP, opaque CONNECT, or a build-only identity claim.
 
 ### 6.4 Workload-image registry egress (promoted from Phase 3)
 
-Agent, base, daemon, helper, in-VM `socat`, and workload images are all **untrusted bundle code**. The
+Agent, base, daemon, helper, the in-VM fixed-profile byte relay, and workload images are all **untrusted bundle code**. The
 bundle can already execute arbitrary workspace code, become root inside its disposable Apple VM, replace
 bundle-local executables, build/import arbitrary images, and call every fixed endpoint deliberately
 mounted into its authority domain. Pinning those bytes cannot reduce the host authority granted to the
@@ -392,7 +417,7 @@ A service image is trusted only when the host gives it authority that ordinary b
 The future Docker Desktop fixed relay is the present design example: it alone attaches to the uplink
 network, so arbitrary relay-image substitution would break G3. That relay uses a dedicated reviewed
 digest and fixed configuration, independent of any bundle-image qualification catalog. The current Apple
-loopback `socat` relay is not such an exception: the colluding bundle can already use the exact mounted
+loopback relay is not such an exception: the colluding bundle can already use the exact mounted
 registry UDS, while the host listener and its policy remain authoritative.
 
 When `imageIngress: public-registry` is enabled, the nested daemon receives proxy environment plus the session public CA and reaches only the fixed proxy path; there is still no direct registry route. The outer MITM adds a registry-aware handler frozen by `registry-egress-manifest.json`:
@@ -793,14 +818,13 @@ revocation, and two-inventory cleanup. The deterministic Compose target/scanner 
 required compatibility gate. Historical all-role catalog publication and generation locks were useful
 qualification experiments but are retired; they neither admit sessions nor define bundle trust.
 
-The future current-Dockerfile build-egress path remains separately specified and tested. Its frozen
-manifest binds reviewed Dockerfile hashes to exact seams, destinations, methods, path/query shapes,
-finite redirect graphs, credential-free headers, and byte/time ceilings. Cold-cache capture observed
-13 endpoints with zero unmediated fetches, and the offline gate scored 34/34 across positive and
-negative cases. This evidence preserves the capture/result for later wiring; it does not claim the
-build-egress variant is admitted. Dockerfile `RUN` fetches use this path, while daemon `FROM` pulls
-belong to registry egress because they bypass build arguments and require Docker's bearer-token flow.
-The production proxy/BuildKit wiring remains a future backend item.
+The historical current-Dockerfile capture observed 13 endpoints and its offline gate scored 34/34. That
+result remains useful falsification history, but its Dockerfile hashes, paths, seams, and TLS-MITM manifest
+are superseded and are not future session authority. The governing
+[`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md) design instead
+requires a live BuildKit stop-gate followed by a dedicated bounded, TLS-terminating package MITM for fixed
+apt, npm, PyPI, and Cargo GET/HEAD grammars. Daemon `FROM` pulls remain separate registry egress because
+they use Docker's bearer-token flow.
 A workload-registry policy/proxy seam and default-on mediated ingress for enabled Docker workloads
 have landed. The Apple production lifecycle constructs its per-bundle listener, mounts only that exact
 socket, and starts a fixed loopback relay inside rootlesskit's network namespace for dockerd. The seam
@@ -879,14 +903,23 @@ per-session artifact stable through activation. Tests must induce tag/cache muta
 and prove either consistent outer/inner identity or clean pre-release failure. A global frozen catalog,
 manual refreeze, and `imageMode` choice are not production prerequisites.
 
-Current IronCurtain Dockerfiles use apt/curl/npm and other online fetches; a warm cache is not offline proof. Local-only mode supports source/tests and explicitly hermetic Dockerfiles only. 0F freezes `build-egress-manifest.json` solely for current checked-in IronCurtain Dockerfiles. Each rule fixes scheme/host/port, methods/paths, redirect closure and hop limit, DNS/address policy, allowed/stripped headers, byte/time limits, and the BuildKit/frontend/worker/build/RUN seam where it applies. Reviewed apt/npm/GitHub/toolchain origins traverse the outer MITM; arbitrary client targets, credentials, and layer secrets are forbidden. Cold-cache/direct-connect traps prove all fetches are mediated; image history/config/layers are scanned for proxy credentials. The result is network-mediated and recorded, not reproducible unless every fetched artifact is also pinned. Disabled narrow egress fails fast; generic workload/package egress remains Phase 4.
+Current IronCurtain Dockerfiles use apt/curl/npm and other online fetches; a warm cache is not offline
+proof. The current admitted local-only behavior supports source/tests and explicitly hermetic Dockerfiles.
+The next slice is the separately reviewed three-state package-network design: `offline`, registry-only
+`images`, and bounded bundle-wide `packages`. Package mode terminates TLS and admits only fixed public
+repository GET/HEAD grammars. A hostile bundle can exfiltrate bounded workspace/build data through allowed
+paths, canonicalized metadata, and timing, so this is not a build-only or no-exfiltration claim. Its exact
+address policy, limits, CA/runc seam, lifecycle, migration, stop-gate, and deterministic acceptance are
+normative in [`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md). The
+old current-Dockerfile and generic-public listener stacks are removed before package modules can become
+reachable; Git history retains the experiments.
 
 **0F exit:** foundations pass hermetic tests; backend release commands, selected-artifact transport,
 authority-bearing relay digest/config, and effective profile are reviewed; the
 workload-registry manifest is frozen and its hermetic protocol/negative fixtures pass; the runner rejects
 skip/pending/todo/zero/missing-suite cases; resolve-once transport and compatibility preflight fail
-cleanly on mismatch; watchdog loss fails closed; offline Compose and narrowly scoped current-Dockerfile
-rebuild fixtures pass their respective modes.
+cleanly on mismatch; watchdog loss fails closed; offline Compose passes, and the package-network slice
+passes its independent stop-gate and packages/images/offline fixtures before it is admitted.
 
 ### 9.6 Phase 0C — backend qualification and repository gates
 
@@ -910,7 +943,7 @@ npx vitest run test/pty-entrypoint.integration.test.ts test/skills-end-to-end.in
 
 The 0F runner—not visual console inspection—requires every backend-suite file to run and rejects every
 reporter-visible skip/pending/todo result while recording the actual results. Then run `npm run format:check`, `npm run lint`, `npm run check:cycles`, `npm run build`,
-and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the resolve-once selected-agent transport and archive verifier, narrow current-Dockerfile build-egress profile, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus direct-CDN selection, unlisted-registry, credentialed-endpoint, redirect-to-private-address, redirect credential-leakage, hop/byte/time/concurrency ceiling, and non-pull negatives, run only in its dedicated gates), watchdog, cgroup ancestry, independently pinned DD relay, and the watchdog's state-growth ceilings.
+and `npm test`; skips from the broad suite are inventory only. Add a controlled end-to-end fixture that starts inner IronCurtain's normal Docker runtime against the private daemon, creates one batch child, exercises a hermetic two-MITM fixture, writes under `/workspace`, and cleans up without a paid live provider call. 0C also qualifies the resolve-once selected-agent transport and archive verifier, the separately gated package-network design when implemented, the workload-registry egress path (live pull-by-digest and tag-resolution positives plus direct-CDN selection, unlisted-registry, credentialed-endpoint, redirect-to-private-address, redirect credential-leakage, hop/byte/time/concurrency ceiling, and non-pull negatives, run only in its dedicated gates), watchdog, cgroup ancestry, independently pinned DD relay, and the watchdog's state-growth ceilings.
 
 The target/scanner acceptance fixture is mandatory even if no existing test covers it.
 
@@ -1000,11 +1033,16 @@ Anonymous public pulls are §6.4 scope. Phase 3 adds policy-controlled credentia
 
 **Exit:** digest/provenance and credential tests pass; malicious archives remain untrusted bundle data; direct registry access and secret injection remain absent.
 
-### Phase 4 — Generic proxy-only workload/package egress
+### Phase 4 — Fixed package-network authority
 
-If needed, expose an HTTP-only fixed gateway to reviewed destinations. Add redirect, DNS-rebinding, CONNECT, protocol-smuggling, metadata/LAN, response-limit, and cancellation tests.
+Implement only the package-only authority in the governing design. Remove the generic-public route first;
+keep new package proxy, CA, wrapper, and shim modules unreachable until the final atomic integration gate.
+Admit fixed apt/npm/PyPI/Cargo GET/HEAD grammars only after redirect, address, request-smuggling,
+credential-field, derived-request, residue, lifecycle, and live-client gates pass.
 
-**Exit:** approved builds succeed without credentials in layers; arbitrary TCP/direct routes fail from every egress location. This phase is not required for offline Docker compatibility.
+**Exit:** supported ordinary builds succeed with no IronCurtain-provisioned credential; recognized
+credential fields/bodies, arbitrary destinations, opaque TCP, and direct routes fail. Bounded exfiltration
+through admitted paths, canonicalized request metadata, and timing remains an explicit nonclaim.
 
 ### Deferred capabilities
 
@@ -1038,19 +1076,27 @@ Each requires its own threat model and gates.
   tooling and transport consistency, not bundle trust.
 - `src/docker-workload/resource-watchdog.ts` — host-only observed-disk/state measurement, reserve thresholds, revocation, and overshoot evidence.
 - `src/docker-workload/desktop-relay.ts` — fixed-target hardened DD-PROXY relay lifecycle/config/health evidence.
-- `src/docker-workload/build-egress-policy.ts` — frozen current-Dockerfile manifest resolution across BuildKit/frontend/worker/build/RUN seams.
+- `src/docker-workload/build-egress-policy.ts` and `src/docker/build-egress-proxy.ts` — deleted obsolete
+  current-Dockerfile source/path policy and TLS-MITM listener seam; Git history retains the experiment.
 - `src/docker/registry-egress-policy.ts` — frozen workload-registry manifest resolution and pull-protocol authorization for the outer MITM registry path (§6.4).
-- `src/docker/outbound-transport.ts` — destination-bound parent-proxy transport shared by MITM and registry/package paths.
-- `src/docker/mediated-egress.ts` — the single credential-free forwarder (backpressured streaming, per-request byte/time ceilings, optional session ledger and internal redirect-following, fail-closed rejection) used by both egress proxies; deliberately separate from the credential-injecting provider path.
-- `src/docker/egress-forwarding.ts` — shared request/response shaping (`buildRequestUrl`/`toOutgoingHeaders`/`sanitizeResponseHeaders`) for both egress proxies.
+- `src/docker/outbound-transport.ts` — destination-bound parent-proxy transport shared by provider,
+  registry, and the future package-only MITM path.
+- `src/docker/mediated-egress.ts` — the registry credential-free forwarder (backpressured streaming,
+  per-request byte/time ceilings, session ledger, internal redirect-following, fail-closed rejection),
+  deliberately separate from the credential-injecting provider path.
+- `src/docker/egress-forwarding.ts` — independently tested registry request/response shaping
+  (`buildRequestUrl`/`toOutgoingHeaders`/`sanitizeResponseHeaders`).
 - [`docker/nested-daemon/`](../../docker/nested-daemon/) — purpose-built rootless daemon source retained
   for the future Docker Desktop/Linux sidecar topology. It clears inherited volumes/ports and pins the
   offline network mode, private UDS runtime, identity, and toolchain; it is not used by current Apple
   production admission.
-- [`scripts/spikes/secure-nested-docker/`](../../scripts/spikes/secure-nested-docker/) — retained Docker Desktop stop-gate replay tools, build-egress capture, and public-registry live gate. The superseded 0A fake harness and completed Apple exploratory executors are retired; the directory README records the deletion/retention rationale and exact future commands.
+- [`scripts/spikes/secure-nested-docker/`](../../scripts/spikes/secure-nested-docker/) — retained Docker
+  Desktop stop-gate replay tools and public-registry live gate. The obsolete build-egress capture tool and
+  instructions are deleted; Git history is the record.
 - `scripts/qualify-backend.ts` and package release commands — current-tree backend suites with zero-skip enforcement and optional generated diagnostic reports; no frozen contract or commit binding.
 - `config/docker-workload/profile-ceiling.json` — exact reviewed P2/P3/P4 ceiling; generated profiles may select subsets only.
-- `config/docker-workload/build-egress-manifest.json` — current-Dockerfile-only destination and BuildKit-seam authorization.
+- `config/docker-workload/build-egress-manifest.json` — deleted obsolete current-Dockerfile-only artifact;
+  it is not packaged or available as admission authority.
 - `config/docker-workload/registry-egress-manifest.json` — reviewed public-registry origins, pull-protocol rules, and ceilings for workload-image pulls.
 - `test/docker-workload/` — boundary, target/scanner, fault, feature-off, and platform acceptance tests.
 - `src/hardened-fs.ts` and `src/zod-helpers.ts` — shared TCB leaves for hardened host-file reads, immutable-JSON load, atomic stable-JSON writes, and canonical-path guards (`hardened-fs`), plus header/identifier and duplicate-detection schema fragments (`zod-helpers`).
@@ -1065,7 +1111,7 @@ Names are provisional; module ownership and security boundaries are normative.
 - [`src/docker/types.ts`](../../src/docker/types.ts) and `parseDockerImageInfo` in [`src/docker/docker-manager.ts`](../../src/docker/docker-manager.ts) — retain normalized image inspection for per-session transport consistency and qualification provenance; image observations are not host authority. Also add trusted outer resource fields and effective profile/mount references with safe defaults.
 - [`src/docker/network-topology.ts`](../../src/docker/network-topology.ts) — add DD-STRICT and Engine-28-preflighted DD-PROXY isolated-v4/v6 topology plus Apple relay capability evidence.
 - [`src/docker/apple-container-manager.ts`](../../src/docker/apple-container-manager.ts) — VM resource, init, lifecycle, and inspection support.
-- [`src/docker/mitm-proxy.ts`](../../src/docker/mitm-proxy.ts) and [`src/docker/registry-proxy.ts`](../../src/docker/registry-proxy.ts) — use destination-bound outbound transport; the MITM resolves a single internal `ListenerMode` for its build-egress/registry-egress listener modes.
+- [`src/docker/mitm-proxy.ts`](../../src/docker/mitm-proxy.ts) and [`src/docker/registry-proxy.ts`](../../src/docker/registry-proxy.ts) — retain provider and registry destination-bound transport. The obsolete build-egress MITM and generic-public opaque-CONNECT modes are not package authority. The governing design requires a separate fixed-repository, TLS-terminating package listener that remains unreachable until its final gate.
 - [`src/docker/docker-resource-lifecycle.ts`](../../src/docker/docker-resource-lifecycle.ts) — own/reconcile only authoritative outer objects; do not import inner inventory.
 - [`src/config/user-config.ts`](../../src/config/user-config.ts) and [`src/config/types.ts`](../../src/config/types.ts) — schema, safe defaults, opt-in resource/image/tier policy, and resolved configuration.
 - `src/config/config-command.ts`, start CLI parsing/help, and web launch request/validation — expose the same explicit session-creation capability without allowing raw outer arguments.
@@ -1171,8 +1217,10 @@ Rollout order is developer-only explicit opt-in, evidence-gated Mac backend prev
 5. Bundle images are untrusted. Production resolves and transports the selected current agent once;
    qualification may separately pin manifests for repeatability. Workload images may additionally use
    §6.4 public-registry egress without IronCurtain-provided registry credentials. Configured credentials
-   and private registries remain Phase 3. Hermetic builds are offline; only current IronCurtain
-   Dockerfiles get 0F's narrow fixed-destination build egress. Generic non-registry egress is Phase 4.
+   and private registries remain Phase 3. Hermetic builds are offline. The next Apple slice may grant the
+   whole bundle bounded fixed-repository GET/HEAD authority under the explicit `packages` mode and
+   nonclaims in [`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md);
+   Dockerfile identity is not authority.
 6. No host port publication in the base capability.
 7. One total resource budget plus fixed trusted-infrastructure reserves is preferred over an agent-selected split.
 8. Docker Desktop/Linux outer privilege and host runtime sockets remain prohibited.
@@ -1209,8 +1257,10 @@ decisions explain the current plan; superseded implementation diaries remain ava
   authorization applies to origins, operations, redirects, credentials, SSRF boundaries, and transfer
   ceilings. Exact derived CDN redirects are request-scoped and never become a reusable allowlist.
   Registry references and digests are provenance, not bundle-code attestation.
-- Dockerfile `RUN` fetches and daemon `FROM` pulls are different seams. Future build egress uses the
-  reviewed current-Dockerfile manifest; `FROM` pulls use registry egress and its bearer-token flow.
+- Dockerfile `RUN` fetches and daemon `FROM` pulls are different seams. Future package `RUN` traffic uses
+  the dedicated TLS-terminating fixed-repository package MITM and grants bounded bundle-wide package
+  authority; `FROM` pulls remain on registry egress and its bearer-token flow. The superseded generic-
+  public opaque-CONNECT experiment is not a product path.
 - Shared hardened filesystem, hashing, schema, request shaping, and credential-free mediated-egress
   primitives replaced duplicated implementations. Provider forwarding remains separate because it
   injects real credentials.

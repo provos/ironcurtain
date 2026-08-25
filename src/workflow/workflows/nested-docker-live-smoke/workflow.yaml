@@ -11,9 +11,9 @@ settings:
 states:
   probe:
     type: deterministic
-    description: Exercise nested Docker using the requested public or offline mode.
+    description: Exercise nested Docker using the requested packages, images, offline, or admission-check mode.
     container: true
-    timeoutMs: 900000
+    timeoutMs: 4320000
     resultFile: .workflow/nested-docker-result.json
     run:
       - ['python3', '/workflow-scripts/nested_docker_probe.py']

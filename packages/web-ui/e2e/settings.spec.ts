@@ -27,15 +27,18 @@ test.describe('Settings — Model Providers', () => {
     await expect(page.getByTestId('default-badge-glm-5.2')).toBeVisible();
   });
 
-  test('enables nested Docker with mediated public image pulls by default', async ({ page }) => {
+  test('enables nested Docker with recommended package access by default', async ({ page }) => {
     await navigateTo(page, 'Settings');
     await expect(page.getByRole('heading', { name: 'Runtime', exact: true })).toBeVisible({ timeout: 10_000 });
 
     const enabled = page.getByTestId('docker-workload-enabled');
-    const publicPulls = page.getByTestId('docker-workload-public-registry');
+    const networkAccess = page.getByTestId('docker-workload-network-access');
     await expect(enabled).not.toBeChecked();
-    await expect(publicPulls).toBeChecked();
-    await expect(publicPulls).toBeDisabled();
+    await expect(networkAccess).toHaveValue('packages');
+    await expect(networkAccess).toBeDisabled();
+    await expect(page.getByTestId('docker-workload-package-warning')).toContainText(
+      'send bounded workspace or build data through allowed package paths',
+    );
 
     await enabled.check();
     await page.getByTestId('save-runtime-settings').click();
@@ -45,7 +48,7 @@ test.describe('Settings — Model Providers', () => {
     await connectWithToken(page);
     await navigateTo(page, 'Settings');
     await expect(page.getByTestId('docker-workload-enabled')).toBeChecked();
-    await expect(page.getByTestId('docker-workload-public-registry')).toBeChecked();
+    await expect(page.getByTestId('docker-workload-network-access')).toHaveValue('packages');
   });
 
   test('edits a profile and saves; the masked key round-trips without clobbering', async ({ page }) => {

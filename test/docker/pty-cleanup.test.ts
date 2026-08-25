@@ -47,9 +47,20 @@ vi.mock('../../src/docker/claude-md-seed.js', () => ({ buildDockerClaudeMd: () =
 
 vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: async () => state.infrastructure,
+  activateAppleVmDockerWorkload: vi.fn(),
   buildAgentUidRemap: () => ({}),
   buildUdsSocketMounts: () => [],
-  buildDockerWorkloadRegistryEgressMount: () => [],
+  buildDockerWorkloadEgressMounts: () => [],
+  dockerWorkloadEgressNetworkAccess: () => 'offline',
+  stopDockerWorkloadEgress: async (egress?: {
+    registry?: { listener: { stop(): Promise<void> } };
+    packages?: { listener: { stop(): Promise<void> } };
+  }) => {
+    await Promise.allSettled([
+      ...(egress?.packages ? [egress.packages.listener.stop()] : []),
+      ...(egress?.registry ? [egress.registry.listener.stop()] : []),
+    ]);
+  },
   createLedgeredAgentContainer: vi.fn(),
   dockerWorkloadSessionMetadata: vi.fn(() => ({
     leaseId: 'lease-1',
@@ -97,6 +108,7 @@ describe('PTY early-initialization cleanup ownership', () => {
     const proxyStop = vi.fn(async () => {});
     const mitmStop = vi.fn(async () => {});
     const registryStop = vi.fn(async () => {});
+    const packageStop = vi.fn(async () => {});
     const docker = {};
     const dockerWorkload = { teardown };
     state.infrastructure = {
@@ -104,7 +116,11 @@ describe('PTY early-initialization cleanup ownership', () => {
       dockerWorkload,
       proxy: { stop: proxyStop },
       mitmProxy: { stop: mitmStop },
-      dockerWorkloadRegistryEgress: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock' },
+      dockerWorkloadEgress: {
+        networkAccess: 'packages',
+        registry: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock' },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock' },
+      },
       useTcp: false,
       runtimeKind: 'apple-container',
       setTokenSessionId: () => {},
@@ -131,6 +147,7 @@ describe('PTY early-initialization cleanup ownership', () => {
     expect(mitmStop).toHaveBeenCalledOnce();
     expect(proxyStop).toHaveBeenCalledOnce();
     expect(registryStop).toHaveBeenCalledOnce();
+    expect(packageStop).toHaveBeenCalledOnce();
     expect(state.removeBundleRuntimeRoot).toHaveBeenCalledOnce();
     expect(state.updateSessionMetadata).toHaveBeenCalledWith(
       expect.any(String),

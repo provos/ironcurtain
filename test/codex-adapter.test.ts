@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -52,19 +52,31 @@ describe('CodexAdapter', () => {
       const capturedArgsPath = join(tempDir, 'captured-args');
       const substitutionSentinel = join(tempDir, 'substitution-ran');
       const backtickSentinel = join(tempDir, 'backtick-ran');
-      writeFileSync(scriptPath, startScript!.content, { mode: 0o755 });
+      const workspaceDir = join(tempDir, 'workspace');
+      mkdirSync(workspaceDir);
+      const executableScript = startScript!.content.replace(
+        '\ncd /workspace\n',
+        '\ncd "$IRONCURTAIN_TEST_WORKSPACE"\n',
+      );
+      expect(executableScript).not.toBe(startScript!.content);
+      // The container-only working-directory step is the sole test-local
+      // substitution. The Codex argv remains the exact generated production
+      // argv, including its `--cd /workspace` argument.
+      writeFileSync(scriptPath, executableScript, { mode: 0o755 });
       writeFileSync(
         fakeCodexPath,
-        `#!/bin/bash
-: > "$CAPTURE_FILE"
-for arg in "$@"; do
-  printf '%s\\0' "$arg" >> "$CAPTURE_FILE"
-done
+        `#!/usr/bin/env node
+const { writeFileSync } = require('node:fs');
+writeFileSync(process.env.CAPTURE_FILE, JSON.stringify(process.argv.slice(2)));
 `,
         { mode: 0o755 },
       );
-
+      const packagePrompt = adapter.buildSystemPrompt({
+        ...sampleContext,
+        nestedDocker: { networkName: 'ironcurtain', networkAccess: 'packages' },
+      });
       const prompt = [
+        packagePrompt,
         'Nested Docker says "quoted".',
         `Do not run: $(touch "${substitutionSentinel}")`,
         `Nor this: \`touch "${backtickSentinel}"\``,
@@ -77,22 +89,32 @@ done
           CAPTURE_FILE: capturedArgsPath,
           IRONCURTAIN_MODEL: '',
           IRONCURTAIN_SYSTEM_PROMPT: prompt,
+          IRONCURTAIN_TEST_WORKSPACE: workspaceDir,
           PATH: `${tempDir}:${process.env.PATH ?? ''}`,
         },
+        // The full suite intentionally runs several CPU-heavy integration
+        // workers in parallel. Give the two short Node launches enough room
+        // to be scheduled while still bounding a genuinely stuck wrapper.
+        timeout: 20_000,
       });
 
-      expect(result.status, result.stderr).toBe(0);
-      const capturedArgs = readFileSync(capturedArgsPath).toString('utf8').split('\0').slice(0, -1);
+      expect(
+        result.status,
+        `${result.stderr}\ncaptured=${existsSync(capturedArgsPath)} error=${result.error?.message ?? 'none'}`,
+      ).toBe(0);
+      const capturedArgs = JSON.parse(readFileSync(capturedArgsPath, 'utf8')) as string[];
       const configIndex = capturedArgs.indexOf('-c');
       expect(configIndex).toBeGreaterThanOrEqual(0);
       expect(capturedArgs.filter((arg) => arg === '-c')).toHaveLength(1);
       expect(capturedArgs[configIndex + 1]).toBe(`developer_instructions=${JSON.stringify(prompt)}`);
+      expect(prompt).toContain('Dockerfile `RUN` steps');
+      expect(prompt).toContain('bundle-wide authority');
       expect(existsSync(substitutionSentinel)).toBe(false);
       expect(existsSync(backtickSentinel)).toBe(false);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('builds a non-interactive codex exec command with approvals disabled', () => {
     const cmd = adapter.buildCommand('say hi', 'system prompt', {
@@ -142,14 +164,21 @@ done
   it('includes managed-network guidance only for admitted nested Docker', () => {
     const prompt = adapter.buildSystemPrompt({
       ...sampleContext,
-      nestedDocker: { networkName: 'ironcurtain' },
+      nestedDocker: { networkName: 'ironcurtain', networkAccess: 'packages' },
     });
 
     expect(prompt).toContain('### Nested Docker');
     expect(prompt).toContain('--network "$IRONCURTAIN_DOCKER_NETWORK"');
     expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
-    expect(prompt).toContain('`--network host`');
-    expect(prompt).toContain('supported service topology, not a security boundary');
+    expect(prompt).toContain('`docker run --network host`');
+    expect(prompt).toContain('supported service topology');
+    expect(prompt).toContain('security boundary');
+    expect(prompt).toContain('`docker build ...`');
+    expect(prompt).toContain('Compose can build implicitly');
+    expect(prompt).toContain('`docker compose up --no-build`');
+    expect(prompt).toContain('--network=none');
+    expect(prompt).toContain('npm, PyPI/pip, Debian apt, and Cargo');
+    expect(prompt).toContain('public repository may relay or hairpin');
   });
 
   it('returns Codex ChatGPT OAuth providers', () => {

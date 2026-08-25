@@ -684,7 +684,7 @@ export function loadUserConfig(options?: { readOnly?: boolean }): ResolvedUserCo
 /**
  * Read the validated requested nested-Docker block without applying defaults,
  * backfilling, environment overrides, or creating the config file. Settings
- * surfaces use this to preserve an explicit offline preference while the
+ * surfaces use this to preserve an explicit network preference while the
  * resolved disabled value remains authority-free `{ enabled: false }`.
  */
 export function loadRequestedDockerWorkloadConfig(): DockerWorkloadRequestedConfig | undefined {
@@ -696,7 +696,7 @@ export function loadRequestedDockerWorkloadConfig(): DockerWorkloadRequestedConf
 }
 
 /**
- * Persist the canonical two-choice nested-Docker request after a successful
+ * Persist the canonical three-state nested-Docker request after a successful
  * normal load. Read-only loads deliberately skip this helper. Validation runs
  * first, so unsupported legacy intent is reported instead of rewritten.
  */
@@ -1291,7 +1291,7 @@ export function saveUserConfig(changes: UserConfig): void {
 
   // `dockerWorkloadRequestedSchema` accepts the previously documented
   // implementation-policy fields only as a compatibility input and transforms
-  // them to the canonical two-choice request. Persist that transformed block
+  // them to the canonical network-access request. Persist that transformed block
   // so the next successful save completes the migration without rewriting or
   // stripping unrelated top-level configuration.
   const normalized = { ...merged };

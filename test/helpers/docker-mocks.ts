@@ -277,7 +277,13 @@ export function createMockCA(tempDir: string): CertificateAuthority {
   const keyPath = join(tempDir, 'mock-ca-key.pem');
   writeFileSync(certPath, certPem);
   writeFileSync(keyPath, keyPem);
-  return { certPem, keyPem, certPath, keyPath };
+  return {
+    generation: 'gen-00000000-0000-4000-8000-000000000000',
+    certPem,
+    keyPem,
+    certPath,
+    keyPath,
+  };
 }
 
 /** Deterministic public-trust metadata for infrastructure shape tests. */

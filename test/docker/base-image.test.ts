@@ -8,6 +8,7 @@ const nestedDaemonDockerfile = readFileSync(resolve('docker/nested-daemon/Docker
 const DOCKER_TOOLCHAIN_DIGEST = 'sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255';
 const TOOLCHAIN_BIN_DIR = '/usr/local/lib/ironcurtain-docker/bin';
 const CLI_PLUGIN_DIR = '/usr/local/libexec/docker/cli-plugins';
+const APPLE_VM_RELAY_PATH = '/usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs';
 
 /** Every `FROM` reference, in file order. */
 function fromReferences(): readonly string[] {
@@ -67,6 +68,7 @@ describe('arm64 agent base image inputs', () => {
 describe('arm64 agent base image rootless prerequisites', () => {
   it('installs the rootlesskit and embedded-DNS prerequisites in one apt layer', () => {
     expect(dockerfile).toMatch(/^\s+uidmap iproute2 iptables libcap2-bin \\$/mu);
+    expect(dockerfile).toMatch(/^\s+git git-lfs sudo socat libnss-myhostname ca-certificates curl \\$/mu);
     // One apt layer, one cleanup: no second unpinned package source.
     expect(dockerfile).toMatch(
       /apt-get install -y --no-install-recommends[\s\S]*?uidmap iproute2 iptables libcap2-bin/u,
@@ -107,12 +109,13 @@ describe('arm64 agent base image rootless prerequisites', () => {
 });
 
 describe('arm64 agent base image Docker toolchain layer', () => {
-  it('copies the toolchain verbatim from the pinned stage and nothing else', () => {
+  it('copies only the pinned toolchain and checked-in relay asset', () => {
     // Pins EVERY copy, not just the `--from=` ones: a plain `COPY ./x /` would
     // otherwise be invisible to this file's assertions.
     expect(copyInstructions()).toEqual([
       `COPY --from=docker-toolchain --chown=root:root /usr/local/bin/ ${TOOLCHAIN_BIN_DIR}/`,
       `COPY --from=docker-toolchain --chown=root:root ${CLI_PLUGIN_DIR}/ ${CLI_PLUGIN_DIR}/`,
+      `COPY --chown=root:root --chmod=0444 apple-vm-egress-relay.mjs ${APPLE_VM_RELAY_PATH}`,
     ]);
   });
 
@@ -121,6 +124,14 @@ describe('arm64 agent base image Docker toolchain layer', () => {
     // Linux host that remaps the agent to uid 1001 would otherwise hand the
     // runtime user ownership of shipped toolchain binaries.
     for (const copy of copyInstructions()) expect(copy).toContain('--chown=root:root');
+  });
+
+  it('bakes and version-checks the immutable Apple VM relay with pinned Node', () => {
+    expect(dockerfile).toContain(
+      `COPY --chown=root:root --chmod=0444 apple-vm-egress-relay.mjs ${APPLE_VM_RELAY_PATH}`,
+    );
+    expect(dockerfile).toContain(`/usr/local/bin/node ${APPLE_VM_RELAY_PATH} --version`);
+    expect(dockerfile).toContain('"ironcurtain-apple-vm-egress-relay/1"');
   });
 
   it('keeps the CLI plugins where the copied docker-compose symlink points', () => {

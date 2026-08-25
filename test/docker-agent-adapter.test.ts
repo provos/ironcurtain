@@ -146,7 +146,7 @@ describe('Claude Code Adapter', () => {
   it('orients admitted nested-Docker sessions to the managed network', () => {
     const prompt = claudeCodeAdapter.buildSystemPrompt({
       ...sampleContext,
-      nestedDocker: { networkName: 'ironcurtain' },
+      nestedDocker: { networkName: 'ironcurtain', networkAccess: 'packages' },
     });
 
     expect(prompt).toContain('### Nested Docker');
@@ -157,9 +157,48 @@ describe('Claude Code Adapter', () => {
     expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
     expect(prompt).toContain('no default bridge');
     expect(prompt).toContain('`-p`/`--publish`');
-    expect(prompt).toContain('`--network host`');
-    expect(prompt).toContain('agent shell cannot reach an inner service through `localhost`');
-    expect(prompt).toContain('supported service topology, not a security boundary');
+    expect(prompt).toContain('`docker run --network host`');
+    expect(prompt).toContain('agent shell cannot reach an inner');
+    expect(prompt).toContain('service through `localhost`');
+    expect(prompt).toContain('supported service topology');
+    expect(prompt).toContain('security boundary');
+    expect(prompt).toContain('Dockerfile `FROM` and image pulls');
+    expect(prompt).toContain('Dockerfile `RUN` steps');
+    expect(prompt).toContain('npm, PyPI/pip, Debian apt, and Cargo');
+    expect(prompt).toContain('Package HTTPS is terminated by IronCurtain');
+    expect(prompt).toContain('Arbitrary `curl`/`wget` URLs, Git');
+    expect(prompt).toContain('private or authenticated package sources');
+    expect(prompt).toContain('`docker buildx build ...` with the local default Docker driver');
+    expect(prompt).toContain('`docker compose up` or');
+    expect(prompt).toContain('`create` without the exact `--no-build` flag');
+    expect(prompt).toContain('`docker compose run`');
+    expect(prompt).toContain('`docker compose up --no-build`');
+    expect(prompt).toContain('Compose watch and navigation-menu controls are unsupported');
+    expect(prompt).toContain('`docker build --network=none ...` is a cooperative per-build offline opt-out');
+    expect(prompt).toContain('bundle-wide authority, not trusted build identity');
+    expect(prompt).toContain('public repository may relay or hairpin elsewhere');
+    expect(prompt).toContain('Package responses, caches, built images, and image contents remain untrusted');
+    expect(prompt).not.toContain('rejected by the shim');
+  });
+
+  it('distinguishes images-only and offline nested-Docker build guidance', () => {
+    const images = claudeCodeAdapter.buildSystemPrompt({
+      ...sampleContext,
+      nestedDocker: { networkName: 'ironcurtain', networkAccess: 'images' },
+    });
+    expect(images).toContain('Docker builds in Images mode');
+    expect(images).toContain('Dockerfile `FROM` and image pulls from Docker Hub/GHCR');
+    expect(images).toContain('Dockerfile `RUN` steps have no package network access');
+    expect(images).not.toContain('bundle-wide authority');
+
+    const offline = claudeCodeAdapter.buildSystemPrompt({
+      ...sampleContext,
+      nestedDocker: { networkName: 'ironcurtain', networkAccess: 'offline' },
+    });
+    expect(offline).toContain('Docker builds in Offline mode');
+    expect(offline).toContain('Dockerfile `FROM` cannot pull');
+    expect(offline).toContain('an absent image');
+    expect(offline).not.toContain('Docker Hub/GHCR');
   });
 
   it('returns providers including anthropic', () => {

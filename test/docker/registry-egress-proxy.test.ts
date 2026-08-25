@@ -104,6 +104,25 @@ describe('registry-egress disabled mode (preloaded-only refuses registry traffic
 });
 
 describe('registry-egress proxy seam (enabled)', () => {
+  it('accounts a denied zero-byte HEAD before policy rejection', async () => {
+    const guard = fixtureGuard();
+    const spy = spyTransport();
+
+    const result = await driveThroughSeam({
+      guard,
+      transport: spy.transport,
+      targetHost: 'registry.test',
+      method: 'HEAD',
+      path: '/v2/_catalog',
+    });
+
+    expect(result.statusCode).toBe(403);
+    expect(spy.state.calls).toBe(0);
+    expect(guard.session.attempts).toBe(1);
+    expect(guard.session.totalBytes).toBe(0);
+    expect(guard.session.activeRequests).toBe(0);
+  });
+
   it('forwards Docker token compression negotiation and compressed bytes unchanged', async () => {
     const compressed = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x49, 0x43]);
     const upstream = await startUpstream((_req, res) => {

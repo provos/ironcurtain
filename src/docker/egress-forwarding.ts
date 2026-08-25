@@ -1,13 +1,10 @@
 /**
- * Shared request/response shaping for the destination-bound egress proxies
- * (`build-egress-proxy.ts` and `registry-egress-proxy.ts`).
+ * Request/response shaping for the destination-bound registry-egress proxy.
  *
- * Both proxies terminate TLS on a per-listener MITM, authorize the decrypted
+ * The proxy terminates TLS on its dedicated listener, authorizes the decrypted
  * request against a frozen manifest, then forward the sanitized result through a
  * destination-bound {@link import('./outbound-transport.js').OutboundTransport}.
- * The pure header/URL shaping around that forward is identical between them, so
- * it lives here — a change to one (e.g. closing a header leak) cannot drift
- * between the two seams.
+ * The pure header/URL shaping remains isolated here so it is independently testable.
  *
  * This is a leaf: it depends only on `node:http` types and the hop-by-hop header
  * set.
@@ -17,8 +14,7 @@ import type * as http from 'node:http';
 import { connectionNominatedHeaderNames, HOP_BY_HOP_RESPONSE_HEADERS } from './hop-by-hop-headers.js';
 
 /**
- * The forward-target fields both proxies' per-request contexts expose. Structural
- * so each proxy passes its own richer `*ForwardContext` without an adapter.
+ * The forward-target fields the registry proxy's richer request context exposes.
  */
 export interface EgressForwardTarget {
   /** Origin-form request target (path + query) as seen after TLS termination. */

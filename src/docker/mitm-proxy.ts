@@ -19,8 +19,7 @@ import * as tls from 'node:tls';
 import * as net from 'node:net';
 import type { Socket } from 'node:net';
 import { existsSync, unlinkSync } from 'node:fs';
-import forge from 'node-forge';
-import { randomSerialNumber, type CertificateAuthority } from './ca.js';
+import { createLeafSecureContextCache, type CertificateAuthority } from './ca.js';
 import {
   isCapturableEndpoint,
   isEndpointAllowed,
@@ -46,7 +45,6 @@ import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeHandle } from './trajectory-tap.js';
 import { createDirectOutboundTransport, createGuardedLookup, type OutboundTransport } from './outbound-transport.js';
 import { connectionNominatedHeaderNames, HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
-import { handleBuildEgressRequest, type BuildEgressGuard, type BuildEgressSeam } from './build-egress-proxy.js';
 import { handleRegistryEgressRequest, type RegistryEgressGuard } from './registry-egress-proxy.js';
 import {
   MetricsAttributionRegistry,
@@ -219,20 +217,6 @@ export interface MitmProxyOptions {
   /** Test-only escape hatch for loopback provider and registry fixtures. */
   readonly allowPrivateDestinationsForTests?: boolean;
   /**
-   * Narrow current-Dockerfile build-egress mode. When present, this proxy
-   * serves ONLY the nested bundle's build path: it has no LLM providers,
-   * package registries, or dynamic passthrough. Every CONNECT is TLS-terminated
-   * and every decrypted (or plain-HTTP) request is authorized against the frozen
-   * manifest via the guard before forwarding through `outboundTransport`. See
-   * `build-egress-proxy.ts` for the seam design. Foundation code — inert behind
-   * the docker-workload admission fuse until a later phase constructs a session
-   * with a nested build path.
-   */
-  readonly buildEgress?: {
-    readonly guard: BuildEgressGuard;
-    readonly seam: BuildEgressSeam;
-  };
-  /**
    * Public workload-image registry-egress mode (§6.4). When present, this proxy
    * serves ONLY the nested bundle's `public-registry` image-pull path: it has no LLM
    * providers, package registries, or dynamic passthrough. Every CONNECT is
@@ -241,8 +225,8 @@ export interface MitmProxyOptions {
    * per-request / per-session transfer ceilings. Workload image content is untrusted
    * bundle state and is never hashed or verified (§16.6); authority is constrained by
    * URL/operation gating, exact derived-redirect authorization, credential handling,
-   * and the ceilings. See `registry-egress-proxy.ts` for the seam design. Mutually
-   * exclusive with `buildEgress`. Production constructs it only for an admitted
+   * and the ceilings. See `registry-egress-proxy.ts` for the seam design.
+   * Production constructs it only for an admitted
    * `public-registry` session; a
    * `preloaded-only` session sets no guard, so registry traffic has no route.
    */
@@ -336,28 +320,18 @@ export interface ProviderKeyMapping {
  *
  * - `standard`: normal proxy; per-connection routing picks provider /
  *   package-registry / dynamic-passthrough by host.
- * - `build-egress`: serves ONLY the nested build path; TLS-terminates every
- *   host and authorizes decrypted (and plain-HTTP) requests via `guard`/`seam`.
  * - `registry-egress`: serves ONLY the `public-registry` image-pull path;
  *   TLS-terminates every host and authorizes decrypted pulls via `guard`.
  */
 type ListenerMode =
   | { readonly kind: 'standard' }
-  | { readonly kind: 'build-egress'; readonly guard: BuildEgressGuard; readonly seam: BuildEgressSeam }
   | { readonly kind: 'registry-egress'; readonly guard: RegistryEgressGuard };
 
 /**
- * Resolve the single listener mode from the proxy options. `buildEgress` and
- * `registryEgress` are mutually exclusive; a proxy configured for neither runs
- * in standard provider / registry / passthrough routing mode.
+ * Resolve the single listener mode from the proxy options. A proxy without the
+ * registry-only mode runs standard provider / package-registry / passthrough routing.
  */
 function resolveListenerMode(options: MitmProxyOptions): ListenerMode {
-  if (options.buildEgress && options.registryEgress) {
-    throw new Error('MitmProxyOptions: build-egress and registry-egress modes are mutually exclusive');
-  }
-  if (options.buildEgress) {
-    return { kind: 'build-egress', guard: options.buildEgress.guard, seam: options.buildEgress.seam };
-  }
   if (options.registryEgress) {
     return { kind: 'registry-egress', guard: options.registryEgress.guard };
   }
@@ -840,10 +814,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
    */
   const passthroughLookup = createGuardedLookup(dnsLookup ?? dns.lookup, allowPrivateDestinations);
 
-  // Parse CA cert and key from PEM
-  const caCert = forge.pki.certificateFromPem(options.ca.certPem);
-  const caKey = forge.pki.privateKeyFromPem(options.ca.keyPem);
-
   // Hostnames are case-insensitive (RFC 1035 §2.3.3, RFC 7230 §5.4). Normalize
   // to lowercase at every storage and lookup site so the allowlist cannot be
   // bypassed by varying the case (e.g. `CONNECT API.TEST.COM:443` while the
@@ -885,50 +855,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // Null (zero-cost) unless IRONCURTAIN_MITM_STREAM_DELAY_MS is set.
   const streamDelayConfig = parseStreamDelayConfig();
 
-  // Certificate cache: hostname → { ctx, expiresAt }
-  const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
-
-  // Renew leaf certs 1 hour before they expire
-  const LEAF_LIFETIME_MS = 24 * 60 * 60 * 1000;
-  const RENEWAL_MARGIN_MS = 60 * 60 * 1000;
-
-  /**
-   * Returns a cached SecureContext for the hostname, generating one if needed.
-   * Automatically renews leaf certificates before they expire.
-   * Synchronous because node-forge's RSA key generation is pure JS.
-   */
-  function getOrCreateSecureContext(hostname: string): tls.SecureContext {
-    const cached = certCache.get(hostname);
-    if (cached && cached.expiresAt - Date.now() > RENEWAL_MARGIN_MS) return cached.ctx;
-
-    // Generate leaf cert signed by IronCurtain CA
-    const leafKeys = forge.pki.rsa.generateKeyPair(2048);
-    const leafCert = forge.pki.createCertificate();
-
-    leafCert.publicKey = leafKeys.publicKey;
-    leafCert.serialNumber = randomSerialNumber();
-    leafCert.validity.notBefore = new Date();
-    const expiresAt = Date.now() + LEAF_LIFETIME_MS;
-    leafCert.validity.notAfter = new Date(expiresAt);
-
-    leafCert.setSubject([{ name: 'commonName', value: hostname }]);
-    leafCert.setIssuer(caCert.subject.attributes);
-    leafCert.setExtensions([
-      { name: 'subjectAltName', altNames: [{ type: 2, value: hostname }] },
-      { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
-      { name: 'extKeyUsage', serverAuth: true },
-    ]);
-
-    leafCert.sign(caKey, forge.md.sha256.create());
-
-    const ctx = tls.createSecureContext({
-      key: forge.pki.privateKeyToPem(leafKeys.privateKey),
-      cert: forge.pki.certificateToPem(leafCert),
-    });
-
-    certCache.set(hostname, { ctx, expiresAt });
-    return ctx;
-  }
+  const getOrCreateSecureContext = createLeafSecureContextCache(options.ca);
 
   // Build host → registry lookup (including mirror hosts)
   const registriesByHost = new Map<string, RegistryConfig>();
@@ -1089,19 +1016,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // through to the per-host provider / registry / passthrough dispatch below.
     // A future ListenerMode kind is a compile error at the `default` guard.
     switch (listenerMode.kind) {
-      case 'build-egress':
-        // Authorize every decrypted request against the frozen manifest, then
-        // forward through the destination-bound transport.
-        handleBuildEgressRequest(clientReq, clientRes, {
-          guard: listenerMode.guard,
-          seam: listenerMode.seam,
-          transport: outboundTransport,
-          scheme: 'https:',
-          targetHost,
-          targetPort,
-          requestTarget: clientReq.url ?? '/',
-        });
-        return;
       case 'registry-egress':
         // Authorize each decrypted pull against the frozen registry manifest and
         // stream it through the destination-bound transport under the per-request
@@ -1987,27 +1901,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     if (req.method === 'GET' && req.url === 'http://ironcurtain.invalid/__ironcurtain/health') {
       res.writeHead(200, { 'Content-Type': 'text/plain', Connection: 'close' });
       res.end('IRONCURTAIN_OK/1\n');
-      return;
-    }
-    // Build-egress mode: plain-HTTP proxy requests (apt speaks HTTP) are
-    // authorized against the frozen manifest and forwarded, same as the
-    // TLS-terminated HTTPS path. No registry/passthrough dispatch applies.
-    if (listenerMode.kind === 'build-egress') {
-      const target = req.url ? tryParseProxyUrl(req.url) : null;
-      if (!target) {
-        res.writeHead(405, { 'Content-Type': 'text/plain' });
-        res.end('Method Not Allowed');
-        return;
-      }
-      handleBuildEgressRequest(req, res, {
-        guard: listenerMode.guard,
-        seam: listenerMode.seam,
-        transport: outboundTransport,
-        scheme: 'http:',
-        targetHost: target.hostname,
-        targetPort: target.port,
-        requestTarget: target.path,
-      });
       return;
     }
     // Handle plain HTTP proxy requests. HTTP proxy clients send absolute URLs:

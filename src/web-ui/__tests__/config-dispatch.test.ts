@@ -91,16 +91,16 @@ afterEach(() => {
 });
 
 describe('config.getDockerWorkload', () => {
-  it('returns disabled with public pulls ready as the ergonomic default', async () => {
+  it('returns disabled with recommended package access without backfilling config', async () => {
     writeConfig({ preferredMode: 'container' });
     await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
       enabled: false,
-      allowPublicRegistryPulls: true,
+      networkAccess: 'packages',
     });
     expect(readConfig().dockerWorkload).toBeUndefined();
   });
 
-  it('maps the resolved image-ingress policy to the narrow DTO', async () => {
+  it('maps legacy image ingress to the three-state DTO without writing', async () => {
     writeConfig({
       dockerWorkload: {
         enabled: true,
@@ -111,8 +111,14 @@ describe('config.getDockerWorkload', () => {
     });
     await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
       enabled: true,
-      allowPublicRegistryPulls: false,
+      networkAccess: 'offline',
     });
+  });
+
+  it('displays an enabled no-choice legacy block as images without rewriting it', async () => {
+    writeConfig({ dockerWorkload: { enabled: true } });
+    await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({ enabled: true, networkAccess: 'images' });
+    expect(readConfig().dockerWorkload).toEqual({ enabled: true });
   });
 
   it('preserves an explicit offline preference while nested Docker is disabled', async () => {
@@ -125,21 +131,32 @@ describe('config.getDockerWorkload', () => {
     });
     await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
       enabled: false,
-      allowPublicRegistryPulls: false,
+      networkAccess: 'offline',
     });
+  });
+
+  it('displays superseded public access as packages without rewriting it', async () => {
+    writeConfig({ dockerWorkload: { enabled: false, networkAccess: 'public' } });
+    await expect(getDockerWorkload(makeCtx(false))).resolves.toEqual({
+      enabled: false,
+      networkAccess: 'packages',
+    });
+    expect(readConfig().dockerWorkload).toEqual({ enabled: false, networkAccess: 'public' });
   });
 });
 
 describe('config.setDockerWorkload', () => {
   it('uses the policy-mutation gate before writing', async () => {
     writeConfig({});
-    await expect(
-      setDockerWorkload(makeCtx(false), { enabled: true, allowPublicRegistryPulls: true }),
-    ).rejects.toMatchObject({ code: 'POLICY_MUTATION_FORBIDDEN' });
+    await expect(setDockerWorkload(makeCtx(false), { enabled: true, networkAccess: 'packages' })).rejects.toMatchObject(
+      {
+        code: 'POLICY_MUTATION_FORBIDDEN',
+      },
+    );
     expect(readConfig().dockerWorkload).toBeUndefined();
   });
 
-  it('sets mediated public pulls and migrates safe legacy implementation defaults', async () => {
+  it('sets package access and migrates safe legacy implementation defaults', async () => {
     writeConfig({
       dockerWorkload: {
         enabled: false,
@@ -157,15 +174,15 @@ describe('config.setDockerWorkload', () => {
     const ctx = makeCtx(true);
     const emitSpy = vi.spyOn(ctx.eventBus, 'emit');
 
-    await expect(setDockerWorkload(ctx, { enabled: true, allowPublicRegistryPulls: true })).resolves.toEqual({
+    await expect(setDockerWorkload(ctx, { enabled: true, networkAccess: 'packages' })).resolves.toEqual({
       enabled: true,
-      allowPublicRegistryPulls: true,
+      networkAccess: 'packages',
     });
 
     expect(emitSpy).toHaveBeenCalledWith('config.changed', {});
     expect(readConfig().dockerWorkload).toEqual({
       enabled: true,
-      imageIngress: 'public-registry',
+      networkAccess: 'packages',
     });
   });
 
@@ -175,7 +192,7 @@ describe('config.setDockerWorkload', () => {
 
     let error: unknown;
     try {
-      await setDockerWorkload(makeCtx(true), { enabled: true, allowPublicRegistryPulls: true });
+      await setDockerWorkload(makeCtx(true), { enabled: true, networkAccess: 'packages' });
     } catch (err) {
       error = err;
     }
@@ -186,12 +203,30 @@ describe('config.setDockerWorkload', () => {
     expect(readConfig().dockerWorkload).toEqual(dockerWorkload);
   });
 
-  it('maps an unchecked registry control to preloaded-only', async () => {
+  it('persists every network access choice canonically', async () => {
     writeConfig({});
-    await expect(setDockerWorkload(makeCtx(true), { enabled: true, allowPublicRegistryPulls: false })).resolves.toEqual(
-      { enabled: true, allowPublicRegistryPulls: false },
-    );
-    expect(readConfig().dockerWorkload).toEqual({ enabled: true, imageIngress: 'preloaded-only' });
+    for (const networkAccess of ['offline', 'images', 'packages'] as const) {
+      await expect(setDockerWorkload(makeCtx(true), { enabled: true, networkAccess })).resolves.toEqual({
+        enabled: true,
+        networkAccess,
+      });
+      expect(readConfig().dockerWorkload).toEqual({ enabled: true, networkAccess });
+    }
+  });
+
+  it('preserves an explicit mode while disabled and on re-enable', async () => {
+    writeConfig({ dockerWorkload: { enabled: false, networkAccess: 'images' } });
+    await expect(setDockerWorkload(makeCtx(true), { enabled: false, networkAccess: 'images' })).resolves.toEqual({
+      enabled: false,
+      networkAccess: 'images',
+    });
+    expect(readConfig().dockerWorkload).toEqual({ enabled: false, networkAccess: 'images' });
+
+    await expect(setDockerWorkload(makeCtx(true), { enabled: true, networkAccess: 'images' })).resolves.toEqual({
+      enabled: true,
+      networkAccess: 'images',
+    });
+    expect(readConfig().dockerWorkload).toEqual({ enabled: true, networkAccess: 'images' });
   });
 
   it('rejects incomplete or expanded write payloads', async () => {
@@ -199,7 +234,7 @@ describe('config.setDockerWorkload', () => {
     const ctx = makeCtx(true);
     await expect(setDockerWorkload(ctx, { enabled: true })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(
-      setDockerWorkload(ctx, { enabled: true, allowPublicRegistryPulls: true, backend: 'docker' }),
+      setDockerWorkload(ctx, { enabled: true, networkAccess: 'packages', backend: 'docker' }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });
 });

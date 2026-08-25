@@ -7,6 +7,7 @@
  */
 
 import type { DockerAuthKind, IronCurtainConfig } from '../config/types.js';
+import type { DockerWorkloadNetworkAccess } from '../docker-workload/config.js';
 import type { ProviderConfig } from './provider-config.js';
 import type { ServerListing } from '../types/server-listing.js';
 import type { AuthMethod } from './oauth-credentials.js';
@@ -197,6 +198,8 @@ export interface OrientationContext {
   readonly nestedDocker?: {
     /** Bundle-local managed network used for sibling service discovery. */
     readonly networkName: string;
+    /** Admitted network authority for image resolution and fixed package repositories. */
+    readonly networkAccess: DockerWorkloadNetworkAccess;
   };
 }
 

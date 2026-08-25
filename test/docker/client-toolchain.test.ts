@@ -24,6 +24,13 @@ describe('Docker client toolchain manifest', () => {
       generation: 'docker-rootless-29.2.1-mac-arm64-v1',
       buildxVersion: '0.31.1',
       composeVersion: '5.1.0',
+      realRunc: {
+        uid: 0,
+        gid: 0,
+        mode: '0755',
+        nlink: 1,
+        size: 16_641_104,
+      },
     });
     expect(loaded.sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
@@ -135,6 +142,18 @@ function manifestFixture(): {
     generation: 'docker-rootless-29.2.1-mac-arm64-v1',
     platform: 'linux',
     architecture: 'arm64',
+    realRunc: {
+      path: '/usr/local/lib/ironcurtain-docker/bin/runc',
+      sha256: 'f0ed2d355945fe2697f11f89773e07b48de0ef239962c4a0e0ae900161a23b12',
+      size: 16_641_104,
+      uid: 0,
+      gid: 0,
+      mode: '0755',
+      nlink: 1,
+      version: '1.3.4',
+      commit: 'd6d73eb',
+      specVersion: '1.2.1',
+    },
     source: {
       daemonImage: `docker@sha256:${'1'.repeat(64)}`,
       daemonImageId: `sha256:${'2'.repeat(64)}`,

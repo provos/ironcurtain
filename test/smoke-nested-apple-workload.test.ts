@@ -36,15 +36,18 @@ describe('nested Apple smoke invocation', () => {
 describe('nested Apple public-registry acceptance plan', () => {
   const nonce = '0123456789abcdef0123456789abcdef';
 
-  it('uses the product-default request for public ingress and explicit offline opt-outs', () => {
-    expect(buildNestedAppleSmokeWorkloadConfig('public-registry')).toEqual({ enabled: true });
+  it('uses canonical explicit Images and Offline requests', () => {
+    expect(buildNestedAppleSmokeWorkloadConfig('public-registry')).toEqual({
+      enabled: true,
+      networkAccess: 'images',
+    });
     expect(buildNestedAppleSmokeWorkloadConfig('batch')).toEqual({
       enabled: true,
-      imageIngress: 'preloaded-only',
+      networkAccess: 'offline',
     });
     expect(buildNestedAppleSmokeWorkloadConfig('pty')).toEqual({
       enabled: true,
-      imageIngress: 'preloaded-only',
+      networkAccess: 'offline',
     });
   });
 

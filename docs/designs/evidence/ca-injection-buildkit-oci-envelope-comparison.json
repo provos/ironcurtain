@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "networkMode": "none",
+    "fixturePath": "/private/tmp/ic-oci-envelope.uuDNaw/docker-29.2.1-buildkit-oci-config-envelope.fixture.json",
+    "fixtureSha256": "af0bcffb2c05a9648a31c383d6110d9db5d7c35550c216a38ada7663f6669a21"
+  },
+  "candidate": {
+    "networkMode": "host",
+    "fixturePath": "/private/tmp/ic-oci-envelope-host.f3HAmj/docker-29.2.1-buildkit-oci-config-envelope-host.fixture.json",
+    "fixtureSha256": "128b830f4ab83823f0e3c6229e8af913b5d989c7480040d726ac8d750bfa6a58"
+  },
+  "structuralDelta": {
+    "qualificationCommand": {
+      "before": "docker build --pull=false --network=none --no-cache",
+      "after": "docker build --pull=false --network=host --no-cache"
+    },
+    "linuxNamespaces": {
+      "removed": [
+        {
+          "keys": [
+            "type"
+          ],
+          "pathPresent": false,
+          "type": "network"
+        }
+      ],
+      "added": [],
+      "interpretation": "BuildKit host networking omits creation of a network namespace; pid, ipc, uts, mount, and cgroup namespaces are unchanged and pathless."
+    },
+    "devMounts": {
+      "changed": false,
+      "exactDestinations": [
+        "/dev",
+        "/dev/pts",
+        "/dev/shm",
+        "/dev/mqueue"
+      ]
+    },
+    "unchangedExactly": [
+      "ociVersion",
+      "runcArgvAfterExecutable",
+      "topLevel",
+      "process",
+      "root",
+      "linux except namespaces",
+      "devMounts",
+      "ownership except per-run inode facts and configJson.size"
+    ],
+    "perRunFacts": {
+      "inodeChanges": {
+        "bundle": [
+          217686,
+          216692
+        ],
+        "configJson": [
+          5120101,
+          30531641
+        ],
+        "rootfs": [
+          287086,
+          30688
+        ],
+        "wrapper": [
+          5707,
+          1566141
+        ]
+      },
+      "realRuncInodeUnchanged": 62277,
+      "configJsonSize": [
+        8450,
+        8441
+      ]
+    },
+    "unexpectedStructuralDeltas": []
+  }
+}

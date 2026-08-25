@@ -22,6 +22,7 @@ import type { ContainerRuntimeKind } from '../docker/container-runtime.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import {
   APPLE_VM_DAEMON_DOCKER_HOST,
+  APPLE_VM_DAEMON_TOOLCHAIN_DIR,
   bootstrapAppleVmDaemon,
   waitForAppleVmDaemonReady,
   type AppleVmDaemonExec,
@@ -34,6 +35,20 @@ import {
   type AppleVmDockerWorkloadBootstrapConfig,
 } from './apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from './infrastructure.js';
+import type { DockerWorkloadNetworkAccess } from './config.js';
+import {
+  DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_FAILURE_ALLOWED_CODES,
+  DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND,
+  DOCKER_BUILD_TRUST_FAILURE_MAX_CODE_BYTES,
+  DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND,
+  DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE,
+  DOCKER_BUILD_TRUST_WRAPPER_PATH,
+  type DockerBuildShimStagingContract,
+  type DockerBuildTrustCanaryContract,
+} from '../docker/docker-build-shim.js';
+import type { RegistryEgressLedgerSnapshot } from '../docker/docker-workload-egress.js';
+import type { PackageEgressLedgerSnapshot } from '../docker/package-egress-ledger.js';
 
 /**
  * Readiness ceiling for the in-VM daemon: a generous upper bound on how long
@@ -45,6 +60,27 @@ import type { DockerWorkloadBundleHandle } from './infrastructure.js';
  * An ordinary reviewed constant — change it by ordinary review.
  */
 export const APPLE_VM_DAEMON_READINESS_TIMEOUT_MS = 90_000;
+const APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS = 15_000;
+const APPLE_VM_BUILD_TRUST_CANARY_TIMEOUT_MS = 5 * 60_000;
+const APPLE_VM_BUILD_SHIM_EXEC_USER = 'codespace';
+const APPLE_VM_BUILD_TRUST_VALIDATION_USER = '0:0';
+const APPLE_VM_BUILD_SHIM_DIAGNOSTIC_MAX_BYTES = 512;
+const APPLE_VM_BUILD_TRUST_CANARY_ROOT = '/run/ironcurtain-docker/build-trust-canary';
+const APPLE_VM_BUILD_TRUST_CANARY_DOCKERFILE = `${APPLE_VM_BUILD_TRUST_CANARY_ROOT}/Dockerfile`;
+const APPLE_VM_BUILD_TRUST_CANARY_BASE_REPOSITORY = 'localhost/ironcurtain/build-trust-canary-base';
+const APPLE_VM_BUILD_TRUST_CANARY_IMAGE_REPOSITORY = 'localhost/ironcurtain/build-trust-canary';
+const APPLE_VM_BUILD_TRUST_CANARY_NONCE = 'IRONCURTAIN_BUILD_TRUST_CANARY_OK/1';
+const CA_GENERATION_PATTERN = /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const BUNDLE_GENERATION_TAG_SUFFIX_PATTERN =
+  /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const IMMUTABLE_IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const TRUST_CONTRACT_METADATA_PATTERN = /^regular file:([0-9]{1,10}):([0-9]{1,10}):([0-7]{1,4}):([0-9]{1,10})$/u;
+
+export interface AppleVmDockerWorkloadEgressLedgers {
+  readonly registry: () => RegistryEgressLedgerSnapshot;
+  readonly packages: () => PackageEgressLedgerSnapshot;
+}
 
 /**
  * The same-VM topology is implemented behind the resolved-variant guard on Apple
@@ -106,11 +142,616 @@ export interface StartAppleVmDockerWorkloadOptions {
   readonly nestedDaemon: DockerWorkloadBundleHandle;
   /** Immutable per-lease selected-agent archive mounted into this VM. */
   readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig;
-  /** Selects the trusted daemon-only registry proxy bootstrap. */
-  readonly registryEgress?: boolean;
+  /** Selects the exact trusted RootlessKit relay set for this admitted bundle. */
+  readonly networkAccess: DockerWorkloadNetworkAccess;
+  /** Package-only staged shim contract. Absent in images/offline modes. */
+  readonly dockerBuildShim?: DockerBuildShimStagingContract;
+  /** Exact staged trust-file observations used by the no-network canary. */
+  readonly dockerBuildTrustCanary?: DockerBuildTrustCanaryContract;
+  /** Package and registry ledgers that the no-network canary must not change. */
+  readonly egressLedgers?: AppleVmDockerWorkloadEgressLedgers;
   /** Defaults to {@link APPLE_VM_DAEMON_READINESS_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
+}
+
+function boundedBuildShimDiagnostic(value: string, maxBytes = APPLE_VM_BUILD_SHIM_DIAGNOSTIC_MAX_BYTES): string {
+  const normalized = value.trim();
+  const encoded = Buffer.from(normalized, 'utf8');
+  if (encoded.byteLength <= maxBytes) return normalized;
+  const suffix = '...';
+  const clipped = encoded
+    .subarray(0, maxBytes - Buffer.byteLength(suffix))
+    .toString('utf8')
+    .replace(/\uFFFD$/u, '');
+  return `${clipped}${suffix}`;
+}
+
+function boundedBuildShimFailureValue(value: string, maxBytes: number): string {
+  const encoded = Buffer.from(value, 'utf8');
+  if (encoded.byteLength <= maxBytes) return value;
+
+  const separator = ' ... ';
+  const separatorBytes = Buffer.byteLength(separator);
+  if (maxBytes <= separatorBytes) {
+    return encoded
+      .subarray(0, maxBytes)
+      .toString('utf8')
+      .replace(/\uFFFD$/u, '');
+  }
+
+  const contentBudget = maxBytes - separatorBytes;
+  const headBudget = Math.floor(contentBudget / 3);
+  const tailBudget = contentBudget - headBudget;
+  const head = encoded
+    .subarray(0, headBudget)
+    .toString('utf8')
+    .replace(/\uFFFD$/u, '');
+  const tail = encoded
+    .subarray(encoded.byteLength - tailBudget)
+    .toString('utf8')
+    .replace(/^\uFFFD+/u, '');
+  return `${head}${separator}${tail}`;
+}
+
+/**
+ * Preserve both trusted-preflight output channels without ever embedding the
+ * argv, environment, or an unbounded blob in an error/evidence record.
+ */
+function boundedBuildShimFailureDiagnostic(
+  stdout: string,
+  stderr = '',
+  annotations: readonly { readonly label: string; readonly value: string }[] = [],
+): string {
+  const streams = [{ label: 'stdout', value: stdout }, { label: 'stderr', value: stderr }, ...annotations].filter(
+    ({ value }) => value.trim() !== '',
+  );
+  if (streams.length === 0) return '';
+
+  const separator = '; ';
+  const labelBytes = streams.reduce((total, { label }) => total + Buffer.byteLength(`[${label}] `), 0);
+  const separatorBytes = Buffer.byteLength(separator) * (streams.length - 1);
+  const valueBudget = Math.floor(
+    (APPLE_VM_BUILD_SHIM_DIAGNOSTIC_MAX_BYTES - labelBytes - separatorBytes) / streams.length,
+  );
+  return streams
+    .map(({ label, value }) => {
+      const singleLine = value
+        .trim()
+        .replace(/\s+/gu, ' ')
+        .replace(/\p{Cc}/gu, '?');
+      return `[${label}] ${boundedBuildShimFailureValue(singleLine, valueBudget)}`;
+    })
+    .join(separator);
+}
+
+async function clearBuildTrustFailureDiagnostic(exec: AppleVmDaemonExec): Promise<boolean> {
+  try {
+    const result = await exec([DOCKER_BUILD_TRUST_WRAPPER_PATH, DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND], {
+      user: APPLE_VM_BUILD_TRUST_VALIDATION_USER,
+      timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+    });
+    return result.exitCode === 0 && result.stdout === '' && result.stderr === '';
+  } catch {
+    return false;
+  }
+}
+
+async function readBuildTrustFailureDiagnostic(exec: AppleVmDaemonExec): Promise<string> {
+  try {
+    const result = await exec([DOCKER_BUILD_TRUST_WRAPPER_PATH, DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND], {
+      user: APPLE_VM_BUILD_TRUST_VALIDATION_USER,
+      timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+    });
+    if (result.exitCode !== 0 || result.stderr !== '') return DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE;
+    const value = result.stdout.endsWith('\n') ? result.stdout.slice(0, -1) : result.stdout;
+    if (
+      Buffer.byteLength(value, 'utf8') > DOCKER_BUILD_TRUST_FAILURE_MAX_CODE_BYTES ||
+      /[^\x20-\x7e]/u.test(value) ||
+      (value !== DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE && !DOCKER_BUILD_TRUST_FAILURE_ALLOWED_CODES.has(value))
+    ) {
+      return DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE;
+    }
+    return value;
+  } catch {
+    return DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE;
+  }
+}
+
+function trustContractMetadataIsQualified(
+  observed: string,
+  expected: { readonly mode: number; readonly nlink: number },
+): boolean {
+  const match = TRUST_CONTRACT_METADATA_PATTERN.exec(observed);
+  if (match === null) return false;
+  const [, uidText, gidText, modeText, nlinkText] = match;
+  const uid = Number.parseInt(uidText, 10);
+  const gid = Number.parseInt(gidText, 10);
+  const mode = Number.parseInt(modeText, 8);
+  const nlink = Number.parseInt(nlinkText, 10);
+  return uid <= 0xffff_ffff && gid <= 0xffff_ffff && mode === expected.mode && nlink === expected.nlink;
+}
+
+async function execBuildShimPreflight(
+  exec: AppleVmDaemonExec,
+  argv: readonly string[],
+  description: string,
+  user = APPLE_VM_BUILD_SHIM_EXEC_USER,
+): Promise<string> {
+  const result = await exec(argv, {
+    user,
+    timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+  });
+  if (result.exitCode !== 0) {
+    const detail = boundedBuildShimFailureDiagnostic(result.stdout, result.stderr);
+    throw new Error(`${description} failed with exit code ${result.exitCode}${detail === '' ? '' : `: ${detail}`}`);
+  }
+  return boundedBuildShimDiagnostic(result.stdout);
+}
+
+/** Create and verify package-build state, then prove PATH selects the staged shim and runc wrapper. */
+export async function preflightAppleVmDockerBuildShim(
+  exec: AppleVmDaemonExec,
+  contract: DockerBuildShimStagingContract,
+  canary: DockerBuildTrustCanaryContract,
+): Promise<void> {
+  for (const directory of contract.writableDirectories) {
+    const mode = directory.mode.toString(8).padStart(3, '0');
+    await execBuildShimPreflight(
+      exec,
+      ['/bin/mkdir', '--parents', directory.path],
+      `nested-Docker build state directory create (${directory.path})`,
+    );
+    await execBuildShimPreflight(
+      exec,
+      ['/bin/chmod', mode, directory.path],
+      `nested-Docker build state directory mode (${directory.path})`,
+    );
+    const observed = await execBuildShimPreflight(
+      exec,
+      ['/usr/bin/stat', '--format=%F:%u:%g:%a', directory.path],
+      `nested-Docker build state directory inspect (${directory.path})`,
+    );
+    const expected = `directory:1000:1000:${mode.replace(/^0+/u, '')}`;
+    if (observed !== expected) {
+      throw new Error(
+        `nested-Docker build state directory ${directory.path} failed its owner/mode check: ` +
+          `expected "${expected}", observed "${observed}"`,
+      );
+    }
+  }
+
+  const resolvedPath = await execBuildShimPreflight(
+    exec,
+    ['/bin/sh', '-c', `command -v ${contract.preflight.executable}`],
+    'nested-Docker build shim PATH resolution',
+  );
+  if (resolvedPath !== contract.preflight.expectedPath) {
+    throw new Error(
+      `nested-Docker build shim PATH resolution selected "${resolvedPath}"; ` +
+        `expected "${contract.preflight.expectedPath}"`,
+    );
+  }
+  if (contract.preflight.argv[0] !== contract.preflight.executable) {
+    throw new Error('nested-Docker build shim preflight argv does not invoke the PATH-resolved executable');
+  }
+  await execBuildShimPreflight(exec, contract.preflight.argv, 'nested-Docker build shim version preflight');
+
+  const runtimePath = await execBuildShimPreflight(
+    exec,
+    ['/bin/sh', '-c', `command -v ${contract.buildTrustPreflight.executable}`],
+    'nested-Docker build-trust runtime PATH resolution',
+  );
+  if (runtimePath !== contract.buildTrustPreflight.expectedPath) {
+    throw new Error(
+      `nested-Docker build-trust runtime PATH resolution selected "${runtimePath}"; ` +
+        `expected "${contract.buildTrustPreflight.expectedPath}"`,
+    );
+  }
+  const runtimeDigest = await execBuildShimPreflight(
+    exec,
+    ['/usr/bin/sha256sum', DOCKER_BUILD_TRUST_WRAPPER_PATH],
+    'nested-Docker build-trust runtime digest preflight',
+  );
+  if (runtimeDigest !== `${contract.buildTrustWrapperArtifact.sha256}  ${DOCKER_BUILD_TRUST_WRAPPER_PATH}`) {
+    throw new Error('nested-Docker build-trust runtime failed its guest digest check');
+  }
+  const trustContract = contract.buildTrustPreflight.trustContract;
+  const trustContractParentMetadata = await execBuildShimPreflight(
+    exec,
+    ['/usr/bin/stat', '--format=%F:%u:%g:%a', trustContract.parentDirectory.path],
+    'nested-Docker build-trust contract parent metadata preflight',
+  );
+  const expectedTrustContractParentMetadata =
+    `directory:${trustContract.parentDirectory.uid}:${trustContract.parentDirectory.gid}:` +
+    trustContract.parentDirectory.mode.toString(8);
+  if (trustContractParentMetadata !== expectedTrustContractParentMetadata) {
+    throw new Error(
+      `nested-Docker build-trust contract parent metadata was "${trustContractParentMetadata}"; ` +
+        `expected "${expectedTrustContractParentMetadata}"`,
+    );
+  }
+  const trustContractMetadata = await execBuildShimPreflight(
+    exec,
+    ['/usr/bin/stat', '--format=%F:%u:%g:%a:%h', trustContract.path],
+    'nested-Docker build-trust contract metadata preflight',
+  );
+  if (!trustContractMetadataIsQualified(trustContractMetadata, trustContract)) {
+    throw new Error(
+      `nested-Docker build-trust contract metadata was "${trustContractMetadata}"; ` +
+        `expected a regular mode ${trustContract.mode.toString(8)} one-link file ` +
+        '(UID/GID are diagnostic only)',
+    );
+  }
+  const trustContractDigest = await execBuildShimPreflight(
+    exec,
+    ['/usr/bin/sha256sum', trustContract.path],
+    'nested-Docker build-trust contract digest preflight',
+  );
+  if (trustContractDigest !== `${canary.buildTrustContractSha256}  ${trustContract.path}`) {
+    throw new Error('nested-Docker build-trust contract failed its guest digest check');
+  }
+  const realRunc = contract.buildTrustPreflight.realRunc;
+  const realRuncMetadata = await execBuildShimPreflight(
+    exec,
+    ['/usr/bin/stat', '--format=%F:%u:%g:%a:%h:%s', realRunc.path],
+    'nested-Docker selected-image real-runc metadata preflight',
+  );
+  const expectedRealRuncMetadata =
+    `regular file:${realRunc.outerUid}:${realRunc.outerGid}:` +
+    `${realRunc.mode.toString(8)}:${realRunc.nlink}:${realRunc.size}`;
+  if (realRuncMetadata !== expectedRealRuncMetadata) {
+    throw new Error(
+      `nested-Docker selected-image real-runc metadata was "${realRuncMetadata}"; ` +
+        `expected "${expectedRealRuncMetadata}"`,
+    );
+  }
+  const realRuncDigest = await execBuildShimPreflight(
+    exec,
+    ['/usr/bin/sha256sum', realRunc.path],
+    'nested-Docker selected-image real-runc digest preflight',
+  );
+  if (realRuncDigest !== `${realRunc.sha256}  ${realRunc.path}`) {
+    throw new Error('nested-Docker selected-image real-runc failed its outer-view digest check');
+  }
+  const runtimeVersionArgv = [
+    contract.buildTrustPreflight.expectedPath,
+    ...contract.buildTrustPreflight.versionArgv.slice(1),
+  ];
+  const runtimeVersion = await execBuildShimPreflight(
+    exec,
+    runtimeVersionArgv,
+    'nested-Docker build-trust runtime version preflight',
+    APPLE_VM_BUILD_TRUST_VALIDATION_USER,
+  );
+  if (!runtimeVersion.startsWith(contract.buildTrustPreflight.expectedVersionPrefix.trimEnd())) {
+    throw new Error(
+      `nested-Docker build-trust runtime version was "${runtimeVersion}"; ` +
+        `expected prefix "${contract.buildTrustPreflight.expectedVersionPrefix.trimEnd()}"`,
+    );
+  }
+}
+
+function sameSnapshot(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function buildTrustCanaryImageReferences(bundleGeneration: string): {
+  readonly base: string;
+  readonly output: string;
+} {
+  if (!BUNDLE_GENERATION_TAG_SUFFIX_PATTERN.test(bundleGeneration)) {
+    throw new Error('nested-Docker build-trust canary received an invalid bundle generation');
+  }
+  return {
+    base: `${APPLE_VM_BUILD_TRUST_CANARY_BASE_REPOSITORY}:${bundleGeneration}`,
+    output: `${APPLE_VM_BUILD_TRUST_CANARY_IMAGE_REPOSITORY}:${bundleGeneration}`,
+  };
+}
+
+async function inspectBuildTrustCanaryImage(exec: AppleVmDaemonExec, reference: string): Promise<string | undefined> {
+  const result = await exec(
+    [
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'image',
+      'inspect',
+      '--format',
+      '{{.Id}}',
+      reference,
+    ],
+    { user: APPLE_VM_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS },
+  );
+  if (result.exitCode === 0) {
+    const observed = boundedBuildShimDiagnostic(result.stdout);
+    if (!IMMUTABLE_IMAGE_ID_PATTERN.test(observed)) {
+      throw new Error(`nested-Docker build-trust image inspect returned invalid ID for ${reference}`);
+    }
+    return observed;
+  }
+  if (result.exitCode === 1 && /(?:no such image|not found)/iu.test(`${result.stdout}\n${result.stderr ?? ''}`)) {
+    return undefined;
+  }
+  const detail = boundedBuildShimFailureDiagnostic(result.stdout, result.stderr);
+  throw new Error(
+    `nested-Docker build-trust image inspect failed for ${reference} with exit code ${result.exitCode}` +
+      (detail === '' ? '' : `: ${detail}`),
+  );
+}
+
+async function removeBuildTrustCanaryImage(exec: AppleVmDaemonExec, reference: string): Promise<void> {
+  const result = await exec(
+    [
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'image',
+      'rm',
+      '--force',
+      reference,
+    ],
+    { user: APPLE_VM_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS },
+  );
+  if (result.exitCode !== 0) {
+    const detail = boundedBuildShimFailureDiagnostic(result.stdout, result.stderr);
+    throw new Error(
+      `nested-Docker build-trust image cleanup failed for ${reference} with exit code ${result.exitCode}` +
+        (detail === '' ? '' : `: ${detail}`),
+    );
+  }
+}
+
+function buildTrustCanaryDockerfile(localBaseImage: string, canary: DockerBuildTrustCanaryContract): string {
+  return (
+    `FROM ${localBaseImage}\n` +
+    'RUN set -eu; ' +
+    '[ "$NODE_EXTRA_CA_CERTS" = "/dev/ironcurtain/ca-cert.pem" ]; ' +
+    '[ "$SSL_CERT_FILE" = "/dev/ironcurtain/ca-bundle.pem" ]; ' +
+    `[ "$APT_CONFIG" = "/dev/ironcurtain/apt.conf" ]; ` +
+    `[ "$(/usr/bin/sha256sum /dev/ironcurtain/ca-cert.pem | /usr/bin/cut -d' ' -f1)" = "${canary.caCertificateSha256}" ]; ` +
+    `[ "$(/usr/bin/sha256sum /dev/ironcurtain/ca-bundle.pem | /usr/bin/cut -d' ' -f1)" = "${canary.caBundleSha256}" ]; ` +
+    `[ "$(/usr/bin/sha256sum /dev/ironcurtain/apt.conf | /usr/bin/cut -d' ' -f1)" = "${canary.aptConfigSha256}" ]; ` +
+    '[ ! -e /dev/ironcurtain/ca-key.pem ]; ' +
+    '[ ! -w /dev/ironcurtain/ca-cert.pem ]; ' +
+    '[ ! -w /dev/ironcurtain/ca-bundle.pem ]; ' +
+    '[ ! -w /dev/ironcurtain/apt.conf ]; ' +
+    `printf '${APPLE_VM_BUILD_TRUST_CANARY_NONCE}\\n'\n`
+  );
+}
+
+async function runAppleVmDockerBuildTrustCanary(
+  exec: AppleVmDaemonExec,
+  selectedLogicalName: string,
+  immutableImageId: string,
+  bundleGeneration: string,
+  canary: DockerBuildTrustCanaryContract,
+  ledgers: AppleVmDockerWorkloadEgressLedgers,
+): Promise<void> {
+  const beforeRegistry = ledgers.registry();
+  const beforePackages = ledgers.packages();
+  const failureDiagnosticWasCleared = await clearBuildTrustFailureDiagnostic(exec);
+  const imageReferences = buildTrustCanaryImageReferences(bundleGeneration);
+  let failure: unknown;
+  const secondaryFailures: Error[] = [];
+  let baseTagged = false;
+  let outputImageId: string | undefined;
+  try {
+    if (
+      !IMMUTABLE_IMAGE_ID_PATTERN.test(immutableImageId) ||
+      !CA_GENERATION_PATTERN.test(canary.caGeneration) ||
+      !SHA256_PATTERN.test(canary.buildTrustContractSha256)
+    ) {
+      throw new Error('nested-Docker build-trust canary received invalid image or CA generation metadata');
+    }
+    const selectedByName = await inspectBuildTrustCanaryImage(exec, selectedLogicalName);
+    const selectedById = await inspectBuildTrustCanaryImage(exec, immutableImageId);
+    if (selectedByName !== immutableImageId || selectedById !== immutableImageId) {
+      throw new Error(
+        'nested-Docker build-trust selected image was not present under its exact logical and immutable IDs',
+      );
+    }
+    if (
+      (await inspectBuildTrustCanaryImage(exec, imageReferences.base)) !== undefined ||
+      (await inspectBuildTrustCanaryImage(exec, imageReferences.output)) !== undefined
+    ) {
+      throw new Error('nested-Docker build-trust reserved canary image tag already exists');
+    }
+    await execBuildShimPreflight(
+      exec,
+      [
+        '/bin/sh',
+        '-c',
+        'observed=$(/usr/bin/sha256sum "$1" | /usr/bin/cut -d" " -f1); ' +
+          '[ "$observed" = "$2" ] && ' +
+          '/usr/bin/grep --fixed-strings --line-regexp --quiet "  \\"caGeneration\\": \\"$3\\"," "$1"',
+        'ironcurtain-build-trust-contract',
+        DOCKER_BUILD_TRUST_CONTRACT_PATH,
+        canary.buildTrustContractSha256,
+        canary.caGeneration,
+      ],
+      `nested-Docker build-trust contract/CA generation validation (${canary.caGeneration})`,
+    );
+    await execBuildShimPreflight(
+      exec,
+      [
+        `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+        '--host',
+        APPLE_VM_DAEMON_DOCKER_HOST,
+        'image',
+        'tag',
+        immutableImageId,
+        imageReferences.base,
+      ],
+      'nested-Docker build-trust local canary base tag',
+    );
+    baseTagged = true;
+    const observedBaseImageId = await inspectBuildTrustCanaryImage(exec, imageReferences.base);
+    if (observedBaseImageId !== immutableImageId) {
+      throw new Error(
+        `nested-Docker build-trust local canary base resolved to "${observedBaseImageId}"; ` +
+          `expected "${immutableImageId}"`,
+      );
+    }
+    await execBuildShimPreflight(
+      exec,
+      ['/bin/mkdir', '--parents', APPLE_VM_BUILD_TRUST_CANARY_ROOT],
+      'nested-Docker build-trust canary context create',
+    );
+    const dockerfile = buildTrustCanaryDockerfile(imageReferences.base, canary);
+    await execBuildShimPreflight(
+      exec,
+      [
+        '/bin/sh',
+        '-c',
+        'umask 077; /usr/bin/printf %s "$1" > "$2"',
+        'ironcurtain-build-trust-canary',
+        dockerfile,
+        APPLE_VM_BUILD_TRUST_CANARY_DOCKERFILE,
+      ],
+      'nested-Docker build-trust canary Dockerfile write',
+    );
+    const built = await exec(
+      [
+        `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+        '--host',
+        APPLE_VM_DAEMON_DOCKER_HOST,
+        'build',
+        '--pull=false',
+        '--network=none',
+        '--no-cache',
+        '--progress=plain',
+        '--tag',
+        imageReferences.output,
+        '--file',
+        APPLE_VM_BUILD_TRUST_CANARY_DOCKERFILE,
+        APPLE_VM_BUILD_TRUST_CANARY_ROOT,
+      ],
+      { user: APPLE_VM_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_TRUST_CANARY_TIMEOUT_MS },
+    );
+    let buildFailure: Error | undefined;
+    if (built.exitCode !== 0) {
+      const wrapperCode = failureDiagnosticWasCleared
+        ? await readBuildTrustFailureDiagnostic(exec)
+        : DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE;
+      const detail = boundedBuildShimFailureDiagnostic(built.stdout, built.stderr, [
+        { label: 'wrapper', value: wrapperCode },
+      ]);
+      buildFailure = new Error(
+        `nested-Docker build-trust canary failed with exit code ${built.exitCode}${detail === '' ? '' : `: ${detail}`}`,
+      );
+    }
+
+    let observedOutputImageId: string | undefined;
+    try {
+      observedOutputImageId = await inspectBuildTrustCanaryImage(exec, imageReferences.output);
+    } catch (error) {
+      if (buildFailure === undefined) throw error;
+      secondaryFailures.push(
+        new Error('nested-Docker build-trust output image inspect failed after canary build failure', {
+          cause: error,
+        }),
+      );
+      throw buildFailure;
+    }
+    if (observedOutputImageId === immutableImageId) {
+      const outputReuseFailure = new Error(
+        'nested-Docker build-trust canary output reused the selected immutable image ID',
+      );
+      if (buildFailure === undefined) throw outputReuseFailure;
+      secondaryFailures.push(outputReuseFailure);
+      throw buildFailure;
+    }
+    outputImageId = observedOutputImageId;
+    if (buildFailure !== undefined) throw buildFailure;
+    if (outputImageId === undefined) {
+      throw new Error('nested-Docker build-trust canary output did not resolve to a distinct immutable image ID');
+    }
+    if (!`${built.stdout}\n${built.stderr ?? ''}`.includes(APPLE_VM_BUILD_TRUST_CANARY_NONCE)) {
+      throw new Error('nested-Docker build-trust canary did not emit its exact success nonce');
+    }
+  } catch (error) {
+    failure = error;
+  }
+
+  const cleanupFailures: Error[] = [...secondaryFailures];
+  const recordCleanup = async (description: string, operation: () => Promise<void>): Promise<void> => {
+    try {
+      await operation();
+    } catch (error) {
+      cleanupFailures.push(new Error(description, { cause: error }));
+    }
+  };
+
+  let currentOutputTagId: string | undefined;
+  await recordCleanup('nested-Docker build-trust output tag ownership check failed', async () => {
+    currentOutputTagId = await inspectBuildTrustCanaryImage(exec, imageReferences.output);
+    if (currentOutputTagId !== undefined && currentOutputTagId !== outputImageId) {
+      throw new Error('reserved output tag was replaced by an unknown image; refusing to delete it');
+    }
+  });
+  if (outputImageId !== undefined) {
+    const capturedOutputImageId = outputImageId;
+    await recordCleanup('nested-Docker build-trust output image cleanup failed', async () => {
+      const currentOutputImageId = await inspectBuildTrustCanaryImage(exec, capturedOutputImageId);
+      if (currentOutputImageId !== undefined && currentOutputImageId !== capturedOutputImageId) {
+        throw new Error('captured canary output image ID changed unexpectedly');
+      }
+      if (currentOutputImageId !== undefined) await removeBuildTrustCanaryImage(exec, capturedOutputImageId);
+    });
+  }
+
+  await recordCleanup('nested-Docker build-trust base tag ownership check or cleanup failed', async () => {
+    const currentBaseImageId = await inspectBuildTrustCanaryImage(exec, imageReferences.base);
+    if (currentBaseImageId === undefined) return;
+    if (!baseTagged || currentBaseImageId !== immutableImageId) {
+      throw new Error('reserved base tag was replaced by an unknown image; refusing to delete it');
+    }
+    await removeBuildTrustCanaryImage(exec, imageReferences.base);
+  });
+  await recordCleanup('nested-Docker build-trust canary context cleanup failed', async () => {
+    const contextCleanup = await exec(['/bin/rm', '-rf', APPLE_VM_BUILD_TRUST_CANARY_ROOT], {
+      user: APPLE_VM_BUILD_SHIM_EXEC_USER,
+      timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+    });
+    if (contextCleanup.exitCode !== 0) throw new Error(`context cleanup exited ${contextCleanup.exitCode}`);
+  });
+
+  await recordCleanup('nested-Docker build-trust canary residue or selected-image check failed', async () => {
+    const [baseResidue, outputTagResidue, outputIdResidue, selectedByName, selectedById] = await Promise.all([
+      inspectBuildTrustCanaryImage(exec, imageReferences.base),
+      inspectBuildTrustCanaryImage(exec, imageReferences.output),
+      outputImageId === undefined ? Promise.resolve(undefined) : inspectBuildTrustCanaryImage(exec, outputImageId),
+      inspectBuildTrustCanaryImage(exec, selectedLogicalName),
+      inspectBuildTrustCanaryImage(exec, immutableImageId),
+    ]);
+    if (baseResidue !== undefined || outputTagResidue !== undefined || outputIdResidue !== undefined) {
+      throw new Error('reserved canary tag or captured output image remains after cleanup');
+    }
+    if (selectedByName !== immutableImageId || selectedById !== immutableImageId) {
+      throw new Error('selected image was changed or removed during canary cleanup');
+    }
+  });
+
+  await clearBuildTrustFailureDiagnostic(exec);
+
+  const afterRegistry = ledgers.registry();
+  const afterPackages = ledgers.packages();
+  if (!sameSnapshot(beforeRegistry, afterRegistry) || !sameSnapshot(beforePackages, afterPackages)) {
+    const priorFailures = [...(failure === undefined ? [] : [failure]), ...cleanupFailures];
+    throw new AggregateError(priorFailures, 'nested-Docker no-network build-trust canary changed an egress ledger');
+  }
+  if (cleanupFailures.length > 0) {
+    const primary = failure instanceof Error ? failure : undefined;
+    const summary = [primary?.message, ...cleanupFailures.map((error) => error.message)].filter(Boolean).join('; ');
+    throw new AggregateError(
+      [...(failure === undefined ? [] : [failure]), ...cleanupFailures],
+      `nested-Docker build-trust canary cleanup verification failed${summary === '' ? '' : `: ${summary}`}`,
+    );
+  }
+  if (failure !== undefined) {
+    throw failure instanceof Error ? failure : new Error('nested-Docker build-trust canary failed', { cause: failure });
+  }
 }
 
 /**
@@ -125,17 +766,39 @@ export interface StartAppleVmDockerWorkloadOptions {
  */
 export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWorkloadOptions): Promise<void> {
   const exec = appleVmDaemonExecFor(options.runtime, options.containerId);
-  await bootstrapAppleVmDaemon(exec, { registryEgress: options.registryEgress });
+  await bootstrapAppleVmDaemon(exec, { networkAccess: options.networkAccess });
   const readiness = await waitForAppleVmDaemonReady(exec, {
     timeoutMs: options.timeoutMs ?? APPLE_VM_DAEMON_READINESS_TIMEOUT_MS,
     pollIntervalMs: options.pollIntervalMs,
   });
   options.nestedDaemon.recordDaemonReady(readiness);
+  const packageArtifactCount = [options.dockerBuildShim, options.dockerBuildTrustCanary, options.egressLedgers].filter(
+    (value) => value !== undefined,
+  ).length;
+  if (
+    (options.networkAccess === 'packages' && packageArtifactCount !== 3) ||
+    (options.networkAccess !== 'packages' && packageArtifactCount !== 0)
+  ) {
+    throw new Error('nested-Docker package-build contracts do not match the admitted network access');
+  }
+  if (options.dockerBuildShim !== undefined && options.dockerBuildTrustCanary !== undefined) {
+    await preflightAppleVmDockerBuildShim(exec, options.dockerBuildShim, options.dockerBuildTrustCanary);
+  }
   const provisioning = await provisionAppleVmDockerWorkload({
     outerRuntime: options.runtime,
     containerId: options.containerId,
     config: options.bootstrap,
   });
+  if (options.dockerBuildTrustCanary !== undefined && options.egressLedgers !== undefined) {
+    await runAppleVmDockerBuildTrustCanary(
+      exec,
+      provisioning.image.logicalName,
+      provisioning.image.immutableImageId,
+      options.nestedDaemon.generation,
+      options.dockerBuildTrustCanary,
+      options.egressLedgers,
+    );
+  }
   const network = await createAppleVmDockerWorkloadNetwork({
     outerRuntime: options.runtime,
     containerId: options.containerId,

@@ -17,16 +17,20 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createSessionContainers,
   ledgerOuterResourceCreate,
+  stopDockerWorkloadEgress,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
 import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../../src/docker-workload/session-daemon.js';
 import {
   APPLE_VM_DAEMON_DOCKER_HOST,
+  APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV,
   APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV,
+  APPLE_VM_DAEMON_TOOLCHAIN_DIR,
+  APPLE_VM_PACKAGE_EGRESS_SOCKET,
   APPLE_VM_REGISTRY_EGRESS_SOCKET,
 } from '../../src/docker-workload/apple-vm-daemon.js';
 import {
@@ -48,6 +52,20 @@ import { getBundleShortId, type BundleId } from '../../src/session/types.js';
 import type { ContainerRuntimeKind } from '../../src/docker/container-runtime.js';
 import type { ContainerRuntime, DockerContainerConfig } from '../../src/docker/types.js';
 import {
+  DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
+  DOCKER_BUILD_SHIM_PATH,
+  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+  DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
+  DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND,
+  DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND,
+  DOCKER_BUILD_TRUST_WRAPPER_PATH,
+  DOCKER_BUILDX_STATE_DIRECTORY,
+  getDockerBuildShimStagingContract,
+} from '../../src/docker/docker-build-shim.js';
+import {
   createMockAdapter,
   createMockCA,
   createMockMitmProxy,
@@ -63,7 +81,10 @@ import {
   createTestAppleVmDockerWorkloadBootstrap,
   createFakeClock,
   createFakeSupervisor,
+  isBuildTrustCanaryBuildArgv,
   respondHealthyAppleVmDaemon,
+  setTestAppleVmDockerImageTag,
+  snapshotTestAppleVmDockerImages,
   useDockerWorkloadHome,
   type CreateEventRuntimeOptions,
   type EventRuntime,
@@ -130,12 +151,14 @@ function makeCore(
   overrides: {
     readonly dockerWorkload?: DockerWorkloadBundleHandle;
     readonly runtimeKind?: ContainerRuntimeKind;
-    readonly publicRegistry?: boolean;
+    readonly networkAccess?: 'offline' | 'images' | 'packages';
   } = {},
 ): PreContainerInfrastructure {
   const runtimeKind = overrides.runtimeKind ?? 'apple-container';
   const admittedApple = overrides.dockerWorkload !== undefined && runtimeKind === 'apple-container';
   const bootstrap = admittedApple ? createTestAppleVmDockerWorkloadBootstrap(tempDir) : undefined;
+  const buildShimContract =
+    admittedApple && overrides.networkAccess === 'packages' ? getDockerBuildShimStagingContract('packages') : undefined;
   if (bootstrap) docker.getImageId = async () => bootstrap.artifact.appleImageId;
   const bundleDir = join(tempDir, 'bundle');
   const workspaceDir = join(tempDir, 'workspace');
@@ -183,9 +206,92 @@ function makeCore(
     endCaptureSession: async () => {},
     dockerWorkload: overrides.dockerWorkload,
     dockerWorkloadBootstrap: bootstrap,
-    dockerWorkloadRegistryEgress: overrides.publicRegistry
-      ? { listener: createMockMitmProxy(), socketPath: join(socketsDir, 'registry-egress.sock') }
-      : undefined,
+    dockerWorkloadEgress:
+      overrides.networkAccess === 'images' || overrides.networkAccess === 'packages'
+        ? {
+            networkAccess: overrides.networkAccess,
+            registry: {
+              listener: createMockMitmProxy(),
+              socketPath: join(socketsDir, 'registry-egress.sock'),
+              snapshot: () => ({ attempts: 0, totalBytes: 0, activeRequests: 0 }),
+            },
+            ...(overrides.networkAccess === 'packages'
+              ? {
+                  packages: {
+                    listener: createMockMitmProxy(),
+                    socketPath: join(socketsDir, 'package-egress.sock'),
+                    snapshot: () => ({
+                      attempts: 0,
+                      clientAttempts: 0,
+                      activeClients: 0,
+                      activeDirect: 0,
+                      activeUpstreams: 0,
+                      transferredBytes: 0,
+                      rateTokens: 120,
+                      stopped: false,
+                    }),
+                  },
+                }
+              : {}),
+          }
+        : undefined,
+    dockerBuildShim:
+      buildShimContract === undefined
+        ? undefined
+        : {
+            contract: buildShimContract,
+            artifacts: [
+              {
+                kind: 'docker-shim',
+                source: join(tempDir, 'build-shim', 'docker'),
+                target: DOCKER_BUILD_SHIM_PATH,
+                readonly: true,
+              },
+              {
+                kind: 'proxy-config',
+                source: join(tempDir, 'build-shim', 'package-build-client'),
+                target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
+                readonly: true,
+              },
+              {
+                kind: 'build-trust-wrapper',
+                source: join(tempDir, 'build-shim', 'runc'),
+                target: DOCKER_BUILD_TRUST_WRAPPER_PATH,
+                readonly: true,
+              },
+              {
+                kind: 'build-trust-contract',
+                source: join(tempDir, 'build-shim', 'build-trust-contract.json'),
+                target: DOCKER_BUILD_TRUST_CONTRACT_PATH,
+                readonly: true,
+              },
+              {
+                kind: 'build-trust-ca-cert',
+                source: join(tempDir, 'build-shim', 'ca-cert.pem'),
+                target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
+                readonly: true,
+              },
+              {
+                kind: 'build-trust-ca-bundle',
+                source: join(tempDir, 'build-shim', 'ca-bundle.pem'),
+                target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+                readonly: true,
+              },
+              {
+                kind: 'build-trust-apt-config',
+                source: join(tempDir, 'build-shim', 'apt.conf'),
+                target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+                readonly: true,
+              },
+            ],
+            buildTrustCanary: {
+              caGeneration: 'gen-00000000-0000-4000-8000-000000000000',
+              buildTrustContractSha256: '4'.repeat(64),
+              caCertificateSha256: '1'.repeat(64),
+              caBundleSha256: '2'.repeat(64),
+              aptConfigSha256: '3'.repeat(64),
+            },
+          },
   };
 }
 
@@ -359,6 +465,27 @@ describe('nested daemon — readiness failure is fail-closed (§8.2 step 5)', ()
     expect(runtime.containers).toHaveLength(0);
     expect(runtime.events.some((event) => event.startsWith('remove:'))).toBe(true);
   });
+
+  it('fails closed before provisioning when packages-mode PATH does not resolve the staged shim', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv[0] === '/bin/sh' && argv[1] === '-c' && argv[2] === 'command -v docker'
+          ? { exitCode: 0, stdout: '/usr/local/bin/docker\n', stderr: '' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+
+    await expect(
+      createSessionContainers(
+        makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' }),
+        makeConfig(),
+      ),
+    ).rejects.toThrow(/PATH resolution selected.*\/usr\/local\/bin\/docker/u);
+
+    expect(runtime.execs.some((argv) => argv.includes('image') && argv.includes('inspect'))).toBe(false);
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+    expect(runtime.containers).toHaveLength(0);
+    expect(runtime.events.some((event) => event.startsWith('remove:'))).toBe(true);
+  });
 });
 
 describe('nested daemon — private Docker environment reaches only an enabled agent (§8.2 step 6)', () => {
@@ -436,11 +563,31 @@ describe('nested daemon — feature-off equivalence', () => {
   });
 });
 
-describe('nested daemon — public-registry transport', () => {
-  it('adds one exact Apple socket mount and selects the proxy-aware daemon bootstrap', async () => {
+describe('nested daemon — egress transports', () => {
+  it('attempts to stop both authorities when either listener fails', async () => {
+    const packageStop = vi.fn(() => Promise.reject(new Error('package stop failed')));
+    const registryStop = vi.fn(async () => {});
+
+    await expect(
+      stopDockerWorkloadEgress({
+        networkAccess: 'packages',
+        registry: {
+          listener: { stop: registryStop },
+          socketPath: '/tmp/registry.sock',
+          snapshot: () => ({ attempts: 0, totalBytes: 0, activeRequests: 0 }),
+        },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: () => ({}) as never },
+      }),
+    ).rejects.toThrow(/package stop failed/u);
+
+    expect(packageStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
+  });
+
+  it('adds only the registry mount and selects the registry-only daemon bootstrap for images', async () => {
     const { runtime, handle } = await admitBundle();
     const capturing = capturingRuntime(runtime);
-    const core = makeCore(capturing.runtime, { dockerWorkload: handle, publicRegistry: true });
+    const core = makeCore(capturing.runtime, { dockerWorkload: handle, networkAccess: 'images' });
 
     await createSessionContainers(core, makeConfig());
 
@@ -450,10 +597,514 @@ describe('nested daemon — public-registry transport', () => {
       readonly: false,
     });
     expect(runtime.execs).toContainEqual([...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV]);
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_PACKAGE_EGRESS_SOCKET }),
+    );
+    expect(capturing.config().mounts).not.toContainEqual(expect.objectContaining({ target: DOCKER_BUILD_SHIM_PATH }));
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY }),
+    );
+    expect(runtime.execs).not.toContainEqual(['/bin/sh', '-c', 'command -v docker']);
+    expect(capturing.config().env).not.toHaveProperty('DOCKER_CONFIG');
+    expect(capturing.config().env).not.toHaveProperty('BUILDX_CONFIG');
     expect(Object.values(capturing.config().env).join(' ')).not.toContain('18081');
   });
 
-  it('adds no registry mount or daemon proxy configuration to preloaded-only', async () => {
+  it('mounts distinct registry/package sockets and selects the dual-relay bootstrap for packages', async () => {
+    const { runtime, handle } = await admitBundle();
+    const capturing = capturingRuntime(runtime);
+    const core = makeCore(capturing.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+    const canaryBase = `localhost/ironcurtain/build-trust-canary-base:${handle.generation}`;
+    const canaryOutput = `localhost/ironcurtain/build-trust-canary:${handle.generation}`;
+    const selectedImageId = core.dockerWorkloadBootstrap!.artifact.dockerImageId;
+    const canaryOutputImageId = `sha256:${'c'.repeat(64)}`;
+    if (core.dockerWorkloadEgress?.networkAccess !== 'packages') throw new Error('expected package egress fixture');
+    const registrySnapshot = vi.spyOn(core.dockerWorkloadEgress.registry, 'snapshot');
+    const packageSnapshot = vi.spyOn(core.dockerWorkloadEgress.packages, 'snapshot');
+
+    await createSessionContainers(core, makeConfig());
+
+    const agentMounts = capturing.config().mounts;
+    expect(agentMounts).toContainEqual({
+      source: core.orientationDir,
+      target: '/etc/ironcurtain',
+      readonly: true,
+    });
+    expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).toBe('/opt/ironcurtain-build-trust/build-trust-contract.json');
+    expect(DOCKER_BUILD_TRUST_CONTRACT_PATH).not.toMatch(/^\/etc\/ironcurtain(?:\/|$)/u);
+    expect(agentMounts).toEqual(
+      expect.arrayContaining([
+        {
+          source: join(core.socketsDir, 'registry-egress.sock'),
+          target: APPLE_VM_REGISTRY_EGRESS_SOCKET,
+          readonly: false,
+        },
+        {
+          source: join(core.socketsDir, 'package-egress.sock'),
+          target: APPLE_VM_PACKAGE_EGRESS_SOCKET,
+          readonly: false,
+        },
+      ]),
+    );
+    expect(runtime.execs).toContainEqual([...APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV]);
+    expect(runtime.execs).not.toContainEqual([...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV]);
+    expect(capturing.config().mounts).toEqual(
+      expect.arrayContaining([
+        {
+          source: join(tempDir, 'build-shim', 'docker'),
+          target: DOCKER_BUILD_SHIM_PATH,
+          readonly: true,
+        },
+        {
+          source: join(tempDir, 'build-shim', 'package-build-client'),
+          target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
+          readonly: true,
+        },
+        {
+          source: join(tempDir, 'build-shim', 'runc'),
+          target: DOCKER_BUILD_TRUST_WRAPPER_PATH,
+          readonly: true,
+        },
+        {
+          source: join(tempDir, 'build-shim', 'build-trust-contract.json'),
+          target: DOCKER_BUILD_TRUST_CONTRACT_PATH,
+          readonly: true,
+        },
+        {
+          source: join(tempDir, 'build-shim', 'ca-cert.pem'),
+          target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
+          readonly: true,
+        },
+        {
+          source: join(tempDir, 'build-shim', 'ca-bundle.pem'),
+          target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+          readonly: true,
+        },
+        {
+          source: join(tempDir, 'build-shim', 'apt.conf'),
+          target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+          readonly: true,
+        },
+      ]),
+    );
+    expect(
+      agentMounts
+        .filter(({ target }) => target.startsWith(`${DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY}/`))
+        .map(({ target }) => target)
+        .sort(),
+    ).toEqual(
+      [
+        DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+        DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+        DOCKER_BUILD_TRUST_CA_CERT_PATH,
+        DOCKER_BUILD_TRUST_CONTRACT_PATH,
+      ].sort(),
+    );
+    const readinessIndex = runtime.execs.findIndex((argv) => argv.includes('info'));
+    const buildStateIndex = runtime.execs.findIndex((argv) => argv.includes(DOCKER_BUILDX_STATE_DIRECTORY));
+    const pathIndex = runtime.execs.findIndex((argv) => argv[2] === 'command -v docker');
+    const shimVersionIndex = runtime.execs.findIndex((argv) => argv.includes('{{json .Client}}'));
+    const provisioningIndex = runtime.execs.findIndex((argv) => argv.includes('image') && argv.includes('inspect'));
+    const contractValidationIndex = runtime.execs.findIndex(
+      (argv) => argv[0] === '/bin/sh' && argv.includes(DOCKER_BUILD_TRUST_CONTRACT_PATH),
+    );
+    const baseTagIndex = runtime.execs.findIndex(
+      (argv) => argv.includes('image') && argv.includes('tag') && argv.includes(canaryBase),
+    );
+    const baseInspectIndices = runtime.execs
+      .map((argv, index) => ({ argv, index }))
+      .filter(({ argv }) => argv.includes('image') && argv.includes('inspect') && argv.includes(canaryBase))
+      .map(({ index }) => index);
+    const outputInspectIndices = runtime.execs
+      .map((argv, index) => ({ argv, index }))
+      .filter(({ argv }) => argv.includes('image') && argv.includes('inspect') && argv.includes(canaryOutput))
+      .map(({ index }) => index);
+    const baseInspectAfterTagIndex = baseInspectIndices.find((index) => index > baseTagIndex) ?? -1;
+    const canaryWriteIndex = runtime.execs.findIndex(
+      (argv) => argv[0] === '/bin/sh' && argv.includes('ironcurtain-build-trust-canary'),
+    );
+    const canaryBuildIndex = runtime.execs.findIndex(isBuildTrustCanaryBuildArgv);
+    const networkIndex = runtime.execs.findIndex((argv) => argv.includes('network') && argv.includes('create'));
+    const outputCleanupIndex = runtime.execs.findIndex(
+      (argv) => argv.includes('image') && argv.includes('rm') && argv.includes(canaryOutputImageId),
+    );
+    const baseCleanupIndex = runtime.execs.findIndex(
+      (argv) => argv.includes('image') && argv.includes('rm') && argv.includes(canaryBase),
+    );
+    expect(buildStateIndex).toBeGreaterThan(readinessIndex);
+    expect(pathIndex).toBeGreaterThan(buildStateIndex);
+    expect(shimVersionIndex).toBeGreaterThan(pathIndex);
+    expect(provisioningIndex).toBeGreaterThan(shimVersionIndex);
+    expect(contractValidationIndex).toBeGreaterThan(provisioningIndex);
+    expect(runtime.execs[contractValidationIndex]).toEqual(
+      expect.arrayContaining([
+        DOCKER_BUILD_TRUST_CONTRACT_PATH,
+        '4'.repeat(64),
+        'gen-00000000-0000-4000-8000-000000000000',
+      ]),
+    );
+    expect(baseTagIndex).toBeGreaterThan(contractValidationIndex);
+    expect(baseInspectIndices[0]).toBeLessThan(baseTagIndex);
+    expect(outputInspectIndices[0]).toBeLessThan(baseTagIndex);
+    expect(runtime.execs[baseTagIndex]).toEqual([
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'image',
+      'tag',
+      selectedImageId,
+      canaryBase,
+    ]);
+    expect(baseInspectAfterTagIndex).toBeGreaterThan(baseTagIndex);
+    expect(runtime.execs[baseInspectAfterTagIndex]).toEqual([
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'image',
+      'inspect',
+      '--format',
+      '{{.Id}}',
+      canaryBase,
+    ]);
+    expect(canaryWriteIndex).toBeGreaterThan(baseInspectAfterTagIndex);
+    expect(runtime.execs[canaryWriteIndex]?.join('\n')).toContain(`FROM ${canaryBase}\n`);
+    expect(runtime.execs[canaryWriteIndex]?.join('\n')).not.toContain('FROM sha256:');
+    expect(runtime.execs[canaryWriteIndex]?.join('\n')).toContain('/dev/ironcurtain/ca-bundle.pem');
+    expect(runtime.execs[canaryBuildIndex]).toEqual([
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'build',
+      '--pull=false',
+      '--network=none',
+      '--no-cache',
+      '--progress=plain',
+      '--tag',
+      canaryOutput,
+      '--file',
+      '/run/ironcurtain-docker/build-trust-canary/Dockerfile',
+      '/run/ironcurtain-docker/build-trust-canary',
+    ]);
+    expect(canaryBuildIndex).toBeGreaterThan(canaryWriteIndex);
+    expect(runtime.execs.some((argv) => argv.includes('pull') && argv.some((arg) => arg.includes(canaryBase)))).toBe(
+      false,
+    );
+    expect(outputCleanupIndex).toBeGreaterThan(canaryBuildIndex);
+    expect(baseCleanupIndex).toBeGreaterThan(outputCleanupIndex);
+    expect(runtime.execs[outputCleanupIndex]).toEqual([
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'image',
+      'rm',
+      '--force',
+      canaryOutputImageId,
+    ]);
+    expect(runtime.execs[baseCleanupIndex]).toEqual([
+      `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
+      '--host',
+      APPLE_VM_DAEMON_DOCKER_HOST,
+      'image',
+      'rm',
+      '--force',
+      canaryBase,
+    ]);
+    expect(networkIndex).toBeGreaterThan(baseCleanupIndex);
+    expect(baseInspectIndices.at(-1)).toBeGreaterThan(baseCleanupIndex);
+    expect(outputInspectIndices.at(-1)).toBeGreaterThan(outputCleanupIndex);
+    expect(registrySnapshot).toHaveBeenCalledTimes(2);
+    expect(packageSnapshot).toHaveBeenCalledTimes(2);
+    const diagnosticClearIndices = runtime.execs
+      .map((argv, index) => ({ argv, index }))
+      .filter(({ argv }) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND)
+      .map(({ index }) => index);
+    expect(diagnosticClearIndices).toHaveLength(2);
+    expect(diagnosticClearIndices[0]).toBeLessThan(canaryBuildIndex);
+    expect(diagnosticClearIndices[1]).toBeGreaterThan(canaryBuildIndex);
+    expect(runtime.execs.some((argv) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND)).toBe(false);
+    expect(diagnosticClearIndices.every((index) => runtime.execUsers[index] === '0:0')).toBe(true);
+    expect([...snapshotTestAppleVmDockerImages()]).toEqual([
+      [core.dockerWorkloadBootstrap!.artifact.logicalName, selectedImageId],
+    ]);
+    expect(capturing.config().env).not.toHaveProperty('DOCKER_CONFIG');
+    expect(capturing.config().env).not.toHaveProperty('BUILDX_CONFIG');
+  });
+
+  it('fails closed before canary build when the staged contract does not match its CA generation', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv[0] === '/bin/sh' && argv.includes(DOCKER_BUILD_TRUST_CONTRACT_PATH)
+          ? { exitCode: 1, stdout: '', stderr: 'contract mismatch' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/contract\/CA generation validation/u);
+
+    expect(runtime.execs.some(isBuildTrustCanaryBuildArgv)).toBe(false);
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+  });
+
+  it('refuses and preserves a pre-existing reserved canary tag', async () => {
+    const { runtime, handle } = await admitBundle();
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+    const canaryBase = `localhost/ironcurtain/build-trust-canary-base:${handle.generation}`;
+    const unknownImageId = `sha256:${'d'.repeat(64)}`;
+    setTestAppleVmDockerImageTag(canaryBase, unknownImageId);
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(
+      /reserved canary image tag already exists/u,
+    );
+
+    expect(runtime.execs.some((argv) => argv.includes('image') && argv.includes('tag'))).toBe(false);
+    expect(runtime.execs.some(isBuildTrustCanaryBuildArgv)).toBe(false);
+    expect(snapshotTestAppleVmDockerImages().get(canaryBase)).toBe(unknownImageId);
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+  });
+
+  it('fails closed before network creation when the no-network canary changes a package ledger', async () => {
+    const { runtime, handle } = await admitBundle();
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+    if (core.dockerWorkloadEgress?.networkAccess !== 'packages') throw new Error('expected package egress fixture');
+    let observations = 0;
+    const packages = {
+      ...core.dockerWorkloadEgress.packages,
+      snapshot: () => ({
+        attempts: observations++,
+        clientAttempts: 0,
+        activeClients: 0,
+        activeDirect: 0,
+        activeUpstreams: 0,
+        transferredBytes: 0,
+        rateTokens: 120,
+        stopped: false,
+      }),
+    };
+
+    await expect(
+      createSessionContainers(
+        {
+          ...core,
+          dockerWorkloadEgress: { ...core.dockerWorkloadEgress, packages },
+        },
+        makeConfig(),
+      ),
+    ).rejects.toThrow(/canary changed an egress ledger/u);
+
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+    expect(runtime.containers).toHaveLength(0);
+    expect(runtime.execs).toContainEqual(
+      expect.arrayContaining(['image', 'rm', '--force', `sha256:${'c'.repeat(64)}`]),
+    );
+    expect(runtime.execs).toContainEqual(
+      expect.arrayContaining([
+        'image',
+        'rm',
+        '--force',
+        `localhost/ironcurtain/build-trust-canary-base:${handle.generation}`,
+      ]),
+    );
+  });
+
+  it('removes the owned local base tag and proves no output residue when the no-network build fails', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        isBuildTrustCanaryBuildArgv(argv)
+          ? { exitCode: 1, stdout: '', stderr: 'scripted canary build failure' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/scripted canary build failure/u);
+
+    expect(
+      runtime.execs.some(
+        (argv) =>
+          argv.includes('image') &&
+          argv.includes('rm') &&
+          argv.includes(`localhost/ironcurtain/build-trust-canary:${handle.generation}`),
+      ),
+    ).toBe(false);
+    expect(runtime.execs).toContainEqual(
+      expect.arrayContaining([
+        'image',
+        'rm',
+        '--force',
+        `localhost/ironcurtain/build-trust-canary-base:${handle.generation}`,
+      ]),
+    );
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+    expect(runtime.containers).toHaveLength(0);
+    expect([...snapshotTestAppleVmDockerImages()]).toEqual([
+      [core.dockerWorkloadBootstrap!.artifact.logicalName, core.dockerWorkloadBootstrap!.artifact.dockerImageId],
+    ]);
+  });
+
+  it('retains bounded BuildKit context and the terminal canary error', async () => {
+    const terminalError = 'WRAPPER-TERMINAL-ROOT-CAUSE';
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) => {
+        if (isBuildTrustCanaryBuildArgv(argv)) {
+          return {
+            exitCode: 1,
+            stdout: `BUILDKIT-CONTEXT\n${'界'.repeat(2_000)}\nSTDOUT-TERMINAL`,
+            stderr: `WRAPPER-CONTEXT\u0007${'🙂'.repeat(2_000)}\n${terminalError}`,
+          };
+        }
+        if (argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND) {
+          return { exitCode: 0, stdout: 'ICBT-CONFIG-STRICT-ENVELOPE-V1\n', stderr: '' };
+        }
+        return respondHealthyAppleVmDaemon(argv);
+      },
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+
+    const error = await createSessionContainers(core, makeConfig()).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain('[stdout] BUILDKIT-CONTEXT');
+    expect(message).toContain('STDOUT-TERMINAL');
+    expect(message).toContain('[stderr] WRAPPER-CONTEXT?');
+    expect(message).toContain(terminalError);
+    expect(message).toContain('[wrapper] ICBT-CONFIG-STRICT-ENVELOPE-V1');
+    expect(message).not.toContain('\n');
+    expect(message).not.toContain('\r');
+    expect(message).not.toContain('\u0007');
+    expect(message).not.toContain('\uFFFD');
+    const diagnostic = message.slice(message.indexOf(': [') + 2);
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(512);
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+    expect(runtime.containers).toHaveLength(0);
+    const buildIndex = runtime.execs.findIndex(isBuildTrustCanaryBuildArgv);
+    const readIndices = runtime.execs
+      .map((argv, index) => ({ argv, index }))
+      .filter(({ argv }) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND)
+      .map(({ index }) => index);
+    const clearIndices = runtime.execs
+      .map((argv, index) => ({ argv, index }))
+      .filter(({ argv }) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND)
+      .map(({ index }) => index);
+    expect(readIndices).toHaveLength(1);
+    expect(clearIndices).toHaveLength(2);
+    expect(clearIndices[0]).toBeLessThan(buildIndex);
+    expect(readIndices[0]).toBeGreaterThan(buildIndex);
+    expect(clearIndices[1]).toBeGreaterThan(readIndices[0]);
+    expect([...clearIndices, ...readIndices].every((index) => runtime.execUsers[index] === '0:0')).toBe(true);
+  });
+
+  it('reads the typed diagnostic before a failed-build output inspect and preserves build causality', async () => {
+    let buildReturnedFailure = false;
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) => {
+        if (isBuildTrustCanaryBuildArgv(argv)) {
+          buildReturnedFailure = true;
+          return { exitCode: 1, stdout: '', stderr: 'primary scripted build failure' };
+        }
+        if (argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND) {
+          return { exitCode: 0, stdout: 'ICBT-CONFIG-STRICT-ENVELOPE-V1\n', stderr: '' };
+        }
+        if (
+          buildReturnedFailure &&
+          argv.includes('image') &&
+          argv.includes('inspect') &&
+          argv.some((arg) => arg.startsWith('localhost/ironcurtain/build-trust-canary:'))
+        ) {
+          throw new Error('scripted output inspect transport failure');
+        }
+        return respondHealthyAppleVmDaemon(argv);
+      },
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+
+    const error = await createSessionContainers(core, makeConfig()).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AggregateError);
+    const aggregate = error as AggregateError;
+    expect(aggregate.message).toMatch(/primary scripted build failure.*\[wrapper\] ICBT-CONFIG-STRICT-ENVELOPE-V1/u);
+    expect(aggregate.errors[0]).toBeInstanceOf(Error);
+    expect((aggregate.errors[0] as Error).message).toMatch(
+      /primary scripted build failure.*\[wrapper\] ICBT-CONFIG-STRICT-ENVELOPE-V1/u,
+    );
+    expect(
+      aggregate.errors
+        .slice(1)
+        .some((secondary) => secondary instanceof Error && secondary.message.includes('output image inspect failed')),
+    ).toBe(true);
+
+    const buildIndex = runtime.execs.findIndex(isBuildTrustCanaryBuildArgv);
+    const diagnosticReadIndex = runtime.execs.findIndex((argv) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND);
+    const firstPostBuildOutputInspectIndex = runtime.execs.findIndex(
+      (argv, index) =>
+        index > buildIndex &&
+        argv.includes('image') &&
+        argv.includes('inspect') &&
+        argv.some((arg) => arg.startsWith('localhost/ironcurtain/build-trust-canary:')),
+    );
+    expect(diagnosticReadIndex).toBeGreaterThan(buildIndex);
+    expect(diagnosticReadIndex).toBeLessThan(firstPostBuildOutputInspectIndex);
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
+  it('keeps diagnostic cleanup best-effort and outside canary admission', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv[1] === DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND
+          ? { exitCode: 125, stdout: '', stderr: '' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+
+    await expect(createSessionContainers(core, makeConfig())).resolves.toBeDefined();
+
+    expect(runtime.execs.filter((argv) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND)).toHaveLength(2);
+    expect(runtime.execs.some((argv) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND)).toBe(false);
+    expect(managedNetworkCreates(runtime)).toHaveLength(1);
+  });
+
+  it('replaces untyped wrapper diagnostic output without masking the build failure', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) => {
+        if (isBuildTrustCanaryBuildArgv(argv)) {
+          return { exitCode: 1, stdout: '', stderr: 'primary build failure' };
+        }
+        if (argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND) {
+          return { exitCode: 0, stdout: 'contract-secret\nextra-line\n', stderr: '' };
+        }
+        return respondHealthyAppleVmDaemon(argv);
+      },
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+
+    const error = await createSessionContainers(core, makeConfig()).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/primary build failure.*\[wrapper\] ICBT-DIAGNOSTIC-UNAVAILABLE-V1/u);
+    expect((error as Error).message).not.toContain('contract-secret');
+    expect(runtime.execs.filter((argv) => argv[1] === DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND)).toHaveLength(1);
+  });
+
+  it('continues ownership checks and exact base cleanup when output-ID removal throws', async () => {
+    const outputImageId = `sha256:${'c'.repeat(64)}`;
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) => {
+        if (argv.includes('image') && argv.includes('rm') && argv.includes(outputImageId)) {
+          throw new Error('scripted output cleanup transport failure');
+        }
+        return respondHealthyAppleVmDaemon(argv);
+      },
+    });
+    const core = makeCore(runtime.runtime, { dockerWorkload: handle, networkAccess: 'packages' });
+    const canaryBase = `localhost/ironcurtain/build-trust-canary-base:${handle.generation}`;
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/cleanup verification failed/u);
+
+    expect(runtime.execs).toContainEqual(expect.arrayContaining(['image', 'rm', '--force', outputImageId]));
+    expect(runtime.execs).toContainEqual(expect.arrayContaining(['image', 'rm', '--force', canaryBase]));
+    expect(runtime.execs).toContainEqual(['/bin/rm', '-rf', '/run/ironcurtain-docker/build-trust-canary']);
+    expect(managedNetworkCreates(runtime)).toHaveLength(0);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
+  it('adds no egress mount or daemon proxy configuration to offline', async () => {
     const { runtime, handle } = await admitBundle();
     const capturing = capturingRuntime(runtime);
     const core = makeCore(capturing.runtime, { dockerWorkload: handle });
@@ -463,7 +1114,17 @@ describe('nested daemon — public-registry transport', () => {
     expect(capturing.config().mounts).not.toContainEqual(
       expect.objectContaining({ target: APPLE_VM_REGISTRY_EGRESS_SOCKET }),
     );
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_PACKAGE_EGRESS_SOCKET }),
+    );
     expect(runtime.execs).not.toContainEqual([...APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV]);
+    expect(capturing.config().mounts).not.toContainEqual(expect.objectContaining({ target: DOCKER_BUILD_SHIM_PATH }));
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY }),
+    );
+    expect(runtime.execs).not.toContainEqual(['/bin/sh', '-c', 'command -v docker']);
+    expect(capturing.config().env).not.toHaveProperty('DOCKER_CONFIG');
+    expect(capturing.config().env).not.toHaveProperty('BUILDX_CONFIG');
   });
 });
 

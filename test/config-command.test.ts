@@ -58,7 +58,7 @@ import {
 import type { ModelCatalogResult, ModelCatalogSource } from '../src/config/openrouter-catalog.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
 import { USER_CONFIG_DEFAULTS, loadUserConfig, maskApiKey } from '../src/config/user-config.js';
-import { resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
+import { DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING, resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
 
 describe('config-command', () => {
   let env: ConfigTestEnv;
@@ -392,17 +392,34 @@ describe('config-command', () => {
 
     expect(readConfig(env.testHome).dockerWorkload).toEqual({
       enabled: true,
-      imageIngress: 'public-registry',
+      networkAccess: 'packages',
     });
     expect(loadUserConfig().dockerWorkload).toMatchObject({
       enabled: true,
-      imageIngress: 'public-registry',
+      networkAccess: 'packages',
       acceptObservedDiskRisk: true,
       resources: { diskMb: null },
     });
+    expect(mocks.note).toHaveBeenCalledWith(DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING, 'Package network warning');
+    type MenuOption = { value: string; label?: string; hint?: string; disabled?: boolean };
+    const menus = mocks.select.mock.calls.map((call) => call[0] as { message?: string; options?: MenuOption[] });
+    const nestedMenus = menus.filter((call) => call.message === 'Nested Docker');
+    expect(nestedMenus[0]?.options?.find((option) => option.value === 'networkAccess')).toMatchObject({
+      hint: 'Public packages and images (recommended) (enable Docker to change)',
+      disabled: true,
+    });
+    expect(nestedMenus[1]?.options?.find((option) => option.value === 'networkAccess')).toMatchObject({
+      hint: 'Public packages and images (recommended)',
+      disabled: false,
+    });
+    const dockerAgentMenus = menus.filter((call) => call.message === 'Docker Agent Settings');
+    expect(dockerAgentMenus[0]?.options?.find((option) => option.value === 'nestedDocker')?.hint).toBe('off');
+    expect(dockerAgentMenus[1]?.options?.find((option) => option.value === 'nestedDocker')?.hint).toBe(
+      'on, public packages and images',
+    );
   });
 
-  it('preserves an explicit pull opt-out while disabled and when re-enabling nested Docker', async () => {
+  it('preserves an explicit offline preference while disabled and when re-enabling nested Docker', async () => {
     seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
@@ -422,13 +439,13 @@ describe('config-command', () => {
 
     expect(readConfig(env.testHome).dockerWorkload).toEqual({
       enabled: true,
-      imageIngress: 'preloaded-only',
+      networkAccess: 'offline',
     });
     const pendingNote = mocks.note.mock.calls.find((call) => call[1] === 'Pending changes');
     expect(pendingNote?.[0]).toBe('  dockerWorkload.enabled: off -> on');
   });
 
-  it('persists preloaded-only as the public-pulls opt-out', async () => {
+  it('persists offline as the network-access choice', async () => {
     seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
@@ -438,20 +455,39 @@ describe('config-command', () => {
     mocks.select
       .mockResolvedValueOnce('dockerAgent')
       .mockResolvedValueOnce('nestedDocker')
-      .mockResolvedValueOnce('publicPulls')
+      .mockResolvedValueOnce('networkAccess')
+      .mockResolvedValueOnce('offline')
       .mockResolvedValueOnce('back')
       .mockResolvedValueOnce('back')
       .mockResolvedValueOnce('save');
-    mocks.confirm
-      .mockResolvedValueOnce(false) // disable public pulls
-      .mockResolvedValueOnce(true); // save changes
+    mocks.confirm.mockResolvedValueOnce(true); // save changes
 
     await runConfigCommand();
 
     expect(readConfig(env.testHome).dockerWorkload).toEqual({
       enabled: true,
-      imageIngress: 'preloaded-only',
+      networkAccess: 'offline',
     });
+    const networkAccessMenu = mocks.select.mock.calls
+      .map((call) => call[0] as { message?: string; options?: unknown[] })
+      .find((call) => call.message === 'Network access');
+    expect(networkAccessMenu?.options).toEqual([
+      {
+        value: 'packages',
+        label: 'Public packages and images (recommended)',
+        hint: 'Docker Hub/GHCR plus fixed public apt, npm, PyPI, and Cargo downloads',
+      },
+      {
+        value: 'images',
+        label: 'Public images only',
+        hint: 'Docker Hub and GHCR pulls work; Dockerfile RUN is offline',
+      },
+      {
+        value: 'offline',
+        label: 'Offline',
+        hint: 'Only preloaded images and hermetic builds work',
+      },
+    ]);
   });
 
   it('non-TTY exits with error', async () => {
@@ -583,15 +619,15 @@ describe('computeDiff', () => {
       ...resolved,
       dockerWorkload: resolveDockerWorkloadConfig({ enabled: true }),
     } as ResolvedUserConfig;
-    expect(computeDiff(enabled, { dockerWorkload: { imageIngress: 'preloaded-only' } })).toEqual([
-      ['dockerWorkload.publicPulls', { from: true, to: false }],
+    expect(computeDiff(enabled, { dockerWorkload: { networkAccess: 'offline' } })).toEqual([
+      ['dockerWorkload.networkAccess', { from: 'images', to: 'offline' }],
     ]);
 
     expect(
       computeDiff(
         resolved,
-        { dockerWorkload: { enabled: true, imageIngress: 'preloaded-only' } },
-        { enabled: false, imageIngress: 'preloaded-only' },
+        { dockerWorkload: { enabled: true, networkAccess: 'offline' } },
+        { enabled: false, networkAccess: 'offline' },
       ),
     ).toEqual([['dockerWorkload.enabled', { from: false, to: true }]]);
   });

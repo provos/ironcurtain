@@ -938,9 +938,11 @@ export interface OpenrouterModelsDto {
 }
 
 /** Narrow runtime settings exposed by the web UI. */
+export type DockerWorkloadNetworkAccess = 'offline' | 'images' | 'packages';
+
 export interface DockerWorkloadSettingsDto {
   readonly enabled: boolean;
-  readonly allowPublicRegistryPulls: boolean;
+  readonly networkAccess: DockerWorkloadNetworkAccess;
 }
 
 // ---------------------------------------------------------------------------

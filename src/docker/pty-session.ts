@@ -37,19 +37,18 @@ import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import {
   buildAgentUidRemap,
-  buildDockerWorkloadRegistryEgressMount,
+  buildDockerBuildShimMounts,
+  buildDockerWorkloadEgressMounts,
   buildUdsSocketMounts,
+  activateAppleVmDockerWorkload,
   createLedgeredAgentContainer,
   dockerWorkloadSessionMetadata,
   removeBundleRuntimeRoot,
   selectOuterContainerResources,
+  stopDockerWorkloadEgress,
   type AgentImageResolution,
 } from './docker-infrastructure.js';
-import {
-  nestedDaemonAgentEnv,
-  resolveNestedDaemonBundle,
-  startAppleVmDockerWorkload,
-} from '../docker-workload/session-daemon.js';
+import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../docker-workload/session-daemon.js';
 import { appleVmDockerWorkloadArtifactMount } from '../docker-workload/apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
@@ -386,9 +385,7 @@ async function runPtySessionAttempt(
   // finally block can tear it down first (§8.3). Undefined for ordinary PTY
   // sessions — the capability is gated by the resolved-variant predicate.
   let dockerWorkload: DockerWorkloadBundleHandle | undefined;
-  let dockerWorkloadRegistryEgress:
-    | Awaited<ReturnType<typeof prepareDockerInfrastructure>>['dockerWorkloadRegistryEgress']
-    | undefined;
+  let dockerWorkloadEgress: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['dockerWorkloadEgress'] | undefined;
   let useTcp: boolean;
   let networkName: string | null = null;
   let allocatedNetworkSubnet: string | undefined;
@@ -453,7 +450,7 @@ async function runPtySessionAttempt(
     // either must still revoke the workload lease and stop both proxies.
     ({ docker, proxy, mitmProxy, useTcp } = infra);
     dockerWorkload = infra.dockerWorkload;
-    dockerWorkloadRegistryEgress = infra.dockerWorkloadRegistryEgress;
+    dockerWorkloadEgress = infra.dockerWorkloadEgress;
 
     // Match standalone batch metadata: persist the admitted lease tuple as
     // soon as preparation returns, before any PTY-specific callback can fail.
@@ -762,7 +759,8 @@ async function runPtySessionAttempt(
       }
     }
 
-    mounts.push(...buildDockerWorkloadRegistryEgressMount(infra));
+    mounts.push(...buildDockerWorkloadEgressMounts(infra));
+    mounts.push(...buildDockerBuildShimMounts(infra));
 
     if (dockerWorkloadBootstrap !== undefined) {
       mounts.push(appleVmDockerWorkloadArtifactMount(dockerWorkloadBootstrap));
@@ -907,15 +905,14 @@ async function runPtySessionAttempt(
     // lease. The untrusted agent is not launched until the host attaches below,
     // so completing activation before attach preserves the release boundary
     // without delaying Apple Container's published-socket listener.
-    if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
-      await startAppleVmDockerWorkload({
-        runtime: docker,
-        containerId,
-        nestedDaemon,
-        bootstrap: dockerWorkloadBootstrap,
-        registryEgress: dockerWorkloadRegistryEgress !== undefined,
-      });
-    }
+    await activateAppleVmDockerWorkload({
+      runtime: docker,
+      containerId,
+      nestedDaemon,
+      bootstrap: dockerWorkloadBootstrap,
+      dockerWorkloadEgress,
+      dockerBuildShim: infra.dockerBuildShim,
+    });
 
     // Write session registration for the escalation listener
     registrationPath = writeRegistration(effectiveSessionId, escalationDir, adapter.displayName);
@@ -1042,7 +1039,7 @@ async function runPtySessionAttempt(
     }
 
     try {
-      await dockerWorkloadRegistryEgress?.listener.stop();
+      await stopDockerWorkloadEgress(dockerWorkloadEgress);
     } catch (error) {
       resourceCleanupError = normalizePtyError(error);
     }

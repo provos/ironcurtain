@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "qualification": "feasibility-only",
+  "redactionToken": "<executor-id>",
+  "executorRoot": "/home/codespace/.local/share/docker/buildkit/executor",
+  "argvAfterRunc": [
+    "--log",
+    "/home/codespace/.local/share/docker/buildkit/executor/runc-log.json",
+    "--log-format",
+    "json",
+    "run",
+    "--bundle",
+    "/home/codespace/.local/share/docker/buildkit/executor/<executor-id>",
+    "--keep",
+    "<executor-id>"
+  ]
+}

@@ -81,6 +81,69 @@ requests, git remote operations, or files outside \`${context.workspaceDir}\`.`;
 export function buildNestedDockerSection(context: OrientationContext): string {
   if (context.nestedDocker === undefined) return '';
 
+  let buildNetworkGuidance: string;
+  switch (context.nestedDocker.networkAccess) {
+    case 'packages':
+      buildNetworkGuidance = `
+
+#### Docker builds in Packages mode
+
+Dockerfile \`FROM\` and image pulls use IronCurtain's separate Docker Hub/GHCR
+registry mediation. For npm, PyPI/pip, Debian apt, and Cargo downloads from
+Dockerfile \`RUN\` steps, use one of these supported direct build commands so
+IronCurtain can select the package proxy and supported build network:
+
+- \`docker build ...\`
+- \`docker image build ...\`
+- \`docker builder build ...\`
+- \`docker buildx build ...\` with the local default Docker driver
+
+Package HTTPS is terminated by IronCurtain and re-encrypted upstream. Supported
+build steps receive the session CA in common system trust stores; clients with
+private trust stores may still fail. Arbitrary \`curl\`/\`wget\` URLs, Git and
+installer-script downloads, private or authenticated package sources, and
+credentials are unsupported. IronCurtain does not inject credentials, and
+recognized credential fields, request bodies, and uploads are rejected.
+
+Compose can build implicitly. \`docker compose build\`, \`docker compose up\` or
+\`create\` without the exact \`--no-build\` flag, and \`docker compose run\` are
+unsupported. Build directly first, then use \`docker compose up --no-build\` or
+\`docker compose create --no-build\`; use \`docker run\` for one-off containers.
+Compose watch and navigation-menu controls are unsupported because they can
+trigger rebuilds. Direct \`docker-buildx\`, \`docker-compose\`, remote contexts,
+remote BuildKit daemons, and custom builders are also unsupported.
+
+The wrapper supplies \`--network=host\` only to supported build commands so
+\`RUN\` can reach the VM-local package proxy. An explicit
+\`docker build --network=none ...\` is a cooperative per-build offline opt-out;
+it is not an operator-enforced session policy. Bypassing the wrapper loses
+automatic package proxy and network selection but creates no direct internet
+route.
+
+Packages is bundle-wide authority, not trusted build identity. Any process in
+this nested-Docker session can send bounded workspace or build data through
+allowed package paths, permitted request metadata, and timing to fixed public
+repositories. A public repository may relay or hairpin elsewhere.
+Package responses, caches, built images, and image contents remain untrusted.`;
+      break;
+    case 'images':
+      buildNetworkGuidance = `
+
+#### Docker builds in Images mode
+
+Dockerfile \`FROM\` and image pulls from Docker Hub/GHCR use IronCurtain's
+registry mediation. Dockerfile \`RUN\` steps have no package network access.`;
+      break;
+    case 'offline':
+      buildNetworkGuidance = `
+
+#### Docker builds in Offline mode
+
+Only preloaded images and hermetic builds work. Dockerfile \`FROM\` cannot pull
+an absent image, and Dockerfile \`RUN\` steps have no package network access.`;
+      break;
+  }
+
   return `### Nested Docker
 A private Docker daemon is available through \`DOCKER_HOST\`. IronCurtain has
 created the internal network exported as \`IRONCURTAIN_DOCKER_NETWORK\`
@@ -91,18 +154,20 @@ Example:
   \`docker run -d --name target --network "$IRONCURTAIN_DOCKER_NETWORK" <service-image>\`
   \`docker run --rm --network "$IRONCURTAIN_DOCKER_NETWORK" <client-image> http://target:<port>/\`
 
-For Compose, use the existing network as the default:
+For Compose services that use already available images, use the existing
+network as the default:
   \`networks:\`
   \`  default:\`
   \`    external: true\`
   \`    name: \${IRONCURTAIN_DOCKER_NETWORK}\`
 
-The nested daemon has no default bridge. Do not use \`-p\`/\`--publish\` or
-\`--network host\`; neither exposes an inner service to the Mac. The Mac host
-and the agent shell cannot reach an inner service through \`localhost\`.
-Connect from a sibling container by service name or network alias instead.
-This is the supported service topology, not a security boundary: the agent has
-Docker administrator authority over its bundle-local daemon.`;
+The nested daemon has no default bridge. For runtime containers, do not use
+\`-p\`/\`--publish\` or \`docker run --network host\`; neither exposes an inner
+service to the Mac. The Mac host and the agent shell cannot reach an inner
+service through \`localhost\`. Connect from a sibling container by service name
+or network alias instead. This is the supported service topology, not a
+security boundary: the agent has Docker administrator authority over its
+bundle-local daemon.${buildNetworkGuidance}`;
 }
 
 /**

@@ -944,19 +944,19 @@ export async function listOpenrouterModels(forceRefresh = false): Promise<Openro
   );
 }
 
-/** Read the two supported nested-Docker settings. */
+/** Read the supported nested-Docker settings. */
 export async function getDockerWorkloadSettings(): Promise<DockerWorkloadSettingsDto> {
   return getWsClient().request<DockerWorkloadSettingsDto>('config.getDockerWorkload', {});
 }
 
 /**
- * Update only nested-Docker enablement and mediated public registry pulls.
+ * Update only nested-Docker enablement and its three-state network access.
  * Advanced runtime fields are deliberately absent from this wire contract.
  */
 export async function setDockerWorkloadSettings(input: DockerWorkloadSettingsDto): Promise<DockerWorkloadSettingsDto> {
   return getWsClient().request<DockerWorkloadSettingsDto>('config.setDockerWorkload', {
     enabled: input.enabled,
-    allowPublicRegistryPulls: input.allowPublicRegistryPulls,
+    networkAccess: input.networkAccess,
   });
 }
 
