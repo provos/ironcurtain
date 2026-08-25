@@ -891,6 +891,7 @@ describe('Claude Code adapter OAuth support', () => {
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-ironcurtain-FAKE');
     expect(env.IRONCURTAIN_API_KEY).toBeUndefined();
     expect(env.CLAUDE_CODE_DISABLE_UPDATE_CHECK).toBe('1');
+    expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
     expect(env.NODE_EXTRA_CA_CERTS).toBe('/etc/ironcurtain/ca-cert.pem');
   });
 

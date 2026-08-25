@@ -769,18 +769,29 @@ for events, expected_exit in (
     assert read_outcome(ScriptedSocket(events), deadline()) == expected_exit
 
 class SlowDripSocket(ScriptedSocket):
-    def __init__(self):
+    def __init__(self, clock):
         super().__init__([])
+        self.clock = clock
     def recv(self, _size):
-        time.sleep(0.015)
+        self.clock.now += 0.015
         return b"x"
 
-slow_drip = SlowDripSocket()
-started = time.monotonic()
-assert read_outcome(slow_drip, started + 0.025) == namespace["EXIT_TIMEOUT_PARTIAL"]
-assert time.monotonic() - started < 0.5
-assert len(slow_drip.timeouts) >= 2
-assert all(left >= right for left, right in zip(slow_drip.timeouts, slow_drip.timeouts[1:]))
+class FakeTime:
+    def __init__(self):
+        self.now = 100.0
+    def monotonic(self):
+        return self.now
+
+real_script_time = namespace["time"]
+fake_time = FakeTime()
+namespace["time"] = fake_time
+try:
+    slow_drip = SlowDripSocket(fake_time)
+    assert read_outcome(slow_drip, fake_time.now + 0.025) == namespace["EXIT_TIMEOUT_PARTIAL"]
+    assert len(slow_drip.timeouts) == 2
+    assert 0 < slow_drip.timeouts[1] < slow_drip.timeouts[0]
+finally:
+    namespace["time"] = real_script_time
 
 class MainSocket(ScriptedSocket):
     def __init__(self):
@@ -1584,45 +1595,50 @@ try:
     else:
         raise AssertionError("privileged scanner timeout passed")
 
-    bounded = real_runner(
-        ("/usr/bin/python3", "-I", "-B", "-c", "import sys;sys.stdout.write('ok')"),
-        5,
-        2,
-        4,
-    )
-    assert (bounded.returncode, bounded.stdout, bounded.stderr) == (0, b"ok", b"")
-    for command, timeout_seconds, per_stream_output_limit, aggregate_output_limit, expected in (
-        (("/usr/bin/python3", "-I", "-B", "-c", "print('x' * 129)"), 5, 128, 256, "snapshot-scan:stdout-overflow"),
-        (("/usr/bin/python3", "-I", "-B", "-c", "import sys;sys.stderr.write('x' * 129)"), 5, 128, 256, "snapshot-scan:stderr-overflow"),
-        (("/usr/bin/python3", "-I", "-B", "-c", "import sys,time;sys.stdout.write('x'*70);sys.stdout.flush();time.sleep(.05);sys.stderr.write('y'*70);sys.stderr.flush()"), 5, 128, 128, "snapshot-scan:output-overflow"),
-        (("/usr/bin/python3", "-I", "-B", "-c", "import sys,time;sys.stderr.write('y'*70);sys.stderr.flush();time.sleep(.05);sys.stdout.write('x'*70);sys.stdout.flush()"), 5, 128, 128, "snapshot-scan:output-overflow"),
-        (("/usr/bin/python3", "-I", "-B", "-c", "import time;time.sleep(5)"), 0.05, 128, 256, "snapshot-scan:timeout"),
-        (("/definitely/missing/ironcurtain-snapshot-helper",), 5, 128, 256, "snapshot-scan:launch"),
-    ):
-        try:
-            real_runner(command, timeout_seconds, per_stream_output_limit, aggregate_output_limit)
-        except module["ProbeFailure"] as error:
-            assert str(error) == expected
-        else:
-            raise AssertionError(f"bounded subprocess accepted {expected}")
+    # The bounded runner executes only inside the Linux workflow VM. Running
+    # these pipe-selector integration cases on a Darwin host exercises kqueue
+    # scheduling that production never uses and can collapse a specific bound
+    # into the deliberately fail-closed snapshot-scan:protocol fallback.
+    if sys.platform == "linux":
+        bounded = real_runner(
+            ("/usr/bin/python3", "-I", "-B", "-c", "import sys;sys.stdout.write('ok')"),
+            5,
+            2,
+            4,
+        )
+        assert (bounded.returncode, bounded.stdout, bounded.stderr) == (0, b"ok", b"")
+        for command, timeout_seconds, per_stream_output_limit, aggregate_output_limit, expected in (
+            (("/usr/bin/python3", "-I", "-B", "-c", "print('x' * 129)"), 5, 128, 256, "snapshot-scan:stdout-overflow"),
+            (("/usr/bin/python3", "-I", "-B", "-c", "import sys;sys.stderr.write('x' * 129)"), 5, 128, 256, "snapshot-scan:stderr-overflow"),
+            (("/usr/bin/python3", "-I", "-B", "-c", "import sys,time;sys.stdout.write('x'*70);sys.stdout.flush();time.sleep(.05);sys.stderr.write('y'*70);sys.stderr.flush()"), 5, 128, 128, "snapshot-scan:output-overflow"),
+            (("/usr/bin/python3", "-I", "-B", "-c", "import sys,time;sys.stderr.write('y'*70);sys.stderr.flush();time.sleep(.05);sys.stdout.write('x'*70);sys.stdout.flush()"), 5, 128, 128, "snapshot-scan:output-overflow"),
+            (("/usr/bin/python3", "-I", "-B", "-c", "import time;time.sleep(5)"), 0.05, 128, 256, "snapshot-scan:timeout"),
+            (("/definitely/missing/ironcurtain-snapshot-helper",), 5, 128, 256, "snapshot-scan:launch"),
+        ):
+            try:
+                real_runner(command, timeout_seconds, per_stream_output_limit, aggregate_output_limit)
+            except module["ProbeFailure"] as error:
+                assert str(error) == expected
+            else:
+                raise AssertionError(f"bounded subprocess accepted {expected}")
 
-    signaled = real_runner(
-        (
-            "/usr/bin/python3", "-I", "-B", "-c",
-            "import os,signal;print('IRONCURTAIN_SNAPSHOT_SCAN_BEGIN/1',flush=True);os.kill(os.getpid(),signal.SIGTERM)",
-        ),
-        5,
-        128,
-        256,
-    )
-    assert signaled.returncode < 0 and signaled.stdout == begin and signaled.stderr == b""
-    set_result(signaled.returncode, signaled.stdout, signaled.stderr)
-    try:
-        module["Probe"]._invoke_privileged_snapshot_scan()
-    except module["ProbeFailure"] as error:
-        assert str(error) == "snapshot-scan:aborted"
-    else:
-        raise AssertionError("real signaled helper passed protocol admission")
+        signaled = real_runner(
+            (
+                "/usr/bin/python3", "-I", "-B", "-c",
+                "import os,signal;print('IRONCURTAIN_SNAPSHOT_SCAN_BEGIN/1',flush=True);os.kill(os.getpid(),signal.SIGTERM)",
+            ),
+            5,
+            128,
+            256,
+        )
+        assert signaled.returncode < 0 and signaled.stdout == begin and signaled.stderr == b""
+        set_result(signaled.returncode, signaled.stdout, signaled.stderr)
+        try:
+            module["Probe"]._invoke_privileged_snapshot_scan()
+        except module["ProbeFailure"] as error:
+            assert str(error) == "snapshot-scan:aborted"
+        else:
+            raise AssertionError("real signaled helper passed protocol admission")
 finally:
     globals["run_bounded_snapshot_subprocess"] = real_runner
 `);
@@ -2157,39 +2173,168 @@ for invalid in (
 `);
   });
 
+  it('uses the production O_PATH pin and proc-fd reopen when the host supports it', () => {
+    runProbeAssertion(String.raw`
+import errno, os, runpy, stat, sys, tempfile
+from pathlib import Path
+module = runpy.run_path(sys.argv[1], run_name="probe_test")
+Probe = module["Probe"]
+ProbeFailure = module["ProbeFailure"]
+
+try:
+    Probe._require_snapshot_scan_capabilities()
+except ProbeFailure as error:
+    # Darwin and older Linux/Python runners may expose O_PATH without the full
+    # descriptor API contract. Production must reject every such host before
+    # traversal instead of selecting a weaker pathname fallback.
+    assert str(error) == "snapshot-scan:capability"
+else:
+    assert sys.platform == "linux"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        payload = b"production descriptor fixture"
+        (root / "candidate").write_bytes(payload)
+        parent_descriptor = -1
+        try:
+            parent_descriptor = os.open(
+                root,
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_NONBLOCK
+                | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+            )
+            expected = os.stat(
+                b"candidate",
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            pin_descriptor, read_descriptor = Probe._open_pinned_snapshot_regular_file(
+                parent_descriptor,
+                b"candidate",
+                expected,
+            )
+            try:
+                assert pin_descriptor != read_descriptor
+                pinned = os.fstat(pin_descriptor)
+                opened = os.fstat(read_descriptor)
+                assert stat.S_ISREG(pinned.st_mode) and stat.S_ISREG(opened.st_mode)
+                assert Probe._snapshot_identity_is_exact(pinned, expected)
+                assert Probe._snapshot_identity_is_exact(opened, pinned)
+                try:
+                    os.read(pin_descriptor, 1)
+                except OSError as error:
+                    assert error.errno == errno.EBADF
+                else:
+                    raise AssertionError("production pin descriptor was directly readable")
+                assert os.read(read_descriptor, len(payload) + 1) == payload
+                assert os.read(read_descriptor, 1) == b""
+            finally:
+                Probe._close_snapshot_descriptors(
+                    (pin_descriptor, read_descriptor),
+                    phase="file-close",
+                    primary_error=None,
+                )
+            for descriptor in (pin_descriptor, read_descriptor):
+                try:
+                    os.fstat(descriptor)
+                except OSError as error:
+                    assert error.errno == errno.EBADF
+                else:
+                    raise AssertionError(f"successful snapshot descriptor leaked: {descriptor}")
+
+            race_expected = os.stat(
+                b"candidate",
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            opener_globals = Probe._open_pinned_snapshot_regular_file.__func__.__globals__
+            real_open = opener_globals["os"].open
+            race_descriptors = []
+            reopen_paths = []
+            def replace_path_before_reopen(path, *args, **kwargs):
+                is_proc_reopen = isinstance(path, str) and path.startswith("/proc/self/fd/")
+                if is_proc_reopen:
+                    assert reopen_paths == []
+                    (root / "candidate").rename(root / "pinned-original")
+                    (root / "candidate").write_bytes(b"replacement pathname fixture")
+                    reopen_paths.append(path)
+                descriptor = real_open(path, *args, **kwargs)
+                if path == b"candidate" or is_proc_reopen:
+                    race_descriptors.append(descriptor)
+                return descriptor
+            fd_count_before = len(os.listdir("/proc/self/fd"))
+            opener_globals["os"].open = replace_path_before_reopen
+            try:
+                try:
+                    Probe._open_pinned_snapshot_regular_file(
+                        parent_descriptor,
+                        b"candidate",
+                        race_expected,
+                    )
+                except ProbeFailure as error:
+                    assert str(error) == "snapshot-scan:unstable"
+                else:
+                    raise AssertionError("pathname replacement passed the production opener")
+            finally:
+                opener_globals["os"].open = real_open
+            assert len(os.listdir("/proc/self/fd")) == fd_count_before
+            assert len(race_descriptors) == 2
+            assert reopen_paths == [f"/proc/self/fd/{race_descriptors[0]}"]
+            for descriptor in race_descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError as error:
+                    assert error.errno == errno.EBADF
+                else:
+                    raise AssertionError(f"failed snapshot descriptor leaked: {descriptor}")
+        finally:
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
+
+        try:
+            os.fstat(parent_descriptor)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+        else:
+            raise AssertionError(f"production parent descriptor leaked: {parent_descriptor}")
+`);
+  });
+
   it('screens every snapshot file by CA SPKI while accepting unrelated private keys', () => {
     runProbeAssertion(String.raw`
 import errno, os, runpy, stat, subprocess, sys, tempfile
 from pathlib import Path
 module = runpy.run_path(sys.argv[1], run_name="probe_test")
 
-# Production requires Linux O_PATH pinning. The host-side unit test uses one
-# already-open regular descriptor plus dup so the traversal logic is testable
-# on Darwin without adding a production pathname fallback.
-if not hasattr(os, "O_PATH"):
-    module["Probe"]._require_snapshot_scan_capabilities = staticmethod(lambda: None)
-    def test_open_pinned(cls, parent_descriptor, component, expected):
-        try:
-            descriptor = os.open(
-                component,
-                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_descriptor,
-            )
-        except OSError as error:
-            cls._raise_snapshot_operation_failure(
-                "file-pin", error, replacement_possible=True
-            )
-        try:
-            observed = os.fstat(descriptor)
-            if not stat.S_ISREG(observed.st_mode) or not cls._snapshot_identity_is_exact(
-                observed, expected
-            ):
-                raise module["ProbeFailure"]("snapshot-scan:unstable")
-            return descriptor, os.dup(descriptor)
-        except BaseException:
-            os.close(descriptor)
-            raise
-    module["Probe"]._open_pinned_snapshot_regular_file = classmethod(test_open_pinned)
+# The focused production-opener test above covers the complete Linux
+# descriptor-capability set and real O_PATH/proc-fd path.
+# This host-side traversal test always supplies its own already-open regular
+# descriptor plus dup so its result cannot depend on the CI runner's Python or
+# kernel capability exposure.
+module["Probe"]._require_snapshot_scan_capabilities = staticmethod(lambda: None)
+def test_open_pinned(cls, parent_descriptor, component, expected):
+    try:
+        descriptor = os.open(
+            component,
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+    except OSError as error:
+        cls._raise_snapshot_operation_failure(
+            "file-pin", error, replacement_possible=True
+        )
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or not cls._snapshot_identity_is_exact(
+            observed, expected
+        ):
+            raise module["ProbeFailure"]("snapshot-scan:unstable")
+        return descriptor, os.dup(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+module["Probe"]._open_pinned_snapshot_regular_file = classmethod(test_open_pinned)
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     ca_key = root / "ca-private.pem"
@@ -2407,45 +2552,54 @@ else:
 
   it('traverses VFS through stable no-follow descriptors with aggregate bounds and no FD leaks', () => {
     runProbeAssertion(String.raw`
-import errno, os, runpy, socket, stat, sys, tempfile, time
+import errno, os, runpy, stat, sys, tempfile, time
 from pathlib import Path
 module = runpy.run_path(sys.argv[1], run_name="probe_test")
 Probe = module["Probe"]
 ProbeFailure = module["ProbeFailure"]
 globals = Probe._scan_snapshot_filesystems_core.__globals__
 
-if not hasattr(os, "O_PATH"):
+# The production gate remains fail closed on a non-Linux runtime, independent
+# of whichever descriptor capabilities this host happens to expose.
+real_platform = globals["sys"].platform
+globals["sys"].platform = "unsupported-test-host"
+try:
     try:
         Probe._require_snapshot_scan_capabilities()
     except ProbeFailure as error:
         assert str(error) == "snapshot-scan:capability"
     else:
-        raise AssertionError("snapshot scanner accepted a host without Linux O_PATH")
-    Probe._require_snapshot_scan_capabilities = staticmethod(lambda: None)
-    def test_open_pinned(cls, parent_descriptor, component, expected):
-        descriptor = -1
+        raise AssertionError("snapshot scanner accepted a non-Linux host")
+finally:
+    globals["sys"].platform = real_platform
+
+# Exercise traversal with deterministic test descriptors rather than making
+# its result conditional on the host runner's full Linux capability matrix.
+Probe._require_snapshot_scan_capabilities = staticmethod(lambda: None)
+def test_open_pinned(cls, parent_descriptor, component, expected):
+    descriptor = -1
+    try:
         try:
-            try:
-                descriptor = os.open(
-                    component,
-                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
-                    dir_fd=parent_descriptor,
-                )
-            except OSError as error:
-                cls._raise_snapshot_operation_failure(
-                    "file-pin", error, replacement_possible=True
-                )
-            observed = os.fstat(descriptor)
-            if not stat.S_ISREG(observed.st_mode) or not cls._snapshot_identity_is_exact(
-                observed, expected
-            ):
-                raise ProbeFailure("snapshot-scan:unstable")
-            return descriptor, os.dup(descriptor)
-        except BaseException:
-            if descriptor >= 0:
-                os.close(descriptor)
-            raise
-    Probe._open_pinned_snapshot_regular_file = classmethod(test_open_pinned)
+            descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as error:
+            cls._raise_snapshot_operation_failure(
+                "file-pin", error, replacement_possible=True
+            )
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or not cls._snapshot_identity_is_exact(
+            observed, expected
+        ):
+            raise ProbeFailure("snapshot-scan:unstable")
+        return descriptor, os.dup(descriptor)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+Probe._open_pinned_snapshot_regular_file = classmethod(test_open_pinned)
 
 public_spki = b"-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
 def probe_for(root):
@@ -2531,13 +2685,21 @@ with tempfile.TemporaryDirectory() as directory:
         opened_as_regular.clear()
 
         socket_path = root / "socket"
-        unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        unix_socket.bind(str(socket_path))
+        socket_path.write_bytes(b"test socket metadata fixture")
+        real_stat = globals["os"].stat
+        def socket_stat(path, *args, **kwargs):
+            observed = real_stat(path, *args, **kwargs)
+            if path != b"socket":
+                return observed
+            fields = list(observed)
+            fields[0] = stat.S_IFSOCK | stat.S_IMODE(observed.st_mode)
+            return os.stat_result(fields)
+        globals["os"].stat = socket_stat
         try:
             expect_failure(probe_for(root), "snapshot-scan:special-entry")
             assert b"socket" not in opened_as_regular
         finally:
-            unix_socket.close()
+            globals["os"].stat = real_stat
             socket_path.unlink()
     finally:
         Probe._open_pinned_snapshot_regular_file = original_opener

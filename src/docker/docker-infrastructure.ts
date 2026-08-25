@@ -1297,15 +1297,7 @@ export async function prepareDockerInfrastructure(
         networkAccess: dockerWorkloadConfig.networkAccess,
       };
     }
-    const { systemPrompt } = prepareSession(
-      adapter,
-      serverListings,
-      bundleDir,
-      config,
-      workspaceDir,
-      proxyAddress,
-      nestedDocker,
-    );
+    const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, proxyAddress, nestedDocker);
 
     const orientationDir = resolve(bundleDir, 'orientation');
     const runtimeTrust = stageRuntimeTrust(orientationDir, ca.certPem);

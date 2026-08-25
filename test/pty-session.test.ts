@@ -161,6 +161,7 @@ describe('Claude Code adapter PTY orientation files', () => {
 
     expect(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBeUndefined();
     expect(env.CLAUDE_ENABLE_STREAM_WATCHDOG).toBeUndefined();
+    expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
   });
 
   it('preserves watchdog tuning as an explicit PTY escape hatch', () => {
