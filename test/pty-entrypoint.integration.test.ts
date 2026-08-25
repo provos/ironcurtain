@@ -196,6 +196,8 @@ describe.skipIf(!dockerReady)('PTY container entrypoint UDS→TCP bridge (via ru
         },
         autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
         auditRedaction: { enabled: true },
+        modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
+        statistics: { enabled: false, retentionDays: null },
         memory: { enabled: false, llmBaseUrl: undefined, llmApiKey: undefined },
         packageInstall: {
           enabled: false,

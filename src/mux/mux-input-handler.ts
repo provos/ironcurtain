@@ -15,7 +15,7 @@ import { homedir } from 'node:os';
 import { expandTilde } from '../types/argument-roles.js';
 import { PASTE_START, PASTE_END } from './paste-interceptor.js';
 import type { InputMode, MuxAction } from './types.js';
-import type { SessionSnapshot } from './session-scanner.js';
+import type { SessionSnapshot } from '../pty/session-scanner.js';
 import type { PersonaSnapshot } from './persona-scanner.js';
 import type { ProviderProfileSnapshot } from './provider-profile-snapshot.js';
 import { hasSelectableProfiles } from './provider-profile-snapshot.js';

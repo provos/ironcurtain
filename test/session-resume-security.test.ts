@@ -11,10 +11,10 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionSnapshot } from '../src/docker/pty-types.js';
-import { validateResumeSession } from '../src/docker/pty-session.js';
+import { acquireResumeSessionLock, releaseResumeSessionLock } from '../src/docker/pty-session.js';
 import { prepareConversationStateDir } from '../src/docker/docker-infrastructure.js';
 import type { ConversationStateConfig } from '../src/docker/agent-adapter.js';
-import { scanResumableSessions } from '../src/mux/session-scanner.js';
+import { scanResumableSessions, validateResumeSession } from '../src/pty/session-scanner.js';
 import { getSessionDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
 
 function makeSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
@@ -98,7 +98,7 @@ describe('snapshot tampering resistance', () => {
     expect(() => validateResumeSession('no-id-session')).toThrow('sessionId mismatch');
 
     // scanResumableSessions also requires sessionId to be truthy
-    const sessions = scanResumableSessions();
+    const sessions = scanResumableSessions([]);
     expect(sessions).toHaveLength(0);
   });
 
@@ -119,6 +119,72 @@ describe('snapshot tampering resistance', () => {
     writeFileSync(join(sessionDir, SESSION_STATE_FILENAME), '{not valid json!!!');
 
     expect(() => validateResumeSession('corrupt-session')).toThrow('corrupted or invalid');
+  });
+
+  it('rejects malformed snapshot metadata on the direct resume path', () => {
+    const sessionDir = join(baseDir, 'sessions', 'malformed-session');
+    const workspaceDir = join(sessionDir, 'sandbox');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(
+        makeSnapshot({
+          sessionId: 'malformed-session',
+          workspacePath: workspaceDir,
+          agent: { name: 'claude-code' } as unknown as string,
+          persona: { name: 'reviewer' } as unknown as string,
+        }),
+      ),
+    );
+
+    expect(() => validateResumeSession('malformed-session')).toThrow('corrupted or invalid');
+  });
+
+  it('holds a crash-recoverable lock for one resumed session at a time', () => {
+    const sessionDir = join(baseDir, 'sessions', 'locked-session');
+    const workspaceDir = join(sessionDir, 'sandbox');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(makeSnapshot({ sessionId: 'locked-session', workspacePath: workspaceDir })),
+    );
+
+    const first = acquireResumeSessionLock('locked-session');
+    expect(() => acquireResumeSessionLock('locked-session')).toThrow('already being resumed');
+    first.release();
+
+    const retry = acquireResumeSessionLock('locked-session');
+    retry.release();
+  });
+
+  it('releases the resume lock when validation fails under the claim', () => {
+    const sessionDir = join(baseDir, 'sessions', 'invalid-then-fixed-session');
+    const workspaceDir = join(sessionDir, 'sandbox');
+    mkdirSync(workspaceDir, { recursive: true });
+
+    expect(() => acquireResumeSessionLock('invalid-then-fixed-session')).toThrow('no session state snapshot');
+
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(makeSnapshot({ sessionId: 'invalid-then-fixed-session', workspacePath: workspaceDir })),
+    );
+    const retry = acquireResumeSessionLock('invalid-then-fixed-session');
+    retry.release();
+  });
+
+  it('does not let lost-lock cleanup replace the resumed session outcome', () => {
+    const sessionDir = join(baseDir, 'sessions', 'lost-lock-session');
+    const workspaceDir = join(sessionDir, 'sandbox');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(makeSnapshot({ sessionId: 'lost-lock-session', workspacePath: workspaceDir })),
+    );
+
+    const lock = acquireResumeSessionLock('lost-lock-session');
+    rmSync(lock.path);
+
+    expect(() => releaseResumeSessionLock(lock)).not.toThrow();
   });
 
   it('handles extra unexpected fields in snapshot gracefully', () => {
@@ -264,19 +330,21 @@ describe('session isolation', () => {
     // Create two sessions
     for (const id of ['session-a', 'session-b']) {
       const dir = join(sessionsDir, id);
+      const workspacePath = join(dir, 'sandbox');
       mkdirSync(dir, { recursive: true });
+      mkdirSync(workspacePath, { recursive: true });
       writeFileSync(
         join(dir, SESSION_STATE_FILENAME),
         JSON.stringify(
           makeSnapshot({
             sessionId: id,
-            workspacePath: `/tmp/${id}/sandbox`,
+            workspacePath,
           }),
         ),
       );
     }
 
-    const sessions = scanResumableSessions();
+    const sessions = scanResumableSessions([]);
     expect(sessions).toHaveLength(2);
 
     // Each session has its own workspace path

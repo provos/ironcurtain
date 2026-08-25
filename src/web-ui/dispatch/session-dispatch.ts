@@ -19,6 +19,7 @@ import {
 import {
   type SessionDto,
   type SessionDetailDto,
+  type ResumableSessionDto,
   RpcError,
   SessionNotFoundError,
   MethodNotFoundError,
@@ -27,6 +28,7 @@ import { tokenStreamDispatch } from './token-stream-dispatch.js';
 import { ptyDispatch } from './pty-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
+import { getWorkspaceLabel, scanResumableSessions, validateResumeSession } from '../../pty/session-scanner.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
 import { BudgetExhaustedError } from '../../types/errors.js';
@@ -57,6 +59,13 @@ const sessionCreateSchema = z.object({
   model: z.string().min(1).optional(),
 });
 const sessionSendSchema = z.object({ label: z.number().int().positive(), text: z.string().min(1) });
+const sessionResumeSchema = z.object({
+  sessionId: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid session ID'),
+});
 
 // ---------------------------------------------------------------------------
 // Session dispatch
@@ -87,6 +96,8 @@ export async function sessionDispatch(
   switch (method) {
     case 'sessions.list':
       return listSessions(ctx);
+    case 'sessions.listResumable':
+      return listResumableSessions(ctx);
     case 'sessions.get': {
       const { label } = validateParams(labelSchema, params);
       return getSession(ctx, label);
@@ -99,6 +110,10 @@ export async function sessionDispatch(
         return createPtySession(ctx, opts);
       }
       return createWebSession(ctx, opts.persona, opts.captureTraces);
+    }
+    case 'sessions.resume': {
+      const { sessionId } = validateParams(sessionResumeSchema, params);
+      return resumePtySession(ctx, sessionId);
     }
     case 'sessions.end': {
       const { label } = validateParams(labelSchema, params);
@@ -177,6 +192,29 @@ function listSessions(ctx: DispatchContext): SessionDto[] {
   return [...managed, ...pty];
 }
 
+function listResumableSessions(ctx: DispatchContext): ResumableSessionDto[] {
+  if (ctx.mode.kind !== 'docker') {
+    throw new RpcError('SESSION_NOT_RESUMABLE', 'Session resume requires container mode');
+  }
+  const protectedPaths = loadConfig().protectedPaths;
+  const result: ResumableSessionDto[] = [];
+  for (const snapshot of scanResumableSessions(protectedPaths)) {
+    if (ctx.ptySessionManager?.isResuming(snapshot.sessionId)) continue;
+    const workspaceLabel = getWorkspaceLabel(snapshot);
+    result.push({
+      sessionId: snapshot.sessionId,
+      displayName: snapshot.label,
+      agent: snapshot.agent,
+      status: snapshot.status,
+      lastActivity: snapshot.lastActivity,
+      ...(workspaceLabel ? { workspaceLabel } : {}),
+      ...(snapshot.persona ? { persona: snapshot.persona } : {}),
+      ...(snapshot.providerProfileName ? { providerProfileName: snapshot.providerProfileName } : {}),
+    });
+  }
+  return result;
+}
+
 function getSession(ctx: DispatchContext, label: number): SessionDetailDto {
   // PTY sessions have no turn history/diagnostics; return the DTO with empty
   // logs rather than throwing, since selecting one drives this call.
@@ -202,13 +240,7 @@ async function createPtySession(
   ctx: DispatchContext,
   opts: z.infer<typeof sessionCreateSchema>,
 ): Promise<{ label: number }> {
-  const manager = ctx.ptySessionManager;
-  if (!manager) {
-    throw new RpcError('INTERNAL_ERROR', 'PTY session manager not available');
-  }
-  if (manager.size >= ctx.maxConcurrentWebSessions) {
-    throw new RpcError('RATE_LIMITED', `PTY session limit reached (max ${ctx.maxConcurrentWebSessions})`);
-  }
+  const manager = requirePtyCapacity(ctx);
   return manager.create({
     ...(opts.persona ? { persona: opts.persona } : {}),
     ...(opts.captureTraces !== undefined ? { captureTraces: opts.captureTraces } : {}),
@@ -216,6 +248,37 @@ async function createPtySession(
     ...(opts.providerProfileName ? { providerProfileName: opts.providerProfileName } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   });
+}
+
+async function resumePtySession(ctx: DispatchContext, sessionId: string): Promise<{ label: number }> {
+  if (ctx.mode.kind !== 'docker') {
+    throw new RpcError('SESSION_NOT_RESUMABLE', 'Session resume requires container mode');
+  }
+  const manager = requirePtyCapacity(ctx);
+
+  let snapshot;
+  try {
+    snapshot = validateResumeSession(sessionId, loadConfig().protectedPaths);
+  } catch (error) {
+    throw new RpcError('SESSION_NOT_RESUMABLE', error instanceof Error ? error.message : String(error));
+  }
+
+  return manager.create({
+    resume: {
+      sessionId: snapshot.sessionId,
+      agent: snapshot.agent,
+      ...(snapshot.persona ? { persona: snapshot.persona } : {}),
+    },
+  });
+}
+
+function requirePtyCapacity(ctx: DispatchContext): NonNullable<DispatchContext['ptySessionManager']> {
+  const manager = ctx.ptySessionManager;
+  if (!manager) throw new RpcError('INTERNAL_ERROR', 'PTY session manager not available');
+  if (manager.capacityUsed >= ctx.maxConcurrentWebSessions) {
+    throw new RpcError('RATE_LIMITED', `PTY session limit reached (max ${ctx.maxConcurrentWebSessions})`);
+  }
+  return manager;
 }
 
 async function createWebSession(

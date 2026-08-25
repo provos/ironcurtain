@@ -1,12 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createIronCurtainInternalNetwork,
   InternalNetworkConnectivityError,
+  IRONCURTAIN_CREATED_AT_LABEL,
   IRONCURTAIN_MANAGED_LABEL,
   IRONCURTAIN_OWNER_PID_LABEL,
+  IRONCURTAIN_OWNER_SCOPE_LABEL,
   IRONCURTAIN_OWNER_TOKEN_LABEL,
   managedResourceLabels,
   reconcileIronCurtainDockerResources,
@@ -83,6 +85,148 @@ describe('Docker resource crash reconciliation', () => {
     expect(result.retainedActiveResources).toBe(2);
     expect(docker.remove).not.toHaveBeenCalled();
     expect(docker.removeNetwork).not.toHaveBeenCalled();
+  });
+
+  it('does not reclaim live resources owned by another IronCurtain home', async () => {
+    const productionHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-production-home-'));
+    process.env.IRONCURTAIN_HOME = productionHome;
+    const labels = managedResourceLabels('production-bundle');
+
+    process.env.IRONCURTAIN_HOME = home;
+    const docker = runtimeWithInventory({
+      containers: [container({ labels })],
+      networks: [network({ labels, containerIds: ['container-id'] })],
+    });
+
+    try {
+      const result = await reconcileIronCurtainDockerResources(docker, { pidAlive: () => true });
+
+      expect(labels[IRONCURTAIN_OWNER_SCOPE_LABEL]).toBeTruthy();
+      expect(result.retainedActiveResources).toBe(2);
+      expect(docker.remove).not.toHaveBeenCalled();
+      expect(docker.removeNetwork).not.toHaveBeenCalled();
+    } finally {
+      process.env.IRONCURTAIN_HOME = productionHome;
+      releaseManagedResourceLease('production-bundle');
+      process.env.IRONCURTAIN_HOME = home;
+      rmSync(productionHome, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the same owner scope for symlink aliases of one IronCurtain home', () => {
+    const alias = `${home}-alias`;
+    symlinkSync(home, alias, 'dir');
+    process.env.IRONCURTAIN_HOME = alias;
+    const aliasLabels = managedResourceLabels('alias-bundle');
+    process.env.IRONCURTAIN_HOME = home;
+    const directLabels = managedResourceLabels('direct-bundle');
+
+    try {
+      expect(aliasLabels[IRONCURTAIN_OWNER_SCOPE_LABEL]).toBe(directLabels[IRONCURTAIN_OWNER_SCOPE_LABEL]);
+    } finally {
+      process.env.IRONCURTAIN_HOME = alias;
+      releaseManagedResourceLease('alias-bundle');
+      process.env.IRONCURTAIN_HOME = home;
+      releaseManagedResourceLease('direct-bundle');
+      rmSync(alias, { force: true });
+    }
+  });
+
+  it('never reclaims foreign-home resources even when their recorded owner is dead', async () => {
+    const foreignHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-foreign-home-'));
+    process.env.IRONCURTAIN_HOME = foreignHome;
+    const labels = managedResourceLabels('foreign-bundle');
+    process.env.IRONCURTAIN_HOME = home;
+    const docker = runtimeWithInventory({ containers: [container({ labels })] });
+
+    try {
+      await reconcileIronCurtainDockerResources(docker, { pidAlive: () => false });
+      expect(docker.remove).not.toHaveBeenCalled();
+    } finally {
+      process.env.IRONCURTAIN_HOME = foreignHome;
+      releaseManagedResourceLease('foreign-bundle');
+      process.env.IRONCURTAIN_HOME = home;
+      rmSync(foreignHome, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves live managed resources created before owner scopes were labeled', async () => {
+    const labels = {
+      [IRONCURTAIN_MANAGED_LABEL]: 'true',
+      [IRONCURTAIN_OWNER_PID_LABEL]: '424242',
+      [IRONCURTAIN_OWNER_TOKEN_LABEL]: 'legacy-live-owner',
+      [IRONCURTAIN_CREATED_AT_LABEL]: '2026-08-24T12:00:00.000Z',
+      'ironcurtain.bundle': 'legacy-live-bundle',
+    };
+    const docker = runtimeWithInventory({
+      containers: [container({ labels })],
+      networks: [network({ labels, containerIds: ['container-id'] })],
+    });
+
+    const result = await reconcileIronCurtainDockerResources(docker, {
+      pidAlive: () => true,
+      processIdentity: () => ({ bootId: 'same-boot', startedAt: '2026-08-24T11:59:00.000Z' }),
+    });
+
+    expect(result.retainedActiveResources).toBe(2);
+    expect(docker.remove).not.toHaveBeenCalled();
+    expect(docker.removeNetwork).not.toHaveBeenCalled();
+  });
+
+  it('preserves a live pre-scope resource when process identity is unavailable', async () => {
+    const labels = {
+      [IRONCURTAIN_MANAGED_LABEL]: 'true',
+      [IRONCURTAIN_OWNER_PID_LABEL]: '424242',
+      [IRONCURTAIN_OWNER_TOKEN_LABEL]: 'legacy-unknown-owner',
+      [IRONCURTAIN_CREATED_AT_LABEL]: '2026-08-24T12:00:00.000Z',
+      'ironcurtain.bundle': 'legacy-unknown-bundle',
+    };
+    const docker = runtimeWithInventory({ containers: [container({ labels })] });
+
+    const result = await reconcileIronCurtainDockerResources(docker, {
+      pidAlive: () => true,
+      processIdentity: (pid) => (pid === process.pid ? { bootId: 'same-boot', startedAt: 'test-process' } : undefined),
+    });
+
+    expect(result.retainedActiveResources).toBe(1);
+    expect(docker.remove).not.toHaveBeenCalled();
+  });
+
+  it('reclaims pre-scope resources when their recorded PID was recycled', async () => {
+    const labels = {
+      [IRONCURTAIN_MANAGED_LABEL]: 'true',
+      [IRONCURTAIN_OWNER_PID_LABEL]: '424242',
+      [IRONCURTAIN_OWNER_TOKEN_LABEL]: 'legacy-recycled-owner',
+      [IRONCURTAIN_CREATED_AT_LABEL]: '2026-08-24T12:00:00.000Z',
+      'ironcurtain.bundle': 'legacy-recycled-bundle',
+    };
+    const docker = runtimeWithInventory({
+      containers: [container({ labels })],
+      networks: [network({ labels, containerIds: ['container-id'] })],
+    });
+    const leaseDir = resolve(home, 'run', 'docker-owners');
+    mkdirSync(leaseDir, { recursive: true });
+    writeFileSync(
+      resolve(leaseDir, 'legacy-recycled-owner.json'),
+      JSON.stringify({
+        token: 'legacy-recycled-owner',
+        pid: 424242,
+        identity: { bootId: 'same-boot', startedAt: 'original-process' },
+      }),
+    );
+
+    const result = await reconcileIronCurtainDockerResources(docker, {
+      pidAlive: () => true,
+      processIdentity: (pid) => ({
+        bootId: 'same-boot',
+        startedAt: pid === 424242 ? 'recycled-process' : 'test-process',
+      }),
+    });
+
+    expect(result.removedContainers).toEqual(['ironcurtain-1234567890ab']);
+    expect(result.removedNetworks).toEqual(['ironcurtain-1234567890ab']);
+    expect(docker.remove).toHaveBeenCalledWith('container-id');
+    expect(docker.removeNetwork).toHaveBeenCalledWith('ironcurtain-1234567890ab');
   });
 
   it('force-removes managed containers and networks after owner death', async () => {

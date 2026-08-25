@@ -106,10 +106,10 @@
   }
 
   // ------------------------------------------------------------------
-  // Relative-time helper. No codebase utility exists for this; keep it
-  // small and inline rather than introducing a new dependency.
+  // Message logs intentionally retain seconds-level detail for recent events;
+  // the shared compact formatter starts at minute granularity.
   // ------------------------------------------------------------------
-  function formatRelativeTime(iso: string, now: number = Date.now()): string {
+  function formatMessageRelativeTime(iso: string, now: number = Date.now()): string {
     const ts = Date.parse(iso);
     if (Number.isNaN(ts)) return iso;
     const deltaSec = Math.round((now - ts) / 1000);
@@ -160,7 +160,7 @@
         <div class="flex items-baseline gap-2 text-xs text-muted-foreground mb-1">
           <Badge variant={meta.badgeVariant} class="font-mono shrink-0">{meta.label}</Badge>
           <span class="font-mono text-foreground/70">{entry.state}</span>
-          <span class="ml-auto" title={formatAbsoluteTime(entry.ts)}>{formatRelativeTime(entry.ts)}</span>
+          <span class="ml-auto" title={formatAbsoluteTime(entry.ts)}>{formatMessageRelativeTime(entry.ts)}</span>
         </div>
 
         {#if isAgentMessage(entry)}

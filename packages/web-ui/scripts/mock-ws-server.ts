@@ -65,6 +65,17 @@ interface MockSession {
   lastAttachedAt?: string;
 }
 
+interface MockResumableSession {
+  sessionId: string;
+  displayName: string;
+  agent: string;
+  status: 'completed' | 'crashed' | 'auth-failure' | 'user-exit';
+  lastActivity: string;
+  workspaceLabel?: string;
+  persona?: string;
+  providerProfileName?: string;
+}
+
 interface MockWhitelistCandidate {
   description: string;
 }
@@ -219,6 +230,7 @@ let replayController: ReplayController | null = null;
 let nextLabel = 1;
 let eventSeq = 0;
 const sessions = new Map<number, MockSession>();
+const resumableSessions = new Map<string, MockResumableSession>();
 const escalations = new Map<string, MockEscalation>();
 const clients = new Set<WebSocket>();
 
@@ -1377,6 +1389,18 @@ const jobs = structuredClone(CANNED_JOBS);
 function resetState(opts?: ResetOptions): void {
   stopAllPtyFrames();
   sessions.clear();
+  resumableSessions.clear();
+  const resumable: MockResumableSession = {
+    sessionId: 'mock-saved-session',
+    displayName: 'Claude Code — ironcurtain',
+    agent: 'claude-code',
+    status: 'user-exit',
+    lastActivity: new Date(Date.now() - 12 * 60_000).toISOString(),
+    workspaceLabel: '~/src/ironcurtain',
+    persona: 'code-reviewer',
+    providerProfileName: 'native',
+  };
+  resumableSessions.set(resumable.sessionId, resumable);
   escalations.clear();
   nextLabel = 1;
   eventSeq = 0;
@@ -1709,6 +1733,31 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     case 'sessions.list':
       return [...sessions.values()].map(buildSessionDto);
+
+    case 'sessions.listResumable':
+      return [...resumableSessions.values()].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+
+    case 'sessions.resume': {
+      const sessionId = params.sessionId as string;
+      const saved = resumableSessions.get(sessionId);
+      if (!saved) return errorResult('SESSION_NOT_RESUMABLE', `Session "${sessionId}" is not resumable`);
+      resumableSessions.delete(sessionId);
+      const label = nextLabel++;
+      const session: MockSession = {
+        label,
+        turnCount: 0,
+        createdAt: new Date().toISOString(),
+        status: 'ready',
+        persona: saved.persona,
+        totalTokens: 0,
+        stepCount: 0,
+        estimatedCostUsd: 0,
+        isPty: true,
+      };
+      sessions.set(label, session);
+      broadcast('session.created', buildSessionDto(session));
+      return { label };
+    }
 
     case 'sessions.create': {
       const label = nextLabel++;
