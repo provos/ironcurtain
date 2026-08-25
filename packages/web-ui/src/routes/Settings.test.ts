@@ -98,7 +98,7 @@ describe('Settings', () => {
     // SAFE default: bundled (warn-only) AND a list covering every fixture slug —
     // so opening/saving existing profiles never spuriously hard-blocks.
     mockList.mockResolvedValue({ models: CATALOG_SLUGS, source: 'bundled' });
-    mockGetDockerWorkload.mockResolvedValue({ enabled: false, allowPublicRegistryPulls: true });
+    mockGetDockerWorkload.mockResolvedValue({ enabled: false, networkAccess: 'packages' });
     mockSetDockerWorkload.mockImplementation((input) => Promise.resolve(input));
     mockGetStatistics.mockResolvedValue({ enabled: true, retentionDays: 90 });
     mockSetStatistics.mockImplementation((input) => Promise.resolve(input));
@@ -109,10 +109,21 @@ describe('Settings', () => {
     await vi.waitFor(() => expect(screen.getByTestId('docker-workload-settings')).toBeTruthy());
 
     expect((screen.getByTestId('docker-workload-enabled') as HTMLInputElement).checked).toBe(false);
-    const publicPulls = screen.getByTestId('docker-workload-public-registry') as HTMLInputElement;
-    expect(publicPulls.checked).toBe(true);
-    expect(publicPulls.disabled).toBe(true);
-    expect(screen.getByText(/Docker Hub and GHCR/)).toBeTruthy();
+    const networkAccess = screen.getByTestId('docker-workload-network-access') as HTMLSelectElement;
+    expect(networkAccess.value).toBe('packages');
+    expect(networkAccess.disabled).toBe(true);
+    expect(networkAccess.options).toHaveLength(3);
+    expect(Array.from(networkAccess.options, (option) => option.text)).toEqual([
+      'Public packages and images (recommended)',
+      'Public images only',
+      'Offline',
+    ]);
+    expect(screen.getByTestId('docker-workload-package-warning').textContent?.replace(/\s+/gu, ' ').trim()).toBe(
+      'Packages permits any process in this nested-Docker session to send bounded workspace or build data through allowed package paths, permitted request metadata, and timing to fixed public repositories, and to download untrusted content. IronCurtain does not inject credentials and rejects recognized credential fields and request bodies. It screens the immediate peer, but a public repository may relay or hairpin elsewhere; use Images only or Offline to remove this route.',
+    );
+    expect(
+      screen.getByText(/Generic destinations, recognized credential fields, request bodies, and uploads/),
+    ).toBeTruthy();
     expect(screen.getByText(/Changes apply to new agent sessions/)).toBeTruthy();
     expect(screen.getByText(/macOS on Apple silicon with Apple Container installed/)).toBeTruthy();
     expect((screen.getByTestId('save-runtime-settings') as HTMLButtonElement).disabled).toBe(true);
@@ -131,52 +142,52 @@ describe('Settings', () => {
     expect(mockSetDockerWorkload).not.toHaveBeenCalled();
   });
 
-  it('enables nested Docker with mediated public pulls on by default', async () => {
+  it('enables nested Docker with recommended package access explicitly selected', async () => {
     render(Settings);
     await vi.waitFor(() => expect(screen.getByTestId('docker-workload-enabled')).toBeTruthy());
 
     await fireEvent.click(screen.getByTestId('docker-workload-enabled'));
-    expect((screen.getByTestId('docker-workload-public-registry') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByTestId('docker-workload-network-access') as HTMLSelectElement).value).toBe('packages');
     await fireEvent.click(screen.getByTestId('save-runtime-settings'));
 
     await vi.waitFor(() =>
       expect(mockSetDockerWorkload).toHaveBeenCalledWith({
         enabled: true,
-        allowPublicRegistryPulls: true,
+        networkAccess: 'packages',
       }),
     );
     expect(screen.getByTestId('runtime-settings-saved')).toBeTruthy();
   });
 
-  it('allows mediated public pulls to be explicitly disabled', async () => {
-    mockGetDockerWorkload.mockResolvedValue({ enabled: true, allowPublicRegistryPulls: true });
+  it('allows network access to be set to offline', async () => {
+    mockGetDockerWorkload.mockResolvedValue({ enabled: true, networkAccess: 'packages' });
     render(Settings);
-    await vi.waitFor(() => expect(screen.getByTestId('docker-workload-public-registry')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByTestId('docker-workload-network-access')).toBeTruthy());
 
-    await fireEvent.click(screen.getByTestId('docker-workload-public-registry'));
+    await fireEvent.change(screen.getByTestId('docker-workload-network-access'), { target: { value: 'offline' } });
     await fireEvent.click(screen.getByTestId('save-runtime-settings'));
 
     await vi.waitFor(() =>
       expect(mockSetDockerWorkload).toHaveBeenCalledWith({
         enabled: true,
-        allowPublicRegistryPulls: false,
+        networkAccess: 'offline',
       }),
     );
   });
 
-  it('preserves a remembered public-pull opt-out when re-enabling Docker', async () => {
-    mockGetDockerWorkload.mockResolvedValue({ enabled: false, allowPublicRegistryPulls: false });
+  it('preserves a remembered images-only preference when re-enabling Docker', async () => {
+    mockGetDockerWorkload.mockResolvedValue({ enabled: false, networkAccess: 'images' });
     render(Settings);
     await vi.waitFor(() => expect(screen.getByTestId('docker-workload-enabled')).toBeTruthy());
 
-    expect((screen.getByTestId('docker-workload-public-registry') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId('docker-workload-network-access') as HTMLSelectElement).value).toBe('images');
     await fireEvent.click(screen.getByTestId('docker-workload-enabled'));
     await fireEvent.click(screen.getByTestId('save-runtime-settings'));
 
     await vi.waitFor(() =>
       expect(mockSetDockerWorkload).toHaveBeenCalledWith({
         enabled: true,
-        allowPublicRegistryPulls: false,
+        networkAccess: 'images',
       }),
     );
   });

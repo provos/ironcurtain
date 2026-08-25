@@ -124,6 +124,7 @@ describe('OpenRouter — Claude Code adapter', () => {
     expect(env.ANTHROPIC_BASE_URL).toBe(OPENROUTER_BASE_URL);
     expect(env.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api');
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe(FAKE_OPENROUTER_KEY);
+    expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
     expect(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBe('1');
 
     // m2: DEFAULT_MODEL_MAP *sonnet*/*opus*/*haiku* globs all map to the GLM slug.
@@ -378,6 +379,7 @@ describe('OpenRouter OFF — native profile is byte-identical to today', () => {
     const env = adapter.buildEnv(nativeConfig, fakeKeys);
     expect(env).toEqual({
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       NODE_EXTRA_CA_CERTS: '/etc/ironcurtain/ca-cert.pem',
       IRONCURTAIN_API_KEY: 'sk-ant-api03-ironcurtain-FAKE',
     });

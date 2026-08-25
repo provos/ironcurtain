@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  isSelectedAgentCaptureAlias,
   prepareSelectedAgentArtifact,
   verifySelectedAgentArtifactArchive,
 } from '../../src/docker/selected-agent-artifact.js';
@@ -30,6 +31,14 @@ describe('selected agent artifact', () => {
 
   afterEach(() => {
     rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('recognizes only the canonical selected-image capture alias shape', () => {
+    const alias = 'ironcurtain-capture-p123-t1755300000000-' + '11111111-1111-4111-8111-111111111111:latest';
+    expect(isSelectedAgentCaptureAlias(alias)).toBe(true);
+    expect(isSelectedAgentCaptureAlias(`localhost/${alias}`)).toBe(true);
+    expect(isSelectedAgentCaptureAlias(`docker.io/library/${alias}`)).toBe(true);
+    expect(isSelectedAgentCaptureAlias('ironcurtain-capture-unstructured:latest')).toBe(false);
   });
 
   it('exports and canonicalizes only the current selected Apple image, then reuses the cache', async () => {

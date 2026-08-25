@@ -18,7 +18,7 @@
  * test/docker/docker-workload-admission.test.ts and is untouched here).
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +37,11 @@ import type {
 import type { SelectedAgentArtifact } from '../../src/docker/selected-agent-artifact.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import { resolveDockerWorkloadConfig } from '../../src/docker-workload/config.js';
+import {
+  getBundlePackageEgressSocketPath,
+  getBundleRegistryEgressSocketPath,
+  getBundleRuntimeRoot,
+} from '../../src/config/paths.js';
 import type { BundleId } from '../../src/session/types.js';
 import { createMockAdapter, createMockCA, createMockMitmProxy, createMockProxy } from '../helpers/docker-mocks.js';
 import {
@@ -60,7 +65,15 @@ interface PrepareSeam {
   admissionOverrides: () => Partial<DockerWorkloadAdmissionOptions>;
   makeProxy: (socketPath: string) => DockerProxy;
   makeMitm: (options: MitmProxyOptions) => MitmProxy;
-  stops: { proxy: number; mitm: number };
+  publicStartError?: Error;
+  publicReturnedSocketPath?: string;
+  publicCreateSocket: boolean;
+  stops: { proxy: number; mitm: number; public: number };
+  lifecycle: string[];
+  registrySocketPath?: string;
+  publicSocketPath?: string;
+  registrySocketMode?: number;
+  publicSocketMode?: number;
 }
 
 const seam = vi.hoisted<PrepareSeam>(() => ({
@@ -83,7 +96,9 @@ const seam = vi.hoisted<PrepareSeam>(() => ({
   makeMitm: () => {
     throw new Error('MITM proxy double not installed');
   },
-  stops: { proxy: 0, mitm: 0 },
+  stops: { proxy: 0, mitm: 0, public: 0 },
+  lifecycle: [],
+  publicCreateSocket: true,
 }));
 
 vi.mock('../../src/docker/agent-registry.js', () => ({
@@ -101,12 +116,58 @@ vi.mock('../../src/docker/container-runtime.js', async (importOriginal) => ({
 
 vi.mock('../../src/docker/ca.js', () => ({ loadOrCreateCA: () => seam.ca }));
 
+vi.mock('../../src/docker/runtime-trust.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/docker/runtime-trust.js')>();
+  return {
+    ...actual,
+    stageRuntimeTrust: (orientationDir: string) => {
+      for (const [name, contents] of [
+        ['ca-cert.pem', 'fixture-ca\n'],
+        ['ca-bundle.pem', 'fixture-bundle\n'],
+      ] as const) {
+        const path = join(orientationDir, name);
+        writeFileSync(path, contents, { mode: 0o444 });
+      }
+      return {
+        schemaVersion: 1,
+        generation: `runtime-trust-v1:${'1'.repeat(64)}`,
+        containerCertificatePath: '/etc/ironcurtain/ca-cert.pem',
+        containerBundlePath: '/etc/ironcurtain/ca-bundle.pem',
+        caCertificateSha256: '1'.repeat(64),
+        publicRootsSha256: '2'.repeat(64),
+        bundleSha256: '3'.repeat(64),
+        publicRootCount: 1,
+      };
+    },
+  };
+});
+
 vi.mock('../../src/docker/code-mode-proxy.js', () => ({
   createCodeModeProxy: (options: { socketPath: string }) => seam.makeProxy(options.socketPath),
 }));
 
 vi.mock('../../src/docker/mitm-proxy.js', () => ({
   createMitmProxy: (options: MitmProxyOptions) => seam.makeMitm(options),
+}));
+
+vi.mock('../../src/docker/package-egress-proxy.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/docker/package-egress-proxy.js')>()),
+  createPackageEgressProxy: () => {
+    seam.lifecycle.push('construct-package');
+    return {
+      snapshot: {},
+      async start(socketPath: string) {
+        seam.lifecycle.push('bind-package');
+        seam.publicSocketPath = socketPath;
+        if (seam.publicStartError !== undefined) throw seam.publicStartError;
+        if (seam.publicCreateSocket) writeFileSync(socketPath, '');
+        return { socketPath: seam.publicReturnedSocketPath ?? socketPath };
+      },
+      async stop() {
+        seam.stops.public += 1;
+      },
+    };
+  },
 }));
 
 // This test drives the post-admission seams with a qualifying Apple variant.
@@ -166,9 +227,17 @@ beforeEach(() => {
   seam.adapter = failFastAdapter();
   seam.runtime = runtime.runtime;
   seam.ca = createMockCA(tempDir);
+  seam.publicStartError = undefined;
+  seam.publicReturnedSocketPath = undefined;
+  seam.publicCreateSocket = true;
   seam.handle = undefined;
   seam.prepareArtifactCalls = 0;
-  seam.stops = { proxy: 0, mitm: 0 };
+  seam.stops = { proxy: 0, mitm: 0, public: 0 };
+  seam.lifecycle = [];
+  seam.registrySocketPath = undefined;
+  seam.publicSocketPath = undefined;
+  seam.registrySocketMode = undefined;
+  seam.publicSocketMode = undefined;
   seam.makeProxy = (socketPath: string): DockerProxy => ({
     ...createMockProxy(socketPath),
     async start() {
@@ -177,6 +246,12 @@ beforeEach(() => {
       writeFileSync(socketPath, '');
     },
     getHelpData() {
+      if (existsSync(getBundleRegistryEgressSocketPath(BUNDLE_ID))) {
+        seam.registrySocketMode = statSync(getBundleRegistryEgressSocketPath(BUNDLE_ID)).mode & 0o777;
+      }
+      if (existsSync(getBundlePackageEgressSocketPath(BUNDLE_ID))) {
+        seam.publicSocketMode = statSync(getBundlePackageEgressSocketPath(BUNDLE_ID)).mode & 0o777;
+      }
       throw new Error('scripted post-attestation failure');
     },
     async stop() {
@@ -184,9 +259,14 @@ beforeEach(() => {
     },
   });
   seam.makeMitm = ({ socketPath, controlSocketPath }: MitmProxyOptions): MitmProxy => {
+    if (socketPath?.endsWith('/registry-egress.sock')) {
+      seam.lifecycle.push('construct-registry');
+      seam.registrySocketPath = socketPath;
+    }
     return {
       ...createMockMitmProxy(),
       async start() {
+        if (socketPath?.endsWith('/registry-egress.sock')) seam.lifecycle.push('bind-registry');
         if (socketPath !== undefined) writeFileSync(socketPath, '');
         return { socketPath, controlSocketPath };
       },
@@ -226,7 +306,7 @@ function admittedHandle(): DockerWorkloadBundleHandle {
 }
 
 async function prepare(
-  imageIngress: 'preloaded-only' | 'public-registry' = 'preloaded-only',
+  networkAccess: 'offline' | 'images' | 'packages' = 'offline',
   preparedImageResolution?: AgentImageResolution,
 ): Promise<unknown> {
   const workspaceDir = join(getHome(), 'workspace');
@@ -236,7 +316,7 @@ async function prepare(
     mcpServers: {},
     userConfig: {
       modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
-      dockerWorkload: resolveDockerWorkloadConfig({ enabled: true, imageIngress }),
+      dockerWorkload: resolveDockerWorkloadConfig({ enabled: true, networkAccess }),
       packageInstall: { enabled: false },
       statistics: { enabled: true, retentionDays: 90 },
       containerRuntime: 'auto',
@@ -268,7 +348,7 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
     const artifact = { ...seam.artifact, buildHash };
 
     await expect(
-      prepare('preloaded-only', {
+      prepare('offline', {
         mode: 'selected-agent-artifact',
         logicalName: artifact.logicalName,
         imageRef: artifact.logicalName,
@@ -285,11 +365,63 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
   it('stops the per-bundle registry listener when later preparation fails', async () => {
     const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
 
-    await expect(prepare('public-registry')).rejects.toThrow(/scripted post-attestation failure/u);
+    await expect(prepare('images')).rejects.toThrow(/scripted post-attestation failure/u);
 
     expect(supervisor.calls.stopRequested).toBe(1);
     expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
-    expect(seam.stops).toEqual({ proxy: 1, mitm: 2 });
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 2, public: 0 });
+  });
+
+  it('stops both constructed listeners when package listener binding fails', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    seam.publicStartError = new Error('scripted public listener bind failure');
+
+    await expect(prepare('packages')).rejects.toThrow(/scripted public listener bind failure/u);
+
+    expect(supervisor.calls.launched).toBe(0);
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 1 });
+  });
+
+  it('stops both listeners when package binding reports a different socket', async () => {
+    installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    seam.publicReturnedSocketPath = join(tempDir, 'wrong-public.sock');
+
+    await expect(prepare('packages')).rejects.toThrow(/did not bind its exact per-bundle socket/u);
+
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 1 });
+  });
+
+  it('stops both listeners when the package socket cannot receive its guest mode', async () => {
+    installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+    seam.publicCreateSocket = false;
+
+    await expect(prepare('packages')).rejects.toThrow(/ENOENT|no such file/iu);
+
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 1 });
+  });
+
+  it('stops registry and package listeners when later packages-mode preparation fails', async () => {
+    const supervisor = installSupervisor(createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true }));
+
+    await expect(prepare('packages')).rejects.toThrow(/scripted post-attestation failure/u);
+
+    expect(supervisor.calls.stopRequested).toBe(1);
+    expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 2, public: 1 });
+    expect(seam.lifecycle.slice(0, 4)).toEqual([
+      'construct-registry',
+      'construct-package',
+      'bind-registry',
+      'bind-package',
+    ]);
+    expect(seam.registrySocketPath).toBe(getBundleRegistryEgressSocketPath(BUNDLE_ID));
+    expect(seam.publicSocketPath).toBe(getBundlePackageEgressSocketPath(BUNDLE_ID));
+    expect(seam.registrySocketMode).toBe(0o666);
+    expect(seam.publicSocketMode).toBe(0o666);
+    expect(existsSync(getBundleRuntimeRoot(BUNDLE_ID))).toBe(false);
   });
 
   it('tears down the staged lease when MITM startup fails before watchdog attestation', async () => {
@@ -308,7 +440,7 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
 
     expect(supervisor.calls.launched).toBe(0);
     expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
-    expect(seam.stops).toEqual({ proxy: 1, mitm: 1 });
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 0 });
   });
 
   it('stops the started MITM and tears down the lease when Code Mode proxy startup fails', async () => {
@@ -327,7 +459,7 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
 
     expect(supervisor.calls.launched).toBe(0);
     expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
-    expect(seam.stops).toEqual({ proxy: 1, mitm: 1 });
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 0 });
   });
 
   it('tears the admitted lease down when a step AFTER attestation throws', async () => {
@@ -345,7 +477,7 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
     expect(supervisor.calls.stopRequested).toBe(1);
     expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
     // The proxy cleanup that already existed still runs.
-    expect(seam.stops).toEqual({ proxy: 1, mitm: 1 });
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 0 });
   });
 
   it('tears the lease down on attestation failure without masking the attestation error', async () => {
@@ -358,6 +490,6 @@ describe('prepareDockerInfrastructure — Docker-workload lease teardown on fail
 
     expect(supervisor.calls.launched).toBe(1);
     expect(loadDockerWorkloadLease(admittedHandle().leasePath).status).toBe('closed');
-    expect(seam.stops).toEqual({ proxy: 1, mitm: 1 });
+    expect(seam.stops).toEqual({ proxy: 1, mitm: 1, public: 0 });
   });
 });

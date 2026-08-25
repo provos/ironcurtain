@@ -74,20 +74,53 @@ describe('loadUserConfig', () => {
     });
     expect(loadRequestedDockerWorkloadConfig()).toEqual({
       enabled: false,
-      imageIngress: 'preloaded-only',
+      networkAccess: 'offline',
     });
   });
 
-  it('keeps nested Docker authority off by default and makes the simple opt-in usable', () => {
+  it('keeps nested Docker authority off by default and conservatively migrates an enabled no-choice block', () => {
     writeConfigFile({
       dockerWorkload: { enabled: true },
     });
+    const configPath = resolve(testHome, 'config.json');
+    const before = readFileSync(configPath, 'utf-8');
+    expect(loadUserConfig({ readOnly: true }).dockerWorkload).toMatchObject({
+      enabled: true,
+      networkAccess: 'images',
+    });
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+
     expect(loadUserConfig().dockerWorkload).toMatchObject({
       enabled: true,
-      imageIngress: 'public-registry',
+      networkAccess: 'images',
       acceptObservedDiskRisk: true,
       resources: { memoryMb: USER_CONFIG_DEFAULTS.dockerResources.memoryMb, diskMb: null },
     });
+    const written = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(written.dockerWorkload).toEqual({ enabled: true, networkAccess: 'images' });
+  });
+
+  it('does not backfill a disabled no-choice network preference', () => {
+    writeConfigFile({ dockerWorkload: { enabled: false } });
+    expect(loadRequestedDockerWorkloadConfig()).toEqual({ enabled: false });
+    expect(loadUserConfig({ readOnly: true }).dockerWorkload).toEqual({ enabled: false });
+    expect(loadUserConfig().dockerWorkload).toEqual({ enabled: false });
+    const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(written.dockerWorkload).toEqual({ enabled: false });
+  });
+
+  it('normalizes superseded public access to packages without rewriting read-only loads', () => {
+    writeConfigFile({ dockerWorkload: { enabled: false, networkAccess: 'public' } });
+    const configPath = resolve(testHome, 'config.json');
+    const before = readFileSync(configPath, 'utf-8');
+
+    expect(loadRequestedDockerWorkloadConfig()).toEqual({ enabled: false, networkAccess: 'packages' });
+    expect(loadUserConfig({ readOnly: true }).dockerWorkload).toEqual({ enabled: false });
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+
+    expect(loadUserConfig().dockerWorkload).toEqual({ enabled: false });
+    const written = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(written.dockerWorkload).toEqual({ enabled: false, networkAccess: 'packages' });
   });
 
   it('inherits numeric Docker resources while keeping safe nested fallbacks for unlimited values', () => {
@@ -119,7 +152,7 @@ describe('loadUserConfig', () => {
     expect(() => loadUserConfig()).toThrow(/dockerResources\.cpus/u);
   });
 
-  it('migrates safe legacy nested-Docker defaults to the canonical two-choice request', () => {
+  it('migrates safe legacy nested-Docker defaults to the canonical network request', () => {
     writeConfigFile({
       dockerWorkload: {
         enabled: true,
@@ -135,9 +168,9 @@ describe('loadUserConfig', () => {
       },
     });
 
-    expect(loadUserConfig().dockerWorkload).toMatchObject({ enabled: true, imageIngress: 'preloaded-only' });
+    expect(loadUserConfig().dockerWorkload).toMatchObject({ enabled: true, networkAccess: 'offline' });
     const written = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
-    expect(written.dockerWorkload).toEqual({ enabled: true, imageIngress: 'preloaded-only' });
+    expect(written.dockerWorkload).toEqual({ enabled: true, networkAccess: 'offline' });
   });
 
   it('accepts safe legacy nested-Docker defaults without rewriting during read-only loads', () => {

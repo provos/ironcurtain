@@ -25,6 +25,10 @@ jobs:
           node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.1
+          cache-dependency-path: docker/build-trust-runtime/go.mod
 
       - name: Install Aikido safe-chain for supply chain protection
         run: npm install -g @aikidosec/safe-chain && safe-chain setup
@@ -37,6 +41,7 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm run build
+      - run: npm run check:build-trust-runtime
       - run: npm test
 
       - name: Publish to npm

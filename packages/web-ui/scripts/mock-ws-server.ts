@@ -636,7 +636,7 @@ let modelProviders: MockModelProviders = {
 
 const ORIGINAL_MODEL_PROVIDERS: MockModelProviders = structuredClone(modelProviders);
 
-let dockerWorkloadSettings = { enabled: false, allowPublicRegistryPulls: true };
+let dockerWorkloadSettings = { enabled: false, networkAccess: 'packages' };
 const ORIGINAL_DOCKER_WORKLOAD_SETTINGS = structuredClone(dockerWorkloadSettings);
 let statisticsScenario: StatisticsFixtureScenario = 'mixed';
 let statisticsFixture: StatisticsFixtureEngine = createStatisticsFixtureEngine(statisticsScenario);
@@ -2141,12 +2141,15 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'config.setDockerWorkload': {
       const gate = requireMutation();
       if (gate) return gate;
-      if (typeof params.enabled !== 'boolean' || typeof params.allowPublicRegistryPulls !== 'boolean') {
-        return errorResult('INVALID_PARAMS', 'enabled and allowPublicRegistryPulls must be booleans');
+      if (
+        typeof params.enabled !== 'boolean' ||
+        !['offline', 'images', 'packages'].includes(params.networkAccess as string)
+      ) {
+        return errorResult('INVALID_PARAMS', 'enabled and networkAccess must be valid nested-Docker settings');
       }
       dockerWorkloadSettings = {
         enabled: params.enabled,
-        allowPublicRegistryPulls: params.allowPublicRegistryPulls,
+        networkAccess: params.networkAccess as 'offline' | 'images' | 'packages',
       };
       broadcast('config.changed', {});
       return dockerWorkloadSettings;

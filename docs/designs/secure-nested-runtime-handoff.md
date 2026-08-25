@@ -1,9 +1,11 @@
 # Secure Nested Runtime Handoff
 
-**Updated:** 2026-08-15
+**Updated:** 2026-08-22
 **Branch:** `feat/secure-nested-runtime`
 **Baseline commit:** `70f22b615b4067ddb7a53d300dc6e6dc23a460a5` (`feat: enable mediated nested registry workloads`)
 **Primary design:** [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md)
+**Governing next-slice design:**
+[`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md)
 
 ## Objective
 
@@ -32,10 +34,17 @@ artifacts. The subsequent usability slice makes mediated public pulls the enable
 the two operator choices in the CLI and web settings, and keeps qualification/offline modes explicit.
 The current working tree removes frozen catalog identity from production admission, automatically
 prepares only the selected current-agent archive, and retains tolerant legacy-lease parsing for cleanup.
+It also deletes the obsolete current-Dockerfile build-egress manifest, source/hash policy, capture tool,
+TLS-MITM listener mode, and focused qualification tests. Legacy `buildEgress: "disabled"` remains a
+normalize-away compatibility input; `ironcurtain-dockerfiles` remains an actionable rejection.
 The replacement live public-registry smoke passed as session
 `a4208f3a-cd33-45bd-a4ec-b9e560acd176` with outer VM
 `ic-dw-agent-6e38b54379de4a49`; post-run inventory confirmed that the exact outer VM and temporary capture
 alias were absent while unrelated pre-existing Apple containers were unchanged.
+On 2026-08-21, the built production workflow entrypoint then passed a deterministic, no-LLM follow-up:
+public mode completed 25 functional checks, offline mode completed 17, and both produced exact closed-lease
+cleanup proof. The two runs shared one isolated IronCurtain home, so the offline workflow also proved that
+a second admitted session is not blocked by the first session's graceful cleanup.
 
 The currently supported variant is deliberately singular:
 
@@ -44,7 +53,7 @@ The currently supported variant is deliberately singular:
 - bundle image: untrusted selected current agent, with one prepared outer/inner artifact resolution;
 - workload ingress: either offline/preloaded-only or mediated public registry;
 - daemon state: ephemeral;
-- build egress: disabled;
+- current-Dockerfile build-egress stack: retired and deleted;
 - host port publishing: disabled;
 - PID enforcement: advisory;
 - disk enforcement: watchdog-observed developer policy, not a hard quota.
@@ -76,7 +85,11 @@ resolved-variant guard.
 
 - Public-registry mode creates one host-owned listener per bundle under its 0700 runtime root.
 - Apple mounts only the exact listener UDS at `/tmp/ironcurtain-registry-egress.sock` in the VM.
-- A fixed `socat` relay runs inside RootlessKit's namespace on `127.0.0.1:18081`.
+- The checked-in purpose-built Node relay runs its fixed `images` profile inside RootlessKit's namespace
+  on `127.0.0.1:18081`; its held-open readiness probe requires the exact host-listener response and EOF.
+- Registry relay connections retain an idle/byte envelope but no relay-level absolute timer because one
+  Docker connection may carry multiple independently bounded requests; package connections retain their
+  own finite absolute envelope. Both remain accounted until the downstream TCP socket actually closes.
 - Only dockerd receives the proxy and public-CA environment. Inner containers and Dockerfile `RUN` steps do not automatically inherit it.
 - The host listener uses direct destination-bound transport with local DNS/SSRF adjudication. There is no generic or direct fallback.
 - CONNECT authority parsing is canonical and exact; registry mode requires an allowed host/port and SNI equal to the CONNECT host before certificate generation.
@@ -163,8 +176,9 @@ administrator authority over its bundle-local daemon and may change inner resour
 Earlier catalog-based offline and public-registry smokes exercised the built CLI and exact cleanup, but
 they do not qualify selected-current transport or the managed-network slice. Their catalog identities,
 temporary paths, and duplicate validation tables are intentionally omitted here; Git history retains the
-diagnostic record. Fresh selected-current offline and PTY gates remain pending. The current
-public-registry result follows.
+diagnostic record. The selected-current public-registry session result and the newer deterministic
+public/offline workflow result follow. The PTY smoke remains available for transport-specific regressions,
+but it is not a completion gate for the functional matrix.
 
 ## Managed-Network Usability Slice Evidence
 
@@ -216,6 +230,31 @@ publication probes. Post-run `container list --all` contained no exact outer VM,
 contained no `ironcurtain-capture-*` alias, the isolated smoke root was removed, and unrelated pre-existing
 Apple containers were unchanged.
 
+### Deterministic no-LLM workflow live result
+
+On 2026-08-21, `npm run smoke:nested:apple:workflow` ran two ordinary built-CLI workflows through
+`workflow start`, without creating an LLM session or sending a provider request:
+
+```text
+[public] workflow passed 28 deterministic checks and exact teardown proof
+[offline] workflow passed 17 deterministic checks and exact teardown proof
+nested Apple workflow smoke passed (public + offline, no LLM)
+```
+
+The public workflow covered the admitted private daemon, rootless/vfs profile, exact exported Docker
+environment, selected image load, default-on allowlisted pull, denied registry, fixed internal bridge,
+embedded DNS, alias and inner-IP sibling routing, direct public-IP denial, ineffective nested `-p`, and
+empty final inner inventories. The offline workflow proved that the same selected image runs with
+`--pull never` while a public pull fails and retains no public image. Each foreground workflow exited
+only after its lease recorded immutable-ID absence, two separated empty inventories, and state/runtime
+root removal. The harness also proved that no new `ironcurtain-capture-*` alias survived. Public then
+offline in the same isolated home provides a graceful next-session recovery gate.
+
+This is now the preferred functional Apple acceptance path: deterministic workflow commands make the
+matrix reproducible and do not rely on an agent choosing commands. PTY testing remains valuable only for
+the transport-specific delta (activation-before-attach, environment/orientation delivery, terminal bytes,
+signal handling, and cleanup), not for duplicating the Docker functional matrix through an LLM.
+
 ### Recorded selected-current validation
 
 At the selected-current migration snapshot, the non-integration root suite, focused selected-image Apple
@@ -226,46 +265,136 @@ modules and fixtures, rerun the current-tree gates before merge rather than reus
 
 ## Important Boundaries: Do Not Overclaim
 
-1. **No real Claude provider turn was part of the public-registry gate.** The harness starts the real built session/infrastructure path and probes the admitted private daemon from trusted host test code. It does not ask Claude to issue the Docker commands.
-2. **Public registry plus PTY/mux composition is not a recorded live gate.** `npm run smoke:nested:apple:pty` exists for the node-pty/Claude-TUI path, but the latest public-registry acceptance was batch mode. The production paths share admission/bootstrap, but a combined gate remains useful evidence.
+1. **No real Claude provider turn is required for functional acceptance.** The current workflow gate runs fixed Python commands inside the real admitted workflow bundle. It exercises production workflow/infrastructure lifecycle without asking an LLM to choose or issue Docker commands.
+2. **PTY/mux is not a completion blocker.** `npm run smoke:nested:apple:pty` remains available for the node-pty/Claude-TUI path, which has prior manual coverage. The deterministic workflow owns the functional Docker matrix. Rerun PTY only after a PTY-specific change or a reported regression; do not require a provider turn to qualify nested-Docker functionality.
 3. **No host access to the server.** Host port publishing is explicitly forbidden. The implemented use case is target/scanner or service/sibling communication inside the bundle. Safely exposing a server to the Mac is a separate design and implementation slice.
 4. **No durable pull-provenance sink yet.** Policy enforcement exists, but successful registry provenance is not yet persisted as complete host session evidence.
 5. **No hard Apple disk quota.** Enabling the admitted developer slice accepts the host-watchdog-observed disk policy; the risk remains even though the UI hides that implementation detail.
 6. **Apple only.** Docker Desktop and Linux results must be independently implemented and qualified.
 7. **Not preview-qualified.** Full G1-G10/0C release evidence, zero-skip backend qualification, and broader failure injection remain incomplete.
-8. **Replacement public-registry gate passed.** The selected-current-agent product-entrypoint smoke passed
-   live on 2026-08-15 and exact cleanup was audited. Offline and PTY product-entrypoint smokes remain
-   separate follow-up evidence; a catalog refreeze is neither required nor a substitute for those gates.
+8. **Replacement public and offline gates passed.** The selected-current-agent public-registry session
+   smoke passed on 2026-08-15. Deterministic public and offline production workflows passed on 2026-08-21
+   with exact cleanup. A catalog refreeze is neither required nor a substitute for these gates.
 
 ## Recommended Next Work
 
-### 1. Complete the remaining post-migration live gates
+### 1. Finish qualification of the three-state package-network design
 
-The selected-current-agent migration in implementation plan §16.16 is implemented. Tag/cache mutation,
-legacy-lease recovery, selected-image archive qualification, and the public-registry managed-network
-product-entrypoint smoke now pass. Complete the remaining offline and PTY product-entrypoint smokes and
-the broader failure-injection matrix without reintroducing catalog admission.
+Registry mediation lets a nested build resolve and pull its `FROM` image. The current branch implements
+the governing
+[`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md) design: one
+`offline | images | packages` Network access control; conservative migration of existing public-registry
+configs to `images`; explicit recommended `packages` persistence for fresh CLI/web enablement; and a
+dedicated TLS-terminating MITM admitting only fixed apt/npm/PyPI/Cargo GET/HEAD grammars on the exact
+`18082`/UDS path. The automatic direct-build/default-driver-Buildx shim injects proxy arguments plus
+`--network=host`. `docker compose` builds are rejected by the shim; direct plugin binaries and custom
+clients are unsupported and uninterposed rather than described as shim-rejected.
 
-### 2. Combined public-registry PTY/mux acceptance
+When ordinary package policy is enabled, npm, PyPI, and Cargo artifacts are checked against an exact
+source-owned metadata fetch for the requested version. Debian retains the documented distro-curated,
+signed-index exception: its exact parsed artifact is presented to the same deny/allow validator with an
+epoch publication date, so quarantine alone does not reject an established distro package.
 
-Extend the live harness so one run combines:
+This is intentionally bounded **bundle-wide package authority**, not build-only provenance. A hostile
+bundle can encode bounded workspace or build data into allowed package paths, canonicalized request
+metadata, and timing, and downloaded bytes remain untrusted. IronCurtain provisions no package
+credential and rejects recognized credential fields and request bodies; that does not make package mode
+an exfiltration-prevention boundary. The host screens the immediate destination, but a fixed public peer
+may itself relay or hairpin elsewhere. The exact CLI/Web warning in the governing design must disclose
+these routes.
 
-- the production node-pty child path used by mux;
-- persisted active lease before PTY evidence;
-- real non-empty Claude TUI output;
-- public-registry listener presence;
-- the existing denied pull, allowed pull, internal bridge, server, raw-IP sibling, alias sibling, and no-egress probes; and
-- existing exact PTY teardown evidence.
+The superseded generic-public/opaque-CONNECT product path is removed. The package proxy, generated CA,
+build-trust wrapper, build shim, and lifecycle are reachable only for `packages`; legacy explicit
+`public` narrows to that mode. The lifecycle loads and re-inspects the immutable selected image before
+running the exact `--pull=false --network=none --no-cache` BuildKit canary, requires registry/package
+ledgers unchanged, and activates only after the canary. Package trust no longer aliases the agent-visible
+orientation tree: dedicated contract/certificate/bundle/apt copies are mounted as four individual
+read-only leaves beneath image-precreated `/opt/ironcurtain-build-trust`, while outer
+`/etc/ironcurtain` and OCI `/dev/ironcurtain` remain unchanged. Parent traversal accepts only complete
+root/overflow owner pairs; leaf UID/GID is diagnostic only, with exact mode/link/size/digest and effective
+read-only backing still mandatory. A fixed allowlisted wrapper failure-code leaf under secure sticky
+`/tmp` supplies bounded canary diagnostics without influencing admission, cleanup, ledgers, or causality.
+The deterministic supported-form gate runs each trust-check layer with cache disabled, requires the exact
+BuildKit step to finish rather than report `CACHED`, and admits only the authoritative RootFS prefix plus
+the canonical 1024-zero-byte empty-tar diff ID. Its later all-image archive scan binds image config and
+layer order to the exact public-base prefix and inspected diff IDs, rechecks the exact empty bytes, scans
+dynamic public authority markers globally, and checks every build-added layer and VFS graphdriver
+snapshot file for a complete plaintext PKCS#1/PKCS#8 PEM private key, bounded to the CA source's 128 KiB
+ceiling, whose derived public SPKI equals the staged CA. An otherwise canonical bounded candidate missing
+only its footer is checked after reconstructing the matching public footer; lone headers, prose,
+malformed bodies, other incomplete text, and oversized text are outside this identity check. Unrelated
+complete keys inherited from the pinned public base are permitted. The primary non-provisioning proof is
+persisted outer-create evidence, which separately proves that the exact
+seven public package-build sources are read-only beneath the bundle runtime, `/etc/ironcurtain` remains
+separate, and no host CA-directory or private/key-named source is mounted; no CA-key bytes or hash enter
+the workflow.
 
-Keep this separate from a paid/provider turn if possible. If the goal is to prove Claude itself chooses and invokes the Docker commands, add a clearly labeled manual or hermetic-provider acceptance lane rather than weakening the infrastructure gate.
+The deterministic packages qualification performs snapshot traversal through one exact root-only
+internal probe because the outer `codespace` process cannot read RootlessKit-owned VFS state. The parent
+remains unprivileged and brackets this call with the initially admitted rootless daemon identity, exact
+Docker data root, and unchanged tracked all/running-container and image inventories. Docker 29.2.1's
+embedded BuildKit 0.27.1 uses the admitted Docker VFS graphdriver rather than a standalone BuildKit
+snapshot directory, so only the exact real, non-symlink, nonempty `vfs/dir` tree is recursively screened. The exact
+real, non-symlink `buildkit` root must instead contain a nonempty, one-link, bounded, stable
+`snapshots.db`; a `buildkit/snapshots` entry is incompatible and fails. Its exact real, non-symlink
+`executor` directory must be quiescent: direct-child bundles, links, devices, and unknown entries fail,
+while only pinned-source steady-state `hosts`, `resolv.conf`, `resolv-host.conf`, and `runc-log.json`
+regular files may remain under individual size and stability bounds. `resolv-host.conf` is the exact
+BuildKit 0.27.1 `NetMode_HOST` resolver artifact required by the supported package builds. BuildKit content
+blobs and databases are not misclassified as root filesystems or recursively authority-marker scanned.
+VFS traversal is streamed from the validated root descriptor with finite entry, depth, byte, candidate,
+and time bounds. Every component is validated before descriptor-relative no-follow metadata access;
+directories retain exact before/open/after identities, symlinks retain exact identity around bounded byte
+target reads, and regular files are pinned with Linux `O_PATH|O_NOFOLLOW`, reopened only through the
+verified `/proc/self/fd` inode, then checked again through both descriptors and the parent directory.
+FIFO, socket, device, and unknown entry types fail without a data open. Fixed phase/errno, authority-input,
+PEM-parser, bound, residue, and instability codes disclose no path or content, and close failures
+cannot replace the primary scan failure.
+The archive proof keeps its independent 4 GiB ceiling. VFS uses a 256 GiB logical-byte ceiling and
+4,000,000-entry ceiling because the retained selected-image replay measured 85,986,117,228 logical bytes,
+1,489,147 entries, depth 20, and zero private-key candidates across its complete per-layer VFS snapshots.
+The 300-second deadline, depth-256 limit, and 256-candidate limit remain unchanged. Archive bytes, VFS
+logical bytes, VFS entries, depth, and candidate exhaustion have separate fixed nonleaking failure codes.
+This is bounded deterministic qualification
+evidence only: the daemon is not quiesced, traversal is not claimed TOCTOU-free, and the result is not a
+continuous runtime security attestation. The root helper uses a
+bounded stdout-only `BEGIN` then exact `OK`/allowlisted-`ERROR` protocol; each stream is capped at 128
+bytes and their aggregate at 256. Before dispatch, the parent proves the bounded Apple outer hostname
+grammar, nonempty safe `getent ahosts` resolution supplied by the image's `libnss-myhostname`, and an
+exact silent `sudo`/empty-environment true command. Bootstrap, stderr, overflow, signal, status, and
+framing failures reduce to nonleaking fixed parent diagnostics.
+
+The redacted checked-in
+[`CA-injection runc-PATH spike evidence`](./evidence/ca-injection-runc-path-spike.md) freezes the exact
+runc version and the full redacted BuildKit argv vector; its machine-readable argv fixture is the wrapper-
+test oracle for order, equality, and absence of extra arguments. The evidence records the functional
+result's `passed: false` and the later production-API reconciliation as separate facts; it is feasibility
+evidence, not a clean run or qualification. Later deterministic
+[no-network](./evidence/ca-injection-buildkit-oci-envelope.md) and
+[host-network](./evidence/ca-injection-buildkit-oci-envelope-host.md) captures both passed with exact
+cleanup. Their checked comparison shows one structural delta: host mode omits only the pathless OCI
+`network` namespace. The hardened wrapper maps its enforced structure to both summary hashes and
+deliberately makes no byte-frozen claim for omitted seccomp bodies or non-`/dev` mounts. Remaining release
+qualification should exercise hostile OCI specs, residue, supported package clients, and exact cleanup
+through the integrated entrypoints; the focused gates cover lock-serialized CA generations under the
+trusted owner-only host parent, no-follow leaf files, certificate/key equality, and bounded source-owned
+derived requests. As the governing design records, concurrent filesystem replacement by another process
+with the same host UID is outside the nested-container threat model.
+
+### 2. Broader failure injection
+
+Add deterministic prepare/create/load/probe failure cases around the workflow entrypoint and require the
+same exact cleanup proof. Keep crash recovery distinct from graceful next-session recovery.
 
 ### 3. Durable registry provenance
 
 Persist a bounded host-owned record of authorized registry requests and resolved destinations. Never store authorization headers, tokens, cookies, or unbounded query/body data. Bind the record to the lease, policy/manifest hash, and session metadata; selected-image observations may be included as provenance but are not authority.
 
-### 4. Next-session recovery gate
+### 4. Crash-recovery gate
 
-In one isolated home, close the first public-registry session, start a second session, and prove no stale listener, lease incident, runtime root, or exact Apple object blocks admission. The generic incident-recovery implementation exists; this is product-entrypoint evidence.
+Graceful next-session recovery passed when the public and offline workflows ran sequentially in one
+isolated home. The remaining recovery evidence is an injected coordinator/process death followed by a
+second workflow proving watchdog cleanup or startup reconciliation closes the old lease before admission.
 
 ### 5. Trusted outer inspect evidence
 
@@ -279,10 +408,17 @@ If users must reach an inner server from the Mac, design a separate trusted fixe
 
 Production:
 
-- `src/docker/docker-workload-egress.ts` — per-bundle registry listener lifecycle.
+- `src/docker/docker-workload-egress.ts` — exact `offline | images | packages` listener construction.
 - `src/docker/registry-egress-policy.ts` — frozen manifest policy enforcement.
 - `src/docker/registry-egress-proxy.ts` — registry-aware proxy forwarding.
-- `src/docker/mitm-proxy.ts` — listener/TLS/CONNECT parsing and authorization boundary.
+- `src/docker/package-egress-proxy.ts` — strict fixed-host package routes, source-owned derived metadata,
+  bounded audit, and destination-bound dialing.
+- `src/docker/package-egress-ledger.ts` — shared client/direct/derived request, concurrency, and byte bounds.
+- `src/docker/ca.ts` — lock-serialized, atomic strict-v2 CA generations, exact legacy-v1 migration with
+  retained prior generations, and strict root/leaf certificate profiles.
+- `src/docker/docker-build-shim.ts` and `docker/build-trust-runtime/` — package-build command interposition,
+  immutable generated runtime contract, and hardened BuildKit `runc` trust injection.
+- `src/docker/mitm-proxy.ts` — provider/registry listener and TLS parsing; it is not the package authority.
 - `src/docker/docker-infrastructure.ts` — batch listener ownership, Apple mount, create/teardown wiring.
 - `src/docker/pty-session.ts` — PTY listener ownership and cleanup wiring.
 - `src/docker-workload/apple-vm-daemon.ts` — RootlessKit, relay, legacy iptables/DNS preflight, dockerd bootstrap.
@@ -292,15 +428,20 @@ Production:
   managed-network creation/inspection.
 - `src/docker-workload/session-daemon.ts` — readiness, provisioning, managed-network admission, and activation ordering.
 - `src/docker-workload/config.ts` — supported-variant guard.
-- `src/config/paths.ts` — exact per-bundle registry UDS paths.
+- `src/config/paths.ts` — exact per-bundle registry/package UDS paths.
 - `docker/Dockerfile.base.arm64` — rootless Docker toolchain and legacy iptables dependency.
 
 Acceptance and tests:
 
 - `scripts/smoke-nested-apple.ts` — offline, PTY, and public-registry Apple smoke orchestration.
 - `scripts/smoke-nested-apple-workload.ts` — pure public-registry workload plan and evidence parsing.
+- `scripts/smoke-nested-apple-workflow.ts` — deterministic packages/images/offline workflow driver and exact cleanup verifier.
+- `src/workflow/workflows/nested-docker-live-smoke/` — packaged no-LLM workflow and fixed Python probe.
+- `test/workflow/nested-docker-live-smoke.test.ts` — deterministic-first/no-session lifecycle and constant-drift regression.
 - `test/smoke-nested-apple-workload.test.ts` — workload-plan unit coverage.
 - `test/docker/docker-workload-egress.test.ts` — listener lifecycle and policy integration.
+- `test/docker/package-egress-proxy.test.ts` and `test/docker/package-egress-ledger.test.ts` — strict package
+  grammar, derived-policy, audit, transport, and accounting gates.
 - `test/docker/registry-egress-policy.test.ts` — manifest authority negatives.
 - `test/docker/registry-egress-proxy.test.ts` — request/redirect/header/streaming behavior.
 - `test/mitm-proxy.test.ts` — raw CONNECT/SNI/certificate-boundary coverage.

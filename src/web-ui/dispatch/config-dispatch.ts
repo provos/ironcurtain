@@ -5,7 +5,7 @@
  *   - `config.getModelProviders` — read; masks every openrouter profile's key.
  *   - `config.setModelProviders` — mutation; gated on `ctx.allowPolicyMutation`,
  *     persists the WHOLE section via `saveUserConfig`, emits `config.changed`.
- *   - `config.getDockerWorkload` — read; returns the two supported UX controls.
+ *   - `config.getDockerWorkload` — read; returns enablement plus the three-state network selector.
  *   - `config.setDockerWorkload` — gated mutation; persists only those controls.
  *   - `config.getStatistics` / `config.setStatistics` — resolved statistics
  *     settings, with the same mutation gate and change event.
@@ -41,6 +41,7 @@ import {
   type ResolvedOpenRouterProfile,
 } from '../../config/user-config.js';
 import { listOpenrouterModels } from '../../config/openrouter-catalog.js';
+import { DOCKER_WORKLOAD_NETWORK_ACCESS } from '../../docker-workload/config.js';
 
 // The mask FORMAT that `maskApiKey` produces is the DTO contract (§12.6): the
 // `resolveApiKey` round-trip below compares an incoming wire value against
@@ -103,7 +104,7 @@ const getDockerWorkloadSchema = z.object({});
 const setDockerWorkloadSchema = z
   .object({
     enabled: z.boolean(),
-    allowPublicRegistryPulls: z.boolean(),
+    networkAccess: z.enum(DOCKER_WORKLOAD_NETWORK_ACCESS),
   })
   .strict();
 
@@ -195,15 +196,16 @@ function getModelProviders(): GetModelProvidersDto {
 }
 
 /**
- * Returns only the product-level choices. The raw requested ingress value is
- * consulted while disabled so an explicit offline preference survives a
- * disable/re-enable cycle; an absent preference keeps the ergonomic default.
+ * Returns only the product-level choices. The validated requested value is
+ * consulted while disabled so its preference survives a disable/re-enable
+ * cycle; a no-choice disabled block displays recommended packages without a
+ * write or authority grant.
  */
 function getDockerWorkload(): DockerWorkloadSettingsDto {
   const requested = loadRequestedDockerWorkloadConfig();
   return {
     enabled: requested?.enabled === true,
-    allowPublicRegistryPulls: requested?.imageIngress !== 'preloaded-only',
+    networkAccess: requested?.networkAccess ?? 'packages',
   };
 }
 
@@ -315,15 +317,17 @@ function setModelProviders(ctx: WorkflowDispatchContext, input: SetInput): GetMo
 }
 
 /**
- * Persists the two fields owned by the web UI. Compatibility-only legacy
- * implementation fields are normalized away by `saveUserConfig`.
+ * Persists the two fields owned by the web UI. A normal load first performs
+ * validated legacy migration so the subsequent canonical write cannot merge
+ * old imageIngress and new networkAccess fields.
  */
 function setDockerWorkload(ctx: WorkflowDispatchContext, input: DockerWorkloadSettingsDto): DockerWorkloadSettingsDto {
   try {
+    loadUserConfig();
     saveUserConfig({
       dockerWorkload: {
         enabled: input.enabled,
-        imageIngress: input.allowPublicRegistryPulls ? 'public-registry' : 'preloaded-only',
+        networkAccess: input.networkAccess,
       },
     });
   } catch (err) {

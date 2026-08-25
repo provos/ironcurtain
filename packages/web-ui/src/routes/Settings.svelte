@@ -1,6 +1,7 @@
 <script lang="ts">
   import type {
     DockerWorkloadSettingsDto,
+    DockerWorkloadNetworkAccess,
     GetModelProvidersDto,
     ProfileDto,
     OpenrouterProfileDto,
@@ -60,13 +61,13 @@
   let runtimeSaving = $state(false);
   let runtimeSaved = $state(false);
   let dockerWorkloadEnabled = $state(false);
-  let allowPublicRegistryPulls = $state(true);
+  let dockerWorkloadNetworkAccess = $state<DockerWorkloadNetworkAccess>('packages');
   let runtimeBaseline = $state<DockerWorkloadSettingsDto | null>(null);
   const runtimeLoaded = $derived(runtimeBaseline !== null);
   const runtimeDirty = $derived(
     runtimeBaseline !== null &&
       (dockerWorkloadEnabled !== runtimeBaseline.enabled ||
-        allowPublicRegistryPulls !== runtimeBaseline.allowPublicRegistryPulls),
+        dockerWorkloadNetworkAccess !== runtimeBaseline.networkAccess),
   );
 
   // The fetched, masked registry. `profileNames` preserves list order (native first).
@@ -173,7 +174,7 @@
 
   function applyRuntimeSettings(dto: DockerWorkloadSettingsDto): void {
     dockerWorkloadEnabled = dto.enabled;
-    allowPublicRegistryPulls = dto.allowPublicRegistryPulls;
+    dockerWorkloadNetworkAccess = dto.networkAccess;
     runtimeBaseline = { ...dto };
   }
 
@@ -186,7 +187,7 @@
       applyRuntimeSettings(
         await setDockerWorkloadSettings({
           enabled: dockerWorkloadEnabled,
-          allowPublicRegistryPulls,
+          networkAccess: dockerWorkloadNetworkAccess,
         }),
       );
       runtimeSaved = true;
@@ -501,23 +502,40 @@
               </span>
             </label>
 
-            <label class="flex items-start gap-3 text-sm" class:opacity-60={!dockerWorkloadEnabled}>
-              <input
-                type="checkbox"
-                class="mt-1"
-                bind:checked={allowPublicRegistryPulls}
+            <div class="space-y-2" class:opacity-60={!dockerWorkloadEnabled}>
+              <label for="docker-workload-network-access" class="block text-sm font-medium">Network access</label>
+              <select
+                id="docker-workload-network-access"
+                class="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                bind:value={dockerWorkloadNetworkAccess}
                 onchange={() => (runtimeSaved = false)}
                 disabled={!mutationAllowed || runtimeSaving || !dockerWorkloadEnabled}
-                data-testid="docker-workload-public-registry"
-              />
-              <span>
-                Allow public image pulls
-                <span class="block text-xs text-muted-foreground mt-1">
-                  Pulls from Docker Hub and GHCR use IronCurtain’s restricted registry mediation. This does not grant
-                  generic internet access or pass registry credentials into the session.
-                </span>
-              </span>
-            </label>
+                data-testid="docker-workload-network-access"
+              >
+                <option value="packages">Public packages and images (recommended)</option>
+                <option value="images">Public images only</option>
+                <option value="offline">Offline</option>
+              </select>
+              {#if dockerWorkloadNetworkAccess === 'packages'}
+                <p class="text-xs text-muted-foreground">
+                  Docker Hub/GHCR plus fixed public apt, npm, PyPI, and Cargo downloads. Generic destinations,
+                  recognized credential fields, request bodies, and uploads are rejected.
+                </p>
+              {:else if dockerWorkloadNetworkAccess === 'images'}
+                <p class="text-xs text-muted-foreground">
+                  Docker Hub and GHCR pulls work; Dockerfile RUN networking is offline.
+                </p>
+              {:else}
+                <p class="text-xs text-muted-foreground">Only preloaded images and hermetic builds work.</p>
+              {/if}
+              <p class="text-xs text-amber-600 dark:text-amber-400" data-testid="docker-workload-package-warning">
+                Packages permits any process in this nested-Docker session to send bounded workspace or build data
+                through allowed package paths, permitted request metadata, and timing to fixed public repositories, and
+                to download untrusted content. IronCurtain does not inject credentials and rejects recognized credential
+                fields and request bodies. It screens the immediate peer, but a public repository may relay or hairpin
+                elsewhere; use Images only or Offline to remove this route.
+              </p>
+            </div>
 
             <p class="text-xs text-muted-foreground">
               Changes apply to new agent sessions. Running sessions are unchanged.

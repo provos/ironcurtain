@@ -258,14 +258,20 @@ describe('GooseAdapter.buildSystemPrompt', () => {
   it('includes managed-network guidance only for admitted nested Docker', () => {
     const prompt = adapter.buildSystemPrompt({
       ...sampleContext,
-      nestedDocker: { networkName: 'ironcurtain' },
+      nestedDocker: { networkName: 'ironcurtain', networkAccess: 'packages' },
     });
 
     expect(prompt).toContain('### Nested Docker');
     expect(prompt).toContain('--network "$IRONCURTAIN_DOCKER_NETWORK"');
     expect(prompt).toContain('name: ${IRONCURTAIN_DOCKER_NETWORK}');
-    expect(prompt).toContain('`--network host`');
-    expect(prompt).toContain('supported service topology, not a security boundary');
+    expect(prompt).toContain('`docker run --network host`');
+    expect(prompt).toContain('supported service topology');
+    expect(prompt).toContain('security boundary');
+    expect(prompt).toContain('Dockerfile `FROM` and image pulls');
+    expect(prompt).toContain('Dockerfile `RUN` steps');
+    expect(prompt).toContain('`docker compose build`');
+    expect(prompt).toContain('cooperative per-build offline opt-out');
+    expect(prompt).toContain('bundle-wide authority');
   });
 });
 

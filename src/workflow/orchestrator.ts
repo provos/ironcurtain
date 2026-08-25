@@ -978,8 +978,8 @@ export class WorkflowOrchestrator implements WorkflowController {
    * Returns the bundle for `scope`, minting a new one on first use.
    *
    * Each unique `containerScope` used across the workflow's states gets
-   * exactly one bundle: the first `executeAgentState` call under a given
-   * scope creates the bundle, attaches its coordinator control server,
+   * exactly one bundle: the first agent or containerized deterministic state
+   * under a given scope creates the bundle, attaches its coordinator control server,
    * and inserts the result into `instance.bundlesByScope`. Later states
    * with the same scope borrow the existing entry (no factory call).
    *
@@ -1625,8 +1625,8 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
 
     // Under `sharedContainer: true`, bundles are minted lazily by
-    // `ensureBundleForScope` on the first `executeAgentState` call for
-    // each scope. There is no eager workflow-start mint — the first
+    // `ensureBundleForScope` on the first agent or containerized deterministic
+    // state for each scope. There is no eager workflow-start mint — the first
     // state pays the cost of spinning up the bundle it needs. This also
     // removes a latent "Docker not available" failure mode at workflow
     // registration time: the workflow enters the actor's first state
@@ -4366,13 +4366,8 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     const scope = input.containerScope ?? DEFAULT_CONTAINER_SCOPE;
-    const bundleWasLive = instance.bundlesByScope.has(scope);
     const bundle = await this.ensureBundleForScope(instance, scope);
-    const warning = bundleWasLive
-      ? undefined
-      : `container: true state "${input.stateId}": scope "${scope}" had no live container before this state. ` +
-        `On a fresh run this likely means no prior state populated it; on resume this can be expected.`;
-    const base = await this.runDeterministicInContainer(bundle, input, warning);
+    const base = await this.runDeterministicInContainer(bundle, input);
     return this.applyResultFile(instance, input, base);
   }
 
@@ -4498,10 +4493,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   private async runDeterministicInContainer(
     bundle: DockerInfrastructure,
     input: DeterministicInvokeInput,
-    warning?: string,
   ): Promise<DeterministicInvokeResult> {
-    if (warning) writeStderr(`[workflow] ${warning}`);
-
     return this.reduceDeterministicCommands(input.commands, async (cmdArray) => {
       // Prepend the workflow venv / node bins to the container's live $PATH so
       // bare `node` / `python` helpers resolve regardless of base-image arch

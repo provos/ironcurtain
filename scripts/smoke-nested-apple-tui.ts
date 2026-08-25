@@ -1,14 +1,19 @@
 /** Pure evidence helpers for the manual Apple nested-PTY smoke gate. */
 
-const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/gu;
-const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu;
-const TERMINAL_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu;
-const CLAUDE_FRAMED_TITLE = /[╭┌](?:(?:─|━|-)+)[^\r\n]{0,160}\bClaude Code\b[^\r\n]{0,160}[╮┐]/iu;
+import type { Terminal } from '@xterm/headless';
+
+const CLAUDE_TITLE = /\bClaude Code\b/iu;
+const CLAUDE_INTERACTIVE_ANCHORS = [
+  /(?:^|\s)[❯›>]\s/u,
+  /(?:^|\s)(?:\/help\b|\? for shortcuts\b)/iu,
+  /\b(?:low|medium|high|max)\s*·\s*\/effort\b/iu,
+  /\bfor agents\b/iu,
+] as const;
 
 export const MAX_TUI_EVIDENCE_BYTES = 2 * 1024 * 1024;
 
 /** Keep only a bounded UTF-8 tail so a broken TUI cannot grow the harness indefinitely. */
-export function appendBoundedTuiOutput(previous: string, chunk: string, maxBytes = MAX_TUI_EVIDENCE_BYTES): string {
+export function appendBoundedOutput(previous: string, chunk: string, maxBytes = MAX_TUI_EVIDENCE_BYTES): string {
   const combined = Buffer.from(previous + chunk);
   if (combined.length <= maxBytes) return combined.toString('utf8');
   let start = combined.length - maxBytes;
@@ -18,12 +23,40 @@ export function appendBoundedTuiOutput(previous: string, chunk: string, maxBytes
   return combined.subarray(start).toString('utf8');
 }
 
+/** Read only the live xterm viewport, excluding stale scrollback. */
+export function renderCurrentTerminalScreen(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let row = 0; row < terminal.rows; row += 1) {
+    lines.push(buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? '');
+  }
+  return lines.join('\n');
+}
+
+/** Clear observer-owned evidence cells without sending input to the child PTY. */
+export function resetTerminalEvidenceViewport(terminal: Terminal): Promise<void> {
+  return new Promise((resolvePromise) => terminal.write('\x1b[2J\x1b[3J\x1b[H', resolvePromise));
+}
+
+export interface ClaudeTuiEvidence {
+  /** Visible cells from the headless xterm after the activation boundary. */
+  readonly renderedScreen: string;
+  /** At least one child-output chunk completed after that boundary. */
+  readonly receivedPostActivationOutput: boolean;
+  /** The production PTY child is still alive while its screen is inspected. */
+  readonly childAlive: boolean;
+}
+
 /**
- * Require both Claude's title and its rendered terminal frame. This excludes
- * IronCurtain startup diagnostics that merely mention the selected agent.
+ * Require a live post-activation child plus Claude's title and multiple
+ * interactive-screen anchors. Claude has used both framed and ASCII-logo
+ * layouts, so xterm's current cell grid is the authority rather than one raw
+ * ANSI title shape. IronCurtain startup diagnostics that merely name Claude
+ * Code do not qualify.
  */
-export function hasClaudeTuiEvidence(raw: string): boolean {
-  if (raw.length === 0) return false;
-  const visible = raw.replace(ANSI_OSC, '').replace(ANSI_CSI, '').replace(TERMINAL_CONTROL, '');
-  return CLAUDE_FRAMED_TITLE.test(visible);
+export function hasClaudeTuiEvidence(evidence: ClaudeTuiEvidence): boolean {
+  if (!evidence.childAlive || !evidence.receivedPostActivationOutput) return false;
+  if (!CLAUDE_TITLE.test(evidence.renderedScreen)) return false;
+  const anchorCount = CLAUDE_INTERACTIVE_ANCHORS.filter((anchor) => anchor.test(evidence.renderedScreen)).length;
+  return anchorCount >= 2;
 }

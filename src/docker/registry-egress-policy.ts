@@ -1,9 +1,9 @@
 /**
  * Frozen public-registry authorization for workload-image egress (§6.4).
  *
- * Pure policy (node + zod only — no transport, no sockets). Mirrors
- * `build-egress-policy.ts`: a strict manifest schema, validate-once → branded
- * manifest, and a per-request hot path that never re-parses. It resolves one
+ * Pure policy (node + zod only — no transport, no sockets): a strict manifest
+ * schema, validate-once → branded manifest, and a per-request hot path that
+ * never re-parses. It resolves one
  * registry pull request to exactly one reviewed origin and a single pull
  * operation, rejecting everything a pull must not do (push, delete, catalog/tags
  * enumeration), client-selected hosts, and encoded-path smuggling.

@@ -38,7 +38,12 @@ import {
 import { createPtyBridge, type PtyBridge } from '../src/pty/pty-bridge.js';
 import type { SessionMetadata } from '../src/session/types.js';
 import type { BundleId } from '../src/session/types.js';
-import { appendBoundedTuiOutput, hasClaudeTuiEvidence } from './smoke-nested-apple-tui.js';
+import {
+  appendBoundedOutput,
+  hasClaudeTuiEvidence,
+  renderCurrentTerminalScreen,
+  resetTerminalEvidenceViewport,
+} from './smoke-nested-apple-tui.js';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
   assertDefaultBridgeUnavailable,
@@ -288,7 +293,7 @@ async function mainPty(): Promise<void> {
   let unsubscribeOutput: (() => void) | undefined;
   let activeBundle: ActiveBundle | undefined;
   let diagnosticOutput = '';
-  let postActivationOutput = '';
+  let receivedPostActivationOutput = false;
   let collectPostActivation = false;
   let succeeded = false;
 
@@ -304,8 +309,8 @@ async function mainPty(): Promise<void> {
       muxPid: process.pid,
     });
     unsubscribeOutput = bridge.onData((chunk) => {
-      diagnosticOutput = appendBoundedTuiOutput(diagnosticOutput, chunk);
-      if (collectPostActivation) postActivationOutput = appendBoundedTuiOutput(postActivationOutput, chunk);
+      diagnosticOutput = appendBoundedOutput(diagnosticOutput, chunk);
+      if (collectPostActivation && chunk.length > 0) receivedPostActivationOutput = true;
     });
     process.stderr.write(
       `nested Apple PTY smoke argv=${JSON.stringify([
@@ -339,22 +344,28 @@ async function mainPty(): Promise<void> {
     const supervisorIdentity = getProcessStartIdentity(supervisor.supervisorPid);
     if (supervisorIdentity === undefined) throw new Error('watchdog supervisor is not alive at PTY activation');
 
-    // Drain the headless terminal's queued write callbacks before opening the
-    // evidence window. Without this barrier, a pre-activation raw chunk could
-    // finish its asynchronous xterm write after `collectPostActivation=true`
-    // and be misclassified as post-activation output.
+    // Drain queued child writes, then clear only the observer terminal. Both
+    // callbacks complete before the evidence window opens, so neither delayed
+    // startup bytes nor pre-activation cells can satisfy the post-activation
+    // screen check. The clear sequence is not sent to the child PTY.
     await new Promise<void>((resolvePromise) => bridge!.terminal.write('', resolvePromise));
+    await resetTerminalEvidenceViewport(bridge.terminal);
 
-    // Only bytes received after this persisted `active` observation count. A
-    // resize requests a normal TUI redraw after the evidence boundary and
-    // avoids accepting an earlier socket, directory, or startup-log artifact.
+    // Only child bytes received after this persisted `active` observation can
+    // reconstruct the cleared viewport. A resize requests a normal TUI redraw.
     collectPostActivation = true;
     bridge.resize(121, 41);
     await poll(
       'post-activation Claude TUI output',
       () => {
         assertBridgeRunning(bridge!, 'while waiting for post-activation Claude TUI output');
-        return hasClaudeTuiEvidence(postActivationOutput) ? true : undefined;
+        return hasClaudeTuiEvidence({
+          renderedScreen: renderCurrentTerminalScreen(bridge!.terminal),
+          receivedPostActivationOutput,
+          childAlive: bridge!.alive,
+        })
+          ? true
+          : undefined;
       },
       PTY_TUI_TIMEOUT_MS,
     );

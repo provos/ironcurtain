@@ -1,24 +1,20 @@
 /**
- * Shared credential-free forward lifecycle for the destination-bound egress
- * proxies (`build-egress-proxy.ts` and `registry-egress-proxy.ts`).
+ * Credential-free forward lifecycle for the destination-bound registry-egress proxy.
  *
- * Both proxies terminate TLS on a per-listener MITM, authorize the decrypted
- * request against a frozen manifest, then forward the sanitized result through a
+ * The registry proxy terminates TLS on its dedicated listener, authorizes the
+ * decrypted request against a frozen manifest, then forwards it through a
  * destination-bound {@link OutboundTransport}. The forward lifecycle around that
  * — arming an absolute per-request deadline, streaming the response with real
  * backpressure under a per-request byte ceiling, and failing closed on any
- * overflow — is identical between them, so it lives here as one copy. The pieces
- * that differ are parameterized on {@link MediatedEgressConfig}:
+ * overflow — is isolated here. Optional lifecycle behavior is explicit in
+ * {@link MediatedEgressConfig}:
  *
- * - `assertReady` — a pre-flight transport-binding check (build's `fixed-parent-only`
- *   rule); absent for registry.
  * - `session` — a per-session concurrency lease and cumulative-byte ceiling
- *   (registry's ledger); absent for build.
+ *   (the registry ledger).
  * - `followRedirect` — when present, a 3xx is authorized and followed *internally*
- *   under the F1 redirect-body ceiling (registry); when absent, a 3xx streams
- *   straight through to the client, which drives its own redirects (build).
+ *   under the F1 redirect-body ceiling; when absent, a 3xx streams through.
  * - `onComplete` — a provenance sink invoked once on successful completion
- *   (registry records the requested/reported digest and streamed size).
+ *   (requested/reported digest and streamed size).
  *
  * This is a leaf: it depends only on node, the destination-bound transport, the
  * shared request/response shaping in `egress-forwarding.ts`, and the logger.
@@ -57,8 +53,7 @@ export interface MediatedEgressLease {
 }
 
 /**
- * Structural per-session accounting. Registry's `RegistryEgressSessionLedger`
- * already satisfies it; build has no session and passes none.
+ * Structural per-session accounting implemented by `RegistryEgressSessionLedger`.
  */
 export interface MediatedEgressSession {
   /** Reserve a concurrency slot; throws once the concurrency ceiling is reached. */
@@ -80,7 +75,7 @@ export interface MediatedEgressConfig<A> {
   readonly initial: A;
   /** Map an authorized request to its destination-bound upstream fetch. */
   describe(authorized: A): MediatedEgressRequestSpec;
-  /** Log/response label, e.g. `build-egress` | `registry-egress`. */
+  /** Bounded log/response label, e.g. `registry-egress`. */
   readonly label: string;
   /** Pre-flight check; a throw rejects `502` before any upstream contact. */
   assertReady?(authorized: A): void;

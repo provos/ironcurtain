@@ -14,6 +14,7 @@
  */
 
 import { createServer, type Server } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,18 +27,24 @@ import {
   HOST_ONLY_SUBNET_POOL,
   type HostOnlyNetwork,
 } from '../src/docker/network-topology.js';
-import { TcpServerTransport } from '../src/trusted-process/tcp-server-transport.js';
+import {
+  TCP_TRANSPORT_HEALTH_REQUEST,
+  TCP_TRANSPORT_HEALTH_RESPONSE,
+  TcpServerTransport,
+} from '../src/trusted-process/tcp-server-transport.js';
 import type { ContainerRuntime } from '../src/docker/types.js';
 
 const probe = await checkAppleContainerAvailable();
 
-const NETWORK_NAME = 'ironcurtain-itest-net';
-const CONTAINER_NAME = 'ironcurtain-itest-c1';
+const RUN_ID = randomUUID().slice(0, 8);
+const NETWORK_NAME = `ironcurtain-itest-net-${RUN_ID}`;
+const CONTAINER_NAME = `ironcurtain-itest-c1-${RUN_ID}`;
 const TEST_IMAGE = 'alpine/socat';
 
 describe.skipIf(!probe.available)('apple-container runtime integration', () => {
   let docker: ContainerRuntime;
   let net: HostOnlyNetwork;
+  let containerId: string;
 
   beforeAll(async () => {
     docker = createAppleContainerManager();
@@ -51,7 +58,7 @@ describe.skipIf(!probe.available)('apple-container runtime integration', () => {
 
     net = await createHostOnlyNetwork(docker, NETWORK_NAME);
 
-    const containerId = await docker.create({
+    containerId = await docker.create({
       image: TEST_IMAGE,
       name: CONTAINER_NAME,
       network: net.name,
@@ -102,11 +109,30 @@ describe.skipIf(!probe.available)('apple-container runtime integration', () => {
     try {
       const reach = await docker.exec(
         CONTAINER_NAME,
-        ['socat', '-u', '/dev/null', `TCP:${net.gateway}:${transport.port},connect-timeout=5`],
+        [
+          'sh',
+          '-c',
+          'printf %s "$1" | socat - "TCP:$2:$3,connect-timeout=5"',
+          'ironcurtain-health',
+          TCP_TRANSPORT_HEALTH_REQUEST,
+          net.gateway,
+          String(transport.port),
+        ],
         10_000,
         null,
       );
-      expect(reach.exitCode).toBe(0);
+      const [containerIp, running] = await Promise.all([
+        docker.getContainerIp(CONTAINER_NAME, net.name),
+        docker.isRunning(CONTAINER_NAME),
+      ]);
+      const diagnostic = JSON.stringify({
+        reach,
+        listenerPort: transport.port,
+        network: net,
+        container: { id: containerId, name: CONTAINER_NAME, ip: containerIp, running },
+      });
+      expect(reach.exitCode, diagnostic).toBe(0);
+      expect(reach.stdout, diagnostic).toBe(TCP_TRANSPORT_HEALTH_RESPONSE);
     } finally {
       await transport.close();
     }
@@ -128,7 +154,7 @@ describe.skipIf(!probe.available)('apple-container runtime integration', () => {
  * only). Mirrors what `createSessionContainers` now emits.
  */
 describe.skipIf(!probe.available)('apple-container UDS topology integration', () => {
-  const UDS_CONTAINER_NAME = 'ironcurtain-itest-uds';
+  const UDS_CONTAINER_NAME = `ironcurtain-itest-uds-${RUN_ID}`;
   let docker: ContainerRuntime;
   let socketDir: string;
   let socketPath: string;

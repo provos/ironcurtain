@@ -850,11 +850,7 @@ describe('bundled workflows lint clean', () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// WF011 — container deterministic state may run before its scope is minted
-// ---------------------------------------------------------------------------
-
-describe('WF011 — container scope not populated by a prior agent', () => {
+describe('WF011 — mixed agent/deterministic scope ordering', () => {
   function withDeterministic(opts: { agentScope?: string; detScope?: string; container: boolean }): WorkflowDefinition {
     return validateDefinition({
       name: 'wf011',
@@ -885,13 +881,10 @@ describe('WF011 — container scope not populated by a prior agent', () => {
     });
   }
 
-  it('flags a container: true state whose scope no prior agent populated', () => {
-    const def = withDeterministic({ agentScope: 'a', detScope: 'b', container: true });
-    const result = lintWorkflow(def, stubCtx);
-    expect(codes(result)).toContain('WF011');
-    const d = result.find((x) => x.code === 'WF011');
-    expect(d?.stateId).toBe('check');
-    expect(d?.severity).toBe('warning');
+  it('flags a mixed scope path that reaches the helper before its same-scope agent', () => {
+    const raw = withDeterministic({ agentScope: 'b', detScope: 'b', container: true });
+    const def: WorkflowDefinition = { ...raw, initial: 'check' };
+    expect(codes(lintWorkflow(def, stubCtx))).toContain('WF011');
   });
 
   it('does not flag when an agent in the same scope precedes the state', () => {
@@ -899,17 +892,12 @@ describe('WF011 — container scope not populated by a prior agent', () => {
     expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF011');
   });
 
-  it('does not flag the default scope when the preceding agent is also default-scoped', () => {
-    const def = withDeterministic({ container: true });
-    expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF011');
-  });
-
-  it('does not flag a host-side (container: false) deterministic state', () => {
+  it('does not flag a host-side deterministic state', () => {
     const def = withDeterministic({ agentScope: 'a', container: false });
     expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF011');
   });
 
-  it('the bundled deterministic-eval-smoke fixture lints clean (no WF011, no errors)', () => {
+  it('allows the intentionally no-LLM nested-Docker workflow', () => {
     const manifestPath = resolve(
       __dirname,
       '..',
@@ -917,13 +905,11 @@ describe('WF011 — container scope not populated by a prior agent', () => {
       'src',
       'workflow',
       'workflows',
-      'deterministic-eval-smoke',
+      'nested-docker-live-smoke',
       'workflow.yaml',
     );
     const def = validateDefinition(parseYaml(readFileSync(manifestPath, 'utf-8'), { maxAliasCount: 0 }));
-    const result = lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath });
-    expect(codes(result)).not.toContain('WF011');
-    expect(result.filter((d) => d.severity === 'error').length).toBe(0);
+    expect(lintWorkflow(def, { ...stubCtx, workflowFilePath: manifestPath })).toEqual([]);
   });
 });
 

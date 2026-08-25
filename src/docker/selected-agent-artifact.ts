@@ -81,6 +81,11 @@ export interface PrepareSelectedAgentArtifactOptions {
 
 const preparedArtifactPromises = new Map<string, Promise<SelectedAgentArtifact>>();
 
+/** Return whether a runtime image reference is one of IronCurtain's capture aliases. */
+export function isSelectedAgentCaptureAlias(reference: string): boolean {
+  return CAPTURE_ALIAS_PATTERN.test(reference);
+}
+
 /**
  * Resolve the current checked-in build once, export it from Apple Container,
  * and cache one Docker-loadable canonical archive. The cache is observational:

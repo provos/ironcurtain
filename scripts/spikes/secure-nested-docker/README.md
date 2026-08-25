@@ -23,7 +23,7 @@ directory changes either product default or the preview qualification state.
 | Docker Desktop P0/P2 and private-API/functional probes                       | Retained      | Baseline Desktop is unsupported at a documented stop gate. These are the exact replay tools required if a future decision explicitly reopens the profile ceiling.                                          |
 | Docker Desktop runtime shim                                                  | Retained      | The functional Desktop probe uses it to select runc's `--no-new-keyring` mode without admitting `keyctl`.                                                                                                  |
 | Profile-ceiling and probe-evidence verifiers                                 | Retained      | They validate the retained Desktop replay inputs and outputs.                                                                                                                                              |
-| Build-egress capture                                                         | Retained      | The frozen manifest is tied to the Dockerfiles' fetch behavior. A cold-cache recapture is still needed when those inputs change.                                                                           |
+| Current-Dockerfile build-egress capture                                      | Retired       | Source/hash pinning and the generic-public experiment are not product authority. Git history retains the deleted capture tooling; the governing package-only design owns future work.                      |
 | Public-registry live gate                                                    | Retained      | It is the only real-registry exercise of the anonymous token and CDN-redirect flow. Keep it until a product-entrypoint 0C integration test replaces it.                                                    |
 | Native Linux                                                                 | No runner yet | Docker Desktop evidence is not Linux evidence. A native-Linux runner must be added when a supported distro/kernel host becomes available.                                                                  |
 
@@ -111,43 +111,28 @@ fuse for additional backends or preview. The Apple developer slice is admitted, 
 evidence remains incomplete. Add missing gates to the release suite instead of restoring an
 exploratory Apple runner.
 
-## Build-egress capture
+## Package-network CA/runc feasibility evidence
 
-`build-egress-capture.mjs` records the destinations and paths fetched by cold-cache builds of the
-current Dockerfiles. It is a policy-review input, not a backend probe. Recapture when a Dockerfile,
-base/frontend, package source, or build tool changes, or before qualifying the production
-build-egress path.
+The future Apple package-network slice is governed by
+[`docs/designs/secure-nested-runtime-public-network.md`](../../../docs/designs/secure-nested-runtime-public-network.md).
+It has only `offline | images | packages`; `packages` terminates TLS and authorizes fixed apt, npm, PyPI,
+and Cargo GET/HEAD grammars. There is no product generic-public or opaque-CONNECT mode.
 
-Validate its recorder and synthesizer without public network access:
+The checked-in redacted
+[`CA-injection runc-PATH spike record`](../../../docs/designs/evidence/ca-injection-runc-path-spike.md)
+preserves the pinned runc version and redacted exact BuildKit argv. Its raw functional result says
+`passed: false`; a later production-API reconciliation separately proves scoped cleanup. Do not describe
+the pair as one clean run or as qualification, and do not make transient `/private/tmp` artifacts release
+inputs. Wrapper tests use the adjacent machine-readable argv fixture and reject any argument reorder,
+duplicate, omission, addition, changed log path, nested bundle, or unequal executor ID.
 
-```sh
-node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke \
-  --evidence-dir /absolute/outside-workspace/build-egress-smoke
-node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --smoke-tunnel \
-  --evidence-dir /absolute/outside-workspace/build-egress-smoke-tunnel
-```
-
-For a reviewed cold-cache run, group Dockerfiles by their real build context. Tunnel mode records
-HTTPS hosts/ports and full plain-HTTP paths:
-
-```sh
-node scripts/spikes/secure-nested-docker/build-egress-capture.mjs --build \
-  --evidence-dir /absolute/outside-workspace/build-egress-capture \
-  --repo-root /absolute/path/to/ironcurtain \
-  --context docker \
-  --dockerfile docker/Dockerfile.base.arm64 \
-  --dockerfile docker/Dockerfile.claude-code
-```
-
-Use `--ca-inject` to generate audit overlays and capture HTTPS path prefixes without modifying the
-production Dockerfiles. Pre-pull their base images and Dockerfile frontends because those daemon
-fetches are outside RUN-step proxy capture. On Docker Desktop the default proxy host is
-`host.docker.internal`; on native Linux pass the actual bridge gateway with `--proxy-host`.
-
-The generated draft must still receive human review: pin fetched artifacts, classify every
-BuildKit/base/RUN seam, decide every connect-only path shape, and update
-`config/docker-workload/build-egress-manifest.json`. Capture does not freeze policy or make a
-network build reproducible.
+Implementation must remove the superseded generic route first and keep new package proxy, CA, wrapper,
+shim, and lifecycle modules unreachable until the final atomic gate. A compatibility value must never map
+to the old listener during transition. The immutable selected image is loaded before the exact
+`--pull=false --network=none --no-cache` startup canary, and both egress ledgers must remain unchanged.
+Concurrent CA create/load is lock-serialized and no-follow; direct plugin/custom Docker clients are
+unsupported rather than shim-rejected. Package authority still permits bounded exfiltration through
+admitted paths, canonicalized request metadata, and timing.
 
 ## Public-registry live gate
 

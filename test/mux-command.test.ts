@@ -197,7 +197,7 @@ describe('ironcurtain mux preflight integration', () => {
       skipNativeProbes: true,
     });
 
-    expect(stderr.lines.join('')).toMatch(/Nested Docker: enabled · pulls: Docker Hub\/GHCR via mediated proxy/);
+    expect(stderr.lines.join('')).toMatch(/Nested Docker: enabled · network: Docker Hub\/GHCR images only/);
   });
 
   it('--capture-traces forwards captureTraces: true to the MuxApp', async () => {

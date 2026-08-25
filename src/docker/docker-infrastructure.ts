@@ -75,7 +75,11 @@ import {
 } from './runtime-trust.js';
 import { getFrozenWatchdogPolicyTemplatePath, getIronCurtainPackageRoot } from './docker-workload-paths.js';
 import { prepareSelectedAgentArtifact, type SelectedAgentArtifact } from './selected-agent-artifact.js';
-import { formatDockerWorkloadStatus, type ResolvedDockerWorkloadConfig } from '../docker-workload/config.js';
+import {
+  formatDockerWorkloadStatus,
+  type DockerWorkloadNetworkAccess,
+  type ResolvedDockerWorkloadConfig,
+} from '../docker-workload/config.js';
 import type {
   DockerWorkloadBundleHandle,
   OuterResourceKind,
@@ -86,7 +90,11 @@ import {
   resolveNestedDaemonBundle,
   startAppleVmDockerWorkload,
 } from '../docker-workload/session-daemon.js';
-import { APPLE_VM_REGISTRY_EGRESS_SOCKET } from '../docker-workload/apple-vm-daemon.js';
+import {
+  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+  APPLE_VM_PACKAGE_EGRESS_SOCKET,
+  APPLE_VM_REGISTRY_EGRESS_SOCKET,
+} from '../docker-workload/apple-vm-daemon.js';
 import type { MetricsInvocationContext, MetricsInvocationLease } from '../llm-metrics/attribution-registry.js';
 import { acquireLlmMetricsRuntime, type LlmMetricsRuntimeLease } from '../llm-metrics/runtime.js';
 import { hasMetricsCapableCompletionEndpoint } from './llm-observation/completion-endpoint.js';
@@ -97,6 +105,26 @@ import {
   type AppleVmDockerWorkloadBootstrapConfig,
 } from '../docker-workload/apple-private-docker.js';
 import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
+import {
+  DOCKER_BUILD_PROXY_CONFIG_PATH,
+  DOCKER_BUILD_SHIM_PATH,
+  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+  DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_PATH,
+  DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
+  DOCKER_BUILD_TRUST_REAL_RUNC_MODE,
+  DOCKER_BUILD_TRUST_REAL_RUNC_NLINK,
+  DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
+  DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
+  DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS,
+  DOCKER_BUILD_TRUST_REAL_RUNC_VERSION,
+  DOCKER_BUILD_TRUST_WRAPPER_PATH,
+  getDockerBuildShimStagingContract,
+  type DockerBuildShimStagingContract,
+  type DockerBuildTrustCanaryContract,
+} from './docker-build-shim.js';
+import type { DockerWorkloadEgressSet } from './docker-workload-egress.js';
 import * as logger from '../logger.js';
 
 export { InternalNetworkConnectivityError };
@@ -138,6 +166,245 @@ export function ensureSecureBundleDir(path: string): void {
   }
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chmodSync(path, 0o700);
+}
+
+const DOCKER_BUILD_SHIM_STAGING_SUBDIR = 'package-build-runtime';
+const DOCKER_BUILD_SHIM_SOURCE_NAME = 'docker';
+const DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR = 'package-build-client';
+const DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME = 'runc';
+const DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME = 'build-trust-contract.json';
+const DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME = 'ca-cert.pem';
+const DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME = 'ca-bundle.pem';
+const DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME = 'apt.conf';
+const CA_GENERATION_PATTERN = /^gen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+function writeExactStagedFile(path: string, content: string | Buffer, mode: number): void {
+  writeFileSync(path, content, { mode, flag: 'wx' });
+  chmodSync(path, mode);
+  const stats = lstatSync(path);
+  const observedMode = stats.mode & 0o777;
+  const observed = readFileSync(path);
+  const expected = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    stats.nlink !== 1 ||
+    observedMode !== mode ||
+    !observed.equals(expected)
+  ) {
+    throw new Error(`nested-Docker build artifact ${path} failed its exact file, link, mode, or content check`);
+  }
+}
+
+interface StagedBuildTrustSource {
+  readonly path: string;
+  readonly destination: string;
+  readonly sha256: string;
+  readonly size: number;
+  readonly mode: '0444';
+}
+
+function readExactBuildTrustInput(path: string): Buffer {
+  const bytes = readFileSync(path);
+  const stats = lstatSync(path);
+  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o444 || stats.nlink !== 1) {
+    throw new Error(`nested-Docker build trust input ${path} failed its exact file or mode check`);
+  }
+  return bytes;
+}
+
+function stagedPublicSource(path: string, containerPath: string, destination: string): StagedBuildTrustSource {
+  const bytes = readFileSync(path);
+  const stats = lstatSync(path);
+  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o444 || stats.nlink !== 1) {
+    throw new Error(`nested-Docker build trust source ${path} failed its exact file or mode check`);
+  }
+  return {
+    path: containerPath,
+    destination,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    size: bytes.length,
+    mode: '0444' as const,
+  };
+}
+
+/** Materialize the package-only build shim outside every agent-visible orientation share. */
+export function stageDockerBuildShim(
+  bundleId: BundleId,
+  networkAccess: DockerWorkloadNetworkAccess,
+  options: { readonly orientationDir: string; readonly caGeneration: string },
+): DockerBuildShimStaging | undefined {
+  const contract = getDockerBuildShimStagingContract(networkAccess);
+  if (contract === undefined) return undefined;
+  if (!CA_GENERATION_PATTERN.test(options.caGeneration)) {
+    throw new Error('nested-Docker package build staging requires an authenticated CA generation');
+  }
+
+  const {
+    shimArtifact,
+    proxyConfigArtifact,
+    buildTrustWrapperArtifact,
+    buildTrustContractArtifact,
+    aptConfigArtifact,
+  } = contract;
+  if (
+    shimArtifact.targetPath !== DOCKER_BUILD_SHIM_PATH ||
+    shimArtifact.mode !== 0o555 ||
+    proxyConfigArtifact.targetPath !== DOCKER_BUILD_PROXY_CONFIG_PATH ||
+    proxyConfigArtifact.mode !== 0o444 ||
+    buildTrustWrapperArtifact.targetPath !== DOCKER_BUILD_TRUST_WRAPPER_PATH ||
+    buildTrustWrapperArtifact.guestMode !== 0o555 ||
+    buildTrustContractArtifact.targetPath !== DOCKER_BUILD_TRUST_CONTRACT_PATH ||
+    buildTrustContractArtifact.mode !== 0o444 ||
+    aptConfigArtifact.targetPath !== DOCKER_BUILD_TRUST_APT_CONFIG_PATH ||
+    aptConfigArtifact.mode !== 0o444
+  ) {
+    throw new Error('nested-Docker package build staging contract has an unsupported artifact layout');
+  }
+
+  const stagingRoot = resolve(getBundleRuntimeRoot(bundleId), DOCKER_BUILD_SHIM_STAGING_SUBDIR);
+  ensureSecureBundleDir(stagingRoot);
+  const shimSourcePath = resolve(stagingRoot, DOCKER_BUILD_SHIM_SOURCE_NAME);
+  const proxyConfigSourceDirectory = resolve(stagingRoot, DOCKER_BUILD_PROXY_CONFIG_SOURCE_SUBDIR);
+  const buildTrustWrapperSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_WRAPPER_SOURCE_NAME);
+  const buildTrustContractSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_CONTRACT_SOURCE_NAME);
+  const caCertificateSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_CA_CERT_SOURCE_NAME);
+  const caBundleSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_CA_BUNDLE_SOURCE_NAME);
+  const aptConfigSourcePath = resolve(stagingRoot, DOCKER_BUILD_TRUST_APT_CONFIG_SOURCE_NAME);
+  mkdirSync(proxyConfigSourceDirectory, { mode: 0o755 });
+  chmodSync(proxyConfigSourceDirectory, 0o755);
+  const configDirectoryStats = lstatSync(proxyConfigSourceDirectory);
+  if (!configDirectoryStats.isDirectory() || configDirectoryStats.isSymbolicLink()) {
+    throw new Error(`nested-Docker build proxy config source is not a real directory: ${proxyConfigSourceDirectory}`);
+  }
+
+  writeExactStagedFile(shimSourcePath, shimArtifact.content, shimArtifact.mode);
+  writeExactStagedFile(
+    resolve(proxyConfigSourceDirectory, 'config.json'),
+    proxyConfigArtifact.content,
+    proxyConfigArtifact.mode,
+  );
+  const packageWrapperPath = resolve(getIronCurtainPackageRoot(), buildTrustWrapperArtifact.packagePath);
+  const packageWrapper = readFileSync(packageWrapperPath);
+  const packageWrapperStats = lstatSync(packageWrapperPath);
+  if (
+    !packageWrapperStats.isFile() ||
+    packageWrapperStats.isSymbolicLink() ||
+    (packageWrapperStats.mode & 0o777) !== buildTrustWrapperArtifact.packageMode ||
+    packageWrapper.length !== buildTrustWrapperArtifact.size ||
+    createHash('sha256').update(packageWrapper).digest('hex') !== buildTrustWrapperArtifact.sha256
+  ) {
+    throw new Error('nested-Docker build-trust wrapper does not match its checked package manifest');
+  }
+  writeExactStagedFile(buildTrustWrapperSourcePath, packageWrapper, buildTrustWrapperArtifact.guestMode);
+
+  writeExactStagedFile(
+    caCertificateSourcePath,
+    readExactBuildTrustInput(resolve(options.orientationDir, 'ca-cert.pem')),
+    0o444,
+  );
+  writeExactStagedFile(
+    caBundleSourcePath,
+    readExactBuildTrustInput(resolve(options.orientationDir, 'ca-bundle.pem')),
+    0o444,
+  );
+  writeExactStagedFile(
+    aptConfigSourcePath,
+    renderAptProxyConfig(APPLE_VM_PACKAGE_EGRESS_PROXY_URL),
+    aptConfigArtifact.mode,
+  );
+  const caCertificateSource = stagedPublicSource(
+    caCertificateSourcePath,
+    DOCKER_BUILD_TRUST_CA_CERT_PATH,
+    '/dev/ironcurtain/ca-cert.pem',
+  );
+  const caBundleSource = stagedPublicSource(
+    caBundleSourcePath,
+    DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+    '/dev/ironcurtain/ca-bundle.pem',
+  );
+  const aptConfigSource = stagedPublicSource(
+    aptConfigSourcePath,
+    DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+    '/dev/ironcurtain/apt.conf',
+  );
+  const publicSources = [caCertificateSource, caBundleSource, aptConfigSource];
+  const trustContract = `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      caGeneration: options.caGeneration,
+      realRunc: {
+        path: DOCKER_BUILD_TRUST_REAL_RUNC_PATH,
+        sha256: DOCKER_BUILD_TRUST_REAL_RUNC_SHA256,
+        size: DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
+        ownerPairs: DOCKER_BUILD_TRUST_REAL_RUNC_OWNER_PAIRS,
+        nlink: DOCKER_BUILD_TRUST_REAL_RUNC_NLINK,
+        mode: DOCKER_BUILD_TRUST_REAL_RUNC_MODE.toString(8).padStart(4, '0'),
+        version: DOCKER_BUILD_TRUST_REAL_RUNC_VERSION,
+      },
+      publicSources,
+    },
+    null,
+    2,
+  )}\n`;
+  writeExactStagedFile(buildTrustContractSourcePath, trustContract, buildTrustContractArtifact.mode);
+  if (readdirSync(proxyConfigSourceDirectory).join('\n') !== 'config.json') {
+    throw new Error('nested-Docker build proxy config source must contain exactly config.json');
+  }
+  return {
+    contract,
+    artifacts: [
+      {
+        kind: 'docker-shim',
+        source: shimSourcePath,
+        target: shimArtifact.targetPath,
+        readonly: true,
+      },
+      {
+        kind: 'proxy-config',
+        source: proxyConfigSourceDirectory,
+        target: dirname(proxyConfigArtifact.targetPath),
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-wrapper',
+        source: buildTrustWrapperSourcePath,
+        target: buildTrustWrapperArtifact.targetPath,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-contract',
+        source: buildTrustContractSourcePath,
+        target: buildTrustContractArtifact.targetPath,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-ca-cert',
+        source: caCertificateSourcePath,
+        target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-ca-bundle',
+        source: caBundleSourcePath,
+        target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-apt-config',
+        source: aptConfigSourcePath,
+        target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+        readonly: true,
+      },
+    ],
+    buildTrustCanary: {
+      caGeneration: options.caGeneration,
+      buildTrustContractSha256: createHash('sha256').update(trustContract).digest('hex'),
+      caCertificateSha256: caCertificateSource.sha256,
+      caBundleSha256: caBundleSource.sha256,
+      aptConfigSha256: aptConfigSource.sha256,
+    },
+  };
 }
 
 /**
@@ -361,13 +628,44 @@ export interface PreContainerInfrastructure {
   readonly dockerWorkload?: DockerWorkloadBundleHandle;
   /** Immutable per-lease selected-agent artifact used only by an admitted Apple Docker workload. */
   readonly dockerWorkloadBootstrap?: AppleVmDockerWorkloadBootstrapConfig;
-  /** Per-bundle host listener mounted only into the admitted public-registry Apple VM. */
-  readonly dockerWorkloadRegistryEgress?: {
-    readonly listener: MitmProxy;
-    readonly socketPath: string;
-  };
+  /** Exact per-bundle nested-Docker egress authorities, absent when offline. */
+  readonly dockerWorkloadEgress?: DockerWorkloadEgressCollection;
+  /** Package-only Docker shim, build-trust wrapper/contract, and credential-free client config. */
+  readonly dockerBuildShim?: DockerBuildShimStaging;
   /** Process-scoped statistics runtime reference held for this infrastructure bundle. */
   readonly metricsRuntime?: LlmMetricsRuntimeLease;
+}
+
+export interface DockerWorkloadEgressEndpoint<S> {
+  readonly listener: { stop(): Promise<void> };
+  readonly socketPath: string;
+  readonly snapshot: () => S;
+}
+
+/** Registry and strict-package authorities are always distinct listeners/sockets. */
+export type DockerWorkloadEgressCollection = DockerWorkloadEgressSet<
+  DockerWorkloadEgressEndpoint<import('./docker-workload-egress.js').RegistryEgressLedgerSnapshot>,
+  DockerWorkloadEgressEndpoint<import('./package-egress-ledger.js').PackageEgressLedgerSnapshot>
+>;
+
+export interface DockerBuildShimStaging {
+  readonly contract: DockerBuildShimStagingContract;
+  readonly artifacts: readonly DockerBuildShimStagedArtifact[];
+  readonly buildTrustCanary: DockerBuildTrustCanaryContract;
+}
+
+export interface DockerBuildShimStagedArtifact {
+  readonly kind:
+    | 'docker-shim'
+    | 'proxy-config'
+    | 'build-trust-wrapper'
+    | 'build-trust-contract'
+    | 'build-trust-ca-cert'
+    | 'build-trust-ca-bundle'
+    | 'build-trust-apt-config';
+  readonly source: string;
+  readonly target: string;
+  readonly readonly: true;
 }
 
 /**
@@ -555,6 +853,7 @@ export async function prepareDockerInfrastructure(
     getBundleMitmProxySocketPath,
     getBundleMitmControlSocketPath,
     getBundleRegistryEgressSocketPath,
+    getBundlePackageEgressSocketPath,
   } = await import('../config/paths.js');
 
   await registerBuiltinAdapters(config.userConfig);
@@ -659,7 +958,8 @@ export async function prepareDockerInfrastructure(
   let proxy: DockerProxy | undefined;
   let mitmProxy: MitmProxy | undefined;
   let metricsRuntime: LlmMetricsRuntimeLease | undefined;
-  let dockerWorkloadRegistryEgress: PreContainerInfrastructure['dockerWorkloadRegistryEgress'];
+  let dockerWorkloadEgress: DockerWorkloadEgressCollection | undefined;
+  let dockerBuildShim: DockerBuildShimStaging | undefined;
   try {
     // tcp-hostonly: create the per-bundle host-only network BEFORE the
     // proxies are constructed. The gateway address feeds the container env,
@@ -688,27 +988,74 @@ export async function prepareDockerInfrastructure(
     const caDir = resolve(getIronCurtainHome(), 'ca');
     const ca = loadOrCreateCA(caDir);
 
-    if (dockerWorkloadConfig?.enabled === true && dockerWorkloadConfig.imageIngress === 'public-registry') {
+    // Resolve package policy exactly once. The strict nested package listener
+    // and ordinary package-install proxy, when enabled, share this immutable
+    // validator instead of constructing policy twice with potentially drifting
+    // clocks or settings.
+    const pkgConfig = config.userConfig.packageInstall;
+    const packageMode = dockerWorkloadConfig?.enabled === true && dockerWorkloadConfig.networkAccess === 'packages';
+    let registries: import('./package-types.js').RegistryConfig[] | undefined;
+    let packageValidation:
+      | { validator: import('./package-types.js').PackageValidator; auditLogPath: string }
+      | undefined;
+    let packagePolicy: import('./package-egress-proxy.js').PackageEgressPolicy | undefined;
+    if (pkgConfig.enabled) {
+      const { createPackageValidator } = await import('./package-validator.js');
+      const validator = createPackageValidator({
+        allowedPackages: pkgConfig.allowedPackages,
+        deniedPackages: pkgConfig.deniedPackages,
+        quarantineDays: pkgConfig.quarantineDays,
+      });
+      const packageAuditLogPath = resolve(bundleDir, 'package-audit.jsonl');
+      const { npmRegistry, pypiRegistry, debianRegistry, cargoRegistry } = await import('./registry-proxy.js');
+      registries = [npmRegistry, pypiRegistry, debianRegistry, cargoRegistry];
+      packageValidation = { validator, auditLogPath: packageAuditLogPath };
+      if (packageMode) packagePolicy = { validator };
+    }
+
+    if (dockerWorkloadConfig?.enabled === true) {
       const { createDockerWorkloadEgressListeners } = await import('./docker-workload-egress.js');
+      const { PACKAGE_EGRESS_AUDIT_FILENAME } = await import('./package-egress-proxy.js');
       const { createDirectOutboundTransport } = await import('./outbound-transport.js');
       const registrySocketPath = getBundleRegistryEgressSocketPath(bundleId);
+      const packageSocketPath = getBundlePackageEgressSocketPath(bundleId);
       const listeners = createDockerWorkloadEgressListeners({
         workload: dockerWorkloadConfig,
         ca,
         outboundTransport: createDirectOutboundTransport(),
         registryListen: { socketPath: registrySocketPath },
+        packagePolicy,
+        ...(packageMode ? { packageAuditLogPath: resolve(bundleDir, PACKAGE_EGRESS_AUDIT_FILENAME) } : {}),
       });
-      if (listeners.registryEgress === undefined || listeners.buildEgress !== undefined) {
-        throw new Error('public-registry Docker workload must construct exactly one registry-egress listener');
+      if (listeners !== undefined) {
+        dockerWorkloadEgress =
+          listeners.networkAccess === 'images'
+            ? {
+                networkAccess: 'images',
+                registry: { ...listeners.registry, socketPath: registrySocketPath },
+              }
+            : {
+                networkAccess: 'packages',
+                registry: { ...listeners.registry, socketPath: registrySocketPath },
+                packages: { ...listeners.packages, socketPath: packageSocketPath },
+              };
+        const registryAddr = await listeners.registry.listener.start();
+        if (registryAddr.socketPath !== registrySocketPath) {
+          throw new Error('registry-egress listener did not bind its exact per-bundle socket');
+        }
+        if (listeners.networkAccess === 'packages') {
+          const packageAddr = await listeners.packages.listener.start(packageSocketPath);
+          if (packageAddr.socketPath !== packageSocketPath) {
+            throw new Error('package-egress listener did not bind its exact per-bundle socket');
+          }
+        }
+        // The host parent is 0700. Apple presents root-owned guest sockets, so
+        // the non-root runtime user needs each mounted socket's "other" write
+        // bit. Apply modes only after every enabled listener has bound and its
+        // returned path has been verified.
+        chmodSync(registrySocketPath, 0o666);
+        if (listeners.networkAccess === 'packages') chmodSync(packageSocketPath, 0o666);
       }
-      dockerWorkloadRegistryEgress = { listener: listeners.registryEgress, socketPath: registrySocketPath };
-      const registryAddr = await listeners.registryEgress.start();
-      if (registryAddr.socketPath !== registrySocketPath) {
-        throw new Error('registry-egress listener did not bind its exact per-bundle socket');
-      }
-      // The host parent is 0700. Apple presents a root-owned guest socket, so
-      // the non-root runtime user needs the socket's "other" write bit.
-      chmodSync(registrySocketPath, 0o666);
     }
 
     // Generate fake keys and build provider key mappings.
@@ -773,27 +1120,6 @@ export async function prepareDockerInfrastructure(
         (adapter.id === 'codex' && CODEX_CHATGPT_HOSTS.has(providerConfig.host));
       const hostTokenManager = tokenManager && isManagedOAuthHost ? tokenManager : undefined;
       providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
-    }
-
-    // Build package installation proxy config if enabled
-    const pkgConfig = config.userConfig.packageInstall;
-    let registries: import('./package-types.js').RegistryConfig[] | undefined;
-    let packageValidation:
-      | { validator: import('./package-types.js').PackageValidator; auditLogPath: string }
-      | undefined;
-
-    if (pkgConfig.enabled) {
-      const { npmRegistry, pypiRegistry, debianRegistry, cargoRegistry } = await import('./registry-proxy.js');
-      const { createPackageValidator } = await import('./package-validator.js');
-
-      registries = [npmRegistry, pypiRegistry, debianRegistry, cargoRegistry];
-      const validator = createPackageValidator({
-        allowedPackages: pkgConfig.allowedPackages,
-        deniedPackages: pkgConfig.deniedPackages,
-        quarantineDays: pkgConfig.quarantineDays,
-      });
-      const packageAuditLogPath = resolve(bundleDir, 'package-audit.jsonl');
-      packageValidation = { validator, auditLogPath: packageAuditLogPath };
     }
 
     // Initial token-stream routing id. Single-session mode: bundleId is
@@ -961,11 +1287,29 @@ export async function prepareDockerInfrastructure(
     // gateway on host-only networks, the Docker host alias otherwise.
     const proxyHost = hostOnlyNetwork ? hostOnlyNetwork.gateway : DOCKER_HOST_GATEWAY;
     const proxyAddress = useTcp && proxy.port !== undefined ? `${proxyHost}:${proxy.port}` : undefined;
-    const nestedDocker = dockerWorkload === undefined ? undefined : { networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK };
+    let nestedDocker: { networkName: string; networkAccess: DockerWorkloadNetworkAccess } | undefined;
+    if (dockerWorkload !== undefined) {
+      if (dockerWorkloadConfig?.enabled !== true) {
+        throw new Error('admitted nested-Docker handle is missing its resolved enabled configuration');
+      }
+      nestedDocker = {
+        networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+        networkAccess: dockerWorkloadConfig.networkAccess,
+      };
+    }
     const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, proxyAddress, nestedDocker);
 
     const orientationDir = resolve(bundleDir, 'orientation');
     const runtimeTrust = stageRuntimeTrust(orientationDir, ca.certPem);
+    if (dockerWorkloadConfig?.enabled === true) {
+      dockerBuildShim = stageDockerBuildShim(bundleId, dockerWorkloadConfig.networkAccess, {
+        orientationDir,
+        caGeneration: ca.generation,
+      });
+      if ((dockerWorkloadConfig.networkAccess === 'packages') !== (dockerBuildShim !== undefined)) {
+        throw new Error('nested-Docker package build staging did not match the resolved network access');
+      }
+    }
 
     // Resolve the stock agent image once, before any container operation.
     // An admitted workload already carries the exact selected artifact created
@@ -1053,7 +1397,8 @@ export async function prepareDockerInfrastructure(
       ...workflowDependencyMounts,
       dockerWorkload,
       dockerWorkloadBootstrap,
-      dockerWorkloadRegistryEgress,
+      dockerWorkloadEgress,
+      dockerBuildShim,
       restageSkills,
       setTokenSessionId: (id) => {
         activeMitmProxy.setTokenSessionId(id);
@@ -1106,7 +1451,7 @@ export async function prepareDockerInfrastructure(
     // teardown is idempotent and, with the supervisor already gone, closes the
     // lease as coordinator and audits the incident. Best-effort — a teardown
     // fault must not mask the original error.
-    await dockerWorkloadRegistryEgress?.listener.stop().catch(() => {});
+    await stopDockerWorkloadEgressBestEffort(dockerWorkloadEgress, 'prepareDockerInfrastructure');
     await dockerWorkload
       ?.teardown()
       .catch((err: unknown) =>
@@ -1122,6 +1467,7 @@ export async function prepareDockerInfrastructure(
     if (hostOnlyNetwork) {
       await docker.removeNetwork(hostOnlyNetwork.name).catch(() => {});
     }
+    removeBundleRuntimeRoot(bundleId, 'prepareDockerInfrastructure');
     throw error;
   }
 }
@@ -1199,11 +1545,13 @@ export async function assembleDockerInfrastructure(
     await provisionWorkflowDependencies(infra, config.userConfig.packageInstall.enabled);
     return infra;
   } catch (error) {
-    await core.dockerWorkloadRegistryEgress?.listener
-      .stop()
-      .catch((err: unknown) =>
-        logger.warn(`assembleDockerInfrastructure: registry-egress stop failed: ${errorMessage(err)}`),
-      );
+    // A create-session failure already revoked these authorities before its
+    // partial VM cleanup. Once container resources were returned, this layer
+    // owns the later-failure revocation instead. The split avoids both an
+    // authority-after-VM rollback window and duplicate stop attempts.
+    if (containerResources !== undefined) {
+      await stopDockerWorkloadEgressBestEffort(core.dockerWorkloadEgress, 'assembleDockerInfrastructure');
+    }
     // §8.3: tear the bundle's outer resources down (teardown-first for a
     // Docker-workload bundle, then the belt-and-braces sweep) and release the
     // managed-resource lease. A create that failed mid-flight already cleaned
@@ -1221,6 +1569,7 @@ export async function assembleDockerInfrastructure(
     await core.mitmProxy.stop().catch(() => {});
     await core.proxy.stop().catch(() => {});
     await core.metricsRuntime?.release().catch(() => {});
+    removeBundleRuntimeRoot(core.bundleId, 'assembleDockerInfrastructure');
     throw error;
   }
 }
@@ -1239,17 +1588,9 @@ export async function assembleDockerInfrastructure(
  * allocates, this function releases.
  */
 export async function destroyDockerInfrastructure(infra: DockerInfrastructure): Promise<void> {
-  // Ordering: stop consumers (containers) before producers (proxies).
-  // Proxy connections from the container terminate cleanly when the
-  // container stops; inverting would leave the proxy with in-flight
-  // connections that get ECONNRESET during its own shutdown.
-
-  // Revoke the optional nested-daemon egress authority before touching the VM.
-  await infra.dockerWorkloadRegistryEgress?.listener
-    .stop()
-    .catch((err: unknown) =>
-      logger.warn(`destroyDockerInfrastructure: registry-egress stop failed: ${errorMessage(err)}`),
-    );
+  // Revoke optional nested-daemon egress authority before touching the VM so
+  // no new package/registry request can begin during exact outer teardown.
+  await stopDockerWorkloadEgressBestEffort(infra.dockerWorkloadEgress, 'destroyDockerInfrastructure');
 
   // Containers + sidecar + internal network + managed-resource lease. For an
   // admitted Docker-workload bundle this tears the ledgered resources down
@@ -1265,8 +1606,11 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
     context: 'destroyDockerInfrastructure',
   });
 
-  // Proxies are independent producers -- stop them in parallel. Each
-  // per-promise catch logs so one failure doesn't mask the other, and
+  // Ordinary agent proxies stop after their consumer container. Proxy
+  // connections terminate cleanly when the container stops; inverting this
+  // part of the order would leave in-flight connections resetting during
+  // proxy shutdown. They are independent producers, so stop them in parallel.
+  // Each per-promise catch logs so one failure doesn't mask the other, and
   // allSettled ensures both complete even if one throws synchronously.
   await Promise.allSettled([
     infra.mitmProxy
@@ -1728,21 +2072,106 @@ export function buildUdsSocketMounts(
   return [{ source: socketsDir, target: CONTAINER_SOCKETS_DIR, readonly: false }];
 }
 
-/** Exact Apple-only mount for the per-bundle registry-egress capability. */
-export function buildDockerWorkloadRegistryEgressMount(
-  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'dockerWorkloadRegistryEgress'>,
+/** Exact Apple-only mounts for the per-bundle nested-Docker egress capabilities. */
+export function buildDockerWorkloadEgressMounts(
+  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'dockerWorkloadEgress'>,
 ): { source: string; target: string; readonly: boolean }[] {
-  if (core.dockerWorkloadRegistryEgress === undefined) return [];
+  if (core.dockerWorkloadEgress === undefined) return [];
   if (core.runtimeKind !== 'apple-container') {
-    throw new Error('registry-egress listener mounting is implemented only for Apple Container');
+    throw new Error('nested-Docker egress listener mounting is implemented only for Apple Container');
   }
-  return [
+  const mounts: { source: string; target: string; readonly: boolean }[] = [
     {
-      source: core.dockerWorkloadRegistryEgress.socketPath,
+      source: core.dockerWorkloadEgress.registry.socketPath,
       target: APPLE_VM_REGISTRY_EGRESS_SOCKET,
       readonly: false,
     },
   ];
+  if (core.dockerWorkloadEgress.networkAccess === 'packages') {
+    mounts.push({
+      source: core.dockerWorkloadEgress.packages.socketPath,
+      target: APPLE_VM_PACKAGE_EGRESS_SOCKET,
+      readonly: false,
+    });
+  }
+  return mounts;
+}
+
+/** Package-only build/runtime-trust mounts, shared by batch/workflow and PTY containers. */
+export function buildDockerBuildShimMounts(
+  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'dockerBuildShim'>,
+): { source: string; target: string; readonly: boolean }[] {
+  const staging = core.dockerBuildShim;
+  if (staging === undefined) return [];
+  if (core.runtimeKind !== 'apple-container') {
+    throw new Error('nested-Docker build shim mounting is implemented only for Apple Container');
+  }
+  return staging.artifacts.map(({ source, target, readonly }) => ({ source, target, readonly }));
+}
+
+/** Resolve and validate the relay mode encoded by the constructed listeners. */
+export function dockerWorkloadEgressNetworkAccess(
+  egress: DockerWorkloadEgressCollection | undefined,
+): DockerWorkloadNetworkAccess {
+  return egress?.networkAccess ?? 'offline';
+}
+
+/**
+ * Activate the same admitted nested-Docker contract for batch and PTY sessions.
+ * Keeping this assembly here prevents the two container-creation paths from
+ * drifting on network mode, trust artifacts, or egress-ledger witnesses.
+ */
+export async function activateAppleVmDockerWorkload(options: {
+  readonly runtime: ContainerRuntime;
+  readonly containerId: string;
+  readonly nestedDaemon: DockerWorkloadBundleHandle | undefined;
+  readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig | undefined;
+  readonly dockerWorkloadEgress: DockerWorkloadEgressCollection | undefined;
+  readonly dockerBuildShim: DockerBuildShimStaging | undefined;
+}): Promise<void> {
+  const { nestedDaemon, bootstrap, dockerWorkloadEgress, dockerBuildShim } = options;
+  if (nestedDaemon === undefined || bootstrap === undefined) return;
+
+  await startAppleVmDockerWorkload({
+    runtime: options.runtime,
+    containerId: options.containerId,
+    nestedDaemon,
+    bootstrap,
+    networkAccess: dockerWorkloadEgressNetworkAccess(dockerWorkloadEgress),
+    dockerBuildShim: dockerBuildShim?.contract,
+    dockerBuildTrustCanary: dockerBuildShim?.buildTrustCanary,
+    egressLedgers:
+      dockerWorkloadEgress?.networkAccess === 'packages'
+        ? {
+            registry: dockerWorkloadEgress.registry.snapshot,
+            packages: dockerWorkloadEgress.packages.snapshot,
+          }
+        : undefined,
+  });
+}
+
+/** Stop every constructed authority even when one listener reports a failure. */
+export async function stopDockerWorkloadEgress(egress: DockerWorkloadEgressCollection | undefined): Promise<void> {
+  if (egress === undefined) return;
+  const endpoints = egress.networkAccess === 'packages' ? [egress.packages, egress.registry] : [egress.registry];
+  const results = await Promise.allSettled(
+    endpoints.map((endpoint) => Promise.resolve().then(() => endpoint.listener.stop())),
+  );
+  const failures: unknown[] = [];
+  for (const result of results) {
+    if (result.status === 'rejected') failures.push(result.reason as unknown);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'nested-Docker egress listeners failed to stop');
+}
+
+async function stopDockerWorkloadEgressBestEffort(
+  egress: DockerWorkloadEgressCollection | undefined,
+  context: string,
+): Promise<void> {
+  await stopDockerWorkloadEgress(egress).catch((err: unknown) =>
+    logger.warn(`${context}: nested-Docker egress stop failed: ${errorMessage(err)}`),
+  );
 }
 
 /** Container-level resources layered on top of the pre-container bundle. */
@@ -1808,18 +2237,18 @@ async function createSessionContainersAttempt(
   // See `docs/designs/workflow-session-identity.md` §7.
   const bundleLabels = buildBundleLabels(core);
 
-  // Remove stale main container from a crashed previous session (same session
-  // ID means same deterministic name, which would conflict on docker create).
-  // Done before the TCP/UDS branch since the main container name is
-  // deterministic in both modes.
-  await core.docker.removeStaleContainer(mainContainerName);
-
   let mainContainerId: string | undefined;
   let sidecarContainerId: string | undefined;
   let internalNetwork: string | undefined;
   let allocatedNetworkSubnet: string | undefined;
 
   try {
+    // Remove stale main container from a crashed previous session (same session
+    // ID means the same deterministic name). Keep this inside the authority-
+    // covered rollback region: even a pre-create rejection must revoke both
+    // nested egress listeners before any outer cleanup can run.
+    await core.docker.removeStaleContainer(mainContainerName);
+
     const mainImage =
       options?.baseImageOverride && (await core.docker.imageExists(options.baseImageOverride))
         ? options.baseImageOverride
@@ -1988,8 +2417,10 @@ async function createSessionContainersAttempt(
     }
 
     // This capability is independent of the outer provider-proxy topology:
-    // Apple mounts exactly one per-bundle socket only for public-registry.
-    mounts.push(...buildDockerWorkloadRegistryEgressMount(core));
+    // Apple mounts registry only for `images`, registry + packages for `packages`,
+    // and no nested-Docker egress socket for `offline`.
+    mounts.push(...buildDockerWorkloadEgressMounts(core));
+    mounts.push(...buildDockerBuildShimMounts(core));
 
     // Mount conversation state directory for session resume (e.g., claude --continue)
     if (core.conversationStateDir && core.conversationStateConfig) {
@@ -2134,15 +2565,14 @@ async function createSessionContainersAttempt(
     // component. Bootstrap/adjudicate dockerd, preflight the pinned client,
     // provision the selected prepared inner image, record observations, and
     // activate the lease before any agent process is exec'd into it.
-    if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
-      await startAppleVmDockerWorkload({
-        runtime: core.docker,
-        containerId: mainContainerId,
-        nestedDaemon,
-        bootstrap: dockerWorkloadBootstrap,
-        registryEgress: core.dockerWorkloadRegistryEgress !== undefined,
-      });
-    }
+    await activateAppleVmDockerWorkload({
+      runtime: core.docker,
+      containerId: mainContainerId,
+      nestedDaemon,
+      bootstrap: dockerWorkloadBootstrap,
+      dockerWorkloadEgress: core.dockerWorkloadEgress,
+      dockerBuildShim: core.dockerBuildShim,
+    });
 
     return {
       containerId: mainContainerId,
@@ -2151,6 +2581,10 @@ async function createSessionContainersAttempt(
       internalNetwork,
     };
   } catch (err) {
+    // Revoke nested egress before removing a partial outer VM. This ordering is
+    // the same for daemon bootstrap, build-trust preflight/canary, and activate
+    // failures: no new registry/package request can race exact VM teardown.
+    await stopDockerWorkloadEgressBestEffort(core.dockerWorkloadEgress, 'createSessionContainers');
     // Best-effort cleanup of any resources created before the failure.
     // All three resources are assigned as soon as `docker.create()` returns
     // (before any subsequent start or connectivity check), so failures at
@@ -2605,7 +3039,7 @@ function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
   // Agent images are CA-neutral. Session-specific public trust is staged in
   // the read-only orientation mount by stageRuntimeTrust().
   const baseImage = 'ironcurtain-base:latest';
-  const baseBuildHash = computeBuildHash(dockerDir, [baseDockerfile]);
+  const baseBuildHash = computeDockerBuildHash(dockerDir, [baseDockerfile]);
 
   const agentName = image.replace(CONTAINER_NAME_PREFIX, '').replace(':latest', '');
   const agentDockerfile = `Dockerfile.${agentName}`;
@@ -2613,7 +3047,7 @@ function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {
   if (!existsSync(agentDockerfilePath)) {
     throw new Error(`Dockerfile not found for agent "${agentName}": ${agentDockerfilePath}`);
   }
-  const agentBuildHash = computeBuildHash(dockerDir, [agentDockerfile], baseBuildHash);
+  const agentBuildHash = computeDockerBuildHash(dockerDir, [agentDockerfile], baseBuildHash);
   return { dockerDir, baseDockerfile, baseImage, baseBuildHash, agentDockerfile, agentBuildHash };
 }
 
@@ -2866,12 +3300,13 @@ async function isImageStale(image: string, docker: ContainerRuntime, expectedHas
   return storedHash !== expectedHash;
 }
 
-function computeBuildHash(dockerDir: string, dockerfiles: string[], parentHash?: string): string {
+export function computeDockerBuildHash(dockerDir: string, dockerfiles: string[], parentHash?: string): string {
   const hash = createHash('sha256');
 
   const files = readdirSync(dockerDir).sort();
   for (const file of files) {
-    if (dockerfiles.includes(file) || file.endsWith('.sh')) {
+    const isAppleVmRelayInput = file === 'apple-vm-egress-relay.mjs' && dockerfiles.includes('Dockerfile.base.arm64');
+    if (dockerfiles.includes(file) || file.endsWith('.sh') || isAppleVmRelayInput) {
       hash.update(`file:${file}\n`);
       hash.update(readFileSync(resolve(dockerDir, file)));
     }

@@ -13,6 +13,7 @@ import type { MessageLogEntry } from '../workflow/message-log.js';
 // forbids VALUE imports from pipeline/* on the live path; `import type` is the
 // sanctioned contract import and creates no runtime edge.
 import type { CompilationPhase } from '../pipeline/pipeline-shared.js';
+import type { DockerWorkloadNetworkAccess } from '../docker-workload/config.js';
 
 // Re-export the phase union so the frontend mirror and event consumers can name
 // it without reaching into the pipeline package directly.
@@ -684,14 +685,10 @@ export interface OpenrouterModelsDto {
   readonly source: 'live' | 'cache' | 'bundled';
 }
 
-/**
- * The intentionally small nested-Docker settings surface. Enabling public
- * registry pulls grants only the mediated Docker Hub/GHCR path; it does not
- * grant the nested daemon generic internet access or registry credentials.
- */
+/** The intentionally small nested-Docker settings surface. */
 export interface DockerWorkloadSettingsDto {
   readonly enabled: boolean;
-  readonly allowPublicRegistryPulls: boolean;
+  readonly networkAccess: DockerWorkloadNetworkAccess;
 }
 
 // ---------------------------------------------------------------------------

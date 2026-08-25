@@ -7,7 +7,7 @@
  * resolving or dialing them.
  */
 
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -20,13 +20,11 @@ import {
   createDockerWorkloadEgressListeners,
   resolveDockerWorkloadEgressListenerOptions,
   type CreateDockerWorkloadEgressListenersOptions,
+  type DockerWorkloadEgressSet,
 } from '../../src/docker/docker-workload-egress.js';
-import {
-  getFrozenBuildEgressManifestPath,
-  getFrozenRegistryEgressManifestPath,
-  getIronCurtainPackageRoot,
-} from '../../src/docker/docker-workload-paths.js';
-import { createMitmProxy, type MitmProxy } from '../../src/docker/mitm-proxy.js';
+import { getFrozenRegistryEgressManifestPath } from '../../src/docker/docker-workload-paths.js';
+import type { MitmProxy } from '../../src/docker/mitm-proxy.js';
+import type { PackageEgressProxy } from '../../src/docker/package-egress-proxy.js';
 import type { DestinationBoundRequest, OutboundTransport } from '../../src/docker/outbound-transport.js';
 import type { ResolvedDockerWorkloadConfig } from '../../src/docker-workload/config.js';
 import { sha256Hex } from '../../src/hash.js';
@@ -38,6 +36,7 @@ let caDirectory: string;
 const temporaryDirectories: string[] = [];
 const servers: http.Server[] = [];
 const proxies: MitmProxy[] = [];
+const packageProxies: PackageEgressProxy[] = [];
 
 beforeAll(() => {
   caDirectory = mkdtempSync(join(tmpdir(), 'workload-egress-ca-'));
@@ -50,6 +49,7 @@ afterAll(() => {
 
 afterEach(async () => {
   await Promise.all(proxies.splice(0).map((proxy) => proxy.stop()));
+  await Promise.all(packageProxies.splice(0).map((proxy) => proxy.stop()));
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -71,35 +71,34 @@ describe('Docker-workload egress gating', () => {
       ca,
       outboundTransport: unreachableTransport(),
     });
-    expect(listeners).toEqual({});
+    expect(listeners).toBeUndefined();
   });
 
   it('builds no listener when both egress modes are off', () => {
-    // `preloaded-only` + `disabled` is "no route", not "a route that 403s": a
+    // `offline` is "no route", not "a route that 403s": a
     // bound socket that TLS-terminates every host is more surface than none.
     const listeners = createDockerWorkloadEgressListeners({
-      workload: workload({ imageIngress: 'preloaded-only', buildEgress: 'disabled' }),
+      workload: workload('offline'),
       ca,
       outboundTransport: unreachableTransport(),
     });
-    expect(listeners).toEqual({});
+    expect(listeners).toBeUndefined();
   });
 
-  it('builds only the registry listener for public-registry image ingress', () => {
+  it('builds only the registry listener for images network access', () => {
     const options = {
-      workload: workload({ imageIngress: 'public-registry', buildEgress: 'disabled' }),
+      workload: workload('images'),
       ca,
       outboundTransport: unreachableTransport(),
       registryListen: { socketPath: socketPathIn(tempDirectory()) },
     } satisfies CreateDockerWorkloadEgressListenersOptions;
 
     const listeners = createDockerWorkloadEgressListeners(options);
-    expect(listeners.registryEgress).toBeDefined();
-    expect(listeners.buildEgress).toBeUndefined();
+    expect(listeners?.networkAccess).toBe('images');
     trackProxies(listeners);
 
     const resolved = resolveDockerWorkloadEgressListenerOptions(options);
-    const guard = resolved.registryEgress?.registryEgress?.guard;
+    const guard = resolved?.registry.registryEgress?.guard;
     expect(guard?.mode).toBe('public-registry');
     expect(guard?.manifest?.policyId).toBe('workload-registry-egress-v1');
     expect(guard?.manifest?.status).toBe('frozen');
@@ -110,54 +109,25 @@ describe('Docker-workload egress gating', () => {
     ]);
   });
 
-  it('builds only the build listener for ironcurtain-dockerfiles build egress', () => {
-    const options = {
-      workload: workload({ imageIngress: 'preloaded-only', buildEgress: 'ironcurtain-dockerfiles' }),
-      ca,
-      outboundTransport: unreachableTransport(),
-      buildListen: { socketPath: socketPathIn(tempDirectory()) },
-    } satisfies CreateDockerWorkloadEgressListenersOptions;
-
-    const listeners = createDockerWorkloadEgressListeners(options);
-    expect(listeners.buildEgress).toBeDefined();
-    expect(listeners.registryEgress).toBeUndefined();
-    trackProxies(listeners);
-
-    const resolved = resolveDockerWorkloadEgressListenerOptions(options);
-    const buildEgress = resolved.buildEgress?.buildEgress;
-    expect(buildEgress?.guard.mode).toBe('ironcurtain-dockerfiles');
-    expect(buildEgress?.seam).toBe('run');
-    expect(buildEgress?.guard.manifest?.dockerfiles.map((source) => source.path)).toEqual([
-      'docker/Dockerfile.base.arm64',
-      'docker/Dockerfile.claude-code',
-      'docker/Dockerfile.codex',
-      'docker/Dockerfile.goose',
-    ]);
-    for (const source of buildEgress?.guard.manifest?.dockerfiles ?? []) {
-      expect(source.sha256).toBe(sha256Hex(readFileSync(resolve(getIronCurtainPackageRoot(), source.path))));
-    }
-  });
-
-  it('builds two distinct listeners when both modes are enabled', () => {
-    const directory = tempDirectory();
+  it('constructs distinct registry and package listeners for packages network access', () => {
     const listeners = createDockerWorkloadEgressListeners({
-      workload: workload({ imageIngress: 'public-registry', buildEgress: 'ironcurtain-dockerfiles' }),
+      workload: workload('packages'),
       ca,
       outboundTransport: unreachableTransport(),
-      registryListen: { socketPath: join(directory, 'registry.sock') },
-      buildListen: { socketPath: join(directory, 'build.sock') },
+      registryListen: { socketPath: socketPathIn(tempDirectory()) },
+      packageAuditLogPath: join(tempDirectory(), 'package-egress-audit.jsonl'),
     });
     trackProxies(listeners);
-    expect(listeners.registryEgress).toBeDefined();
-    expect(listeners.buildEgress).toBeDefined();
-    // Two listeners, never one proxy in two modes: the MITM rejects that pairing.
-    expect(listeners.registryEgress).not.toBe(listeners.buildEgress);
+    expect(listeners?.networkAccess).toBe('packages');
+    if (listeners?.networkAccess !== 'packages') throw new Error('expected package egress listeners');
+    expect(listeners.registry).toBeDefined();
+    expect(listeners.packages).toBeDefined();
   });
 
   it('refuses to build an enabled mode without a listen target', () => {
     expect(() =>
       createDockerWorkloadEgressListeners({
-        workload: workload({ imageIngress: 'public-registry', buildEgress: 'disabled' }),
+        workload: workload('images'),
         ca,
         outboundTransport: unreachableTransport(),
       }),
@@ -169,14 +139,10 @@ describe('Docker-workload egress gating', () => {
 
 describe('frozen-manifest binding', () => {
   it('binds each guard to the exact committed manifest bytes', () => {
-    const resolved = resolveDockerWorkloadEgressListenerOptions(bothModes());
-    const registryManifest = resolved.registryEgress?.registryEgress?.guard.manifest;
+    const resolved = resolveDockerWorkloadEgressListenerOptions(registryOnly());
+    const registryManifest = resolved?.registry.registryEgress?.guard.manifest;
     expect(registryManifest?.path).toBe(getFrozenRegistryEgressManifestPath());
     expect(registryManifest?.sha256).toBe(sha256Hex(readFileSync(getFrozenRegistryEgressManifestPath())));
-
-    const buildManifest = resolved.buildEgress?.buildEgress?.guard.manifest;
-    expect(buildManifest?.path).toBe(getFrozenBuildEgressManifestPath());
-    expect(buildManifest?.sha256).toBe(sha256Hex(readFileSync(getFrozenBuildEgressManifestPath())));
   });
 
   it('never opts out of the frozen-manifest requirement', () => {
@@ -190,6 +156,29 @@ describe('frozen-manifest binding', () => {
 // ── 3. Admit / deny end-to-end through createMitmProxy ────────────────
 
 describe('registry-egress listener (end-to-end through createMitmProxy)', () => {
+  it('changes the exported ledger snapshot for a denied zero-byte request', async () => {
+    const transport = recordingTransport({});
+    const socketPath = socketPathIn(tempDirectory());
+    const listeners = createDockerWorkloadEgressListeners({
+      workload: workload('images'),
+      ca,
+      outboundTransport: transport.transport,
+      registryListen: { socketPath },
+    });
+    if (listeners === undefined) throw new Error('expected registry listener');
+    await startListener(listeners.registry.listener, socketPath);
+    expect(listeners.registry.snapshot()).toEqual({ attempts: 0, totalBytes: 0, activeRequests: 0 });
+
+    const response = await httpsThroughProxy(socketPath, 'registry-1.docker.io', {
+      method: 'HEAD',
+      path: '/v2/_catalog',
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(transport.requests).toHaveLength(0);
+    expect(listeners.registry.snapshot()).toEqual({ attempts: 1, totalBytes: 0, activeRequests: 0 });
+  });
+
   it('admits a manifest pull to a listed registry and forwards it destination-bound', async () => {
     const upstream = await startUpstream((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/vnd.oci.image.manifest.v1+json' });
@@ -279,131 +268,9 @@ describe('registry-egress listener (end-to-end through createMitmProxy)', () => 
   });
 });
 
-describe('build-egress listener (end-to-end through createMitmProxy)', () => {
-  it('admits a listed TLS origin and forwards it destination-bound', async () => {
-    const upstream = await startUpstream((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"name":"ironcurtain"}');
-    });
-    const transport = recordingTransport({ 'registry.npmjs.org': upstream.port });
-    const socketPath = await startBuildListener(transport.transport);
-
-    const response = await rawHttpsThroughProxy(
-      socketPath,
-      'registry.npmjs.org',
-      'GET /ironcurtain HTTP/1.0\r\naccept: application/json\r\n\r\n',
-    );
-
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toBe('{"name":"ironcurtain"}');
-    expect(transport.requests).toHaveLength(1);
-    expect(transport.requests[0].destination).toEqual({
-      protocol: 'https:',
-      hostname: 'registry.npmjs.org',
-      port: 443,
-    });
-  });
-
-  it('refuses an unlisted TLS origin with no upstream contact', async () => {
-    const transport = recordingTransport({});
-    const socketPath = await startBuildListener(transport.transport);
-
-    const response = await rawHttpsThroughProxy(socketPath, 'evil.example', 'GET /payload HTTP/1.0\r\n\r\n');
-
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toMatch(/build egress denied/u);
-    expect(transport.requests).toHaveLength(0);
-  });
-
-  it('admits the plain-HTTP apt path, a dispatch separate from the TLS path', async () => {
-    const upstream = await startUpstream((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('Suite: bookworm');
-    });
-    const transport = recordingTransport({ 'deb.debian.org': upstream.port });
-    const socketPath = await startBuildListener(transport.transport);
-
-    const response = await rawPlainHttpThroughProxy(
-      socketPath,
-      'GET http://deb.debian.org/debian/dists/bookworm/InRelease HTTP/1.0\r\naccept: */*\r\n\r\n',
-    );
-
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toBe('Suite: bookworm');
-    expect(transport.requests).toHaveLength(1);
-    expect(transport.requests[0].destination).toEqual({ protocol: 'http:', hostname: 'deb.debian.org', port: 80 });
-    expect(transport.requests[0].path).toBe('/debian/dists/bookworm/InRelease');
-  });
-
-  it('refuses an unlisted plain-HTTP host with no upstream contact', async () => {
-    const transport = recordingTransport({});
-    const socketPath = await startBuildListener(transport.transport);
-
-    const response = await rawPlainHttpThroughProxy(
-      socketPath,
-      'GET http://evil.example/debian/dists/bookworm/InRelease HTTP/1.0\r\n\r\n',
-    );
-
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toMatch(/build egress denied/u);
-    expect(transport.requests).toHaveLength(0);
-  });
-
-  it('admits a realistic HTTP/1.1 client that sends the mandatory Host header', async () => {
-    // `Host` is mandatory in HTTP/1.1 and no frozen rule enumerates it, so build
-    // egress used to refuse every real client (apt, curl, BuildKit).
-    // `build-egress-policy.ts` now drops `host` and the hop-by-hop set before the
-    // allow/strip lists are consulted, matching `registry-egress-policy.ts`:
-    // the destination-bound transport owns Host/SNI, so relaying a client-supplied
-    // `Host` would be a smuggling vector rather than a feature.
-    const upstream = await startUpstream((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('Suite: bookworm');
-    });
-    const transport = recordingTransport({ 'deb.debian.org': upstream.port });
-    const socketPath = await startBuildListener(transport.transport);
-
-    const response = await rawPlainHttpThroughProxy(
-      socketPath,
-      'GET http://deb.debian.org/debian/dists/bookworm/InRelease HTTP/1.1\r\n' +
-        'host: deb.debian.org\r\nconnection: close\r\nuser-agent: Debian APT-HTTP/1.3\r\n\r\n',
-    );
-
-    expect(response.statusCode).toBe(200);
-    expect(transport.requests).toHaveLength(1);
-    expect(transport.requests[0]?.destination.hostname).toBe('deb.debian.org');
-    // host/connection dropped, the declared user-agent preserved.
-    expect(transport.requests[0]?.headers).toEqual({ 'user-agent': 'Debian APT-HTTP/1.3' });
-  });
-});
-
-// ── 4. Fail-closed construction ───────────────────────────────────────
-
-describe('fail-closed construction', () => {
-  it('aborts before any listener exists when a hash-bound Dockerfile drifts', () => {
-    const drifted = driftedRepositoryRoot();
-    const options: CreateDockerWorkloadEgressListenersOptions = { ...bothModes(), repositoryRoot: drifted };
-
-    // Both modes are enabled, and guard construction happens for every mode
-    // before any proxy is constructed, so a drifted Dockerfile leaves no
-    // half-built registry listener behind either.
-    expect(() => resolveDockerWorkloadEgressListenerOptions(options)).toThrow(/hash mismatch/u);
-    expect(() => createDockerWorkloadEgressListeners(options)).toThrow(/hash mismatch/u);
-  });
-});
-
-// ── 5. Transport preconditions (checked at construction) ──────────────
+// ── 4. Transport preconditions (checked at construction) ──────────────
 
 describe('transport preconditions', () => {
-  it('refuses build egress over a direct transport', () => {
-    expect(() =>
-      createDockerWorkloadEgressListeners({
-        ...buildOnly(),
-        outboundTransport: unreachableTransport({ kind: 'direct' }),
-      }),
-    ).toThrow(/fixed parent proxy transport/u);
-  });
-
   it('refuses registry egress over a transport that delegates the address policy', () => {
     expect(() =>
       createDockerWorkloadEgressListeners({
@@ -414,7 +281,7 @@ describe('transport preconditions', () => {
   });
 });
 
-// ── 6. Per-mode option discipline ─────────────────────────────────────
+// ── 5. Per-mode option discipline ─────────────────────────────────────
 
 describe('per-mode proxy options', () => {
   const SECURITY_SENSITIVE_OPTIONS = [
@@ -431,60 +298,34 @@ describe('per-mode proxy options', () => {
     'allowPrivateDestinationsForTests',
   ] as const;
 
-  it('gives each listener only the keys its mode needs', () => {
-    const resolved = resolveDockerWorkloadEgressListenerOptions(bothModes());
-    expect(Object.keys(resolved.registryEgress ?? {}).sort()).toEqual([
+  it('gives the registry listener only the keys its mode needs', () => {
+    const resolved = resolveDockerWorkloadEgressListenerOptions(registryOnly());
+    expect(Object.keys(resolved?.registry ?? {}).sort()).toEqual([
       'ca',
       'outboundTransport',
       'providers',
       'registryEgress',
       'socketPath',
     ]);
-    expect(Object.keys(resolved.buildEgress ?? {}).sort()).toEqual([
-      'buildEgress',
-      'ca',
-      'outboundTransport',
-      'providers',
-      'socketPath',
-    ]);
   });
 
-  it.each(SECURITY_SENSITIVE_OPTIONS)('never sets %s on either listener', (key) => {
-    const resolved = resolveDockerWorkloadEgressListenerOptions(bothModes());
-    expect(resolved.registryEgress?.[key]).toBeUndefined();
-    expect(resolved.buildEgress?.[key]).toBeUndefined();
+  it.each(SECURITY_SENSITIVE_OPTIONS)('never sets %s on the registry listener', (key) => {
+    const resolved = resolveDockerWorkloadEgressListenerOptions(registryOnly());
+    expect(resolved?.registry[key]).toBeUndefined();
   });
 
-  it('gives each listener no providers and exactly one egress mode', () => {
-    const resolved = resolveDockerWorkloadEgressListenerOptions(bothModes());
-    expect(resolved.registryEgress?.providers).toEqual([]);
-    expect(resolved.buildEgress?.providers).toEqual([]);
-    expect(resolved.registryEgress?.buildEgress).toBeUndefined();
-    expect(resolved.buildEgress?.registryEgress).toBeUndefined();
-  });
-
-  it('would be rejected by the MITM if the two modes were ever merged onto one listener', () => {
-    // Guards the invariant the seam relies on: one listener, one mode. Splicing
-    // the two resolved option sets together must not produce a usable proxy.
-    const resolved = resolveDockerWorkloadEgressListenerOptions(bothModes());
-    const registryOptions = resolved.registryEgress;
-    const buildMode = resolved.buildEgress?.buildEgress;
-    if (registryOptions === undefined || buildMode === undefined) throw new Error('expected both modes resolved');
-    expect(() => createMitmProxy({ ...registryOptions, buildEgress: buildMode })).toThrow(/mutually exclusive/u);
+  it('gives the registry listener no providers and exactly one egress mode', () => {
+    const resolved = resolveDockerWorkloadEgressListenerOptions(registryOnly());
+    expect(resolved?.registry.providers).toEqual([]);
   });
 });
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
-function workload(overrides: {
-  imageIngress: 'preloaded-only' | 'public-registry';
-  buildEgress: 'disabled' | 'ironcurtain-dockerfiles';
-}): ResolvedDockerWorkloadConfig {
-  // This suite qualifies the lower-level frozen build-egress implementation,
-  // which is intentionally not expressible through ordinary user config.
+function workload(networkAccess: 'offline' | 'images' | 'packages'): ResolvedDockerWorkloadConfig {
   return {
     enabled: true,
-    ...overrides,
+    networkAccess,
     acceptObservedDiskRisk: true,
     resources: {
       memoryMb: 4096,
@@ -506,53 +347,23 @@ function socketPathIn(directory: string): string {
   return join(directory, 'e.sock');
 }
 
-function trackProxies(listeners: { registryEgress?: MitmProxy; buildEgress?: MitmProxy }): void {
-  if (listeners.registryEgress) proxies.push(listeners.registryEgress);
-  if (listeners.buildEgress) proxies.push(listeners.buildEgress);
+function trackProxies(
+  listeners:
+    | DockerWorkloadEgressSet<{ readonly listener: MitmProxy }, { readonly listener: PackageEgressProxy }>
+    | undefined,
+): void {
+  if (listeners === undefined) return;
+  proxies.push(listeners.registry.listener);
+  if (listeners.networkAccess === 'packages') packageProxies.push(listeners.packages.listener);
 }
 
 function registryOnly(): CreateDockerWorkloadEgressListenersOptions {
   return {
-    workload: workload({ imageIngress: 'public-registry', buildEgress: 'disabled' }),
+    workload: workload('images'),
     ca,
     outboundTransport: unreachableTransport(),
     registryListen: { socketPath: socketPathIn(tempDirectory()) },
   };
-}
-
-function buildOnly(): CreateDockerWorkloadEgressListenersOptions {
-  return {
-    workload: workload({ imageIngress: 'preloaded-only', buildEgress: 'ironcurtain-dockerfiles' }),
-    ca,
-    outboundTransport: unreachableTransport(),
-    buildListen: { socketPath: socketPathIn(tempDirectory()) },
-  };
-}
-
-function bothModes(): CreateDockerWorkloadEgressListenersOptions {
-  const directory = tempDirectory();
-  return {
-    workload: workload({ imageIngress: 'public-registry', buildEgress: 'ironcurtain-dockerfiles' }),
-    ca,
-    outboundTransport: unreachableTransport(),
-    registryListen: { socketPath: join(directory, 'r.sock') },
-    buildListen: { socketPath: join(directory, 'b.sock') },
-  };
-}
-
-/** A checkout whose reviewed Dockerfiles no longer match the frozen hashes. */
-function driftedRepositoryRoot(): string {
-  const root = tempDirectory();
-  mkdirSync(join(root, 'docker'));
-  const manifest = JSON.parse(readFileSync(getFrozenBuildEgressManifestPath(), 'utf8')) as {
-    sourceDockerfiles: readonly { readonly path: string }[];
-  };
-  for (const source of manifest.sourceDockerfiles) {
-    copyFileSync(resolve(getIronCurtainPackageRoot(), source.path), join(root, source.path));
-  }
-  const drifted = join(root, 'docker', 'Dockerfile.base.arm64');
-  writeFileSync(drifted, `${readFileSync(drifted, 'utf8')}\n`, { mode: 0o600 });
-  return root;
 }
 
 interface RecordedTransport {
@@ -561,8 +372,8 @@ interface RecordedTransport {
 }
 
 /**
- * Stub destination-bound transport with the capabilities both egress modes
- * require, routing each frozen hostname at a loopback upstream and recording
+ * Stub destination-bound transport with the capabilities registry egress
+ * requires, routing each frozen hostname at a loopback upstream and recording
  * exactly what it was asked to fetch.
  */
 function recordingTransport(routes: Record<string, number | undefined>): RecordedTransport {
@@ -617,23 +428,12 @@ function startUpstream(handler: http.RequestListener): Promise<UpstreamServer> {
 async function startRegistryListener(transport: OutboundTransport): Promise<string> {
   const socketPath = socketPathIn(tempDirectory());
   const listeners = createDockerWorkloadEgressListeners({
-    workload: workload({ imageIngress: 'public-registry', buildEgress: 'disabled' }),
+    workload: workload('images'),
     ca,
     outboundTransport: transport,
     registryListen: { socketPath },
   });
-  return startListener(listeners.registryEgress, socketPath);
-}
-
-async function startBuildListener(transport: OutboundTransport): Promise<string> {
-  const socketPath = socketPathIn(tempDirectory());
-  const listeners = createDockerWorkloadEgressListeners({
-    workload: workload({ imageIngress: 'preloaded-only', buildEgress: 'ironcurtain-dockerfiles' }),
-    ca,
-    outboundTransport: transport,
-    buildListen: { socketPath },
-  });
-  return startListener(listeners.buildEgress, socketPath);
+  return startListener(listeners?.registry.listener, socketPath);
 }
 
 async function startListener(proxy: MitmProxy | undefined, socketPath: string): Promise<string> {
@@ -767,13 +567,4 @@ async function rawHttpsThroughProxy(socketPath: string, host: string, request: s
     socket.on('error', fail);
   });
   return exchangeRaw(secure, request);
-}
-
-/** A plain-HTTP proxy request (absolute-form), as apt speaks it. */
-async function rawPlainHttpThroughProxy(socketPath: string, request: string): Promise<RawResponse> {
-  const socket = await new Promise<net.Socket>((done, fail) => {
-    const connection = net.connect({ path: socketPath }, () => done(connection));
-    connection.on('error', fail);
-  });
-  return exchangeRaw(socket, request);
 }

@@ -57,37 +57,53 @@ All budget fields are nullable — set to `null` to disable the limit.
 
 Docker Agent sessions can expose a private Docker daemon to the agent. The capability is off unless
 `dockerWorkload.enabled` is true. Configure it with `ironcurtain config` → **Docker Agent** →
-**Nested Docker**, in web Settings, or with the minimal JSON:
-
-```json
-{
-  "dockerWorkload": {
-    "enabled": true
-  }
-}
-```
-
-When enabled, anonymous workload-image pulls from Docker Hub and GHCR are available by default through
-IronCurtain's fixed mediated registry proxy. This does not grant generic internet access, registry
-credentials, private-registry access, or host-port publication. To disable live pulls and use only
-images already available to the private runtime:
+**Nested Docker**, in web Settings, or with this JSON:
 
 ```json
 {
   "dockerWorkload": {
     "enabled": true,
-    "imageIngress": "preloaded-only"
+    "networkAccess": "packages"
   }
 }
 ```
 
-| Field                         | Type            | Default when enabled | Description                                                                                 |
-| ----------------------------- | --------------- | -------------------- | ------------------------------------------------------------------------------------------- |
-| `dockerWorkload.enabled`      | boolean         | `false`              | Enable private nested Docker for Docker Agent sessions.                                     |
-| `dockerWorkload.imageIngress` | string          | `public-registry`    | `public-registry` for mediated Docker Hub/GHCR pulls; `preloaded-only` disables live pulls. |
-| `containerRuntime`            | string          | `auto`               | `auto`, `docker`, or `apple-container`; the current nested-Docker slice requires Apple.     |
-| `dockerResources.memoryMb`    | integer \| null | `8192`               | Ordinary container memory ceiling; numeric values are inherited by nested Docker.           |
-| `dockerResources.cpus`        | number \| null  | `4`                  | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.              |
+Fresh CLI and web enablement explicitly selects `packages`, which supports mediated Docker Hub/GHCR pulls
+plus fixed public apt, npm, PyPI, and Cargo downloads through a TLS-terminating MITM proxy. It does not
+provide arbitrary `curl`, Git, private registries, authenticated package sources, uploads, or generic web
+access. Package responses, caches, built images, and image contents remain untrusted.
+
+Packages permits any process in this nested-Docker session to send bounded workspace or build data through
+allowed package paths, permitted request metadata, and timing to fixed public repositories, and to download
+untrusted content. IronCurtain does not inject credentials and rejects recognized credential fields and
+request bodies. It screens the immediate peer, but a public repository may relay or hairpin elsewhere; use
+Images only or Offline to remove this route.
+
+Set `networkAccess` to `images` for mediated Docker Hub/GHCR pulls without Dockerfile `RUN` networking, or
+to `offline` to use only images already available to the private runtime:
+
+```json
+{
+  "dockerWorkload": {
+    "enabled": true,
+    "networkAccess": "offline"
+  }
+}
+```
+
+| Field                          | Type            | Default when enabled     | Description                                                                             |
+| ------------------------------ | --------------- | ------------------------ | --------------------------------------------------------------------------------------- |
+| `dockerWorkload.enabled`       | boolean         | `false`                  | Enable private nested Docker for Docker Agent sessions.                                 |
+| `dockerWorkload.networkAccess` | string          | Fresh enable: `packages` | `packages`, `images`, or `offline`; changes apply only to new sessions.                 |
+| `containerRuntime`             | string          | `auto`                   | `auto`, `docker`, or `apple-container`; the current nested-Docker slice requires Apple. |
+| `dockerResources.memoryMb`     | integer \| null | `8192`                   | Ordinary container memory ceiling; numeric values are inherited by nested Docker.       |
+| `dockerResources.cpus`         | number \| null  | `4`                      | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.          |
+
+For backward compatibility, an existing enabled block with no old or new network choice migrates to
+`images`; old `imageIngress: "public-registry"` also becomes `images`, while `preloaded-only` becomes
+`offline`. The superseded `networkAccess: "public"` becomes the narrower `packages` mode. A disabled block
+with no prior choice remains unchanged until the first CLI or web enable, which explicitly writes
+`packages`.
 
 The current admitted implementation is the Apple Container developer slice. `containerRuntime` may
 remain `auto` when Apple Container is available; unsupported runtime resolutions fail before nested

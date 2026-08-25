@@ -1,0 +1,9 @@
+{
+  "name": "ironcurtain-package-build-smoke",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "is-number": "7.0.0"
+  }
+}

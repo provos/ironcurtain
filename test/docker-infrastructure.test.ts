@@ -15,6 +15,7 @@ import {
   prepareDockerInfrastructure,
   resolveRealKey,
   canRefreshOAuth,
+  computeDockerBuildHash,
   computeWorkflowDependencyHash,
   buildWorkflowExecCommand,
   checkDockerContainerWritableStorage,
@@ -122,6 +123,7 @@ describe('DockerInfrastructure interface', () => {
         extractResponse: () => ({ text: '' }),
       },
       ca: {
+        generation: 'gen-00000000-0000-4000-8000-000000000000',
         certPem: 'mock-cert',
         keyPem: 'mock-key',
         certPath: '/tmp/ca-cert.pem',
@@ -1404,6 +1406,29 @@ describe('destroyDockerInfrastructure', () => {
 // ---------------------------------------------------------------------------
 // Per-workflow runtime dependency cache hashing
 // ---------------------------------------------------------------------------
+
+describe('computeDockerBuildHash', () => {
+  it('folds the checked-in Apple relay into the arm64 base and chained agent hashes', () => {
+    const dockerDir = mkdtempSync(join(tmpdir(), 'ironcurtain-docker-build-hash-'));
+    try {
+      writeFileSync(join(dockerDir, 'Dockerfile.base.arm64'), 'FROM pinned\nCOPY apple-vm-egress-relay.mjs /relay\n');
+      writeFileSync(join(dockerDir, 'Dockerfile.agent'), 'FROM base\n');
+      writeFileSync(join(dockerDir, 'apple-vm-egress-relay.mjs'), 'export const version = 1;\n');
+
+      const baseBefore = computeDockerBuildHash(dockerDir, ['Dockerfile.base.arm64']);
+      const agentBefore = computeDockerBuildHash(dockerDir, ['Dockerfile.agent'], baseBefore);
+      writeFileSync(join(dockerDir, 'apple-vm-egress-relay.mjs'), 'export const version = 2;\n');
+      const baseAfter = computeDockerBuildHash(dockerDir, ['Dockerfile.base.arm64']);
+      const agentAfter = computeDockerBuildHash(dockerDir, ['Dockerfile.agent'], baseAfter);
+
+      expect(baseAfter).not.toBe(baseBefore);
+      expect(agentAfter).not.toBe(agentBefore);
+      expect(computeDockerBuildHash(dockerDir, ['Dockerfile.agent'], baseBefore)).toBe(agentBefore);
+    } finally {
+      rmSync(dockerDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('computeWorkflowDependencyHash', () => {
   let scriptsDir: string;

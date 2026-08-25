@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "os": "linux",
+    "architecture": "arm64",
+    "cgoEnabled": false
+  },
+  "realRuncPath": "/usr/local/lib/ironcurtain-docker/bin/runc",
+  "goVersion": "go1.26.1",
+  "buildArguments": [
+    "build",
+    "-buildvcs=false",
+    "-mod=readonly",
+    "-trimpath",
+    "-ldflags=-buildid= -s -w"
+  ],
+  "sourceFiles": [
+    "go.mod",
+    "diagnostic-codes.mjs",
+    "contract.go",
+    "contract_test.go",
+    "diagnostic_linux.go",
+    "main.go",
+    "main_test.go",
+    "secure_linux.go",
+    "secure_linux_test.go",
+    "secure_unsupported.go",
+    "spec.go",
+    "spec_test.go"
+  ],
+  "sourceSha256": "845e44a7c55fb7895df766fad46ef10367239e5395ea2cd2592c8a2813a43221",
+  "builderSha256": "1e300b1111c8354ba30b7229b8845758e6c1b55f7cc3f50ff67e5ac414d7899d",
+  "binary": {
+    "path": "bin/linux-arm64/ironcurtain-build-trust-runc",
+    "sha256": "d17e334a07d82df0ce25b8da44e60591ca7916cfa53bd941a523410555c74c91",
+    "size": 2752638,
+    "mode": "0755"
+  },
+  "stagingContract": {
+    "productionReachable": true,
+    "runtimeContract": {
+      "packagePath": "src/docker/build-trust-runtime-contract.ts",
+      "sha256": "64fd7d0ec5bc57b9e8b027f8e778b99a6a3ec09b988ce3c60d3d8c7e17226aa5"
+    },
+    "wrapper": {
+      "packagePath": "bin/linux-arm64/ironcurtain-build-trust-runc",
+      "packageMode": "0755",
+      "requiredGuestMode": "0555",
+      "qualifiedOCIEnvelopes": {
+        "structuralSummariesOnly": true,
+        "entries": [
+          {
+            "networkMode": "none",
+            "packagePath": "docs/designs/evidence/ca-injection-buildkit-oci-envelope.fixture.json",
+            "sha256": "af0bcffb2c05a9648a31c383d6110d9db5d7c35550c216a38ada7663f6669a21"
+          },
+          {
+            "networkMode": "host",
+            "packagePath": "docs/designs/evidence/ca-injection-buildkit-oci-envelope-host.fixture.json",
+            "sha256": "128b830f4ab83823f0e3c6229e8af913b5d989c7480040d726ac8d750bfa6a58"
+          }
+        ],
+        "comparison": {
+          "packagePath": "docs/designs/evidence/ca-injection-buildkit-oci-envelope-comparison.json",
+          "sha256": "36e5779065479b0aaecbbc7f859f8a9f5ae16a66665a4b8bcac318f4fbcbebf1"
+        }
+      }
+    },
+    "trustContract": {
+      "path": "/opt/ironcurtain-build-trust/build-trust-contract.json",
+      "parentDirectory": {
+        "path": "/opt/ironcurtain-build-trust",
+        "uid": 0,
+        "gid": 0,
+        "mode": "0755",
+        "ownerPairs": [
+          {
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "uid": 65534,
+            "gid": 65534
+          }
+        ]
+      },
+      "requiredMode": "0444",
+      "requiredLinkCount": 1,
+      "requiresEffectiveReadOnly": true,
+      "schemaFixtureSha256": "1b758d895f0d353d38e285dd9fae1614433d3a66d2a60c6dbf5bd4dfee6c47a2",
+      "schemaVersion": 1,
+      "rootFields": [
+        "caGeneration",
+        "publicSources",
+        "realRunc",
+        "schemaVersion"
+      ],
+      "caGenerationFormat": "gen-uuid-v4-lowercase",
+      "commonIntegrityFields": [
+        "sha256",
+        "size",
+        "mode"
+      ],
+      "realRunc": {
+        "path": "/usr/local/lib/ironcurtain-docker/bin/runc",
+        "version": "1.3.4",
+        "ownerPairs": [
+          {
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "uid": 65534,
+            "gid": 65534
+          }
+        ],
+        "requiredLinkCount": 1
+      },
+      "publicSources": [
+        {
+          "path": "/opt/ironcurtain-build-trust/ca-cert.pem",
+          "destination": "/dev/ironcurtain/ca-cert.pem",
+          "requiredMode": "0444"
+        },
+        {
+          "path": "/opt/ironcurtain-build-trust/ca-bundle.pem",
+          "destination": "/dev/ironcurtain/ca-bundle.pem",
+          "requiredMode": "0444"
+        },
+        {
+          "path": "/opt/ironcurtain-build-trust/apt.conf",
+          "destination": "/dev/ironcurtain/apt.conf",
+          "requiredMode": "0444"
+        }
+      ]
+    },
+    "failureDiagnostic": {
+      "path": "/tmp/.ironcurtain-build-trust-runc-failure-v1",
+      "clearCommand": "--ironcurtain-internal-clear-failure-v1",
+      "readCommand": "--ironcurtain-internal-read-failure-v1",
+      "unavailableCode": "ICBT-DIAGNOSTIC-UNAVAILABLE-V1",
+      "maxCodeBytes": 128,
+      "allowedCodes": [
+        "ICBT-RUNC-GRAMMAR-V1",
+        "ICBT-CONTRACT-LOAD-V1",
+        "ICBT-EXECUTOR-OPEN-V1",
+        "ICBT-EXECUTOR-METADATA-V1",
+        "ICBT-BUNDLE-OPEN-V1",
+        "ICBT-BUNDLE-METADATA-V1",
+        "ICBT-SOURCE-CA-CERT-OPEN-V1",
+        "ICBT-SOURCE-CA-CERT-METADATA-V1",
+        "ICBT-SOURCE-CA-CERT-READONLY-V1",
+        "ICBT-SOURCE-CA-CERT-DIGEST-V1",
+        "ICBT-SOURCE-CA-BUNDLE-OPEN-V1",
+        "ICBT-SOURCE-CA-BUNDLE-METADATA-V1",
+        "ICBT-SOURCE-CA-BUNDLE-READONLY-V1",
+        "ICBT-SOURCE-CA-BUNDLE-DIGEST-V1",
+        "ICBT-SOURCE-APT-CONFIG-OPEN-V1",
+        "ICBT-SOURCE-APT-CONFIG-METADATA-V1",
+        "ICBT-SOURCE-APT-CONFIG-READONLY-V1",
+        "ICBT-SOURCE-APT-CONFIG-DIGEST-V1",
+        "ICBT-CONFIG-OPEN-V1",
+        "ICBT-CONFIG-METADATA-V1",
+        "ICBT-CONFIG-READ-V1",
+        "ICBT-CONFIG-STRICT-ENVELOPE-V1",
+        "ICBT-CONFIG-PATCH-V1",
+        "ICBT-CONFIG-ATOMIC-COMMIT-V1",
+        "ICBT-REAL-RUNC-VALIDATION-V1",
+        "ICBT-REAL-RUNC-HANDOFF-V1",
+        "ICBT-INTERNAL-ERROR-V1"
+      ]
+    }
+  }
+}

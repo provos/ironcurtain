@@ -708,10 +708,11 @@ export function getBundleRuntimeRoot(bundleId: BundleId): string {
  * Returns the per-bundle container-visible sockets directory:
  *   {home}/run/{bundleId[0:12]}/sockets/
  *
- * Up to three UDS files live here:
+ * Up to four UDS files live here:
  *  - `proxy.sock`      (Code Mode proxy — bind-mounted into container)
  *  - `mitm-proxy.sock` (MITM proxy      — bind-mounted into container)
- *  - `registry-egress.sock` (public workload-image pulls; strict opt-in)
+ *  - `registry-egress.sock` (nested workload-image pulls; strict opt-in)
+ *  - `package-egress.sock` (nested strict package registries; explicit opt-in)
  *
  * This directory is what `prepareDockerInfrastructure()` bind-mounts as
  * `/run/ironcurtain/` inside the container (read-write). Only container-facing
@@ -758,15 +759,25 @@ export function getBundleMitmProxySocketPath(bundleId: BundleId): string {
 }
 
 /**
- * Public-registry egress UDS path for an admitted Docker-workload bundle.
+ * Registry image-egress UDS path for an admitted Docker-workload bundle.
  *
  * This is deliberately a third, exact per-bundle socket rather than another
- * mode on the ordinary MITM listener. It is bound only for the explicit
- * `public-registry` variant and Apple mounts only this file into that bundle's
- * VM. `preloaded-only` therefore has no listener and no guest-visible path.
+ * mode on the ordinary MITM listener. It is bound for `networkAccess:
+ * "images"` and `"packages"`; Apple mounts only this file into that bundle's
+ * VM. `"offline"` therefore has no listener and no guest-visible path.
  */
 export function getBundleRegistryEgressSocketPath(bundleId: BundleId): string {
   return resolve(getBundleSocketsDir(bundleId), 'registry-egress.sock');
+}
+
+/**
+ * Strict package-registry MITM UDS path for an admitted Docker-workload bundle.
+ *
+ * This listener is distinct from image-registry egress: it has no registry
+ * bearer state and is mounted only for `networkAccess: "packages"`.
+ */
+export function getBundlePackageEgressSocketPath(bundleId: BundleId): string {
+  return resolve(getBundleSocketsDir(bundleId), 'package-egress.sock');
 }
 
 /**

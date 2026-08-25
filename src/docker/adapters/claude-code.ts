@@ -276,6 +276,11 @@ exit $STATUS
     buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
       const env: Record<string, string> = {
         CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
+        // Claude Code can emit optional telemetry and error reports during
+        // startup, before the user submits a task. Its supported umbrella
+        // opt-out also disables updater and feedback traffic, keeping an idle
+        // PTY from contacting an upstream provider.
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         // Node.js does not use the system CA store -- must set this explicitly
         NODE_EXTRA_CA_CERTS: CONTAINER_RUNTIME_CA_CERT,
       };

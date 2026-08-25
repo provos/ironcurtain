@@ -42,6 +42,13 @@ import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.
 import type { IronCurtainConfig } from '../../src/config/types.js';
 import type { BundleId } from '../../src/session/types.js';
 import type { ContainerRuntime } from '../../src/docker/types.js';
+import { APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV } from '../../src/docker-workload/apple-vm-daemon.js';
+import {
+  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+  DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  getDockerBuildShimStagingContract,
+} from '../../src/docker/docker-build-shim.js';
 import {
   createMockAdapter,
   createMockCA,
@@ -57,6 +64,7 @@ import {
   createEventRuntime,
   createFakeClock,
   createFakeSupervisor,
+  respondHealthyAppleVmDaemon,
   useDockerWorkloadHome,
   type EventRuntime,
   type FakeClock,
@@ -173,6 +181,76 @@ function makeConfig(): IronCurtainConfig {
     },
   } as unknown as IronCurtainConfig;
 }
+
+function packageBuildShim(): NonNullable<PreContainerInfrastructure['dockerBuildShim']> {
+  const contract = getDockerBuildShimStagingContract('packages')!;
+  return {
+    contract,
+    artifacts: [
+      {
+        kind: 'docker-shim',
+        source: '/tmp/package-build/docker',
+        target: contract.shimArtifact.targetPath,
+        readonly: true,
+      },
+      {
+        kind: 'proxy-config',
+        source: '/tmp/package-build/client',
+        target: dirname(contract.proxyConfigArtifact.targetPath),
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-wrapper',
+        source: '/tmp/package-build/runc',
+        target: contract.buildTrustWrapperArtifact.targetPath,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-contract',
+        source: '/tmp/package-build/build-trust-contract.json',
+        target: contract.buildTrustContractArtifact.targetPath,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-ca-cert',
+        source: '/tmp/package-build/ca-cert.pem',
+        target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-ca-bundle',
+        source: '/tmp/package-build/ca-bundle.pem',
+        target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+        readonly: true,
+      },
+      {
+        kind: 'build-trust-apt-config',
+        source: '/tmp/package-build/apt.conf',
+        target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+        readonly: true,
+      },
+    ],
+    buildTrustCanary: {
+      caGeneration: 'gen-00000000-0000-4000-8000-000000000000',
+      buildTrustContractSha256: '4'.repeat(64),
+      caCertificateSha256: '1'.repeat(64),
+      caBundleSha256: '2'.repeat(64),
+      aptConfigSha256: '3'.repeat(64),
+    },
+  };
+}
+
+const registrySnapshot = () => ({ attempts: 0, totalBytes: 0, activeRequests: 0 });
+const packageSnapshot = () => ({
+  attempts: 0,
+  clientAttempts: 0,
+  activeClients: 0,
+  activeDirect: 0,
+  activeUpstreams: 0,
+  transferredBytes: 0,
+  rateTokens: 120,
+  stopped: false,
+});
 
 describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', () => {
   it('ledgers the agent container before create and observes the runtime ID', async () => {
@@ -360,12 +438,124 @@ describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 / §8.3
         throw new Error('scripted start failure');
       },
     };
-    const core = makeCore(failingDocker, handle);
+    const packageStop = vi.fn(async () => void runtime.events.push('stop:package'));
+    const registryStop = vi.fn(async () => void runtime.events.push('stop:registry'));
+    const core = {
+      ...makeCore(failingDocker, handle),
+      dockerWorkloadEgress: {
+        networkAccess: 'packages' as const,
+        registry: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock', snapshot: registrySnapshot },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: packageSnapshot },
+      },
+      dockerBuildShim: packageBuildShim(),
+    };
 
     await expect(assembleDockerInfrastructure(core, makeConfig())).rejects.toThrow(/scripted start failure/u);
 
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
     expect(supervisor.calls.stopRequested).toBe(1);
+    expect(packageStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
+    const firstRemove = runtime.events.findIndex((event) => event.startsWith('remove:'));
+    expect(runtime.events.indexOf('stop:package')).toBeLessThan(firstRemove);
+    expect(runtime.events.indexOf('stop:registry')).toBeLessThan(firstRemove);
+  });
+
+  it('revokes both listeners when stale-container removal rejects before any VM exists', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admit(clock, runtime, supervisor);
+    const staleRemovalFailure: ContainerRuntime = {
+      ...runtime.runtime,
+      async removeStaleContainer() {
+        runtime.events.push('remove-stale:rejected');
+        throw new Error('scripted stale removal failure');
+      },
+    };
+    const packageStop = vi.fn(async () => void runtime.events.push('stop:package'));
+    const registryStop = vi.fn(async () => void runtime.events.push('stop:registry'));
+    const core: PreContainerInfrastructure = {
+      ...makeCore(staleRemovalFailure, handle),
+      dockerWorkloadEgress: {
+        networkAccess: 'packages',
+        registry: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock', snapshot: registrySnapshot },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: packageSnapshot },
+      },
+      dockerBuildShim: packageBuildShim(),
+    };
+
+    await expect(assembleDockerInfrastructure(core, makeConfig())).rejects.toThrow(/scripted stale removal failure/u);
+
+    expect(packageStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
+    expect(runtime.events.indexOf('stop:package')).toBeGreaterThan(runtime.events.indexOf('remove-stale:rejected'));
+    expect(runtime.events.indexOf('stop:registry')).toBeGreaterThan(runtime.events.indexOf('remove-stale:rejected'));
+    expect(runtime.events.filter((event) => event.startsWith('remove:'))).toEqual([]);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+  });
+
+  it('stops both listeners and closes the lease when the package mount create fails', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admit(clock, runtime, supervisor);
+    const packageStop = vi.fn(async () => {});
+    const registryStop = vi.fn(async () => {});
+    const mountFailingRuntime: ContainerRuntime = {
+      ...runtime.runtime,
+      async create(config) {
+        expect(config.mounts).toContainEqual(
+          expect.objectContaining({ target: '/tmp/ironcurtain-package-egress.sock' }),
+        );
+        throw new Error('scripted package mount failure');
+      },
+    };
+    const core: PreContainerInfrastructure = {
+      ...makeCore(mountFailingRuntime, handle),
+      dockerWorkloadEgress: {
+        networkAccess: 'packages',
+        registry: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock', snapshot: registrySnapshot },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: packageSnapshot },
+      },
+      dockerBuildShim: packageBuildShim(),
+    };
+
+    await expect(assembleDockerInfrastructure(core, makeConfig())).rejects.toThrow(/scripted package mount failure/u);
+
+    expect(packageStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+  });
+
+  it('stops both listeners and closes the lease when package relay health fails', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime({
+      exec: (argv) =>
+        JSON.stringify(argv) === JSON.stringify(APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV)
+          ? { exitCode: 1, stdout: '', stderr: 'package relay health failed' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admit(clock, runtime, supervisor);
+    const packageStop = vi.fn(async () => {});
+    const registryStop = vi.fn(async () => {});
+    const core: PreContainerInfrastructure = {
+      ...makeCore(runtime.runtime, handle),
+      dockerWorkloadEgress: {
+        networkAccess: 'packages',
+        registry: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock', snapshot: registrySnapshot },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: packageSnapshot },
+      },
+      dockerBuildShim: packageBuildShim(),
+    };
+
+    await expect(assembleDockerInfrastructure(core, makeConfig())).rejects.toThrow(/apple-vm daemon start/u);
+
+    expect(packageStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
+    expect(runtime.containers).toEqual([]);
   });
 
   it('refuses activation when the watchdog status disappeared during bootstrap', async () => {
@@ -375,6 +565,35 @@ describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 / §8.3
 
     await expect(handle.activate()).rejects.toThrow(/watchdog supervisor status is missing/u);
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('admitting');
+  });
+
+  it('stops both listeners and closes the lease when activation fails', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const handle = await admit(
+      clock,
+      runtime,
+      createFakeSupervisor({ clock: clock.clock, statusMode: 'absent', closeLeaseOnStop: true }),
+    );
+    const packageStop = vi.fn(async () => {});
+    const registryStop = vi.fn(async () => {});
+    const core: PreContainerInfrastructure = {
+      ...makeCore(runtime.runtime, handle),
+      dockerWorkloadEgress: {
+        networkAccess: 'packages',
+        registry: { listener: { stop: registryStop }, socketPath: '/tmp/registry.sock', snapshot: registrySnapshot },
+        packages: { listener: { stop: packageStop }, socketPath: '/tmp/package.sock', snapshot: packageSnapshot },
+      },
+      dockerBuildShim: packageBuildShim(),
+    };
+
+    await expect(assembleDockerInfrastructure(core, makeConfig())).rejects.toThrow(
+      /watchdog supervisor status is missing/u,
+    );
+
+    expect(packageStop).toHaveBeenCalledOnce();
+    expect(registryStop).toHaveBeenCalledOnce();
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
   });
 
   it('refuses activation when the watchdog attestation expired during bootstrap', async () => {
@@ -417,6 +636,43 @@ describe('Docker-workload wiring — destroyDockerInfrastructure (§8.3)', () =>
     expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('closed');
     expect(runtime.containers.map((container) => container.id)).not.toContain(agentId);
     expect(supervisor.calls.stopRequested).toBe(1);
+  });
+
+  it('revokes package and registry authorities before removing the outer VM', async () => {
+    const clock = createFakeClock();
+    const runtime = createEventRuntime();
+    const supervisor = createFakeSupervisor({ clock: clock.clock, closeLeaseOnStop: true });
+    const handle = await admit(clock, runtime, supervisor);
+    const core = makeCore(runtime.runtime, handle);
+    const infra: DockerInfrastructure = await assembleDockerInfrastructure(core, makeConfig());
+    const teardownOrder: string[] = [];
+    const originalRemove = runtime.runtime.remove.bind(runtime.runtime);
+    runtime.runtime.remove = async (containerId) => {
+      teardownOrder.push(`remove:${containerId}`);
+      await originalRemove(containerId);
+    };
+
+    await destroyDockerInfrastructure({
+      ...infra,
+      dockerWorkloadEgress: {
+        networkAccess: 'packages',
+        registry: {
+          listener: { stop: async () => void teardownOrder.push('stop:registry') },
+          socketPath: '/tmp/registry.sock',
+          snapshot: registrySnapshot,
+        },
+        packages: {
+          listener: { stop: async () => void teardownOrder.push('stop:package') },
+          socketPath: '/tmp/package.sock',
+          snapshot: packageSnapshot,
+        },
+      },
+    });
+
+    const firstRemove = teardownOrder.findIndex((event) => event.startsWith('remove:'));
+    expect(firstRemove).toBeGreaterThanOrEqual(0);
+    expect(teardownOrder.indexOf('stop:package')).toBeLessThan(firstRemove);
+    expect(teardownOrder.indexOf('stop:registry')).toBeLessThan(firstRemove);
   });
 
   it('sweeps the non-ledgered tcp-sidecar sidecar + internal network on destroy', async () => {
@@ -700,8 +956,7 @@ describe('Docker-workload wiring — outer resource envelope', () => {
         dockerResources: { memoryMb: 7777, cpus: 7 },
         dockerWorkload: {
           enabled: true,
-          imageIngress: 'preloaded-only',
-          buildEgress: 'disabled',
+          networkAccess: 'offline',
           acceptObservedDiskRisk: true,
           resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },
         },

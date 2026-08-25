@@ -21,7 +21,7 @@ USER root
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     # Existing
-    git git-lfs sudo socat ca-certificates curl \
+    git git-lfs sudo socat libnss-myhostname ca-certificates curl \
     # Build tools for native extensions
     build-essential cmake pkg-config \
     # Graphics/Qt runtime + dev
@@ -122,6 +122,8 @@ RUN npx playwright install-deps chromium && \
 # image's ownership, and `rootlesskit`/`vpnkit` are owned 1001:1001 there. On a
 # Linux host that remaps the agent to uid 1001 the runtime user would otherwise
 # OWN shipped toolchain binaries and could rewrite them.
+# The selected-image view of the pinned runc is therefore root:root; inside the
+# RootlessKit child namespace the same inode is the overflow pair 65534:65534.
 #
 # The plugins land in /usr/local/libexec/docker/cli-plugins to match the source
 # layout: the copied /usr/local/bin/docker-compose is a symlink into that exact
@@ -129,8 +131,11 @@ RUN npx playwright install-deps chromium && \
 # the symlink and plugin discovery resolve.
 COPY --from=docker-toolchain --chown=root:root /usr/local/bin/ /usr/local/lib/ironcurtain-docker/bin/
 COPY --from=docker-toolchain --chown=root:root /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+COPY --chown=root:root --chmod=0444 apple-vm-egress-relay.mjs /usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs
 RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker && \
-    ln -s /usr/sbin/iptables-legacy /usr/local/lib/ironcurtain-docker/bin/iptables
+    ln -s /usr/sbin/iptables-legacy /usr/local/lib/ironcurtain-docker/bin/iptables && \
+    test "$(/usr/local/bin/node /usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs --version)" = \
+      "ironcurtain-apple-vm-egress-relay/1"
 
 # /run is ext4 in the agent VM, not a tmpfs, so directories created here survive
 # into the runtime. The nested-daemon API directory MUST be image-provided: the
@@ -138,6 +143,7 @@ RUN ln -s /usr/local/lib/ironcurtain-docker/bin/docker /usr/local/bin/docker && 
 # directory to the runtime user.
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain && \
+    install -d -o root -g root -m 0755 /opt/ironcurtain-build-trust && \
     install -d -o codespace -g codespace -m 0700 /run/ironcurtain-docker
 
 WORKDIR /workspace

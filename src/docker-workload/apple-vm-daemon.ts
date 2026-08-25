@@ -31,7 +31,6 @@
  */
 
 import { z } from 'zod';
-
 /** VM-local Docker API directory (plan §4.2), created 0700 by the base image and owned by the runtime user. */
 export const APPLE_VM_DAEMON_API_DIR = '/run/ironcurtain-docker';
 
@@ -46,6 +45,12 @@ export const APPLE_VM_REGISTRY_EGRESS_SOCKET = '/tmp/ironcurtain-registry-egress
 
 /** Rootless-netns loopback proxy; reachable only by bundle members that join that netns. */
 export const APPLE_VM_REGISTRY_EGRESS_PROXY_URL = 'http://127.0.0.1:18081';
+
+/** Exact Apple file mount for strict package-registry HTTP/HTTPS egress. */
+export const APPLE_VM_PACKAGE_EGRESS_SOCKET = '/tmp/ironcurtain-package-egress.sock';
+
+/** Rootless-netns loopback proxy available bundle-wide only in package mode. */
+export const APPLE_VM_PACKAGE_EGRESS_PROXY_URL = 'http://127.0.0.1:18082';
 
 /** Public trust bundle already staged read-only in the outer orientation mount. */
 export const APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE = '/etc/ironcurtain/ca-bundle.pem';
@@ -65,6 +70,9 @@ export const APPLE_VM_DAEMON_LOG_PATH = `${APPLE_VM_DAEMON_API_DIR}/dockerd.log`
 
 const APPLE_VM_DAEMON_HOME = '/home/codespace';
 const APPLE_VM_DAEMON_PATH = `/usr/bin:/bin:${APPLE_VM_DAEMON_TOOLCHAIN_DIR}`;
+const APPLE_VM_DAEMON_PACKAGE_PATH = `/usr/local/sbin:${APPLE_VM_DAEMON_PATH}`;
+const APPLE_VM_EGRESS_RELAY_NODE = '/usr/local/bin/node';
+export const APPLE_VM_EGRESS_RELAY_PATH = '/usr/local/lib/ironcurtain-docker/apple-vm-egress-relay.mjs';
 
 /**
  * VM-local dockerd state root, pinned explicitly rather than left to dockerd's
@@ -124,42 +132,106 @@ export const APPLE_VM_DAEMON_DOCKERD_COMMAND =
  * raises euid to 0, which forfeits the kernel's owner-of-the-userns capability
  * grant and then fails against the VM's clamped bounding set.
  */
-const APPLE_VM_DAEMON_START_SCRIPT = [
-  'set -e',
-  `exec </dev/null >${APPLE_VM_DAEMON_LOG_PATH} 2>&1`,
-  `export XDG_RUNTIME_DIR=${APPLE_VM_DAEMON_API_DIR} HOME=${APPLE_VM_DAEMON_HOME} PATH=${APPLE_VM_DAEMON_PATH}`,
-  `exec nohup ${APPLE_VM_DAEMON_DOCKERD_COMMAND} &`,
-].join('\n');
+function renderDetachedDaemonStartScript(command: string, path = APPLE_VM_DAEMON_PATH): string {
+  return [
+    'set -e',
+    `exec </dev/null >${APPLE_VM_DAEMON_LOG_PATH} 2>&1`,
+    `export XDG_RUNTIME_DIR=${APPLE_VM_DAEMON_API_DIR} HOME=${APPLE_VM_DAEMON_HOME} PATH=${path}`,
+    `exec nohup ${command} &`,
+  ].join('\n');
+}
 
-const APPLE_VM_DAEMON_REGISTRY_EGRESS_INNER_SCRIPT = [
-  ...APPLE_VM_DAEMON_NETWORK_PREREQUISITES,
-  `test -S ${APPLE_VM_REGISTRY_EGRESS_SOCKET}`,
-  'unset ALL_PROXY all_proxy NO_PROXY no_proxy HTTP_PROXY HTTPS_PROXY http_proxy https_proxy SSL_CERT_FILE',
-  `export HTTP_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL} HTTPS_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`,
-  `export http_proxy=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL} https_proxy=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`,
-  `export SSL_CERT_FILE=${APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE}`,
-  `/usr/bin/socat TCP-LISTEN:18081,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${APPLE_VM_REGISTRY_EGRESS_SOCKET} &`,
-  'relay_pid=$!',
-  'trap "/bin/kill $relay_pid 2>/dev/null || true" EXIT',
-  'relay_ready=0',
-  'relay_attempt=0',
-  'while [ "$relay_attempt" -lt 40 ]; do',
-  '  /bin/kill -0 "$relay_pid"',
-  '  if /usr/bin/printf "GET http://ironcurtain.invalid/__ironcurtain/health HTTP/1.1\\r\\nHost: ironcurtain.invalid\\r\\nConnection: close\\r\\n\\r\\n" | /usr/bin/socat -T1 - TCP:127.0.0.1:18081,connect-timeout=1 | /bin/grep -q "IRONCURTAIN_OK/1"; then relay_ready=1; break; fi',
-  '  relay_attempt=$((relay_attempt + 1))',
-  '  /bin/sleep 0.05',
-  'done',
-  '[ "$relay_ready" -eq 1 ]',
-  'trap - EXIT',
-  `exec ${APPLE_VM_DOCKERD_COMMAND}`,
-].join('\n');
+const APPLE_VM_DAEMON_START_SCRIPT = renderDetachedDaemonStartScript(APPLE_VM_DAEMON_DOCKERD_COMMAND);
 
-const APPLE_VM_DAEMON_REGISTRY_EGRESS_START_SCRIPT = [
-  'set -e',
-  `exec </dev/null >${APPLE_VM_DAEMON_LOG_PATH} 2>&1`,
-  `export XDG_RUNTIME_DIR=${APPLE_VM_DAEMON_API_DIR} HOME=${APPLE_VM_DAEMON_HOME} PATH=${APPLE_VM_DAEMON_PATH}`,
-  `exec nohup rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run sh -c '${APPLE_VM_DAEMON_REGISTRY_EGRESS_INNER_SCRIPT}' &`,
-].join('\n');
+type AppleVmEgressRelayProfile = 'images' | 'packages';
+
+function relayCommand(profile: AppleVmEgressRelayProfile, operation: 'serve' | 'probe'): string {
+  return (
+    `/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C ${APPLE_VM_EGRESS_RELAY_NODE} ` +
+    `${APPLE_VM_EGRESS_RELAY_PATH} ${operation} ${profile}`
+  );
+}
+
+function relayReadinessLines(profile: AppleVmEgressRelayProfile): readonly string[] {
+  return [
+    'relay_ready=0',
+    'relay_attempt=0',
+    'while [ "$relay_attempt" -lt 40 ]; do',
+    '  /bin/kill -0 "$relay_pid"',
+    `  if ${relayCommand(profile, 'probe')}; then relay_ready=1; break; fi`,
+    '  relay_attempt=$((relay_attempt + 1))',
+    '  /bin/sleep 0.05',
+    'done',
+    '[ "$relay_ready" -eq 1 ]',
+  ];
+}
+
+const RELAY_SUPERVISOR_CLEANUP = [
+  'cleanup() {',
+  '  trap - EXIT INT TERM',
+  '  if [ -n "$dockerd_pid" ]; then /bin/kill "$dockerd_pid" 2>/dev/null || true; fi',
+  '  if [ -n "$relay_pid" ]; then /bin/kill "$relay_pid" 2>/dev/null || true; fi',
+  '  cleanup_attempt=0',
+  '  while [ "$cleanup_attempt" -lt 100 ]; do',
+  '    dockerd_alive=0',
+  '    relay_alive=0',
+  '    if [ -n "$dockerd_pid" ] && /bin/kill -0 "$dockerd_pid" 2>/dev/null; then dockerd_alive=1; fi',
+  '    if [ -n "$relay_pid" ] && /bin/kill -0 "$relay_pid" 2>/dev/null; then relay_alive=1; fi',
+  '    if [ "$dockerd_alive" -eq 0 ] && [ "$relay_alive" -eq 0 ]; then break; fi',
+  '    cleanup_attempt=$((cleanup_attempt + 1))',
+  '    /bin/sleep 0.05',
+  '  done',
+  '  if [ -n "$dockerd_pid" ]; then /bin/kill -9 "$dockerd_pid" 2>/dev/null || true; fi',
+  '  if [ -n "$relay_pid" ]; then /bin/kill -9 "$relay_pid" 2>/dev/null || true; fi',
+  '  if [ -n "$dockerd_pid" ]; then wait "$dockerd_pid" 2>/dev/null || true; fi',
+  '  if [ -n "$relay_pid" ]; then wait "$relay_pid" 2>/dev/null || true; fi',
+  '}',
+];
+
+function renderEgressDaemonInnerScript(profile: AppleVmEgressRelayProfile): string {
+  const includePackageRelay = profile === 'packages';
+  return [
+    ...APPLE_VM_DAEMON_NETWORK_PREREQUISITES,
+    `test -S ${APPLE_VM_REGISTRY_EGRESS_SOCKET}`,
+    ...(includePackageRelay ? [`test -S ${APPLE_VM_PACKAGE_EGRESS_SOCKET}`] : []),
+    'unset ALL_PROXY all_proxy NO_PROXY no_proxy HTTP_PROXY HTTPS_PROXY http_proxy https_proxy SSL_CERT_FILE',
+    `export HTTP_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL} HTTPS_PROXY=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`,
+    `export http_proxy=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL} https_proxy=${APPLE_VM_REGISTRY_EGRESS_PROXY_URL}`,
+    `export SSL_CERT_FILE=${APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE}`,
+    'relay_pid=',
+    'dockerd_pid=',
+    ...RELAY_SUPERVISOR_CLEANUP,
+    'trap cleanup EXIT INT TERM',
+    `${relayCommand(profile, 'serve')} &`,
+    'relay_pid=$!',
+    ...relayReadinessLines(profile),
+    `${APPLE_VM_DOCKERD_COMMAND} &`,
+    'dockerd_pid=$!',
+    'wait -n "$relay_pid" "$dockerd_pid" || true',
+    // Either long-lived child exiting is a daemon failure. The EXIT trap
+    // terminates and reaps the sibling under a fixed five-second ceiling.
+    'exit 1',
+  ].join('\n');
+}
+
+const APPLE_VM_DAEMON_REGISTRY_EGRESS_INNER_SCRIPT = renderEgressDaemonInnerScript('images');
+
+const APPLE_VM_DAEMON_REGISTRY_EGRESS_START_SCRIPT = renderDetachedDaemonStartScript(
+  `rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run /bin/bash -c '${APPLE_VM_DAEMON_REGISTRY_EGRESS_INNER_SCRIPT}'`,
+);
+
+/*
+ * The package profile binds the independently mounted registry and package
+ * UDS endpoints in one all-or-rollback relay process. Dockerd retains the
+ * registry-scoped proxy environment; bundle members reach strict package
+ * egress explicitly through port 18082.
+ */
+const APPLE_VM_DAEMON_PACKAGE_EGRESS_INNER_SCRIPT = renderEgressDaemonInnerScript('packages');
+
+const APPLE_VM_DAEMON_PACKAGE_EGRESS_START_SCRIPT = renderDetachedDaemonStartScript(
+  `rootlesskit --net=none --disable-host-loopback --copy-up=/etc --copy-up=/run /bin/bash -c '${APPLE_VM_DAEMON_PACKAGE_EGRESS_INNER_SCRIPT}'`,
+  APPLE_VM_DAEMON_PACKAGE_PATH,
+);
 
 /**
  * Precondition probe: the image-provided API directory is a real directory,
@@ -196,11 +268,18 @@ export const APPLE_VM_DAEMON_API_DIR_EXPECTED_STAT = 'directory:1000:1000:700';
 /** Runtime-user step: start the daemon detached under the frozen invocation. */
 export const APPLE_VM_DAEMON_START_ARGV: readonly string[] = Object.freeze(['sh', '-c', APPLE_VM_DAEMON_START_SCRIPT]);
 
-/** Proxy-aware variant selected only by trusted resolved `public-registry` configuration. */
+/** Registry-relay variant selected by trusted resolved `networkAccess: "images"`. */
 export const APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV: readonly string[] = Object.freeze([
   'sh',
   '-c',
   APPLE_VM_DAEMON_REGISTRY_EGRESS_START_SCRIPT,
+]);
+
+/** Registry-scoped dockerd plus an independent strict package relay and build-trust PATH. */
+export const APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV: readonly string[] = Object.freeze([
+  'sh',
+  '-c',
+  APPLE_VM_DAEMON_PACKAGE_EGRESS_START_SCRIPT,
 ]);
 
 /** Readiness probe, through the pinned toolchain client rather than whatever is on PATH. */
@@ -262,6 +341,8 @@ const CONTROL_CHARACTERS = /[^\P{Cc}\n\t]/gu;
 
 export interface AppleVmDaemonExecResult {
   readonly stdout: string;
+  /** Runtime adapters may preserve stderr for bounded bootstrap diagnostics. */
+  readonly stderr?: string;
   readonly exitCode: number;
 }
 
@@ -316,15 +397,16 @@ type DockerInfoAnswer =
  */
 export async function bootstrapAppleVmDaemon(
   exec: AppleVmDaemonExec,
-  options: { readonly registryEgress?: boolean } = {},
+  options: { readonly networkAccess?: 'offline' | 'images' | 'packages' } = {},
 ): Promise<void> {
   await assertApiDirectoryProvided(exec);
-  await execOrThrow(
-    exec,
-    options.registryEgress === true ? APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV : APPLE_VM_DAEMON_START_ARGV,
-    RUNTIME_EXEC_USER,
-    'apple-vm daemon start',
-  );
+  const startArgv =
+    options.networkAccess === 'packages'
+      ? APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV
+      : options.networkAccess === 'images'
+        ? APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV
+        : APPLE_VM_DAEMON_START_ARGV;
+  await execOrThrow(exec, startArgv, RUNTIME_EXEC_USER, 'apple-vm daemon start');
 }
 
 /**

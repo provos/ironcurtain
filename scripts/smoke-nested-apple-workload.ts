@@ -63,9 +63,12 @@ export function parseNestedAppleSmokeMode(argv: readonly string[]): NestedAppleS
 }
 
 export function buildNestedAppleSmokeWorkloadConfig(mode: NestedAppleSmokeMode): DockerWorkloadRequestedConfig {
-  // Exercise the same requested shape operators use. Registry ingress is the
-  // enabled-state default; deterministic offline/PTY gates opt out explicitly.
-  return mode === 'public-registry' ? { enabled: true } : { enabled: true, imageIngress: 'preloaded-only' };
+  // Exercise the same canonical request shape operators use. This legacy
+  // smoke's registry gate maps to Images; deterministic batch/PTY gates are
+  // explicitly Offline.
+  return mode === 'public-registry'
+    ? { enabled: true, networkAccess: 'images' }
+    : { enabled: true, networkAccess: 'offline' };
 }
 
 /**

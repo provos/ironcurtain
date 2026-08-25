@@ -18,8 +18,7 @@ describe('secure nested Docker configuration', () => {
   it('materializes the admitted Apple developer policy when explicitly enabled', () => {
     expect(resolveDockerWorkloadConfig({ enabled: true })).toEqual({
       enabled: true,
-      imageIngress: 'public-registry',
-      buildEgress: 'disabled',
+      networkAccess: 'images',
       acceptObservedDiskRisk: true,
       resources: {
         memoryMb: 4096,
@@ -30,15 +29,40 @@ describe('secure nested Docker configuration', () => {
     });
   });
 
-  it('defaults to mediated public pulls while preserving preloaded-only as an explicit opt-out', () => {
-    expect(resolveDockerWorkloadConfig({ enabled: true })).toMatchObject({ imageIngress: 'public-registry' });
-    expect(resolveDockerWorkloadConfig({ enabled: true, imageIngress: 'preloaded-only' })).toMatchObject({
-      imageIngress: 'preloaded-only',
+  it('conservatively migrates old network choices and accepts every canonical network mode', () => {
+    expect(dockerWorkloadRequestedSchema.parse({ enabled: true })).toEqual({
+      enabled: true,
+      networkAccess: 'images',
     });
-    // Any value outside the reviewed union is rejected before resolution.
-    expect(dockerWorkloadRequestedSchema.safeParse({ enabled: true, imageIngress: 'any-registry' }).success).toBe(
+    expect(dockerWorkloadRequestedSchema.parse({ enabled: true, imageIngress: 'public-registry' })).toEqual({
+      enabled: true,
+      networkAccess: 'images',
+    });
+    expect(dockerWorkloadRequestedSchema.parse({ enabled: false, imageIngress: 'public-registry' })).toEqual({
+      enabled: false,
+      networkAccess: 'images',
+    });
+    expect(dockerWorkloadRequestedSchema.parse({ enabled: false, imageIngress: 'preloaded-only' })).toEqual({
+      enabled: false,
+      networkAccess: 'offline',
+    });
+    expect(dockerWorkloadRequestedSchema.parse({ enabled: true, networkAccess: 'public' })).toEqual({
+      enabled: true,
+      networkAccess: 'packages',
+    });
+    for (const networkAccess of ['offline', 'images', 'packages'] as const) {
+      expect(resolveDockerWorkloadConfig({ enabled: true, networkAccess })).toMatchObject({ networkAccess });
+    }
+    expect(dockerWorkloadRequestedSchema.safeParse({ enabled: true, networkAccess: 'unrestricted' }).success).toBe(
       false,
     );
+    expect(
+      dockerWorkloadRequestedSchema.safeParse({
+        enabled: true,
+        imageIngress: 'public-registry',
+        networkAccess: 'images',
+      }).success,
+    ).toBe(false);
   });
 
   it('accepts and removes safe legacy implementation defaults', () => {
@@ -55,7 +79,22 @@ describe('secure nested Docker configuration', () => {
         acceptObservedDiskRisk: true,
         resources: { pids: { desired: 512, required: false }, diskMb: null },
       }),
-    ).toEqual({ enabled: true, imageIngress: 'preloaded-only' });
+    ).toEqual({ enabled: true, networkAccess: 'offline' });
+
+    expect(
+      dockerWorkloadRequestedSchema.parse({
+        enabled: false,
+        networkAccess: 'images',
+        tier: 'developer-only',
+        backend: 'apple-container',
+        imageMode: 'preloaded-catalog',
+        daemonState: 'ephemeral',
+        hostPortPublishing: false,
+        buildEgress: 'disabled',
+        acceptObservedDiskRisk: true,
+        resources: { pids: { desired: 512, required: false }, diskMb: null },
+      }),
+    ).toEqual({ enabled: false, networkAccess: 'images' });
   });
 
   it('rejects unsupported legacy intent with an actionable replacement', () => {
@@ -98,14 +137,20 @@ describe('secure nested Docker configuration', () => {
     });
   });
 
-  it('formats effective enabled-state pull status for user-visible entrypoints', () => {
+  it('formats effective enabled-state network status for user-visible entrypoints', () => {
     expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig(undefined))).toBeUndefined();
     expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true }))).toBe(
-      'Nested Docker: enabled · pulls: Docker Hub/GHCR via mediated proxy',
+      'Nested Docker: enabled · network: Docker Hub/GHCR images only',
+    );
+    expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'offline' }))).toBe(
+      'Nested Docker: enabled · network: offline',
+    );
+    expect(formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'packages' }))).toBe(
+      'Nested Docker: enabled · network: public packages + Docker Hub/GHCR (strict proxy)',
     );
     expect(
-      formatDockerWorkloadStatus(resolveDockerWorkloadConfig({ enabled: true, imageIngress: 'preloaded-only' })),
-    ).toBe('Nested Docker: enabled · pulls: off (local images only)');
+      dockerWorkloadConfigHash(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'packages' })),
+    ).not.toBe(dockerWorkloadConfigHash(resolveDockerWorkloadConfig({ enabled: true, networkAccess: 'images' })));
   });
 
   it('absorbs the safe legacy disk defaults without hidden risk configuration', () => {

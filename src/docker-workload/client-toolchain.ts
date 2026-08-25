@@ -20,6 +20,7 @@ export const CLIENT_TOOLCHAIN_PREFLIGHT_ARGVS = [
 const versionSchema = z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u);
 const apiVersionSchema = z.string().regex(/^\d{1,3}\.\d{1,3}$/u);
 const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
 
 const clientToolchainManifestSchema = z
   .object({
@@ -27,6 +28,24 @@ const clientToolchainManifestSchema = z
     generation: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u),
     platform: z.literal('linux'),
     architecture: z.enum(['amd64', 'arm64']),
+    realRunc: z
+      .object({
+        path: z.literal('/usr/local/lib/ironcurtain-docker/bin/runc'),
+        sha256: sha256Schema,
+        size: z
+          .number()
+          .int()
+          .positive()
+          .max(128 << 20),
+        uid: z.literal(0),
+        gid: z.literal(0),
+        mode: z.literal('0755'),
+        nlink: z.literal(1),
+        version: versionSchema,
+        commit: z.string().regex(/^[a-f0-9]{7,40}$/u),
+        specVersion: versionSchema,
+      })
+      .strict(),
     source: z
       .object({
         daemonImage: z.string().regex(/^[A-Za-z0-9./_-]+@sha256:[a-f0-9]{64}$/u),

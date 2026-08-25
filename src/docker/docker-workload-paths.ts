@@ -3,7 +3,7 @@
  * artifacts (`<package>/config/docker-workload/`).
  *
  * These files are *reviewed records*, not runtime state: manifests that pin
- * reviewed egress origins and hash-bind the checked-in Dockerfiles. Every
+ * reviewed egress origins and host/runtime ceilings. Every
  * consumer must import a helper from here instead of re-deriving the package
  * root inline, so the frozen locations can never drift apart and no caller can
  * be pointed at an unreviewed manifest by passing a different path.
@@ -27,11 +27,6 @@ export function getIronCurtainPackageRoot(): string {
 /** Committed frozen-record directory (`<package>/config/docker-workload`). */
 export function getFrozenDockerWorkloadDir(): string {
   return resolve(getIronCurtainPackageRoot(), 'config', 'docker-workload');
-}
-
-/** Frozen narrow build-egress manifest (hash-binds the current Dockerfiles). */
-export function getFrozenBuildEgressManifestPath(): string {
-  return resolve(getFrozenDockerWorkloadDir(), 'build-egress-manifest.json');
 }
 
 /** Frozen anonymous workload-image registry-egress manifest. */
