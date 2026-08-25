@@ -43,6 +43,8 @@ import {
   sendPtyResize,
   sendPtyPrompt,
   createSession,
+  listResumableSessions,
+  resumeSession,
   registerPtySink,
   unregisterPtySink,
   connectPtyTerminal,
@@ -80,6 +82,16 @@ describe('PTY store actions', () => {
   it('sendPtyPrompt sends sessions.ptyPrompt with PLAIN text (not base64)', async () => {
     await sendPtyPrompt(5, 'approve the write');
     expect(mockRequest).toHaveBeenCalledWith('sessions.ptyPrompt', { label: 5, text: 'approve the write' });
+  });
+
+  it('lists and resumes persisted sessions with the exact RPC contract', async () => {
+    mockRequest.mockResolvedValueOnce([]).mockResolvedValueOnce({ label: 9 });
+
+    await listResumableSessions();
+    await resumeSession('saved-session');
+
+    expect(mockRequest).toHaveBeenNthCalledWith(1, 'sessions.listResumable');
+    expect(mockRequest).toHaveBeenNthCalledWith(2, 'sessions.resume', { sessionId: 'saved-session' });
   });
 });
 

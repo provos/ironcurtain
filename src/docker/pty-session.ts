@@ -25,13 +25,14 @@ import { buildSessionConfig } from '../session/index.js';
 import { loadSessionMetadata, updateSessionMetadata } from '../session/session-metadata.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
-import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK } from './pty-types.js';
+import { PTY_SOCK_NAME, DEFAULT_PTY_PORT, APPLE_PTY_GUEST_SOCK, isSessionSnapshot } from './pty-types.js';
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import type { ContainerRuntime } from './types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { getSessionDir, getSessionCapturesDir, getPtyRegistryDir, SESSION_STATE_FILENAME } from '../config/paths.js';
 import * as logger from '../logger.js';
+import { acquireProcessLock, ProcessLockBusyError, type ProcessLockHandle } from '../docker-workload/process-lock.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
@@ -151,16 +152,22 @@ export function validateResumeSession(resumeSessionId: string, protectedPaths: s
     throw new Error(`Cannot resume session "${resumeSessionId}": no session state snapshot found`);
   }
 
-  let snapshot: SessionSnapshot;
+  let parsed: unknown;
   try {
-    snapshot = JSON.parse(readFileSync(snapshotPath, 'utf-8')) as SessionSnapshot;
+    parsed = JSON.parse(readFileSync(snapshotPath, 'utf-8'));
   } catch {
     throw new Error(`Cannot resume session "${resumeSessionId}": session state snapshot is corrupted or invalid`);
   }
 
-  if (!snapshot.sessionId || snapshot.sessionId !== resumeSessionId) {
+  const parsedSessionId =
+    typeof parsed === 'object' && parsed !== null ? (parsed as { sessionId?: unknown }).sessionId : undefined;
+  if (parsedSessionId !== resumeSessionId) {
     throw new Error(`Cannot resume session "${resumeSessionId}": snapshot sessionId mismatch`);
   }
+  if (!isSessionSnapshot(parsed)) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session state snapshot is corrupted or invalid`);
+  }
+  const snapshot = parsed;
   if (!snapshot.resumable) {
     throw new Error(
       `Cannot resume session "${resumeSessionId}": session is not resumable (status: ${snapshot.status})`,
@@ -268,20 +275,44 @@ function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): vo
  * Claude Code, attaches the terminal, and blocks until the session ends.
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
+  const resumeLock = options.resumeSessionId
+    ? acquireResumeSessionLock(options.resumeSessionId, options.config.protectedPaths)
+    : undefined;
   let retryDocker: ContainerRuntime | undefined;
-  await withInternalNetworkAllocationRetry(
-    {
-      maxAttempts: 4,
-      description: 'PTY internal Docker network',
-      reconcile: async () => {
-        if (retryDocker) await reconcileIronCurtainDockerResourcesBestEffort(retryDocker, 'PTY internal network retry');
+  try {
+    await withInternalNetworkAllocationRetry(
+      {
+        maxAttempts: 4,
+        description: 'PTY internal Docker network',
+        reconcile: async () => {
+          if (retryDocker)
+            await reconcileIronCurtainDockerResourcesBestEffort(retryDocker, 'PTY internal network retry');
+        },
       },
-    },
-    (excludedSubnets, attempt) =>
-      runPtySessionAttempt(options, excludedSubnets, attempt, (docker) => {
-        retryDocker = docker;
-      }),
-  );
+      (excludedSubnets, attempt) =>
+        runPtySessionAttempt(options, excludedSubnets, attempt, (docker) => {
+          retryDocker = docker;
+        }),
+    );
+  } finally {
+    resumeLock?.release();
+  }
+}
+
+const RESUME_SESSION_LOCK_FILENAME = 'resume.lock';
+
+/** Holds a session-global lock for the full resumed PTY lifecycle. */
+export function acquireResumeSessionLock(sessionId: string, protectedPaths: string[] = []): ProcessLockHandle {
+  validateResumeSession(sessionId, protectedPaths);
+  const lockPath = resolve(getSessionDir(sessionId), RESUME_SESSION_LOCK_FILENAME);
+  try {
+    return acquireProcessLock(lockPath);
+  } catch (error) {
+    if (error instanceof ProcessLockBusyError) {
+      throw new Error(`Cannot resume session "${sessionId}": session is already being resumed`, { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function runPtySessionAttempt(

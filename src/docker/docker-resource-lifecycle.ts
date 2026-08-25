@@ -11,7 +11,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
@@ -24,10 +24,11 @@ import { acquireProcessLock, ProcessLockBusyError } from '../docker-workload/pro
 export const IRONCURTAIN_MANAGED_LABEL = 'ironcurtain.managed';
 export const IRONCURTAIN_OWNER_PID_LABEL = 'ironcurtain.owner-pid';
 export const IRONCURTAIN_OWNER_TOKEN_LABEL = 'ironcurtain.owner-token';
+export const IRONCURTAIN_OWNER_SCOPE_LABEL = 'ironcurtain.owner-scope';
 export const IRONCURTAIN_CREATED_AT_LABEL = 'ironcurtain.created-at';
 export const IRONCURTAIN_RESOURCE_SCHEMA_LABEL = 'ironcurtain.resource-schema';
 const IRONCURTAIN_BUNDLE_LABEL = 'ironcurtain.bundle';
-const RESOURCE_SCHEMA = '2';
+const RESOURCE_SCHEMA = '3';
 // Current bundle slugs are 12 hex digits; pre-identity-refactor names used a
 // raw UUID substring and therefore contain a hyphen after eight digits.
 const LEGACY_NETWORK_RE = /^ironcurtain-(?:[a-f0-9]{12}|[a-f0-9]{8}-[a-f0-9]{3})$/;
@@ -91,6 +92,23 @@ function leaseRoot(): string {
   return resolve(getIronCurtainHome(), 'run', 'docker-owners');
 }
 
+/**
+ * Stable, non-sensitive namespace for one IronCurtain home. Docker inventory is
+ * host-global, while ownership leases live below IRONCURTAIN_HOME; without this
+ * label a test using a temporary home can mistake production resources for
+ * orphans because it cannot see their lease files.
+ */
+function currentOwnerScope(): string {
+  const resolvedHome = resolve(getIronCurtainHome());
+  let canonicalHome: string;
+  try {
+    canonicalHome = realpathSync(resolvedHome);
+  } catch {
+    canonicalHome = resolvedHome;
+  }
+  return createHash('sha256').update(canonicalHome).digest('hex').slice(0, 24);
+}
+
 function installExitHook(): void {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
@@ -139,6 +157,7 @@ export function managedResourceLabels(bundleId: BundleId | string): Record<strin
     [IRONCURTAIN_BUNDLE_LABEL]: bundleId,
     [IRONCURTAIN_OWNER_PID_LABEL]: String(lease.pid),
     [IRONCURTAIN_OWNER_TOKEN_LABEL]: lease.token,
+    [IRONCURTAIN_OWNER_SCOPE_LABEL]: currentOwnerScope(),
     [IRONCURTAIN_CREATED_AT_LABEL]: new Date().toISOString(),
     [IRONCURTAIN_RESOURCE_SCHEMA_LABEL]: RESOURCE_SCHEMA,
   };
@@ -199,6 +218,24 @@ function ownerIsAlive(
   } catch {
     return false;
   }
+}
+
+/**
+ * Foreign-home resources are never ours to reclaim. Resources created before
+ * the scope label existed are retained while their recorded PID is alive; this
+ * conservative migration rule protects an already-running older IronCurtain
+ * session from a newer test or installation using a different home.
+ */
+function belongsToForeignScopeOrLiveLegacy(
+  labels: Readonly<Partial<Record<string, string>>>,
+  pidAlive: (pid: number) => boolean,
+  ownerScope: string,
+): boolean {
+  const scope = labels[IRONCURTAIN_OWNER_SCOPE_LABEL];
+  if (scope !== undefined) return scope !== ownerScope;
+
+  const pid = Number(labels[IRONCURTAIN_OWNER_PID_LABEL]);
+  return Number.isSafeInteger(pid) && pid > 0 && pidAlive(pid);
 }
 
 interface ReconcileOptions {
@@ -277,10 +314,15 @@ export async function reconcileIronCurtainDockerResources(
     const removedNetworks: string[] = [];
     const skippedUnsafeNetworks: string[] = [];
     const deadOwnerTokens = new Set<string>();
+    const ownerScope = currentOwnerScope();
     let retainedActiveResources = 0;
 
     const managedContainers = await docker.listContainers?.({ labelFilter: `${IRONCURTAIN_MANAGED_LABEL}=true` });
     for (const container of managedContainers ?? []) {
+      if (belongsToForeignScopeOrLiveLegacy(container.labels, pidAlive, ownerScope)) {
+        retainedActiveResources++;
+        continue;
+      }
       if (ownerIsAlive(container.labels, pidAlive, processIdentity)) {
         retainedActiveResources++;
         continue;
@@ -309,6 +351,10 @@ export async function reconcileIronCurtainDockerResources(
       const legacy = !managed && LEGACY_NETWORK_RE.test(network.name);
       if (!managed && !legacy) continue;
 
+      if (managed && belongsToForeignScopeOrLiveLegacy(network.labels, pidAlive, ownerScope)) {
+        retainedActiveResources++;
+        continue;
+      }
       if (managed && ownerIsAlive(network.labels, pidAlive, processIdentity)) {
         retainedActiveResources++;
         continue;

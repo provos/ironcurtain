@@ -164,6 +164,30 @@ export interface PtySessionManagerOptions {
   readonly idleTtlMs?: number;
 }
 
+interface FreshPtySessionOptions {
+  readonly persona?: string;
+  readonly captureTraces?: boolean;
+  /** Workspace dir passed as `--workspace` (the child validates containment). */
+  readonly workspacePath?: string;
+  /** Provider-profile name passed as `--provider-profile`. */
+  readonly providerProfileName?: string;
+  /** Model ID override passed as `--model`. */
+  readonly model?: string;
+  readonly resume?: never;
+}
+
+interface ResumePtySessionOptions {
+  /** Trusted, validated persisted session descriptor. Never browser-supplied directly. */
+  readonly resume: { sessionId: string; agent: string; persona?: string };
+  readonly persona?: never;
+  readonly captureTraces?: never;
+  readonly workspacePath?: never;
+  readonly providerProfileName?: never;
+  readonly model?: never;
+}
+
+type PtySessionCreateOptions = FreshPtySessionOptions | ResumePtySessionOptions;
+
 // ---------------------------------------------------------------------------
 // PtyWebSession -- one bridge + its subscriber set + the coalescing streamer
 // ---------------------------------------------------------------------------
@@ -195,6 +219,7 @@ export class PtyWebSession {
     readonly bridge: PtyBridge,
     private readonly sender: PtyStreamSender,
     readonly persona: string | undefined,
+    readonly resumeSessionId?: string,
   ) {}
 
   get alive(): boolean {
@@ -391,6 +416,7 @@ export class PtyWebSession {
 
 export class PtySessionManager {
   private readonly sessions = new Map<number, PtyWebSession>();
+  private readonly activeResumeIds = new Set<string>();
   private readonly idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly sender: PtyStreamSender;
   private readonly sessionManager: SessionManager;
@@ -403,6 +429,9 @@ export class PtySessionManager {
   private readonly runPreflight: () => Promise<void>;
   private readonly idleTtlMs: number;
   private preflightPromise: Promise<void> | undefined;
+  private pendingCreates = 0;
+  private closing = false;
+  private readonly pendingCreateWaiters = new Set<() => void>();
 
   constructor(options: PtySessionManagerOptions) {
     this.sender = options.sender;
@@ -422,8 +451,17 @@ export class PtySessionManager {
     return this.sessions.size;
   }
 
+  /** Live sessions plus creates that have reserved capacity but not registered yet. */
+  get capacityUsed(): number {
+    return this.sessions.size + this.pendingCreates;
+  }
+
   has(label: number): boolean {
     return this.sessions.has(label);
+  }
+
+  isResuming(sessionId: string): boolean {
+    return this.activeResumeIds.has(sessionId);
   }
 
   /**
@@ -432,64 +470,82 @@ export class PtySessionManager {
    * borrowed label. The initial size is a sane 80x24 default; the first browser
    * attach re-sizes it (§11 D1).
    */
-  async create(
-    options: {
-      persona?: string;
-      captureTraces?: boolean;
-      /** Workspace dir passed as `--workspace` (the child validates containment). */
-      workspacePath?: string;
-      /** Provider-profile name passed as `--provider-profile`. */
-      providerProfileName?: string;
-      /** Model ID override passed as `--model`. */
-      model?: string;
-    } = {},
-  ): Promise<{ label: number }> {
-    await this.preflight();
+  async create(options: PtySessionCreateOptions = {}): Promise<{ label: number }> {
+    if (this.closing) throw new RpcError('INTERNAL_ERROR', 'PTY session manager is shutting down');
+    const resumeSessionId = options.resume?.sessionId;
+    if (resumeSessionId && this.activeResumeIds.has(resumeSessionId)) {
+      throw new RpcError('SESSION_BUSY', `Session "${resumeSessionId}" is already being resumed`);
+    }
+    if (resumeSessionId) this.activeResumeIds.add(resumeSessionId);
+    this.pendingCreates++;
 
-    const label = this.sessionManager.reserveLabel();
-    const { bin, prefixArgs } = resolveIroncurtainBin();
-    const agent = this.mode.kind === 'docker' ? this.mode.agent : 'claude-code';
-    const captureTraces = options.captureTraces ?? this.captureTracesDefault;
+    try {
+      await this.preflight();
+      if (this.isClosing()) throw new RpcError('INTERNAL_ERROR', 'PTY session manager is shutting down');
 
-    const bridge = await this.createBridge({
-      cols: PTY_INITIAL_COLS,
-      rows: PTY_INITIAL_ROWS,
-      ironcurtainBin: bin,
-      prefixArgs,
-      agent,
-      ...(options.persona ? { persona: options.persona } : {}),
-      ...(options.workspacePath ? { workspacePath: options.workspacePath } : {}),
-      ...(options.providerProfileName ? { providerProfileName: options.providerProfileName } : {}),
-      ...(options.model ? { model: options.model } : {}),
-      captureTraces,
-      muxId: this.ownerId,
-      muxPid: this.ownerPid,
-    });
+      const label = this.sessionManager.reserveLabel();
+      const { bin, prefixArgs } = resolveIroncurtainBin();
+      const agent = options.resume?.agent ?? (this.mode.kind === 'docker' ? this.mode.agent : 'claude-code');
+      const captureTraces = options.captureTraces ?? this.captureTracesDefault;
 
-    const session = new PtyWebSession(label, bridge, this.sender, options.persona);
+      const bridge = await this.createBridge({
+        cols: PTY_INITIAL_COLS,
+        rows: PTY_INITIAL_ROWS,
+        ironcurtainBin: bin,
+        prefixArgs,
+        agent,
+        ...(options.resume
+          ? { resumeSessionId: options.resume.sessionId }
+          : {
+              ...(options.persona ? { persona: options.persona } : {}),
+              ...(options.workspacePath ? { workspacePath: options.workspacePath } : {}),
+              ...(options.providerProfileName ? { providerProfileName: options.providerProfileName } : {}),
+              ...(options.model ? { model: options.model } : {}),
+            }),
+        captureTraces,
+        muxId: this.ownerId,
+        muxPid: this.ownerPid,
+      });
 
-    // Register + announce the session BEFORE wiring the bridge handlers. A child
-    // that already exited by now makes `bridge.onExit` fire its callback
-    // synchronously; if the session were not yet in the map, `handleExit` would
-    // no-op and leak the entry (armed idle timer, `session.created` with no
-    // matching `session.ended`). Registering first makes that a clean
-    // created -> ended. A freshly created session has no subscribers yet, so the
-    // idle backstop guards against a browser that crashes between create and
-    // attach; the first attach cancels it.
-    this.sessions.set(label, session);
-    this.startIdleTimer(label);
-    this.eventBus.emit('session.created', toPtySessionDto(session));
+      if (this.isClosing()) {
+        bridge.kill();
+        throw new RpcError('INTERNAL_ERROR', 'PTY session manager is shutting down');
+      }
 
-    bridge.onData((chunk) => session.pushChunk(chunk));
-    bridge.onExit(() => this.handleExit(label));
-    // Phase 4: capture the escalation dir and start bridging its escalations
-    // to the structured Escalations UI over the WebEventBus.
-    bridge.onSessionDiscovered((reg) => {
-      if (!reg) return;
-      session.escalationDir = reg.escalationDir;
-      this.startEscalationWatcher(session, reg.escalationDir);
-    });
-    return { label };
+      const persona = options.resume?.persona ?? options.persona;
+      const session = new PtyWebSession(label, bridge, this.sender, persona, resumeSessionId);
+
+      // Register + announce the session BEFORE wiring the bridge handlers. A child
+      // that already exited by now makes `bridge.onExit` fire its callback
+      // synchronously; if the session were not yet in the map, `handleExit` would
+      // no-op and leak the entry (armed idle timer, `session.created` with no
+      // matching `session.ended`). Registering first makes that a clean
+      // created -> ended. A freshly created session has no subscribers yet, so the
+      // idle backstop guards against a browser that crashes between create and
+      // attach; the first attach cancels it.
+      this.sessions.set(label, session);
+      this.startIdleTimer(label);
+      this.eventBus.emit('session.created', toPtySessionDto(session));
+
+      bridge.onData((chunk) => session.pushChunk(chunk));
+      bridge.onExit(() => this.handleExit(label));
+      // Phase 4: capture the escalation dir and start bridging its escalations
+      // to the structured Escalations UI over the WebEventBus.
+      bridge.onSessionDiscovered((reg) => {
+        if (!reg) return;
+        session.escalationDir = reg.escalationDir;
+        this.startEscalationWatcher(session, reg.escalationDir);
+      });
+      return { label };
+    } catch (error) {
+      if (resumeSessionId) this.activeResumeIds.delete(resumeSessionId);
+      throw error;
+    } finally {
+      this.pendingCreates--;
+      if (this.pendingCreates === 0) {
+        for (const settle of [...this.pendingCreateWaiters]) settle();
+      }
+    }
   }
 
   /**
@@ -577,8 +633,11 @@ export class PtySessionManager {
 
   /** Kills all bridges with a bounded await (mirrors mux doShutdown). */
   async close(): Promise<void> {
+    this.closing = true;
+    await this.waitForPendingCreates();
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
+    this.activeResumeIds.clear();
     for (const timer of this.idleTimers.values()) clearTimeout(timer);
     this.idleTimers.clear();
 
@@ -694,6 +753,7 @@ export class PtySessionManager {
     const session = this.sessions.get(label);
     if (!session) return;
     this.sessions.delete(label);
+    if (session.resumeSessionId) this.activeResumeIds.delete(session.resumeSessionId);
     this.clearIdleTimer(label);
     session.dispose();
     const reason = session.endReason ?? 'pty_exited';
@@ -745,6 +805,24 @@ export class PtySessionManager {
       clearTimeout(timer);
       this.idleTimers.delete(label);
     }
+  }
+
+  private waitForPendingCreates(): Promise<void> {
+    if (this.pendingCreates === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const settle = (): void => {
+        this.pendingCreateWaiters.delete(settle);
+        clearTimeout(timer);
+        resolve();
+      };
+      this.pendingCreateWaiters.add(settle);
+      const timer = setTimeout(settle, PTY_CLOSE_TIMEOUT_MS);
+      timer.unref();
+    });
+  }
+
+  private isClosing(): boolean {
+    return this.closing;
   }
 
   private preflight(): Promise<void> {

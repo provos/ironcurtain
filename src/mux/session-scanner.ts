@@ -10,9 +10,13 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { getSessionsDir, getSessionSandboxDir, SESSION_STATE_FILENAME } from '../config/paths.js';
-import type { SessionSnapshot } from '../docker/pty-types.js';
+import { isSessionSnapshot, type SessionSnapshot } from '../docker/pty-types.js';
 
 export type { SessionSnapshot } from '../docker/pty-types.js';
+
+function isResumableSnapshot(value: unknown, directoryName: string): value is SessionSnapshot {
+  return isSessionSnapshot(value) && value.resumable && value.sessionId === directoryName;
+}
 
 /**
  * Scans the sessions directory for resumable sessions.
@@ -34,8 +38,8 @@ export function scanResumableSessions(): SessionSnapshot[] {
     const statePath = resolve(sessionsDir, entry, SESSION_STATE_FILENAME);
     try {
       const raw = readFileSync(statePath, 'utf-8');
-      const snapshot = JSON.parse(raw) as SessionSnapshot;
-      if (snapshot.resumable && snapshot.sessionId) {
+      const snapshot: unknown = JSON.parse(raw);
+      if (isResumableSnapshot(snapshot, entry)) {
         snapshots.push(snapshot);
       }
     } catch {

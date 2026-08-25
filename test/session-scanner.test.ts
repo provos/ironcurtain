@@ -52,6 +52,40 @@ describe('session-scanner', () => {
     expect(scanResumableSessions()).toEqual([]);
   });
 
+  it('skips snapshots whose session ID does not match their directory', () => {
+    writeSnapshot('expected-session', {
+      sessionId: 'different-session',
+      status: 'user-exit',
+      exitCode: 0,
+      lastActivity: '2026-03-10T12:00:00Z',
+      workspacePath: '/workspace',
+      agent: 'claude-code',
+      label: 'Mismatched session',
+      resumable: true,
+    });
+
+    expect(scanResumableSessions()).toEqual([]);
+  });
+
+  it('skips resumable-looking snapshots with malformed required metadata', () => {
+    const dir = resolve(sessionsDir, 'malformed-session');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      resolve(dir, SESSION_STATE_FILENAME),
+      JSON.stringify({
+        sessionId: 'malformed-session',
+        status: 'made-up-status',
+        lastActivity: 42,
+        workspacePath: '/workspace',
+        agent: '',
+        label: 'Malformed',
+        resumable: true,
+      }),
+    );
+
+    expect(scanResumableSessions()).toEqual([]);
+  });
+
   it('skips non-resumable sessions', () => {
     writeSnapshot('session-1', {
       sessionId: 'session-1',

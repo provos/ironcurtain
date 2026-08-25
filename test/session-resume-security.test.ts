@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionSnapshot } from '../src/docker/pty-types.js';
-import { validateResumeSession } from '../src/docker/pty-session.js';
+import { acquireResumeSessionLock, validateResumeSession } from '../src/docker/pty-session.js';
 import { prepareConversationStateDir } from '../src/docker/docker-infrastructure.js';
 import type { ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import { scanResumableSessions } from '../src/mux/session-scanner.js';
@@ -119,6 +119,42 @@ describe('snapshot tampering resistance', () => {
     writeFileSync(join(sessionDir, SESSION_STATE_FILENAME), '{not valid json!!!');
 
     expect(() => validateResumeSession('corrupt-session')).toThrow('corrupted or invalid');
+  });
+
+  it('rejects malformed snapshot metadata on the direct resume path', () => {
+    const sessionDir = join(baseDir, 'sessions', 'malformed-session');
+    const workspaceDir = join(sessionDir, 'sandbox');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(
+        makeSnapshot({
+          sessionId: 'malformed-session',
+          workspacePath: workspaceDir,
+          agent: { name: 'claude-code' } as unknown as string,
+          persona: { name: 'reviewer' } as unknown as string,
+        }),
+      ),
+    );
+
+    expect(() => validateResumeSession('malformed-session')).toThrow('corrupted or invalid');
+  });
+
+  it('holds a crash-recoverable lock for one resumed session at a time', () => {
+    const sessionDir = join(baseDir, 'sessions', 'locked-session');
+    const workspaceDir = join(sessionDir, 'sandbox');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(makeSnapshot({ sessionId: 'locked-session', workspacePath: workspaceDir })),
+    );
+
+    const first = acquireResumeSessionLock('locked-session');
+    expect(() => acquireResumeSessionLock('locked-session')).toThrow('already being resumed');
+    first.release();
+
+    const retry = acquireResumeSessionLock('locked-session');
+    retry.release();
   });
 
   it('handles extra unexpected fields in snapshot gracefully', () => {

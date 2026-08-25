@@ -51,6 +51,18 @@ export interface SessionDto {
   readonly lastAttachedAt?: string;
 }
 
+/** Persisted Docker-agent session available to resume as a live terminal. */
+export interface ResumableSessionDto {
+  readonly sessionId: string;
+  readonly displayName: string;
+  readonly agent: string;
+  readonly status: 'completed' | 'crashed' | 'auth-failure' | 'user-exit';
+  readonly lastActivity: string;
+  readonly workspaceLabel?: string;
+  readonly persona?: string;
+  readonly providerProfileName?: string;
+}
+
 export interface ConversationTurn {
   readonly turnNumber: number;
   readonly userMessage: string;

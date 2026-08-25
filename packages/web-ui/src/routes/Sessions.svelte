@@ -15,11 +15,14 @@
     connectPtyTerminal,
     disconnectPtyTerminal,
     getModelProviders,
+    listResumableSessions,
+    resumeSession,
   } from '../lib/stores.svelte.js';
-  import type { CreateSessionOptions } from '../lib/types.js';
+  import type { CreateSessionOptions, ResumableSessionDto } from '../lib/types.js';
 
   import SessionSidebar from '$lib/components/features/session-sidebar.svelte';
   import TerminalConsole from '$lib/components/features/terminal-console.svelte';
+  import ResumeSessionModal from '$lib/components/features/resume-session-modal.svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -30,6 +33,68 @@
   // Session creation state
   let creatingSession = $state(false);
   let createError = $state('');
+
+  let resumeModalOpen = $state(false);
+  let resumableSessions = $state<ResumableSessionDto[]>([]);
+  let loadingResumable = $state(false);
+  let resumeLoadError = $state('');
+  let resumeActionError = $state('');
+  let resumingId = $state<string | null>(null);
+  let resumeLoadGeneration = 0;
+
+  const resumeDisabledReason = $derived(
+    !appState.connected
+      ? 'Connect to the daemon to resume a session.'
+      : appState.daemonStatus?.sessionMode !== 'container'
+        ? 'Session resume requires container mode.'
+        : undefined,
+  );
+
+  async function loadResumable(): Promise<void> {
+    const generation = ++resumeLoadGeneration;
+    loadingResumable = true;
+    resumeLoadError = '';
+    try {
+      const sessions = await listResumableSessions();
+      if (generation === resumeLoadGeneration && resumeModalOpen) resumableSessions = sessions;
+    } catch (err) {
+      if (generation === resumeLoadGeneration && resumeModalOpen) {
+        resumeLoadError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      if (generation === resumeLoadGeneration && resumeModalOpen) loadingResumable = false;
+    }
+  }
+
+  function openResumeModal(): void {
+    if (resumeDisabledReason) return;
+    resumeModalOpen = true;
+    resumableSessions = [];
+    resumeActionError = '';
+    void loadResumable();
+  }
+
+  function closeResumeModal(): void {
+    if (resumingId !== null) return;
+    resumeModalOpen = false;
+    resumeLoadGeneration++;
+  }
+
+  async function handleResume(sessionId: string): Promise<void> {
+    if (resumingId !== null) return;
+    resumingId = sessionId;
+    resumeActionError = '';
+    try {
+      const result = await resumeSession(sessionId);
+      appState.selectedSessionLabel = result.label;
+      resumeModalOpen = false;
+      resumeLoadGeneration++;
+    } catch (err) {
+      resumeActionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      resumingId = null;
+    }
+  }
 
   // Session end state
   let endingSession = $state<number | null>(null);
@@ -147,7 +212,7 @@
   });
 </script>
 
-<div class="flex h-full min-h-0 animate-fade-in">
+<div class="flex h-full min-h-0 flex-col animate-fade-in md:flex-row">
   <SessionSidebar
     sessions={appState.sessions}
     selectedLabel={appState.selectedSessionLabel}
@@ -157,6 +222,20 @@
     {createError}
     loadPersonasFn={listPersonas}
     loadProviderProfilesFn={loadProviderProfiles}
+    onresumeopen={openResumeModal}
+    {resumeDisabledReason}
+  />
+
+  <ResumeSessionModal
+    open={resumeModalOpen}
+    sessions={resumableSessions}
+    loading={loadingResumable}
+    loadError={resumeLoadError}
+    actionError={resumeActionError}
+    {resumingId}
+    onclose={closeResumeModal}
+    onretry={loadResumable}
+    onresume={handleResume}
   />
 
   {#if appState.selectedSession}

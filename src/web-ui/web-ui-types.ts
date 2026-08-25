@@ -38,8 +38,10 @@ export type MethodName =
   | 'jobs.run'
   | 'jobs.logs'
   | 'sessions.list'
+  | 'sessions.listResumable'
   | 'sessions.get'
   | 'sessions.create'
+  | 'sessions.resume'
   | 'sessions.end'
   | 'sessions.send'
   | 'sessions.budget'
@@ -132,6 +134,7 @@ export interface EventFrame {
 export type ErrorCode =
   | 'AUTH_REQUIRED'
   | 'SESSION_NOT_FOUND'
+  | 'SESSION_NOT_RESUMABLE'
   | 'JOB_NOT_FOUND'
   | 'ESCALATION_NOT_FOUND'
   | 'ESCALATION_EXPIRED'
@@ -188,6 +191,18 @@ export interface SessionDto {
    * kinds. Additive/optional — existing consumers ignore it.
    */
   readonly lastAttachedAt?: string;
+}
+
+/** Persisted Docker-agent session that can be resumed into a new web PTY. */
+export interface ResumableSessionDto {
+  readonly sessionId: string;
+  readonly displayName: string;
+  readonly agent: string;
+  readonly status: 'completed' | 'crashed' | 'auth-failure' | 'user-exit';
+  readonly lastActivity: string;
+  readonly workspaceLabel?: string;
+  readonly persona?: string;
+  readonly providerProfileName?: string;
 }
 
 export interface BudgetSummaryDto {

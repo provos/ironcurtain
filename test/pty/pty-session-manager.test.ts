@@ -245,6 +245,50 @@ describe('PtySessionManager', () => {
       expect(seen[0].rows).toBe(24);
     });
 
+    it('resumes with the persisted agent and persona without fresh-launch flags', async () => {
+      const seen: PtyBridgeOptions[] = [];
+      const h = makeHarness({
+        createBridge: async (opts) => {
+          seen.push(opts);
+          return new StubBridge() as unknown as PtyBridge;
+        },
+      });
+
+      const result = await h.manager.create({
+        resume: { sessionId: 'saved-session', agent: 'goose', persona: 'saved-persona' },
+      });
+
+      expect(seen[0]).toMatchObject({ resumeSessionId: 'saved-session', agent: 'goose' });
+      expect(seen[0]).not.toHaveProperty('workspacePath');
+      expect(seen[0]).not.toHaveProperty('providerProfileName');
+      expect(seen[0]).not.toHaveProperty('model');
+      expect(seen[0]).not.toHaveProperty('persona');
+      expect(h.manager.getDto(result.label)?.persona).toBe('saved-persona');
+    });
+
+    it('rejects duplicate resume claims until the first resumed PTY exits', async () => {
+      const h = makeHarness();
+      const resume = { resume: { sessionId: 'saved-session', agent: 'claude-code' } };
+
+      await h.manager.create(resume);
+      await expect(h.manager.create(resume)).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+
+      h.lastBridge().emitExit(0);
+      await expect(h.manager.create(resume)).resolves.toEqual({ label: 2 });
+    });
+
+    it('releases a resume claim when bridge creation fails', async () => {
+      const createBridge = vi
+        .fn<(options: PtyBridgeOptions) => Promise<PtyBridge>>()
+        .mockRejectedValueOnce(new Error('spawn failed'))
+        .mockResolvedValueOnce(new StubBridge() as unknown as PtyBridge);
+      const h = makeHarness({ createBridge });
+      const resume = { resume: { sessionId: 'retryable-session', agent: 'claude-code' } };
+
+      await expect(h.manager.create(resume)).rejects.toThrow('spawn failed');
+      await expect(h.manager.create(resume)).resolves.toEqual({ label: 2 });
+    });
+
     it('threads workspace / provider-profile / model options to the bridge factory', async () => {
       const seen: PtyBridgeOptions[] = [];
       const h = makeHarness({
@@ -681,6 +725,29 @@ describe('PtySessionManager', () => {
       expect(h.manager.size).toBe(0);
     });
 
+    it('close() waits for an in-flight bridge and prevents it from registering', async () => {
+      let resolveBridge: ((bridge: PtyBridge) => void) | undefined;
+      const bridge = new StubBridge();
+      const h = makeHarness({
+        createBridge: () =>
+          new Promise((resolve) => {
+            resolveBridge = resolve;
+          }),
+      });
+
+      const create = h.manager.create();
+      for (let attempt = 0; attempt < 5 && !resolveBridge; attempt++) await Promise.resolve();
+      expect(resolveBridge).toBeDefined();
+      const close = h.manager.close();
+      resolveBridge?.(bridge as unknown as PtyBridge);
+
+      await expect(create).rejects.toThrow('shutting down');
+      await close;
+      expect(bridge.kill).toHaveBeenCalledTimes(1);
+      expect(h.manager.size).toBe(0);
+      expect(h.events.filter((event) => event.event === 'session.created')).toHaveLength(0);
+    });
+
     it('attempts later bridge kills when an earlier kill throws', async () => {
       const first = new StubBridge();
       first.kill.mockImplementationOnce(() => {
@@ -995,5 +1062,161 @@ describe('sessions.create (docker) concurrency cap', () => {
     expect(manager.size).toBe(2);
 
     await expect(sessionDispatch(ctx, 'sessions.create', {})).rejects.toThrow('PTY session limit reached (max 2)');
+  });
+
+  it('counts an in-flight create before its bridge has registered', async () => {
+    let resolveBridge: ((bridge: PtyBridge) => void) | undefined;
+    const eventBus = new WebEventBus();
+    const sessionManager = new SessionManager();
+    const manager = new PtySessionManager({
+      sender: { sendToSubscribers: () => {} },
+      sessionManager,
+      eventBus,
+      mode: { kind: 'docker', agent: 'claude-code' },
+      daemonId: 'test',
+      daemonPid: 1,
+      createBridge: () =>
+        new Promise((resolve) => {
+          resolveBridge = resolve;
+        }),
+      preflight: async () => {},
+    });
+    const ctx: DispatchContext = {
+      handler: makeHandler(),
+      sessionManager,
+      mode: { kind: 'docker', agent: 'claude-code' },
+      eventBus,
+      maxConcurrentWebSessions: 1,
+      sessionQueues: new Map(),
+      ptySessionManager: manager,
+    };
+
+    const first = sessionDispatch(ctx, 'sessions.create', {});
+    expect(manager.capacityUsed).toBe(1);
+    await expect(sessionDispatch(ctx, 'sessions.create', {})).rejects.toThrow('PTY session limit reached (max 1)');
+
+    resolveBridge?.(new StubBridge() as unknown as PtyBridge);
+    await expect(first).resolves.toMatchObject({ label: 1 });
+  });
+});
+
+describe('sessions resume RPC', () => {
+  let home: string;
+  let previousHome: string | undefined;
+
+  beforeEach(() => {
+    previousHome = process.env.IRONCURTAIN_HOME;
+    home = mkdtempSync(join(tmpdir(), 'ironcurtain-web-resume-'));
+    process.env.IRONCURTAIN_HOME = home;
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.IRONCURTAIN_HOME;
+    else process.env.IRONCURTAIN_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function writeSnapshot(sessionId: string, overrides: Record<string, unknown> = {}): void {
+    const sessionDir = join(home, 'sessions', sessionId);
+    const workspacePath = join(sessionDir, 'sandbox');
+    mkdirSync(workspacePath, { recursive: true });
+    writeFileSync(
+      join(sessionDir, 'session-state.json'),
+      JSON.stringify({
+        sessionId,
+        status: 'user-exit',
+        exitCode: 0,
+        lastActivity: '2026-08-24T12:00:00.000Z',
+        workspacePath,
+        persona: 'saved-persona',
+        providerProfileName: 'work',
+        agent: 'goose',
+        label: 'Saved Goose session',
+        resumable: true,
+        ...overrides,
+      }),
+    );
+  }
+
+  function makeResumeContext(seen: PtyBridgeOptions[] = []): DispatchContext {
+    const eventBus = new WebEventBus();
+    const sessionManager = new SessionManager();
+    const manager = new PtySessionManager({
+      sender: { sendToSubscribers: () => {} },
+      sessionManager,
+      eventBus,
+      mode: { kind: 'docker', agent: 'claude-code' },
+      daemonId: 'test',
+      daemonPid: 1,
+      createBridge: async (options) => {
+        seen.push(options);
+        return new StubBridge() as unknown as PtyBridge;
+      },
+      preflight: async () => {},
+    });
+    return {
+      handler: makeHandler(),
+      sessionManager,
+      mode: { kind: 'docker', agent: 'claude-code' },
+      eventBus,
+      maxConcurrentWebSessions: 2,
+      sessionQueues: new Map(),
+      ptySessionManager: manager,
+    };
+  }
+
+  it('lists safe resumable metadata and resumes with the validated snapshot identity', async () => {
+    writeSnapshot('saved-session');
+    const seen: PtyBridgeOptions[] = [];
+    const ctx = makeResumeContext(seen);
+
+    const list = (await sessionDispatch(ctx, 'sessions.listResumable', {})) as Array<Record<string, unknown>>;
+    expect(list).toEqual([
+      expect.objectContaining({
+        sessionId: 'saved-session',
+        displayName: 'Saved Goose session',
+        agent: 'goose',
+        persona: 'saved-persona',
+      }),
+    ]);
+    expect(list[0]).not.toHaveProperty('workspacePath');
+
+    await expect(sessionDispatch(ctx, 'sessions.resume', { sessionId: 'saved-session' })).resolves.toEqual({
+      label: 1,
+    });
+    expect(seen[0]).toMatchObject({ resumeSessionId: 'saved-session', agent: 'goose' });
+
+    await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toEqual([]);
+    ctx.ptySessionManager?.end(1);
+    await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toHaveLength(1);
+  });
+
+  it('returns SESSION_NOT_RESUMABLE for a stale or invalid saved session', async () => {
+    writeSnapshot('finished-session', { resumable: false, status: 'completed' });
+    writeSnapshot('unsafe-session', { workspacePath: '/' });
+    const ctx = makeResumeContext();
+
+    await expect(sessionDispatch(ctx, 'sessions.listResumable', {})).resolves.toEqual([]);
+
+    await expect(sessionDispatch(ctx, 'sessions.resume', { sessionId: 'finished-session' })).rejects.toMatchObject({
+      code: 'SESSION_NOT_RESUMABLE',
+    });
+    await expect(sessionDispatch(ctx, 'sessions.resume', { sessionId: 'unsafe-session' })).rejects.toMatchObject({
+      code: 'SESSION_NOT_RESUMABLE',
+    });
+    await expect(sessionDispatch(ctx, 'sessions.resume', { sessionId: 'missing-session' })).rejects.toMatchObject({
+      code: 'SESSION_NOT_RESUMABLE',
+    });
+  });
+
+  it('rejects resume outside container mode before touching the saved session', async () => {
+    const ctx = makeResumeContext();
+    const builtinCtx = { ...ctx, mode: { kind: 'builtin' } as const };
+
+    await expect(
+      sessionDispatch(builtinCtx, 'sessions.resume', { sessionId: 'missing-session' }),
+    ).rejects.toMatchObject({
+      code: 'SESSION_NOT_RESUMABLE',
+    });
   });
 });
