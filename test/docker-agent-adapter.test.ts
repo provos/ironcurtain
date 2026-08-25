@@ -15,7 +15,6 @@ const sampleServerListings: ServerListing[] = [{ name: 'filesystem', description
 
 const sampleContext: OrientationContext = {
   workspaceDir: CONTAINER_WORKSPACE_DIR,
-  hostSandboxDir: '/home/user/.ironcurtain/sessions/test/sandbox',
   serverListings: sampleServerListings,
   allowedDomains: ['example.com'],
   networkMode: 'none',
@@ -135,10 +134,12 @@ describe('Claude Code Adapter', () => {
     expect(prompt).toContain('synchronous');
 
     // Docker environment layer
-    expect(prompt).toContain('/workspace');
-    expect(prompt).toContain('NO direct internet access');
-    expect(prompt).toContain('When to use `execute_code`');
-    expect(prompt).toContain('Policy Enforcement');
+    expect(prompt).toContain('Your workspace is `/workspace`');
+    expect(prompt).toContain('It is backed by the host workspace');
+    expect(prompt).not.toContain('Your sandbox directory is:');
+    expect(prompt).toContain('no direct internet access');
+    expect(prompt).toContain('### External operations');
+    expect(prompt).toContain('### Policy');
     expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
   });
 
@@ -663,13 +664,7 @@ describe('prepareSession', () => {
       userConfig: { anthropicApiKey: 'sk-test' },
     } as IronCurtainConfig;
 
-    const { systemPrompt } = prepareSession(
-      claudeCodeAdapter,
-      sampleServerListings,
-      sessionDir,
-      config,
-      '/host/sandbox',
-    );
+    const { systemPrompt } = prepareSession(claudeCodeAdapter, sampleServerListings, sessionDir, config);
 
     // Check that orientation dir was created with config file
     const orientationDir = join(sessionDir, 'orientation');
@@ -690,15 +685,9 @@ describe('prepareSession', () => {
       userConfig: { anthropicApiKey: 'sk-test' },
     } as IronCurtainConfig;
 
-    const { systemPrompt } = prepareSession(
-      claudeCodeAdapter,
-      sampleServerListings,
-      sessionDir,
-      config,
-      '/host/sandbox',
-      undefined,
-      { networkName: 'ironcurtain' },
-    );
+    const { systemPrompt } = prepareSession(claudeCodeAdapter, sampleServerListings, sessionDir, config, undefined, {
+      networkName: 'ironcurtain',
+    });
 
     expect(systemPrompt).toContain('IRONCURTAIN_DOCKER_NETWORK');
     expect(systemPrompt).toContain('`ironcurtain`');

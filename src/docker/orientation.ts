@@ -58,7 +58,6 @@ export function prepareSession(
   serverListings: ServerListing[],
   sessionDir: string,
   config: IronCurtainConfig,
-  hostSandboxDir: string,
   proxyAddress?: string,
   nestedDocker?: OrientationContext['nestedDocker'],
 ): { systemPrompt: string } {
@@ -67,7 +66,6 @@ export function prepareSession(
 
   const context: OrientationContext = {
     workspaceDir: CONTAINER_WORKSPACE_DIR,
-    hostSandboxDir,
     serverListings,
     allowedDomains: extractAllowedDomains(config),
     networkMode: proxyAddress ? 'bridge' : 'none',

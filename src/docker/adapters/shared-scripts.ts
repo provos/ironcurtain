@@ -56,14 +56,21 @@ stty -F "$PTS" size 2>/dev/null || echo "0 0"
 
 // ─── Shared Docker Environment Prompt Sections ──────────────
 
-/**
- * Network restriction section. `toolReference` describes how to access network
- * (e.g. "the sandbox tools via `execute_code`" or "the IronCurtain MCP tools").
- */
-export function buildNetworkSection(toolReference: string): string {
-  return `### Network
-The container has NO direct internet access. All HTTP requests and
-git operations MUST go through ${toolReference}.`;
+/** Workspace and external-access orientation shared by every agent adapter. */
+export function buildWorkspaceAccessSection(
+  context: OrientationContext,
+  localTools: string,
+  externalTools: string,
+): string {
+  return `### Workspace
+Your workspace is \`${context.workspaceDir}\`. It is backed by the host workspace.
+Always refer to workspace files as \`${context.workspaceDir}/...\`.
+Use ${localTools} for all operations there, including after cloning or writing
+through ${externalTools}. Clone repositories into \`${context.workspaceDir}\`.
+
+### External operations
+The container has no direct internet access. Use ${externalTools} only for network
+requests, git remote operations, or files outside \`${context.workspaceDir}\`.`;
 }
 
 /**
@@ -103,11 +110,8 @@ Docker administrator authority over its bundle-local daemon.`;
  * (e.g. "tool call through `execute_code`" or "MCP tool call").
  */
 export function buildPolicySection(callType: string): string {
-  return `### Policy Enforcement
-Every ${callType} is evaluated against security policy rules:
-- **Allowed**: proceeds automatically
-- **Denied**: blocked -- do NOT retry denied operations
-- **Escalated**: requires human approval -- you will receive the result once approved`;
+  return `### Policy
+Each ${callType} may be allowed, denied, or escalated for human approval. Do not retry denials.`;
 }
 
 /**
@@ -115,6 +119,5 @@ Every ${callType} is evaluated against security policy rules:
  */
 export function buildAttributionSection(): string {
   return `### Attribution
-When adding attribution lines (e.g. Co-Authored-By, "Generated with"), include
-"running under IronCurtain" alongside the tool name.`;
+When adding attribution (for example, Co-Authored-By), say the tool ran under IronCurtain.`;
 }

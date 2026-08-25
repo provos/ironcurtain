@@ -962,15 +962,7 @@ export async function prepareDockerInfrastructure(
     const proxyHost = hostOnlyNetwork ? hostOnlyNetwork.gateway : DOCKER_HOST_GATEWAY;
     const proxyAddress = useTcp && proxy.port !== undefined ? `${proxyHost}:${proxy.port}` : undefined;
     const nestedDocker = dockerWorkload === undefined ? undefined : { networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK };
-    const { systemPrompt } = prepareSession(
-      adapter,
-      serverListings,
-      bundleDir,
-      config,
-      workspaceDir,
-      proxyAddress,
-      nestedDocker,
-    );
+    const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, proxyAddress, nestedDocker);
 
     const orientationDir = resolve(bundleDir, 'orientation');
     const runtimeTrust = stageRuntimeTrust(orientationDir, ca.certPem);

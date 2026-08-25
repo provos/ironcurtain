@@ -39,7 +39,7 @@ import { buildSystemPrompt } from '../../session/prompts.js';
 import {
   buildResizePtyScript,
   buildCheckPtySizeScript,
-  buildNetworkSection,
+  buildWorkspaceAccessSection,
   buildNestedDockerSection,
   buildPolicySection,
   buildAttributionSection,
@@ -79,38 +79,12 @@ const CLAUDE_SKILLS_MOUNT_TARGET = `${CLAUDE_SKILLS_PARENT}/.claude/skills`;
 function buildDockerEnvironmentPrompt(context: OrientationContext): string {
   return `## Docker Environment
 
-### Workspace (\`${context.workspaceDir}\`)
-This is YOUR local workspace inside the container. Use your normal built-in
-tools (Bash, Read, Write, Edit, etc.) freely here -- no restrictions.
-
-### When to use \`execute_code\` (MCP tools)
-Use \`execute_code\` ONLY for operations that your built-in tools cannot do:
-- **Network requests**: HTTP fetches, web searches, API calls
-- **Git remote operations**: clone, push, pull, fetch
-- **Reading files outside ${context.workspaceDir}**
-
-For everything else -- listing, reading, searching, writing, and editing files
-inside ${context.workspaceDir} -- use your built-in tools (Bash, Read, Write,
-Edit, Glob, Grep, etc.). Do NOT use MCP filesystem or git tools for local file
-operations inside ${context.workspaceDir}.
-
-After cloning a repo or writing files via \`execute_code\`, switch to built-in
-tools for all subsequent file operations on the cloned/written files.
-When cloning repos, use ${context.workspaceDir} as the target directory
-(e.g. \`${context.workspaceDir}/repo-name\`).
-
-${buildNetworkSection('the sandbox tools via `execute_code`')}
+${buildWorkspaceAccessSection(context, 'built-in tools (Bash, Read, Write, Edit, Glob, Grep)', '`execute_code`')}
 
 ${buildNestedDockerSection(context)}
 
-IMPORTANT: Your built-in server-side web search tool (WebSearch) is DISABLED
-and will NOT work — it is stripped by the security proxy. You MUST use the
-sandbox tools via \`execute_code\` instead. Do NOT attempt to use your
-built-in WebSearch or WebFetch tools.
-
-To search the web:
+Built-in WebSearch and WebFetch are disabled. Use these through \`execute_code\`:
   \`const results = fetch.web_search({ query: "search terms" });\`
-To fetch a URL:
   \`const page = fetch.http_fetch({ url: "https://example.com" });\`
 
 ${buildPolicySection('tool call through `execute_code`')}
@@ -266,7 +240,7 @@ exit $STATUS
 
     buildSystemPrompt(context: OrientationContext): string {
       // Layer 1: Code Mode instructions (tool discovery, sync calls, return semantics)
-      const codeModePrompt = buildSystemPrompt(context.serverListings, context.hostSandboxDir);
+      const codeModePrompt = buildSystemPrompt(context.serverListings);
 
       // Layer 2: Docker environment specifics (workspace, host access, policy)
       const dockerPrompt = buildDockerEnvironmentPrompt(context);

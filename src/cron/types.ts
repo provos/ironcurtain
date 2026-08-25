@@ -155,7 +155,7 @@ export interface RunRecord {
   };
 
   /**
-   * Brief summary extracted from workspace/last-run.md, if it exists.
+   * Brief summary extracted from last-run.md at the workspace root, if it exists.
    * Truncated to 2000 chars. Null if the file was not written.
    */
   readonly summary: string | null;
