@@ -727,7 +727,7 @@ describe('PtySessionManager', () => {
 
     it('close() waits for an in-flight bridge and prevents it from registering', async () => {
       let resolveBridge: ((bridge: PtyBridge) => void) | undefined;
-      const bridge = new StubBridge();
+      const bridge = new NonExitingBridge();
       const h = makeHarness({
         createBridge: () =>
           new Promise((resolve) => {
@@ -739,13 +739,84 @@ describe('PtySessionManager', () => {
       for (let attempt = 0; attempt < 5 && !resolveBridge; attempt++) await Promise.resolve();
       expect(resolveBridge).toBeDefined();
       const close = h.manager.close();
+      let closeResolved = false;
+      void close.then(() => {
+        closeResolved = true;
+      });
       resolveBridge?.(bridge as unknown as PtyBridge);
 
       await expect(create).rejects.toThrow('shutting down');
+      await Promise.resolve();
+      expect(closeResolved).toBe(false);
+      expect(bridge.kill).toHaveBeenCalledTimes(1);
+
+      bridge.emitExit(0);
       await close;
+      expect(closeResolved).toBe(true);
+      expect(h.manager.size).toBe(0);
+      expect(h.events.filter((event) => event.event === 'session.created')).toHaveLength(0);
+    });
+
+    it('kills an in-flight bridge even when it resolves after close() times out', async () => {
+      let resolveBridge: ((bridge: PtyBridge) => void) | undefined;
+      const bridge = new NonExitingBridge();
+      const h = makeHarness({
+        createBridge: () =>
+          new Promise((resolve) => {
+            resolveBridge = resolve;
+          }),
+      });
+
+      const create = h.manager.create();
+      const rejectedCreate = expect(create).rejects.toThrow('shutting down');
+      for (let attempt = 0; attempt < 5 && !resolveBridge; attempt++) await Promise.resolve();
+      expect(resolveBridge).toBeDefined();
+
+      const close = h.manager.close();
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS + 5_000);
+      await close;
+
+      resolveBridge?.(bridge as unknown as PtyBridge);
+      await rejectedCreate;
       expect(bridge.kill).toHaveBeenCalledTimes(1);
       expect(h.manager.size).toBe(0);
       expect(h.events.filter((event) => event.event === 'session.created')).toHaveLength(0);
+
+      bridge.emitExit(0);
+    });
+
+    it('does not treat a thrown in-flight kill request as a completed exit', async () => {
+      let resolveBridge: ((bridge: PtyBridge) => void) | undefined;
+      const bridge = new NonExitingBridge();
+      bridge.kill.mockImplementationOnce(() => {
+        throw new Error('signal unavailable');
+      });
+      const h = makeHarness({
+        createBridge: () =>
+          new Promise((resolve) => {
+            resolveBridge = resolve;
+          }),
+      });
+
+      const create = h.manager.create();
+      for (let attempt = 0; attempt < 5 && !resolveBridge; attempt++) await Promise.resolve();
+      expect(resolveBridge).toBeDefined();
+
+      let closeResolved = false;
+      const close = h.manager.close().then(() => {
+        closeResolved = true;
+      });
+      resolveBridge?.(bridge as unknown as PtyBridge);
+
+      await expect(create).rejects.toThrow('shutting down');
+      await Promise.resolve();
+      expect(closeResolved).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(PTY_KILL_GRACE_MS + 5_000);
+      await close;
+      expect(closeResolved).toBe(true);
+
+      bridge.emitExit(0);
     });
 
     it('attempts later bridge kills when an earlier kill throws', async () => {

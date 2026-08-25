@@ -417,6 +417,8 @@ export class PtyWebSession {
 export class PtySessionManager {
   private readonly sessions = new Map<number, PtyWebSession>();
   private readonly activeResumeIds = new Set<string>();
+  /** Exit waits for bridges that spawned after close() began and were never registered. */
+  private readonly closingBridgeExits = new Set<Promise<void>>();
   private readonly idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly sender: PtyStreamSender;
   private readonly sessionManager: SessionManager;
@@ -508,7 +510,10 @@ export class PtySessionManager {
       });
 
       if (this.isClosing()) {
-        bridge.kill();
+        // Own cleanup here even if close() has already exhausted its timeout.
+        // When close() is still waiting, pendingCreates keeps this exit promise
+        // inside the same bounded shutdown window.
+        this.trackClosingBridge(bridge);
         throw new RpcError('INTERNAL_ERROR', 'PTY session manager is shutting down');
       }
 
@@ -634,14 +639,18 @@ export class PtySessionManager {
   /** Kills all bridges with a bounded await (mirrors mux doShutdown). */
   async close(): Promise<void> {
     this.closing = true;
-    await this.waitForPendingCreates();
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.activeResumeIds.clear();
     for (const timer of this.idleTimers.values()) clearTimeout(timer);
     this.idleTimers.clear();
 
-    const exits = sessions.map(
+    const pendingCreateExits = (async (): Promise<void> => {
+      await this.waitForPendingCreates();
+      await Promise.allSettled([...this.closingBridgeExits]);
+    })();
+
+    const exits: Promise<void>[] = sessions.map(
       (session) =>
         new Promise<void>((resolve) => {
           session.bridge.onExit(() => resolve());
@@ -649,6 +658,7 @@ export class PtySessionManager {
           session.bridge.kill();
         }),
     );
+    exits.push(pendingCreateExits);
     let closeTimeout: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, PTY_CLOSE_TIMEOUT_MS);
@@ -812,13 +822,27 @@ export class PtySessionManager {
     return new Promise((resolve) => {
       const settle = (): void => {
         this.pendingCreateWaiters.delete(settle);
-        clearTimeout(timer);
         resolve();
       };
       this.pendingCreateWaiters.add(settle);
-      const timer = setTimeout(settle, PTY_CLOSE_TIMEOUT_MS);
-      timer.unref();
     });
+  }
+
+  private trackClosingBridge(bridge: PtyBridge): void {
+    const exit = new Promise<void>((resolve) => {
+      bridge.onExit(() => resolve());
+      try {
+        bridge.kill();
+      } catch (error) {
+        // A thrown termination request is not evidence that the child exited;
+        // keep tracking it until onExit (while close remains globally bounded).
+        logger.error(
+          `[WebUI] PTY child pid=${bridge.pid}: shutdown request failed (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
+    });
+    this.closingBridgeExits.add(exit);
+    void exit.finally(() => this.closingBridgeExits.delete(exit));
   }
 
   private isClosing(): boolean {

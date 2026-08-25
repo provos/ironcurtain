@@ -33,7 +33,7 @@ import type {
   EscalationPickerState,
 } from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
-import { formatRelativeTime, getWorkspaceLabel } from './session-scanner.js';
+import { formatRelativeTime, getWorkspaceLabel } from '../pty/session-scanner.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;

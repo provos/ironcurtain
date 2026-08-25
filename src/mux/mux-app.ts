@@ -16,7 +16,7 @@ import { writeTrustedUserContext } from '../escalation/trusted-input.js';
 import { createPasteInterceptor, type PasteInterceptor } from './paste-interceptor.js';
 import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
-import { scanResumableSessions } from './session-scanner.js';
+import { scanResumableSessions } from '../pty/session-scanner.js';
 import { scanPersonas } from './persona-scanner.js';
 import type { ProviderProfileSnapshot } from './provider-profile-snapshot.js';
 import ora from 'ora';

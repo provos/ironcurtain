@@ -14,7 +14,7 @@ import type { SessionSnapshot } from '../src/docker/pty-types.js';
 import { acquireResumeSessionLock, validateResumeSession } from '../src/docker/pty-session.js';
 import { prepareConversationStateDir } from '../src/docker/docker-infrastructure.js';
 import type { ConversationStateConfig } from '../src/docker/agent-adapter.js';
-import { scanResumableSessions } from '../src/mux/session-scanner.js';
+import { scanResumableSessions } from '../src/pty/session-scanner.js';
 import { getSessionDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
 
 function makeSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {

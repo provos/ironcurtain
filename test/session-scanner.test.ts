@@ -7,9 +7,9 @@ import {
   formatRelativeTime,
   shortenHomePath,
   getWorkspaceLabel,
-} from '../src/mux/session-scanner.js';
+} from '../src/pty/session-scanner.js';
 import { getSessionSandboxDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
-import type { SessionSnapshot } from '../src/mux/session-scanner.js';
+import type { SessionSnapshot } from '../src/pty/session-scanner.js';
 
 describe('session-scanner', () => {
   const testDir = resolve('/tmp', `ironcurtain-scanner-test-${process.pid}`);

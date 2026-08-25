@@ -29,7 +29,7 @@ import { ptyDispatch } from './pty-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
 import { validateResumeSession } from '../../docker/pty-session.js';
-import { getWorkspaceLabel, scanResumableSessions } from '../../mux/session-scanner.js';
+import { getWorkspaceLabel, scanResumableSessions } from '../../pty/session-scanner.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
 import { BudgetExhaustedError } from '../../types/errors.js';

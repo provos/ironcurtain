@@ -1,9 +1,8 @@
 /**
- * Session scanner -- discovers resumable sessions from disk.
+ * Session scanner -- discovers resumable PTY sessions from disk.
  *
- * Reads `session-state.json` files from the sessions directory,
- * filters for resumable sessions, and returns them sorted by
- * last activity (most recent first).
+ * This module is shared by the mux and Web UI layers, so neither interactive
+ * frontend needs to import the other.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
@@ -75,9 +74,7 @@ export function getWorkspaceLabel(s: SessionSnapshot): string | undefined {
   return shortenHomePath(s.workspacePath);
 }
 
-/**
- * Formats a relative time description for display (e.g., "2h ago", "3d ago").
- */
+/** Formats a relative time description for display (e.g., "2h ago", "3d ago"). */
 export function formatRelativeTime(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime();
   if (isNaN(diff)) return 'unknown';
