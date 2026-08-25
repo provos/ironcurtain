@@ -28,8 +28,7 @@ import { tokenStreamDispatch } from './token-stream-dispatch.js';
 import { ptyDispatch } from './pty-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
-import { validateResumeSession } from '../../docker/pty-session.js';
-import { getWorkspaceLabel, scanResumableSessions } from '../../pty/session-scanner.js';
+import { getWorkspaceLabel, scanResumableSessions, validateResumeSession } from '../../pty/session-scanner.js';
 import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
 import { BudgetExhaustedError } from '../../types/errors.js';
@@ -194,26 +193,24 @@ function listSessions(ctx: DispatchContext): SessionDto[] {
 }
 
 function listResumableSessions(ctx: DispatchContext): ResumableSessionDto[] {
+  if (ctx.mode.kind !== 'docker') {
+    throw new RpcError('SESSION_NOT_RESUMABLE', 'Session resume requires container mode');
+  }
   const protectedPaths = loadConfig().protectedPaths;
   const result: ResumableSessionDto[] = [];
-  for (const candidate of scanResumableSessions()) {
-    if (ctx.ptySessionManager?.isResuming(candidate.sessionId)) continue;
-    try {
-      const snapshot = validateResumeSession(candidate.sessionId, protectedPaths);
-      const workspaceLabel = getWorkspaceLabel(snapshot);
-      result.push({
-        sessionId: snapshot.sessionId,
-        displayName: snapshot.label,
-        agent: snapshot.agent,
-        status: snapshot.status,
-        lastActivity: snapshot.lastActivity,
-        ...(workspaceLabel ? { workspaceLabel } : {}),
-        ...(snapshot.persona ? { persona: snapshot.persona } : {}),
-        ...(snapshot.providerProfileName ? { providerProfileName: snapshot.providerProfileName } : {}),
-      });
-    } catch {
-      // A stale, corrupted, or newly unsafe snapshot is not advertised.
-    }
+  for (const snapshot of scanResumableSessions(protectedPaths)) {
+    if (ctx.ptySessionManager?.isResuming(snapshot.sessionId)) continue;
+    const workspaceLabel = getWorkspaceLabel(snapshot);
+    result.push({
+      sessionId: snapshot.sessionId,
+      displayName: snapshot.label,
+      agent: snapshot.agent,
+      status: snapshot.status,
+      lastActivity: snapshot.lastActivity,
+      ...(workspaceLabel ? { workspaceLabel } : {}),
+      ...(snapshot.persona ? { persona: snapshot.persona } : {}),
+      ...(snapshot.providerProfileName ? { providerProfileName: snapshot.providerProfileName } : {}),
+    });
   }
   return result;
 }

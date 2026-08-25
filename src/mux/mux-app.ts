@@ -454,7 +454,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         const directId = args[0];
         if (directId) {
           // Direct resume by session ID
-          const sessions = scanResumableSessions();
+          const sessions = scanResumableSessions(protectedPaths);
           const match = sessions.find((s) => s.sessionId.startsWith(directId));
           if (!match) {
             showMessage(`No resumable session matching "${directId}"`);
@@ -464,7 +464,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           break;
         }
         // Open the resume picker
-        const sessions = scanResumableSessions();
+        const sessions = scanResumableSessions(protectedPaths);
         if (sessions.length === 0) {
           showMessage('No resumable sessions found');
           break;

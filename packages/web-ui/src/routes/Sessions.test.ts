@@ -165,7 +165,7 @@ describe('Sessions create flow guards', () => {
     await fireEvent.click(screen.getByTestId('launch-start'));
 
     expect(mockCreateSession).not.toHaveBeenCalled();
-    expect(screen.getByText(/daemon session-mode support/i)).toBeTruthy();
+    expect(screen.getByText(/web sessions require daemon session-mode support/i)).toBeTruthy();
     expect(screen.queryByText(/container mode enabled/i)).toBeNull();
   });
 
@@ -177,6 +177,27 @@ describe('Sessions create flow guards', () => {
 
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(screen.getByText(/container mode enabled/i)).toBeTruthy();
+  });
+
+  it('waits for daemon status before describing resume availability', () => {
+    mockAppState.daemonStatus = null;
+    render(Sessions);
+
+    expect(screen.getByTestId('resume-open')).toHaveProperty('disabled', true);
+    expect(screen.getByText(/daemon status is not available yet/i)).toBeTruthy();
+    expect(screen.queryByText(/session resume requires container mode/i)).toBeNull();
+  });
+
+  it('distinguishes unsupported and builtin daemon modes for resume', () => {
+    mockAppState.daemonStatus = makeStatus();
+    const rendered = render(Sessions);
+
+    expect(screen.getByText(/session resume requires daemon session-mode support/i)).toBeTruthy();
+
+    rendered.unmount();
+    mockAppState.daemonStatus = makeStatus('builtin');
+    render(Sessions);
+    expect(screen.getByText(/session resume requires container mode/i)).toBeTruthy();
   });
 
   it('loads resumable sessions on demand and selects the resumed terminal', async () => {
@@ -214,5 +235,30 @@ describe('Sessions create flow guards', () => {
 
     await waitFor(() => expect(mockListResumableSessions).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('No resumable sessions')).toBeTruthy();
+  });
+
+  it('clears a stale resume-action error when refreshing the saved-session list', async () => {
+    mockListResumableSessions
+      .mockResolvedValueOnce([
+        {
+          sessionId: 'stale-session',
+          displayName: 'Stale session',
+          agent: 'claude-code',
+          status: 'user-exit',
+          lastActivity: new Date().toISOString(),
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    mockResumeSession.mockRejectedValueOnce(new Error('That session is already active'));
+    render(Sessions);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume previous…' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Resume Stale session' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('already active');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
+
+    expect(await screen.findByText('No resumable sessions')).toBeTruthy();
+    expect(screen.queryByText(/already active/i)).toBeNull();
   });
 });

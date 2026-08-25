@@ -488,6 +488,8 @@ function buildDockerSessionConfig(workspaceDir: string, generatedDir: string): I
       },
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: false },
+      modelProviders: { default: 'native', profiles: { native: { type: 'native' } } },
+      statistics: { enabled: false, retentionDays: null },
       memory: { enabled: false, llmBaseUrl: undefined, llmApiKey: undefined },
       packageInstall: {
         enabled: false,

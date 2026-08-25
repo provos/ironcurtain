@@ -480,6 +480,7 @@ export class PtySessionManager {
     }
     if (resumeSessionId) this.activeResumeIds.add(resumeSessionId);
     this.pendingCreates++;
+    let claimTransferredToSession = false;
 
     try {
       await this.preflight();
@@ -529,8 +530,18 @@ export class PtySessionManager {
       // idle backstop guards against a browser that crashes between create and
       // attach; the first attach cancels it.
       this.sessions.set(label, session);
+      claimTransferredToSession = true;
       this.startIdleTimer(label);
-      this.eventBus.emit('session.created', toPtySessionDto(session));
+      try {
+        this.eventBus.emit('session.created', toPtySessionDto(session));
+      } catch (error) {
+        // Event delivery is observational: a broken WebSocket/subscriber must
+        // not unwind registration, release the resume claim, or orphan a live
+        // child before its exit handler is installed.
+        logger.error(
+          `[WebUI] PTY session #${label}: session.created delivery failed (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
 
       bridge.onData((chunk) => session.pushChunk(chunk));
       bridge.onExit(() => this.handleExit(label));
@@ -543,7 +554,7 @@ export class PtySessionManager {
       });
       return { label };
     } catch (error) {
-      if (resumeSessionId) this.activeResumeIds.delete(resumeSessionId);
+      if (resumeSessionId && !claimTransferredToSession) this.activeResumeIds.delete(resumeSessionId);
       throw error;
     } finally {
       this.pendingCreates--;

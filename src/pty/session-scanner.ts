@@ -5,23 +5,74 @@
  * frontend needs to import the other.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { getSessionsDir, getSessionSandboxDir, SESSION_STATE_FILENAME } from '../config/paths.js';
+import { getSessionDir, getSessionsDir, getSessionSandboxDir, SESSION_STATE_FILENAME } from '../config/paths.js';
 import { isSessionSnapshot, type SessionSnapshot } from '../docker/pty-types.js';
+import { validateWorkspacePath } from '../session/workspace-validation.js';
 
 export type { SessionSnapshot } from '../docker/pty-types.js';
 
-function isResumableSnapshot(value: unknown, directoryName: string): value is SessionSnapshot {
-  return isSessionSnapshot(value) && value.resumable && value.sessionId === directoryName;
+function validateParsedResumeSession(
+  parsed: unknown,
+  resumeSessionId: string,
+  protectedPaths: string[],
+): SessionSnapshot {
+  const parsedSessionId =
+    typeof parsed === 'object' && parsed !== null ? (parsed as { sessionId?: unknown }).sessionId : undefined;
+  if (parsedSessionId !== resumeSessionId) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": snapshot sessionId mismatch`);
+  }
+  if (!isSessionSnapshot(parsed)) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session state snapshot is corrupted or invalid`);
+  }
+  if (!parsed.resumable) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session is not resumable (status: ${parsed.status})`);
+  }
+
+  try {
+    validateWorkspacePath(parsed.workspacePath, protectedPaths);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot resume session "${resumeSessionId}": workspace path is unsafe: ${detail}`, {
+      cause: error,
+    });
+  }
+
+  return parsed;
+}
+
+/**
+ * Loads and authoritatively validates one persisted session for resume.
+ * Direct launch callers must use this again even if the session was previously
+ * listed, because the mutable snapshot or workspace may have changed.
+ */
+export function validateResumeSession(resumeSessionId: string, protectedPaths: string[] = []): SessionSnapshot {
+  const sessionDir = getSessionDir(resumeSessionId);
+  if (!existsSync(sessionDir)) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session directory not found`);
+  }
+  const snapshotPath = resolve(sessionDir, SESSION_STATE_FILENAME);
+  if (!existsSync(snapshotPath)) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": no session state snapshot found`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(snapshotPath, 'utf-8')) as unknown;
+  } catch {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session state snapshot is corrupted or invalid`);
+  }
+  return validateParsedResumeSession(parsed, resumeSessionId, protectedPaths);
 }
 
 /**
  * Scans the sessions directory for resumable sessions.
+ * Applies the same snapshot and workspace checks as direct resume validation.
  * Returns snapshots sorted by lastActivity descending (most recent first).
  */
-export function scanResumableSessions(): SessionSnapshot[] {
+export function scanResumableSessions(protectedPaths: string[]): SessionSnapshot[] {
   const sessionsDir = getSessionsDir();
 
   let entries: string[];
@@ -34,13 +85,11 @@ export function scanResumableSessions(): SessionSnapshot[] {
   const snapshots: SessionSnapshot[] = [];
 
   for (const entry of entries) {
-    const statePath = resolve(sessionsDir, entry, SESSION_STATE_FILENAME);
     try {
+      const statePath = resolve(getSessionDir(entry), SESSION_STATE_FILENAME);
       const raw = readFileSync(statePath, 'utf-8');
       const snapshot: unknown = JSON.parse(raw);
-      if (isResumableSnapshot(snapshot, entry)) {
-        snapshots.push(snapshot);
-      }
+      snapshots.push(validateParsedResumeSession(snapshot, entry, protectedPaths));
     } catch {
       // Skip sessions without a valid state file
     }

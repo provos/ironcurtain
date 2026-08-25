@@ -45,15 +45,20 @@
   const resumeDisabledReason = $derived(
     !appState.connected
       ? 'Connect to the daemon to resume a session.'
-      : appState.daemonStatus?.sessionMode !== 'container'
-        ? 'Session resume requires container mode.'
-        : undefined,
+      : !appState.daemonStatus
+        ? 'Daemon status is not available yet. Wait for the daemon connection to finish.'
+        : appState.daemonStatus.sessionMode === undefined
+          ? 'Session resume requires daemon session-mode support. Upgrade or restart the daemon, then refresh this page.'
+          : appState.daemonStatus.sessionMode !== 'container'
+            ? 'Session resume requires container mode.'
+            : undefined,
   );
 
   async function loadResumable(): Promise<void> {
     const generation = ++resumeLoadGeneration;
     loadingResumable = true;
     resumeLoadError = '';
+    resumeActionError = '';
     try {
       const sessions = await listResumableSessions();
       if (generation === resumeLoadGeneration && resumeModalOpen) resumableSessions = sessions;

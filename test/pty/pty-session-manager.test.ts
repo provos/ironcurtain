@@ -277,6 +277,23 @@ describe('PtySessionManager', () => {
       await expect(h.manager.create(resume)).resolves.toEqual({ label: 2 });
     });
 
+    it('keeps the resume claim and exit wiring when session.created delivery throws', async () => {
+      const h = makeHarness();
+      h.eventBus.subscribe((event) => {
+        if (event === 'session.created') throw new Error('broadcast failed');
+      });
+      const resume = { resume: { sessionId: 'saved-session', agent: 'claude-code' } };
+
+      const first = await h.manager.create(resume);
+
+      expect(h.manager.has(first.label)).toBe(true);
+      await expect(h.manager.create(resume)).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+
+      h.lastBridge().emitExit(0);
+      expect(h.manager.has(first.label)).toBe(false);
+      await expect(h.manager.create(resume)).resolves.toEqual({ label: 2 });
+    });
+
     it('releases a resume claim when bridge creation fails', async () => {
       const createBridge = vi
         .fn<(options: PtyBridgeOptions) => Promise<PtyBridge>>()
@@ -1284,6 +1301,9 @@ describe('sessions resume RPC', () => {
     const ctx = makeResumeContext();
     const builtinCtx = { ...ctx, mode: { kind: 'builtin' } as const };
 
+    await expect(sessionDispatch(builtinCtx, 'sessions.listResumable', {})).rejects.toMatchObject({
+      code: 'SESSION_NOT_RESUMABLE',
+    });
     await expect(
       sessionDispatch(builtinCtx, 'sessions.resume', { sessionId: 'missing-session' }),
     ).rejects.toMatchObject({

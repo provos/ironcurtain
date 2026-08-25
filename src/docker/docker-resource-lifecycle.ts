@@ -186,15 +186,17 @@ function defaultPidAlive(pid: number): boolean {
   }
 }
 
-function ownerIsAlive(
+type OwnerLeaseStatus = 'alive' | 'dead' | 'unattributed';
+
+function ownerLeaseStatus(
   labels: Readonly<Record<string, string>>,
   pidAlive: (pid: number) => boolean,
   processIdentity: (pid: number) => ProcessIdentity | undefined,
   root = leaseRoot(),
-): boolean {
+): OwnerLeaseStatus {
   const pid = Number(labels[IRONCURTAIN_OWNER_PID_LABEL]);
   const token = labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !token || !pidAlive(pid)) return false;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !token || !pidAlive(pid)) return 'dead';
   try {
     const lease = JSON.parse(readFileSync(resolve(root, `${token}.json`), 'utf8')) as {
       token?: unknown;
@@ -207,35 +209,37 @@ function ownerIsAlive(
       typeof lease.identity?.bootId !== 'string' ||
       typeof lease.identity.startedAt !== 'string'
     ) {
-      return false;
+      return 'unattributed';
     }
     const currentIdentity = processIdentity(pid);
-    return (
-      currentIdentity !== undefined &&
-      currentIdentity.bootId === lease.identity.bootId &&
-      currentIdentity.startedAt === lease.identity.startedAt
-    );
+    if (currentIdentity === undefined) return 'unattributed';
+    return currentIdentity.bootId === lease.identity.bootId && currentIdentity.startedAt === lease.identity.startedAt
+      ? 'alive'
+      : 'dead';
   } catch {
-    return false;
+    return 'unattributed';
   }
 }
 
 /**
- * Foreign-home resources are never ours to reclaim. Resources created before
- * the scope label existed are retained while their recorded PID is alive; this
- * conservative migration rule protects an already-running older IronCurtain
- * session from a newer test or installation using a different home.
+ * Foreign-home resources are never ours to reclaim.
  */
-function belongsToForeignScopeOrLiveLegacy(
-  labels: Readonly<Partial<Record<string, string>>>,
-  pidAlive: (pid: number) => boolean,
-  ownerScope: string,
-): boolean {
+function belongsToForeignScope(labels: Readonly<Partial<Record<string, string>>>, ownerScope: string): boolean {
   const scope = labels[IRONCURTAIN_OWNER_SCOPE_LABEL];
-  if (scope !== undefined) return scope !== ownerScope;
+  return scope !== undefined && scope !== ownerScope;
+}
 
-  const pid = Number(labels[IRONCURTAIN_OWNER_PID_LABEL]);
-  return Number.isSafeInteger(pid) && pid > 0 && pidAlive(pid);
+/**
+ * Conservatively protects a resource created before owner scopes were labeled
+ * when the current home cannot attribute it. A missing or unreadable lease may
+ * live under another IRONCURTAIN_HOME, so only a readable local lease with a
+ * mismatched process identity is proof that its PID was recycled.
+ */
+function legacyOwnerMayBeAlive(
+  labels: Readonly<Partial<Record<string, string>>>,
+  leaseStatus: OwnerLeaseStatus,
+): boolean {
+  return labels[IRONCURTAIN_OWNER_SCOPE_LABEL] === undefined && leaseStatus === 'unattributed';
 }
 
 interface ReconcileOptions {
@@ -319,11 +323,16 @@ export async function reconcileIronCurtainDockerResources(
 
     const managedContainers = await docker.listContainers?.({ labelFilter: `${IRONCURTAIN_MANAGED_LABEL}=true` });
     for (const container of managedContainers ?? []) {
-      if (belongsToForeignScopeOrLiveLegacy(container.labels, pidAlive, ownerScope)) {
+      if (belongsToForeignScope(container.labels, ownerScope)) {
         retainedActiveResources++;
         continue;
       }
-      if (ownerIsAlive(container.labels, pidAlive, processIdentity)) {
+      const leaseStatus = ownerLeaseStatus(container.labels, pidAlive, processIdentity);
+      if (leaseStatus === 'alive') {
+        retainedActiveResources++;
+        continue;
+      }
+      if (legacyOwnerMayBeAlive(container.labels, leaseStatus)) {
         retainedActiveResources++;
         continue;
       }
@@ -351,11 +360,16 @@ export async function reconcileIronCurtainDockerResources(
       const legacy = !managed && LEGACY_NETWORK_RE.test(network.name);
       if (!managed && !legacy) continue;
 
-      if (managed && belongsToForeignScopeOrLiveLegacy(network.labels, pidAlive, ownerScope)) {
+      if (managed && belongsToForeignScope(network.labels, ownerScope)) {
         retainedActiveResources++;
         continue;
       }
-      if (managed && ownerIsAlive(network.labels, pidAlive, processIdentity)) {
+      const leaseStatus = managed ? ownerLeaseStatus(network.labels, pidAlive, processIdentity) : 'dead';
+      if (managed && leaseStatus === 'alive') {
+        retainedActiveResources++;
+        continue;
+      }
+      if (managed && legacyOwnerMayBeAlive(network.labels, leaseStatus)) {
         retainedActiveResources++;
         continue;
       }

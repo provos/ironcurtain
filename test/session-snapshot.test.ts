@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionSnapshot } from '../src/docker/pty-types.js';
 import { SESSION_STATE_FILENAME } from '../src/config/paths.js';
-import { validateResumeSession, loadSessionSnapshot, resolveSnapshotResumability } from '../src/docker/pty-session.js';
+import { loadSessionSnapshot, resolveSnapshotResumability } from '../src/docker/pty-session.js';
+import { validateResumeSession } from '../src/pty/session-scanner.js';
 
 /**
  * These tests verify session snapshot I/O and resume validation

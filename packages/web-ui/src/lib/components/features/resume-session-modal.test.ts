@@ -68,10 +68,13 @@ describe('ResumeSessionModal', () => {
     expect(screen.getByRole('button', { name: 'Close' })).toHaveProperty('disabled', true);
   });
 
-  it('keeps valid rows visible when a resume action fails', () => {
-    render(ResumeSessionModal, { props: props({ actionError: 'That session is already active' }) });
+  it('keeps valid rows visible and offers a refresh when a resume action fails', async () => {
+    const onretry = vi.fn();
+    render(ResumeSessionModal, { props: props({ actionError: 'That session is already active', onretry }) });
 
     expect(screen.getByRole('alert').textContent).toContain('already active');
     expect(screen.getByText('Claude Code session')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
+    expect(onretry).toHaveBeenCalledOnce();
   });
 });

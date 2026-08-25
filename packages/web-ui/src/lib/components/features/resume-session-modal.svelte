@@ -42,7 +42,12 @@
 
     <div class="min-h-0 flex-1 overflow-y-auto p-4" aria-busy={loading || resumingId !== null}>
       {#if actionError}
-        <Alert variant="destructive" class="mb-3 items-start">{actionError}</Alert>
+        <Alert variant="destructive" class="mb-3 items-start">
+          <div class="flex flex-col items-start gap-3">
+            <span>{actionError}</span>
+            <Button variant="outline" size="sm" onclick={onretry}>Refresh sessions</Button>
+          </div>
+        </Alert>
       {/if}
       {#if loading}
         <div
