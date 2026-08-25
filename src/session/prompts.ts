@@ -97,10 +97,7 @@ return content;
  * Context injected into the system prompt for cron-initiated sessions.
  */
 export interface CronPromptContext {
-  /** The English task description from the job definition. */
-  readonly taskDescription: string;
-
-  /** Absolute path to the persistent workspace directory. */
+  /** Workspace path visible to the agent. */
   readonly workspacePath: string;
 }
 
@@ -113,16 +110,12 @@ export function buildCronSystemPromptAugmentation(context: CronPromptContext): s
 
 You are running as an automated scheduled task. There is no interactive user present.
 
-### Your Task
-
-${context.taskDescription}
-
 ### Workspace
 
 Your persistent workspace is: ${context.workspacePath}
 This directory persists across runs. Use it for cross-run state:
 
-- **workspace/last-run.md** -- Write a structured summary here before finishing. Include:
+- **last-run.md** -- Write a structured summary in the workspace root before finishing. Include:
   - Date and time of this run
   - Actions taken (with counts: "Labeled 12 issues, commented on 3, closed 1")
   - Any issues encountered or items skipped
@@ -133,5 +126,5 @@ This directory persists across runs. Use it for cross-run state:
 - If a tool call is denied, do NOT retry it. Note the denial in your summary and continue with other work.
 - If a tool call requires approval and no human responds in time, it will be auto-denied. Continue without that operation.
 - Work efficiently: this is a recurring job, not an exploration. Focus on the task.
-- Always write workspace/last-run.md before finishing, even if the task failed.`;
+- Always write last-run.md in the workspace root before finishing, even if the task failed.`;
 }

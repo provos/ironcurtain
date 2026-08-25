@@ -35,6 +35,7 @@ import { BudgetExhaustedError } from '../types/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
 import { getDaemonLogPath } from '../config/paths.js';
+import { CONTAINER_WORKSPACE_DIR } from '../docker/agent-adapter.js';
 import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
 import type { LlmMetricsRuntimeLease } from '../llm-metrics/runtime.js';
@@ -537,8 +538,7 @@ export class IronCurtainDaemon {
 
     // Build system prompt augmentation
     const augmentation = buildCronSystemPromptAugmentation({
-      taskDescription: job.taskDescription,
-      workspacePath: workspace,
+      workspacePath: this.mode.kind === 'docker' ? CONTAINER_WORKSPACE_DIR : workspace,
     });
 
     // Create the headless transport. The job is already loaded; pass

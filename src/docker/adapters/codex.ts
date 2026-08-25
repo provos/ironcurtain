@@ -28,7 +28,7 @@ import { parseModelId } from '../../config/model-provider.js';
 import {
   buildAttributionSection,
   buildCheckPtySizeScript,
-  buildNetworkSection,
+  buildWorkspaceAccessSection,
   buildNestedDockerSection,
   buildPolicySection,
   buildResizePtyScript,
@@ -47,20 +47,7 @@ function tomlString(value: string): string {
 function buildCodexDockerEnvironmentPrompt(context: OrientationContext): string {
   return `## Docker Environment
 
-### Workspace (\`${context.workspaceDir}\`)
-This is your workspace inside the container. You have full access here.
-For local file operations inside ${context.workspaceDir}, use your built-in shell tools.
-
-### External Operations (MCP tools)
-Use the IronCurtain MCP server for operations that require external access:
-- Network requests (HTTP fetches, web searches, API calls)
-- Git remote operations (clone, push, pull, fetch)
-- Reading files outside ${context.workspaceDir}
-
-After cloning a repo or writing files via MCP tools, use your built-in
-tools for subsequent file operations.
-
-${buildNetworkSection('the IronCurtain MCP tools')}
+${buildWorkspaceAccessSection(context, 'built-in shell tools', 'IronCurtain MCP tools')}
 ${buildNestedDockerSection(context)}
 ${buildPolicySection('MCP tool call')}
 ${buildAttributionSection()}`;
@@ -207,7 +194,7 @@ export function createCodexAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     buildSystemPrompt(context: OrientationContext): string {
-      const codeModePrompt = buildSystemPrompt(context.serverListings, context.hostSandboxDir);
+      const codeModePrompt = buildSystemPrompt(context.serverListings);
       const dockerPrompt = buildCodexDockerEnvironmentPrompt(context);
       return `${codeModePrompt}\n${dockerPrompt}`;
     },

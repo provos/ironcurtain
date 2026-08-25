@@ -38,7 +38,6 @@ async function main(): Promise<void> {
   // --- Docker agent session prompt (Claude Code adapter) ---
   const orientationContext: OrientationContext = {
     workspaceDir: CONTAINER_WORKSPACE_DIR,
-    hostSandboxDir: config.allowedDirectory,
     serverListings,
     allowedDomains: extractAllowedDomains(config),
     networkMode: 'none',

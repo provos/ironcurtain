@@ -10,7 +10,6 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 
 const sampleContext: OrientationContext = {
   workspaceDir: CONTAINER_WORKSPACE_DIR,
-  hostSandboxDir: '/home/user/.ironcurtain/sessions/test/sandbox',
   serverListings: [{ name: 'filesystem', description: 'Read, write, and manage files' }],
   allowedDomains: ['example.com'],
   networkMode: 'none',
@@ -132,9 +131,11 @@ done
   it('builds system prompt with Docker and policy guidance', () => {
     const prompt = adapter.buildSystemPrompt(sampleContext);
     expect(prompt).toContain('help.help');
-    expect(prompt).toContain('/workspace');
-    expect(prompt).toContain('NO direct internet access');
-    expect(prompt).toContain('Policy Enforcement');
+    expect(prompt).toContain('Your workspace is `/workspace`');
+    expect(prompt).toContain('It is backed by the host workspace');
+    expect(prompt).not.toContain('Your sandbox directory is:');
+    expect(prompt).toContain('no direct internet access');
+    expect(prompt).toContain('### Policy');
     expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
   });
 

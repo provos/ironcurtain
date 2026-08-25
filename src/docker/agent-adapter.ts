@@ -184,8 +184,6 @@ export interface AgentConfigFile {
 export interface OrientationContext {
   /** The sandbox directory path inside the container. */
   readonly workspaceDir: string;
-  /** The host-side path that is bind-mounted as workspaceDir. */
-  readonly hostSandboxDir: string;
   /** Server listings for progressive tool disclosure. */
   readonly serverListings: ServerListing[];
   /** Domains the agent may access via fetch MCP tool. */

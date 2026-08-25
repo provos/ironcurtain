@@ -17,7 +17,6 @@ const sampleServerListings: ServerListing[] = [{ name: 'filesystem', description
 
 const sampleContext: OrientationContext = {
   workspaceDir: CONTAINER_WORKSPACE_DIR,
-  hostSandboxDir: '/home/user/.ironcurtain/sessions/test/sandbox',
   serverListings: sampleServerListings,
   allowedDomains: ['example.com'],
   networkMode: 'none',
@@ -223,9 +222,11 @@ describe('GooseAdapter.buildCommand', () => {
 describe('GooseAdapter.buildSystemPrompt', () => {
   const adapter = createGooseAdapter();
 
-  it('contains workspace path', () => {
+  it('contains only the container-visible workspace path', () => {
     const prompt = adapter.buildSystemPrompt(sampleContext);
-    expect(prompt).toContain('/workspace');
+    expect(prompt).toContain('Your workspace is `/workspace`');
+    expect(prompt).toContain('It is backed by the host workspace');
+    expect(prompt).not.toContain('Your sandbox directory is:');
   });
 
   it('contains MCP tool guidance', () => {
@@ -243,14 +244,14 @@ describe('GooseAdapter.buildSystemPrompt', () => {
 
   it('contains policy enforcement explanation', () => {
     const prompt = adapter.buildSystemPrompt(sampleContext);
-    expect(prompt).toContain('Policy Enforcement');
-    expect(prompt).toContain('Denied');
-    expect(prompt).toContain('Escalated');
+    expect(prompt).toContain('### Policy');
+    expect(prompt).toContain('denied');
+    expect(prompt).toContain('escalated');
   });
 
-  it('contains NO direct internet access warning', () => {
+  it('contains direct internet access warning', () => {
     const prompt = adapter.buildSystemPrompt(sampleContext);
-    expect(prompt).toContain('NO direct internet access');
+    expect(prompt).toContain('no direct internet access');
     expect(prompt).not.toContain('IRONCURTAIN_DOCKER_NETWORK');
   });
 

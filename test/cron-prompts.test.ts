@@ -9,13 +9,12 @@ import type { CronPromptContext } from '../src/session/prompts.js';
 
 describe('buildCronSystemPromptAugmentation', () => {
   const baseContext: CronPromptContext = {
-    taskDescription: 'Label all open GitHub issues that are older than 7 days',
     workspacePath: '/home/user/.ironcurtain/jobs/label-issues/workspace',
   };
 
-  it('includes the task description', () => {
+  it('does not duplicate the task description sent as the user message', () => {
     const prompt = buildCronSystemPromptAugmentation(baseContext);
-    expect(prompt).toContain('Label all open GitHub issues that are older than 7 days');
+    expect(prompt).not.toContain('Your Task');
   });
 
   it('includes the workspace path', () => {
@@ -44,29 +43,27 @@ describe('buildCronSystemPromptAugmentation', () => {
 
   it('produces different output for different contexts', () => {
     const ctx1: CronPromptContext = {
-      taskDescription: 'Task A',
       workspacePath: '/path/a',
     };
     const ctx2: CronPromptContext = {
-      taskDescription: 'Task B',
       workspacePath: '/path/b',
     };
     const prompt1 = buildCronSystemPromptAugmentation(ctx1);
     const prompt2 = buildCronSystemPromptAugmentation(ctx2);
 
     expect(prompt1).not.toBe(prompt2);
-    expect(prompt1).toContain('Task A');
-    expect(prompt2).toContain('Task B');
+    expect(prompt1).toContain('/path/a');
+    expect(prompt2).toContain('/path/b');
   });
 
-  it('handles multi-line task descriptions', () => {
+  it('uses the container-visible workspace path when provided', () => {
     const ctx: CronPromptContext = {
-      taskDescription: 'Step 1: Do this\nStep 2: Do that\nStep 3: Report',
       workspacePath: '/workspace',
     };
     const prompt = buildCronSystemPromptAugmentation(ctx);
-    expect(prompt).toContain('Step 1: Do this');
-    expect(prompt).toContain('Step 3: Report');
+    expect(prompt).toContain('Your persistent workspace is: /workspace');
+    expect(prompt).toContain('last-run.md in the workspace root');
+    expect(prompt).not.toContain('workspace/last-run.md');
   });
 });
 

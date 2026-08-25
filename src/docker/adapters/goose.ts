@@ -32,7 +32,7 @@ import { resolveApiKeyForProvider } from '../../config/model-provider.js';
 import {
   buildResizePtyScript,
   buildCheckPtySizeScript,
-  buildNetworkSection,
+  buildWorkspaceAccessSection,
   buildNestedDockerSection,
   buildPolicySection,
   buildAttributionSection,
@@ -137,20 +137,7 @@ export function escapeHeredoc(content: string): { delimiter: string } {
 function buildGooseDockerEnvironmentPrompt(context: OrientationContext): string {
   return `## Docker Environment
 
-### Workspace (\`${context.workspaceDir}\`)
-This is your workspace inside the container. You have full access here.
-For local file operations inside ${context.workspaceDir}, use your built-in tools.
-
-### External Operations (MCP tools)
-Use the IronCurtain MCP extension for operations that require external access:
-- Network requests (HTTP fetches, web searches, API calls)
-- Git remote operations (clone, push, pull, fetch)
-- Reading files outside ${context.workspaceDir}
-
-After cloning a repo or writing files via MCP tools, use your built-in
-tools for subsequent file operations.
-
-${buildNetworkSection('the IronCurtain MCP tools')}
+${buildWorkspaceAccessSection(context, 'built-in tools', 'IronCurtain MCP tools')}
 ${buildNestedDockerSection(context)}
 ${buildPolicySection('MCP tool call')}
 ${buildAttributionSection()}`;
@@ -268,7 +255,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     buildSystemPrompt(context: OrientationContext): string {
-      const codeModePrompt = buildSystemPrompt(context.serverListings, context.hostSandboxDir);
+      const codeModePrompt = buildSystemPrompt(context.serverListings);
       const dockerPrompt = buildGooseDockerEnvironmentPrompt(context);
       return `${codeModePrompt}\n${dockerPrompt}`;
     },
