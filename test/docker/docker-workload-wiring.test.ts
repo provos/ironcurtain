@@ -29,7 +29,9 @@ import {
   createSessionContainers,
   destroyDockerInfrastructure,
   dockerWorkloadSessionMetadata,
+  ensureDockerDesktopSidecarImage,
   ledgerOuterResourceCreate,
+  selectDockerDesktopResourcePartition,
   selectOuterContainerResources,
   type DockerInfrastructure,
   type PreContainerInfrastructure,
@@ -977,5 +979,65 @@ describe('Docker-workload wiring — outer resource envelope', () => {
         { cpus: 8, memoryMb: 16_384 },
       ),
     ).toEqual({ memoryMb: 2048, cpus: 1.5 });
+  });
+
+  it('partitions the Docker Desktop aggregate without double-counting the sidecar', () => {
+    const partition = selectDockerDesktopResourcePartition(
+      {
+        dockerResources: { memoryMb: 7777, cpus: 7 },
+        dockerWorkload: {
+          enabled: true,
+          networkAccess: 'offline',
+          acceptObservedDiskRisk: true,
+          resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },
+        },
+      },
+      { cpus: 8, memoryMb: 16_384 },
+    );
+
+    expect(partition).toEqual({
+      sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: 512 },
+      agent: { memoryMb: 1024, cpus: 1 },
+    });
+    expect(partition.sidecar.memoryMb + (partition.agent.memoryMb ?? 0)).toBe(1536);
+    expect(partition.sidecar.cpus + (partition.agent.cpus ?? 0)).toBe(1.25);
+  });
+
+  it('fails a Docker Desktop aggregate that cannot leave bounded resources for both containers', () => {
+    expect(() =>
+      selectDockerDesktopResourcePartition(
+        {
+          dockerResources: { memoryMb: 7777, cpus: 7 },
+          dockerWorkload: {
+            enabled: true,
+            networkAccess: 'offline',
+            acceptObservedDiskRisk: true,
+            resources: { memoryMb: 768, cpus: 0.4, pids: { desired: 512, required: false }, diskMb: null },
+          },
+        },
+        { cpus: 8, memoryMb: 16_384 },
+      ),
+    ).toThrow(/requires at least 1024 MiB and 0\.5 CPU/u);
+  });
+
+  it('builds the purpose-built Desktop daemon once and reuses its hash-labeled image', async () => {
+    let storedHash: string | undefined;
+    const buildImage = vi.fn(
+      async (_tag: string, _dockerfile: string, _context: string, labels?: Record<string, string>) => {
+        storedHash = labels?.['ironcurtain.build-hash'];
+      },
+    );
+    const runtime = {
+      getImageLabel: vi.fn(async () => storedHash),
+      buildImage,
+    } as unknown as ContainerRuntime;
+
+    await expect(ensureDockerDesktopSidecarImage(runtime)).resolves.toBe('ironcurtain-nested-daemon:latest');
+    await expect(ensureDockerDesktopSidecarImage(runtime)).resolves.toBe('ironcurtain-nested-daemon:latest');
+
+    expect(buildImage).toHaveBeenCalledOnce();
+    expect(buildImage.mock.calls[0]?.[1]).toMatch(/docker\/nested-daemon\/Dockerfile$/u);
+    expect(buildImage.mock.calls[0]?.[2]).toMatch(/docker\/nested-daemon$/u);
+    expect(storedHash).toMatch(/^[a-f0-9]{64}$/u);
   });
 });

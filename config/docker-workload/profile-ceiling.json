@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "probe-only-dd-h1-h2-supported-not-qualified",
+  "status": "reviewed-dd-h3-sidecar-supported-not-qualified",
   "maximumArtifactsPerCategory": 1,
   "categories": {
     "idMap": {
@@ -42,7 +42,8 @@
           "setns",
           "umount",
           "umount2"
-        ]
+        ],
+        "nestedUtsLifecycle": ["sethostname"]
       },
       "forbidden": [
         "bpf",
@@ -60,7 +61,7 @@
       },
       "artifact": {
         "path": "config/docker-workload/seccomp/desktop-p2-userns.json",
-        "sha256": "e5be04f5d37728c4c863768deea26eae3e64c07437e11c7363cb6e5ee27f983f"
+        "sha256": "5693eddf4a993ba182346c7570def97b49d5b97c02b961f2329f47e5a629a5f5"
       },
       "additions": [
         {
@@ -104,6 +105,20 @@
             "source": "https://github.com/moby/moby/blob/11ee7e07df4203b65b9cb23302aed9f8d81af0b6/daemon/internal/mounttree/switchroot_linux.go"
           },
           "namespaceInterpretation": "PivotRoot is available only to Moby's unpack helper inside RootlessKit's nested user/mount namespace; chroot remains denied and outside the ceiling.",
+          "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
+        },
+        {
+          "syscall": "sethostname",
+          "arguments": "all",
+          "group": "nestedUtsLifecycle",
+          "denialEvidence": {
+            "runId": "codex-dd-functional-systempaths-0001",
+            "rootManifestSha256": "045d36989eded7c5048a838e23e4ff20404e4dd12cf0ec8af617cfa4c9838ccb",
+            "commandPath": "commands/45-inner-run-main.json",
+            "commandSha256": "3cf1f3f21ee573cfedb9b0f69189f40549ff9e568e741a7c384fae6cad3becd9",
+            "observation": "After the reviewed sidecar-only mount-mask exception allowed nested procfs creation, the first inner container failed at sethostname with EPERM under the prior P2 artifact"
+          },
+          "namespaceInterpretation": "SetHostname initializes only the inner container's UTS namespace inside the rootless daemon sidecar; the sidecar retains its private outer UTS namespace and no host namespace or capability is added.",
           "reviewerDisposition": "Eligible for the cumulative P2 probe only; this is not qualification approval."
         },
         {
@@ -157,9 +172,34 @@
       "additions": []
     },
     "mountMask": {
-      "eligibleEntryClasses": ["exact-bundle-private-run-or-data", "namespaced-nonsensitive-guest-proc-sys"],
+      "eligibleEntryClasses": [
+        "exact-bundle-private-run-or-data",
+        "namespaced-nonsensitive-guest-proc-sys",
+        "nested-daemon-sidecar-procfs"
+      ],
       "artifact": null,
-      "additions": []
+      "additions": [
+        {
+          "option": "systempaths=unconfined",
+          "scope": "docker-desktop-nested-daemon-sidecar-only",
+          "denialEvidence": {
+            "runId": "codex-dd-functional-baseline-0001",
+            "rootManifestSha256": "85b8d2ad16826d47450acff6fab2f769253895734452bfdbec5af0a2530ab8c1",
+            "commandPath": "commands/45-inner-run-main.json",
+            "commandSha256": "7ad475a45d6ca765d6c93645aee18acf512a9452a645d210764e107905701e3a",
+            "observation": "The first inner container failed because Docker's outer masked and read-only proc paths made the nested user-namespace procfs mount too revealing"
+          },
+          "positiveEvidence": {
+            "runId": "codex-dd-functional-systempaths-0008",
+            "rootManifestSha256": "f9eab292db802ea42b626a936e63b83d31c1642a823b3307bc2ee21a6e3869be",
+            "summaryPath": "summary.json",
+            "summarySha256": "98794ef41d7fd8d70ff23a835a9df74b1c9515735420debfd56f396624c28e8f",
+            "observation": "The functional sidecar probe passed staged load, run, exec, offline build, bind, volume, internal-network exchange, negative pull, and exact cleanup"
+          },
+          "boundary": "This exception applies only to the dedicated rootless nested-daemon sidecar with no outer network, host namespace, host runtime socket, device, SYS_ADMIN, NET_ADMIN, or broad bind. Agent containers retain Docker's default masked and read-only system paths.",
+          "reviewerDisposition": "Reviewed exception for the version-scoped Docker Desktop nested-daemon sidecar only; forbidden for agent and other containers."
+        }
+      ]
     }
   },
   "versionScope": {
@@ -179,7 +219,7 @@
     "device-or-fuse",
     "seccomp-unconfined",
     "apparmor-unconfined-or-complain",
-    "systempaths-unconfined",
+    "systempaths-unconfined-outside-reviewed-nested-daemon-sidecar",
     "direct-external-network"
   ]
 }

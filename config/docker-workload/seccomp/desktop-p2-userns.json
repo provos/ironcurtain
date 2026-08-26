@@ -912,6 +912,13 @@
       ],
       "action": "SCMP_ACT_ALLOW",
       "comment": "IronCurtain P2: denial-proven detached unmount of the old root after nested image-unpack pivot"
+    },
+    {
+      "names": [
+        "sethostname"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "IronCurtain P2: denial-proven inner UTS namespace hostname initialization"
     }
   ]
 }

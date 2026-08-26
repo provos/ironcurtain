@@ -46,8 +46,8 @@ import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import type { CertificateAuthority } from './ca.js';
-import type { ContainerRuntime } from './types.js';
-import { createContainerRuntime, type ContainerRuntimeKind } from './container-runtime.js';
+import type { ContainerRuntime, DockerNamedVolumeMount } from './types.js';
+import { createContainerRuntime, resolveRuntimeKind, type ContainerRuntimeKind } from './container-runtime.js';
 import type { HostOnlyNetwork, NetworkTopology } from './network-topology.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
 import { parseUpstreamBaseUrl, type AgentKind, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
@@ -62,7 +62,7 @@ import {
   withInternalNetworkAllocationRetry,
 } from './docker-resource-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
-import type { HostResources } from './resource-limits.js';
+import type { EffectiveDockerResources, HostResources } from './resource-limits.js';
 import { errorMessage } from '../utils/error-message.js';
 import { createCachedStager } from '../skills/staging.js';
 import type { ResolvedSkill } from '../skills/types.js';
@@ -76,6 +76,8 @@ import {
 import { getFrozenWatchdogPolicyTemplatePath, getIronCurtainPackageRoot } from './docker-workload-paths.js';
 import { prepareSelectedAgentArtifact, type SelectedAgentArtifact } from './selected-agent-artifact.js';
 import {
+  assertAdmittedDockerWorkloadRuntimeAvailable,
+  assertDockerWorkloadVariantAdmitted,
   formatDockerWorkloadStatus,
   type DockerWorkloadNetworkAccess,
   type ResolvedDockerWorkloadConfig,
@@ -86,6 +88,7 @@ import type {
   OuterResourceRole,
 } from '../docker-workload/infrastructure.js';
 import {
+  assertNestedDaemonBackendImplemented,
   nestedDaemonAgentEnv,
   resolveNestedDaemonBundle,
   startAppleVmDockerWorkload,
@@ -100,10 +103,15 @@ import { acquireLlmMetricsRuntime, type LlmMetricsRuntimeLease } from '../llm-me
 import { hasMetricsCapableCompletionEndpoint } from './llm-observation/completion-endpoint.js';
 import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+  APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
   appleVmDockerWorkloadArtifactMount,
   stageAppleVmDockerWorkloadBootstrap,
   type AppleVmDockerWorkloadBootstrapConfig,
 } from '../docker-workload/apple-private-docker.js';
+import type {
+  DockerDesktopSidecarHandle,
+  DockerDesktopSidecarResources,
+} from '../docker-workload/docker-desktop-sidecar.js';
 import type { ExpandedOuterCreate } from '../docker-workload/lifecycle-evidence.js';
 import {
   DOCKER_BUILD_PROXY_CONFIG_PATH,
@@ -417,6 +425,15 @@ export function stageDockerBuildShim(
  * `createDockerInfrastructure()` instead, which extends this with a
  * running container.
  */
+export type DockerDesktopAgentAccess = Pick<DockerDesktopSidecarHandle, 'dockerHost' | 'agentApiMount'> & {
+  readonly networkName: string;
+};
+
+export interface DockerDesktopResourcePartition {
+  readonly sidecar: DockerDesktopSidecarResources;
+  readonly agent: EffectiveDockerResources;
+}
+
 export interface PreContainerInfrastructure {
   /**
    * Stable key for this bundle. Used by:
@@ -620,14 +637,18 @@ export interface PreContainerInfrastructure {
    * (docs/designs/secure-nested-runtime-implementation-plan.md §8.2–8.3).
    * The host-owned lease handle: `createSessionContainers` / the PTY path
    * ledger every outer resource through it before create and observe it
-   * after (§8.2 step 1); the same-VM bootstrap activates it after private
-   * Docker is fully provisioned; `destroyDockerInfrastructure` tears it down
-   * first (§8.3). Undefined for every ordinary session. The resolved-variant
-   * guard currently admits only the explicit Apple developer slice.
+   * after (§8.2 step 1); the selected backend activates it after private
+   * Docker and the agent create are fully adjudicated;
+   * `destroyDockerInfrastructure` tears it down first (§8.3). Undefined for
+   * every ordinary session.
    */
   readonly dockerWorkload?: DockerWorkloadBundleHandle;
-  /** Immutable per-lease selected-agent artifact used only by an admitted Apple Docker workload. */
+  /** Immutable per-lease selected-agent artifact consumed by the selected nested-daemon backend. */
   readonly dockerWorkloadBootstrap?: AppleVmDockerWorkloadBootstrapConfig;
+  /** Private Docker Desktop API capability exposed to the agent after sidecar adjudication. */
+  readonly dockerDesktopAgentAccess?: DockerDesktopAgentAccess;
+  /** One aggregate Docker Desktop envelope partitioned between sidecar and agent. */
+  readonly dockerDesktopResources?: DockerDesktopResourcePartition;
   /** Exact per-bundle nested-Docker egress authorities, absent when offline. */
   readonly dockerWorkloadEgress?: DockerWorkloadEgressCollection;
   /** Package-only Docker shim, build-trust wrapper/contract, and credential-free client config. */
@@ -695,6 +716,23 @@ const CODEX_CHATGPT_HOSTS = new Set(['chatgpt.com', 'auth.openai.com']);
 
 /** Prefix for container/sidecar names. Keep in sync with `docker ps` filters. */
 const CONTAINER_NAME_PREFIX = 'ironcurtain-';
+
+const DOCKER_DESKTOP_SIDECAR_IMAGE = 'ironcurtain-nested-daemon:latest';
+const DOCKER_DESKTOP_SIDECAR_MEMORY_MB = 512;
+const DOCKER_DESKTOP_SIDECAR_CPUS = 0.25;
+const DOCKER_DESKTOP_MIN_AGGREGATE_MEMORY_MB = 1024;
+const DOCKER_DESKTOP_MIN_AGGREGATE_CPUS = 0.5;
+
+function assertDockerDesktopNetworkModeImplemented(
+  runtimeKind: ContainerRuntimeKind,
+  config: ResolvedDockerWorkloadConfig,
+): void {
+  if (runtimeKind !== 'docker' || !config.enabled || config.networkAccess === 'offline') return;
+  throw new Error(
+    'secure nested Docker on Docker Desktop currently supports only networkAccess "offline"; ' +
+      'DD-PROXY image and package mediation is not yet implemented and no sidecar was provisioned',
+  );
+}
 
 /** Host gateway alias used by Docker containers on macOS/Windows. */
 const DOCKER_HOST_GATEWAY = 'host.docker.internal';
@@ -788,14 +826,12 @@ export async function prepareDockerInfrastructure(
   // proxy, lease, or filesystem provisioning. Runtime resolution is a
   // read-only probe; ordinary CLI credential preflight is outside this seam.
   // Keep the feature-off path's historical profile/adapter/runtime ordering.
-  let admittedRuntimeKind: ContainerRuntimeKind | undefined;
-  if (config.userConfig.dockerWorkload?.enabled === true) {
-    const { resolveRuntimeKind } = await import('./container-runtime.js');
-    admittedRuntimeKind = await resolveRuntimeKind(config.userConfig.containerRuntime);
-    const { assertDockerWorkloadVariantAdmitted, assertAdmittedDockerWorkloadRuntimeAvailable } =
-      await import('../docker-workload/config.js');
-    assertDockerWorkloadVariantAdmitted(config.userConfig.dockerWorkload, admittedRuntimeKind);
-    await assertAdmittedDockerWorkloadRuntimeAvailable();
+  const admittedRuntimeKind = await resolveAdmittedDockerWorkloadRuntimeKind(config.userConfig);
+  let dockerDesktopResources: DockerDesktopResourcePartition | undefined;
+  if (admittedRuntimeKind !== undefined) {
+    if (admittedRuntimeKind === 'docker') {
+      dockerDesktopResources = selectDockerDesktopResourcePartition(config.userConfig);
+    }
     const nestedDockerStatus = formatDockerWorkloadStatus(config.userConfig.dockerWorkload);
     if (nestedDockerStatus) logger.info(nestedDockerStatus);
   }
@@ -913,16 +949,20 @@ export async function prepareDockerInfrastructure(
   // host-owned lease before any proxy or outer resource is created. Placed
   // here (after the runtime is resolved, before proxy startup) so the §8.2
   // ordering "lease -> proxies -> watchdog attestation" holds. The
-  // resolved-variant guard above limits this production path to the admitted
-  // Apple developer slice. `attestWatchdog()` (§8.2 step 3) is driven after
-  // the proxies start, below.
+  // resolved-variant guard above limits this production path to an admitted
+  // backend/mode. `attestWatchdog()` (§8.2 step 3) is driven after the proxies
+  // start, below.
   const dockerWorkloadConfig = config.userConfig.dockerWorkload;
   let dockerWorkloadAgentImage: string | undefined;
   let dockerWorkloadImageResolution: AgentImageResolution | undefined;
+  let dockerDesktopSidecarImage: string | undefined;
   let admittedDockerWorkload:
     | { readonly handle: DockerWorkloadBundleHandle; readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig }
     | undefined;
   if (dockerWorkloadConfig?.enabled === true) {
+    if (runtimeKind === 'docker') {
+      dockerDesktopSidecarImage = await ensureDockerDesktopSidecarImage(docker);
+    }
     dockerWorkloadAgentImage = await adapter.getImage();
     dockerWorkloadImageResolution = preparedImageResolution;
     if (dockerWorkloadImageResolution === undefined) {
@@ -960,6 +1000,7 @@ export async function prepareDockerInfrastructure(
   let metricsRuntime: LlmMetricsRuntimeLease | undefined;
   let dockerWorkloadEgress: DockerWorkloadEgressCollection | undefined;
   let dockerBuildShim: DockerBuildShimStaging | undefined;
+  let dockerDesktopAgentAccess: DockerDesktopAgentAccess | undefined;
   try {
     // tcp-hostonly: create the per-bundle host-only network BEFORE the
     // proxies are constructed. The gateway address feeds the container env,
@@ -1266,6 +1307,31 @@ export async function prepareDockerInfrastructure(
     // reconciliation cannot be relied on for a post-attestation failure.
     await dockerWorkload?.attestWatchdog();
 
+    if (runtimeKind === 'docker' && dockerWorkload !== undefined) {
+      if (
+        dockerWorkloadBootstrap === undefined ||
+        dockerDesktopSidecarImage === undefined ||
+        dockerDesktopResources === undefined
+      ) {
+        throw new Error('Docker Desktop nested-Docker preparation is missing its staged artifact, image, or resources');
+      }
+      const { requireDockerDesktopSidecarRuntime, startDockerDesktopSidecar } =
+        await import('../docker-workload/docker-desktop-sidecar.js');
+      const sidecar = await startDockerDesktopSidecar({
+        runtime: requireDockerDesktopSidecarRuntime(docker),
+        sidecarImage: dockerDesktopSidecarImage,
+        bootstrap: dockerWorkloadBootstrap,
+        resources: dockerDesktopResources.sidecar,
+        createOuterResource: (spec, create) => ledgerOuterResourceCreate(dockerWorkload, spec, create),
+        activation: dockerWorkload,
+      });
+      dockerDesktopAgentAccess = {
+        dockerHost: sidecar.dockerHost,
+        networkName: sidecar.network.name,
+        agentApiMount: sidecar.agentApiMount,
+      };
+    }
+
     // Build orientation
     const helpData = proxy.getHelpData();
     const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
@@ -1293,7 +1359,7 @@ export async function prepareDockerInfrastructure(
         throw new Error('admitted nested-Docker handle is missing its resolved enabled configuration');
       }
       nestedDocker = {
-        networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+        networkName: dockerDesktopAgentAccess?.networkName ?? APPLE_VM_DOCKER_WORKLOAD_NETWORK,
         networkAccess: dockerWorkloadConfig.networkAccess,
       };
     }
@@ -1397,6 +1463,8 @@ export async function prepareDockerInfrastructure(
       ...workflowDependencyMounts,
       dockerWorkload,
       dockerWorkloadBootstrap,
+      dockerDesktopAgentAccess,
+      dockerDesktopResources,
       dockerWorkloadEgress,
       dockerBuildShim,
       restageSkills,
@@ -1948,6 +2016,45 @@ export function selectOuterContainerResources(
   return clampDockerResources(configured, hostResources).effective;
 }
 
+/**
+ * Partition one aggregate Docker Desktop nested-workload envelope. The fixed
+ * daemon reserve is deliberately small but nonzero; the agent receives the
+ * exact remainder, so the two outer `--memory`/`--cpus` declarations never
+ * exceed the operator-selected total. Apple keeps its existing single-VM
+ * envelope and does not call this helper.
+ */
+export function selectDockerDesktopResourcePartition(
+  userConfig: Pick<ResolvedUserConfig, 'dockerResources' | 'dockerWorkload'>,
+  hostResources?: HostResources,
+): DockerDesktopResourcePartition {
+  if (userConfig.dockerWorkload?.enabled !== true) {
+    throw new Error('Docker Desktop resource partition requires an enabled nested-Docker workload');
+  }
+  const aggregate = selectOuterContainerResources(userConfig, hostResources);
+  const memoryMb = aggregate.memoryMb;
+  const cpus = aggregate.cpus;
+  if (memoryMb === undefined || cpus === undefined) {
+    throw new Error('Docker Desktop nested Docker requires finite aggregate memory and CPU limits');
+  }
+  if (memoryMb < DOCKER_DESKTOP_MIN_AGGREGATE_MEMORY_MB || cpus < DOCKER_DESKTOP_MIN_AGGREGATE_CPUS) {
+    throw new Error(
+      `Docker Desktop nested Docker requires at least ${DOCKER_DESKTOP_MIN_AGGREGATE_MEMORY_MB} MiB and ` +
+        `${DOCKER_DESKTOP_MIN_AGGREGATE_CPUS} CPU in dockerWorkload.resources`,
+    );
+  }
+  return {
+    sidecar: {
+      memoryMb: DOCKER_DESKTOP_SIDECAR_MEMORY_MB,
+      cpus: DOCKER_DESKTOP_SIDECAR_CPUS,
+      pidsLimit: userConfig.dockerWorkload.resources.pids.desired,
+    },
+    agent: {
+      memoryMb: memoryMb - DOCKER_DESKTOP_SIDECAR_MEMORY_MB,
+      cpus: cpus - DOCKER_DESKTOP_SIDECAR_CPUS,
+    },
+  };
+}
+
 interface DockerWorkloadAdmissionForSessionOptions {
   readonly dockerWorkload: Extract<ResolvedDockerWorkloadConfig, { enabled: true }>;
   readonly runtime: ContainerRuntime;
@@ -1972,8 +2079,6 @@ async function admitDockerWorkloadForSession(options: DockerWorkloadAdmissionFor
   const { admitDockerWorkloadBundle } = await import('../docker-workload/infrastructure.js');
   const { createJsonlDockerWorkloadAuditSink } = await import('../docker-workload/lifecycle-evidence.js');
   const { dockerWorkloadConfigHash } = await import('../docker-workload/config.js');
-  const { assertNestedDaemonBackendImplemented } = await import('../docker-workload/session-daemon.js');
-
   assertNestedDaemonBackendImplemented(options.runtimeKind);
   const configHash = dockerWorkloadConfigHash(options.dockerWorkload);
   const packageRoot = getIronCurtainPackageRoot();
@@ -2072,6 +2177,69 @@ export function buildUdsSocketMounts(
   return [{ source: socketsDir, target: CONTAINER_SOCKETS_DIR, readonly: false }];
 }
 
+export interface NestedDockerAgentWiring {
+  readonly appleNestedDaemon: DockerWorkloadBundleHandle | undefined;
+  readonly env: Readonly<Record<string, string>>;
+  readonly namedVolumeMounts: readonly DockerNamedVolumeMount[];
+}
+
+/** Resolve the backend-specific private-Docker capability exposed to an agent. */
+export function resolveNestedDockerAgentWiring(
+  core: Pick<
+    PreContainerInfrastructure,
+    'runtimeKind' | 'dockerWorkload' | 'dockerWorkloadBootstrap' | 'dockerDesktopAgentAccess'
+  >,
+): NestedDockerAgentWiring {
+  const appleNestedDaemon = resolveNestedDaemonBundle(core.dockerWorkload, core.runtimeKind);
+  if (core.dockerWorkload === undefined) {
+    if (core.dockerWorkloadBootstrap !== undefined || core.dockerDesktopAgentAccess !== undefined) {
+      throw new Error('nested-Docker staging or API access exists without an admitted workload');
+    }
+    return { appleNestedDaemon, env: {}, namedVolumeMounts: [] };
+  }
+  if (core.dockerWorkloadBootstrap === undefined) {
+    throw new Error('admitted nested Docker is missing its staged selected-agent artifact');
+  }
+
+  if (core.runtimeKind === 'apple-container') {
+    if (core.dockerDesktopAgentAccess !== undefined) {
+      throw new Error('Apple nested Docker received a Docker Desktop API capability');
+    }
+    return {
+      appleNestedDaemon,
+      env: nestedDaemonAgentEnv(appleNestedDaemon),
+      namedVolumeMounts: [],
+    };
+  }
+
+  const access = core.dockerDesktopAgentAccess;
+  if (access === undefined) throw new Error('Docker Desktop nested Docker is missing its qualified sidecar API');
+  if (access.agentApiMount.readonly !== true || access.agentApiMount.noCopy !== true) {
+    throw new Error('Docker Desktop agent API volume must be an exact read-only no-copy capability');
+  }
+  return {
+    appleNestedDaemon: undefined,
+    env: {
+      DOCKER_HOST: access.dockerHost,
+      [APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]: access.networkName,
+    },
+    namedVolumeMounts: [access.agentApiMount],
+  };
+}
+
+/** Pin Docker Desktop's outer agent create to the same captured immutable image. */
+export function resolveNestedDockerOuterAgentImage(
+  core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'dockerWorkload' | 'imageResolution'>,
+  fallbackImage: string,
+): string {
+  if (core.runtimeKind !== 'docker' || core.dockerWorkload === undefined) return fallbackImage;
+  const selectedImageId = core.imageResolution?.immutableImageId;
+  if (selectedImageId === undefined || SHA256_IMAGE_ID.exec(selectedImageId) === null) {
+    throw new Error('Docker Desktop nested Docker is missing its selected immutable outer-agent image');
+  }
+  return selectedImageId;
+}
+
 /** Exact Apple-only mounts for the per-bundle nested-Docker egress capabilities. */
 export function buildDockerWorkloadEgressMounts(
   core: Pick<PreContainerInfrastructure, 'runtimeKind' | 'dockerWorkloadEgress'>,
@@ -2121,16 +2289,33 @@ export function dockerWorkloadEgressNetworkAccess(
  * Keeping this assembly here prevents the two container-creation paths from
  * drifting on network mode, trust artifacts, or egress-ledger witnesses.
  */
-export async function activateAppleVmDockerWorkload(options: {
+export async function activateNestedDockerWorkload(options: {
   readonly runtime: ContainerRuntime;
+  readonly runtimeKind: ContainerRuntimeKind;
   readonly containerId: string;
-  readonly nestedDaemon: DockerWorkloadBundleHandle | undefined;
+  readonly dockerWorkload: DockerWorkloadBundleHandle | undefined;
+  readonly dockerDesktopAgentAccess: DockerDesktopAgentAccess | undefined;
   readonly bootstrap: AppleVmDockerWorkloadBootstrapConfig | undefined;
   readonly dockerWorkloadEgress: DockerWorkloadEgressCollection | undefined;
   readonly dockerBuildShim: DockerBuildShimStaging | undefined;
 }): Promise<void> {
-  const { nestedDaemon, bootstrap, dockerWorkloadEgress, dockerBuildShim } = options;
-  if (nestedDaemon === undefined || bootstrap === undefined) return;
+  const { dockerWorkload, bootstrap, dockerWorkloadEgress, dockerBuildShim } = options;
+  if (dockerWorkload === undefined) return;
+  if (bootstrap === undefined) throw new Error('admitted nested Docker is missing its staged selected-agent artifact');
+
+  if (options.runtimeKind === 'docker') {
+    if (options.dockerDesktopAgentAccess === undefined) {
+      throw new Error('Docker Desktop nested Docker is missing its qualified sidecar API');
+    }
+    await dockerWorkload.activate();
+    return;
+  }
+
+  if (options.dockerDesktopAgentAccess !== undefined) {
+    throw new Error('Apple nested Docker received a Docker Desktop API capability');
+  }
+  const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, options.runtimeKind);
+  if (nestedDaemon === undefined) throw new Error('Apple nested Docker is missing its same-VM daemon handle');
 
   await startAppleVmDockerWorkload({
     runtime: options.runtime,
@@ -2249,10 +2434,16 @@ async function createSessionContainersAttempt(
     // nested egress listeners before any outer cleanup can run.
     await core.docker.removeStaleContainer(mainContainerName);
 
-    const mainImage =
+    const resumableBaseImage =
       options?.baseImageOverride && (await core.docker.imageExists(options.baseImageOverride))
         ? options.baseImageOverride
-        : core.image;
+        : undefined;
+    // Docker can create directly from the selected immutable ID, closing the
+    // tag-replacement window between artifact capture and the ledgered create.
+    // Apple cannot, so its stopped-create adjudication below remains the
+    // equivalent backend-specific defense. An immutable workflow snapshot,
+    // when present, continues to take precedence for resume.
+    const mainImage = resumableBaseImage ?? resolveNestedDockerOuterAgentImage(core, core.image);
 
     // Base mounts shared by TCP and UDS modes: the sandbox as the
     // workspace and the orientation dir. Mode-specific mounts (apt proxy
@@ -2265,19 +2456,17 @@ async function createSessionContainersAttempt(
     // Docker-workload bundle, in which case this agent container both hosts the
     // daemon and reaches it at the VM-local socket. Resolved once here and
     // reused for the env, the ledgered create, and the post-start bootstrap.
-    const nestedDaemon = resolveNestedDaemonBundle(core.dockerWorkload, core.runtimeKind);
+    const nestedDockerWiring = resolveNestedDockerAgentWiring(core);
+    const nestedDaemon = nestedDockerWiring.appleNestedDaemon;
     const dockerWorkloadBootstrap = core.dockerWorkloadBootstrap;
-    if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
-      throw new Error('Docker-workload lease and selected-agent artifact staging must be present together');
-    }
-    if (dockerWorkloadBootstrap !== undefined) {
+    if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
       mounts.push(appleVmDockerWorkloadArtifactMount(dockerWorkloadBootstrap));
     }
     let env = {
       ...core.adapter.buildEnv(config, core.fakeKeys),
       ...core.adapter.buildBatchEnv?.(config, core.fakeKeys),
       ...buildRuntimeTrustEnv(),
-      ...nestedDaemonAgentEnv(nestedDaemon),
+      ...nestedDockerWiring.env,
     };
     let network: string | null;
     let extraHosts: string[] | undefined;
@@ -2469,7 +2658,7 @@ async function createSessionContainersAttempt(
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as
     // "no flag emitted" (see clampDockerResources docs).
-    const containerResources = selectOuterContainerResources(config.userConfig);
+    const containerResources = core.dockerDesktopResources?.agent ?? selectOuterContainerResources(config.userConfig);
 
     // Build the agent container create args for a given name + resolved labels.
     // `labels` is the base bundle labels in the ordinary case and the base merged
@@ -2512,6 +2701,10 @@ async function createSessionContainersAttempt(
         // nested daemon boot AND lets its runc mount procfs for inner
         // containers.
         fullyVisibleProc: nestedDaemon !== undefined,
+        trustedCreateOptions:
+          nestedDockerWiring.namedVolumeMounts.length === 0
+            ? undefined
+            : { namedVolumeMounts: nestedDockerWiring.namedVolumeMounts },
       });
 
     // §8.2 step 1: ledger the agent container before create when a
@@ -2524,12 +2717,36 @@ async function createSessionContainersAttempt(
       expectedImageId: core.imageResolution?.immutableImageId,
       deterministicName: mainContainerName,
       baseLabels: bundleLabels.labels,
-      mounts,
+      mounts: [
+        ...mounts,
+        ...nestedDockerWiring.namedVolumeMounts.map((mount) => ({
+          source: mount.name,
+          target: mount.target,
+          readonly: mount.readonly === true,
+        })),
+      ],
       create: createMainContainer,
     });
 
     await core.docker.start(mainContainerId);
     logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
+
+    // The Desktop sidecar is already adjudicated. Finalize the lease as soon
+    // as the ledgered agent has started, before even trusted diagnostic execs
+    // can cross the release boundary. Apple activation remains below because
+    // its daemon bootstrap itself runs inside this container.
+    if (core.runtimeKind === 'docker') {
+      await activateNestedDockerWorkload({
+        runtime: core.docker,
+        runtimeKind: core.runtimeKind,
+        containerId: mainContainerId,
+        dockerWorkload: core.dockerWorkload,
+        dockerDesktopAgentAccess: core.dockerDesktopAgentAccess,
+        bootstrap: dockerWorkloadBootstrap,
+        dockerWorkloadEgress: core.dockerWorkloadEgress,
+        dockerBuildShim: core.dockerBuildShim,
+      });
+    }
 
     if (core.runtimeKind === 'docker') {
       await checkDockerContainerWritableStorage(core.docker, mainContainerId);
@@ -2565,14 +2782,18 @@ async function createSessionContainersAttempt(
     // component. Bootstrap/adjudicate dockerd, preflight the pinned client,
     // provision the selected prepared inner image, record observations, and
     // activate the lease before any agent process is exec'd into it.
-    await activateAppleVmDockerWorkload({
-      runtime: core.docker,
-      containerId: mainContainerId,
-      nestedDaemon,
-      bootstrap: dockerWorkloadBootstrap,
-      dockerWorkloadEgress: core.dockerWorkloadEgress,
-      dockerBuildShim: core.dockerBuildShim,
-    });
+    if (core.runtimeKind === 'apple-container') {
+      await activateNestedDockerWorkload({
+        runtime: core.docker,
+        runtimeKind: core.runtimeKind,
+        containerId: mainContainerId,
+        dockerWorkload: core.dockerWorkload,
+        dockerDesktopAgentAccess: core.dockerDesktopAgentAccess,
+        bootstrap: dockerWorkloadBootstrap,
+        dockerWorkloadEgress: core.dockerWorkloadEgress,
+        dockerBuildShim: core.dockerBuildShim,
+      });
+    }
 
     return {
       containerId: mainContainerId,
@@ -2878,15 +3099,7 @@ export async function ensureDockerImage(
   agentId: AgentId,
   userConfig: ResolvedUserConfig,
 ): Promise<AgentImageResolution> {
-  let admittedRuntimeKind: ContainerRuntimeKind | undefined;
-  if (userConfig.dockerWorkload?.enabled === true) {
-    const { resolveRuntimeKind } = await import('./container-runtime.js');
-    admittedRuntimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
-    const { assertDockerWorkloadVariantAdmitted, assertAdmittedDockerWorkloadRuntimeAvailable } =
-      await import('../docker-workload/config.js');
-    assertDockerWorkloadVariantAdmitted(userConfig.dockerWorkload, admittedRuntimeKind);
-    await assertAdmittedDockerWorkloadRuntimeAvailable();
-  }
+  const admittedRuntimeKind = await resolveAdmittedDockerWorkloadRuntimeKind(userConfig);
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { createContainerRuntime, resolveRuntimeKind } = await import('./container-runtime.js');
 
@@ -2895,6 +3108,10 @@ export async function ensureDockerImage(
   const image = await adapter.getImage();
   const runtimeKind = admittedRuntimeKind ?? (await resolveRuntimeKind(userConfig.containerRuntime));
   const docker = createContainerRuntime(runtimeKind);
+  if (userConfig.dockerWorkload?.enabled === true && runtimeKind === 'docker') {
+    selectDockerDesktopResourcePartition(userConfig);
+    await ensureDockerDesktopSidecarImage(docker);
+  }
   const resolved = await resolveAgentImage(image, docker);
   if (userConfig.dockerWorkload?.enabled === true) {
     const artifact = await prepareSelectedAgentArtifact({
@@ -2905,6 +3122,19 @@ export async function ensureDockerImage(
     return selectedAgentImageResolution(resolved, artifact);
   }
   return resolved;
+}
+
+async function resolveAdmittedDockerWorkloadRuntimeKind(
+  userConfig: Pick<ResolvedUserConfig, 'containerRuntime' | 'dockerWorkload'>,
+): Promise<ContainerRuntimeKind | undefined> {
+  const workload = userConfig.dockerWorkload;
+  if (workload?.enabled !== true) return undefined;
+
+  const runtimeKind = await resolveRuntimeKind(userConfig.containerRuntime);
+  assertDockerWorkloadVariantAdmitted(workload, runtimeKind);
+  await assertAdmittedDockerWorkloadRuntimeAvailable(runtimeKind);
+  assertDockerDesktopNetworkModeImplemented(runtimeKind, workload);
+  return runtimeKind;
 }
 
 function selectedAgentImageResolution(
@@ -3024,6 +3254,25 @@ export async function resolveAgentImage(image: string, docker: ContainerRuntime)
   const spec = computeAgentImageBuildSpec(image);
   const buildHash = await ensureImageFromSpec(image, docker, spec);
   return { mode: 'build-if-stale', logicalName: image, imageRef: image, buildHash };
+}
+
+/** Resolve the purpose-built Desktop daemon image through the normal hash-label cache. */
+export async function ensureDockerDesktopSidecarImage(runtime: ContainerRuntime): Promise<string> {
+  const contextDirectory = resolve(getIronCurtainPackageRoot(), 'docker', 'nested-daemon');
+  const dockerfilePath = resolve(contextDirectory, 'Dockerfile');
+  const runtimeShimPath = resolve(contextDirectory, 'runtime-shim', 'main.go');
+  const runtimeShimHash = createHash('sha256').update(readFileSync(runtimeShimPath)).digest('hex');
+  const buildHash = computeDockerBuildHash(contextDirectory, ['Dockerfile'], runtimeShimHash);
+  if (!(await isImageStale(DOCKER_DESKTOP_SIDECAR_IMAGE, runtime, buildHash))) {
+    return DOCKER_DESKTOP_SIDECAR_IMAGE;
+  }
+
+  logger.info('Building Docker Desktop nested-daemon image...');
+  await runtime.buildImage(DOCKER_DESKTOP_SIDECAR_IMAGE, dockerfilePath, contextDirectory, {
+    'ironcurtain.build-hash': buildHash,
+  });
+  logger.info('Docker Desktop nested-daemon image built successfully');
+  return DOCKER_DESKTOP_SIDECAR_IMAGE;
 }
 
 function computeAgentImageBuildSpec(image: string): AgentImageBuildSpec {

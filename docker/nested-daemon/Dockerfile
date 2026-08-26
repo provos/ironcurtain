@@ -1,3 +1,12 @@
+# Reuse the same pinned builder as the fixed relay. The tiny wrapper adds
+# runc's --no-new-keyring option for ordinary runs and integrated BuildKit RUN
+# without admitting the keyctl syscall to the outer sidecar profile.
+FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS shim-build
+WORKDIR /src
+COPY runtime-shim/main.go ./main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/runc ./main.go \
+    && install -d -o 1000 -g 1000 -m 0700 /out/api
+
 # The stock rootless image is input bytes only. A scratch final stage clears
 # its inherited anonymous VOLUME declarations and exposed TCP ports so every
 # writable state root is explicitly named, leased, watched, and deleted by the
@@ -6,6 +15,12 @@ FROM docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904
 
 FROM scratch
 COPY --from=stock / /
+
+# Docker named-volume copy-up preserves this image-owned directory metadata.
+# The daemon sidecar therefore receives a private API root already owned by
+# the rootless UID without an initializer container or CAP_CHOWN.
+COPY --from=shim-build --chown=1000:1000 --chmod=0700 /out/api/ /run/ironcurtain-docker/
+COPY --from=shim-build --chown=0:0 --chmod=0555 /out/runc /usr/local/lib/ironcurtain/runc
 
 ARG IRONCURTAIN_BUILD_HASH_SCHEMA=""
 ARG IRONCURTAIN_BUILD_HASH=""

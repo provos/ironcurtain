@@ -40,15 +40,16 @@ import {
   buildDockerBuildShimMounts,
   buildDockerWorkloadEgressMounts,
   buildUdsSocketMounts,
-  activateAppleVmDockerWorkload,
+  activateNestedDockerWorkload,
   createLedgeredAgentContainer,
   dockerWorkloadSessionMetadata,
   removeBundleRuntimeRoot,
+  resolveNestedDockerAgentWiring,
+  resolveNestedDockerOuterAgentImage,
   selectOuterContainerResources,
   stopDockerWorkloadEgress,
   type AgentImageResolution,
 } from './docker-infrastructure.js';
-import { nestedDaemonAgentEnv, resolveNestedDaemonBundle } from '../docker-workload/session-daemon.js';
 import { appleVmDockerWorkloadArtifactMount } from '../docker-workload/apple-private-docker.js';
 import type { DockerWorkloadBundleHandle } from '../docker-workload/infrastructure.js';
 import { buildRuntimeTrustEnv, renderAptProxyConfig } from './runtime-trust.js';
@@ -579,11 +580,10 @@ async function runPtySessionAttempt(
     } else {
       throw new Error(`Agent ${adapter.id} does not support PTY mode.`);
     }
-    const nestedDaemon = resolveNestedDaemonBundle(dockerWorkload, infra.runtimeKind);
+    const nestedDockerWiring = resolveNestedDockerAgentWiring(infra);
+    const nestedDaemon = nestedDockerWiring.appleNestedDaemon;
     const dockerWorkloadBootstrap = infra.dockerWorkloadBootstrap;
-    if ((nestedDaemon === undefined) !== (dockerWorkloadBootstrap === undefined)) {
-      throw new Error('Docker-workload lease and selected-agent artifact staging must be present together');
-    }
+    const outerAgentImage = resolveNestedDockerOuterAgentImage(infra, image);
 
     // Build container configuration
     const shortId = getBundleShortId(bundleId);
@@ -762,7 +762,7 @@ async function runPtySessionAttempt(
     mounts.push(...buildDockerWorkloadEgressMounts(infra));
     mounts.push(...buildDockerBuildShimMounts(infra));
 
-    if (dockerWorkloadBootstrap !== undefined) {
+    if (nestedDaemon !== undefined && dockerWorkloadBootstrap !== undefined) {
       mounts.push(appleVmDockerWorkloadArtifactMount(dockerWorkloadBootstrap));
     }
 
@@ -786,7 +786,7 @@ async function runPtySessionAttempt(
     // docker-infrastructure.ts::createSessionContainersAttempt. Present only
     // for an admitted Docker-workload bundle; §8.2 step 6 gives the agent the
     // VM-local `DOCKER_HOST`, and the bootstrap runs after `docker.start`.
-    Object.assign(env, nestedDaemonAgentEnv(nestedDaemon));
+    Object.assign(env, nestedDockerWiring.env);
 
     // Pass initial terminal size so start-claude.sh can set PTY dimensions
     // before Claude starts, eliminating the resize race condition.
@@ -819,7 +819,7 @@ async function runPtySessionAttempt(
     // Resource ceilings come from userConfig (defaults: 8 GB / 4 cpus) and
     // are clamped to fit the host. `null` in either field is preserved as
     // "no flag emitted" (see clampDockerResources docs).
-    const ptyResources = selectOuterContainerResources(sessionConfig.userConfig);
+    const ptyResources = infra.dockerDesktopResources?.agent ?? selectOuterContainerResources(sessionConfig.userConfig);
 
     // Build the PTY agent container create args for a given name + resolved
     // labels. `labels` is the base resource labels in the ordinary case and the
@@ -827,7 +827,7 @@ async function runPtySessionAttempt(
     // ledgered — the merge lives in createLedgeredAgentContainer.
     const createPtyContainer = (name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string> =>
       infra.docker.create({
-        image,
+        image: outerAgentImage,
         name,
         network: network ?? 'none',
         mounts,
@@ -854,6 +854,10 @@ async function runPtySessionAttempt(
         // nested daemon boot AND lets its runc mount procfs for inner
         // containers.
         fullyVisibleProc: nestedDaemon !== undefined,
+        trustedCreateOptions:
+          nestedDockerWiring.namedVolumeMounts.length === 0
+            ? undefined
+            : { namedVolumeMounts: nestedDockerWiring.namedVolumeMounts },
         // Apple Container allocates the agent TTY on `container exec -it`;
         // the outer `sleep infinity` process does not need a second TTY.
         tty: nativePtyCommand === undefined,
@@ -869,11 +873,34 @@ async function runPtySessionAttempt(
       expectedImageId: infra.imageResolution?.immutableImageId,
       deterministicName: mainContainerName,
       baseLabels: resourceLabels,
-      mounts,
+      mounts: [
+        ...mounts,
+        ...nestedDockerWiring.namedVolumeMounts.map((mount) => ({
+          source: mount.name,
+          target: mount.target,
+          readonly: mount.readonly === true,
+        })),
+      ],
       create: createPtyContainer,
     });
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
+
+    // Docker Desktop's daemon sidecar is already adjudicated. Activate the
+    // bundle immediately after the ledgered agent starts and before any exec.
+    // Apple activation stays after its in-agent daemon bootstrap below.
+    if (infra.runtimeKind === 'docker') {
+      await activateNestedDockerWorkload({
+        runtime: docker,
+        runtimeKind: infra.runtimeKind,
+        containerId,
+        dockerWorkload,
+        dockerDesktopAgentAccess: infra.dockerDesktopAgentAccess,
+        bootstrap: dockerWorkloadBootstrap,
+        dockerWorkloadEgress,
+        dockerBuildShim: infra.dockerBuildShim,
+      });
+    }
 
     if (infra.runtimeKind === 'docker') {
       await checkDockerContainerWritableStorage(docker, containerId);
@@ -905,14 +932,18 @@ async function runPtySessionAttempt(
     // lease. The untrusted agent is not launched until the host attaches below,
     // so completing activation before attach preserves the release boundary
     // without delaying Apple Container's published-socket listener.
-    await activateAppleVmDockerWorkload({
-      runtime: docker,
-      containerId,
-      nestedDaemon,
-      bootstrap: dockerWorkloadBootstrap,
-      dockerWorkloadEgress,
-      dockerBuildShim: infra.dockerBuildShim,
-    });
+    if (infra.runtimeKind === 'apple-container') {
+      await activateNestedDockerWorkload({
+        runtime: docker,
+        runtimeKind: infra.runtimeKind,
+        containerId,
+        dockerWorkload,
+        dockerDesktopAgentAccess: infra.dockerDesktopAgentAccess,
+        bootstrap: dockerWorkloadBootstrap,
+        dockerWorkloadEgress,
+        dockerBuildShim: infra.dockerBuildShim,
+      });
+    }
 
     // Write session registration for the escalation listener
     registrationPath = writeRegistration(effectiveSessionId, escalationDir, adapter.displayName);

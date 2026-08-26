@@ -75,7 +75,7 @@ export const dockerWorkloadRequestedSchema = z
         code: 'custom',
         path: ['backend'],
         message:
-          'legacy nested-Docker backend "docker" is not supported; remove dockerWorkload.backend and use the current Apple Container developer slice',
+          'legacy dockerWorkload.backend is no longer supported; remove it and set containerRuntime to "docker" to select Docker Desktop',
       });
     }
     if (request.buildEgress === 'ironcurtain-dockerfiles') {
@@ -224,36 +224,45 @@ export function dockerWorkloadConfigHash(config: ResolvedDockerWorkloadConfig): 
 }
 
 /**
- * Admit only the Mac developer slice whose complete runtime path is currently
- * implemented. The caller resolves `auto` first, then invokes this guard before
- * any feature-attributable runtime, image, proxy, lease, or filesystem
- * provisioning. Operational artifacts are verified later by their owning
- * seams; this guard deliberately contains no release/commit bookkeeping.
+ * Admit only a supported developer slice. The caller resolves `auto` first,
+ * then invokes this guard before any feature-attributable runtime, image,
+ * proxy, lease, or filesystem provisioning. Docker Desktop is admitted only
+ * on Darwin; Apple Container performs its platform/version checks in the
+ * runtime-availability preflight below. Operational artifacts are verified
+ * later by their owning seams; this guard deliberately contains no
+ * release/commit bookkeeping.
  */
 export function assertDockerWorkloadVariantAdmitted(
   config: ResolvedDockerWorkloadConfig | undefined,
   resolvedRuntimeKind: 'docker' | 'apple-container',
+  hostPlatform: NodeJS.Platform = process.platform,
 ): void {
   if (config?.enabled !== true) return;
-  const admitted =
-    resolvedRuntimeKind === 'apple-container' &&
-    !config.resources.pids.required &&
-    config.resources.diskMb === null &&
-    config.acceptObservedDiskRisk;
-  if (!admitted) {
+  if (config.resources.pids.required || config.resources.diskMb !== null || !config.acceptObservedDiskRisk) {
     throw new Error(
-      'secure nested Docker currently admits only the Apple Container developer slice with offline, mediated images-only, or fixed public package access; no image, relay, daemon, or lease action was performed',
+      'secure nested Docker does not admit the requested resource policy; no image, relay, daemon, or lease action was performed',
+    );
+  }
+  if (resolvedRuntimeKind === 'docker' && hostPlatform !== 'darwin') {
+    throw new Error(
+      `secure nested Docker with the Docker runtime is supported only on macOS (Darwin), not ${hostPlatform}; no image, relay, daemon, or lease action was performed`,
     );
   }
 }
 
-/** Read-only platform preflight required after the supported variant is selected. */
-export async function assertAdmittedDockerWorkloadRuntimeAvailable(): Promise<void> {
-  const { checkAppleContainerAvailable } = await import('../docker/apple-container-manager.js');
-  const availability = await checkAppleContainerAvailable();
+/** Read-only runtime preflight required after the supported variant is selected. */
+export async function assertAdmittedDockerWorkloadRuntimeAvailable(
+  resolvedRuntimeKind: 'docker' | 'apple-container',
+): Promise<void> {
+  const checkAvailability =
+    resolvedRuntimeKind === 'docker'
+      ? (await import('../docker/docker-probe.js')).checkDockerAvailable
+      : (await import('../docker/apple-container-manager.js')).checkAppleContainerAvailable;
+  const availability = await checkAvailability();
   if (!availability.available) {
+    const runtimeName = resolvedRuntimeKind === 'docker' ? 'Docker' : 'Apple';
     throw new Error(
-      `secure nested Docker Apple runtime is unavailable: ${availability.reason}` +
+      `secure nested Docker ${runtimeName} runtime is unavailable: ${availability.reason}` +
         (availability.detailedMessage ? ` (${availability.detailedMessage})` : ''),
     );
   }

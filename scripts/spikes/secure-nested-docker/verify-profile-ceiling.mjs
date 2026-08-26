@@ -10,8 +10,13 @@ const workspaceRoot = path.resolve(scriptDir, '../../..');
 const ceilingPath = path.join(workspaceRoot, 'config/docker-workload/profile-ceiling.json');
 const ceiling = readJson(ceilingPath);
 const seccomp = ceiling.categories?.seccomp;
+const mountMask = ceiling.categories?.mountMask;
 
 assert(ceiling.schemaVersion === 1, 'unsupported profile-ceiling schema');
+assert(
+  ceiling.status === 'reviewed-dd-h3-sidecar-supported-not-qualified',
+  'profile-ceiling status does not describe the reviewed sidecar result',
+);
 assert(ceiling.maximumArtifactsPerCategory === 1, 'profile ceiling must permit exactly one artifact per category');
 assert(seccomp?.artifact?.path, 'seccomp artifact path is missing');
 assertHash(seccomp.artifact.sha256, 'seccomp artifact sha256');
@@ -80,8 +85,41 @@ for (const entry of taggedEntries) {
 assert(emitted.size === declared.size, 'artifact and declared addition counts differ');
 for (const syscall of declared.keys())
   assert(emitted.has(syscall), `declared syscall is absent from artifact: ${syscall}`);
+assert(declared.has('sethostname'), 'denial-proven sethostname addition is absent');
 
-process.stdout.write(`verified P2 subset: ${[...emitted].sort().join(', ')}; artifact ${seccomp.artifact.sha256}\n`);
+const mountMaskAdditions = mountMask?.additions ?? [];
+assert(mountMaskAdditions.length === 1, 'profile ceiling must contain exactly one mount-mask exception');
+const [sidecarSystemPaths] = mountMaskAdditions;
+assert(sidecarSystemPaths.option === 'systempaths=unconfined', 'reviewed mount-mask option is missing');
+assert(
+  sidecarSystemPaths.scope === 'docker-desktop-nested-daemon-sidecar-only',
+  'systempaths exception is not confined to the Docker Desktop nested-daemon sidecar',
+);
+assertEvidence(sidecarSystemPaths.denialEvidence, 'systempaths=unconfined');
+assertPositiveEvidence(sidecarSystemPaths.positiveEvidence, 'systempaths=unconfined');
+assert(
+  sidecarSystemPaths.reviewerDisposition ===
+    'Reviewed exception for the version-scoped Docker Desktop nested-daemon sidecar only; forbidden for agent and other containers.',
+  'systempaths exception lacks the sidecar-only reviewer disposition',
+);
+assert(
+  /Agent containers retain Docker's default masked and read-only system paths\./u.test(
+    sidecarSystemPaths.boundary ?? '',
+  ),
+  'systempaths exception does not preserve the agent-container mount-mask policy',
+);
+assert(
+  ceiling.absoluteStops?.includes('systempaths-unconfined-outside-reviewed-nested-daemon-sidecar'),
+  'absolute stops do not reject systempaths=unconfined outside the reviewed sidecar',
+);
+assert(
+  !ceiling.absoluteStops?.includes('systempaths-unconfined'),
+  'absolute stops still contradict the reviewed sidecar-only systempaths exception',
+);
+
+process.stdout.write(
+  `verified P2 subset: ${[...emitted].sort().join(', ')}; sidecar mount-mask exception: ${sidecarSystemPaths.option}; artifact ${seccomp.artifact.sha256}\n`,
+);
 
 function assertEvidence(evidence, syscall) {
   assert(evidence && typeof evidence === 'object', `denial evidence is missing: ${syscall}`);
@@ -95,6 +133,18 @@ function assertEvidence(evidence, syscall) {
   assert(
     typeof evidence.observation === 'string' && evidence.observation.length > 0,
     `denial observation is missing: ${syscall}`,
+  );
+}
+
+function assertPositiveEvidence(evidence, label) {
+  assert(evidence && typeof evidence === 'object', `positive evidence is missing: ${label}`);
+  assert(/^[a-z0-9][a-z0-9-]{0,127}$/.test(evidence.runId ?? ''), `invalid positive run ID: ${label}`);
+  assert(evidence.summaryPath === 'summary.json', `invalid positive summary path: ${label}`);
+  assertHash(evidence.rootManifestSha256, `positive manifest hash: ${label}`);
+  assertHash(evidence.summarySha256, `positive summary hash: ${label}`);
+  assert(
+    typeof evidence.observation === 'string' && evidence.observation.length > 0,
+    `positive observation is missing: ${label}`,
   );
 }
 

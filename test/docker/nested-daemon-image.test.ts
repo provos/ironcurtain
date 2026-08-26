@@ -26,6 +26,17 @@ describe('purpose-built rootless nested daemon image', () => {
     expect(dockerfile).not.toMatch(/tcp:\/\//u);
   });
 
+  it('bakes the private API root and no-new-keyring runc wrapper with exact metadata', () => {
+    expect(dockerfile).toContain('install -d -o 1000 -g 1000 -m 0700 /out/api');
+    expect(dockerfile).toContain(
+      'COPY --from=shim-build --chown=1000:1000 --chmod=0700 /out/api/ /run/ironcurtain-docker/',
+    );
+    expect(dockerfile).toContain(
+      'COPY --from=shim-build --chown=0:0 --chmod=0555 /out/runc /usr/local/lib/ironcurtain/runc',
+    );
+    expect(dockerfile.indexOf('/run/ironcurtain-docker/')).toBeLessThan(dockerfile.indexOf('USER rootless'));
+  });
+
   it('contains qualification identity labels and no catalog or credential material', () => {
     for (const label of [
       'ironcurtain.build-hash-schema',

@@ -5,10 +5,10 @@
  * own per-session VM, so there is no separate daemon container: the agent
  * container create IS the §8.2 step-4 "daemon component" create, and the in-VM
  * bootstrap happens between that container's start and the agent process. This
- * module owns the three consequences of that topology so neither session mode
- * has to re-derive them:
+ * module owns the Apple-specific consequences of that topology so neither
+ * session mode has to re-derive them:
  *
- *  - which backend currently implements the topology (Apple `container` only),
+ *  - selecting the same-VM topology only for Apple `container`,
  *  - the `ContainerRuntime.exec` -> {@link AppleVmDaemonExec} adaptation plus
  *    the bootstrap/adjudicate/record sequence,
  *  - the private socket and managed-network environment the agent receives.
@@ -83,23 +83,28 @@ export interface AppleVmDockerWorkloadEgressLedgers {
 }
 
 /**
- * The same-VM topology is implemented behind the resolved-variant guard on Apple
- * `container` only: the daemon needs a per-session VM to live in. This is an
- * implementation check, not a qualification or enablement claim.
+ * Both macOS product backends have a nested-daemon implementation. Apple runs
+ * the daemon inside the agent VM; Docker Desktop uses a separate rootless
+ * sidecar. This is an implementation check, not a qualification or enablement
+ * claim.
  */
 export function assertNestedDaemonBackendImplemented(runtimeKind: ContainerRuntimeKind): void {
-  if (runtimeKind === 'apple-container') return;
-  throw new Error(
-    `secure nested Docker is not implemented on the ${runtimeKind} backend: ` +
-      'the nested Docker daemon runs inside the agent VM, which only the apple-container runtime provides',
-  );
+  switch (runtimeKind) {
+    case 'apple-container':
+    case 'docker':
+      return;
+    default: {
+      const unsupported: never = runtimeKind;
+      throw new Error(`nested Docker is not implemented for runtime ${String(unsupported)}`);
+    }
+  }
 }
 
 /**
  * The admitted bundle whose agent container IS the nested-daemon component, or
- * `undefined` for an ordinary session. Returning the handle rather than a
- * boolean keeps the "daemon wiring applies" decision and the handle the wiring
- * needs from ever disagreeing.
+ * `undefined` for an ordinary session and for the separate Docker Desktop
+ * sidecar topology. Returning the handle rather than a boolean keeps the
+ * Apple same-VM wiring decision and the handle it needs from ever disagreeing.
  *
  * @throws when a bundle was admitted on a backend where the topology is not
  * implemented — a create that silently produced no daemon would be worse.
@@ -110,7 +115,7 @@ export function resolveNestedDaemonBundle(
 ): DockerWorkloadBundleHandle | undefined {
   if (dockerWorkload === undefined) return undefined;
   assertNestedDaemonBackendImplemented(runtimeKind);
-  return dockerWorkload;
+  return runtimeKind === 'apple-container' ? dockerWorkload : undefined;
 }
 
 /**

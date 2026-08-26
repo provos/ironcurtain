@@ -11,7 +11,7 @@ const realRunc = "/usr/local/bin/runc"
 func main() {
 	args := append([]string{"runc"}, os.Args[1:]...)
 	for index, argument := range args {
-		if argument != "create" {
+		if argument != "create" && argument != "run" {
 			continue
 		}
 		if !contains(args[index+1:], "--no-new-keyring") {

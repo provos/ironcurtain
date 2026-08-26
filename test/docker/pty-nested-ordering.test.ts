@@ -108,10 +108,22 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     infra.dockerBuildShim === undefined
       ? []
       : infra.dockerBuildShim.artifacts.map(({ source, target, readonly }) => ({ source, target, readonly })),
-  activateAppleVmDockerWorkload: async (options: {
+  resolveNestedDockerAgentWiring: (infra: { dockerWorkload?: unknown }) => ({
+    appleNestedDaemon: infra.dockerWorkload,
+    env:
+      infra.dockerWorkload === undefined
+        ? {}
+        : {
+            DOCKER_HOST: 'unix:///run/ironcurtain-docker/docker.sock',
+            IRONCURTAIN_DOCKER_NETWORK: 'ironcurtain',
+          },
+    namedVolumeMounts: [],
+  }),
+  resolveNestedDockerOuterAgentImage: (_infra: unknown, image: string) => image,
+  activateNestedDockerWorkload: async (options: {
     runtime: unknown;
     containerId: string;
-    nestedDaemon?: unknown;
+    dockerWorkload?: unknown;
     bootstrap?: unknown;
     dockerWorkloadEgress?: {
       networkAccess: 'images' | 'packages';
@@ -120,11 +132,11 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     };
     dockerBuildShim?: { contract: unknown; buildTrustCanary: unknown };
   }) => {
-    if (options.nestedDaemon === undefined || options.bootstrap === undefined) return;
+    if (options.dockerWorkload === undefined || options.bootstrap === undefined) return;
     await state.startAppleVmDockerWorkload({
       runtime: options.runtime,
       containerId: options.containerId,
-      nestedDaemon: options.nestedDaemon,
+      nestedDaemon: options.dockerWorkload,
       bootstrap: options.bootstrap,
       networkAccess: options.dockerWorkloadEgress?.networkAccess ?? 'offline',
       dockerBuildShim: options.dockerBuildShim?.contract,

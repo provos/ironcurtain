@@ -32,11 +32,12 @@ const labelKeySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u);
  * so downstream readers (lifecycle evidence) never restate the numbers.
  */
 export const cleanupInventoryGapMsSchema = z.number().int().min(100).max(60_000);
+export const outerResourceKindSchema = z.enum(['container', 'network', 'volume']);
 
 const outerResourceSchema = z
   .object({
     requestId: identifierSchema,
-    kind: z.enum(['container', 'network']),
+    kind: outerResourceKindSchema,
     role: identifierSchema,
     requestedName: resourceNameSchema,
     ownershipLabelKey: labelKeySchema,

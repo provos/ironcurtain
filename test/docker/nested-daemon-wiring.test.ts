@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createSessionContainers,
   ledgerOuterResourceCreate,
+  resolveNestedDockerAgentWiring,
   stopDockerWorkloadEgress,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
@@ -38,6 +39,7 @@ import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
   APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
 } from '../../src/docker-workload/apple-private-docker.js';
+import { DOCKER_DESKTOP_SIDECAR_DOCKER_HOST } from '../../src/docker-workload/docker-desktop-sidecar.js';
 import {
   admitDockerWorkloadBundle,
   type DockerWorkloadBundleHandle,
@@ -155,8 +157,9 @@ function makeCore(
   } = {},
 ): PreContainerInfrastructure {
   const runtimeKind = overrides.runtimeKind ?? 'apple-container';
-  const admittedApple = overrides.dockerWorkload !== undefined && runtimeKind === 'apple-container';
-  const bootstrap = admittedApple ? createTestAppleVmDockerWorkloadBootstrap(tempDir) : undefined;
+  const admitted = overrides.dockerWorkload !== undefined;
+  const admittedApple = admitted && runtimeKind === 'apple-container';
+  const bootstrap = admitted ? createTestAppleVmDockerWorkloadBootstrap(tempDir) : undefined;
   const buildShimContract =
     admittedApple && overrides.networkAccess === 'packages' ? getDockerBuildShimStagingContract('packages') : undefined;
   if (bootstrap) docker.getImageId = async () => bootstrap.artifact.appleImageId;
@@ -206,6 +209,26 @@ function makeCore(
     endCaptureSession: async () => {},
     dockerWorkload: overrides.dockerWorkload,
     dockerWorkloadBootstrap: bootstrap,
+    dockerDesktopAgentAccess:
+      admitted && runtimeKind === 'docker'
+        ? {
+            dockerHost: DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
+            networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+            agentApiMount: {
+              name: 'ic-desktop-api-test',
+              target: '/run/ironcurtain-docker',
+              readonly: true,
+              noCopy: true,
+            },
+          }
+        : undefined,
+    dockerDesktopResources:
+      admitted && runtimeKind === 'docker'
+        ? {
+            sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: 512 },
+            agent: { memoryMb: 1024, cpus: 1 },
+          }
+        : undefined,
     dockerWorkloadEgress:
       overrides.networkAccess === 'images' || overrides.networkAccess === 'packages'
         ? {
@@ -1128,13 +1151,52 @@ describe('nested daemon — egress transports', () => {
   });
 });
 
-describe('nested daemon — unimplemented backend fails closed', () => {
-  it('refuses an admitted bundle on the docker backend instead of skipping the daemon', async () => {
+describe('nested daemon — Docker Desktop agent capability', () => {
+  it('mounts only the qualified API volume and activates after the ledgered agent starts', async () => {
     const { runtime, handle } = await admitBundle();
-    const core = makeCore(runtime.runtime, { dockerWorkload: handle, runtimeKind: 'docker' });
+    const capturing = capturingRuntime(runtime);
+    const core = makeCore(capturing.runtime, { dockerWorkload: handle, runtimeKind: 'docker' });
 
-    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/not implemented on the docker backend/u);
-    expect(runtime.events).toEqual([]);
+    await createSessionContainers(core, makeConfig());
+
+    expect(capturing.config().image).toBe(core.imageResolution?.immutableImageId);
+    expect(capturing.config().env.DOCKER_HOST).toBe(DOCKER_DESKTOP_SIDECAR_DOCKER_HOST);
+    expect(capturing.config().env[APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]).toBe(APPLE_VM_DOCKER_WORKLOAD_NETWORK);
+    expect(capturing.config().trustedCreateOptions?.namedVolumeMounts).toEqual([
+      {
+        name: 'ic-desktop-api-test',
+        target: '/run/ironcurtain-docker',
+        readonly: true,
+        noCopy: true,
+      },
+    ]);
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR }),
+    );
+    expect(capturing.config().fullyVisibleProc).toBe(false);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
+  });
+
+  it('rejects mutable or copy-up Desktop API grants', () => {
+    const dockerWorkload = {} as DockerWorkloadBundleHandle;
+    const bootstrap = createTestAppleVmDockerWorkloadBootstrap(tempDir);
+    expect(() =>
+      resolveNestedDockerAgentWiring({
+        runtimeKind: 'docker',
+        dockerWorkload,
+        dockerWorkloadBootstrap: bootstrap,
+        dockerDesktopAgentAccess: {
+          dockerHost: DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
+          networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+          agentApiMount: {
+            name: 'ic-desktop-api-test',
+            target: '/run/ironcurtain-docker',
+            readonly: false,
+            noCopy: true,
+          },
+        },
+      }),
+    ).toThrow(/read-only no-copy capability/u);
   });
 
   it('resolveNestedDaemonBundle is inert without a bundle on any backend', () => {

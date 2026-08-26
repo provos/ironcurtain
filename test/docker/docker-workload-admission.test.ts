@@ -11,6 +11,7 @@ import { assertDockerWorkloadVariantAdmitted, resolveDockerWorkloadConfig } from
 const registerBuiltinAdapters = vi.fn();
 const resolveRuntimeKind = vi.fn();
 const checkAppleContainerAvailable = vi.fn();
+const checkDockerAvailable = vi.fn();
 
 vi.mock('../../src/docker/agent-registry.js', () => ({
   registerBuiltinAdapters,
@@ -25,10 +26,12 @@ vi.mock('../../src/docker/container-runtime.js', () => ({
   resolveRuntimeKind,
 }));
 vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContainerAvailable }));
+vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   checkAppleContainerAvailable.mockResolvedValue({ available: true });
+  checkDockerAvailable.mockResolvedValue({ available: true });
 });
 
 function admittedAppleConfig() {
@@ -54,13 +57,31 @@ describe('secure nested Docker resolved-variant admission', () => {
     ).not.toThrow();
   });
 
-  it('rejects an enabled capability resolved to Docker', () => {
-    expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'docker')).toThrow(
-      /currently admits only the Apple Container developer slice/u,
-    );
+  it('admits an enabled capability resolved to Docker on Darwin', () => {
+    expect(() => assertDockerWorkloadVariantAdmitted(admittedAppleConfig(), 'docker', 'darwin')).not.toThrow();
   });
 
-  it('rejects a Docker-resolved opt-in before adapter, runtime, image, relay, or daemon work', async () => {
+  it('rejects an unavailable Docker runtime before adapter, runtime, image, relay, or daemon work', async () => {
+    resolveRuntimeKind.mockResolvedValueOnce('docker');
+    checkDockerAvailable.mockResolvedValueOnce({
+      available: false,
+      reason: 'Docker not available',
+      detailedMessage: 'Start Docker Desktop.',
+    });
+    const { ensureDockerImage } = await import('../../src/docker/docker-infrastructure.js');
+    await expect(
+      ensureDockerImage('claude-code', {
+        containerRuntime: 'auto',
+        dockerWorkload: admittedAppleConfig(),
+      } as ResolvedUserConfig),
+    ).rejects.toThrow(/Docker runtime is unavailable: Docker not available/u);
+    expect(registerBuiltinAdapters).not.toHaveBeenCalled();
+    expect(resolveRuntimeKind).toHaveBeenCalledOnce();
+    expect(checkDockerAvailable).toHaveBeenCalledOnce();
+    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
+  });
+
+  it('rejects Docker Desktop image mediation before adapter, image, relay, or sidecar work', async () => {
     resolveRuntimeKind.mockResolvedValueOnce('docker');
     const { ensureDockerImage } = await import('../../src/docker/docker-infrastructure.js');
     await expect(
@@ -68,9 +89,10 @@ describe('secure nested Docker resolved-variant admission', () => {
         containerRuntime: 'auto',
         dockerWorkload: admittedAppleConfig(),
       } as ResolvedUserConfig),
-    ).rejects.toThrow(/currently admits only the Apple Container developer slice/u);
+    ).rejects.toThrow(/supports only networkAccess "offline"/u);
     expect(registerBuiltinAdapters).not.toHaveBeenCalled();
-    expect(resolveRuntimeKind).toHaveBeenCalledOnce();
+    expect(checkDockerAvailable).toHaveBeenCalledOnce();
+    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
   });
 
   it('preserves feature-off adapter-before-runtime error ordering', async () => {
@@ -84,6 +106,7 @@ describe('secure nested Docker resolved-variant admission', () => {
     expect(registerBuiltinAdapters).toHaveBeenCalledOnce();
     expect(resolveRuntimeKind).not.toHaveBeenCalled();
     expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
+    expect(checkDockerAvailable).not.toHaveBeenCalled();
   });
 
   it('rejects an unavailable explicit Apple runtime before adapter or image work', async () => {
@@ -121,7 +144,12 @@ describe('secure nested Docker admission — prepareDockerInfrastructure', () =>
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('rejects after read-only runtime resolution but before feature infrastructure provisioning', async () => {
+  it('rejects unavailable Docker after read-only runtime resolution but before feature infrastructure provisioning', async () => {
+    checkDockerAvailable.mockResolvedValueOnce({
+      available: false,
+      reason: 'Docker not available',
+      detailedMessage: 'Start Docker Desktop.',
+    });
     const { prepareDockerInfrastructure } = await import('../../src/docker/docker-infrastructure.js');
     const { getDockerWorkloadRoot } = await import('../../src/config/paths.js');
 
@@ -143,7 +171,7 @@ describe('secure nested Docker admission — prepareDockerInfrastructure', () =>
         join(home, 'escalations'),
         'bundle-fuse-001' as BundleId,
       ),
-    ).rejects.toThrow(/currently admits only the Apple Container developer slice/u);
+    ).rejects.toThrow(/Docker runtime is unavailable: Docker not available/u);
 
     // Effective runtime resolution is read-only. At this seam rejection
     // precedes the active-profile stamp and feature-attributable adapter,
@@ -153,6 +181,8 @@ describe('secure nested Docker admission — prepareDockerInfrastructure', () =>
     expect(readdirSync(home)).toEqual([]);
     expect(registerBuiltinAdapters).not.toHaveBeenCalled();
     expect(resolveRuntimeKind).toHaveBeenCalledOnce();
+    expect(checkDockerAvailable).toHaveBeenCalledOnce();
+    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
   });
 
   it('preserves feature-off provider-before-runtime error ordering', async () => {
@@ -179,6 +209,7 @@ describe('secure nested Docker admission — prepareDockerInfrastructure', () =>
 
     expect(resolveRuntimeKind).not.toHaveBeenCalled();
     expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
+    expect(checkDockerAvailable).not.toHaveBeenCalled();
     expect(readdirSync(home)).toEqual([]);
   });
 

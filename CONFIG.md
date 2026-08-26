@@ -91,13 +91,13 @@ to `offline` to use only images already available to the private runtime:
 }
 ```
 
-| Field                          | Type            | Default when enabled     | Description                                                                             |
-| ------------------------------ | --------------- | ------------------------ | --------------------------------------------------------------------------------------- |
-| `dockerWorkload.enabled`       | boolean         | `false`                  | Enable private nested Docker for Docker Agent sessions.                                 |
-| `dockerWorkload.networkAccess` | string          | Fresh enable: `packages` | `packages`, `images`, or `offline`; changes apply only to new sessions.                 |
-| `containerRuntime`             | string          | `auto`                   | `auto`, `docker`, or `apple-container`; the current nested-Docker slice requires Apple. |
-| `dockerResources.memoryMb`     | integer \| null | `8192`                   | Ordinary container memory ceiling; numeric values are inherited by nested Docker.       |
-| `dockerResources.cpus`         | number \| null  | `4`                      | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.          |
+| Field                          | Type            | Default when enabled     | Description                                                                        |
+| ------------------------------ | --------------- | ------------------------ | ---------------------------------------------------------------------------------- |
+| `dockerWorkload.enabled`       | boolean         | `false`                  | Enable private nested Docker for Docker Agent sessions.                            |
+| `dockerWorkload.networkAccess` | string          | Fresh enable: `packages` | `packages`, `images`, or `offline`; changes apply only to new sessions.            |
+| `containerRuntime`             | string          | `auto`                   | `auto`, `docker`, or `apple-container`; nested Docker with `docker` is macOS-only. |
+| `dockerResources.memoryMb`     | integer \| null | `8192`                   | Ordinary container memory ceiling; numeric values are inherited by nested Docker.  |
+| `dockerResources.cpus`         | number \| null  | `4`                      | Ordinary container CPU ceiling; numeric values are inherited by nested Docker.     |
 
 For backward compatibility, an existing enabled block with no old or new network choice migrates to
 `images`; old `imageIngress: "public-registry"` also becomes `images`, while `preloaded-only` becomes
@@ -105,11 +105,13 @@ For backward compatibility, an existing enabled block with no old or new network
 with no prior choice remains unchanged until the first CLI or web enable, which explicitly writes
 `packages`.
 
-The current admitted implementation is the Apple Container developer slice. `containerRuntime` may
-remain `auto` when Apple Container is available; unsupported runtime resolutions fail before nested
-Docker is provisioned. If an ordinary Docker resource is `null`, nested Docker keeps its safe fallback
-instead of inheriting an unlimited value. The setting is global for Docker Agent execution: standalone
-sessions and each workflow infrastructure bundle receive their own private nested daemon when enabled.
+On macOS, nested Docker admits a resolved Docker Desktop or Apple Container runtime and checks that the
+selected runtime is available before provisioning. Docker Desktop currently supports only `offline`;
+`images` and `packages` fail before a sidecar is created until the separate DD-PROXY mediation topology is
+implemented. A Docker resolution on another host fails closed. If an ordinary Docker resource is `null`,
+nested Docker keeps its safe fallback instead of inheriting an unlimited value. The setting is global for
+Docker Agent execution: standalone sessions and each workflow infrastructure bundle receive their own
+private nested daemon when enabled.
 
 ### Connecting nested containers
 

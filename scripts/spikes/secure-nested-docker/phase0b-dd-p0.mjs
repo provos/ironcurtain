@@ -36,7 +36,10 @@ if (!['p0', 'p2'].includes(profileLevel)) throw new Error('--profile-level must 
 const profilePath =
   profileLevel === 'p2' ? path.join(workspaceRoot, 'config/docker-workload/seccomp/desktop-p2-userns.json') : undefined;
 const profileHash = profilePath ? sha256File(profilePath) : 'docker-builtin';
-const expectedProfileHash = 'e5be04f5d37728c4c863768deea26eae3e64c07437e11c7363cb6e5ee27f983f';
+const ceiling = JSON.parse(
+  readFileSync(path.join(workspaceRoot, 'config/docker-workload/profile-ceiling.json'), 'utf8'),
+);
+const expectedProfileHash = ceiling.categories?.seccomp?.artifact?.sha256;
 if (profilePath && profileHash !== expectedProfileHash) {
   throw new Error(
     `P2 seccomp artifact hash mismatch: expected ${expectedProfileHash}, received ${profileHash} at ${profilePath}`,

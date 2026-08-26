@@ -37,6 +37,7 @@ import { APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS as READINESS_TEXT_BOUNDS } from '
 import {
   assertCleanupInventoryGap,
   cleanupInventoryGapMsSchema,
+  outerResourceKindSchema,
   type DockerWorkloadCleanupProof,
 } from './bundle-lease.js';
 
@@ -83,7 +84,7 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
       ...baseEventShape,
       kind: z.literal('outer-create'),
       requestId: identifierSchema,
-      resourceKind: z.enum(['container', 'network']),
+      resourceKind: outerResourceKindSchema,
       role: z.string().min(1).max(128),
       requestedName: resourceNameSchema,
       immutableId: runtimeIdentitySchema,

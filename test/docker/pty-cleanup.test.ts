@@ -47,7 +47,9 @@ vi.mock('../../src/docker/claude-md-seed.js', () => ({ buildDockerClaudeMd: () =
 
 vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: async () => state.infrastructure,
-  activateAppleVmDockerWorkload: vi.fn(),
+  activateNestedDockerWorkload: vi.fn(),
+  resolveNestedDockerAgentWiring: () => ({ appleNestedDaemon: undefined, env: {}, namedVolumeMounts: [] }),
+  resolveNestedDockerOuterAgentImage: (_infra: unknown, image: string) => image,
   buildAgentUidRemap: () => ({}),
   buildUdsSocketMounts: () => [],
   buildDockerWorkloadEgressMounts: () => [],

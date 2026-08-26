@@ -1,10 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  assertAdmittedDockerWorkloadRuntimeAvailable,
+  assertDockerWorkloadVariantAdmitted,
   dockerWorkloadConfigHash,
   dockerWorkloadRequestedSchema,
   formatDockerWorkloadStatus,
   resolveDockerWorkloadConfig,
 } from '../../src/docker-workload/config.js';
+
+const checkAppleContainerAvailable = vi.fn();
+const checkDockerAvailable = vi.fn();
+
+vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContainerAvailable }));
+vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  checkAppleContainerAvailable.mockResolvedValue({ available: true });
+  checkDockerAvailable.mockResolvedValue({ available: true });
+});
 
 describe('secure nested Docker configuration', () => {
   it('resolves absence, an empty object, and explicit false to the same authority-free value', () => {
@@ -99,7 +113,7 @@ describe('secure nested Docker configuration', () => {
 
   it('rejects unsupported legacy intent with an actionable replacement', () => {
     for (const [request, replacement] of [
-      [{ enabled: true, backend: 'docker' }, 'Apple Container'],
+      [{ enabled: true, backend: 'docker' }, 'containerRuntime'],
       [{ enabled: true, buildEgress: 'ironcurtain-dockerfiles' }, 'build egress'],
       [{ enabled: true, acceptObservedDiskRisk: false }, 'observed-disk policy'],
       [{ enabled: true, resources: { memoryMb: 8192 } }, 'dockerResources.memoryMb'],
@@ -113,6 +127,54 @@ describe('secure nested Docker configuration', () => {
       if (result.success) throw new Error('expected unsupported legacy intent to fail');
       expect(result.error.issues.map((issue) => issue.message).join('\n')).toContain(replacement);
     }
+  });
+
+  it('admits the resolved Apple runtime and Docker only on Darwin', () => {
+    const enabled = resolveDockerWorkloadConfig({ enabled: true });
+    expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'apple-container', 'darwin')).not.toThrow();
+    expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'docker', 'darwin')).not.toThrow();
+    expect(() => assertDockerWorkloadVariantAdmitted(enabled, 'docker', 'linux')).toThrow(
+      /Docker runtime is supported only on macOS \(Darwin\), not linux/u,
+    );
+  });
+
+  it('preserves feature-off without applying the runtime or platform admission gate', () => {
+    expect(() => assertDockerWorkloadVariantAdmitted(undefined, 'docker', 'linux')).not.toThrow();
+    expect(() =>
+      assertDockerWorkloadVariantAdmitted(resolveDockerWorkloadConfig({ enabled: false }), 'docker', 'linux'),
+    ).not.toThrow();
+  });
+
+  it('preflights only the selected runtime', async () => {
+    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('docker')).resolves.toBeUndefined();
+    expect(checkDockerAvailable).toHaveBeenCalledOnce();
+    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    checkAppleContainerAvailable.mockResolvedValue({ available: true });
+    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('apple-container')).resolves.toBeUndefined();
+    expect(checkAppleContainerAvailable).toHaveBeenCalledOnce();
+    expect(checkDockerAvailable).not.toHaveBeenCalled();
+  });
+
+  it('reports selected-runtime availability failures with probe detail', async () => {
+    checkDockerAvailable.mockResolvedValueOnce({
+      available: false,
+      reason: 'Docker not available',
+      detailedMessage: 'Start Docker Desktop.',
+    });
+    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('docker')).rejects.toThrow(
+      /Docker runtime is unavailable: Docker not available \(Start Docker Desktop\.\)/u,
+    );
+
+    checkAppleContainerAvailable.mockResolvedValueOnce({
+      available: false,
+      reason: 'container services not running',
+      detailedMessage: 'Start them first.',
+    });
+    await expect(assertAdmittedDockerWorkloadRuntimeAvailable('apple-container')).rejects.toThrow(
+      /Apple runtime is unavailable: container services not running \(Start them first\.\)/u,
+    );
   });
 
   it('rejects raw runtime authority', () => {

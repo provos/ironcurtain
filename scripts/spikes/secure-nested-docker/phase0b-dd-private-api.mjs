@@ -30,6 +30,7 @@ const probe = (parsed.probe ?? 'private-api').toLowerCase();
 if (!['functional', 'private-api'].includes(probe)) {
   throw new Error('--probe must be functional or private-api');
 }
+const systempathsUnconfined = parsed['systempaths-unconfined'] === 'true';
 const daemonImage =
   parsed['daemon-image'] ?? 'docker@sha256:67c4114553192e9072969fc347426048cfe4192385dc762d8eb449c05e904255';
 const helperImage =
@@ -60,9 +61,9 @@ const stageRoot = '/run/ironcurtain-staged';
 const stagingDir = path.join(evidenceDir, 'staging');
 const stagedArchiveHostPath = path.join(stagingDir, 'alpine.tar');
 const stagedArchiveGuestPath = `${stageRoot}/alpine.tar`;
-const runtimeShimSourcePath = path.join(scriptDir, 'runtime-shim/main.go');
-const runtimeShimHostPath = path.join(stagingDir, 'runc-no-new-keyring');
-const runtimeShimGuestPath = `${stageRoot}/runc-no-new-keyring`;
+const runtimeShimSourcePath = path.join(workspaceRoot, 'docker/nested-daemon/runtime-shim/main.go');
+const runtimeShimHostPath = path.join(stagingDir, 'runc');
+const runtimeShimGuestPath = `${stageRoot}/runc`;
 const requestedNames = {
   authorized: `ic-nested-spike-${runId}-authorized`,
   daemon: `ic-nested-spike-${runId}-daemon`,
@@ -232,7 +233,7 @@ function prepareStagedImage() {
   appendLedger(evidenceDir, {
     event: 'artifact-intent',
     generation,
-    path: 'staging/runc-no-new-keyring',
+    path: 'staging/runc',
     runId,
     source: path.relative(workspaceRoot, runtimeShimSourcePath),
     time: new Date().toISOString(),
@@ -261,7 +262,7 @@ function prepareStagedImage() {
   ].join('\n');
   writeFileSync(path.join(stagingDir, 'Dockerfile'), dockerfile, { mode: 0o600, flag: 'wx' });
   writeFileSync(path.join(stagingDir, 'payload.txt'), 'offline-build-ok\n', { mode: 0o600, flag: 'wx' });
-  writeFileSync(path.join(stagingDir, '.dockerignore'), 'alpine.tar\nrunc-no-new-keyring\n', {
+  writeFileSync(path.join(stagingDir, '.dockerignore'), 'alpine.tar\nrunc\n', {
     mode: 0o600,
     flag: 'wx',
   });
@@ -276,7 +277,7 @@ function prepareStagedImage() {
     source: helperImage,
   });
   writeJsonAtomic(path.join(evidenceDir, 'runtime-shim.json'), {
-    binaryPath: 'staging/runc-no-new-keyring',
+    binaryPath: 'staging/runc',
     binarySha256: sha256File(runtimeShimHostPath),
     build: {
       cgoEnabled: false,
@@ -318,7 +319,7 @@ function createApiVolume() {
 function initializeApiVolume() {
   const initCommand =
     probe === 'functional'
-      ? 'chmod 0700 /api && chown 1000:1000 /api && chown 0:0 /staged/.dockerignore /staged/alpine.tar /staged/Dockerfile /staged/payload.txt /staged/runc-no-new-keyring && chmod 0444 /staged/.dockerignore /staged/alpine.tar /staged/Dockerfile /staged/payload.txt && chmod 0555 /staged/runc-no-new-keyring'
+      ? 'chmod 0700 /api && chown 1000:1000 /api && chown 0:0 /staged/.dockerignore /staged/alpine.tar /staged/Dockerfile /staged/payload.txt /staged/runc && chmod 0444 /staged/.dockerignore /staged/alpine.tar /staged/Dockerfile /staged/payload.txt && chmod 0555 /staged/runc'
       : 'chmod 0700 /api && chown 1000:1000 /api';
   const init = createTrackedContainer('init', [
     'docker',
@@ -387,6 +388,7 @@ function createDaemon() {
     'SETGID',
     '--security-opt',
     `seccomp=${profilePath}`,
+    ...(systempathsUnconfined ? ['--security-opt', 'systempaths=unconfined'] : []),
     '--read-only',
     '--pids-limit',
     '128',
@@ -398,6 +400,8 @@ function createDaemon() {
     '/run:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
     '--tmpfs',
     '/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
+    '--tmpfs',
+    '/home/rootless/.docker:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000',
     '--mount',
     `type=volume,src=${apiVolumeName},dst=${apiRoot},volume-nocopy`,
     ...(probe === 'functional'
@@ -409,6 +413,8 @@ function createDaemon() {
     'DOCKERD_ROOTLESS_ROOTLESSKIT_NET=none',
     '--env',
     `XDG_RUNTIME_DIR=${apiRoot}`,
+    '--env',
+    `PATH=${stageRoot}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
     daemonImage,
     'dockerd',
     ...(probe === 'functional' ? ['--debug'] : []),
@@ -484,6 +490,10 @@ function runFunctionalPrimitives(daemon) {
   if (JSON.parse(loadedInspect.stdout)[0]?.Id !== helperImageId) {
     throw new ProbeFailure('loaded image immutable ID differs from the staged image');
   }
+  assertInnerSucceeded(
+    innerDocker(daemon, 'inner-tag-loaded-image', ['image', 'tag', helperImageId, 'alpine:latest']),
+    'loaded image could not be tagged for the offline build',
+  );
 
   const main = innerDocker(daemon, 'inner-run-main', [
     'run',
@@ -613,11 +623,23 @@ function runFunctionalPrimitives(daemon) {
     helperImageId,
     '/bin/sh',
     '-c',
-    'printf vulnerable-marker > /www/index.html; exec httpd -f -p 8080 -h /www',
+    "while :; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 17\\r\\nConnection: close\\r\\n\\r\\nvulnerable-marker' | nc -l -p 8080; done",
   ]);
   assertInnerSucceeded(server, 'nested target start failed');
   const serverId = server.stdout.trim();
   if (!/^[a-f0-9]{64}$/.test(serverId)) throw new ProbeFailure('nested target returned an invalid ID');
+
+  const serverRunning = innerDocker(daemon, 'inner-target-readiness', [
+    'inspect',
+    '--format',
+    '{{.State.Running}}',
+    serverId,
+  ]);
+  assertInnerSucceeded(serverRunning, 'nested target readiness inspect failed');
+  if (serverRunning.stdout.trim() !== 'true') {
+    const serverLogs = innerDocker(daemon, 'inner-target-failed-logs', ['logs', serverId]);
+    throw new ProbeFailure(`nested target exited before readiness: ${serverLogs.stderr || serverLogs.stdout}`);
+  }
 
   assertInnerSucceeded(
     innerDocker(daemon, 'inner-run-scanner', [

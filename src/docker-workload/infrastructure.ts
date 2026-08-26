@@ -39,6 +39,7 @@ import {
   returnDockerWorkloadLeaseRecoveryToIncident,
   requestDockerWorkloadOuterResource,
   type DockerWorkloadCleanupProof,
+  type DockerWorkloadOuterResource,
 } from './bundle-lease.js';
 import type { DockerWorkloadRevocationResult } from './bundle-revocation.js';
 import {
@@ -88,8 +89,8 @@ const POST_CREATE_SAMPLE_POLL_MS = 50;
 const ADMISSION_LOCK_ACQUIRE_ATTEMPTS = 16;
 
 export type DockerWorkloadRuntimeKind = ContainerRuntimeKind;
-export type OuterResourceKind = 'container' | 'network';
-export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'proxy' | 'network';
+export type OuterResourceKind = DockerWorkloadOuterResource['kind'];
+export type OuterResourceRole = 'agent' | 'nested-daemon' | 'daemon-api' | 'fixed-relay' | 'proxy' | 'network';
 
 /**
  * A precommitted outer-resource ledger entry. The caller creates the runtime

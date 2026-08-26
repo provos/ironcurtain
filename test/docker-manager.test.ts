@@ -352,6 +352,47 @@ describe('DockerManager', () => {
       );
       expect(() => buildCreateArgs({ ...sampleConfig, ipv4Address: 'relay.internal' })).toThrow(/IPv4 literal/u);
     });
+
+    it('emits the frozen trusted sidecar profile without changing ordinary container defaults', () => {
+      const args = buildCreateArgs({
+        ...sampleConfig,
+        trustedCreateOptions: {
+          namedVolumeMounts: [
+            { name: 'ic-api-volume', target: '/run/user/1000', noCopy: true },
+            { name: 'ic-stage-volume', target: '/staged', readonly: true, noCopy: true },
+          ],
+          tmpfs: ['/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000'],
+          readOnlyRootfs: true,
+          securityOptions: ['no-new-privileges=true'],
+          seccompProfile: '/trusted/profiles/rootless-sidecar.json',
+          pidsLimit: 128,
+        },
+      });
+
+      expect(args).toContain('type=volume,src=ic-api-volume,dst=/run/user/1000,volume-nocopy');
+      expect(args).toContain('type=volume,src=ic-stage-volume,dst=/staged,readonly,volume-nocopy');
+      expect(args).toContain('/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000');
+      expect(args).toContain('--read-only');
+      expect(args).toContain('no-new-privileges=true');
+      expect(args).toContain('seccomp=/trusted/profiles/rootless-sidecar.json');
+      expect(args[args.indexOf('--pids-limit') + 1]).toBe('128');
+      expect(buildCreateArgs(sampleConfig)).not.toContain('--read-only');
+    });
+
+    it('rejects ambiguous or invalid trusted sidecar limits', () => {
+      expect(() =>
+        buildCreateArgs({
+          ...sampleConfig,
+          trustedCreateOptions: { securityOptions: ['seccomp=unconfined'] },
+        }),
+      ).toThrow(/dedicated seccompProfile/u);
+      expect(() =>
+        buildCreateArgs({
+          ...sampleConfig,
+          trustedCreateOptions: { pidsLimit: 0 },
+        }),
+      ).toThrow(/positive safe integer/u);
+    });
   });
 
   describe('preflight', () => {
@@ -776,6 +817,111 @@ describe('DockerManager', () => {
     });
   });
 
+  describe('named volume lifecycle', () => {
+    it('creates an exactly named, labeled volume', async () => {
+      mock.setSequence([
+        { stdout: 'ic-api-volume\n' },
+        {
+          stdout: JSON.stringify([
+            {
+              Name: 'ic-api-volume',
+              Driver: 'local',
+              Labels: { 'com.ironcurtain.docker-workload.generation': 'generation-001' },
+            },
+          ]),
+        },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(
+        manager.createVolume?.('ic-api-volume', {
+          driver: 'local',
+          driverOptions: { type: 'none' },
+          labels: { 'com.ironcurtain.docker-workload.generation': 'generation-001' },
+        }),
+      ).resolves.toBe('ic-api-volume');
+      expect(mock.calls[0].args).toEqual([
+        'volume',
+        'create',
+        '--driver',
+        'local',
+        '--opt',
+        'type=none',
+        '--label',
+        'com.ironcurtain.docker-workload.generation=generation-001',
+        'ic-api-volume',
+      ]);
+      expect(mock.calls[1].args).toEqual(['volume', 'inspect', 'ic-api-volume']);
+    });
+
+    it('fails closed when Docker returns a different volume identity', async () => {
+      mock.setResponse('foreign-volume\n');
+      const manager = createDockerManager(mock.mockExec);
+      await expect(manager.createVolume?.('ic-api-volume')).rejects.toThrow(/unexpected volume identity/u);
+    });
+
+    it('fails closed when an existing volume name carries a foreign ownership label', async () => {
+      mock.setSequence([
+        { stdout: 'ic-api-volume\n' },
+        {
+          stdout: JSON.stringify([
+            {
+              Name: 'ic-api-volume',
+              Driver: 'local',
+              Labels: { 'com.ironcurtain.docker-workload.generation': 'foreign-generation' },
+            },
+          ]),
+        },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+      await expect(
+        manager.createVolume?.('ic-api-volume', {
+          labels: { 'com.ironcurtain.docker-workload.generation': 'generation-001' },
+        }),
+      ).rejects.toThrow(/does not carry requested ownership label/u);
+    });
+
+    it('lists and inspects exact volume ownership metadata', async () => {
+      const inspected = {
+        Name: 'ic-api-volume',
+        CreatedAt: '2026-08-25T01:02:03Z',
+        Driver: 'local',
+        Mountpoint: '/var/lib/docker/volumes/ic-api-volume/_data',
+        Labels: { 'com.ironcurtain.docker-workload.generation': 'generation-001' },
+      };
+      mock.setSequence([
+        { stdout: 'ic-api-volume\n' },
+        { stdout: JSON.stringify([inspected]) },
+        { stdout: JSON.stringify([inspected]) },
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(
+        manager.listVolumes?.({ labelFilter: 'com.ironcurtain.docker-workload.generation=generation-001' }),
+      ).resolves.toEqual([
+        {
+          id: 'ic-api-volume',
+          name: 'ic-api-volume',
+          created: '2026-08-25T01:02:03Z',
+          driver: 'local',
+          mountpoint: '/var/lib/docker/volumes/ic-api-volume/_data',
+          labels: { 'com.ironcurtain.docker-workload.generation': 'generation-001' },
+        },
+      ]);
+      await expect(manager.inspectVolume?.('ic-api-volume')).resolves.toMatchObject({ id: 'ic-api-volume' });
+      expect(mock.calls[0].args).toContain('label=com.ironcurtain.docker-workload.generation=generation-001');
+    });
+
+    it('removes by exact name and ignores an already-absent volume', async () => {
+      mock.setSequence([{ stdout: '' }, { error: true, code: 1, stderr: 'Error: No such volume: ic-api-volume' }]);
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.removeVolume?.('ic-api-volume')).resolves.toBeUndefined();
+      await expect(manager.removeVolume?.('ic-api-volume')).resolves.toBeUndefined();
+      expect(mock.calls[0].args).toEqual(['volume', 'rm', 'ic-api-volume']);
+    });
+  });
+
   describe('buildImage', () => {
     it('passes labels as --label flags', async () => {
       const spawnMock = createMockSpawn();
@@ -854,6 +1000,27 @@ describe('DockerManager', () => {
       spawnMock.handles[0].exit(1);
 
       await expect(promise).rejects.toThrow(/docker build .*exited with code 1.*Dockerfile syntax error/s);
+    });
+  });
+
+  describe('selected image artifact primitives', () => {
+    it('tags and saves an exact platform image through Docker', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.tagImage?.('sha256:source', 'ironcurtain-capture:latest');
+      await manager.saveImageArchive?.('ironcurtain-capture:latest', '/trusted/artifacts/agent.tar', 'linux/arm64');
+
+      expect(mock.calls[0].args).toEqual(['image', 'tag', 'sha256:source', 'ironcurtain-capture:latest']);
+      expect(mock.calls[1].args).toEqual([
+        'image',
+        'save',
+        '--output',
+        '/trusted/artifacts/agent.tar',
+        '--platform',
+        'linux/arm64',
+        'ironcurtain-capture:latest',
+      ]);
     });
   });
 
