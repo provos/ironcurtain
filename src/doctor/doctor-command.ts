@@ -18,7 +18,6 @@ import {
   checkAgentApiRoundtrip,
   checkAnnotationDrift,
   checkAppleContainer,
-  checkCertificateAuthority,
   checkConfigLoad,
   checkConstitutionDrift,
   checkDocker,
@@ -31,7 +30,6 @@ import {
   checkSandbox,
   checkServerCredentials,
   collectDeclaredEnvVars,
-  repairCertificateAuthorityStorage,
   type CheckResult,
 } from './checks.js';
 import { checkAnthropicCredentials, checkOAuthRefresh } from './oauth-checks.js';
@@ -45,8 +43,6 @@ import { printCheck, printSection, printSummary } from './output.js';
  */
 export interface DoctorDeps {
   readonly probeMcpServer?: typeof probeServer;
-  readonly checkCertificateAuthority?: typeof checkCertificateAuthority;
-  readonly repairCertificateAuthorityStorage?: typeof repairCertificateAuthorityStorage;
 }
 
 const DOCTOR_HELP: CommandSpec = {
@@ -55,15 +51,13 @@ const DOCTOR_HELP: CommandSpec = {
   usage: ['ironcurtain doctor [options]'],
   options: [
     { flag: 'check-api', description: 'Also run an agent-model API round-trip and OAuth refresh probe' },
-    { flag: 'repair', description: 'Repair MITM CA storage; unsafe state is quarantined and rotated' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
-  examples: ['ironcurtain doctor', 'ironcurtain doctor --check-api', 'ironcurtain doctor --repair'],
+  examples: ['ironcurtain doctor', 'ironcurtain doctor --check-api'],
 };
 
 export interface DoctorCliArgs {
   readonly checkApi: boolean;
-  readonly repair: boolean;
   readonly help: boolean;
 }
 
@@ -72,14 +66,12 @@ export function parseDoctorArgs(argv: string[]): DoctorCliArgs {
     args: argv,
     options: {
       'check-api': { type: 'boolean' },
-      repair: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     strict: true,
   });
   return {
     checkApi: values['check-api'] === true,
-    repair: values.repair === true,
     help: values.help === true,
   };
 }
@@ -130,22 +122,6 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     const rosettaResult = checkRosetta();
     printCheck(rosettaResult);
     collected.push(rosettaResult);
-  }
-
-  printSection('MITM CA');
-  const checkCa = deps.checkCertificateAuthority ?? checkCertificateAuthority;
-  let shouldCheckCa = true;
-  if (args.repair) {
-    const repairCa = deps.repairCertificateAuthorityStorage ?? repairCertificateAuthorityStorage;
-    const repairResult = repairCa();
-    printCheck(repairResult);
-    collected.push(repairResult);
-    shouldCheckCa = repairResult.status !== 'fail';
-  }
-  if (shouldCheckCa) {
-    const caResult = checkCa();
-    printCheck(caResult);
-    collected.push(caResult);
   }
 
   // Configuration — gates everything that needs the resolved config.

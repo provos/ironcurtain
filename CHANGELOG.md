@@ -6,7 +6,6 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- **MITM CA diagnosis and explicit repair** — `ironcurtain doctor` now verifies CA storage with the same validators used by container startup. `ironcurtain doctor --repair` hardens safe permissions, migrates valid legacy storage without changing its key, or quarantines unverifiable state and generates a fresh authority.
 - **Streaming workflow watch command** — `ironcurtain workflow watch <workflowId|runDir>` replays and follows operational `messages.jsonl` records with JSON, timestamp, and event filters, while `--lines N` provides a bounded last-N snapshot for scripts. Live watches remain open across human gates and return phase-derived terminal exit codes. ID-based watches reconcile through the daemon's existing RPC/event surface while run-directory watches work from disk alone (#439).
 
 ### Fixes
@@ -15,7 +14,7 @@ All notable changes to this project will be documented in this file.
 
 ### Behavior changes
 
-- **CA parent trust is enforced without silently changing safe home modes** — normal CA loads no longer tighten a non-writable `~/.ironcurtain` directory from `0755` to `0700`. A group- or world-writable parent remains a startup error because another writer could replace the CA directory; run `ironcurtain doctor --repair` to harden the parent and rotate CA state whose confidentiality cannot be established. First-run paths updated here now request mode `0700` when creating the home directory.
+- **Unusable MITM CA storage is replaced automatically** — instead of failing bundle startup, IronCurtain generates and atomically publishes a fresh CA for malformed, exposed, or legacy storage; valid legacy keys are rotated rather than migrated. Existing bundles retain their in-memory CA, while newly created bundles receive the replacement. First-run paths updated here now request mode `0700` when creating the IronCurtain home directory.
 - **Node.js engine floor raised to 22.15.0** (from 22.13.0). The SQLite worker entry shim registers its resolve hook via `module.registerHooks`, the synchronous module-customization API added in Node 22.15; the older async `module.register()` API cannot express the hook correctly and is now deprecated (`DEP0205`). Node 22.13/22.14 are the only versions dropped — 22.15+, 24, and 26 are unaffected, and `ironcurtain doctor` now reports sub-22.15 as a failure rather than an `ok`. CI additionally gained a `workflow_dispatch` trigger so the Node 22 job (otherwise master-push-only) can be run on demand against a PR branch.
 
 ## [0.13.0] - 2026-07-11

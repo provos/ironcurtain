@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
@@ -40,7 +40,6 @@ import {
   checkActiveRuntime,
   checkAnnotationDrift,
   checkAppleContainer,
-  checkCertificateAuthority,
   checkConstitutionDrift,
   checkDocker,
   checkDockerResources,
@@ -50,10 +49,8 @@ import {
   checkRosetta,
   checkServerCredentials,
   collectDeclaredEnvVars,
-  repairCertificateAuthorityStorage,
   type CheckResult,
 } from '../src/doctor/checks.js';
-import { loadOrCreateCA } from '../src/docker/ca.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 import type { ProbeResult } from '../src/doctor/mcp-liveness.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../src/config/types.js';
@@ -199,130 +196,6 @@ describe('checkNodeVersion', () => {
 
   it('fails for unparseable input', () => {
     expect(checkNodeVersion('not-a-version').status).toBe('fail');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Unit: checkCertificateAuthority
-// ---------------------------------------------------------------------------
-
-describe('checkCertificateAuthority', () => {
-  it('reports uninitialized storage without creating it', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const caDir = resolve(root, 'ca');
-    try {
-      const result = checkCertificateAuthority(caDir);
-      expect(result.status).toBe('ok');
-      expect(result.message).toMatch(/not initialized/u);
-      expect(existsSync(caDir)).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('reports uninitialized storage when the IronCurtain home does not exist', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const caDir = resolve(root, 'missing-home', 'ca');
-    try {
-      const result = checkCertificateAuthority(caDir);
-      expect(result.status).toBe('ok');
-      expect(result.message).toMatch(/not initialized/u);
-      expect(existsSync(resolve(root, 'missing-home'))).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('creates a missing IronCurtain home only during explicit repair', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const home = resolve(root, 'missing-home');
-    const caDir = resolve(home, 'ca');
-    try {
-      expect(repairCertificateAuthorityStorage(caDir).status).toBe('ok');
-      expect(existsSync(home)).toBe(true);
-      expect(existsSync(caDir)).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('warns about valid storage that requires migration without modifying it', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const source = loadOrCreateCA(resolve(root, 'source'));
-    const caDir = resolve(root, 'ca');
-    mkdirSync(caDir, { mode: 0o700 });
-    writeFileSync(resolve(caDir, 'ca-cert.pem'), readFileSync(source.certPath), { mode: 0o644 });
-    writeFileSync(resolve(caDir, 'ca-key.pem'), readFileSync(source.keyPath), { mode: 0o600 });
-    try {
-      const result = checkCertificateAuthority(caDir);
-      expect(result.status).toBe('warn');
-      expect(result.message).toMatch(/will be migrated/u);
-      expect(existsSync(resolve(caDir, 'current.json'))).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('migrates valid legacy storage during explicit repair', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const source = loadOrCreateCA(resolve(root, 'source'));
-    const caDir = resolve(root, 'ca');
-    mkdirSync(caDir, { mode: 0o700 });
-    writeFileSync(resolve(caDir, 'ca-cert.pem'), readFileSync(source.certPath), { mode: 0o644 });
-    writeFileSync(resolve(caDir, 'ca-key.pem'), readFileSync(source.keyPath), { mode: 0o600 });
-    try {
-      const result = repairCertificateAuthorityStorage(caDir);
-      expect(result.status).toBe('ok');
-      expect(result.message).toMatch(/migrated valid legacy storage to generation/u);
-      expect(existsSync(resolve(caDir, 'current.json'))).toBe(true);
-      expect(readFileSync(loadOrCreateCA(caDir).keyPath, 'utf8')).toBe(source.keyPem);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('fails with the startup error for incomplete legacy storage', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const caDir = resolve(root, 'ca');
-    mkdirSync(caDir, { mode: 0o700 });
-    writeFileSync(resolve(caDir, 'ca-key.pem'), 'incomplete', { mode: 0o600 });
-    try {
-      const result = checkCertificateAuthority(caDir);
-      expect(result.status).toBe('fail');
-      expect(result.message).toMatch(/CA is incomplete/u);
-      expect(result.hint).toContain(resolve(caDir, '..'));
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('fails when the CA directory has unsafe permissions', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const caDir = resolve(root, 'ca');
-    mkdirSync(caDir, { mode: 0o770 });
-    chmodSync(caDir, 0o770);
-    try {
-      const result = checkCertificateAuthority(caDir);
-      expect(result.status).toBe('fail');
-      expect(result.message).toMatch(/group- or world-writable/u);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('repairs exposed CA storage by reporting its quarantine path', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
-    const caDir = resolve(root, 'ca');
-    const authority = loadOrCreateCA(caDir);
-    chmodSync(authority.keyPath, 0o644);
-    try {
-      const result = repairCertificateAuthorityStorage(caDir);
-      expect(result.status).toBe('ok');
-      expect(result.message).toMatch(/quarantined previous state at .*ca\.quarantine-/u);
-      expect(checkCertificateAuthority(caDir).status).toBe('ok');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
   });
 });
 
@@ -842,72 +715,7 @@ describe('runDoctorCommand', () => {
     const { output, exitCode } = await captureOutput(() => runDoctorCommand(['--help']));
     expect(output).toContain('ironcurtain doctor');
     expect(output).toContain('--check-api');
-    expect(output).toContain('--repair');
     expect(exitCode).toBeUndefined();
-  });
-
-  it('parses repair as an explicit opt-in', async () => {
-    const { parseDoctorArgs } = await import('../src/doctor/doctor-command.js');
-    expect(parseDoctorArgs([]).repair).toBe(false);
-    expect(parseDoctorArgs(['--repair']).repair).toBe(true);
-  });
-
-  it('runs repair only when requested and prints a successful post-repair check', async () => {
-    const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
-    const probeStub = vi.fn(async (): Promise<ProbeResult> => ({ status: 'ok', toolCount: 1, elapsedMs: 10 }));
-    const repair = vi.fn(
-      (): CheckResult => ({
-        name: 'MITM CA repair',
-        status: 'ok',
-        message: '/tmp/ca.quarantine-test',
-      }),
-    );
-    const check = vi.fn(
-      (): CheckResult => ({ name: 'MITM CA storage', status: 'ok', message: 'verified generation gen-test' }),
-    );
-
-    const normal = await captureOutput(() =>
-      runDoctorCommand([], {
-        probeMcpServer: probeStub,
-        checkCertificateAuthority: check,
-        repairCertificateAuthorityStorage: repair,
-      }),
-    );
-    expect(normal.output).not.toContain('MITM CA repair');
-    expect(repair).not.toHaveBeenCalled();
-
-    check.mockClear();
-    const repaired = await captureOutput(() =>
-      runDoctorCommand(['--repair'], {
-        probeMcpServer: probeStub,
-        checkCertificateAuthority: check,
-        repairCertificateAuthorityStorage: repair,
-      }),
-    );
-    expect(repaired.output).toContain('MITM CA repair');
-    expect(repaired.output).toContain('ca.quarantine-test');
-    expect(repair).toHaveBeenCalledOnce();
-    expect(check).toHaveBeenCalledOnce();
-  });
-
-  it('suppresses the follow-up CA check when repair fails', async () => {
-    const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
-    const check = vi.fn((): CheckResult => ({ name: 'MITM CA storage', status: 'ok', message: 'must not be printed' }));
-    const repair = vi.fn(
-      (): CheckResult => ({ name: 'MITM CA repair', status: 'fail', message: 'repair failed safely' }),
-    );
-
-    const { output } = await captureOutput(() =>
-      runDoctorCommand(['--repair'], {
-        probeMcpServer: async () => ({ status: 'ok', toolCount: 1, elapsedMs: 10 }),
-        checkCertificateAuthority: check,
-        repairCertificateAuthorityStorage: repair,
-      }),
-    );
-
-    expect(output).toContain('repair failed safely');
-    expect(output).not.toContain('must not be printed');
-    expect(check).not.toHaveBeenCalled();
   });
 
   it('prints all sections and a summary footer', async () => {
@@ -925,11 +733,8 @@ describe('runDoctorCommand', () => {
     const { output } = await captureOutput(() => runDoctorCommand([], { probeMcpServer: probeStub }));
     expect(output).toContain('Environment');
     expect(output).toContain('Configuration');
-    expect(output).toContain('MITM CA');
-    expect(output).toContain('MITM CA storage');
     expect(output).toContain('Credentials');
     expect(output).toContain('MCP servers');
-    expect(output.indexOf('MITM CA')).toBeLessThan(output.indexOf('Configuration'));
     expect(output).toMatch(/Summary: \d+ ok, \d+ warn, \d+ fail/);
   });
 
