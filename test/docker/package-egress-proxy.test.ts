@@ -31,7 +31,7 @@ let auditCounter = 0;
 
 beforeAll(() => {
   caDir = mkdtempSync(join(tmpdir(), 'ironcurtain-package-egress-ca-'));
-  ca = loadOrCreateCA(caDir);
+  ca = loadOrCreateCA(join(caDir, 'ca'));
   upstreamCredentials = createUpstreamCredentials(ca);
 });
 
