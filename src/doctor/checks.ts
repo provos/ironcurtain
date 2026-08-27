@@ -163,7 +163,9 @@ export function checkCertificateAuthority(caDir = resolve(getIronCurtainHome(), 
       name: 'MITM CA storage',
       status: 'fail',
       message: error instanceof Error ? error.message : String(error),
-      hint: `Run ironcurtain doctor --repair to quarantine unsafe state under ${caDir} and rotate any exposed CA key.`,
+      hint:
+        `Run ironcurtain doctor --repair to quarantine unsafe state under ${resolve(caDir, '..')} ` +
+        'and rotate any exposed CA key.',
     };
   }
 }

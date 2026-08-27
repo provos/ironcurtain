@@ -60,7 +60,7 @@ function readCacheMarker(): CacheMarker | null {
 
 function writeCacheMarker(marker: CacheMarker): void {
   try {
-    mkdirSync(getIronCurtainHome(), { recursive: true });
+    mkdirSync(getIronCurtainHome(), { recursive: true, mode: 0o700 });
     writeFileSync(getCacheMarkerPath(), JSON.stringify(marker), { mode: 0o600 });
   } catch {
     // Cache writes are best-effort — failure just means we re-run next time.

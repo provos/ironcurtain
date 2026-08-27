@@ -23,7 +23,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import * as tls from 'node:tls';
 import forge from 'node-forge';
 import * as logger from '../logger.js';
-import { acquireProcessLock } from '../docker-workload/process-lock.js';
+import { acquireProcessLock, ProcessLockBusyError, type ProcessLockHandle } from '../docker-workload/process-lock.js';
 
 export interface CertificateAuthority {
   /** Authenticated generation selected by the atomically published current manifest. */
@@ -50,6 +50,13 @@ export type CertificateAuthorityRepair =
       readonly quarantineDirectory: string;
     };
 
+export interface CertificateAuthorityRepairDeps {
+  /** Test seam for deterministic publication and rollback failures. */
+  readonly rename?: (source: string, destination: string) => void;
+  /** Test seam for deterministic parent-directory sync failures. */
+  readonly syncDirectory?: (path: string) => void;
+}
+
 type CertificateAuthorityFiles = Omit<CertificateAuthority, 'generation'>;
 
 type AuthorityProfile = 'legacy-v1' | 'strict-v2';
@@ -71,6 +78,8 @@ const GENERATION_MANIFEST_FILENAME = 'manifest.json';
 const CURRENT_FILENAME = 'current.json';
 const LOCK_FILENAME = '.ca.lock';
 const PARENT_LOCK_FILENAME = '.ca-repair.lock';
+const ROTATION_REQUIRED_FILENAME = '.ca-rotation-required';
+const ROTATION_REQUIRED_CONTENTS = Buffer.from('IronCurtain CA rotation required\n', 'utf8');
 const CERT_MODE = 0o644;
 const KEY_MODE = 0o600;
 const MANIFEST_MODE = 0o600;
@@ -98,7 +107,6 @@ interface PreparedAuthorityParent {
   readonly path: string;
   readonly identity: FileIdentity;
   readonly wasBroad: boolean;
-  readonly wasWritable: boolean;
 }
 
 type CertificateAuthorityStorage =
@@ -141,12 +149,10 @@ interface CurrentManifest {
  */
 export function loadOrCreateCA(caDir: string): CertificateAuthority {
   const directory = resolve(caDir);
-  const parent = prepareAuthorityParent(directory, false);
-  const parentLock = acquireProcessLock(join(parent.path, PARENT_LOCK_FILENAME), {
-    attempts: 8,
-    processIdentityForPid: livePidIdentity,
-  });
+  const parent = prepareAuthorityParent(directory, 'validate');
+  const parentLock = acquireAuthorityParentLock(parent.path);
   try {
+    assertNoRotationIntent(parent.path);
     return loadOrCreateCAWithParentLock(directory);
   } finally {
     parentLock.release();
@@ -196,24 +202,35 @@ function loadOrCreateCAWithParentLock(directory: string): CertificateAuthority {
  * established is renamed to a quarantine sibling and replaced with a newly
  * generated authority; quarantined contents are never opened or traversed.
  */
-export function repairCertificateAuthority(caDir: string): CertificateAuthorityRepair {
+export function repairCertificateAuthority(
+  caDir: string,
+  deps: CertificateAuthorityRepairDeps = {},
+): CertificateAuthorityRepair {
   const directory = resolve(caDir);
   const parentCreated = createAuthorityParentIfMissing(directory);
-  const parent = prepareAuthorityParent(directory, true);
-  const parentLock = acquireProcessLock(join(parent.path, PARENT_LOCK_FILENAME), {
-    attempts: 8,
-    processIdentityForPid: livePidIdentity,
-  });
+  const observedParent = observeAuthorityParent(directory);
+  const parentLock = acquireAuthorityParentLock(observedParent.path);
   try {
+    if (authorityParentIsWritable(observedParent.path, observedParent.identity)) {
+      persistRotationIntent(observedParent.path);
+    }
+    const rotationRequired = rotationIntentExists(observedParent.path);
+    const parent = prepareAuthorityParent(directory, 'repair', observedParent.identity);
     assertPathIdentity(parent.path, parent.identity, 'parent directory');
     const entry = lstatIfPresent(directory);
     if (entry === undefined) {
+      if (rotationRequired) clearRotationIntent(parent.path);
       return { state: parentCreated || parent.wasBroad ? 'hardened' : 'not-needed', directory };
     }
 
-    const assessment = assessCertificateAuthorityForRepair(directory, entry, parent.wasWritable);
+    const assessment = assessCertificateAuthorityForRepair(directory, entry, rotationRequired);
     if (assessment.action === 'rotate') {
-      return rotateQuarantinedAuthority(directory, parent.path, parent.identity);
+      const repair = rotateQuarantinedAuthority(directory, parent.path, parent.identity, {
+        rename: deps.rename ?? renameSync,
+        syncDirectory: deps.syncDirectory ?? fsyncDirectory,
+      });
+      if (rotationRequired) clearRotationIntent(parent.path);
+      return repair;
     }
 
     const { inspection, directoryWasBroad } = assessment;
@@ -242,7 +259,7 @@ export function repairCertificateAuthority(caDir: string): CertificateAuthorityR
 function assessCertificateAuthorityForRepair(
   directory: string,
   entry: Stats,
-  parentWasWritable: boolean,
+  rotationRequired: boolean,
 ): CertificateAuthorityRepairAssessment {
   const expectedUid = process.getuid?.();
   if (!entry.isDirectory() || entry.isSymbolicLink()) {
@@ -251,7 +268,7 @@ function assessCertificateAuthorityForRepair(
   if (expectedUid !== undefined && entry.uid !== expectedUid) {
     throw new Error(`IronCurtain CA repair refuses to replace directory not owned by the current user: ${directory}`);
   }
-  if (parentWasWritable) return { action: 'rotate' };
+  if (rotationRequired) return { action: 'rotate' };
   if ((entry.mode & 0o022) !== 0) return { action: 'rotate' };
 
   try {
@@ -275,6 +292,7 @@ function rotateQuarantinedAuthority(
   directory: string,
   parent: string,
   parentIdentity: FileIdentity,
+  filesystem: Required<CertificateAuthorityRepairDeps>,
 ): CertificateAuthorityRepair {
   const id = randomUUID();
   const stagingDirectory = join(parent, `.${basename(directory)}.repair-staging-${id}`);
@@ -286,16 +304,17 @@ function rotateQuarantinedAuthority(
   mkdirSync(stagingDirectory, { mode: DIRECTORY_MODE });
   let stagingPublished = false;
   let oldQuarantined = false;
+  let oldRestoredButNotSynced = false;
   try {
     validateAuthorityDirectory(lstatSync(stagingDirectory), stagingDirectory, true);
     const authority = generateAndPublishCA(stagingDirectory);
     assertPathIdentity(parent, parentIdentity, 'parent directory');
-    renameSync(directory, quarantineDirectory);
+    filesystem.rename(directory, quarantineDirectory);
     oldQuarantined = true;
-    fsyncDirectory(parent);
-    renameSync(stagingDirectory, directory);
+    filesystem.syncDirectory(parent);
+    filesystem.rename(stagingDirectory, directory);
     stagingPublished = true;
-    fsyncDirectory(parent);
+    filesystem.syncDirectory(parent);
     return {
       state: 'rotated',
       directory,
@@ -307,15 +326,17 @@ function rotateQuarantinedAuthority(
       try {
         assertPathIdentity(parent, parentIdentity, 'parent directory');
         if (lstatIfPresent(directory) === undefined) {
-          renameSync(quarantineDirectory, directory);
+          filesystem.rename(quarantineDirectory, directory);
+          oldRestoredButNotSynced = true;
+          filesystem.syncDirectory(parent);
           oldQuarantined = false;
-          fsyncDirectory(parent);
+          oldRestoredButNotSynced = false;
         }
       } catch (restoreError) {
-        throw new Error(
-          `IronCurtain CA repair failed (${String(error)}); old state remains at ${quarantineDirectory} and the fresh replacement at ${stagingDirectory}`,
-          { cause: restoreError },
-        );
+        const survivingState = oldRestoredButNotSynced
+          ? `old state was restored at ${directory} but its parent sync failed; the fresh replacement remains at ${stagingDirectory}`
+          : `old state remains at ${quarantineDirectory} and the fresh replacement at ${stagingDirectory}`;
+        throw new Error(`IronCurtain CA repair failed (${String(error)}); ${survivingState}`, { cause: restoreError });
       }
     }
     if (oldQuarantined) {
@@ -325,7 +346,9 @@ function rotateQuarantinedAuthority(
     }
     throw error;
   } finally {
-    if (!stagingPublished && !oldQuarantined) rmSync(stagingDirectory, { recursive: true, force: true });
+    if (!stagingPublished && !oldQuarantined) {
+      rmSync(stagingDirectory, { recursive: true, force: true });
+    }
   }
 }
 
@@ -385,6 +408,23 @@ function livePidIdentity(pid: number): string | undefined {
   }
 }
 
+function acquireAuthorityParentLock(parent: string): ProcessLockHandle {
+  try {
+    return acquireProcessLock(join(parent, PARENT_LOCK_FILENAME), {
+      attempts: 8,
+      processIdentityForPid: livePidIdentity,
+    });
+  } catch (error) {
+    if (error instanceof ProcessLockBusyError) {
+      throw new Error(
+        `IronCurtain CA initialization or repair is already in progress; retry after it completes (${error.message})`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 function prepareAuthorityDirectory(input: string): string {
   const directory = resolve(input);
   try {
@@ -396,7 +436,7 @@ function prepareAuthorityDirectory(input: string): string {
     const parent = dirname(directory);
     const parentStats = lstatSync(parent);
     validateAuthorityDirectory(parentStats, parent, false);
-    hardenDirectoryMode(parentStats, parent);
+    validateHardenableDirectoryMode(parentStats, parent);
     try {
       mkdirSync(directory, { mode: DIRECTORY_MODE });
     } catch (mkdirError) {
@@ -413,21 +453,28 @@ function prepareAuthorityDirectory(input: string): string {
   return directory;
 }
 
-function prepareAuthorityParent(directory: string, allowWritable: boolean): PreparedAuthorityParent {
+function prepareAuthorityParent(
+  directory: string,
+  operation: 'validate' | 'repair',
+  expectedIdentity?: FileIdentity,
+): PreparedAuthorityParent {
   const path = dirname(directory);
-  const descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const descriptor = openAuthorityParent(path);
   try {
     const before = fstatSync(descriptor);
     validateAuthorityDirectory(before, path, false);
-    if (!allowWritable) validateHardenableDirectoryMode(before, path);
+    if (expectedIdentity !== undefined && !sameIdentity(before, expectedIdentity)) {
+      throw new Error(`IronCurtain CA parent directory changed before it could be hardened: ${path}`);
+    }
+    if (operation === 'validate') validateHardenableDirectoryMode(before, path);
     const mode = before.mode & 0o777;
-    if (mode !== DIRECTORY_MODE) {
+    if (operation === 'repair' && mode !== DIRECTORY_MODE) {
       fchmodSync(descriptor, DIRECTORY_MODE);
       fsyncSync(descriptor);
     }
     const after = fstatSync(descriptor);
     const published = lstatSync(path);
-    validateAuthorityDirectory(after, path, true);
+    validateAuthorityDirectory(after, path, operation === 'repair');
     if (!sameIdentity(before, after) || !sameIdentity(after, published)) {
       throw new Error(`IronCurtain CA parent directory changed while it was being hardened: ${path}`);
     }
@@ -435,10 +482,113 @@ function prepareAuthorityParent(directory: string, allowWritable: boolean): Prep
       path,
       identity: identity(after),
       wasBroad: mode !== DIRECTORY_MODE,
-      wasWritable: (mode & 0o022) !== 0,
     };
   } finally {
     closeSync(descriptor);
+  }
+}
+
+function authorityParentIsWritable(path: string, expectedIdentity: FileIdentity): boolean {
+  const descriptor = openAuthorityParent(path);
+  try {
+    const observed = fstatSync(descriptor);
+    validateAuthorityDirectory(observed, path, false);
+    if (!sameIdentity(observed, expectedIdentity) || !sameIdentity(observed, lstatSync(path))) {
+      throw new Error(`IronCurtain CA parent directory changed before repair intent could be recorded: ${path}`);
+    }
+    return (observed.mode & 0o022) !== 0;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function persistRotationIntent(parent: string): void {
+  const path = join(parent, ROTATION_REQUIRED_FILENAME);
+  if (lstatIfPresent(path) === undefined) {
+    const candidate = `${path}.candidate-${process.pid}-${randomUUID()}`;
+    try {
+      writeDurableExclusiveFile(
+        candidate,
+        ROTATION_REQUIRED_CONTENTS,
+        MANIFEST_MODE,
+        'rotation-required marker candidate',
+        ROTATION_REQUIRED_CONTENTS.length,
+      );
+      renameSync(candidate, path);
+      fsyncDirectory(parent);
+    } finally {
+      unlinkIfPresent(candidate);
+    }
+  }
+  if (!rotationIntentExists(parent)) {
+    throw new Error(`IronCurtain CA rotation-required marker disappeared during repair: ${path}`);
+  }
+}
+
+function rotationIntentExists(parent: string): boolean {
+  const path = join(parent, ROTATION_REQUIRED_FILENAME);
+  const stats = lstatIfPresent(path);
+  if (stats === undefined) return false;
+  validateRotationIntentMarker(stats, path);
+  return true;
+}
+
+function validateRotationIntentMarker(stats: Stats, path: string): void {
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+    throw new Error(`IronCurtain CA rotation-required marker ${path} must be one unlinked regular file`);
+  }
+  const expectedUid = process.getuid?.();
+  if (expectedUid !== undefined && stats.uid !== expectedUid) {
+    throw new Error(`IronCurtain CA rotation-required marker ${path} is not owned by the current user`);
+  }
+  if ((stats.mode & 0o777) !== MANIFEST_MODE || stats.size > ROTATION_REQUIRED_CONTENTS.length) {
+    throw new Error(`IronCurtain CA rotation-required marker is invalid: ${path}`);
+  }
+}
+
+function assertNoRotationIntent(parent: string): void {
+  const path = join(parent, ROTATION_REQUIRED_FILENAME);
+  if (lstatIfPresent(path) !== undefined) {
+    throw new Error(`IronCurtain CA repair is incomplete; run ironcurtain doctor --repair (${path})`);
+  }
+}
+
+function clearRotationIntent(parent: string): void {
+  const path = join(parent, ROTATION_REQUIRED_FILENAME);
+  const marker = lstatIfPresent(path);
+  if (marker === undefined) return;
+  validateRotationIntentMarker(marker, path);
+  const markerIdentity = identity(marker);
+  unlinkExactPath(path, markerIdentity);
+  fsyncDirectory(parent);
+}
+
+function observeAuthorityParent(directory: string): Pick<PreparedAuthorityParent, 'path' | 'identity'> {
+  const path = dirname(directory);
+  const descriptor = openAuthorityParent(path);
+  try {
+    const observed = fstatSync(descriptor);
+    validateAuthorityDirectory(observed, path, false);
+    if (!sameIdentity(observed, lstatSync(path))) {
+      throw new Error(`IronCurtain CA parent directory changed while it was being inspected: ${path}`);
+    }
+    return { path, identity: identity(observed) };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function openAuthorityParent(path: string): number {
+  try {
+    return openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'ENOTDIR') {
+      throw new Error(`IronCurtain CA parent ${path} must be a real directory and cannot be a symbolic link`, {
+        cause: error,
+      });
+    }
+    throw error;
   }
 }
 
@@ -449,6 +599,7 @@ function inspectAuthorityDirectory(input: string): { readonly directory: string;
   if (parentStats === undefined) return { directory, exists: false };
   validateAuthorityDirectory(parentStats, parent, false);
   validateHardenableDirectoryMode(parentStats, parent);
+  assertNoRotationIntent(parent);
   try {
     const existing = lstatSync(directory);
     validateAuthorityDirectory(existing, directory, false);

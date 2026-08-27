@@ -55,7 +55,7 @@ const DOCTOR_HELP: CommandSpec = {
   usage: ['ironcurtain doctor [options]'],
   options: [
     { flag: 'check-api', description: 'Also run an agent-model API round-trip and OAuth refresh probe' },
-    { flag: 'repair', description: 'Repair MITM CA storage, quarantining unsafe state and rotating its key' },
+    { flag: 'repair', description: 'Repair MITM CA storage; unsafe state is quarantined and rotated' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: ['ironcurtain doctor', 'ironcurtain doctor --check-api', 'ironcurtain doctor --repair'],
@@ -132,12 +132,7 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     collected.push(rosettaResult);
   }
 
-  // Configuration — gates everything that needs the resolved config.
-  printSection('Configuration');
-  const configCheck = checkConfigLoad();
-  printCheck(configCheck.result);
-  collected.push(configCheck.result);
-
+  printSection('MITM CA');
   const checkCa = deps.checkCertificateAuthority ?? checkCertificateAuthority;
   let shouldCheckCa = true;
   if (args.repair) {
@@ -152,6 +147,12 @@ export async function runDoctorCommand(argv: string[], deps: DoctorDeps = {}): P
     printCheck(caResult);
     collected.push(caResult);
   }
+
+  // Configuration — gates everything that needs the resolved config.
+  printSection('Configuration');
+  const configCheck = checkConfigLoad();
+  printCheck(configCheck.result);
+  collected.push(configCheck.result);
 
   if (!configCheck.config) {
     // Without a config we can't proceed past the basic environment.

@@ -119,6 +119,14 @@ describe('oauth-token-store', () => {
       expect(loaded).toEqual(token);
     });
 
+    it('creates a missing IronCurtain home with owner-only permissions', () => {
+      rmSync(testDir, { recursive: true });
+
+      saveOAuthToken('google', makeToken());
+
+      expect(statSync(testDir).mode & 0o777).toBe(0o700);
+    });
+
     it('sets file permissions to 0o600', () => {
       saveOAuthToken('google', makeToken());
 

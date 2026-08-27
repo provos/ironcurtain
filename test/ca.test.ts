@@ -78,6 +78,21 @@ describe('loadOrCreateCA', () => {
     expect(readdirSync(caDir).sort()).toEqual(['ca-cert.pem', 'ca-key.pem']);
   });
 
+  it('repairs valid legacy storage without rotating its key', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const legacy = createLegacyAuthority();
+    mkdirSync(caDir, { mode: 0o700 });
+    writeFileSync(join(caDir, 'ca-cert.pem'), legacy.certPem, { mode: 0o644 });
+    writeFileSync(join(caDir, 'ca-key.pem'), legacy.keyPem, { mode: 0o600 });
+
+    const repair = repairCertificateAuthority(caDir);
+
+    expect(repair.state).toBe('migrated');
+    expect(loadOrCreateCA(caDir).keyPem).toBe(legacy.keyPem);
+    expect(readdirSync(tempDir).filter((name) => name.includes('.quarantine-'))).toEqual([]);
+  });
+
   it('inspects the published generation with the startup validators', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
     const caDir = join(tempDir, 'ca');
@@ -109,6 +124,18 @@ describe('loadOrCreateCA', () => {
     expect(loaded.generation).toBe(original.generation);
     expect(loaded.keyPem).toBe(original.keyPem);
     expect(readdirSync(tempDir).filter((name) => name.includes('.quarantine-'))).toEqual([]);
+  });
+
+  it('does not silently harden a safe non-writable parent during normal load', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    chmodSync(tempDir, 0o755);
+
+    const original = loadOrCreateCA(caDir);
+
+    expect(statSync(tempDir).mode & 0o777).toBe(0o755);
+    expect(loadOrCreateCA(caDir).generation).toBe(original.generation);
+    expect(statSync(tempDir).mode & 0o777).toBe(0o755);
   });
 
   it('rotates a valid CA when its parent was writable and preserves the old tree', () => {
@@ -163,6 +190,55 @@ describe('loadOrCreateCA', () => {
     expect(loadOrCreateCA(caDir).keyPem).not.toBe(original.keyPem);
   });
 
+  it('restores the old CA and removes staging when publication fails after quarantine', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const original = loadOrCreateCA(caDir);
+    chmodSync(original.keyPath, 0o644);
+
+    expect(() =>
+      repairCertificateAuthority(caDir, {
+        rename(source, destination) {
+          if (source.includes('.repair-staging-') && destination === caDir) {
+            throw new Error('injected publication failure');
+          }
+          renameSync(source, destination);
+        },
+      }),
+    ).toThrow(/injected publication failure/u);
+
+    expect(readFileSync(original.keyPath, 'utf8')).toBe(original.keyPem);
+    expect(readdirSync(tempDir).filter((name) => name.includes('repair-staging'))).toEqual([]);
+    expect(readdirSync(tempDir).filter((name) => name.includes('.quarantine-'))).toEqual([]);
+  });
+
+  it('preserves restored and staged state when the rollback parent sync fails', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const original = loadOrCreateCA(caDir);
+    chmodSync(original.keyPath, 0o644);
+    let parentSyncs = 0;
+
+    expect(() =>
+      repairCertificateAuthority(caDir, {
+        rename(source, destination) {
+          if (source.includes('.repair-staging-') && destination === caDir) {
+            throw new Error('injected publication failure');
+          }
+          renameSync(source, destination);
+        },
+        syncDirectory() {
+          parentSyncs += 1;
+          if (parentSyncs === 2) throw new Error('injected rollback sync failure');
+        },
+      }),
+    ).toThrow(/old state was restored.*fresh replacement remains/u);
+
+    expect(readFileSync(original.keyPath, 'utf8')).toBe(original.keyPem);
+    expect(readdirSync(tempDir).filter((name) => name.includes('repair-staging'))).toHaveLength(1);
+    expect(readdirSync(tempDir).filter((name) => name.includes('.quarantine-'))).toEqual([]);
+  });
+
   it('rotates storage containing a symlink without following it', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
     const caDir = join(tempDir, 'ca');
@@ -188,11 +264,87 @@ describe('loadOrCreateCA', () => {
       processIdentityForPid: () => `live-pid:${process.pid}`,
     });
     try {
-      expect(() => loadOrCreateCA(caDir)).toThrow(/process lock is busy/u);
-      expect(() => repairCertificateAuthority(caDir)).toThrow(/process lock is busy/u);
+      expect(() => loadOrCreateCA(caDir)).toThrow(/CA initialization or repair is already in progress; retry/u);
+      expect(() => repairCertificateAuthority(caDir)).toThrow(
+        /CA initialization or repair is already in progress; retry/u,
+      );
     } finally {
       lock.release();
     }
+  });
+
+  it('does not erase writable-parent evidence while repair is locked', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const original = loadOrCreateCA(caDir);
+    chmodSync(tempDir, 0o770);
+    const lock = acquireProcessLock(join(tempDir, '.ca-repair.lock'), {
+      processIdentityForPid: () => `live-pid:${process.pid}`,
+    });
+    try {
+      expect(() => repairCertificateAuthority(caDir)).toThrow(
+        /CA initialization or repair is already in progress; retry/u,
+      );
+      expect(statSync(tempDir).mode & 0o777).toBe(0o770);
+    } finally {
+      lock.release();
+    }
+
+    const repair = repairCertificateAuthority(caDir);
+    expect(repair.state).toBe('rotated');
+    expect(loadOrCreateCA(caDir).keyPem).not.toBe(original.keyPem);
+  });
+
+  it('persists writable-parent rotation intent across a failed repair', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const original = loadOrCreateCA(caDir);
+    chmodSync(tempDir, 0o770);
+
+    expect(() =>
+      repairCertificateAuthority(caDir, {
+        rename(source, destination) {
+          if (source.includes('.repair-staging-') && destination === caDir) {
+            throw new Error('injected publication failure');
+          }
+          renameSync(source, destination);
+        },
+      }),
+    ).toThrow(/injected publication failure/u);
+
+    expect(statSync(tempDir).mode & 0o777).toBe(0o700);
+    expect(() => loadOrCreateCA(caDir)).toThrow(/repair is incomplete/u);
+    const repair = repairCertificateAuthority(caDir);
+    expect(repair.state).toBe('rotated');
+    expect(loadOrCreateCA(caDir).keyPem).not.toBe(original.keyPem);
+    expect(existsSync(join(tempDir, '.ca-rotation-required'))).toBe(false);
+  });
+
+  it('recovers a partial rotation intent by rotating and clearing it', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const caDir = join(tempDir, 'ca');
+    const original = loadOrCreateCA(caDir);
+    writeFileSync(join(tempDir, '.ca-rotation-required'), '', { mode: 0o600 });
+
+    expect(() => loadOrCreateCA(caDir)).toThrow(/repair is incomplete/u);
+    const repair = repairCertificateAuthority(caDir);
+
+    expect(repair.state).toBe('rotated');
+    expect(loadOrCreateCA(caDir).keyPem).not.toBe(original.keyPem);
+    expect(existsSync(join(tempDir, '.ca-rotation-required'))).toBe(false);
+  });
+
+  it('rejects a symlinked CA parent with an explicit domain error', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ca-test-'));
+    const actualParent = join(tempDir, 'actual-parent');
+    const linkedParent = join(tempDir, 'linked-parent');
+    mkdirSync(actualParent, { mode: 0o700 });
+    symlinkSync(actualParent, linkedParent);
+
+    expect(() => loadOrCreateCA(join(linkedParent, 'ca'))).toThrow(/parent .* real directory.*symbolic link/u);
+    expect(() => repairCertificateAuthority(join(linkedParent, 'ca'))).toThrow(
+      /parent .* real directory.*symbolic link/u,
+    );
   });
 
   it('refuses to replace a non-directory CA path', () => {

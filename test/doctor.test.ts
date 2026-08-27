@@ -263,6 +263,24 @@ describe('checkCertificateAuthority', () => {
     }
   });
 
+  it('migrates valid legacy storage during explicit repair', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
+    const source = loadOrCreateCA(resolve(root, 'source'));
+    const caDir = resolve(root, 'ca');
+    mkdirSync(caDir, { mode: 0o700 });
+    writeFileSync(resolve(caDir, 'ca-cert.pem'), readFileSync(source.certPath), { mode: 0o644 });
+    writeFileSync(resolve(caDir, 'ca-key.pem'), readFileSync(source.keyPath), { mode: 0o600 });
+    try {
+      const result = repairCertificateAuthorityStorage(caDir);
+      expect(result.status).toBe('ok');
+      expect(result.message).toMatch(/migrated valid legacy storage to generation/u);
+      expect(existsSync(resolve(caDir, 'current.json'))).toBe(true);
+      expect(readFileSync(loadOrCreateCA(caDir).keyPath, 'utf8')).toBe(source.keyPem);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('fails with the startup error for incomplete legacy storage', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'ironcurtain-doctor-ca-'));
     const caDir = resolve(root, 'ca');
@@ -272,7 +290,7 @@ describe('checkCertificateAuthority', () => {
       const result = checkCertificateAuthority(caDir);
       expect(result.status).toBe('fail');
       expect(result.message).toMatch(/CA is incomplete/u);
-      expect(result.hint).toContain(caDir);
+      expect(result.hint).toContain(resolve(caDir, '..'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -872,6 +890,26 @@ describe('runDoctorCommand', () => {
     expect(check).toHaveBeenCalledOnce();
   });
 
+  it('suppresses the follow-up CA check when repair fails', async () => {
+    const { runDoctorCommand } = await import('../src/doctor/doctor-command.js');
+    const check = vi.fn((): CheckResult => ({ name: 'MITM CA storage', status: 'ok', message: 'must not be printed' }));
+    const repair = vi.fn(
+      (): CheckResult => ({ name: 'MITM CA repair', status: 'fail', message: 'repair failed safely' }),
+    );
+
+    const { output } = await captureOutput(() =>
+      runDoctorCommand(['--repair'], {
+        probeMcpServer: async () => ({ status: 'ok', toolCount: 1, elapsedMs: 10 }),
+        checkCertificateAuthority: check,
+        repairCertificateAuthorityStorage: repair,
+      }),
+    );
+
+    expect(output).toContain('repair failed safely');
+    expect(output).not.toContain('must not be printed');
+    expect(check).not.toHaveBeenCalled();
+  });
+
   it('prints all sections and a summary footer', async () => {
     // loadConfig() reads from src/config/mcp-servers.json which exists
     // in the repo. We pass a probe stub through DoctorDeps to avoid
@@ -887,9 +925,11 @@ describe('runDoctorCommand', () => {
     const { output } = await captureOutput(() => runDoctorCommand([], { probeMcpServer: probeStub }));
     expect(output).toContain('Environment');
     expect(output).toContain('Configuration');
+    expect(output).toContain('MITM CA');
     expect(output).toContain('MITM CA storage');
     expect(output).toContain('Credentials');
     expect(output).toContain('MCP servers');
+    expect(output.indexOf('MITM CA')).toBeLessThan(output.indexOf('Configuration'));
     expect(output).toMatch(/Summary: \d+ ok, \d+ warn, \d+ fail/);
   });
 

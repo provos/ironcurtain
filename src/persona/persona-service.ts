@@ -128,7 +128,7 @@ export function createPersona(input: CreatePersonaInput, actor: string): Persona
   };
 
   // Build the whole tree under a temp name first; rename atomically at the end.
-  mkdirSync(personasDir, { recursive: true });
+  mkdirSync(personasDir, { recursive: true, mode: 0o700 });
   const tmpDir = resolve(personasDir, `.tmp-${name}-${randomUUID()}`);
   mkdirSync(resolve(tmpDir, 'generated'), { recursive: true });
   mkdirSync(resolve(tmpDir, 'workspace'), { recursive: true });
@@ -255,7 +255,7 @@ export function deletePersona(name: PersonaName, actor: string, opts: DeletePers
     rmSync(personaDir, { recursive: true, force: true });
   } else {
     const trashDir = getPersonaTrashDir();
-    mkdirSync(trashDir, { recursive: true });
+    mkdirSync(trashDir, { recursive: true, mode: 0o700 });
     // Colons are invalid in some filesystems; use a filesystem-safe timestamp.
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     renameSync(personaDir, resolve(trashDir, `${name}-${ts}`));

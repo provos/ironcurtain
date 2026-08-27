@@ -820,7 +820,7 @@ function describeAddedFields(patch: Record<string, unknown>): string {
  */
 function readOrCreateConfigFile(configPath: string): string {
   if (!existsSync(configPath)) {
-    mkdirSync(dirname(configPath), { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
     writeConfigFile(configPath, DEFAULT_CONFIG_CONTENT);
     process.stderr.write(`Created default config at ${configPath}\n`);
     return DEFAULT_CONFIG_CONTENT;
@@ -1277,7 +1277,7 @@ export function saveUserConfig(changes: UserConfig): void {
       existing = {};
     }
   } else {
-    mkdirSync(dirname(configPath), { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
   }
 
   const merged = normalizeLegacyPreferredMode(stripEnvOpenrouterKeys(deepMergeConfig(existing, changes), existing));
