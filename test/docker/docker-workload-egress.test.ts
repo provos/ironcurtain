@@ -40,7 +40,7 @@ const packageProxies: PackageEgressProxy[] = [];
 
 beforeAll(() => {
   caDirectory = mkdtempSync(join(tmpdir(), 'workload-egress-ca-'));
-  ca = loadOrCreateCA(caDirectory);
+  ca = loadOrCreateCA(join(caDirectory, 'ca'));
 });
 
 afterAll(() => {

@@ -242,7 +242,7 @@ async function runStart(args: string[]): Promise<void> {
   const modelOverride = values.model as string | undefined;
   const captureTracesFlag = values['capture-traces'] as boolean | undefined;
   const baseDir = resolve(getIronCurtainHome(), 'workflow-runs');
-  mkdirSync(baseDir, { recursive: true });
+  mkdirSync(baseDir, { recursive: true, mode: 0o700 });
 
   const checkpointStore = new FileCheckpointStore(baseDir);
   const gateHandler = createGateHandler();

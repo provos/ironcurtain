@@ -100,7 +100,7 @@ describe('DynamicHostController', () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'proxy-tools-test-'));
-    ca = loadOrCreateCA(tmpDir);
+    ca = loadOrCreateCA(join(tmpDir, 'ca'));
 
     const fakeKey = generateFakeKey(testProvider.fakeKeyPrefix);
     proxy = createMitmProxy({
@@ -471,7 +471,7 @@ describe('MITM proxy control API', () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'control-api-integ-'));
-    ca = loadOrCreateCA(tmpDir);
+    ca = loadOrCreateCA(join(tmpDir, 'ca'));
 
     const fakeKey = generateFakeKey(testProvider.fakeKeyPrefix);
     proxy = createMitmProxy({

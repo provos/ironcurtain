@@ -5,6 +5,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -18,11 +19,11 @@ import {
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import * as tls from 'node:tls';
 import forge from 'node-forge';
 import * as logger from '../logger.js';
-import { acquireProcessLock } from '../docker-workload/process-lock.js';
+import { acquireProcessLock, ProcessLockBusyError, type ProcessLockHandle } from '../docker-workload/process-lock.js';
 
 export interface CertificateAuthority {
   /** Authenticated generation selected by the atomically published current manifest. */
@@ -53,10 +54,13 @@ const GENERATION_KEY_FILENAME = 'ca-key.pem';
 const GENERATION_MANIFEST_FILENAME = 'manifest.json';
 const CURRENT_FILENAME = 'current.json';
 const LOCK_FILENAME = '.ca.lock';
+const PARENT_LOCK_FILENAME = '.ca-lifecycle.lock';
 const CERT_MODE = 0o644;
 const KEY_MODE = 0o600;
 const MANIFEST_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
+// Owner-only plus sticky records a durable "replacement pending" state.
+const PARENT_REPLACEMENT_MODE = 0o1700;
 const MAX_CA_FILE_BYTES = 128 * 1024;
 const MAX_MANIFEST_BYTES = 16 * 1024;
 const CA_VALIDITY_MS = 10 * 365 * 24 * 60 * 60 * 1000;
@@ -69,10 +73,20 @@ const BASIC_CONSTRAINTS_OID = '2.5.29.19';
 const KEY_USAGE_OID = '2.5.29.15';
 const SUBJECT_KEY_IDENTIFIER_OID = '2.5.29.14';
 const AUTHORITY_KEY_IDENTIFIER_OID = '2.5.29.35';
+const TRANSIENT_FILESYSTEM_ERROR_CODES = new Set(['EBUSY', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM', 'ENOSPC', 'ESTALE']);
 
 interface FileIdentity {
   readonly dev: number;
   readonly ino: number;
+}
+
+interface PreparedAuthorityParent {
+  readonly path: string;
+  readonly identity: FileIdentity;
+}
+
+interface ObservedAuthorityParent extends PreparedAuthorityParent {
+  readonly requiresReplacement: boolean;
 }
 
 interface GenerationManifest {
@@ -95,13 +109,42 @@ interface CurrentManifest {
 }
 
 /**
- * Load the exact current generation or create/migrate one under the bounded
- * process lock. Only `current.json` is authoritative: generation contents are
- * fully written, fsynced, hashed, and verified before that one pointer is
- * atomically renamed into place.
+ * Load the exact current generation or atomically replace unusable storage
+ * with a fresh authority. A replacement is fully generated in a sibling
+ * directory before it is published under the bounded parent process lock.
  */
 export function loadOrCreateCA(caDir: string): CertificateAuthority {
-  const directory = prepareAuthorityDirectory(caDir);
+  const directory = resolve(caDir);
+  const preLockParent = observeAuthorityParent(directory);
+  const parentLock = acquireAuthorityParentLock(preLockParent.path);
+  try {
+    const observedParent = observeAuthorityParent(directory, preLockParent.identity);
+    const parent = prepareAuthorityParent(directory, observedParent.identity, observedParent.requiresReplacement);
+    const displaced = observedParent.requiresReplacement
+      ? displaceAuthority(directory, parent.path, parent.identity)
+      : undefined;
+    let authority: CertificateAuthority;
+    if (observedParent.requiresReplacement) {
+      logger.warn(`[ca] Replacing IronCurtain MITM CA after securing unsafe parent ${parent.path}`);
+      authority = replaceCertificateAuthority(directory, parent, displaced);
+      finalizeAuthorityParent(parent);
+    } else {
+      try {
+        authority = loadOrCreateCAWithParentLock(directory);
+      } catch (error) {
+        if (isTransientFilesystemFailure(error)) throw error;
+        logger.warn(`[ca] Replacing unusable IronCurtain MITM CA: ${String(error)}`);
+        authority = replaceCertificateAuthority(directory, parent);
+      }
+    }
+    return authority;
+  } finally {
+    parentLock.release();
+  }
+}
+
+function loadOrCreateCAWithParentLock(directory: string): CertificateAuthority {
+  prepareAuthorityDirectory(directory);
   const lock = acquireProcessLock(join(directory, LOCK_FILENAME), {
     attempts: 8,
     processIdentityForPid: livePidIdentity,
@@ -109,19 +152,17 @@ export function loadOrCreateCA(caDir: string): CertificateAuthority {
   try {
     cleanupInterruptedCurrentTemps(directory);
     const currentPath = join(directory, CURRENT_FILENAME);
+    const legacyCertPath = join(directory, LEGACY_CERT_FILENAME);
+    const legacyKeyPath = join(directory, LEGACY_KEY_FILENAME);
     if (pathExistsNoFollow(currentPath)) {
       const authority = loadCurrentAuthority(directory, currentPath);
-      if (authority.profile === 'legacy-v1') {
-        cleanupLegacyMigrationRemainder(directory, authority);
-        const migrated = publishStrictAuthorityWithExistingKey(directory, authority.keyPem, true);
-        return withoutProfile(migrated);
+      if (authority.profile === 'legacy-v1') throw new Error('IronCurtain CA uses the legacy profile');
+      if (pathExistsNoFollow(legacyCertPath) || pathExistsNoFollow(legacyKeyPath)) {
+        throw new Error('IronCurtain CA contains legacy flat-file storage');
       }
-      cleanupLegacyMigrationRemainder(directory, authority);
       return withoutProfile(authority);
     }
 
-    const legacyCertPath = join(directory, LEGACY_CERT_FILENAME);
-    const legacyKeyPath = join(directory, LEGACY_KEY_FILENAME);
     const certExists = pathExistsNoFollow(legacyCertPath);
     const keyExists = pathExistsNoFollow(legacyKeyPath);
     if (certExists !== keyExists) {
@@ -129,22 +170,67 @@ export function loadOrCreateCA(caDir: string): CertificateAuthority {
         'IronCurtain CA is incomplete: legacy ca-cert.pem and ca-key.pem must either both exist or both be absent',
       );
     }
-
     cleanupUnreachableGenerations(directory);
-    if (certExists) {
-      const legacy = loadAndVerifyAuthorityFiles(legacyCertPath, legacyKeyPath);
-      const authority =
-        legacy.profile === 'legacy-v1'
-          ? publishStrictAuthorityWithExistingKey(directory, legacy.keyPem, false)
-          : publishGeneration(directory, legacy.certPem, legacy.keyPem, false);
-      removeExactLegacyPair(legacy);
-      fsyncDirectory(directory);
-      return withoutProfile(authority);
-    }
+    if (certExists) throw new Error('IronCurtain CA uses legacy flat-file storage');
     return withoutProfile(generateAndPublishCA(directory));
   } finally {
     lock.release();
   }
+}
+
+function isTransientFilesystemFailure(error: unknown): boolean {
+  if (error instanceof ProcessLockBusyError) return true;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code !== undefined && TRANSIENT_FILESYSTEM_ERROR_CODES.has(code);
+}
+
+function replaceCertificateAuthority(
+  directory: string,
+  parent: PreparedAuthorityParent,
+  displacedDirectory?: string,
+): CertificateAuthority {
+  const id = randomUUID();
+  const stagingDirectory = join(parent.path, `.${basename(directory)}.staging-${id}`);
+  const obsoleteDirectory = displacedDirectory ?? join(parent.path, `.${basename(directory)}.obsolete-${id}`);
+  assertPathIdentity(parent.path, parent.identity, 'parent directory');
+  mkdirSync(stagingDirectory, { mode: DIRECTORY_MODE });
+  let stagingPublished = false;
+  let obsoletePublished = displacedDirectory !== undefined;
+  try {
+    validateAuthorityDirectory(lstatSync(stagingDirectory), stagingDirectory, true);
+    generateAndPublishCA(stagingDirectory);
+    assertPathIdentity(parent.path, parent.identity, 'parent directory');
+    if (displacedDirectory === undefined && lstatIfPresent(directory) !== undefined) {
+      renameSync(directory, obsoleteDirectory);
+      obsoletePublished = true;
+      fsyncDirectory(parent.path);
+    }
+    renameSync(stagingDirectory, directory);
+    stagingPublished = true;
+    fsyncDirectory(parent.path);
+    const authority = loadOrCreateCAWithParentLock(directory);
+    if (obsoletePublished) removeReplacementArtifact(obsoleteDirectory);
+    return authority;
+  } finally {
+    if (!stagingPublished) rmSync(stagingDirectory, { recursive: true, force: true });
+  }
+}
+
+function removeReplacementArtifact(path: string): void {
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch (error) {
+    logger.warn(`[ca] Could not remove obsolete CA state at ${path}: ${String(error)}`);
+  }
+}
+
+function displaceAuthority(directory: string, parent: string, parentIdentity: FileIdentity): string | undefined {
+  assertPathIdentity(parent, parentIdentity, 'parent directory');
+  if (lstatIfPresent(directory) === undefined) return undefined;
+  const obsoleteDirectory = join(parent, `.${basename(directory)}.obsolete-${randomUUID()}`);
+  renameSync(directory, obsoleteDirectory);
+  fsyncDirectory(parent);
+  return obsoleteDirectory;
 }
 
 function livePidIdentity(pid: number): string | undefined {
@@ -155,6 +241,23 @@ function livePidIdentity(pid: number): string | undefined {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ESRCH') return undefined;
     if (code === 'EPERM') return `live-pid:${pid}`;
+    throw error;
+  }
+}
+
+function acquireAuthorityParentLock(parent: string): ProcessLockHandle {
+  try {
+    return acquireProcessLock(join(parent, PARENT_LOCK_FILENAME), {
+      attempts: 8,
+      processIdentityForPid: livePidIdentity,
+    });
+  } catch (error) {
+    if (error instanceof ProcessLockBusyError) {
+      throw new Error(
+        `IronCurtain CA initialization or regeneration is already in progress; retry after it completes (${error.message})`,
+        { cause: error },
+      );
+    }
     throw error;
   }
 }
@@ -170,7 +273,7 @@ function prepareAuthorityDirectory(input: string): string {
     const parent = dirname(directory);
     const parentStats = lstatSync(parent);
     validateAuthorityDirectory(parentStats, parent, false);
-    hardenDirectoryMode(parentStats, parent);
+    validateHardenableDirectoryMode(parentStats, parent);
     try {
       mkdirSync(directory, { mode: DIRECTORY_MODE });
     } catch (mkdirError) {
@@ -187,10 +290,111 @@ function prepareAuthorityDirectory(input: string): string {
   return directory;
 }
 
+function prepareAuthorityParent(
+  directory: string,
+  expectedIdentity: FileIdentity,
+  requiresReplacement: boolean,
+): PreparedAuthorityParent {
+  const path = dirname(directory);
+  const descriptor = openAuthorityParent(path);
+  try {
+    const before = fstatSync(descriptor);
+    validateAuthorityDirectory(before, path, false);
+    if (!sameIdentity(before, expectedIdentity)) {
+      throw new Error(`IronCurtain CA parent directory changed before it could be hardened: ${path}`);
+    }
+    const mode = before.mode & 0o7777;
+    const becameUnsafe = (mode & 0o022) !== 0 || (mode & 0o1000) !== 0;
+    if (!requiresReplacement && becameUnsafe) {
+      throw new Error(`IronCurtain CA parent directory became unsafe during initialization: ${path}; retry`);
+    }
+    if (requiresReplacement && mode !== PARENT_REPLACEMENT_MODE) {
+      fchmodSync(descriptor, PARENT_REPLACEMENT_MODE);
+      fsyncSync(descriptor);
+    }
+    const after = fstatSync(descriptor);
+    const published = lstatSync(path);
+    validateAuthorityDirectory(after, path, requiresReplacement);
+    if (requiresReplacement && (after.mode & 0o7777) !== PARENT_REPLACEMENT_MODE) {
+      throw new Error(`IronCurtain CA parent directory did not retain replacement-pending mode: ${path}`);
+    }
+    if (!sameIdentity(before, after) || !sameIdentity(after, published)) {
+      throw new Error(`IronCurtain CA parent directory changed while it was being hardened: ${path}`);
+    }
+    if (requiresReplacement && (published.mode & 0o7777) !== PARENT_REPLACEMENT_MODE) {
+      throw new Error(`IronCurtain CA parent path did not retain replacement-pending mode: ${path}`);
+    }
+    return {
+      path,
+      identity: identity(after),
+    };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function observeAuthorityParent(directory: string, expectedIdentity?: FileIdentity): ObservedAuthorityParent {
+  const path = dirname(directory);
+  const descriptor = openAuthorityParent(path);
+  try {
+    const observed = fstatSync(descriptor);
+    validateAuthorityDirectory(observed, path, false);
+    if (expectedIdentity !== undefined && !sameIdentity(observed, expectedIdentity)) {
+      throw new Error(`IronCurtain CA parent directory changed while waiting for its lifecycle lock: ${path}`);
+    }
+    if (!sameIdentity(observed, lstatSync(path))) {
+      throw new Error(`IronCurtain CA parent directory changed while it was being inspected: ${path}`);
+    }
+    const mode = observed.mode & 0o7777;
+    return {
+      path,
+      identity: identity(observed),
+      requiresReplacement: (mode & 0o022) !== 0 || (mode & 0o1000) !== 0,
+    };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function finalizeAuthorityParent(parent: PreparedAuthorityParent): void {
+  assertPathIdentity(parent.path, parent.identity, 'parent directory');
+  chmodSync(parent.path, DIRECTORY_MODE);
+  fsyncDirectory(parent.path);
+}
+
+function openAuthorityParent(path: string): number {
+  try {
+    return openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'ENOTDIR') {
+      throw new Error(`IronCurtain CA parent ${path} must be a real directory and cannot be a symbolic link`, {
+        cause: error,
+      });
+    }
+    throw error;
+  }
+}
+
+function lstatIfPresent(path: string): Stats | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 function hardenDirectoryMode(stats: Stats, path: string): void {
+  validateHardenableDirectoryMode(stats, path);
   const mode = stats.mode & 0o777;
-  if ((mode & 0o022) !== 0) throw new Error(`IronCurtain CA directory ${path} is group- or world-writable`);
   if (mode !== DIRECTORY_MODE) chmodSync(path, DIRECTORY_MODE);
+}
+
+function validateHardenableDirectoryMode(stats: Stats, path: string): void {
+  if ((stats.mode & 0o022) !== 0) {
+    throw new Error(`IronCurtain CA directory ${path} is group- or world-writable`);
+  }
 }
 
 function validateAuthorityDirectory(stats: Stats, path: string, requireExactMode: boolean): void {
@@ -289,24 +493,12 @@ function validateAuthorityFile(
 }
 
 function generateAndPublishCA(directory: string): VerifiedCertificateAuthority {
-  logger.info('[ca] Generating IronCurtain MITM CA (first run)...');
+  logger.info('[ca] Generating IronCurtain MITM CA...');
   const keys = forge.pki.rsa.generateKeyPair(2048);
-  return publishStrictAuthority(directory, keys.privateKey, false);
+  return publishStrictAuthority(directory, keys.privateKey);
 }
 
-function publishStrictAuthorityWithExistingKey(
-  directory: string,
-  keyPem: string,
-  replaceCurrent: boolean,
-): VerifiedCertificateAuthority {
-  return publishStrictAuthority(directory, forge.pki.privateKeyFromPem(keyPem), replaceCurrent);
-}
-
-function publishStrictAuthority(
-  directory: string,
-  privateKey: forge.pki.rsa.PrivateKey,
-  replaceCurrent: boolean,
-): VerifiedCertificateAuthority {
+function publishStrictAuthority(directory: string, privateKey: forge.pki.rsa.PrivateKey): VerifiedCertificateAuthority {
   const certificate = forge.pki.createCertificate();
   certificate.publicKey = forge.pki.rsa.setPublicKey(privateKey.n, privateKey.e);
   certificate.serialNumber = randomSerialNumber();
@@ -324,20 +516,10 @@ function publishStrictAuthority(
     { name: 'authorityKeyIdentifier', keyIdentifier: subjectKeyIdentifier },
   ]);
   certificate.sign(privateKey, forge.md.sha256.create());
-  return publishGeneration(
-    directory,
-    forge.pki.certificateToPem(certificate),
-    forge.pki.privateKeyToPem(privateKey),
-    replaceCurrent,
-  );
+  return publishGeneration(directory, forge.pki.certificateToPem(certificate), forge.pki.privateKeyToPem(privateKey));
 }
 
-function publishGeneration(
-  directory: string,
-  certPem: string,
-  keyPem: string,
-  replaceCurrent: boolean,
-): VerifiedCertificateAuthority {
+function publishGeneration(directory: string, certPem: string, keyPem: string): VerifiedCertificateAuthority {
   if (verifyAuthority(certPem, keyPem) !== 'strict-v2') {
     throw new Error('IronCurtain refuses to publish a legacy CA profile as current');
   }
@@ -373,7 +555,7 @@ function publishGeneration(
     verifyManifestFile(generationManifest.privateKey, GENERATION_KEY_FILENAME, KEY_MODE, keyBytes);
 
     const current: CurrentManifest = { schemaVersion: 1, generation, manifestSha256: sha256(manifestBytes) };
-    publishCurrentManifest(directory, Buffer.from(`${JSON.stringify(current, null, 2)}\n`), replaceCurrent, () => {
+    publishCurrentManifest(directory, Buffer.from(`${JSON.stringify(current, null, 2)}\n`), () => {
       publicationState.currentPublished = true;
     });
     const published = loadCurrentAuthority(directory, join(directory, CURRENT_FILENAME));
@@ -398,21 +580,9 @@ function ensureGenerationsDirectory(directory: string): string {
   return path;
 }
 
-function publishCurrentManifest(
-  directory: string,
-  contents: Buffer,
-  replaceCurrent: boolean,
-  didRename: () => void,
-): void {
+function publishCurrentManifest(directory: string, contents: Buffer, didRename: () => void): void {
   const currentPath = join(directory, CURRENT_FILENAME);
-  const currentExists = pathExistsNoFollow(currentPath);
-  if (replaceCurrent !== currentExists) {
-    throw new Error(
-      replaceCurrent
-        ? 'IronCurtain CA current manifest disappeared during migration'
-        : 'IronCurtain CA current manifest already exists',
-    );
-  }
+  if (pathExistsNoFollow(currentPath)) throw new Error('IronCurtain CA current manifest already exists');
   const temporaryPath = join(directory, `.current.json.tmp-${process.pid}-${randomUUID()}`);
   try {
     writeDurableExclusiveFile(temporaryPath, contents, MANIFEST_MODE, 'current manifest', MAX_MANIFEST_BYTES);
@@ -560,50 +730,6 @@ function removeGenerationDirectory(path: string): void {
   rmSync(path, { recursive: true });
 }
 
-function cleanupLegacyMigrationRemainder(directory: string, current: CertificateAuthority): void {
-  const certPath = join(directory, LEGACY_CERT_FILENAME);
-  const keyPath = join(directory, LEGACY_KEY_FILENAME);
-  const certExists = pathExistsNoFollow(certPath);
-  const keyExists = pathExistsNoFollow(keyPath);
-  if (!certExists && !keyExists) return;
-  if (certExists) {
-    const legacyCertPem = readExactFile(certPath, CERT_MODE, 'legacy certificate', MAX_CA_FILE_BYTES).toString('utf8');
-    if (legacyCertPem !== current.certPem) {
-      let profile: AuthorityProfile;
-      try {
-        profile = verifyAuthority(legacyCertPem, current.keyPem);
-      } catch (error) {
-        throw new Error('IronCurtain CA legacy certificate conflicts with the current generation', { cause: error });
-      }
-      if (profile !== 'legacy-v1' || verifyAuthority(current.certPem, current.keyPem) !== 'strict-v2') {
-        throw new Error('IronCurtain CA legacy certificate conflicts with the current generation');
-      }
-    }
-  }
-  if (
-    keyExists &&
-    readExactFile(keyPath, KEY_MODE, 'legacy private key', MAX_CA_FILE_BYTES).toString('utf8') !== current.keyPem
-  ) {
-    throw new Error('IronCurtain CA legacy private key conflicts with the current generation');
-  }
-  if (certExists) unlinkSync(certPath);
-  if (keyExists) unlinkSync(keyPath);
-  fsyncDirectory(directory);
-}
-
-function removeExactLegacyPair(authority: CertificateAuthorityFiles): void {
-  const certIdentity = identity(lstatSync(authority.certPath));
-  const keyIdentity = identity(lstatSync(authority.keyPath));
-  unlinkExactPath(authority.certPath, certIdentity);
-  unlinkExactPath(authority.keyPath, keyIdentity);
-}
-
-function unlinkExactPath(path: string, expected: FileIdentity): void {
-  const current = lstatSync(path);
-  if (!sameIdentity(current, expected)) throw new Error(`IronCurtain CA path identity changed before unlink: ${path}`);
-  unlinkSync(path);
-}
-
 function writeDurableExclusiveFile(
   path: string,
   contents: Buffer,
@@ -660,6 +786,12 @@ function sha256(contents: Buffer): string {
 
 function identity(stats: Stats): FileIdentity {
   return { dev: stats.dev, ino: stats.ino };
+}
+
+function assertPathIdentity(path: string, expected: FileIdentity, label: string): void {
+  if (!sameIdentity(lstatSync(path), expected)) {
+    throw new Error(`IronCurtain CA ${label} changed during regeneration: ${path}`);
+  }
 }
 
 function sameIdentity(left: Pick<Stats, 'dev' | 'ino'>, right: Pick<Stats, 'dev' | 'ino'>): boolean {
