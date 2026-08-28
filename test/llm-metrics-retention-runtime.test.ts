@@ -50,6 +50,8 @@ import { acquireLlmMetricsRuntime, type LlmMetricsRuntimeLease } from '../src/ll
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const RETENTION_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+const RETENTION_RETRY_BASE_MS = 30_000;
+const RETENTION_RETRY_MAX_MS = 30 * 60 * 1_000;
 
 describe('LLM metrics runtime retention', () => {
   const directories: string[] = [];
@@ -138,6 +140,74 @@ describe('LLM metrics runtime retention', () => {
     expect(deleteBefore).toHaveBeenCalledTimes(2);
     expect(deleteBefore).toHaveBeenNthCalledWith(1, Date.now() - DAY_MS - 1, expect.any(Object));
     expect(deleteBefore).toHaveBeenNthCalledWith(2, Date.now() - DAY_MS, expect.any(Object));
+  });
+
+  it('retries retention failures with exponential backoff capped at thirty minutes', async () => {
+    const deleteBefore = vi.mocked(repositoryMocks.repository.deleteBefore);
+    deleteBefore.mockRejectedValue(new Error('simulated retention timeout'));
+    const lease = await acquireLlmMetricsRuntime({ databasePath: await databasePath(), retentionDays: 1 });
+    leases.push(lease);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deleteBefore).toHaveBeenCalledTimes(1);
+
+    const retryDelays = [
+      RETENTION_RETRY_BASE_MS,
+      RETENTION_RETRY_BASE_MS * 2,
+      RETENTION_RETRY_BASE_MS * 4,
+      RETENTION_RETRY_BASE_MS * 8,
+      RETENTION_RETRY_BASE_MS * 16,
+      RETENTION_RETRY_BASE_MS * 32,
+      RETENTION_RETRY_MAX_MS,
+      RETENTION_RETRY_MAX_MS,
+    ];
+    for (const [index, delayMs] of retryDelays.entries()) {
+      await vi.advanceTimersByTimeAsync(delayMs - 1);
+      expect(deleteBefore).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(deleteBefore).toHaveBeenCalledTimes(index + 2);
+    }
+
+    await lease.release();
+    deleteBefore.mockClear();
+    await vi.advanceTimersByTimeAsync(RETENTION_RETRY_MAX_MS);
+    expect(deleteBefore).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass backoff when a retry deadline overlaps an active prune', async () => {
+    const deleteBefore = vi.mocked(repositoryMocks.repository.deleteBefore);
+    const failure = new Error('simulated retention timeout');
+    let rejectActivePrune: ((reason?: unknown) => void) | undefined;
+    deleteBefore
+      .mockRejectedValueOnce(failure)
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectActivePrune = reject;
+          }),
+      )
+      .mockRejectedValue(failure);
+    const path = await databasePath();
+    const initialLease = await acquireLlmMetricsRuntime({ databasePath: path, retentionDays: 30 });
+    leases.push(initialLease);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(RETENTION_RETRY_BASE_MS - 1);
+    const shorterLease = await acquireLlmMetricsRuntime({ databasePath: path, retentionDays: 1 });
+    leases.push(shorterLease);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deleteBefore).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deleteBefore).toHaveBeenCalledTimes(2);
+    rejectActivePrune?.(failure);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deleteBefore).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(RETENTION_RETRY_BASE_MS * 2 - 1);
+    expect(deleteBefore).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deleteBefore).toHaveBeenCalledTimes(3);
   });
 
   it('does not schedule pruning without a finite retention window and clears timers on final release', async () => {

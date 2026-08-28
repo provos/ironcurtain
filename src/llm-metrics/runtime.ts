@@ -22,6 +22,9 @@ export interface LlmMetricsRuntimeOptions {
 
 const RETENTION_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const RETENTION_DAY_MS = 24 * 60 * 60 * 1_000;
+const RETENTION_RETRY_BASE_MS = 30_000;
+const RETENTION_RETRY_MAX_MS = 30 * 60 * 1_000;
+const RETENTION_RETRY_MAX_EXPONENT = Math.ceil(Math.log2(RETENTION_RETRY_MAX_MS / RETENTION_RETRY_BASE_MS));
 interface SharedRuntime {
   readonly databasePath: string;
   readonly repository: LlmMetricsRepository;
@@ -32,6 +35,8 @@ interface SharedRuntime {
   effectiveRetentionDays: number | null;
   retentionTimer?: ReturnType<typeof setInterval>;
   immediateRetentionTimer?: ReturnType<typeof setTimeout>;
+  retentionRetryTimer?: ReturnType<typeof setTimeout>;
+  retentionRetryAttempt: number;
   prunePromise?: Promise<void>;
   rerunPrune: boolean;
   closing: boolean;
@@ -65,6 +70,7 @@ async function createSharedRuntime(databasePath: string): Promise<SharedRuntime>
     retentionByLease: new Map(),
     references: 0,
     effectiveRetentionDays: null,
+    retentionRetryAttempt: 0,
     rerunPrune: false,
     closing: false,
   };
@@ -93,6 +99,25 @@ function clearRetentionTimers(shared: SharedRuntime): void {
   if (shared.retentionTimer !== undefined) clearInterval(shared.retentionTimer);
   shared.immediateRetentionTimer = undefined;
   shared.retentionTimer = undefined;
+  resetRetentionRetry(shared);
+}
+
+function resetRetentionRetry(shared: SharedRuntime): void {
+  if (shared.retentionRetryTimer !== undefined) clearTimeout(shared.retentionRetryTimer);
+  shared.retentionRetryTimer = undefined;
+  shared.retentionRetryAttempt = 0;
+}
+
+function scheduleRetentionRetry(shared: SharedRuntime): void {
+  if (shared.closing || shared.effectiveRetentionDays === null || shared.retentionRetryTimer !== undefined) return;
+  const exponent = Math.min(shared.retentionRetryAttempt, RETENTION_RETRY_MAX_EXPONENT);
+  const delayMs = Math.min(RETENTION_RETRY_BASE_MS * 2 ** exponent, RETENTION_RETRY_MAX_MS);
+  shared.retentionRetryAttempt += 1;
+  shared.retentionRetryTimer = setTimeout(() => {
+    shared.retentionRetryTimer = undefined;
+    if (shared.prunePromise === undefined) runRetentionPrune(shared);
+  }, delayMs);
+  shared.retentionRetryTimer.unref();
 }
 
 function runRetentionPrune(shared: SharedRuntime): void {
@@ -107,12 +132,17 @@ function runRetentionPrune(shared: SharedRuntime): void {
     try {
       const result = await shared.repository.deleteBefore(cutoffMs, BOUNDED_STATISTICS_DELETE_OPTIONS);
       // A large backlog is drained in separately bounded calls. setTimeout(0)
-      // below yields between calls; a busy repository waits for the periodic
-      // retry instead of competing with another process.
-      if (result.status === 'partial' && !shared.closing) shared.rerunPrune = true;
+      // below yields between calls. Busy repositories retry with bounded
+      // exponential backoff without waiting for the periodic fallback.
+      if (result.status === 'busy') scheduleRetentionRetry(shared);
+      else {
+        resetRetentionRetry(shared);
+        if (result.status === 'partial' && !shared.closing) shared.rerunPrune = true;
+      }
     } catch {
       // Retention is best-effort management work. Repository health remains
       // queryable and inference/session startup must never fail because of it.
+      scheduleRetentionRetry(shared);
     }
   })();
   shared.prunePromise = prune;
