@@ -628,6 +628,14 @@ async function runPtySessionAttempt(
     // deterministic in both modes.
     await docker.removeStaleContainer(mainContainerName);
 
+    // A crashed socat process leaves its UDS inode behind. Resumed sessions
+    // reuse the bundle ID (and therefore this pathname), and socat refuses to
+    // bind while the old entry exists. Clear it only after the old container
+    // has been removed and before the replacement container can start.
+    if (ptySockPath !== undefined) {
+      removeStalePtySocket(resolve(socketsDir, PTY_SOCK_NAME));
+    }
+
     if (infra.topology === 'tcp-hostonly') {
       // Apple container host-only mode: the agent VM reaches the host
       // proxies directly at the vmnet gateway, and the host connects
@@ -1501,6 +1509,33 @@ async function verifyInitialPtySize(
 }
 
 // --- Readiness polling ---
+
+/**
+ * Removes the UDS inode left by an unclean PTY listener shutdown.
+ *
+ * The caller must establish exclusive ownership and stop the prior listener
+ * before invoking this helper. Unexpected path types fail closed rather than
+ * being deleted from the host-owned runtime directory.
+ */
+export function removeStalePtySocket(path: string): void {
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (!stats.isSocket()) {
+    throw new Error(`Refusing to replace non-socket PTY path ${path}`);
+  }
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  logger.info(`Removed stale PTY socket ${path}`);
+}
 
 /**
  * Waits for the PTY socket file to appear (Linux UDS only). macOS TCP
