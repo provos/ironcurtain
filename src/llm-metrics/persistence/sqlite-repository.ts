@@ -74,6 +74,11 @@ interface QueuedExchange {
   readonly bytes: number;
 }
 
+interface ActiveDelete {
+  callerSettled: boolean;
+  outstandingRequests: number;
+}
+
 export interface SqliteLlmMetricsRepositoryOptions {
   readonly databasePath: string;
   readonly processRunId?: string;
@@ -376,7 +381,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   private checkpointTimer: NodeJS.Timeout | null = null;
   private activeFlush: Promise<void> | null = null;
   private activeClose: Promise<void> | null = null;
-  private activeDelete: Promise<LlmDeleteBeforeResult> | null = null;
+  private activeDelete: ActiveDelete | null = null;
   private nextRequestId = 1;
   private state: LlmMetricsRepositoryHealth['state'] = 'starting';
   private schemaVersion: number | null = null;
@@ -544,7 +549,6 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   }
 
   async snapshotMaxSequence(): Promise<number> {
-    this.assertReadable();
     const value = await this.reader.request({ kind: 'snapshotMaxSequence' });
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
       throw new Error('Invalid snapshot response from LLM metrics worker');
@@ -553,7 +557,6 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   }
 
   async scan(query: LlmExchangeScanQuery): Promise<readonly StoredLlmExchange[]> {
-    this.assertReadable();
     const value = await this.reader.request({ kind: 'scan', query });
     if (!Array.isArray(value)) throw new Error('Invalid scan response from LLM metrics worker');
     return value as readonly StoredLlmExchange[];
@@ -563,14 +566,13 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     dimension: LlmStatisticsDimension,
     query: Omit<LlmExchangeScanQuery, 'cursor'>,
   ): Promise<readonly LlmDimensionCount[]> {
-    this.assertReadable();
     const value = await this.reader.request({ kind: 'dimensionValues', dimension, query });
     if (!Array.isArray(value)) throw new Error('Invalid dimension response from LLM metrics worker');
     return value as readonly LlmDimensionCount[];
   }
 
   async deleteBefore(cutoffMs: number, options: LlmDeleteBeforeOptions = {}): Promise<LlmDeleteBeforeResult> {
-    this.assertReadable();
+    this.assertWriterAvailable();
     if (this.closing) throw new LlmMetricsRepositoryUnavailableError('LLM metrics repository is closing');
     if (!Number.isSafeInteger(cutoffMs) || cutoffMs < 0) throw new Error('Invalid delete cutoff');
     const snapshotMaxSequence =
@@ -612,23 +614,25 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
       });
     }
 
-    const operation = this.performDeleteBefore(
+    const activity: ActiveDelete = { callerSettled: false, outstandingRequests: 0 };
+    this.activeDelete = activity;
+    return this.performDeleteBefore(
       cutoffMs,
       snapshotMaxSequence,
       chunkSize,
       maxRows,
       maxDurationMs,
       leaseDurationMs,
+      activity,
     )
       .catch((error: unknown) => {
         this.markDegraded(error);
         throw error;
       })
       .finally(() => {
-        this.activeDelete = null;
+        activity.callerSettled = true;
+        this.maybeClearActiveDelete(activity);
       });
-    this.activeDelete = operation;
-    return operation;
   }
 
   private async performDeleteBefore(
@@ -638,21 +642,33 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     maxRows: number,
     maxDurationMs: number,
     leaseDurationMs: number,
+    activity: ActiveDelete,
   ): Promise<LlmDeleteBeforeResult> {
     const startedAt = performance.now();
-    let leaseAcquired = false;
+    const release = { needed: false, detached: false };
     try {
-      const leaseValue = await this.boundedMaintenanceRequest(
-        {
-          kind: 'beginDeleteBefore',
-          leaseName: DELETE_LEASE_NAME,
-          cutoffMs,
-          snapshotMaxSequence: requestedSnapshotMaxSequence,
-          leaseDurationMs,
-        },
-        maxDurationMs,
-        'LLM metrics retention lease acquisition timed out',
-      );
+      const leaseTimeoutMessage = 'LLM metrics retention lease acquisition timed out';
+      let leaseValue: WorkerResult;
+      try {
+        leaseValue = await this.boundedMaintenanceRequest(
+          activity,
+          {
+            kind: 'beginDeleteBefore',
+            leaseName: DELETE_LEASE_NAME,
+            cutoffMs,
+            snapshotMaxSequence: requestedSnapshotMaxSequence,
+            leaseDurationMs,
+          },
+          maxDurationMs,
+          leaseTimeoutMessage,
+        );
+      } catch (error) {
+        if (error instanceof Error && error.message === leaseTimeoutMessage) {
+          release.needed = true;
+          release.detached = true;
+        }
+        throw error;
+      }
       if (!this.isDeleteLeaseResult(leaseValue)) {
         throw new Error('Invalid retention lease response from LLM metrics worker');
       }
@@ -665,7 +681,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
           chunksProcessed: 0,
         };
       }
-      leaseAcquired = true;
+      release.needed = true;
       const snapshotMaxSequence = leaseValue.snapshotMaxSequence;
       if (snapshotMaxSequence === null || snapshotMaxSequence === 0) {
         return {
@@ -691,18 +707,26 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
           };
         }
 
-        const chunkValue = await this.boundedMaintenanceRequest(
-          {
-            kind: 'deleteBeforeChunk',
-            leaseName: DELETE_LEASE_NAME,
-            cutoffMs,
-            snapshotMaxSequence,
-            chunkSize: Math.min(chunkSize, maxRows - deletedCount),
-            leaseDurationMs,
-          },
-          remainingDurationMs,
-          'LLM metrics retention chunk timed out',
-        );
+        const chunkTimeoutMessage = 'LLM metrics retention chunk timed out';
+        let chunkValue: WorkerResult;
+        try {
+          chunkValue = await this.boundedMaintenanceRequest(
+            activity,
+            {
+              kind: 'deleteBeforeChunk',
+              leaseName: DELETE_LEASE_NAME,
+              cutoffMs,
+              snapshotMaxSequence,
+              chunkSize: Math.min(chunkSize, maxRows - deletedCount),
+              leaseDurationMs,
+            },
+            remainingDurationMs,
+            chunkTimeoutMessage,
+          );
+        } catch (error) {
+          if (error instanceof Error && error.message === chunkTimeoutMessage) release.detached = true;
+          throw error;
+        }
         if (!this.isDeleteChunkResult(chunkValue)) {
           throw new Error('Invalid retention chunk response from LLM metrics worker');
         }
@@ -729,30 +753,48 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
         chunksProcessed,
       };
     } finally {
-      if (leaseAcquired && (this.state === 'ready' || this.state === 'degraded')) {
-        try {
-          await this.boundedMaintenanceRequest(
-            { kind: 'releaseMaintenanceLease', leaseName: DELETE_LEASE_NAME },
-            MAINTENANCE_RELEASE_TIMEOUT_MS,
-            'LLM metrics retention lease release timed out',
-          );
-        } catch (error) {
-          this.markDegraded(error);
-        }
+      if (release.needed && (this.state === 'ready' || this.state === 'degraded')) {
+        const cleanup = this.boundedMaintenanceRequest(
+          activity,
+          { kind: 'releaseMaintenanceLease', leaseName: DELETE_LEASE_NAME },
+          MAINTENANCE_RELEASE_TIMEOUT_MS,
+          'LLM metrics retention lease release timed out',
+        ).catch((error: unknown) => this.markDegraded(error));
+        if (release.detached) void cleanup;
+        else await cleanup;
       }
     }
   }
 
   private async boundedMaintenanceRequest(
+    activity: ActiveDelete,
     request: WriterRequestWithoutId,
     timeoutMs: number,
     timeoutMessage: string,
   ): Promise<WorkerResult> {
-    try {
-      return await withTimeout(this.request(request), timeoutMs, timeoutMessage);
-    } catch (error) {
-      if (error instanceof Error && error.message === timeoutMessage) this.disable(error);
-      throw error;
+    const underlying = this.trackMaintenanceRequest(activity, this.request(request));
+    const result = await withTimeout(underlying, timeoutMs, timeoutMessage);
+    this.markReady();
+    return result;
+  }
+
+  private trackMaintenanceRequest(activity: ActiveDelete, request: Promise<WorkerResult>): Promise<WorkerResult> {
+    activity.outstandingRequests++;
+    void request.then(
+      () => this.settleMaintenanceRequest(activity),
+      () => this.settleMaintenanceRequest(activity),
+    );
+    return request;
+  }
+
+  private settleMaintenanceRequest(activity: ActiveDelete): void {
+    activity.outstandingRequests = Math.max(0, activity.outstandingRequests - 1);
+    this.maybeClearActiveDelete(activity);
+  }
+
+  private maybeClearActiveDelete(activity: ActiveDelete): void {
+    if (this.activeDelete === activity && activity.callerSettled && activity.outstandingRequests === 0) {
+      this.activeDelete = null;
     }
   }
 
@@ -789,7 +831,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     return !this.closing && (this.state === 'ready' || this.state === 'degraded');
   }
 
-  private assertReadable(): void {
+  private assertWriterAvailable(): void {
     if (this.state !== 'ready' && this.state !== 'degraded') {
       throw new LlmMetricsRepositoryUnavailableError(this.lastError ?? undefined);
     }
@@ -818,7 +860,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
         }
         this.persisted += value.inserted;
         this.duplicates += value.duplicates;
-        if (this.state === 'degraded') this.state = 'ready';
+        this.markReady();
       } catch (error) {
         this.recordBatchDrop(batch.length);
         this.markDegraded(error);
@@ -860,7 +902,7 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
   }
 
   private request(request: WriterRequestWithoutId): Promise<WorkerResult> {
-    this.assertReadable();
+    this.assertWriterAvailable();
     if (this.pending.size >= MAX_PENDING_WORKER_REQUESTS) {
       return Promise.reject(new LlmMetricsRepositoryUnavailableError('LLM metrics worker request limit reached'));
     }
@@ -920,8 +962,13 @@ export class SqliteLlmMetricsRepository implements LlmMetricsRepository {
     this.rejectPending(new LlmMetricsRepositoryUnavailableError(this.lastError));
     this.resolveReady?.();
     this.resolveReady = null;
-    void this.reader.close();
     void this.worker.terminate();
+  }
+
+  private markReady(): void {
+    if (this.state !== 'degraded') return;
+    this.state = 'ready';
+    this.lastError = null;
   }
 
   private markDegraded(error: unknown): void {

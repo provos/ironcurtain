@@ -1037,10 +1037,7 @@ export class LlmStatisticsQueryService implements LlmStatisticsReader {
   capabilities(): Promise<StatisticsCapabilities> {
     const health = this.repository.health();
     return Promise.resolve({
-      available:
-        (health.state === 'ready' || health.state === 'degraded') &&
-        health.readerState !== 'unavailable' &&
-        health.readerState !== 'closed',
+      available: health.readerState !== 'unavailable' && health.readerState !== 'closed',
       dtoVersion: DTO_VERSION,
       formulaVersion: FORMULA_VERSION,
       schemaVersion: health.schemaVersion,

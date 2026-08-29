@@ -769,13 +769,36 @@ describe('SQLite LLM metrics repository', () => {
     await opened.repository.close();
   });
 
-  it('bounds an unresponsive retention worker and exposes the failure in health', async () => {
+  it('keeps timed-out retention single-flight until its late lease cleanup settles', async () => {
     const opened = await repository({
       workerFactory: () =>
         new Worker(
           `const { parentPort } = require('node:worker_threads');
+           let firstDelete = true;
+           let leaseHeld = false;
+           let chain = Promise.resolve();
            parentPort.postMessage({ kind: 'ready', schemaVersion: 1 });
-           parentPort.on('message', () => {});`,
+           parentPort.on('message', (request) => {
+             chain = chain.then(async () => {
+               let value = null;
+               if (request.kind === 'beginDeleteBefore') {
+                 if (firstDelete) {
+                   firstDelete = false;
+                   await new Promise((resolve) => setTimeout(resolve, 75));
+                 }
+                 if (leaseHeld) value = { acquired: false, snapshotMaxSequence: null };
+                 else {
+                   leaseHeld = true;
+                   value = { acquired: true, snapshotMaxSequence: null };
+                 }
+               } else if (request.kind === 'releaseMaintenanceLease') {
+                 leaseHeld = false;
+               } else if (request.kind === 'insert') {
+                 value = { inserted: request.exchanges.length, duplicates: 0 };
+               }
+               parentPort.postMessage({ kind: 'result', id: request.id, value });
+             });
+           });`,
           { eval: true },
         ),
     });
@@ -789,12 +812,92 @@ describe('SQLite LLM metrics repository', () => {
     expect(performance.now() - enqueueStartedAt).toBeLessThan(100);
     await expect(deletion).rejects.toThrow(/lease acquisition timed out/);
     expect(opened.repository.health()).toMatchObject({
-      state: 'disabled',
-      dropped: 1,
-      queuedRecords: 0,
+      state: 'degraded',
+      dropped: 0,
+      queuedRecords: 1,
       lastError: expect.stringMatching(/lease acquisition timed out/),
     });
+
+    await expect(
+      opened.repository.deleteBefore(BASE_TIME, { maxDurationMs: 20, leaseDurationMs: 100 }),
+    ).resolves.toMatchObject({ status: 'busy' });
+    await delay(100);
+    await expect(
+      opened.repository.deleteBefore(BASE_TIME, { maxDurationMs: 20, leaseDurationMs: 100 }),
+    ).resolves.toMatchObject({ status: 'complete' });
+    await expect(opened.repository.flush()).resolves.toBeUndefined();
+    expect(opened.repository.health()).toMatchObject({ state: 'ready', persisted: 1, dropped: 0, queuedRecords: 0 });
     await opened.repository.close();
+  });
+
+  it('preserves degraded health when retention lease release fails', async () => {
+    const opened = await repository({
+      workerFactory: () =>
+        new Worker(
+          `const { parentPort } = require('node:worker_threads');
+           parentPort.postMessage({ kind: 'ready', schemaVersion: 1 });
+           parentPort.on('message', (request) => {
+             if (request.kind === 'beginDeleteBefore') {
+               parentPort.postMessage({
+                 kind: 'result', id: request.id, value: { acquired: true, snapshotMaxSequence: null }
+               });
+             } else if (request.kind === 'releaseMaintenanceLease') {
+               parentPort.postMessage({ kind: 'error', id: request.id, message: 'simulated lease release failure' });
+             } else {
+               parentPort.postMessage({ kind: 'result', id: request.id, value: null });
+             }
+           });`,
+          { eval: true },
+        ),
+    });
+
+    await expect(opened.repository.deleteBefore(BASE_TIME)).resolves.toMatchObject({ status: 'complete' });
+    expect(opened.repository.health()).toMatchObject({
+      state: 'degraded',
+      lastError: expect.stringMatching(/lease release failure/),
+    });
+    await opened.repository.close();
+  });
+
+  it('keeps the independent reader usable after a terminal writer failure', async () => {
+    const seeded = await repository();
+    seeded.repository.enqueue(exchange('exchange-before-writer-failure'));
+    await seeded.repository.flush();
+    await seeded.repository.close();
+
+    const repositoryWithFailedWriter = await SqliteLlmMetricsRepository.open({
+      databasePath: seeded.databasePath,
+      flushIntervalMs: 60_000,
+      flushTimeoutMs: 30,
+      closeTimeoutMs: 30,
+      workerFactory: () =>
+        new Worker(
+          `const { parentPort } = require('node:worker_threads');
+           parentPort.postMessage({ kind: 'ready', schemaVersion: 1 });
+           parentPort.on('message', () => {});`,
+          { eval: true },
+        ),
+    });
+    const query = { fromMs: BASE_TIME, toMs: BASE_TIME + 1_000, limit: 10 };
+
+    await expect(repositoryWithFailedWriter.scan(query)).resolves.toMatchObject([
+      { exchangeId: 'exchange-before-writer-failure' },
+    ]);
+    repositoryWithFailedWriter.enqueue(exchange('exchange-that-cannot-be-persisted'));
+    await repositoryWithFailedWriter.flush();
+    expect(repositoryWithFailedWriter.health()).toMatchObject({
+      state: 'disabled',
+      readerState: 'ready',
+      dropped: 1,
+    });
+    await expect(repositoryWithFailedWriter.scan(query)).resolves.toMatchObject([
+      { exchangeId: 'exchange-before-writer-failure' },
+    ]);
+    await expect(new LlmStatisticsQueryService(repositoryWithFailedWriter).capabilities()).resolves.toMatchObject({
+      available: true,
+      health: { state: 'disabled', readerState: 'ready' },
+    });
+    await repositoryWithFailedWriter.close();
   });
 
   it('bounds its queue and fails open when persistence cannot accept another record', async () => {
