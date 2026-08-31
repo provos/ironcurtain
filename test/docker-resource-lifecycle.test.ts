@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -192,6 +192,21 @@ describe('Docker resource crash reconciliation', () => {
     expect(docker.remove).not.toHaveBeenCalled();
   });
 
+  it('preserves current-scope resources when a live owner lease is unavailable', async () => {
+    const labels = managedResourceLabels('bundle-current-unattributed');
+    releaseManagedResourceLease('bundle-current-unattributed');
+    const docker = runtimeWithInventory({
+      containers: [container({ labels })],
+      networks: [network({ labels, containerIds: ['container-id'] })],
+    });
+
+    const result = await reconcileIronCurtainDockerResources(docker, { pidAlive: () => true });
+
+    expect(result.retainedActiveResources).toBe(2);
+    expect(docker.remove).not.toHaveBeenCalled();
+    expect(docker.removeNetwork).not.toHaveBeenCalled();
+  });
+
   it('reclaims pre-scope resources when their recorded PID was recycled', async () => {
     const labels = {
       [IRONCURTAIN_MANAGED_LABEL]: 'true',
@@ -292,14 +307,64 @@ describe('Docker resource crash reconciliation', () => {
     await expect(reconcileIronCurtainDockerResourcesBestEffort(docker, 'test startup')).resolves.toBeUndefined();
   });
 
-  it('reclaims a failed teardown in the same live process after its bundle lease is released', async () => {
+  it('retains a failed teardown while its released owner process is still live', async () => {
     const labels = managedResourceLabels('bundle-released');
     releaseManagedResourceLease('bundle-released');
     const docker = runtimeWithInventory({ networks: [network({ labels })] });
 
     const result = await reconcileIronCurtainDockerResources(docker, { pidAlive: () => true });
 
-    expect(result.removedNetworks).toEqual(['ironcurtain-1234567890ab']);
+    expect(result.retainedActiveResources).toBe(1);
+    expect(result.removedNetworks).toEqual([]);
+    expect(docker.removeNetwork).not.toHaveBeenCalled();
+  });
+
+  it('releases a lease once its matching container was removed even if its network remains attached', async () => {
+    const labels = managedResourceLabels('bundle-container-removed');
+    const token = labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
+    const leasePath = resolve(home, 'run', 'docker-owners', `${token}.json`);
+    const docker = runtimeWithInventory({
+      containers: [container({ labels })],
+      networks: [network({ labels, containerIds: ['other-container'] })],
+    });
+
+    const result = await reconcileIronCurtainDockerResources(docker, { pidAlive: () => false });
+
+    expect(result.removedContainers).toEqual(['ironcurtain-1234567890ab']);
+    expect(result.skippedUnsafeNetworks).toEqual(['ironcurtain-1234567890ab']);
+    expect(existsSync(leasePath)).toBe(false);
+  });
+
+  it('keeps a lease when Docker still reports its container after removal', async () => {
+    const labels = managedResourceLabels('bundle-container-still-exists');
+    const token = labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
+    const leasePath = resolve(home, 'run', 'docker-owners', `${token}.json`);
+    const docker = runtimeWithInventory({
+      containers: [container({ labels })],
+      networks: [network({ labels, containerIds: ['container-id'] })],
+    });
+    vi.mocked(docker.containerExists).mockResolvedValue(true);
+
+    const result = await reconcileIronCurtainDockerResources(docker, { pidAlive: () => false });
+
+    expect(docker.remove).toHaveBeenCalledWith('container-id');
+    expect(result.removedContainers).toEqual([]);
+    expect(result.skippedUnsafeNetworks).toEqual(['ironcurtain-1234567890ab']);
+    expect(existsSync(leasePath)).toBe(true);
+  });
+
+  it('keeps a lease when Docker still reports its network after removal', async () => {
+    const labels = managedResourceLabels('bundle-network-still-exists');
+    const token = labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
+    const leasePath = resolve(home, 'run', 'docker-owners', `${token}.json`);
+    const docker = runtimeWithInventory({ networks: [network({ labels })] });
+    vi.mocked(docker.networkExists).mockResolvedValue(true);
+
+    const result = await reconcileIronCurtainDockerResources(docker, { pidAlive: () => false });
+
+    expect(docker.removeNetwork).toHaveBeenCalledWith('ironcurtain-1234567890ab');
+    expect(result.removedNetworks).toEqual([]);
+    expect(existsSync(leasePath)).toBe(true);
   });
 
   it('migrates only empty, aged legacy networks', async () => {

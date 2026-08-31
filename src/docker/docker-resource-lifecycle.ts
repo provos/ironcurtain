@@ -230,16 +230,12 @@ function belongsToForeignScope(labels: Readonly<Partial<Record<string, string>>>
 }
 
 /**
- * Conservatively protects a resource created before owner scopes were labeled
- * when the current home cannot attribute it. A missing or unreadable lease may
- * live under another IRONCURTAIN_HOME, so only a readable local lease with a
- * mismatched process identity is proof that its PID was recycled.
+ * A live PID with an unreadable or unverifiable lease is not proof that its
+ * resource is orphaned. Reconciliation is destructive, so ambiguous ownership
+ * must be retained for every schema generation, not only legacy resources.
  */
-function legacyOwnerMayBeAlive(
-  labels: Readonly<Partial<Record<string, string>>>,
-  leaseStatus: OwnerLeaseStatus,
-): boolean {
-  return labels[IRONCURTAIN_OWNER_SCOPE_LABEL] === undefined && leaseStatus === 'unattributed';
+function ownerMayBeAlive(leaseStatus: OwnerLeaseStatus): boolean {
+  return leaseStatus === 'unattributed';
 }
 
 interface ReconcileOptions {
@@ -332,12 +328,11 @@ export async function reconcileIronCurtainDockerResources(
         retainedActiveResources++;
         continue;
       }
-      if (legacyOwnerMayBeAlive(container.labels, leaseStatus)) {
+      if (ownerMayBeAlive(leaseStatus)) {
         retainedActiveResources++;
         continue;
       }
       const ownerToken = container.labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
-      if (ownerToken) deadOwnerTokens.add(ownerToken);
       logger.warn(`[docker-gc] reclaiming orphaned container ${container.name}`);
       if (!options.dryRun) {
         await docker.remove(container.id);
@@ -347,6 +342,7 @@ export async function reconcileIronCurtainDockerResources(
         }
       }
       removedContainers.push(container.name);
+      if (ownerToken) deadOwnerTokens.add(ownerToken);
     }
 
     const removedContainerIds = new Set(
@@ -369,12 +365,11 @@ export async function reconcileIronCurtainDockerResources(
         retainedActiveResources++;
         continue;
       }
-      if (managed && legacyOwnerMayBeAlive(network.labels, leaseStatus)) {
+      if (managed && ownerMayBeAlive(leaseStatus)) {
         retainedActiveResources++;
         continue;
       }
       const ownerToken = network.labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
-      if (managed && ownerToken) deadOwnerTokens.add(ownerToken);
       if (legacy) {
         const graceMs = options.legacyGraceMs ?? LEGACY_EMPTY_NETWORK_GRACE_MS;
         if (network.containerIds.length > 0 || resourceAgeMs(network.created, now) < graceMs) {
@@ -398,6 +393,7 @@ export async function reconcileIronCurtainDockerResources(
         }
       }
       removedNetworks.push(network.name);
+      if (managed && ownerToken) deadOwnerTokens.add(ownerToken);
     }
 
     if (!options.dryRun) {
