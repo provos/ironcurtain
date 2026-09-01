@@ -23,14 +23,17 @@ describe('nested Apple smoke invocation', () => {
     expect(parseNestedAppleSmokeMode([])).toBe('batch');
     expect(parseNestedAppleSmokeMode(['--pty'])).toBe('pty');
     expect(parseNestedAppleSmokeMode(['--public-registry'])).toBe('public-registry');
+    expect(parseNestedAppleSmokeMode(['--docker-desktop-packages'])).toBe('docker-desktop-packages');
   });
 
-  it.each([['--pty', '--public-registry'], ['--public-registry', '--pty'], ['--unknown']])(
-    'rejects ambiguous or unknown arguments: %j',
-    (...argv) => {
-      expect(() => parseNestedAppleSmokeMode(argv)).toThrow(/usage/u);
-    },
-  );
+  it.each([
+    ['--pty', '--public-registry'],
+    ['--public-registry', '--pty'],
+    ['--docker-desktop-packages', '--public-registry'],
+    ['--unknown'],
+  ])('rejects ambiguous or unknown arguments: %j', (...argv) => {
+    expect(() => parseNestedAppleSmokeMode(argv)).toThrow(/usage/u);
+  });
 });
 
 describe('nested Apple public-registry acceptance plan', () => {
@@ -48,6 +51,10 @@ describe('nested Apple public-registry acceptance plan', () => {
     expect(buildNestedAppleSmokeWorkloadConfig('pty')).toEqual({
       enabled: true,
       networkAccess: 'offline',
+    });
+    expect(buildNestedAppleSmokeWorkloadConfig('docker-desktop-packages')).toEqual({
+      enabled: true,
+      networkAccess: 'packages',
     });
   });
 

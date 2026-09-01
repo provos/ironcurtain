@@ -2,27 +2,28 @@
  * Package-mode Docker build and BuildKit-trust artifacts.
  *
  * This module deliberately does not stage or mount anything itself. It gives
- * the Apple lifecycle one compact, immutable contract to materialize after
+ * the selected backend one compact, immutable contract to materialize after
  * admission. Non-package modes return no contract and therefore acquire no
  * build-proxy artifact, state directory, or preflight.
  */
 
 import type { DockerWorkloadNetworkAccess } from '../docker-workload/config.js';
 import {
-  APPLE_VM_DAEMON_DOCKER_HOST,
-  APPLE_VM_DAEMON_TOOLCHAIN_DIR,
-  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
-} from '../docker-workload/apple-vm-daemon.js';
+  PRIVATE_DOCKER_API_DIR,
+  PRIVATE_DOCKER_CLIENT,
+  PRIVATE_DOCKER_HOST,
+} from '../docker-workload/private-docker.js';
 import { BUILD_TRUST_RUNTIME_CONTRACT as buildTrustRuntimeContract } from './build-trust-runtime-contract.js';
 
 export const DOCKER_BUILD_SHIM_DIRECTORY = '/usr/local/sbin';
 export const DOCKER_BUILD_SHIM_PATH = `${DOCKER_BUILD_SHIM_DIRECTORY}/docker`;
-export const DOCKER_BUILD_PROXY_CONFIG_DIRECTORY = '/run/ironcurtain-docker/package-build-client';
+export const DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY = '/run/ironcurtain-package-build';
+export const DOCKER_BUILD_PROXY_CONFIG_DIRECTORY = `${DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY}/client`;
 export const DOCKER_BUILD_PROXY_CONFIG_PATH = `${DOCKER_BUILD_PROXY_CONFIG_DIRECTORY}/config.json`;
-export const DOCKER_BUILDX_STATE_DIRECTORY = '/run/ironcurtain-docker/package-buildx';
+export const DOCKER_BUILDX_STATE_DIRECTORY = `${DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY}/buildx`;
+export const DOCKER_BUILDX_INSTANCES_DIRECTORY = `${DOCKER_BUILDX_STATE_DIRECTORY}/instances`;
 export const DOCKER_BUILDX_DEFAULT_BUILDER = 'default';
-export const DOCKER_BUILD_PACKAGE_PROXY_URL = APPLE_VM_PACKAGE_EGRESS_PROXY_URL;
-export const DOCKER_BUILD_REAL_CLIENT = `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`;
+export const DOCKER_BUILD_REAL_CLIENT = PRIVATE_DOCKER_CLIENT;
 export const DOCKER_BUILD_TRUST_WRAPPER_PATH = `${DOCKER_BUILD_SHIM_DIRECTORY}/runc`;
 export const DOCKER_BUILD_TRUST_CONTRACT_PATH = '/opt/ironcurtain-build-trust/build-trust-contract.json';
 export const DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY = buildTrustRuntimeContract.trustContract.parentDirectory.path;
@@ -72,6 +73,26 @@ function parseContractMode(value: string, label: string): number {
   return Number.parseInt(value, 8);
 }
 
+function runtimePathsOverlap(left: string, right: string): boolean {
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+/** Keep agent-owned package state outside the read-only private-daemon API mount. */
+function assertPackageBuildRuntimeNamespace(): void {
+  if (runtimePathsOverlap(DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY, PRIVATE_DOCKER_API_DIR)) {
+    throw new Error('nested-Docker package-build runtime overlaps the private Docker API directory');
+  }
+  for (const path of [
+    DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
+    DOCKER_BUILDX_STATE_DIRECTORY,
+    DOCKER_BUILDX_INSTANCES_DIRECTORY,
+  ]) {
+    if (!path.startsWith(`${DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY}/`)) {
+      throw new Error(`nested-Docker package-build path escapes its runtime namespace: ${path}`);
+    }
+  }
+}
+
 export interface DockerBuildShimArtifact {
   readonly targetPath: string;
   readonly content: string;
@@ -94,6 +115,8 @@ export interface DockerBuildTrustGeneratedArtifact {
 
 export interface DockerBuildShimDirectory {
   readonly path: string;
+  readonly uid: number;
+  readonly gid: number;
   readonly mode: number;
 }
 
@@ -159,13 +182,14 @@ export interface DockerBuildShimStagingContract {
  * these two fields into both upper- and lower-case predefined HTTP/HTTPS build
  * arguments without adding them to the caller's argv.
  */
-export function renderDockerBuildProxyConfig(): string {
+export function renderDockerBuildProxyConfig(packageProxyUrl: string): string {
+  assertCanonicalProxyUrl(packageProxyUrl, 'package');
   return `${JSON.stringify(
     {
       proxies: {
         default: {
-          httpProxy: DOCKER_BUILD_PACKAGE_PROXY_URL,
-          httpsProxy: DOCKER_BUILD_PACKAGE_PROXY_URL,
+          httpProxy: packageProxyUrl,
+          httpsProxy: packageProxyUrl,
         },
       },
     },
@@ -175,12 +199,14 @@ export function renderDockerBuildProxyConfig(): string {
 }
 
 /** Render the argv-preserving Bash shim installed ahead of the pinned client. */
-export function renderDockerBuildShim(): string {
+export function renderDockerBuildShim(registryProxyUrl: string): string {
+  assertCanonicalProxyUrl(registryProxyUrl, 'registry');
   return `#!/bin/bash
 set -u
 
 REAL_DOCKER=${DOCKER_BUILD_REAL_CLIENT}
-ADMITTED_DOCKER_HOST=${APPLE_VM_DAEMON_DOCKER_HOST}
+ADMITTED_DOCKER_HOST=${PRIVATE_DOCKER_HOST}
+REGISTRY_PROXY=${registryProxyUrl}
 BUILD_CONFIG_DIR=${DOCKER_BUILD_PROXY_CONFIG_DIRECTORY}
 BUILDX_STATE_DIR=${DOCKER_BUILDX_STATE_DIRECTORY}
 BUILDX_DEFAULT_BUILDER=${DOCKER_BUILDX_DEFAULT_BUILDER}
@@ -527,6 +553,17 @@ fi
 export DOCKER_HOST="$ADMITTED_DOCKER_HOST"
 export DOCKER_CONFIG="$BUILD_CONFIG_DIR"
 export BUILDX_CONFIG="$BUILDX_STATE_DIR"
+# Buildx performs registry challenge/token work in this outer client process.
+# Route that control plane through the admitted image-registry authority. The
+# Docker config above independently injects the package proxy into Dockerfile
+# RUN steps, so package traffic does not acquire registry authority.
+export HTTP_PROXY="$REGISTRY_PROXY"
+export HTTPS_PROXY="$REGISTRY_PROXY"
+export http_proxy="$REGISTRY_PROXY"
+export https_proxy="$REGISTRY_PROXY"
+export NO_PROXY=''
+export no_proxy=''
+unset ALL_PROXY all_proxy
 
 forward=()
 for ((j = 0; j <= build_index; j++)); do
@@ -547,18 +584,32 @@ exec "$REAL_DOCKER" "\${forward[@]}"
 /** Return artifacts only for the admitted package-network mode. */
 export function getDockerBuildShimStagingContract(
   networkAccess: DockerWorkloadNetworkAccess,
+  packageProxyUrl?: string,
+  registryProxyUrl?: string,
 ): DockerBuildShimStagingContract | undefined {
   if (networkAccess !== 'packages') return undefined;
+  if (packageProxyUrl === undefined) {
+    throw new Error('nested-Docker package build staging requires an explicit package proxy URL');
+  }
+  if (registryProxyUrl === undefined) {
+    throw new Error('nested-Docker package build staging requires an explicit registry proxy URL');
+  }
+  assertPackageBuildRuntimeNamespace();
+  assertCanonicalProxyUrl(packageProxyUrl, 'package');
+  assertCanonicalProxyUrl(registryProxyUrl, 'registry');
+  if (packageProxyUrl === registryProxyUrl) {
+    throw new Error('nested-Docker package and registry proxy URLs must be distinct');
+  }
 
   return {
     shimArtifact: {
       targetPath: DOCKER_BUILD_SHIM_PATH,
-      content: renderDockerBuildShim(),
+      content: renderDockerBuildShim(registryProxyUrl),
       mode: 0o555,
     },
     proxyConfigArtifact: {
       targetPath: DOCKER_BUILD_PROXY_CONFIG_PATH,
-      content: renderDockerBuildProxyConfig(),
+      content: renderDockerBuildProxyConfig(packageProxyUrl),
       mode: 0o444,
     },
     buildTrustWrapperArtifact: {
@@ -577,7 +628,12 @@ export function getDockerBuildShimStagingContract(
       targetPath: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
       mode: 0o444,
     },
-    writableDirectories: [{ path: DOCKER_BUILDX_STATE_DIRECTORY, mode: 0o700 }],
+    writableDirectories: [DOCKER_BUILDX_STATE_DIRECTORY, DOCKER_BUILDX_INSTANCES_DIRECTORY].map((path) => ({
+      path,
+      uid: 1000,
+      gid: 1000,
+      mode: 0o700,
+    })),
     preflight: {
       executable: 'docker',
       expectedPath: DOCKER_BUILD_SHIM_PATH,
@@ -612,4 +668,26 @@ export function getDockerBuildShimStagingContract(
       },
     },
   };
+}
+
+/** Accept only one credential-free HTTP proxy origin; paths and selectors are not configuration. */
+function assertCanonicalProxyUrl(value: string, authority: 'package' | 'registry'): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch (error) {
+    throw new Error(`nested-Docker ${authority} proxy URL is invalid`, { cause: error });
+  }
+  if (
+    parsed.protocol !== 'http:' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.port === '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.origin !== value
+  ) {
+    throw new Error(`nested-Docker ${authority} proxy URL must be one canonical credential-free HTTP origin`);
+  }
 }

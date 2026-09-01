@@ -4,15 +4,17 @@ This directory contains only the platform probes and capture tools that still ha
 It is not a second test suite and no result here qualifies a backend. Product behavior belongs in
 `src/docker-workload`, product tests, and `npm run qualify:apple`.
 
-The Apple developer slice is currently admitted with this minimal operator configuration:
+The macOS developer slices are currently admitted with this minimal operator configuration:
 
 ```json
 { "dockerWorkload": { "enabled": true } }
 ```
 
 That enabled state defaults to mediated Docker Hub/GHCR pulls. Deterministic offline and PTY-only
-qualification gates set `imageIngress: "preloaded-only"` explicitly. Nothing in this retained-probe
-directory changes either product default or the preview qualification state.
+qualification gates set `imageIngress: "preloaded-only"` explicitly. Docker Desktop uses the
+version-scoped reviewed rootless sidecar profile recorded below; Apple Container uses its separate VM
+profile. Nothing in this retained-probe directory changes either product default or the preview
+qualification state.
 
 ## Retention ledger
 
@@ -20,7 +22,7 @@ directory changes either product default or the preview qualification state.
 | ---------------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Phase 0A fake-runtime ledger, recovery, redaction, and tamper harness        | Retired       | The real lease, lock, reconciliation, lifecycle-evidence, and watchdog paths now have production tests. The design also rejects commit/hash-bound qualification bookkeeping (§16.12).                      |
 | Apple 0B inventory, rootless, path, relay, resource, disk, and fault runners | Retired       | They were one-off executors for a completed primitive study, used superseded CA-baked images, and cannot qualify the current product topology. The durable results and evidence IDs remain in design §9.4. |
-| Docker Desktop P0/P2 and private-API/functional probes                       | Retained      | Baseline Desktop is unsupported at a documented stop gate. These are the exact replay tools required if a future decision explicitly reopens the profile ceiling.                                          |
+| Docker Desktop P0/P2 and private-API/functional probes                       | Retained      | These bind the reviewed sidecar-only profile exception and replay the functional result; they do not qualify Docker Desktop or authorize the exception for agent containers.                               |
 | Docker Desktop runtime shim                                                  | Retained      | The functional Desktop probe uses it to select runc's `--no-new-keyring` mode without admitting `keyctl`.                                                                                                  |
 | Profile-ceiling and probe-evidence verifiers                                 | Retained      | They validate the retained Desktop replay inputs and outputs.                                                                                                                                              |
 | Current-Dockerfile build-egress capture                                      | Retired       | Source/hash pinning and the generic-public experiment are not product authority. Git history retains the deleted capture tooling; the governing package-only design owns future work.                      |
@@ -30,21 +32,25 @@ directory changes either product default or the preview qualification state.
 Deleted executors are intentionally not kept as historical code. The design is the record of their
 findings; source control is the record of their implementation.
 
-## Docker Desktop: retained stop-gate replay
+## Docker Desktop: reviewed sidecar-profile replay
 
-Do not run these probes to make an unsupported backend appear supported. The existing result is:
+The retained sequence records both the original stop gate and the explicitly reviewed sidecar-only
+exception:
 
 - P0 denies unprivileged user-namespace creation.
 - P2 plus only outer `SETUID`/`SETGID` and `NoNewPrivs=false` boots the rootless daemon.
 - A named-volume UDS gives the authorized sibling private daemon access while excluding a sibling
   without the volume.
-- The functional probe loads the staged image, then runc fails to mount procfs because the outer
-  Docker container's masked/read-only proc paths make the nested procfs too revealing.
-- Docker's `systempaths=unconfined` override is outside the frozen ceiling, so baseline Docker
-  Desktop stopped before DD-PROXY.
+- With Docker's default system paths, the functional probe loads the staged image, then runc fails to
+  mount procfs because the outer container's masked/read-only proc paths make nested procfs too
+  revealing.
+- Review admitted `systempaths=unconfined` only for the dedicated rootless daemon sidecar. The first
+  rerun then denial-proved `sethostname`; the updated P2 artifact admits it only for inner UTS setup.
+- `codex-dd-functional-systempaths-0008` passes the functional matrix and exact cleanup under that
+  version-scoped profile. Agent containers retain Docker's default masked/read-only system paths.
 
-The detailed evidence IDs and adjudication are in design §9.3. Reopening this track requires an
-explicit review of the ceiling followed by a fresh P0-P4 sequence, not another ad hoc delta.
+The detailed evidence IDs and adjudication are in design §9.3. This is functional sidecar evidence,
+not 0C qualification or authority to broaden another container's profile.
 
 First verify the checked-in ceiling against its canonical Moby baseline:
 
@@ -66,6 +72,7 @@ node scripts/spikes/secure-nested-docker/phase0b-dd-private-api.mjs \
 
 node scripts/spikes/secure-nested-docker/phase0b-dd-private-api.mjs \
   --probe functional \
+  --systempaths-unconfined true \
   --run-id dd-functional-review-0001 \
   --evidence-dir /absolute/outside-workspace/dd-functional-review-0001
 

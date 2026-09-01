@@ -18,7 +18,7 @@ export interface DockerWorkloadRevocationResult {
 /**
  * Revoke only resources whose immutable ID/name and generation label match the
  * host-only lease. The create-before-observation crash window is resolved by
- * the precommitted random name plus the exact generation label, then promoted
+ * the precommitted caller-selected name plus the exact generation label, then promoted
  * to an immutable-ID record before deletion.
  */
 export async function revokeDockerWorkloadOuterResources(
@@ -48,8 +48,11 @@ export async function revokeDockerWorkloadOuterResources(
     if (current.kind === 'container') {
       const removed = await revokeContainer(runtime, leasePath, generation, current, now, assertBudget);
       removedResourceIds.push(removed);
-    } else {
+    } else if (current.kind === 'network') {
       const removed = await revokeNetwork(runtime, leasePath, generation, current, now, assertBudget);
+      removedResourceIds.push(removed);
+    } else {
+      const removed = await revokeVolume(runtime, leasePath, generation, current, now, assertBudget);
       removedResourceIds.push(removed);
     }
   }
@@ -102,6 +105,25 @@ export async function inventoryOwnedResourceIds(
           }),
         )
         .map((network) => network.id),
+    );
+  }
+  if (lease.resources.some((resource) => resource.kind === 'volume')) {
+    if (runtime.listVolumes === undefined) {
+      throw new Error('selected outer runtime cannot inventory volumes for cleanup proof');
+    }
+    assertBudget();
+    const volumes = await runtime.listVolumes();
+    assertBudget();
+    assertUniqueInventory(volumes, 'volume');
+    ids.push(
+      ...volumes
+        .filter((volume) =>
+          [...ownershipTuples].some((tuple) => {
+            const [key, value] = tuple.split('\0');
+            return volume.labels[key] === value;
+          }),
+        )
+        .map((volume) => volume.id),
     );
   }
   return [...ids].sort();
@@ -183,15 +205,69 @@ async function revokeNetwork(
   if (runtime.listNetworks === undefined) {
     throw new Error('selected outer runtime cannot inventory networks for exact revocation');
   }
-  assertBudget();
-  const inventory = await runtime.listNetworks();
-  assertBudget();
-  assertUniqueInventory(inventory, 'network');
+  const listNetworks = runtime.listNetworks.bind(runtime);
+  return revokeNamedResource({
+    kind: 'network',
+    leasePath,
+    generation,
+    resource,
+    now,
+    assertBudget,
+    list: listNetworks,
+    remove: (id) => runtime.removeNetwork(id),
+  });
+}
+
+async function revokeVolume(
+  runtime: ContainerRuntime,
+  leasePath: string,
+  generation: string,
+  resource: DockerWorkloadOuterResource,
+  now: () => Date,
+  assertBudget: () => void,
+): Promise<string> {
+  if (runtime.listVolumes === undefined || runtime.removeVolume === undefined) {
+    throw new Error('selected outer runtime cannot inventory and remove volumes for exact revocation');
+  }
+  const listVolumes = runtime.listVolumes.bind(runtime);
+  const removeVolume = runtime.removeVolume.bind(runtime);
+  return revokeNamedResource({
+    kind: 'volume',
+    leasePath,
+    generation,
+    resource,
+    now,
+    assertBudget,
+    list: listVolumes,
+    remove: removeVolume,
+  });
+}
+
+interface RevokeNamedResourceOptions {
+  readonly kind: 'network' | 'volume';
+  readonly leasePath: string;
+  readonly generation: string;
+  readonly resource: DockerWorkloadOuterResource;
+  readonly now: () => Date;
+  readonly assertBudget: () => void;
+  readonly list: () => Promise<readonly NamedResourceInfo[]>;
+  readonly remove: (id: string) => Promise<void>;
+}
+
+interface NamedResourceInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly labels: Readonly<Record<string, string>>;
+}
+
+async function revokeNamedResource(options: RevokeNamedResourceOptions): Promise<string> {
+  const { kind, leasePath, generation, resource, now, assertBudget, list, remove } = options;
+  const inventory = await requiredNamedResourceInventory(kind, list, assertBudget);
   let observedId = resource.observedId;
   if (observedId === null) {
-    const matching = inventory.filter((network) => network.name === resource.requestedName);
+    const matching = inventory.filter((candidate) => candidate.name === resource.requestedName);
     if (matching.length > 1)
-      throw new Error(`outer runtime returned duplicate network name: ${resource.requestedName}`);
+      throw new Error(`outer runtime returned duplicate ${kind} name: ${resource.requestedName}`);
     const discovered = matching.at(0);
     if (discovered === undefined) {
       recordDockerWorkloadOuterResourceRemoval(
@@ -207,7 +283,7 @@ async function revokeNetwork(
     observedId = discovered.id;
     observeDockerWorkloadOuterResource(leasePath, generation, resource.requestId, observedId, now());
   } else {
-    const observed = inventory.find((network) => network.id === observedId);
+    const observed = inventory.find((candidate) => candidate.id === observedId);
     if (observed === undefined) {
       recordDockerWorkloadOuterResourceRemoval(
         leasePath,
@@ -219,19 +295,16 @@ async function revokeNetwork(
       return observedId;
     }
     if (observed.name !== resource.requestedName) {
-      throw new Error(`observed network name changed for immutable ID ${observedId}`);
+      throw new Error(`observed ${kind} name changed for runtime identity ${observedId}`);
     }
     assertOwnership(observed, resource);
   }
 
   assertBudget();
-  await runtime.removeNetwork(observedId);
-  assertBudget();
-  const after = await runtime.listNetworks();
-  assertBudget();
-  assertUniqueInventory(after, 'network');
-  if (after.some((network) => network.id === observedId)) {
-    throw new Error(`exact outer network still exists after revocation: ${observedId}`);
+  await remove(observedId);
+  const after = await requiredNamedResourceInventory(kind, list, assertBudget);
+  if (after.some((candidate) => candidate.id === observedId)) {
+    throw new Error(`exact outer ${kind} still exists after revocation: ${observedId}`);
   }
   recordDockerWorkloadOuterResourceRemoval(
     leasePath,
@@ -252,6 +325,18 @@ async function requiredContainerInventory(
   const inventory = await runtime.listContainers();
   assertBudget();
   assertUniqueInventory(inventory, 'container');
+  return inventory;
+}
+
+async function requiredNamedResourceInventory(
+  kind: 'network' | 'volume',
+  list: () => Promise<readonly NamedResourceInfo[]>,
+  assertBudget: () => void,
+): Promise<readonly NamedResourceInfo[]> {
+  assertBudget();
+  const inventory = await list();
+  assertBudget();
+  assertUniqueInventory(inventory, kind);
   return inventory;
 }
 
@@ -283,7 +368,8 @@ function requiredResource(lease: DockerWorkloadLease, requestId: string): Docker
 }
 
 function compareRevocationOrder(left: DockerWorkloadOuterResource, right: DockerWorkloadOuterResource): number {
-  if (left.kind !== right.kind) return left.kind === 'container' ? -1 : 1;
+  const kindPriority = { container: 0, volume: 1, network: 2 } as const;
+  if (left.kind !== right.kind) return kindPriority[left.kind] - kindPriority[right.kind];
   const priorities = new Map([
     ['agent', 0],
     ['nested-daemon', 1],

@@ -13,8 +13,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS } from '../../src/docker-workload/apple-vm-daemon.js';
 import { admitDockerWorkloadBundle } from '../../src/docker-workload/infrastructure.js';
+import { PRIVATE_DOCKER_READINESS_TEXT_BOUNDS } from '../../src/docker-workload/private-docker.js';
 import {
   createJsonlDockerWorkloadAuditSink,
   createRecordingDockerWorkloadAuditSink,
@@ -94,9 +94,10 @@ describe('Docker-workload lifecycle evidence', () => {
     });
     runtime.setLeasePath(handle.leasePath);
     await handle.attestWatchdog();
-    const grant = handle.requestOuterResource('container', 'nested-daemon');
+    const requestedName = 'nested-daemon-test';
+    const grant = handle.precommitOuterResource({ kind: 'container', role: 'nested-daemon', requestedName });
     const containerId = await runtime.runtime.create({
-      name: grant.requestedName,
+      name: requestedName,
       image: 'ironcurtain-nested-daemon',
       mounts: [],
       network: 'none',
@@ -295,7 +296,7 @@ describe('Docker-workload lifecycle evidence', () => {
     // would fail here — turning a successful readiness into what reads as a
     // host bug rather than the fail-closed decision it should have been.
     const sink = createRecordingDockerWorkloadAuditSink();
-    const bounds = APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS;
+    const bounds = PRIVATE_DOCKER_READINESS_TEXT_BOUNDS;
     const atBound = {
       at: '2026-07-29T12:00:00.000Z',
       leaseId: 'dw-daemon-ready',
@@ -316,6 +317,60 @@ describe('Docker-workload lifecycle evidence', () => {
         ...atBound,
         securityOptions: Array.from({ length: bounds.securityOptionCount + 1 }, () => 'name=rootless'),
       }),
+    ).toThrow();
+  });
+
+  it('requires backend-discriminated private-Docker image evidence', () => {
+    const sink = createRecordingDockerWorkloadAuditSink();
+    const bootstrap = {
+      at: '2026-07-29T12:00:00.000Z',
+      leaseId: 'dw-private-docker',
+      generation: 'gen-dw-private-docker',
+      kind: 'private-docker-bootstrap' as const,
+      attestation: DAEMON_READY_ATTESTATION,
+      toolchainDigest: 'a'.repeat(64),
+      toolchain: {
+        dockerCli: '29.2.1',
+        dockerDaemon: '29.2.1',
+        buildx: '0.31.1',
+        compose: '5.1.0',
+      },
+      network: { name: 'ironcurtain', runtimeId: 'b'.repeat(64) },
+    };
+
+    const desktopImage = {
+      transport: 'docker-desktop-direct' as const,
+      outerImageId: `sha256:${'e'.repeat(64)}`,
+    };
+    const appleImage = {
+      transport: 'apple-archive' as const,
+      logicalName: 'ironcurtain-claude-code:latest',
+      buildHash: 'c'.repeat(64),
+      archiveSha256: 'd'.repeat(64),
+      outerImageId: `sha256:${'e'.repeat(64)}`,
+      innerImageId: `sha256:${'f'.repeat(64)}`,
+    };
+
+    expect(() => sink.emit({ ...bootstrap, image: desktopImage })).not.toThrow();
+    expect(() => sink.emit({ ...bootstrap, image: appleImage })).not.toThrow();
+    expect(() => sink.emit(bootstrap as never)).toThrow();
+    expect(() =>
+      sink.emit({
+        ...bootstrap,
+        image: { ...desktopImage, archiveSha256: 'd'.repeat(64), innerImageId: `sha256:${'f'.repeat(64)}` },
+      } as never),
+    ).toThrow();
+    expect(() =>
+      sink.emit({
+        ...bootstrap,
+        image: {
+          transport: 'apple-archive',
+          logicalName: appleImage.logicalName,
+          buildHash: appleImage.buildHash,
+          archiveSha256: appleImage.archiveSha256,
+          outerImageId: appleImage.outerImageId,
+        },
+      } as never),
     ).toThrow();
   });
 

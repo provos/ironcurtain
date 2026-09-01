@@ -14,7 +14,7 @@ import {
   requestDockerWorkloadOuterResource,
   type CreateDockerWorkloadLeaseOptions,
 } from '../../src/docker-workload/bundle-lease.js';
-import type { DockerContainerInfo, DockerNetworkInfo } from '../../src/docker/types.js';
+import type { DockerContainerInfo, DockerNetworkInfo, DockerVolumeInfo } from '../../src/docker/types.js';
 import { createMockDocker } from '../helpers/docker-mocks.js';
 
 const temporaryDirectories: string[] = [];
@@ -24,13 +24,15 @@ afterEach(() => {
 });
 
 describe('Docker-workload exact outer-resource revocation', () => {
-  it('deletes observed immutable IDs in container-before-network order and preserves foreign resources', async () => {
+  it('deletes observed identities in container-volume-network order and preserves foreign resources', async () => {
     const fixture = leaseFixture();
     createDockerWorkloadLease(fixture.path, fixture.options);
     request(fixture, 'daemon-sidecar', 'container', 'nested-daemon', 'ic-daemon');
     request(fixture, 'isolated-network', 'network', 'daemon-isolation', 'ic-network');
+    request(fixture, 'api-volume', 'volume', 'daemon-api', 'ic-api-volume');
     observeDockerWorkloadOuterResource(fixture.path, fixture.options.generation, 'daemon-sidecar', 'container-owned');
     observeDockerWorkloadOuterResource(fixture.path, fixture.options.generation, 'isolated-network', 'network-owned');
+    observeDockerWorkloadOuterResource(fixture.path, fixture.options.generation, 'api-volume', 'ic-api-volume');
     activateDockerWorkloadLease(fixture.path, fixture.options.generation);
 
     const state = runtimeState(
@@ -43,15 +45,22 @@ describe('Docker-workload exact outer-resource revocation', () => {
         network('network-owned', 'ic-network', fixture.options.generation),
         network('network-foreign', 'unrelated-network', 'foreign-generation'),
       ],
+      [volume('ic-api-volume', fixture.options.generation), volume('foreign-volume', 'foreign-generation')],
     );
     const result = await revokeDockerWorkloadOuterResources(state.runtime, fixture.path, fixture.options.generation);
     expect(result).toEqual({
-      removedResourceIds: ['container-owned', 'network-owned'],
+      removedResourceIds: ['container-owned', 'ic-api-volume', 'network-owned'],
       finalOwnedResourceIds: [],
     });
-    expect(state.calls).toEqual(['stop:container-owned', 'remove:container-owned', 'remove-network:network-owned']);
+    expect(state.calls).toEqual([
+      'stop:container-owned',
+      'remove:container-owned',
+      'remove-volume:ic-api-volume',
+      'remove-network:network-owned',
+    ]);
     expect(state.containers.map((value) => value.id)).toEqual(['container-foreign']);
     expect(state.networks.map((value) => value.id)).toEqual(['network-foreign']);
+    expect(state.volumes.map((value) => value.id)).toEqual(['foreign-volume']);
     expect(loadDockerWorkloadLease(fixture.path).resources.every((resource) => resource.removal !== null)).toBe(true);
   });
 
@@ -93,6 +102,37 @@ describe('Docker-workload exact outer-resource revocation', () => {
     expect(state.calls).toEqual([]);
     expect(state.containers).toHaveLength(1);
     expect(loadDockerWorkloadLease(fixture.path).resources[0].removal).toBeNull();
+  });
+
+  it('recovers a volume create-before-observation window only with exact generation ownership', async () => {
+    const fixture = leaseFixture();
+    createDockerWorkloadLease(fixture.path, fixture.options);
+    request(fixture, 'api-volume', 'volume', 'daemon-api', 'ic-api-volume');
+    const state = runtimeState(
+      fixture.options.generation,
+      [],
+      [],
+      [volume('ic-api-volume', fixture.options.generation)],
+    );
+
+    await revokeDockerWorkloadOuterResources(state.runtime, fixture.path, fixture.options.generation);
+    expect(state.calls).toEqual(['remove-volume:ic-api-volume']);
+    expect(loadDockerWorkloadLease(fixture.path).resources[0]).toMatchObject({
+      observedId: 'ic-api-volume',
+      removal: { proof: 'immutable-id-absent', identity: 'ic-api-volume' },
+    });
+  });
+
+  it('refuses to remove a colliding foreign volume name', async () => {
+    const fixture = leaseFixture();
+    createDockerWorkloadLease(fixture.path, fixture.options);
+    request(fixture, 'api-volume', 'volume', 'daemon-api', 'ic-api-volume');
+    const state = runtimeState(fixture.options.generation, [], [], [volume('ic-api-volume', 'foreign-generation')]);
+
+    await expect(
+      revokeDockerWorkloadOuterResources(state.runtime, fixture.path, fixture.options.generation),
+    ).rejects.toThrow(/wrong generation label/u);
+    expect(state.calls).toEqual([]);
   });
 
   it('does not claim cleanup when the runtime silently fails to remove an exact ID', async () => {
@@ -182,7 +222,7 @@ function leaseFixture(): {
 function request(
   fixture: ReturnType<typeof leaseFixture>,
   requestId: string,
-  kind: 'container' | 'network',
+  kind: 'container' | 'network' | 'volume',
   role: string,
   requestedName: string,
 ): void {
@@ -216,17 +256,31 @@ function network(id: string, name: string, generation: string): DockerNetworkInf
   };
 }
 
+function volume(name: string, generation: string): DockerVolumeInfo {
+  return {
+    id: name,
+    name,
+    created: '2026-07-20T12:00:00Z',
+    labels: { 'com.ironcurtain.docker-workload.generation': generation },
+    driver: 'local',
+    mountpoint: `/var/lib/docker/volumes/${name}/_data`,
+  };
+}
+
 function runtimeState(
   _generation: string,
   initialContainers: readonly DockerContainerInfo[],
   initialNetworks: readonly DockerNetworkInfo[] = [],
+  initialVolumes: readonly DockerVolumeInfo[] = [],
 ) {
   const containers = structuredClone(initialContainers) as DockerContainerInfo[];
   const networks = structuredClone(initialNetworks) as DockerNetworkInfo[];
+  const volumes = structuredClone(initialVolumes) as DockerVolumeInfo[];
   const calls: string[] = [];
   const state = {
     containers,
     networks,
+    volumes,
     calls,
     removeFails: false,
     runtime: {
@@ -236,6 +290,9 @@ function runtimeState(
       },
       async listNetworks() {
         return structuredClone(networks);
+      },
+      async listVolumes() {
+        return structuredClone(volumes);
       },
       async stop(id: string) {
         calls.push(`stop:${id}`);
@@ -254,6 +311,11 @@ function runtimeState(
         calls.push(`remove-network:${id}`);
         const index = networks.findIndex((networkValue) => networkValue.id === id);
         if (index !== -1) networks.splice(index, 1);
+      },
+      async removeVolume(id: string) {
+        calls.push(`remove-volume:${id}`);
+        const index = volumes.findIndex((volumeValue) => volumeValue.id === id);
+        if (index !== -1) volumes.splice(index, 1);
       },
     },
   };

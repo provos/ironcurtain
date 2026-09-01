@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createSessionContainers,
   ledgerOuterResourceCreate,
+  resolveNestedDockerAgentWiring,
   stopDockerWorkloadEgress,
   type PreContainerInfrastructure,
 } from '../../src/docker/docker-infrastructure.js';
@@ -30,7 +31,9 @@ import {
   APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV,
   APPLE_VM_DAEMON_REGISTRY_EGRESS_START_ARGV,
   APPLE_VM_DAEMON_TOOLCHAIN_DIR,
+  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
   APPLE_VM_PACKAGE_EGRESS_SOCKET,
+  APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
   APPLE_VM_REGISTRY_EGRESS_SOCKET,
 } from '../../src/docker-workload/apple-vm-daemon.js';
 import {
@@ -38,6 +41,7 @@ import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
   APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
 } from '../../src/docker-workload/apple-private-docker.js';
+import { DOCKER_DESKTOP_SIDECAR_DOCKER_HOST } from '../../src/docker-workload/docker-desktop-sidecar.js';
 import {
   admitDockerWorkloadBundle,
   type DockerWorkloadBundleHandle,
@@ -50,6 +54,7 @@ import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.
 import type { IronCurtainConfig } from '../../src/config/types.js';
 import { getBundleShortId, type BundleId } from '../../src/session/types.js';
 import type { ContainerRuntimeKind } from '../../src/docker/container-runtime.js';
+import { getInternalNetworkName } from '../../src/docker/platform.js';
 import type { ContainerRuntime, DockerContainerConfig } from '../../src/docker/types.js';
 import {
   DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
@@ -62,6 +67,7 @@ import {
   DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND,
   DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND,
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
+  DOCKER_BUILDX_INSTANCES_DIRECTORY,
   DOCKER_BUILDX_STATE_DIRECTORY,
   getDockerBuildShimStagingContract,
 } from '../../src/docker/docker-build-shim.js';
@@ -94,6 +100,10 @@ import {
 
 const getHome = useDockerWorkloadHome();
 const BUNDLE_ID = 'bundle-nested-daemon-1';
+const TEST_OUTER_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
+const TEST_DESKTOP_REGISTRY_PORT = 31_081;
+const TEST_DESKTOP_PACKAGE_PORT = 31_082;
+const TEST_DESKTOP_EGRESS_NETWORK = 'ic-dw-egress-nested';
 
 let tempDir: string;
 
@@ -155,10 +165,21 @@ function makeCore(
   } = {},
 ): PreContainerInfrastructure {
   const runtimeKind = overrides.runtimeKind ?? 'apple-container';
-  const admittedApple = overrides.dockerWorkload !== undefined && runtimeKind === 'apple-container';
+  const admitted = overrides.dockerWorkload !== undefined;
+  const admittedApple = admitted && runtimeKind === 'apple-container';
   const bootstrap = admittedApple ? createTestAppleVmDockerWorkloadBootstrap(tempDir) : undefined;
   const buildShimContract =
-    admittedApple && overrides.networkAccess === 'packages' ? getDockerBuildShimStagingContract('packages') : undefined;
+    admitted && overrides.networkAccess === 'packages'
+      ? getDockerBuildShimStagingContract(
+          'packages',
+          runtimeKind === 'docker'
+            ? `http://172.31.44.4:${TEST_DESKTOP_PACKAGE_PORT}`
+            : APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+          runtimeKind === 'docker'
+            ? `http://172.31.44.2:${TEST_DESKTOP_REGISTRY_PORT}`
+            : APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+        )
+      : undefined;
   if (bootstrap) docker.getImageId = async () => bootstrap.artifact.appleImageId;
   const bundleDir = join(tempDir, 'bundle');
   const workspaceDir = join(tempDir, 'workspace');
@@ -184,15 +205,23 @@ function makeCore(
     orientationDir,
     systemPrompt: 'You are a test agent.',
     image: 'ironcurtain-claude-code:latest',
-    imageResolution: bootstrap
-      ? {
-          mode: 'selected-agent-artifact',
-          logicalName: bootstrap.artifact.logicalName,
-          imageRef: bootstrap.artifact.logicalName,
-          immutableImageId: bootstrap.artifact.appleImageId,
-          buildHash: bootstrap.artifact.buildHash,
-          artifact: bootstrap.artifact,
-        }
+    imageResolution: admitted
+      ? bootstrap
+        ? {
+            mode: 'selected-agent-artifact',
+            logicalName: bootstrap.artifact.logicalName,
+            imageRef: bootstrap.artifact.logicalName,
+            immutableImageId: bootstrap.artifact.appleImageId,
+            buildHash: bootstrap.artifact.buildHash,
+            artifact: bootstrap.artifact,
+          }
+        : {
+            mode: 'build-if-stale',
+            logicalName: 'ironcurtain-claude-code:latest',
+            imageRef: 'ironcurtain-claude-code:latest',
+            immutableImageId: TEST_OUTER_IMAGE_ID,
+            buildHash: '1'.repeat(64),
+          }
       : undefined,
     runtimeKind,
     topology: 'uds',
@@ -206,20 +235,50 @@ function makeCore(
     endCaptureSession: async () => {},
     dockerWorkload: overrides.dockerWorkload,
     dockerWorkloadBootstrap: bootstrap,
+    dockerDesktopAgentAccess:
+      admitted && runtimeKind === 'docker'
+        ? {
+            dockerHost: DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
+            networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+            ...(overrides.networkAccess === 'images' || overrides.networkAccess === 'packages'
+              ? {
+                  outerEgressNetworkName: TEST_DESKTOP_EGRESS_NETWORK,
+                }
+              : {}),
+            agentApiMount: {
+              name: 'ic-desktop-api-test',
+              target: '/run/ironcurtain-docker',
+              readonly: true,
+              noCopy: true,
+            },
+          }
+        : undefined,
+    dockerDesktopResources:
+      admitted && runtimeKind === 'docker'
+        ? {
+            sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: 352 },
+            transport: { memoryMb: 64, cpus: 0.25, pidsLimit: 32 },
+            agent: { memoryMb: 960, cpus: 0.75, pidsLimit: 128 },
+          }
+        : undefined,
     dockerWorkloadEgress:
       overrides.networkAccess === 'images' || overrides.networkAccess === 'packages'
         ? {
             networkAccess: overrides.networkAccess,
             registry: {
               listener: createMockMitmProxy(),
-              socketPath: join(socketsDir, 'registry-egress.sock'),
+              ...(runtimeKind === 'docker'
+                ? { port: TEST_DESKTOP_REGISTRY_PORT }
+                : { socketPath: join(socketsDir, 'registry-egress.sock') }),
               snapshot: () => ({ attempts: 0, totalBytes: 0, activeRequests: 0 }),
             },
             ...(overrides.networkAccess === 'packages'
               ? {
                   packages: {
                     listener: createMockMitmProxy(),
-                    socketPath: join(socketsDir, 'package-egress.sock'),
+                    ...(runtimeKind === 'docker'
+                      ? { port: TEST_DESKTOP_PACKAGE_PORT }
+                      : { socketPath: join(socketsDir, 'package-egress.sock') }),
                     snapshot: () => ({
                       attempts: 0,
                       clientAttempts: 0,
@@ -329,6 +388,42 @@ function capturingRuntime(runtime: EventRuntime): {
   };
 }
 
+function desktopTcpRuntime(
+  runtime: EventRuntime,
+  options: { readonly failAgentEgressConnect?: boolean } = {},
+): {
+  readonly runtime: ContainerRuntime;
+  readonly configs: DockerContainerConfig[];
+  readonly networkConnections: Array<{ networkName: string; containerId: string }>;
+  readonly lifecycleEvents: string[];
+} {
+  const configs: DockerContainerConfig[] = [];
+  const networkConnections: Array<{ networkName: string; containerId: string }> = [];
+  const lifecycleEvents: string[] = [];
+  const wrapped: ContainerRuntime = {
+    ...runtime.runtime,
+    async create(config) {
+      configs.push(config);
+      lifecycleEvents.push(`create:${config.name}`);
+      if (config.name.includes('sidecar')) return 'transport-sidecar-id';
+      return runtime.runtime.create(config);
+    },
+    async start(containerId) {
+      lifecycleEvents.push(`start:${containerId}`);
+      await runtime.runtime.start(containerId);
+    },
+    async connectNetwork(networkName, containerId) {
+      networkConnections.push({ networkName, containerId });
+      lifecycleEvents.push(`connect:${containerId}:${networkName}`);
+      if (options.failAgentEgressConnect === true && networkName === TEST_DESKTOP_EGRESS_NETWORK) {
+        throw new Error('scripted agent egress attachment failure');
+      }
+      await runtime.runtime.connectNetwork(networkName, containerId);
+    },
+  };
+  return { runtime: wrapped, configs, networkConnections, lifecycleEvents };
+}
+
 function daemonInfoProbes(runtime: EventRuntime): (readonly string[])[] {
   return runtime.execs.filter((argv) => argv.includes('info'));
 }
@@ -358,7 +453,7 @@ describe('nested daemon — watchdog gate on the daemon-launching create (§8.2 
     // Same role, no same-VM declaration: a stale watchdog does not block it.
     const created = await ledgerOuterResourceCreate(
       handle,
-      { kind: 'container', role: 'agent' },
+      { kind: 'container', role: 'agent', requestedName: 'agent-test' },
       async (name, labels) => ({
         id: await runtime.runtime.create({
           name,
@@ -525,7 +620,8 @@ describe('nested daemon — feature-off equivalence', () => {
         JSON.stringify(enabled.config()[key as keyof DockerContainerConfig]) !==
         JSON.stringify(off.config()[key as keyof DockerContainerConfig]),
     );
-    expect(differing.sort()).toEqual(['env', 'fullyVisibleProc', 'labels', 'mounts', 'name']);
+    expect(differing.sort()).toEqual(['env', 'fullyVisibleProc', 'labels', 'mounts']);
+    expect(enabled.config().name).toBe(off.config().name);
     // The proc-visibility opt-out is one of the differences the feature is
     // allowed to introduce, and ONLY when admitted: an ordinary session must
     // keep the runtime's masked/read-only path hardening.
@@ -557,7 +653,7 @@ describe('nested daemon — feature-off equivalence', () => {
     const result = await createSessionContainers(core, makeConfig());
 
     expect(result.containerName).toBe(`ironcurtain-${getBundleShortId(core.bundleId)}`);
-    // The create used that deterministic name, not a ledgered random one.
+    // Admission preserves the same topology-selected name used by ordinary sessions.
     expect(runtime.events).toEqual([`create:${result.containerName}`, `start:${result.containerId}`]);
     expect(daemonInfoProbes(runtime)).toEqual([]);
   });
@@ -1128,13 +1224,298 @@ describe('nested daemon — egress transports', () => {
   });
 });
 
-describe('nested daemon — unimplemented backend fails closed', () => {
-  it('refuses an admitted bundle on the docker backend instead of skipping the daemon', async () => {
+describe('nested daemon — Docker Desktop agent capability', () => {
+  it('initializes codespace Buildx state through the shared preflight before activation', async () => {
     const { runtime, handle } = await admitBundle();
-    const core = makeCore(runtime.runtime, { dockerWorkload: handle, runtimeKind: 'docker' });
+    const originalActivate = handle.activate.bind(handle);
+    let activationExecCount = -1;
+    vi.spyOn(handle, 'activate').mockImplementation(async () => {
+      activationExecCount = runtime.execs.length;
+      await originalActivate();
+    });
+    const core = makeCore(runtime.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
 
-    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(/not implemented on the docker backend/u);
-    expect(runtime.events).toEqual([]);
+    await createSessionContainers(core, makeConfig());
+
+    expect(runtime.execs.slice(0, activationExecCount)).toEqual([
+      [
+        '/bin/sh',
+        '-c',
+        expect.stringMatching(/\[ ! -L "\$path" \].*mkdir.*\[ -d "\$path" \].*chown.*chmod/su),
+        'ironcurtain-build-state-init',
+        DOCKER_BUILDX_STATE_DIRECTORY,
+        '1000',
+        '1000',
+        '700',
+        DOCKER_BUILDX_INSTANCES_DIRECTORY,
+        '1000',
+        '1000',
+        '700',
+      ],
+      [
+        '/bin/sh',
+        '-c',
+        expect.stringMatching(/stat --format=%F:%u:%g:%a.*: > "\$probe".*rm -- "\$probe"/su),
+        'ironcurtain-build-state-verify',
+        DOCKER_BUILDX_STATE_DIRECTORY,
+        'directory:1000:1000:700',
+        DOCKER_BUILDX_INSTANCES_DIRECTORY,
+        'directory:1000:1000:700',
+      ],
+      ['/bin/sh', '-c', 'command -v docker'],
+      ['docker', 'version', '--format', '{{json .Client}}'],
+    ]);
+    expect(runtime.execUsers.slice(0, activationExecCount)).toEqual(['0:0', 'codespace', 'codespace', 'codespace']);
+    expect(activationExecCount).toBe(4);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
+  });
+
+  it.each([
+    {
+      condition: 'a pre-existing build-state symlink',
+      phase: 'ironcurtain-build-state-init',
+      detail: `nested-Docker build state path is a symlink: ${DOCKER_BUILDX_STATE_DIRECTORY}`,
+      expectedUsers: ['0:0'],
+    },
+    {
+      condition: 'a failed codespace write canary',
+      phase: 'ironcurtain-build-state-verify',
+      detail: `cannot create ${DOCKER_BUILDX_STATE_DIRECTORY}/.ironcurtain-write-preflight: ` + 'Read-only file system',
+      expectedUsers: ['0:0', 'codespace'],
+    },
+  ])('does not activate Desktop after $condition', async ({ phase, detail, expectedUsers }) => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv[0] === '/bin/sh' && argv[3] === phase
+          ? { exitCode: 1, stdout: '', stderr: `${detail}\n` }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const activate = vi.spyOn(handle, 'activate');
+    const core = makeCore(runtime.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(detail);
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(runtime.execUsers).toEqual(expectedUsers);
+    expect(runtime.execs).not.toContainEqual(['/bin/sh', '-c', 'command -v docker']);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
+  it('does not activate Desktop when codespace ownership verification fails', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv[0] === '/bin/sh' && argv[3] === 'ironcurtain-build-state-verify'
+          ? {
+              exitCode: 1,
+              stdout: '',
+              stderr:
+                `nested-Docker build state directory ${DOCKER_BUILDX_STATE_DIRECTORY} ` +
+                'failed its owner/mode check: expected "directory:1000:1000:700", observed "directory:0:0:700"\n',
+            }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const activate = vi.spyOn(handle, 'activate');
+    const core = makeCore(runtime.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(
+      /failed its owner\/mode check.*expected "directory:1000:1000:700"/u,
+    );
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(runtime.execs).not.toContainEqual(['/bin/sh', '-c', 'command -v docker']);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
+  it('carries TCP egress endpoints without mounting Apple socket capabilities', async () => {
+    const { runtime, handle } = await admitBundle();
+    const capturing = capturingRuntime(runtime);
+    const core = makeCore(capturing.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+    if (core.dockerWorkloadEgress?.networkAccess !== 'packages') throw new Error('expected Desktop package egress');
+
+    expect(core.dockerWorkloadEgress.registry).toMatchObject({ port: TEST_DESKTOP_REGISTRY_PORT });
+    expect(core.dockerWorkloadEgress.packages).toMatchObject({ port: TEST_DESKTOP_PACKAGE_PORT });
+    expect(core.dockerWorkloadEgress.registry.socketPath).toBeUndefined();
+    expect(core.dockerWorkloadEgress.packages.socketPath).toBeUndefined();
+
+    await createSessionContainers(core, makeConfig());
+
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_REGISTRY_EGRESS_SOCKET }),
+    );
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_PACKAGE_EGRESS_SOCKET }),
+    );
+  });
+
+  it('attaches the batch agent to ledgered Desktop egress before start while retaining the ordinary transport network', async () => {
+    const { runtime, handle } = await admitBundle();
+    const tcp = desktopTcpRuntime(runtime);
+    const activate = handle.activate.bind(handle);
+    vi.spyOn(handle, 'activate').mockImplementation(async () => {
+      tcp.lifecycleEvents.push('activate');
+      await activate();
+    });
+    const base = makeCore(tcp.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+    const core: PreContainerInfrastructure = {
+      ...base,
+      topology: 'tcp-sidecar',
+      useTcp: true,
+      proxy: createMockProxy(base.proxy.socketPath, 31_080),
+      mitmAddr: { port: 31_083 },
+    };
+
+    const resources = await createSessionContainers(core, makeConfig());
+
+    expect(tcp.configs).toHaveLength(2);
+    const [transport, agent] = tcp.configs;
+    const ordinaryNetwork = agent.network;
+    const expectedOrdinaryNetwork = getInternalNetworkName(getBundleShortId(BUNDLE_ID as BundleId));
+    expect(transport).toMatchObject({ name: expect.stringContaining('sidecar'), network: 'bridge' });
+    expect(ordinaryNetwork).toBe(expectedOrdinaryNetwork);
+    expect(tcp.networkConnections).toEqual([
+      { networkName: ordinaryNetwork, containerId: 'transport-sidecar-id' },
+      { networkName: TEST_DESKTOP_EGRESS_NETWORK, containerId: resources.containerId },
+    ]);
+    expect(tcp.lifecycleEvents).toEqual([
+      expect.stringMatching(/^create:ironcurtain-sidecar-/u),
+      'start:transport-sidecar-id',
+      `connect:transport-sidecar-id:${ordinaryNetwork}`,
+      expect.stringMatching(/^create:ironcurtain-/u),
+      `connect:${resources.containerId}:${TEST_DESKTOP_EGRESS_NETWORK}`,
+      `start:${resources.containerId}`,
+      'activate',
+    ]);
+    expect(resources.sidecarContainerId).toBe('transport-sidecar-id');
+    expect(resources.internalNetwork).toBe(ordinaryNetwork);
+    expect(runtime.events.filter((event) => event.startsWith('create-network:'))).toHaveLength(1);
+  });
+
+  it('preserves the first Desktop connectivity failure instead of retrying an activated workload lease', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv.some((arg) => arg.includes('IRONCURTAIN_HEALTH/1'))
+          ? { exitCode: 1, stdout: '', stderr: 'scripted transport failure' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const activate = vi.spyOn(handle, 'activate');
+    const tcp = desktopTcpRuntime(runtime);
+    const base = makeCore(tcp.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+    const core: PreContainerInfrastructure = {
+      ...base,
+      topology: 'tcp-sidecar',
+      useTcp: true,
+      proxy: createMockProxy(base.proxy.socketPath, 31_080),
+      mitmAddr: { port: 31_083 },
+    };
+
+    const error = await createSessionContainers(core, makeConfig()).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/Internal network connectivity check failed: MCP round-trip exited 1/u);
+    expect((error as Error).message).not.toMatch(/outer resources may be requested only during admission/u);
+
+    expect(activate).toHaveBeenCalledOnce();
+    expect(tcp.configs).toHaveLength(2);
+    expect(runtime.events.filter((event) => event.startsWith('create-network:'))).toHaveLength(1);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
+  it('cleans up the batch agent, transport, and ordinary network when egress attachment fails', async () => {
+    const { runtime, handle } = await admitBundle();
+    const tcp = desktopTcpRuntime(runtime, { failAgentEgressConnect: true });
+    const activate = vi.spyOn(handle, 'activate');
+    const base = makeCore(tcp.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+    const core: PreContainerInfrastructure = {
+      ...base,
+      topology: 'tcp-sidecar',
+      useTcp: true,
+      proxy: createMockProxy(base.proxy.socketPath, 31_080),
+      mitmAddr: { port: 31_083 },
+    };
+
+    await expect(createSessionContainers(core, makeConfig())).rejects.toThrow(
+      /scripted agent egress attachment failure/u,
+    );
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(tcp.lifecycleEvents.some((event) => event.startsWith('start:container-id-'))).toBe(false);
+    expect(runtime.containers).toHaveLength(0);
+    expect(runtime.events).toContain(
+      `remove-network:${getInternalNetworkName(getBundleShortId(BUNDLE_ID as BundleId))}`,
+    );
+  });
+
+  it('mounts only the qualified API volume and activates after the ledgered agent starts', async () => {
+    const { runtime, handle } = await admitBundle();
+    const capturing = capturingRuntime(runtime);
+    const core = makeCore(capturing.runtime, { dockerWorkload: handle, runtimeKind: 'docker' });
+
+    await createSessionContainers(core, makeConfig());
+
+    expect(capturing.config().image).toBe(core.imageResolution?.immutableImageId);
+    expect(capturing.config().env.DOCKER_HOST).toBe(DOCKER_DESKTOP_SIDECAR_DOCKER_HOST);
+    expect(capturing.config().env[APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]).toBe(APPLE_VM_DOCKER_WORKLOAD_NETWORK);
+    expect(capturing.config().trustedCreateOptions?.namedVolumeMounts).toEqual([
+      {
+        name: 'ic-desktop-api-test',
+        target: '/run/ironcurtain-docker',
+        readonly: true,
+        noCopy: true,
+      },
+    ]);
+    expect(capturing.config().mounts).not.toContainEqual(
+      expect.objectContaining({ target: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR }),
+    );
+    expect(capturing.config().fullyVisibleProc).toBe(false);
+    expect(loadDockerWorkloadLease(handle.leasePath).status).toBe('active');
+  });
+
+  it('rejects mutable or copy-up Desktop API grants', () => {
+    const dockerWorkload = {} as DockerWorkloadBundleHandle;
+    expect(() =>
+      resolveNestedDockerAgentWiring({
+        runtimeKind: 'docker',
+        dockerWorkload,
+        dockerWorkloadBootstrap: undefined,
+        dockerDesktopAgentAccess: {
+          dockerHost: DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
+          networkName: APPLE_VM_DOCKER_WORKLOAD_NETWORK,
+          agentApiMount: {
+            name: 'ic-desktop-api-test',
+            target: '/run/ironcurtain-docker',
+            readonly: false,
+            noCopy: true,
+          },
+        },
+      }),
+    ).toThrow(/read-only no-copy capability/u);
   });
 
   it('resolveNestedDaemonBundle is inert without a bundle on any backend', () => {
@@ -1167,12 +1548,13 @@ describe('nested daemon — daemon-ready evidence (§8.4)', () => {
     expect(audit.events).toContainEqual(
       expect.objectContaining({
         kind: 'private-docker-bootstrap',
-        artifact: {
+        image: {
+          transport: 'apple-archive',
           logicalName: 'ironcurtain-claude-code:latest',
           buildHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
           archiveSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          outerAppleImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
-          innerDockerImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+          outerImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+          innerImageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
         },
         network: { name: 'ironcurtain', runtimeId: expect.stringMatching(/^[a-f0-9]{64}$/u) },
       }),

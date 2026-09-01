@@ -6,7 +6,7 @@ import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV,
 } from '../src/docker-workload/apple-private-docker.js';
 
-export type NestedAppleSmokeMode = 'batch' | 'pty' | 'public-registry';
+export type NestedAppleSmokeMode = 'batch' | 'pty' | 'public-registry' | 'docker-desktop-packages';
 
 /** Small Docker Official multi-architecture image with reviewed built-in applets. */
 export const PUBLIC_REGISTRY_SMOKE_IMAGE = 'busybox:1.37.0-glibc';
@@ -59,16 +59,20 @@ export function parseNestedAppleSmokeMode(argv: readonly string[]): NestedAppleS
   if (argv.length === 0) return 'batch';
   if (argv.length === 1 && argv[0] === '--pty') return 'pty';
   if (argv.length === 1 && argv[0] === '--public-registry') return 'public-registry';
-  throw new Error('usage: smoke-nested-apple.ts [--pty | --public-registry] (the modes are separate acceptance gates)');
+  if (argv.length === 1 && argv[0] === '--docker-desktop-packages') return 'docker-desktop-packages';
+  throw new Error(
+    'usage: smoke-nested-apple.ts [--pty | --public-registry | --docker-desktop-packages] ' +
+      '(the modes are separate acceptance gates)',
+  );
 }
 
 export function buildNestedAppleSmokeWorkloadConfig(mode: NestedAppleSmokeMode): DockerWorkloadRequestedConfig {
   // Exercise the same canonical request shape operators use. This legacy
   // smoke's registry gate maps to Images; deterministic batch/PTY gates are
   // explicitly Offline.
-  return mode === 'public-registry'
-    ? { enabled: true, networkAccess: 'images' }
-    : { enabled: true, networkAccess: 'offline' };
+  if (mode === 'public-registry') return { enabled: true, networkAccess: 'images' };
+  if (mode === 'docker-desktop-packages') return { enabled: true, networkAccess: 'packages' };
+  return { enabled: true, networkAccess: 'offline' };
 }
 
 /**

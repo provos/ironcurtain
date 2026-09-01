@@ -276,7 +276,6 @@ async function captureSelectedImageArchive(options: {
       logicalName: options.logicalName,
       architecture: options.architecture,
       expectedLabels: { 'ironcurtain.build-hash': options.buildHash },
-      acceptedSourceReferences: [options.logicalName, captureReference],
     });
   } catch (error) {
     captureError = error;

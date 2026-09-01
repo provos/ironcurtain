@@ -22,6 +22,17 @@ const packageRoot = dirname(fileURLToPath(import.meta.url));
 const outputPath = join(packageRoot, 'bin', 'linux-arm64', 'ironcurtain-build-trust-runc');
 const manifestPath = join(packageRoot, 'manifest.json');
 const runtimeContractPath = join(packageRoot, '..', '..', 'src', 'docker', 'build-trust-runtime-contract.ts');
+const liveSmokeProbePath = join(
+  packageRoot,
+  '..',
+  '..',
+  'src',
+  'workflow',
+  'workflows',
+  'nested-docker-live-smoke',
+  'scripts',
+  'nested_docker_probe.py',
+);
 const mainGoPath = join(packageRoot, 'main.go');
 const contractFixturePath = join(packageRoot, 'testdata', 'synthetic-build-trust-contract.json');
 const clientToolchainManifestPath = join(
@@ -149,6 +160,10 @@ try {
     failureDiagnostic,
   };
   const runtimeContract = renderRuntimeContract(runtimeContractObject);
+  const liveSmokeProbe = renderLiveSmokeProbe(
+    readFileSync(liveSmokeProbePath, 'utf8'),
+    runtimeContractObject.wrapper.sha256,
+  );
   const contractFixture = JSON.parse(readFileSync(contractFixturePath, 'utf8'));
   if (!caGenerationPattern.test(contractFixture.caGeneration)) {
     throw new Error('synthetic trust contract has an invalid CA generation');
@@ -222,11 +237,15 @@ try {
   if (mode === '--write') {
     atomicWrite(outputPath, binary, 0o755);
     atomicWrite(runtimeContractPath, Buffer.from(runtimeContract), 0o644);
+    atomicWrite(liveSmokeProbePath, Buffer.from(liveSmokeProbe), 0o644);
     atomicWrite(manifestPath, Buffer.from(manifest), 0o644);
-    process.stdout.write(`wrote ${outputPath}\nwrote ${runtimeContractPath}\nwrote ${manifestPath}\n`);
+    process.stdout.write(
+      `wrote ${outputPath}\nwrote ${runtimeContractPath}\nwrote ${liveSmokeProbePath}\nwrote ${manifestPath}\n`,
+    );
   } else {
     requireExact(outputPath, binary, 0o755);
     requireExact(runtimeContractPath, Buffer.from(runtimeContract), 0o644);
+    requireExact(liveSmokeProbePath, Buffer.from(liveSmokeProbe), 0o644);
     requireExact(manifestPath, Buffer.from(manifest), 0o644);
     process.stdout.write('build-trust runtime binary and manifest are fresh\n');
   }
@@ -306,6 +325,15 @@ ${contract.failureDiagnostic.allowedCodes.map((code) => `      ${stringLiteral(c
   },
 } as const;
 `;
+}
+
+function renderLiveSmokeProbe(source, wrapperSha256) {
+  const pattern = /^PACKAGE_RUNC_SHA256 = "[a-f0-9]{64}"$/gmu;
+  const matches = source.match(pattern);
+  if (matches?.length !== 1) {
+    throw new Error('nested-Docker live-smoke probe must contain exactly one canonical package runtime digest');
+  }
+  return source.replace(pattern, `PACKAGE_RUNC_SHA256 = "${wrapperSha256}"`);
 }
 
 function atomicWrite(path, contents, modeBits) {

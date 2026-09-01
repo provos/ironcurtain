@@ -147,6 +147,44 @@ describe('registry-egress proxy seam (enabled)', () => {
     expect(Buffer.concat(delivered)).toEqual(compressed);
   });
 
+  it('authorizes an uncached FROM metadata request without forwarding BuildKit trace context', async () => {
+    let upstreamHeaders: http.IncomingHttpHeaders | undefined;
+    let upstreamMethod: string | undefined;
+    const upstream = await startUpstream((req, res) => {
+      upstreamHeaders = req.headers;
+      upstreamMethod = req.method;
+      res.writeHead(200, { 'content-type': 'application/vnd.oci.image.manifest.v1+json' });
+      res.end();
+    });
+
+    const result = await driveThroughSeam({
+      guard: fixtureGuard(),
+      transport: routingTransport({ 'registry.test': upstream.port }),
+      targetHost: 'registry.test',
+      path: '/v2/library/debian/manifests/bookworm-slim',
+      method: 'HEAD',
+      headers: {
+        accept: 'application/vnd.oci.image.manifest.v1+json',
+        baggage: 'build-id=client-controlled',
+        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+        tracestate: 'vendor=client-controlled',
+        'user-agent': 'buildkit/v0.26',
+      },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toBe('');
+    expect(upstreamMethod).toBe('HEAD');
+    if (upstreamHeaders === undefined) throw new Error('expected the authorized metadata request to reach upstream');
+    expect(upstreamHeaders).toMatchObject({
+      accept: 'application/vnd.oci.image.manifest.v1+json',
+      'user-agent': 'buildkit/v0.26',
+    });
+    expect(upstreamHeaders.baggage).toBeUndefined();
+    expect(upstreamHeaders.traceparent).toBeUndefined();
+    expect(upstreamHeaders.tracestate).toBeUndefined();
+  });
+
   it('forwards a by-digest pull, stripping response cookies and injecting no credential', async () => {
     const body = Buffer.from('delivered-blob-bytes');
     const digest = digestOf(body);

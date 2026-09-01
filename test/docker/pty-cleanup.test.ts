@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as logger from '../../src/logger.js';
 
 const state = vi.hoisted<{
   infrastructure: unknown;
@@ -47,8 +48,13 @@ vi.mock('../../src/docker/claude-md-seed.js', () => ({ buildDockerClaudeMd: () =
 
 vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   prepareDockerInfrastructure: async () => state.infrastructure,
-  activateAppleVmDockerWorkload: vi.fn(),
+  activateNestedDockerWorkload: vi.fn(),
+  attachDockerDesktopAgentEgressNetwork: vi.fn(),
+  resolveNestedDockerAgentWiring: () => ({ appleNestedDaemon: undefined, env: {}, namedVolumeMounts: [] }),
+  resolveNestedDockerOuterAgentImage: (_infra: unknown, image: string) => image,
   buildAgentUidRemap: () => ({}),
+  buildDockerDesktopTransportCreateLimits: () => ({}),
+  buildNestedDockerAgentTrustedCreateOptions: () => undefined,
   buildUdsSocketMounts: () => [],
   buildDockerWorkloadEgressMounts: () => [],
   dockerWorkloadEgressNetworkAccess: () => 'offline',
@@ -102,6 +108,7 @@ describe('PTY early-initialization cleanup ownership', () => {
   });
 
   it('revokes the workload and stops both proxies when capture begin throws', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
     const directory = mkdtempSync(join(tmpdir(), 'pty-cleanup-'));
     directories.push(directory);
     const teardown = vi.fn(async () => {});
@@ -159,6 +166,8 @@ describe('PTY early-initialization cleanup ownership', () => {
         }),
       }),
     );
+    expect(errorSpy).toHaveBeenCalledWith('PTY setup failed: scripted capture begin failure');
+    errorSpy.mockRestore();
   });
 
   it('stops proxies and removes the runtime root when resource verification fails', async () => {

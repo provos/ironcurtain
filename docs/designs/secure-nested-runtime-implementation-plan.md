@@ -1,8 +1,10 @@
 # Secure Nested Docker Runtime Implementation Plan
 
 **Date:** 2026-07-19
-**Status:** Phase 0A is implemented and self-tested. Phase 0B baseline Docker Desktop reached its
-frozen-topology stop gate at the inner procfs mount. Independent Apple evidence supports guest
+**Status:** Phase 0A is implemented and self-tested. A later Docker Desktop H3 probe resolved the
+earlier inner-procfs stop with a reviewed, sidecar-only mount-mask exception and passed staged image
+load, ordinary run/exec, bind and named-volume mounts, offline BuildKit RUN, internal target/scanner
+exchange, egress negatives, and exact cleanup. Independent Apple evidence supports guest
 prerequisites, a rootless `vfs` daemon, the functional offline matrix, sampled VM-boundary and
 publication negatives, resource accounting/peer survival, sparse-disk observation, and scoped
 fault cleanup, exact workspace/dependency paths, and a fixed per-file proxy relay with fail-closed
@@ -23,10 +25,12 @@ readiness and egress negatives, immutable-image checks, and exact cleanup on Doc
 that verifies its stopped and running effective profiles; a live Engine-28 check proved fixed-target
 forwarding, uplink-peer exclusion, relay-loss failure, and exact cleanup on an isolated dual-stack
 network. The Apple same-VM rootless daemon lifecycle and selected same-agent private-Docker image
-bootstrap are implemented. A fail-closed resolved-variant guard now admits only the exact Apple
-developer-only, selected-current-agent, ephemeral slice defined in §12, with either offline ingress or
-the fixed public-registry path, after a live Apple-availability
-preflight. `npm run smoke:nested:apple` exercises the built CLI session/bootstrap/activation path,
+bootstrap are implemented. A fail-closed resolved-variant guard admits the exact Apple slice defined
+in §12 and the macOS Docker Desktop developer slice: a dedicated rootless daemon sidecar,
+selected-current-agent transport, reviewed P2 seccomp and mount-mask exception, bounded aggregate
+resources, lease-owned API volume, and—for online modes—one exact TUN device plus isolated fixed relays
+to bundle-authenticated host policy engines. Both paths require live runtime-availability preflight.
+`npm run smoke:nested:apple` exercises the built Apple CLI session/bootstrap/activation path,
 then an exact lease-bound private-Docker child and teardown. The complementary, manually invoked
 `npm run smoke:nested:apple:pty` drives the built `start --pty` entrypoint through the same node-pty
 bridge as mux and requires a post-activation Claude TUI redraw plus private-Docker evidence and exact
@@ -37,9 +41,22 @@ path. The replacement selected-current public-registry product-entrypoint gate p
 IP/public-DNS negatives, no published ports, and exact teardown. A newer deterministic production
 workflow gate passed both public (28 checks) and offline (17 checks) modes without an LLM, with exact
 cleanup after each run and graceful second-session admission in one isolated home. These smokes are not
-agent-turn/provider, full 0C, or preview qualification. Docker Desktop, native Linux,
-build-egress, enforced-PID, bounded-disk, and preview variants remain rejected. No backend is
+agent-turn/provider, full 0C, or preview qualification. Native Linux, enforced-PID, bounded-disk, and
+preview variants remain rejected. No backend is
 implementation-qualified or preview-ready.
+**Amendment (2026-08-31, Docker Desktop online developer slice):** explicit opt-in on macOS may use
+`networkAccess: "images"` or `"packages"` through the independently pinned fixed-relay topology. The
+rootless daemon receives only `/dev/net/tun` (no `NET_ADMIN`, `SYS_ADMIN`, privileged mode, host runtime
+socket, or direct external network); each relay has one immutable destination, an isolated bundle
+address, and a per-bundle proxy credential required by the host policy engine. Effective sidecar and
+relay profiles are adjudicated before activation. This is narrowly supported developer functionality,
+not formal 0C qualification or preview readiness. It supersedes the offline-only restriction below.
+**Amendment (2026-08-25, Docker Desktop offline developer slice):** explicit opt-in on macOS may use
+the reviewed H3 sidecar topology before formal 0C/preview qualification. This is narrowly supported,
+not qualified: only `networkAccess: "offline"` is admitted, the outer sidecar remains `network=none`,
+and the agent receives only the read-only private API volume. Earlier statements that all Docker
+Desktop sessions were rejected or that the sidecar was unbuilt are superseded by this amendment.
+Native Linux remains fail-closed future work.
 **Amendment (2026-07-21, user-approved; image-class disposition superseded by §16.16):** workload-image
 registry egress is promoted from Phase 3 into 0F/0C scope. See §6.4, §7.1, and §16.5.
 **Amendment (2026-07-21, user-approved):** workload-registry mediation gates request and derived-
@@ -153,7 +170,7 @@ Therefore:
 - do not treat the name `dind-rootless` as proof of a safe outer profile;
 - build a purpose-specific daemon image and begin with the normal outer restrictions;
 - permit only narrow, recorded changes shown necessary by the spike;
-- do not add `SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse`, host namespaces, `seccomp=unconfined`, `apparmor=unconfined`, `systempaths=unconfined`, or outer `--privileged` during the Docker Desktop spike;
+- do not add `SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse`, host namespaces, `seccomp=unconfined`, `apparmor=unconfined`, or outer `--privileged`; `systempaths=unconfined` is permitted only by the version-scoped, reviewed nested-daemon-sidecar exception recorded in §9.3 and remains forbidden for the agent container;
 - if a bounded non-privileged daemon cannot start, Docker Desktop support is infeasible under this topology and fails closed.
 
 Apple `container` is different: each outer workload has a dedicated lightweight VM. Rootful Docker inside that VM may be acceptable because it controls the disposable bundle VM rather than a shared host kernel. That is a separately named and separately proven topology, not a fallback that weakens Docker Desktop or Linux.
@@ -531,7 +548,7 @@ The deterministic vertical fixture uses pinned target and scanner digests, an ex
 
 ### 8.1 Resource envelope
 
-Expose one configured bundle budget with a coordinator-chosen reserve rather than asking the untrusted client to partition authority. On Desktop/Linux, statically partition outer agent/daemon/relay CPU, memory, and PIDs so their sum cannot exceed the bundle total. Qualification must prove every dockerd, BuildKit, shim, build, and child process remains under an immutable outer sidecar cgroup ancestor; probe inner `--cgroup-parent`, host cgroup namespace, delegation, migration, and direct cgroup writes. Any process observed outside the subtree, successful migration, or writable parent/ancestor cgroup is an immediate compatibility blocker. Inner delegation may reduce inner Docker semantics but never weaken the outer ceiling.
+Expose one configured bundle budget with a coordinator-chosen reserve rather than asking the untrusted client to partition authority. On Desktop/Linux, statically partition CPU, memory, and PIDs across the outer agent, private daemon, ordinary macOS session transport, and every enabled fixed relay so their sum cannot exceed the bundle total. Qualification must prove every dockerd, BuildKit, shim, build, and child process remains under an immutable outer sidecar cgroup ancestor; probe inner `--cgroup-parent`, host cgroup namespace, delegation, migration, and direct cgroup writes. Any process observed outside the subtree, successful migration, or writable parent/ancestor cgroup is an immediate compatibility blocker. Inner delegation may reduce inner Docker semantics but never weaken the outer ceiling.
 
 | Backend               | CPU                           | Memory                        | PIDs                                        | Disk                                                                 |
 | --------------------- | ----------------------------- | ----------------------------- | ------------------------------------------- | -------------------------------------------------------------------- |
@@ -646,7 +663,7 @@ Never mount a host runtime socket, Mac home/root, SSH material, real credentials
 9. **Resources:** run bounded memory, CPU, process, and disk fixtures; sample outer runtime and host state; prove the declared aggregate behavior.
 10. **Fault cleanup:** kill nested child, daemon, agent, and sidecar at separate points during build and target/scanner execution. Delete exact outer resources and capture two empty owned inventories.
 
-Exploratory evidence establishes DD-H1 and DD-H2 but falsifies DD-H3 under the frozen baseline
+Exploratory evidence establishes DD-H1 and DD-H2 and initially falsifies DD-H3 under the baseline
 ceiling. `dd-p0-run-0002` falsifies P0 user-namespace creation. Fresh cumulative
 `dd-p2-capsetid-0005`, `dd-p2-capsetid-daemon-0006`, and `dd-h2-private-api-0006` support namespace
 creation, UDS-only daemon boot, and private sibling access with `NoNewPrivs=false`, only outer
@@ -655,27 +672,32 @@ eligible `pivot_root` and `umount2` syscalls and used a hash-recorded runtime sh
 `--no-new-keyring` mode rather than admit the forbidden `keyctl` syscall. `dd-h3-functional-0004`
 successfully loads the staged image but the first inner container fails while mounting procfs.
 
-This DD-H3 result reaches the Track DD stop gate, rather than P4. The outer container's default
+That DD-H3 result reached the Track DD stop gate. The outer container's default
 masked and read-only `/proc/*` overmounts cause Linux `mount_too_revealing` to reject a new procfs
 mount from the nested user namespace. This is a kernel rule, not a further seccomp denial: an
 unconditional `mount` rule is already present and earlier nested mounts succeed. Primary runc
 analysis demonstrates that removing a single entry is insufficient; the mount namespace needs at
 least one fully visible procfs. Docker's supported control is an empty `MaskedPaths` and
-`ReadonlyPaths` override, exposed by `systempaths=unconfined`. That would unmask sensitive proc
-entries and is explicitly outside P4 and the absolute-stop list. A host/VM procfs bind would instead
-expose a host namespace and is also forbidden. Consequently baseline Docker Desktop is currently
-**not feasible under the frozen topology**. DD-PROXY cannot repair this local mount prerequisite and
-is not run for this candidate. ECI/Sysbox may still be assessed only as their separately named
-environments.
+`ReadonlyPaths` override, exposed by `systempaths=unconfined`. Review accepted that override only for
+the dedicated, networkless rootless-daemon sidecar: it has no host namespace, host runtime socket,
+device, `SYS_ADMIN`, `NET_ADMIN`, or broad bind. The agent container and every other outer container
+retain Docker's default masks. A host/VM procfs bind remains forbidden.
+
+The first reviewed-exception run, `codex-dd-functional-systempaths-0001`, advanced to an independent
+`sethostname` seccomp denial. Its manifest-bound command denial justified the one additional P2 rule,
+which operates only for inner UTS initialization inside the rootless sidecar. With that hash-bound
+artifact, `codex-dd-functional-systempaths-0008` passes staged image load, run/exec, offline build,
+bind/volume, internal-network target/scanner exchange, negative pull, and exact cleanup. This closes
+the local DD-H3 functional blocker for the version-scoped sidecar profile; it does not qualify
+DD-PROXY, the product entrypoint, native Linux, or preview support.
 
 Every cited successful or falsifying run has a verified manifest and exact cleanup with two empty
-inventories. These stock-image probes do not qualify Docker Desktop. Proceed independently with
-Track AC; revisiting baseline Desktop requires an explicit reviewed change to the profile ceiling
-and a complete P0-P4 restart, not an exploratory fallback.
+inventories. These stock-image probes do not qualify Docker Desktop. The reviewed exception is
+recorded in the checked-in profile ceiling and cannot be reused outside the dedicated sidecar.
 
 #### Track DD stop gates
 
-Stop and record **not feasible under the baseline topology** if rootless Docker requires outer `--privileged`, `SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse`, the host cgroup namespace/mount, writable cgroup control above its delegated subtree, migration outside its immutable ancestor, any other host namespace/device, a host runtime socket, broad unconfined profiles, direct external networking, unconfined host mounts, or untrusted cleanup access to the host daemon. Also stop for external egress, sidecar-cgroup escape, host port exposure, sibling/runtime access, or incomplete exact cleanup.
+Stop and record **not feasible under the baseline topology** if rootless Docker requires outer `--privileged`, `SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse`, the host cgroup namespace/mount, writable cgroup control above its delegated subtree, migration outside its immutable ancestor, any other host namespace/device, a host runtime socket, broad unconfined profiles beyond the reviewed nested-daemon-sidecar system-path exception, direct external networking, unconfined host mounts, or untrusted cleanup access to the host daemon. Also stop for external egress, sidecar-cgroup escape, host port exposure, sibling/runtime access, or incomplete exact cleanup.
 
 ### 9.4 Phase 0B Track AC: Apple primitive falsification
 
@@ -807,7 +829,7 @@ Phase 0B classifies each primitive hypothesis as `supported`, `falsified`, or `b
 Implementation slices may land behind a fail-closed resolved-variant guard before their phase exit.
 That makes one exact topology testable without claiming broader support. The ordering of phase exits,
 backend qualification, product-entrypoint reruns, and preview remains normative; admitting the narrow
-Apple developer slice satisfies none of those later gates by itself.
+Apple or Docker Desktop offline developer slice satisfies none of those later gates by itself.
 
 Current 0F foundations are catalog-independent. Checked-in images are CA-neutral; trusted bootstrap
 stages only public trust, provider/registry forwarding uses destination-bound transport, and the
@@ -1006,7 +1028,11 @@ unbound, or non-ready; reconciliation fencing alone is not treated as cleanup pr
 
 ### Phase 2-DD — Docker Desktop product slice (independent)
 
-Proceed only if Track DD becomes an implementation-qualified candidate in 0C. Implement its minimal recorded profile, separate named-volume API/exchange roots, identical workspace paths, DD-STRICT `network=none`, evidence-gated DD-PROXY isolated-gateway network plus independently pinned fixed relay, selected-current-agent transport, and resource declarations.
+The explicit-opt-in DD-STRICT developer slice is implemented with its minimal recorded profile,
+lease-owned named-volume API/data root, `network=none`, selected-current-agent transport, and aggregate
+resource partition across the daemon, agent, ordinary session transport, and enabled fixed relays. The explicit-opt-in DD-PROXY developer slice adds only the exact TUN device required
+by rootless slirp networking plus an isolated-gateway network and independently pinned fixed relays to
+bundle-authenticated host policy engines. Both remain supported-not-qualified.
 
 **Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the Desktop release suite and G1-G10 before Desktop preview. Every Phase 0 stop condition is a regression test. Failed preflight disables the capability without fallback.
 
@@ -1062,7 +1088,7 @@ Each requires its own threat model and gates.
 
 - `src/docker-workload/config.ts` — requested and resolved capability types.
 - `src/docker-workload/infrastructure.ts` — common bundle lifecycle and budget partition.
-- `src/docker-workload/rootless-sidecar.ts` — Linux/Desktop bootstrap, health, profile record, and UDS paths. Not built: no Linux/Desktop backend is qualified, and §9.3 classifies baseline Desktop as infeasible under the frozen topology.
+- [`src/docker-workload/docker-desktop-sidecar.ts`](../../src/docker-workload/docker-desktop-sidecar.ts) — implemented Docker Desktop rootless sidecar bootstrap, health, frozen-profile binding, activation canaries, API-volume handoff, and rollback.
 - `src/docker-workload/client-toolchain.ts` — qualification-recorded Docker CLI/Buildx/Compose installation manifest and API compatibility preflight; its guest result is advisory.
 - [`src/docker-workload/apple-vm-daemon.ts`](../../src/docker-workload/apple-vm-daemon.ts) — frozen same-VM rootless bootstrap argv and the fail-closed readiness adjudication (§4.4 variant 1). Pure logic over an injected exec seam; variants 2 and 3 are unbuilt.
 - [`src/docker-workload/session-daemon.ts`](../../src/docker-workload/session-daemon.ts) — backend implementation assert (`assertNestedDaemonBackendImplemented`) and the per-session decision of whether a create launches the nested daemon component.
@@ -1144,7 +1170,7 @@ Operators who require no live registry access opt out explicitly:
 ```yaml
 dockerWorkload:
   enabled: true
-  imageIngress: preloaded-only
+  networkAccess: offline
 ```
 
 Qualification, offline, and PTY-only gates must use that explicit opt-out. The remaining internal
@@ -1152,7 +1178,7 @@ fields are implementation invariants, not ordinary UI choices. The following are
 unsupported and rejected before feature-attributable runtime, image transport, proxy, lease, or
 filesystem provisioning:
 
-- Docker Desktop and native Linux outer runtimes;
+- native Linux outer runtimes;
 - `tier: preview`, current-Dockerfile build egress, persistent daemon state,
   or host-port publishing;
 - `pids.required: true`, a numeric disk limit, or explicitly disabling acceptance of the admitted
@@ -1250,14 +1276,14 @@ decisions explain the current plan; superseded implementation diaries remain ava
   may use rootful Docker only inside its disposable per-session VM. Apple guest PID observations are
   advisory; hard disk claims require host enforcement, while the current observed-disk slice requires
   the pre-daemon watchdog.
-- DD-PROXY is a distinct future authority-bearing service: its fixed image digest, command,
+- DD-PROXY is a distinct authority-bearing service: its fixed image digest, command,
   destination, effective profile, and isolated network remain host-adjudicated because it receives an
   uplink unavailable to the bundle.
 - Public workload-image pulls moved into the fixed registry-egress path. Pulled bytes are untrusted;
   authorization applies to origins, operations, redirects, credentials, SSRF boundaries, and transfer
   ceilings. Exact derived CDN redirects are request-scoped and never become a reusable allowlist.
   Registry references and digests are provenance, not bundle-code attestation.
-- Dockerfile `RUN` fetches and daemon `FROM` pulls are different seams. Future package `RUN` traffic uses
+- Dockerfile `RUN` fetches and daemon `FROM` pulls are different seams. Package `RUN` traffic uses
   the dedicated TLS-terminating fixed-repository package MITM and grants bounded bundle-wide package
   authority; `FROM` pulls remain on registry egress and its bearer-token flow. The superseded generic-
   public opaque-CONNECT experiment is not a product path.
@@ -1379,6 +1405,15 @@ reviewed binary image digest, fixed command/configuration, exact target, effecti
 attachments remain host-adjudicated operational inputs. It must not inherit identity from, or rotate
 with, a bundle-image qualification generation. Any future image-backed service receives mandatory
 pinning only after the design shows an analogous authority differential.
+
+The current Docker Desktop implementation attaches that trusted relay to Docker's default bridge so it
+can reach the host-gateway listener. This intentionally gives the relay a NAT-capable default route and
+L2 adjacency to other default-bridge containers; mediation on this hop therefore depends on the pinned
+relay binary and its adjudicated single-target configuration, not on an egress-denying uplink network.
+The untrusted agent and private daemon never join the default bridge. This is an accepted residual risk
+of the Docker Desktop backend. Replacing the default bridge requires a separately qualified uplink that
+both reaches the host gateway and proves the absence of public/LAN egress; a merely custom non-internal
+bridge is not such proof.
 
 Earlier text that described eight “trusted infrastructure” roles, catalog hashes as lease bindings,
 catalog mismatch as a security blocker, or refreeze as a product-start prerequisite is superseded by

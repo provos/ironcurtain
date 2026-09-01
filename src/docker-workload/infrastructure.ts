@@ -13,7 +13,7 @@
  * fuse has already admitted the session. A guard test enforces the non-import.
  */
 
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -25,10 +25,9 @@ import {
 import type { ContainerRuntime } from '../docker/types.js';
 import type { ContainerRuntimeKind } from '../docker/container-runtime.js';
 import { loadResourceWatchdogPolicy, type LoadedResourceWatchdogPolicy } from '../docker/resource-watchdog.js';
-// Type-only: the readiness record is deliberately field-compatible with the
-// `daemon-ready` evidence payload, and a type import adds no runtime edge.
-import type { AppleVmDaemonReadiness } from './apple-vm-daemon.js';
-import type { AppleVmDockerWorkloadNetwork, AppleVmDockerWorkloadProvisioning } from './apple-private-docker.js';
+// Type-only: daemon observations are deliberately field-compatible with the
+// lifecycle evidence payloads, and a type import adds no runtime edge.
+import type { PrivateDockerBootstrapObservation, PrivateDockerDaemonReadiness } from './private-docker.js';
 import {
   activateDockerWorkloadLease,
   createDockerWorkloadLease,
@@ -39,6 +38,7 @@ import {
   returnDockerWorkloadLeaseRecoveryToIncident,
   requestDockerWorkloadOuterResource,
   type DockerWorkloadCleanupProof,
+  type DockerWorkloadOuterResource,
 } from './bundle-lease.js';
 import type { DockerWorkloadRevocationResult } from './bundle-revocation.js';
 import {
@@ -88,21 +88,48 @@ const POST_CREATE_SAMPLE_POLL_MS = 50;
 const ADMISSION_LOCK_ACQUIRE_ATTEMPTS = 16;
 
 export type DockerWorkloadRuntimeKind = ContainerRuntimeKind;
-export type OuterResourceKind = 'container' | 'network';
-export type OuterResourceRole = 'agent' | 'nested-daemon' | 'fixed-relay' | 'proxy' | 'network';
+export type OuterResourceKind = DockerWorkloadOuterResource['kind'];
+export type OuterResourceRole = 'agent' | 'nested-daemon' | 'daemon-api' | 'fixed-relay' | 'proxy' | 'network';
 
 /**
  * A precommitted outer-resource ledger entry. The caller creates the runtime
- * object with the returned name and ownership labels, then calls `observed()`
+ * object with its selected name and these ownership labels, then calls `observed()`
  * with the runtime's immutable ID (for networks the caller reads the ID back
  * via `listNetworks` — `createNetwork` returns void).
  */
-export interface OuterResourceGrant {
-  readonly requestId: string;
-  readonly requestedName: string;
+export interface OuterResourceRegistration {
   readonly labels: Readonly<Record<string, string>>;
   observed(immutableId: string, expanded?: ExpandedOuterCreate): void;
 }
+
+export interface OuterResourceRequest {
+  readonly kind: OuterResourceKind;
+  readonly role: OuterResourceRole;
+  readonly requestedName: string;
+}
+
+/** Shared callback contract for a topology adapter creating one ledgered outer resource. */
+export interface LedgeredOuterCreateSpec<
+  Kind extends OuterResourceKind = OuterResourceKind,
+  Role extends OuterResourceRole = OuterResourceRole,
+> extends OuterResourceRequest {
+  readonly kind: Kind;
+  readonly role: Role;
+  readonly launchesNestedDaemon?: boolean;
+  readonly baseLabels?: Readonly<Record<string, string>>;
+  readonly adjudicateObserved?: (immutableId: string) => Promise<void>;
+}
+
+export type LedgeredOuterCreateAuthority<
+  Kind extends OuterResourceKind = OuterResourceKind,
+  Role extends OuterResourceRole = OuterResourceRole,
+> = (
+  spec: LedgeredOuterCreateSpec<Kind, Role>,
+  create: (
+    requestedName: string,
+    ownershipLabels: Readonly<Record<string, string>>,
+  ) => Promise<{ readonly id: string; readonly expanded?: ExpandedOuterCreate }>,
+) => Promise<{ readonly id: string }>;
 
 /** Injectable seam over the detached watchdog supervisor process for tests. */
 export interface WatchdogSupervisorController {
@@ -139,7 +166,6 @@ export interface DockerWorkloadAdmissionOptions {
   readonly processIdentityForPid?: ProcessIdentityResolver;
   /** Resolve the runtime recorded by an older lease when backend selection changed. */
   readonly runtimeForKind?: (kind: DockerWorkloadRuntimeKind) => ContainerRuntime;
-  readonly randomName?: (role: OuterResourceRole, kind: OuterResourceKind) => string;
   readonly supervisor?: WatchdogSupervisorController;
   /** Off for tests that must not leave a real host heartbeat interval running. */
   readonly startHeartbeat?: boolean;
@@ -274,7 +300,6 @@ export async function admitDockerWorkloadBundle(
       auditSink: options.auditSink,
       clock,
       sleep,
-      randomName: options.randomName ?? defaultRandomName,
       supervisor,
       startHeartbeat: options.startHeartbeat ?? true,
       processIdentityForPid: options.processIdentityForPid,
@@ -311,7 +336,6 @@ interface DockerWorkloadBundleHandleContext {
   readonly auditSink: DockerWorkloadAuditSink | undefined;
   readonly clock: () => Date;
   readonly sleep: (milliseconds: number) => Promise<void>;
-  readonly randomName: (role: OuterResourceRole, kind: OuterResourceKind) => string;
   readonly supervisor: WatchdogSupervisorController;
   readonly startHeartbeat: boolean;
   readonly processIdentityForPid: ProcessIdentityResolver | undefined;
@@ -355,14 +379,14 @@ export class DockerWorkloadBundleHandle {
     return loadDockerWorkloadLease(this.leasePath).paths.stagingRoot;
   }
 
-  /** Precommit one outer resource to the ledger BEFORE the caller creates it. */
-  requestOuterResource(kind: OuterResourceKind, role: OuterResourceRole): OuterResourceGrant {
+  /** Durably record the caller-selected runtime name BEFORE the caller creates it. */
+  precommitOuterResource(request: OuterResourceRequest): OuterResourceRegistration {
     if (this.rejecting) throw new Error('Docker-workload bundle is tearing down; new outer resources are rejected');
+    const { kind, role, requestedName } = request;
     if (kind === 'network' && this.context.runtimeKind === 'apple-container') {
       throw new Error('apple-container has no outer network objects to ledger');
     }
     const requestId = `res-${randomUUID()}`;
-    const requestedName = this.context.randomName(role, kind);
     requestDockerWorkloadOuterResource(
       this.leasePath,
       this.generation,
@@ -371,8 +395,6 @@ export class DockerWorkloadBundleHandle {
     );
     const labels = { [this.context.ownershipLabelKey]: this.generation };
     return {
-      requestId,
-      requestedName,
       labels,
       observed: (immutableId: string, expanded?: ExpandedOuterCreate): void => {
         observeDockerWorkloadOuterResource(
@@ -476,7 +498,7 @@ export class DockerWorkloadBundleHandle {
    * these values reach the host through a bundle-local socket, so the evidence
    * must say so beside the host-observed events it sits next to.
    */
-  recordDaemonReady(readiness: AppleVmDaemonReadiness): void {
+  recordDaemonReady(readiness: PrivateDockerDaemonReadiness): void {
     this.emit({
       kind: 'daemon-ready',
       attestation: DAEMON_READY_ATTESTATION,
@@ -488,25 +510,16 @@ export class DockerWorkloadBundleHandle {
   }
 
   /** Record the exact private-Docker inputs and advisory bundle-local observations before activation. */
-  recordPrivateDockerBootstrap(
-    provisioning: AppleVmDockerWorkloadProvisioning,
-    network: AppleVmDockerWorkloadNetwork,
-  ): void {
+  recordPrivateDockerBootstrap(observation: PrivateDockerBootstrapObservation): void {
     this.emit({
       kind: 'private-docker-bootstrap',
       attestation: DAEMON_READY_ATTESTATION,
-      toolchainDigest: provisioning.preflight.toolchainDigest,
-      toolchain: provisioning.preflight.toolchain,
-      artifact: {
-        logicalName: provisioning.image.logicalName,
-        buildHash: provisioning.image.buildHash,
-        archiveSha256: provisioning.image.archiveSha256,
-        outerAppleImageId: provisioning.image.outerAppleImageId,
-        innerDockerImageId: provisioning.image.immutableImageId,
-      },
+      toolchainDigest: observation.preflight.toolchainDigest,
+      toolchain: observation.preflight.toolchain,
+      image: observation.image,
       network: {
-        name: network.name,
-        runtimeId: network.id,
+        name: observation.network.name,
+        runtimeId: observation.network.id,
       },
     });
   }
@@ -1112,10 +1125,6 @@ function defaultPidAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
-}
-
-function defaultRandomName(role: OuterResourceRole): string {
-  return `ic-dw-${role}-${randomBytes(8).toString('hex')}`;
 }
 
 const defaultSupervisorController: WatchdogSupervisorController = {

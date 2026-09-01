@@ -23,10 +23,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { loadDockerWorkloadLease, type DockerWorkloadLease } from '../src/docker-workload/bundle-lease.js';
 import { dockerWorkloadConfigHash, resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
 import { getProcessStartIdentity } from '../src/docker-workload/process-lock.js';
-import { APPLE_VM_DAEMON_DOCKER_HOST, APPLE_VM_DAEMON_TOOLCHAIN_DIR } from '../src/docker-workload/apple-vm-daemon.js';
 import { APPLE_VM_DOCKER_WORKLOAD_NETWORK } from '../src/docker-workload/apple-private-docker.js';
+import type { DockerWorkloadAuditEvent } from '../src/docker-workload/lifecycle-evidence.js';
+import {
+  createPrivateDockerClient,
+  PRIVATE_DOCKER_CLIENT,
+  PRIVATE_DOCKER_HOST,
+} from '../src/docker-workload/private-docker.js';
 import { loadResourceWatchdogSupervisorStatus } from '../src/docker-workload/resource-watchdog-supervisor.js';
-import { createContainerRuntime } from '../src/docker/container-runtime.js';
+import { createContainerRuntime, type ContainerRuntimeKind } from '../src/docker/container-runtime.js';
 import {
   getBundleControlSocketPath,
   getBundleMitmControlSocketPath,
@@ -36,8 +41,8 @@ import {
   getBundleRuntimeRoot,
 } from '../src/config/paths.js';
 import { createPtyBridge, type PtyBridge } from '../src/pty/pty-bridge.js';
-import type { SessionMetadata } from '../src/session/types.js';
-import type { BundleId } from '../src/session/types.js';
+import { getBundleShortId, type BundleId, type SessionMetadata } from '../src/session/types.js';
+import { DOCKER_BUILDX_INSTANCES_DIRECTORY, DOCKER_BUILDX_STATE_DIRECTORY } from '../src/docker/docker-build-shim.js';
 import {
   appendBoundedOutput,
   hasClaudeTuiEvidence,
@@ -67,8 +72,6 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..');
 const CLI_PATH = resolve(PACKAGE_ROOT, 'dist', 'cli.js');
 const SELECTED_IMAGE = 'ironcurtain-claude-code:latest';
-const DOCKER_CLIENT = `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`;
-const DOCKER_HOST = APPLE_VM_DAEMON_DOCKER_HOST;
 const TIMEOUT_MS = 60 * 60_000;
 const PTY_ACTIVATION_TIMEOUT_MS = 15 * 60_000;
 const PTY_TUI_TIMEOUT_MS = 60_000;
@@ -88,15 +91,16 @@ interface SmokeEnvironment {
   readonly smokeHome: string;
   readonly workspace: string;
   readonly expectedConfigHash: string;
+  readonly runtimeKind: ContainerRuntimeKind;
 }
 
-async function main(mode: 'batch' | 'public-registry'): Promise<void> {
-  const { smokeRoot, smokeHome, workspace, expectedConfigHash } = prepareSmokeEnvironment(mode);
+async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
+  const { smokeRoot, smokeHome, workspace, expectedConfigHash, runtimeKind } = prepareSmokeEnvironment(mode);
   try {
     const argv = [CLI_PATH, 'start', '--agent', 'claude-code', '--workspace', workspace];
     const child = spawn(process.execPath, argv, {
       cwd: dirname(smokeRoot),
-      env: smokeChildEnvironment(smokeHome),
+      env: smokeChildEnvironment(smokeHome, runtimeKind),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -104,7 +108,7 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
     process.stderr.write(
-      `nested Apple smoke argv=${JSON.stringify([process.execPath, ...argv])} cwd=${dirname(smokeRoot)}\n`,
+      `nested ${runtimeKind} smoke argv=${JSON.stringify([process.execPath, ...argv])} cwd=${dirname(smokeRoot)}\n`,
     );
 
     let succeeded = false;
@@ -114,17 +118,18 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
         smokeHome,
         () => assertChildRunning(child, 'while waiting for activation'),
         expectedConfigHash,
+        runtimeKind,
       );
       activeBundle = active;
       const outerId = requireAgentOuterId(active.lease);
       const registryEgressSocketPath = withIronCurtainHome(smokeHome, () =>
         getBundleRegistryEgressSocketPath(active.sessionId as BundleId),
       );
-      if (mode === 'public-registry') {
+      if (runtimeKind === 'apple-container' && mode === 'public-registry') {
         if (!existsSync(registryEgressSocketPath) || !statSync(registryEgressSocketPath).isSocket()) {
           throw new Error('active public-registry bundle lacks its exact host registry-egress listener UDS');
         }
-      } else if (existsSync(registryEgressSocketPath)) {
+      } else if (runtimeKind === 'apple-container' && existsSync(registryEgressSocketPath)) {
         throw new Error('active preloaded-only bundle unexpectedly provisioned a registry-egress listener UDS');
       }
       const supervisorStatusPath = resolve(dirname(active.leasePath), 'status.json');
@@ -133,17 +138,21 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
       if (supervisorIdentity === undefined) throw new Error('watchdog supervisor is not alive at smoke activation');
       assertChildRunning(child, 'before private-Docker operation');
 
-      const runtime = createContainerRuntime('apple-container');
+      const runtime = createContainerRuntime(runtimeKind);
       await verifyAgentDockerEnvironment(runtime, outerId);
       const selectedImageId = await verifyPrivateDockerBaseline(
         runtime,
         outerId,
         resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'),
+        runtimeKind,
       );
       const before = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
       if (before.stdout.trim() !== '') throw new Error('private Docker inventory was not empty before smoke child');
 
-      if (mode === 'public-registry') {
+      if (mode === 'docker-desktop-packages') {
+        await verifyDockerDesktopOuterTopology(runtime, outerId, active.lease, active.sessionId as BundleId);
+        await verifyDockerDesktopPackageBuild(runtime, outerId);
+      } else if (mode === 'public-registry') {
         await verifyPublicRegistryWorkload(runtime, outerId);
       } else {
         await innerDocker(runtime, outerId, [
@@ -187,7 +196,7 @@ async function main(mode: 'batch' | 'public-registry'): Promise<void> {
       assertNoProviderRequest(resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'));
       succeeded = true;
       process.stderr.write(
-        `nested Apple ${mode} infrastructure smoke passed (session=${active.sessionId}, outer=${outerId})\n`,
+        `nested ${runtimeKind} ${mode} smoke passed (session=${active.sessionId}, outer=${outerId})\n`,
       );
     } finally {
       try {
@@ -239,6 +248,7 @@ function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: s
     mkdirSync(workspace, { mode: 0o700 });
     assertSmokeSocketPathBudget(smokeHome);
     const requestedWorkload = buildNestedAppleSmokeWorkloadConfig(mode);
+    const runtimeKind: ContainerRuntimeKind = mode === 'docker-desktop-packages' ? 'docker' : 'apple-container';
     const smokeDockerResources = { memoryMb: 4096, cpus: 2 } as const;
     const resolvedWorkload = resolveDockerWorkloadConfig(requestedWorkload, smokeDockerResources);
     const expectedConfigHash = dockerWorkloadConfigHash(resolvedWorkload);
@@ -246,26 +256,29 @@ function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: s
       anthropicApiKey: FAKE_API_KEY,
       preferredMode: 'container',
       preferredDockerAgent: 'claude-code',
-      containerRuntime: 'apple-container',
+      containerRuntime: runtimeKind,
       dockerResources: smokeDockerResources,
       dockerWorkload: requestedWorkload,
       ...(providerBaseUrl === undefined ? {} : { anthropicBaseUrl: providerBaseUrl }),
     });
-    return { smokeRoot, smokeHome, workspace, expectedConfigHash };
+    return { smokeRoot, smokeHome, workspace, expectedConfigHash, runtimeKind };
   } catch (error) {
     process.stderr.write(`nested Apple smoke setup failed; diagnostics retained at ${smokeRoot}\n`);
     throw error;
   }
 }
 
-function smokeChildEnvironment(smokeHome: string): NodeJS.ProcessEnv {
-  return { ...process.env, ...smokeEnvironmentValues(smokeHome) };
+function smokeChildEnvironment(smokeHome: string, runtimeKind: ContainerRuntimeKind): NodeJS.ProcessEnv {
+  return { ...process.env, ...smokeEnvironmentValues(smokeHome, runtimeKind) };
 }
 
-function smokeEnvironmentValues(smokeHome: string): Readonly<Record<string, string>> {
+function smokeEnvironmentValues(
+  smokeHome: string,
+  runtimeKind: ContainerRuntimeKind = 'apple-container',
+): Readonly<Record<string, string>> {
   return {
     IRONCURTAIN_HOME: smokeHome,
-    IRONCURTAIN_CONTAINER_RUNTIME: 'apple-container',
+    IRONCURTAIN_CONTAINER_RUNTIME: runtimeKind,
     IRONCURTAIN_DOCKER_AUTH: 'apikey',
     ANTHROPIC_API_KEY: FAKE_API_KEY,
     NO_COLOR: '1',
@@ -329,6 +342,7 @@ async function mainPty(): Promise<void> {
       smokeHome,
       () => assertBridgeRunning(bridge!, 'while waiting for persisted lease activation'),
       expectedConfigHash,
+      'apple-container',
       PTY_ACTIVATION_TIMEOUT_MS,
     );
     activeBundle = active;
@@ -376,6 +390,7 @@ async function mainPty(): Promise<void> {
       runtime,
       outerId,
       resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'),
+      'apple-container',
     );
 
     // `/exit` is Claude Code's graceful TUI command. Success requires the
@@ -527,6 +542,7 @@ async function waitForActiveBundle(
   home: string,
   assertRunning: () => void,
   configHash: string,
+  runtimeKind: ContainerRuntimeKind,
   timeoutMs = TIMEOUT_MS,
 ): Promise<ActiveBundle> {
   return poll(
@@ -540,11 +556,8 @@ async function waitForActiveBundle(
         if (!existsSync(metadataPath)) continue;
         const metadata = JSON.parse(readFileSync(metadataPath, 'utf8')) as SessionMetadata;
         if (metadata.dockerWorkload === undefined) continue;
-        if (
-          metadata.dockerWorkload.backend !== 'apple-container' ||
-          metadata.dockerWorkload.configHash !== configHash
-        ) {
-          throw new Error('persisted Docker-workload metadata does not match the admitted Apple config');
+        if (metadata.dockerWorkload.backend !== runtimeKind || metadata.dockerWorkload.configHash !== configHash) {
+          throw new Error(`persisted Docker-workload metadata does not match the admitted ${runtimeKind} config`);
         }
         const leasePath = resolve(home, 'docker-workload', 'leases', metadata.dockerWorkload.leaseId, 'lease.json');
         const lease = loadDockerWorkloadLease(leasePath);
@@ -574,13 +587,98 @@ function requireAgentOuterId(lease: DockerWorkloadLease): string {
   return resources[0].observedId;
 }
 
+function inspectObject(value: unknown, label: string): Readonly<Record<string, unknown>> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Docker Desktop topology inspect is missing ${label}`);
+  }
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function inspectNetworkNames(raw: unknown, label: string): readonly string[] {
+  const root = inspectObject(raw, `${label} root`);
+  const networkSettings = inspectObject(root.NetworkSettings, `${label} NetworkSettings`);
+  const networks = inspectObject(networkSettings.Networks, `${label} Networks`);
+  return Object.keys(networks).sort();
+}
+
+function assertExactNetworkNames(actual: readonly string[], expected: readonly string[], label: string): void {
+  const wanted = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    throw new Error(`${label} network drift: expected ${wanted.join(',')}, received ${actual.join(',')}`);
+  }
+}
+
+async function verifyDockerDesktopOuterTopology(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  lease: DockerWorkloadLease,
+  bundleId: BundleId,
+): Promise<void> {
+  if (runtime.inspectContainerRaw === undefined) {
+    throw new Error('Docker Desktop topology smoke requires raw container inspect');
+  }
+  const egressNetworks = lease.resources.filter(
+    (resource) => resource.kind === 'network' && resource.role === 'network' && resource.observedId !== null,
+  );
+  const daemons = lease.resources.filter(
+    (resource) => resource.kind === 'container' && resource.role === 'nested-daemon' && resource.observedId !== null,
+  );
+  const relays = lease.resources.filter(
+    (resource) => resource.kind === 'container' && resource.role === 'fixed-relay' && resource.observedId !== null,
+  );
+  if (egressNetworks.length !== 1 || daemons.length !== 1 || relays.length !== 2) {
+    throw new Error('Docker Desktop packages lease omitted its exact egress network, daemon, or fixed relays');
+  }
+  const egressName = egressNetworks[0].requestedName;
+  const agentRaw = await runtime.inspectContainerRaw(outerId);
+  const agentNetworks = inspectNetworkNames(agentRaw, 'agent');
+  const ordinaryNetworks = agentNetworks.filter((name) => name !== egressName);
+  if (ordinaryNetworks.length !== 1) {
+    throw new Error(`Docker Desktop agent does not have exactly one ordinary network beside ${egressName}`);
+  }
+  const ordinaryName = ordinaryNetworks[0];
+  assertExactNetworkNames(agentNetworks, [ordinaryName, egressName], 'agent');
+
+  const transportName = `ironcurtain-sidecar-${getBundleShortId(bundleId)}`;
+  assertExactNetworkNames(
+    inspectNetworkNames(await runtime.inspectContainerRaw(transportName), 'transport'),
+    ['bridge', ordinaryName],
+    'transport',
+  );
+  const daemonId = daemons[0].observedId;
+  if (daemonId === null) throw new Error('Docker Desktop private daemon is not observed');
+  assertExactNetworkNames(
+    inspectNetworkNames(await runtime.inspectContainerRaw(daemonId), 'private daemon'),
+    [egressName],
+    'private daemon',
+  );
+  for (const relay of relays) {
+    if (relay.observedId === null) throw new Error(`Docker Desktop relay ${relay.requestedName} is not observed`);
+    assertExactNetworkNames(
+      inspectNetworkNames(await runtime.inspectContainerRaw(relay.observedId), `relay ${relay.requestedName}`),
+      ['bridge', egressName],
+      `relay ${relay.requestedName}`,
+    );
+  }
+
+  const directEgress = await runtime.exec(
+    outerId,
+    ['socat', '-u', '/dev/null', 'TCP:1.1.1.1:443,connect-timeout=3'],
+    5_000,
+    'codespace',
+  );
+  if (directEgress.exitCode === 0) {
+    throw new Error('Docker Desktop agent unexpectedly reached the internet without a policy proxy');
+  }
+}
+
 async function innerDocker(
   runtime: ReturnType<typeof createContainerRuntime>,
   outerId: string,
   args: readonly string[],
   timeoutMs = 120_000,
 ): Promise<{ readonly stdout: string; readonly stderr: string }> {
-  const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], timeoutMs, 'codespace');
+  const result = await smokePrivateDockerClient(runtime, outerId).execute(args, timeoutMs);
   if (result.exitCode !== 0) {
     throw new Error(
       `inner docker ${args[0] ?? '<empty>'} failed (exit ${result.exitCode}); ` +
@@ -596,9 +694,129 @@ async function expectInnerDockerFailure(
   args: readonly string[],
   timeoutMs = 120_000,
 ): Promise<{ readonly stdout: string; readonly stderr: string }> {
-  const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], timeoutMs, 'codespace');
+  const result = await smokePrivateDockerClient(runtime, outerId).execute(args, timeoutMs);
   if (result.exitCode === 0) throw new Error(`inner docker ${args[0]} unexpectedly succeeded`);
   return result;
+}
+
+function smokePrivateDockerClient(runtime: ReturnType<typeof createContainerRuntime>, outerId: string) {
+  return createPrivateDockerClient({
+    runtime,
+    containerId: outerId,
+    dockerCommand: PRIVATE_DOCKER_CLIENT,
+    dockerHost: PRIVATE_DOCKER_HOST,
+    execUser: 'codespace',
+    defaultTimeoutMs: 120_000,
+  });
+}
+
+async function agentDocker(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  args: readonly string[],
+  timeoutMs = 120_000,
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  const result = await runtime.exec(outerId, ['docker', ...args], timeoutMs, 'codespace');
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `agent docker ${args[0] ?? '<empty>'} failed (exit ${result.exitCode}); ` +
+        `stdout=${boundedDiagnostic(result.stdout)}; stderr=${boundedDiagnostic(result.stderr)}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Docker Desktop Packages acceptance through the production outer-agent
+ * composition. The private daemon is fresh for every bundle, so proving the
+ * base is absent before `docker build` makes this a real uncached BuildKit FROM
+ * request. The build uses the agent-visible `docker` shim and performs no
+ * pre-pull or privilege/permission repair.
+ */
+async function verifyDockerDesktopPackageBuild(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+): Promise<void> {
+  const suffix = randomBytes(12).toString('hex');
+  const contextDirectory = `/tmp/ic-desktop-package-smoke-${suffix}`;
+  const outputImage = `localhost/ironcurtain-package-smoke:${suffix}`;
+  const baseImage = 'debian:bookworm-slim';
+  const dockerfile = [
+    `FROM ${baseImage}`,
+    'RUN apt-get update && apt-get install -y --no-install-recommends hello && rm -rf /var/lib/apt/lists/*',
+    'CMD ["hello"]',
+    '',
+  ].join('\n');
+
+  const stateProbe = await runtime.exec(
+    outerId,
+    [
+      '/bin/sh',
+      '-eu',
+      '-c',
+      [
+        'state=$1',
+        'instances=$2',
+        'test -d "$state"',
+        'test -d "$instances"',
+        'test "$(stat -c %u "$state")" = "$(id -u)"',
+        'test "$(stat -c %g "$state")" = "$(id -g)"',
+        'probe="$state/.ironcurtain-smoke-$$"',
+        ': > "$probe"',
+        'rm "$probe"',
+      ].join('\n'),
+      'sh',
+      DOCKER_BUILDX_STATE_DIRECTORY,
+      DOCKER_BUILDX_INSTANCES_DIRECTORY,
+    ],
+    10_000,
+    'codespace',
+  );
+  if (stateProbe.exitCode !== 0) {
+    throw new Error(
+      `agent Buildx state was not initialized as writable by codespace; ` +
+        `stdout=${boundedDiagnostic(stateProbe.stdout)} stderr=${boundedDiagnostic(stateProbe.stderr)}`,
+    );
+  }
+
+  const context = await runtime.exec(
+    outerId,
+    [
+      '/bin/sh',
+      '-eu',
+      '-c',
+      'umask 077; mkdir "$1"; printf %s "$2" > "$1/Dockerfile"',
+      'sh',
+      contextDirectory,
+      dockerfile,
+    ],
+    10_000,
+    'codespace',
+  );
+  if (context.exitCode !== 0) {
+    throw new Error(`agent could not create its ordinary build context: ${boundedDiagnostic(context.stderr)}`);
+  }
+
+  const absentBase = await runtime.exec(
+    outerId,
+    ['docker', 'image', 'inspect', '--format', '{{.Id}}', baseImage],
+    10_000,
+    'codespace',
+  );
+  if (absentBase.exitCode === 0) {
+    throw new Error(`fresh private Docker unexpectedly contained the package-build base image: ${baseImage}`);
+  }
+
+  await agentDocker(
+    runtime,
+    outerId,
+    ['build', '--pull=false', '--network=host', '--tag', outputImage, contextDirectory],
+    10 * 60_000,
+  );
+  const hello = await agentDocker(runtime, outerId, ['run', '--rm', '--network', 'none', outputImage], 60_000);
+  if (!hello.stdout.includes('Hello, world!')) {
+    throw new Error(`package-built image returned unexpected output: ${boundedDiagnostic(hello.stdout)}`);
+  }
 }
 
 /**
@@ -894,7 +1112,7 @@ async function captureInnerDockerDiagnostic(
   args: readonly string[],
 ): Promise<string> {
   try {
-    const result = await runtime.exec(outerId, [DOCKER_CLIENT, '--host', DOCKER_HOST, ...args], 10_000, 'codespace');
+    const result = await smokePrivateDockerClient(runtime, outerId).execute(args, 10_000);
     return `exit=${result.exitCode} stdout=${boundedDiagnostic(result.stdout)} stderr=${boundedDiagnostic(result.stderr)}`;
   } catch (error) {
     return `capture-failed=${boundedDiagnostic(error instanceof Error ? error.message : String(error))}`;
@@ -905,6 +1123,7 @@ async function verifyPrivateDockerBaseline(
   runtime: ReturnType<typeof createContainerRuntime>,
   outerId: string,
   auditPath: string,
+  runtimeKind: ContainerRuntimeKind,
 ): Promise<string> {
   const info = await innerDocker(runtime, outerId, ['info', '--format', '{{json .}}']);
   const parsedInfo = JSON.parse(info.stdout) as { Driver?: string; SecurityOptions?: readonly string[] };
@@ -920,7 +1139,14 @@ async function verifyPrivateDockerBaseline(
   ]);
   assertInternalBridge(managedNetwork.stdout);
 
-  const expectedImageId = readPreparedInnerImageId(auditPath);
+  const expectedImageId = readPreparedInnerImageId(auditPath, runtimeKind);
+  if (runtimeKind === 'docker') {
+    const initialImages = await innerDocker(runtime, outerId, ['image', 'ls', '--quiet']);
+    if (initialImages.stdout.trim() !== '') {
+      throw new Error('fresh Docker Desktop private daemon unexpectedly contained an image');
+    }
+    return expectedImageId;
+  }
   const inspected = await innerDocker(runtime, outerId, ['image', 'inspect', '--format', '{{.Id}}', SELECTED_IMAGE]);
   if (inspected.stdout.trim() !== expectedImageId) {
     throw new Error('selected inner image immutable ID differs from the prepared artifact observation');
@@ -928,30 +1154,26 @@ async function verifyPrivateDockerBaseline(
   return expectedImageId;
 }
 
-function readPreparedInnerImageId(auditPath: string): string {
+function readPreparedInnerImageId(auditPath: string, runtimeKind: ContainerRuntimeKind): string {
   if (!existsSync(auditPath)) throw new Error(`Docker-workload audit log is missing: ${auditPath}`);
+  type BootstrapEvent = Extract<DockerWorkloadAuditEvent, { kind: 'private-docker-bootstrap' }>;
   const events = readFileSync(auditPath, 'utf8')
     .split('\n')
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as unknown);
-  const event = events.find(
-    (candidate): candidate is { kind: 'private-docker-bootstrap'; artifact: { innerDockerImageId: string } } => {
-      if (candidate === null || typeof candidate !== 'object') return false;
-      const record = candidate as { kind?: unknown; artifact?: unknown };
-      if (
-        record.kind !== 'private-docker-bootstrap' ||
-        record.artifact === null ||
-        typeof record.artifact !== 'object'
-      ) {
-        return false;
-      }
-      return /^sha256:[a-f0-9]{64}$/u.test(
-        String((record.artifact as { innerDockerImageId?: unknown }).innerDockerImageId),
-      );
-    },
-  );
+    .map((line) => JSON.parse(line) as DockerWorkloadAuditEvent);
+  const event = events.find((candidate): candidate is BootstrapEvent => candidate.kind === 'private-docker-bootstrap');
   if (event === undefined) throw new Error('Docker-workload audit lacks a prepared selected-agent observation');
-  return event.artifact.innerDockerImageId;
+  if (runtimeKind === 'apple-container' && event.image.transport !== 'apple-archive') {
+    throw new Error('Apple smoke observed a Docker Desktop image transport');
+  }
+  if (runtimeKind === 'docker' && event.image.transport !== 'docker-desktop-direct') {
+    throw new Error('Docker Desktop smoke observed an Apple image transport');
+  }
+  const imageId = event.image.transport === 'apple-archive' ? event.image.innerImageId : event.image.outerImageId;
+  if (!/^sha256:[a-f0-9]{64}$/u.test(imageId)) {
+    throw new Error('Docker-workload audit contains an invalid prepared selected-agent image ID');
+  }
+  return imageId;
 }
 
 async function verifyClosedBundle(options: {

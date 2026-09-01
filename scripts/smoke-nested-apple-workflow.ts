@@ -25,6 +25,7 @@ import {
   type DockerWorkloadLease,
 } from '../src/docker-workload/bundle-lease.js';
 import { createContainerRuntime } from '../src/docker/container-runtime.js';
+import { DOCKER_BUILD_PROXY_CONFIG_DIRECTORY } from '../src/docker/docker-build-shim.js';
 import {
   PACKAGE_EGRESS_AUDIT_FILENAME,
   PACKAGE_EGRESS_AUDIT_HOSTS,
@@ -562,7 +563,7 @@ export function validatePackageBuildMounts(
     '/usr/local/sbin/docker',
     '/usr/local/sbin/runc',
     '/opt/ironcurtain-build-trust',
-    '/run/ironcurtain-docker/package-build-client',
+    DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
   ] as const;
   const reservedTarget = (target: string): boolean =>
     protectedTargets.some((protectedTarget) => overlaps(target, protectedTarget));
@@ -578,7 +579,7 @@ export function validatePackageBuildMounts(
     { source: resolve(packageRuntimeRoot, 'docker'), target: '/usr/local/sbin/docker', readonly: true },
     {
       source: resolve(packageRuntimeRoot, 'package-build-client'),
-      target: '/run/ironcurtain-docker/package-build-client',
+      target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
       readonly: true,
     },
     { source: resolve(packageRuntimeRoot, 'runc'), target: '/usr/local/sbin/runc', readonly: true },

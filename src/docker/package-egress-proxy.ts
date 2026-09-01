@@ -19,6 +19,7 @@ import type { Duplex } from 'node:stream';
 import * as tls from 'node:tls';
 import { URL } from 'node:url';
 import { createLeafSecureContextCache, type CertificateAuthority } from './ca.js';
+import { consumeProxyAuthorization } from './proxy-authorization.js';
 import type { PackageIdentity, PackageDecision, PackageValidator, RegistryType } from './package-types.js';
 import {
   cargoSparseIndexPath,
@@ -140,13 +141,31 @@ export interface CreatePackageEgressProxyOptions {
   readonly nat64PrefixProvider?: PackageEgressNat64PrefixProvider;
   readonly nat64Prefixes?: readonly PackageEgressNat64Prefix[];
   readonly clock?: PackageEgressClock;
+  /**
+   * Connection-source filter for TCP mode. Rejected sockets are destroyed
+   * before they acquire a client lease or reach HTTP parsing. UDS listeners
+   * do not consult this predicate.
+   */
+  readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+  /** Exact per-bundle credential required on Docker Desktop's shared host-gateway hop. */
+  readonly requiredProxyAuthorization?: string;
   /** @internal Hermetic tests only; rejected outside NODE_ENV=test. */
   readonly testHooks?: PackageEgressTestHooks;
 }
 
+/** Exact endpoint selected by the trusted topology for this listener. */
+export type PackageEgressListenTarget =
+  | { readonly socketPath: string; readonly listenPort?: never }
+  | { readonly socketPath?: never; readonly listenPort: number };
+
+/** Bound endpoint returned after successful listener startup. */
+export type PackageEgressListenAddress =
+  | { readonly socketPath: string; readonly port?: never }
+  | { readonly socketPath?: never; readonly port: number };
+
 export interface PackageEgressProxy {
   readonly snapshot: PackageEgressLedgerSnapshot;
-  start(socketPath: string): Promise<{ readonly socketPath: string }>;
+  start(target: PackageEgressListenTarget): Promise<PackageEgressListenAddress>;
   stop(): Promise<void>;
 }
 
@@ -456,6 +475,7 @@ export function createPackageEgressProxy(options: CreatePackageEgressProxyOption
   const leafContext = createLeafSecureContextCache(options.ca);
   let socketPath: string | undefined;
   let socketOwnership: SocketOwnership | undefined;
+  let tcpListener = false;
   let started = false;
   let stopped = false;
   let stopCompletion: Promise<void> | undefined;
@@ -480,6 +500,18 @@ export function createPackageEgressProxy(options: CreatePackageEgressProxyOption
   outerServer.headersTimeout = limits.idleTimeoutMs;
 
   outerServer.on('connection', (socket) => {
+    if (tcpListener && options.allowRemoteAddress !== undefined) {
+      let allowed = false;
+      try {
+        allowed = options.allowRemoteAddress(socket.remoteAddress);
+      } catch {
+        // A source-admission failure is a denial, never a process failure.
+      }
+      if (!allowed) {
+        socket.destroy();
+        return;
+      }
+    }
     try {
       const lease = ledger.admitClient();
       const absoluteTimer = setTimeout(() => {
@@ -528,6 +560,10 @@ export function createPackageEgressProxy(options: CreatePackageEgressProxyOption
       response.destroy();
       return;
     }
+    if (!consumeProxyAuthorization(request, options.requiredProxyAuthorization)) {
+      rejectResponse(response, 407, 'Proxy Authentication Required', client.lease);
+      return;
+    }
     if (isExactHealthRequest(request)) {
       const responseBytes = estimateResponseBytes(200, { 'Content-Type': 'text/plain' }, PACKAGE_EGRESS_HEALTH_BODY);
       if (!client.lease.charge(responseBytes)) {
@@ -565,6 +601,9 @@ export function createPackageEgressProxy(options: CreatePackageEgressProxyOption
       return;
     }
     try {
+      if (!consumeProxyAuthorization(request, options.requiredProxyAuthorization)) {
+        throw new PackageEgressError(407, 'Proxy Authentication Required');
+      }
       assertBodylessCredentialFreeRequest(request);
       if (head.length !== 0) throw new PackageEgressError(400, 'pipelined bytes after CONNECT are not accepted');
       const host = parseConnectAuthority(request.url, request.headers.host);
@@ -1081,15 +1120,22 @@ export function createPackageEgressProxy(options: CreatePackageEgressProxyOption
     get snapshot(): PackageEgressLedgerSnapshot {
       return ledger.snapshot;
     },
-    start(path): Promise<{ readonly socketPath: string }> {
+    start(target): Promise<PackageEgressListenAddress> {
       return serializeLifecycle(async () => {
         if (stopped) throw new Error('package egress proxy cannot restart after stop');
         if (started) throw new Error('package egress proxy is already started');
-        if (!path.startsWith('/')) throw new Error('package egress requires an absolute UDS path');
-        await assertSocketPathAbsent(socketFilesystem, path);
+        const normalizedTarget = normalizeListenTarget(target);
+        const path = normalizedTarget.socketPath;
+        if (path !== undefined) await assertSocketPathAbsent(socketFilesystem, path);
         let ownership: SocketOwnership | undefined;
+        tcpListener = path === undefined;
         try {
           await audit.start();
+          if (path === undefined) {
+            const boundPort = await listenOnTcp(outerServer, normalizedTarget.listenPort);
+            started = true;
+            return { port: boundPort };
+          }
           await listenOnSocket(outerServer, path);
           const bound = await socketFilesystem.lstat(path);
           if (!bound.isSocket()) throw new Error('package egress bind did not create a socket');
@@ -1104,9 +1150,10 @@ export function createPackageEgressProxy(options: CreatePackageEgressProxyOption
           started = true;
           return { socketPath: path };
         } catch (error) {
-          if (ownership === undefined) await closeServer(outerServer);
+          if (ownership === undefined || path === undefined) await closeServer(outerServer);
           else await closeOwnedSocketServer(outerServer, socketFilesystem, path, ownership);
           await audit.stop().catch(() => undefined);
+          tcpListener = false;
           throw error;
         }
       });
@@ -1725,6 +1772,42 @@ function listenOnSocket(server: http.Server, path: string): Promise<void> {
       resolve();
     });
   });
+}
+
+function listenOnTcp(server: http.Server, port: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    server.once('error', onError);
+    server.listen(port, '0.0.0.0', () => {
+      server.off('error', onError);
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('package egress TCP listener did not return an IP address'));
+        return;
+      }
+      resolve(address.port);
+    });
+  });
+}
+
+function normalizeListenTarget(target: PackageEgressListenTarget): PackageEgressListenTarget {
+  // Keep the runtime boundary fail-closed for untyped JavaScript callers too.
+  const candidate: { readonly socketPath?: unknown; readonly listenPort?: unknown } = target;
+  const { socketPath, listenPort } = candidate;
+  if (typeof socketPath === 'string') {
+    if (listenPort !== undefined) {
+      throw new Error('package egress requires exactly one UDS path or TCP listen port');
+    }
+    if (!socketPath.startsWith('/')) throw new Error('package egress requires an absolute UDS path');
+    return { socketPath };
+  }
+  if (socketPath !== undefined || typeof listenPort !== 'number') {
+    throw new Error('package egress requires exactly one UDS path or TCP listen port');
+  }
+  if (!Number.isSafeInteger(listenPort) || listenPort < 0 || listenPort > 65_535) {
+    throw new Error('package egress requires a TCP listen port from 0 through 65535');
+  }
+  return { listenPort };
 }
 
 async function assertSocketPathAbsent(filesystem: PackageEgressSocketFilesystem, path: string): Promise<void> {

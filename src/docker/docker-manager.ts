@@ -20,6 +20,8 @@ import type {
   DockerImageInfo,
   DockerNetworkCreateOptions,
   DockerNetworkInfo,
+  DockerVolumeCreateOptions,
+  DockerVolumeInfo,
 } from './types.js';
 import { parseDockerImageInfo } from './docker-image-inspect.js';
 import * as logger from '../logger.js';
@@ -90,7 +92,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function inspectDockerObjects(
   exec: ExecFileFn,
-  kind: 'network' | 'container',
+  kind: 'network' | 'container' | 'volume',
   ids: readonly string[],
 ): Promise<readonly Record<string, unknown>[]> {
   if (ids.length === 0) return [];
@@ -103,7 +105,8 @@ async function inspectDockerObjects(
     if (!Array.isArray(parsed)) throw new Error(`Unexpected docker ${kind} inspect result: expected array`);
     return parsed.filter(isRecord);
   } catch (error) {
-    const disappeared = isExecError(error) && /not found|no such (?:network|container|object)/i.test(error.stderr);
+    const disappeared =
+      isExecError(error) && /not found|no such (?:network|container|volume|object)/i.test(error.stderr);
     if (!disappeared) throw error;
     if (ids.length === 1) return [];
 
@@ -128,6 +131,18 @@ function parseDockerImageId(stdout: string): string {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+function parseDockerVolumeInfo(entry: Record<string, unknown>): DockerVolumeInfo {
+  const name = typeof entry.Name === 'string' ? entry.Name : '';
+  return {
+    id: name,
+    name,
+    created: typeof entry.CreatedAt === 'string' ? entry.CreatedAt : '',
+    labels: stringRecord(entry.Labels),
+    driver: typeof entry.Driver === 'string' ? entry.Driver : '',
+    mountpoint: typeof entry.Mountpoint === 'string' ? entry.Mountpoint : '',
+  };
 }
 
 /**
@@ -277,6 +292,50 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
   for (const mount of config.mounts) {
     const opts = mount.readonly ? ':ro' : '';
     args.push('-v', `${mount.source}:${mount.target}${opts}`);
+  }
+
+  const trusted = config.trustedCreateOptions;
+  for (const mount of trusted?.namedVolumeMounts ?? []) {
+    const options = [
+      `type=volume`,
+      `src=${mount.name}`,
+      `dst=${mount.target}`,
+      ...(mount.readonly === true ? ['readonly'] : []),
+      ...(mount.noCopy === true ? ['volume-nocopy'] : []),
+    ];
+    args.push('--mount', options.join(','));
+  }
+  for (const device of trusted?.devices ?? []) {
+    if (
+      !device.source.startsWith('/') ||
+      !device.target.startsWith('/') ||
+      device.source.includes(':') ||
+      device.target.includes(':')
+    ) {
+      throw new Error('trusted device mappings require colon-free absolute source and target paths');
+    }
+    args.push('--device', `${device.source}:${device.target}:${device.permissions}`);
+  }
+  for (const tmpfs of trusted?.tmpfs ?? []) {
+    args.push('--tmpfs', tmpfs);
+  }
+  if (trusted?.readOnlyRootfs === true) {
+    args.push('--read-only');
+  }
+  for (const securityOption of trusted?.securityOptions ?? []) {
+    if (/^seccomp=/u.test(securityOption)) {
+      throw new Error('trusted securityOptions must use the dedicated seccompProfile field for seccomp');
+    }
+    args.push('--security-opt', securityOption);
+  }
+  if (trusted?.seccompProfile !== undefined) {
+    args.push('--security-opt', `seccomp=${trusted.seccompProfile}`);
+  }
+  if (trusted?.pidsLimit !== undefined) {
+    if (!Number.isSafeInteger(trusted.pidsLimit) || trusted.pidsLimit <= 0) {
+      throw new Error('trusted pidsLimit must be a positive safe integer');
+    }
+    args.push('--pids-limit', String(trusted.pidsLimit));
   }
 
   for (const [key, value] of Object.entries(config.env)) {
@@ -628,6 +687,17 @@ export function createDockerManager(
       }
     },
 
+    async tagImage(sourceRef: string, targetRef: string): Promise<void> {
+      await exec('docker', ['image', 'tag', sourceRef, targetRef], { timeout: 30_000 });
+    },
+
+    async saveImageArchive(ref: string, archivePath: string, platform?: 'linux/amd64' | 'linux/arm64'): Promise<void> {
+      const args = ['image', 'save', '--output', archivePath];
+      if (platform !== undefined) args.push('--platform', platform);
+      args.push(ref);
+      await exec('docker', args, { timeout: DEFAULT_COMMIT_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    },
+
     async loadImageArchive(archivePath: string): Promise<void> {
       await runStreamed({
         operation: 'docker image load',
@@ -764,6 +834,10 @@ export function createDockerManager(
       });
     },
 
+    async inspectContainerRaw(nameOrId: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+      return (await inspectDockerObjects(exec, 'container', [nameOrId])).at(0);
+    },
+
     async removeNetwork(name: string): Promise<void> {
       try {
         await exec('docker', ['network', 'rm', name], { timeout: 10_000 });
@@ -785,6 +859,67 @@ export function createDockerManager(
         return true;
       } catch {
         return false;
+      }
+    },
+
+    async createVolume(name: string, options?: DockerVolumeCreateOptions): Promise<string> {
+      const args = ['volume', 'create'];
+      if (options?.driver !== undefined) args.push('--driver', options.driver);
+      for (const [key, value] of Object.entries(options?.driverOptions ?? {})) {
+        args.push('--opt', `${key}=${value}`);
+      }
+      for (const [key, value] of Object.entries(options?.labels ?? {})) {
+        args.push('--label', `${key}=${value}`);
+      }
+      args.push(name);
+      const { stdout } = await exec('docker', args, { timeout: 10_000, maxBuffer: 1024 * 1024 });
+      const createdName = stdout.trim();
+      if (createdName !== name) {
+        throw new Error(`Docker returned an unexpected volume identity for ${name}: ${createdName || '(empty)'}`);
+      }
+      const inspected = await inspectDockerObjects(exec, 'volume', [createdName]);
+      const created = inspected.at(0);
+      if (created === undefined) throw new Error(`Docker-created volume disappeared before ownership check: ${name}`);
+      const info = parseDockerVolumeInfo(created);
+      if (info.name !== name) {
+        throw new Error(`Docker returned mismatched volume inspect identity for ${name}: ${info.name || '(empty)'}`);
+      }
+      for (const [key, value] of Object.entries(options?.labels ?? {})) {
+        if (info.labels[key] !== value) {
+          throw new Error(`Docker volume ${name} does not carry requested ownership label ${key}`);
+        }
+      }
+      return info.id;
+    },
+
+    async inspectVolume(name: string): Promise<DockerVolumeInfo | undefined> {
+      const inspected = await inspectDockerObjects(exec, 'volume', [name]);
+      const entry = inspected.at(0);
+      return entry === undefined ? undefined : parseDockerVolumeInfo(entry);
+    },
+
+    async listVolumes(options?: { readonly labelFilter?: string }): Promise<readonly DockerVolumeInfo[]> {
+      const args = ['volume', 'ls', '--quiet'];
+      if (options?.labelFilter !== undefined) args.push('--filter', `label=${options.labelFilter}`);
+      const { stdout } = await exec('docker', args, { timeout: 10_000, maxBuffer: 10 * 1024 * 1024 });
+      const names = [
+        ...new Set(
+          stdout
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .filter(Boolean),
+        ),
+      ];
+      const inspected = await inspectDockerObjects(exec, 'volume', names);
+      return inspected.map(parseDockerVolumeInfo);
+    },
+
+    async removeVolume(name: string): Promise<void> {
+      try {
+        await exec('docker', ['volume', 'rm', name], { timeout: 10_000 });
+      } catch (err: unknown) {
+        if (isExecError(err) && /not found|no such volume/i.test(err.stderr)) return;
+        throw err;
       }
     },
 

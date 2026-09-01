@@ -100,6 +100,14 @@ export interface DockerContainerConfig {
   readonly capAdd?: readonly string[];
 
   /**
+   * Host-coordinator-selected controls for trusted infrastructure containers.
+   * These values must never be populated from agent or user configuration.
+   * Keeping them behind one explicit trust-boundary field prevents the more
+   * permissive sidecar profile from leaking into ordinary agent containers.
+   */
+  readonly trustedCreateOptions?: DockerTrustedCreateOptions;
+
+  /**
    * Leave `/proc` fully visible inside the container by opting out of the OCI
    * masked-path and read-only-path sets (`container create --masked-path NONE
    * --read-only-path NONE`).
@@ -171,6 +179,41 @@ export interface DockerMount {
   readonly readonly: boolean;
 }
 
+/** A Docker named-volume mount selected by the trusted host coordinator. */
+export interface DockerNamedVolumeMount {
+  readonly name: string;
+  readonly target: string;
+  readonly readonly?: boolean;
+  /** Suppress Docker's initial copy-up from the image into an empty volume. */
+  readonly noCopy?: boolean;
+}
+
+/** A host device mapping selected exclusively by the trusted coordinator. */
+export interface DockerTrustedDeviceMapping {
+  readonly source: string;
+  readonly target: string;
+  /** Keep the current exception narrow: Docker's complete read/write/mknod mapping. */
+  readonly permissions: 'rwm';
+}
+
+/**
+ * Docker-only create controls for trusted infrastructure containers.
+ * Callers must supply frozen, coordinator-owned values rather than forwarding
+ * configuration or agent input.
+ */
+export interface DockerTrustedCreateOptions {
+  readonly namedVolumeMounts?: readonly DockerNamedVolumeMount[];
+  readonly devices?: readonly DockerTrustedDeviceMapping[];
+  /** Exact Docker tmpfs specifications, for example `/run:rw,nosuid,size=64m`. */
+  readonly tmpfs?: readonly string[];
+  readonly readOnlyRootfs?: boolean;
+  /** Exact `--security-opt` values other than the separately pinned seccomp profile. */
+  readonly securityOptions?: readonly string[];
+  /** Host path or Docker literal used as `--security-opt seccomp=<value>`. */
+  readonly seccompProfile?: string;
+  readonly pidsLimit?: number;
+}
+
 /** Result of a docker exec command. */
 export interface DockerExecResult {
   readonly exitCode: number;
@@ -219,6 +262,24 @@ export interface DockerContainerInfo {
   readonly created: string;
   readonly running: boolean;
   readonly labels: Readonly<Record<string, string>>;
+}
+
+/** Docker named-volume state used by exact bundle cleanup. */
+export interface DockerVolumeInfo {
+  /** Docker volumes have no separate immutable ID; the random exact name is their runtime identity. */
+  readonly id: string;
+  readonly name: string;
+  readonly created: string;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly driver: string;
+  readonly mountpoint: string;
+}
+
+export interface DockerVolumeCreateOptions {
+  readonly labels?: Readonly<Record<string, string>>;
+  readonly driver?: string;
+  /** Exact trusted driver options; never populated from agent input. */
+  readonly driverOptions?: Readonly<Record<string, string>>;
 }
 
 export interface DockerNetworkCreateOptions {
@@ -368,11 +429,30 @@ export interface ContainerRuntime {
   /** Enumerate Docker containers, including stopped containers. Optional for non-Docker runtimes. */
   listContainers?(options?: { readonly labelFilter?: string }): Promise<readonly DockerContainerInfo[]>;
 
+  /**
+   * Return Docker's unmodified container-inspect object. Optional because its
+   * shape is Docker-specific; trusted infrastructure uses it to adjudicate a
+   * stopped container's complete effective create profile before start.
+   */
+  inspectContainerRaw?(nameOrId: string): Promise<Readonly<Record<string, unknown>> | undefined>;
+
   /** Remove a Docker network. Ignores errors (e.g., already removed). */
   removeNetwork(name: string): Promise<void>;
 
   /** Check whether a named network still exists. Optional for non-Docker runtimes. */
   networkExists?(name: string): Promise<boolean>;
+
+  /** Create a named Docker volume and return its exact runtime identity. Optional for non-Docker runtimes. */
+  createVolume?(name: string, options?: DockerVolumeCreateOptions): Promise<string>;
+
+  /** Inspect one named Docker volume. Optional for non-Docker runtimes. */
+  inspectVolume?(name: string): Promise<DockerVolumeInfo | undefined>;
+
+  /** Enumerate named Docker volumes, optionally filtered by label. Optional for non-Docker runtimes. */
+  listVolumes?(options?: { readonly labelFilter?: string }): Promise<readonly DockerVolumeInfo[]>;
+
+  /** Remove a named Docker volume. Already-absent volumes are ignored. Optional for non-Docker runtimes. */
+  removeVolume?(name: string): Promise<void>;
 
   /** Pull a Docker image from a registry. */
   pullImage(image: string): Promise<void>;

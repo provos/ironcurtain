@@ -28,11 +28,11 @@
     "spec.go",
     "spec_test.go"
   ],
-  "sourceSha256": "845e44a7c55fb7895df766fad46ef10367239e5395ea2cd2592c8a2813a43221",
-  "builderSha256": "1e300b1111c8354ba30b7229b8845758e6c1b55f7cc3f50ff67e5ac414d7899d",
+  "sourceSha256": "c7416ba2b0eba82e5da82c2655724cc4715068a0009777cbcfc9f83e82ace8cd",
+  "builderSha256": "fbd45dcedd40e432d07cb0dd3000c0ce12d41066ba49ba37b51a43b5c4e42bb3",
   "binary": {
     "path": "bin/linux-arm64/ironcurtain-build-trust-runc",
-    "sha256": "d17e334a07d82df0ce25b8da44e60591ca7916cfa53bd941a523410555c74c91",
+    "sha256": "34be777c92032e4bb63f7c467e396e0b9c35d4bf981f3b54a434d09b608c370d",
     "size": 2752638,
     "mode": "0755"
   },
@@ -40,7 +40,7 @@
     "productionReachable": true,
     "runtimeContract": {
       "packagePath": "src/docker/build-trust-runtime-contract.ts",
-      "sha256": "64fd7d0ec5bc57b9e8b027f8e778b99a6a3ec09b988ce3c60d3d8c7e17226aa5"
+      "sha256": "813934217b1803250d4f4a4ff8c63a6e7177eade1bcecdf9fd37bd99c01cf8df"
     },
     "wrapper": {
       "packagePath": "bin/linux-arm64/ironcurtain-build-trust-runc",

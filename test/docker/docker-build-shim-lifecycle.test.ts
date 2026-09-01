@@ -31,6 +31,7 @@ import {
   DOCKER_BUILD_TRUST_REAL_RUNC_SIZE,
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
   DOCKER_BUILD_TRUST_WRAPPER_SHA256,
+  DOCKER_BUILDX_INSTANCES_DIRECTORY,
   DOCKER_BUILDX_STATE_DIRECTORY,
   getDockerBuildShimStagingContract,
 } from '../../src/docker/docker-build-shim.js';
@@ -40,6 +41,8 @@ import type { AppleVmDaemonExec } from '../../src/docker-workload/apple-vm-daemo
 
 const BUNDLE_ID = 'bundle-build-shim-lifecycle' as BundleId;
 const CA_GENERATION = 'gen-00000000-0000-4000-8000-000000000000';
+const APPLE_PACKAGE_PROXY_URL = 'http://127.0.0.1:18082';
+const APPLE_REGISTRY_PROXY_URL = 'http://127.0.0.1:18081';
 const BUILD_TRUST_CANARY = {
   caGeneration: CA_GENERATION,
   buildTrustContractSha256: '4'.repeat(64),
@@ -111,8 +114,13 @@ describe('package Docker build shim lifecycle staging', () => {
   });
 
   it('stages exact hardened files under the bundle runtime root and emits shared Apple mounts', () => {
-    const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', { orientationDir, caGeneration: CA_GENERATION });
-    const contract = getDockerBuildShimStagingContract('packages');
+    const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', {
+      orientationDir,
+      caGeneration: CA_GENERATION,
+      packageProxyUrl: APPLE_PACKAGE_PROXY_URL,
+      registryProxyUrl: APPLE_REGISTRY_PROXY_URL,
+    });
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL);
     expect(staged).toBeDefined();
     expect(contract).toBeDefined();
     const staging = staged!;
@@ -182,7 +190,12 @@ describe('package Docker build shim lifecycle staging', () => {
   });
 
   it('emits the exact root and integrity schema accepted by the Go runtime fixture', () => {
-    const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', { orientationDir, caGeneration: CA_GENERATION })!;
+    const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', {
+      orientationDir,
+      caGeneration: CA_GENERATION,
+      packageProxyUrl: APPLE_PACKAGE_PROXY_URL,
+      registryProxyUrl: APPLE_REGISTRY_PROXY_URL,
+    })!;
     const buildTrustContract = staged.artifacts.find(({ kind }) => kind === 'build-trust-contract');
     expect(buildTrustContract).toBeDefined();
     const generated = JSON.parse(readFileSync(buildTrustContract!.source, 'utf8')) as Record<string, unknown>;
@@ -229,12 +242,22 @@ describe('package Docker build shim lifecycle staging', () => {
 
   it('rejects an unauthenticated CA generation before staging package authority', () => {
     expect(() =>
-      stageDockerBuildShim(BUNDLE_ID, 'packages', { orientationDir, caGeneration: 'legacy-flat-pair' }),
+      stageDockerBuildShim(BUNDLE_ID, 'packages', {
+        orientationDir,
+        caGeneration: 'legacy-flat-pair',
+        packageProxyUrl: APPLE_PACKAGE_PROXY_URL,
+        registryProxyUrl: APPLE_REGISTRY_PROXY_URL,
+      }),
     ).toThrow(/authenticated CA generation/u);
   });
 
   it('is removed with the exact bundle runtime root', () => {
-    const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', { orientationDir, caGeneration: CA_GENERATION });
+    const staged = stageDockerBuildShim(BUNDLE_ID, 'packages', {
+      orientationDir,
+      caGeneration: CA_GENERATION,
+      packageProxyUrl: APPLE_PACKAGE_PROXY_URL,
+      registryProxyUrl: APPLE_REGISTRY_PROXY_URL,
+    });
     expect(staged).toBeDefined();
     removeBundleRuntimeRoot(BUNDLE_ID, 'test');
     expect(() => lstatSync(getBundleRuntimeRoot(BUNDLE_ID))).toThrow(/ENOENT/u);
@@ -243,7 +266,7 @@ describe('package Docker build shim lifecycle staging', () => {
 
 describe('package Docker build shim in-VM preflight', () => {
   it('fails before reading the contract when its trusted parent is not root-owned', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const calls: string[][] = [];
     const exec: AppleVmDaemonExec = async (argv, options) => {
       calls.push([...argv]);
@@ -261,7 +284,7 @@ describe('package Docker build shim in-VM preflight', () => {
   });
 
   it('treats namespace-translated trust-contract owners as bounded diagnostics only', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     for (const owner of ['0:0', '1000:1000', '65534:65534', '12345:54321']) {
       const calls: string[][] = [];
       const exec: AppleVmDaemonExec = async (argv, options) => {
@@ -278,7 +301,7 @@ describe('package Docker build shim in-VM preflight', () => {
   });
 
   it('fails before wrapper handoff when trust-contract metadata authority drifts', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const calls: string[][] = [];
     const exec: AppleVmDaemonExec = async (argv, options) => {
       calls.push([...argv]);
@@ -295,7 +318,7 @@ describe('package Docker build shim in-VM preflight', () => {
   });
 
   it('fails before wrapper handoff when the mounted trust-contract digest drifts', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const calls: string[][] = [];
     const exec: AppleVmDaemonExec = async (argv, options) => {
       calls.push([...argv]);
@@ -311,8 +334,8 @@ describe('package Docker build shim in-VM preflight', () => {
     expect(calls).not.toContainEqual([DOCKER_BUILD_TRUST_WRAPPER_PATH, '--version']);
   });
 
-  it('creates state as codespace, resolves the exact PATH entry, and invokes the version argv in order', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+  it('assigns trusted state to codespace before resolving the exact Apple PATH and runtime', async () => {
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const calls: { argv: readonly string[]; options: Parameters<AppleVmDaemonExec>[1] }[] = [];
     const exec: AppleVmDaemonExec = async (argv, options) => {
       calls.push({ argv, options });
@@ -359,9 +382,30 @@ describe('package Docker build shim in-VM preflight', () => {
     await preflightAppleVmDockerBuildShim(exec, contract, BUILD_TRUST_CANARY);
 
     expect(calls.map(({ argv }) => argv)).toEqual([
-      ['/bin/mkdir', '--parents', DOCKER_BUILDX_STATE_DIRECTORY],
-      ['/bin/chmod', '700', DOCKER_BUILDX_STATE_DIRECTORY],
-      ['/usr/bin/stat', '--format=%F:%u:%g:%a', DOCKER_BUILDX_STATE_DIRECTORY],
+      [
+        '/bin/sh',
+        '-c',
+        expect.stringMatching(/\[ ! -L "\$path" \].*mkdir.*\[ -d "\$path" \].*chown.*chmod/su),
+        'ironcurtain-build-state-init',
+        DOCKER_BUILDX_STATE_DIRECTORY,
+        '1000',
+        '1000',
+        '700',
+        DOCKER_BUILDX_INSTANCES_DIRECTORY,
+        '1000',
+        '1000',
+        '700',
+      ],
+      [
+        '/bin/sh',
+        '-c',
+        expect.stringMatching(/stat --format=%F:%u:%g:%a.*: > "\$probe".*rm -- "\$probe"/su),
+        'ironcurtain-build-state-verify',
+        DOCKER_BUILDX_STATE_DIRECTORY,
+        'directory:1000:1000:700',
+        DOCKER_BUILDX_INSTANCES_DIRECTORY,
+        'directory:1000:1000:700',
+      ],
       ['/bin/sh', '-c', 'command -v docker'],
       ['docker', 'version', '--format', '{{json .Client}}'],
       ['/bin/sh', '-c', 'command -v runc'],
@@ -373,13 +417,25 @@ describe('package Docker build shim in-VM preflight', () => {
       ['/usr/bin/sha256sum', DOCKER_BUILD_TRUST_REAL_RUNC_PATH],
       [DOCKER_BUILD_TRUST_WRAPPER_PATH, '--version'],
     ]);
-    expect(calls.slice(0, -1).every(({ options }) => options.user === 'codespace')).toBe(true);
-    expect(calls.at(-1)?.options.user).toBe('0:0');
+    expect(calls.map(({ options }) => options.user)).toEqual([
+      '0:0',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      'codespace',
+      '0:0',
+    ]);
     expect(calls.every(({ options }) => options.timeoutMs > 0)).toBe(true);
   });
 
   it('rejects a version failure after successful PATH identity without continuing', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const exec: AppleVmDaemonExec = async (argv) => {
       if (argv[0] === '/usr/bin/stat') return { exitCode: 0, stdout: 'directory:1000:1000:700\n' };
       if (argv[0] === '/bin/sh') return { exitCode: 0, stdout: `${DOCKER_BUILD_SHIM_PATH}\n` };
@@ -395,7 +451,7 @@ describe('package Docker build shim in-VM preflight', () => {
   });
 
   it('fails before wrapper handoff when selected-image real-runc metadata drifts', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const calls: string[][] = [];
     const exec: AppleVmDaemonExec = async (argv) => {
       calls.push([...argv]);
@@ -440,7 +496,7 @@ describe('package Docker build shim in-VM preflight', () => {
   });
 
   it('bounds combined failure output while retaining the head and tail of both channels', async () => {
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     const exec: AppleVmDaemonExec = async (argv) => {
       if (argv[0] === '/usr/bin/stat') return { exitCode: 0, stdout: 'directory:1000:1000:700\n' };
       if (argv[0] === '/bin/sh') return { exitCode: 0, stdout: `${DOCKER_BUILD_SHIM_PATH}\n` };

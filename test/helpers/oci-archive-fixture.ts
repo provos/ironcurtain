@@ -5,6 +5,8 @@ import { join } from 'node:path';
 export interface OciArchiveFixtureOptions {
   readonly directory: string;
   readonly logicalName: string;
+  /** Advisory source-runtime name written into OCI/Docker compatibility metadata. */
+  readonly sourceReference?: string;
   readonly buildHash: string;
   readonly architecture: 'amd64' | 'arm64';
   /** Optional label used to create distinct image identities in one test. */
@@ -107,7 +109,7 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
           digest: nestedIndexDigest ?? manifestDigest,
           size: nestedIndex?.length ?? manifest.length,
           platform: { architecture: options.architecture, os: 'linux' },
-          annotations: { 'org.opencontainers.image.ref.name': options.logicalName },
+          annotations: { 'org.opencontainers.image.ref.name': options.sourceReference ?? options.logicalName },
         },
       ],
     }),
@@ -118,7 +120,7 @@ export function writeOciArchiveFixture(options: OciArchiveFixtureOptions): OciAr
     JSON.stringify([
       {
         Config: blobPath(configDigest),
-        RepoTags: [options.logicalName],
+        RepoTags: [options.sourceReference ?? options.logicalName],
         Layers: (options.duplicateLayer ? [0, 1] : [0]).map(() => blobPath(layerDigest)),
         LayerSources: {
           [layerDigest]: {

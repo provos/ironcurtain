@@ -1,9 +1,11 @@
-// ironcurtain-fixed-relay is a single-destination byte relay for DD-PROXY.
-// It intentionally has no protocol for choosing a destination.
+// ironcurtain-fixed-relay is a single-destination proxy relay for DD-PROXY.
+// It injects one host-hop credential but has no protocol for choosing a destination.
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -20,17 +23,20 @@ import (
 )
 
 const version = "ironcurtain-fixed-relay-v1"
+const dockerDesktopHostGatewayAlias = "host.docker.internal"
+const maxProxyHeaderBytes = 64 * 1024
 
 var errByteLimit = errors.New("relay byte limit reached")
 
 type config struct {
-	listenAddress string
-	targetAddress string
-	allowedCIDR   *net.IPNet
-	maxConcurrent int
-	maxBytes      int64
-	maxDuration   time.Duration
-	dialTimeout   time.Duration
+	listenAddress      string
+	targetAddress      string
+	allowedCIDR        *net.IPNet
+	maxConcurrent      int
+	maxBytes           int64
+	maxDuration        time.Duration
+	dialTimeout        time.Duration
+	proxyAuthorization string
 }
 
 type relay struct {
@@ -95,12 +101,13 @@ func parseConfig(args []string) (config, bool, error) {
 	flags := flag.NewFlagSet("ironcurtain-fixed-relay", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	listenAddress := flags.String("listen", "", "exact IPv4 listen address")
-	targetAddress := flags.String("target", "", "exact IPv4 target address")
+	targetAddress := flags.String("target", "", "exact IPv4 target address or frozen Docker Desktop host-gateway alias")
 	allowCIDR := flags.String("allow-cidr", "", "only admitted IPv4 source CIDR")
 	maxConcurrent := flags.Int("max-concurrent", 64, "maximum concurrent streams")
 	maxBytes := flags.Int64("max-bytes", 256*1024*1024, "maximum bytes in each direction")
 	maxDuration := flags.Duration("max-duration", 10*time.Minute, "maximum stream lifetime")
 	dialTimeout := flags.Duration("dial-timeout", 5*time.Second, "fixed-target dial timeout")
+	proxyAuthorization := flags.String("proxy-authorization", "", "fixed Proxy-Authorization header injected upstream")
 	showVersion := flags.Bool("version", false, "print version")
 	if err := flags.Parse(args); err != nil {
 		return config{}, false, err
@@ -119,7 +126,7 @@ func parseConfig(args []string) (config, bool, error) {
 	if err != nil {
 		return config{}, false, fmt.Errorf("listen: %w", err)
 	}
-	target, err := validateIPv4Endpoint(*targetAddress, false)
+	target, err := validateTargetEndpoint(*targetAddress)
 	if err != nil {
 		return config{}, false, fmt.Errorf("target: %w", err)
 	}
@@ -147,15 +154,51 @@ func parseConfig(args []string) (config, bool, error) {
 	if *dialTimeout < 100*time.Millisecond || *dialTimeout > time.Minute {
 		return config{}, false, errors.New("dial-timeout must be between 100ms and 1m")
 	}
+	if err := validateProxyAuthorization(*proxyAuthorization); err != nil {
+		return config{}, false, err
+	}
 	return config{
-		listenAddress: listen,
-		targetAddress: target,
-		allowedCIDR:   network,
-		maxConcurrent: *maxConcurrent,
-		maxBytes:      *maxBytes,
-		maxDuration:   *maxDuration,
-		dialTimeout:   *dialTimeout,
+		listenAddress:      listen,
+		targetAddress:      target,
+		allowedCIDR:        network,
+		maxConcurrent:      *maxConcurrent,
+		maxBytes:           *maxBytes,
+		maxDuration:        *maxDuration,
+		dialTimeout:        *dialTimeout,
+		proxyAuthorization: *proxyAuthorization,
 	}, false, nil
+}
+
+func validateProxyAuthorization(value string) error {
+	if !strings.HasPrefix(value, "Basic ") {
+		return errors.New("proxy-authorization must be one Basic credential")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, "Basic "))
+	if err != nil || !strings.HasPrefix(string(decoded), "ironcurtain:") || len(decoded) != len("ironcurtain:")+43 {
+		return errors.New("proxy-authorization must be one canonical IronCurtain bundle credential")
+	}
+	for _, character := range string(decoded[len("ironcurtain:"):]) {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') &&
+			!(character >= '0' && character <= '9') && character != '_' && character != '-' {
+			return errors.New("proxy-authorization contains an invalid bundle token")
+		}
+	}
+	return nil
+}
+
+func validateTargetEndpoint(value string) (string, error) {
+	host, portText, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", errors.New("must be host:port")
+	}
+	if host == dockerDesktopHostGatewayAlias {
+		port, portErr := strconv.Atoi(portText)
+		if portErr != nil || port < 1 || port > 65535 {
+			return "", errors.New("port must be between 1 and 65535")
+		}
+		return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	}
+	return validateIPv4Endpoint(value, false)
 }
 
 func validateIPv4Endpoint(value string, allowUnspecified bool) (string, error) {
@@ -236,6 +279,11 @@ func (r *relay) handle(ctx context.Context, downstream net.Conn) {
 	deadline := time.Now().Add(r.config.maxDuration)
 	_ = downstream.SetDeadline(deadline)
 	_ = upstream.SetDeadline(deadline)
+	authorizedDownstream, err := injectProxyAuthorization(downstream, upstream, r.config.proxyAuthorization)
+	if err != nil {
+		log.Printf("stream=%d proxy-authorization=failed", id)
+		return
+	}
 
 	type copyResult struct {
 		direction string
@@ -253,7 +301,7 @@ func (r *relay) handle(ctx context.Context, downstream net.Conn) {
 			err:       copyErr,
 		}
 	}
-	go copyBounded("up", upstream, downstream)
+	go copyBounded("up", upstream, authorizedDownstream)
 	go copyBounded("down", downstream, upstream)
 	first := <-results
 	_ = downstream.Close()
@@ -269,4 +317,77 @@ func (r *relay) handle(ctx context.Context, downstream net.Conn) {
 		first.exceeded || second.exceeded,
 		first.err != nil || second.err != nil,
 	)
+}
+
+func injectProxyAuthorization(downstream net.Conn, upstream io.Writer, authorization string) (io.Reader, error) {
+	reader := bufio.NewReaderSize(downstream, maxProxyHeaderBytes)
+	var header strings.Builder
+	firstLine := true
+	for header.Len() <= maxProxyHeaderBytes {
+		lineBytes, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			return nil, errors.New("proxy request header exceeds limit")
+		}
+		if err != nil {
+			return nil, err
+		}
+		line := string(lineBytes)
+		if !strings.HasSuffix(line, "\r\n") {
+			return nil, errors.New("proxy request header requires CRLF framing")
+		}
+		if firstLine {
+			firstLine = false
+			requestLine := strings.TrimSuffix(line, "\r\n")
+			parts := strings.Split(requestLine, " ")
+			if len(parts) != 3 || !validHTTPToken(parts[0]) || parts[1] == "" || (parts[2] != "HTTP/1.1" && parts[2] != "HTTP/1.0") {
+				return nil, errors.New("downstream did not send one HTTP proxy request")
+			}
+		} else if line != "\r\n" {
+			field := strings.TrimSuffix(line, "\r\n")
+			separator := strings.IndexByte(field, ':')
+			if separator <= 0 || !validHTTPToken(field[:separator]) || !validHTTPFieldValue(field[separator+1:]) {
+				return nil, errors.New("downstream sent a malformed HTTP proxy header")
+			}
+			if strings.EqualFold(field[:separator], "Proxy-Authorization") {
+				return nil, errors.New("downstream proxy authorization is forbidden")
+			}
+		}
+		header.WriteString(line)
+		if header.Len() > maxProxyHeaderBytes {
+			return nil, errors.New("proxy request header exceeds limit")
+		}
+		if line == "\r\n" {
+			request := header.String()
+			injected := strings.TrimSuffix(request, "\r\n") + "Proxy-Authorization: " + authorization + "\r\n\r\n"
+			if _, err := io.WriteString(upstream, injected); err != nil {
+				return nil, err
+			}
+			return reader, nil
+		}
+	}
+	return nil, errors.New("proxy request header exceeds limit")
+}
+
+func validHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if !(character >= '0' && character <= '9') &&
+			!(character >= 'A' && character <= 'Z') &&
+			!(character >= 'a' && character <= 'z') &&
+			!strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			return false
+		}
+	}
+	return true
+}
+
+func validHTTPFieldValue(value string) bool {
+	for _, character := range []byte(value) {
+		if (character < 0x20 && character != '\t') || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }

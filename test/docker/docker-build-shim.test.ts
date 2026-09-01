@@ -3,20 +3,31 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { APPLE_VM_DAEMON_DOCKER_HOST } from '../../src/docker-workload/apple-vm-daemon.js';
+import {
+  PRIVATE_DOCKER_API_DIR,
+  PRIVATE_DOCKER_CLIENT,
+  PRIVATE_DOCKER_HOST,
+} from '../../src/docker-workload/private-docker.js';
+import { DOCKER_DESKTOP_SIDECAR_API_ROOT } from '../../src/docker-workload/docker-desktop-sidecar.js';
 import {
   DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
   DOCKER_BUILD_PROXY_CONFIG_PATH,
-  DOCKER_BUILD_PACKAGE_PROXY_URL,
   DOCKER_BUILD_REAL_CLIENT,
   DOCKER_BUILD_SHIM_PATH,
   DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
   DOCKER_BUILDX_DEFAULT_BUILDER,
+  DOCKER_BUILDX_INSTANCES_DIRECTORY,
   DOCKER_BUILDX_STATE_DIRECTORY,
+  DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY,
   getDockerBuildShimStagingContract,
   renderDockerBuildProxyConfig,
   renderDockerBuildShim,
 } from '../../src/docker/docker-build-shim.js';
+
+const APPLE_PACKAGE_PROXY_URL = 'http://127.0.0.1:18082';
+const APPLE_REGISTRY_PROXY_URL = 'http://127.0.0.1:18081';
+const DESKTOP_PACKAGE_PROXY_URL = 'http://172.31.44.2:18082';
+const DESKTOP_REGISTRY_PROXY_URL = 'http://172.31.44.3:18081';
 
 const SELECTOR_ENV = [
   'DOCKER_CONTEXT',
@@ -33,7 +44,11 @@ describe('Docker package-build staging contract', () => {
     expect(getDockerBuildShimStagingContract('offline')).toBeUndefined();
     expect(getDockerBuildShimStagingContract('images')).toBeUndefined();
 
-    const contract = getDockerBuildShimStagingContract('packages');
+    expect(() => getDockerBuildShimStagingContract('packages')).toThrow(/explicit package proxy URL/u);
+    expect(() => getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL)).toThrow(
+      /explicit registry proxy URL/u,
+    );
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL);
     expect(contract).toBeDefined();
     expect(contract!.preflight).toEqual({
       executable: 'docker',
@@ -45,7 +60,14 @@ describe('Docker package-build staging contract', () => {
       targetPath: DOCKER_BUILD_PROXY_CONFIG_PATH,
       mode: 0o444,
     });
-    expect(contract!.writableDirectories).toEqual([{ path: DOCKER_BUILDX_STATE_DIRECTORY, mode: 0o700 }]);
+    expect(contract!.writableDirectories).toEqual(
+      [DOCKER_BUILDX_STATE_DIRECTORY, DOCKER_BUILDX_INSTANCES_DIRECTORY].map((path) => ({
+        path,
+        uid: 1000,
+        gid: 1000,
+        mode: 0o700,
+      })),
+    );
     expect(contract!.buildTrustPreflight.trustContract.parentDirectory).toEqual({
       path: DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY,
       uid: 0,
@@ -63,17 +85,81 @@ describe('Docker package-build staging contract', () => {
   it('requires the immutable trust parent to be precreated only by the selected image', () => {
     const dockerfile = readFileSync('docker/Dockerfile.base.arm64', 'utf8');
     expect(dockerfile).toContain('install -d -o root -g root -m 0755 /opt/ironcurtain-build-trust');
-    const contract = getDockerBuildShimStagingContract('packages')!;
+    const contract = getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_REGISTRY_PROXY_URL)!;
     expect(contract.writableDirectories.map(({ path }) => path)).not.toContain(DOCKER_BUILD_TRUST_CONTRACT_DIRECTORY);
   });
 
-  it('generates only the credential-free loopback proxy configuration', () => {
-    const content = renderDockerBuildProxyConfig();
+  it('keeps agent-owned package paths outside the read-only private Docker API volume', () => {
+    const contract = getDockerBuildShimStagingContract(
+      'packages',
+      DESKTOP_PACKAGE_PROXY_URL,
+      DESKTOP_REGISTRY_PROXY_URL,
+    )!;
+    expect(DOCKER_DESKTOP_SIDECAR_API_ROOT).toBe(PRIVATE_DOCKER_API_DIR);
+    expect(DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY).not.toBe(PRIVATE_DOCKER_API_DIR);
+    expect(DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY.startsWith(`${PRIVATE_DOCKER_API_DIR}/`)).toBe(false);
+    expect(PRIVATE_DOCKER_API_DIR.startsWith(`${DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY}/`)).toBe(false);
+
+    const agentOwnedTargets = [
+      contract.proxyConfigArtifact.targetPath,
+      ...contract.writableDirectories.map(({ path }) => path),
+    ];
+    for (const target of agentOwnedTargets) {
+      expect(target.startsWith(`${DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY}/`)).toBe(true);
+      expect(target).not.toBe(PRIVATE_DOCKER_API_DIR);
+      expect(target.startsWith(`${PRIVATE_DOCKER_API_DIR}/`)).toBe(false);
+    }
+  });
+
+  it.each([APPLE_PACKAGE_PROXY_URL, DESKTOP_PACKAGE_PROXY_URL])(
+    'generates only the explicit credential-free proxy configuration %s',
+    (packageProxyUrl) => {
+      const content = renderDockerBuildProxyConfig(packageProxyUrl);
+      expect(JSON.parse(content)).toEqual({
+        proxies: {
+          default: {
+            httpProxy: packageProxyUrl,
+            httpsProxy: packageProxyUrl,
+          },
+        },
+      });
+      expect(content).not.toMatch(/auth|credential|helper|password|token|username|ca(?:cert)?|hostname/iu);
+    },
+  );
+
+  it.each([
+    '',
+    'https://172.31.44.2:18082',
+    'http://user@172.31.44.2:18082',
+    'http://172.31.44.2',
+    'http://172.31.44.2:18082/path',
+    'http://172.31.44.2:18082?query',
+    'http://172.31.44.2:18082/',
+  ])('rejects a noncanonical package proxy URL %j', (packageProxyUrl) => {
+    expect(() => renderDockerBuildProxyConfig(packageProxyUrl)).toThrow(/package proxy URL/u);
+  });
+
+  it('uses the shared private-Docker client and host constants', () => {
+    expect(DOCKER_BUILD_REAL_CLIENT).toBe(PRIVATE_DOCKER_CLIENT);
+    const shim = renderDockerBuildShim(APPLE_REGISTRY_PROXY_URL);
+    expect(shim).toContain(`ADMITTED_DOCKER_HOST=${PRIVATE_DOCKER_HOST}`);
+    expect(shim).toContain(`REGISTRY_PROXY=${APPLE_REGISTRY_PROXY_URL}`);
+  });
+
+  it('requires distinct canonical registry and package proxy origins', () => {
+    expect(() => renderDockerBuildShim('https://127.0.0.1:18081')).toThrow(/registry proxy URL/u);
+    expect(() =>
+      getDockerBuildShimStagingContract('packages', APPLE_PACKAGE_PROXY_URL, APPLE_PACKAGE_PROXY_URL),
+    ).toThrow(/must be distinct/u);
+  });
+
+  it('preserves the historical Apple proxy output when passed its loopback URL', () => {
+    const content = renderDockerBuildProxyConfig(APPLE_PACKAGE_PROXY_URL);
     expect(JSON.parse(content)).toEqual({
       proxies: {
         default: {
-          httpProxy: DOCKER_BUILD_PACKAGE_PROXY_URL,
-          httpsProxy: DOCKER_BUILD_PACKAGE_PROXY_URL,
+          httpProxy: APPLE_PACKAGE_PROXY_URL,
+          httpsProxy: APPLE_PACKAGE_PROXY_URL,
         },
       },
     });
@@ -82,7 +168,7 @@ describe('Docker package-build staging contract', () => {
   });
 
   it('pins the real client instead of looking it up through PATH', () => {
-    const shim = renderDockerBuildShim();
+    const shim = renderDockerBuildShim(APPLE_REGISTRY_PROXY_URL);
     expect(shim).toContain(`REAL_DOCKER=${DOCKER_BUILD_REAL_CLIENT}`);
     expect(shim).not.toMatch(/(?:command|which)\s+(?:-v\s+)?docker/u);
     expect(shim).not.toContain('eval');
@@ -95,6 +181,7 @@ describe('executable Docker package-build shim', () => {
   let fakeDockerPath: string;
   let capturedArgvPath: string;
   let capturedEnvPath: string;
+  let capturedProxyEnvPath: string;
   let buildxStatePath: string;
 
   beforeEach(() => {
@@ -103,10 +190,11 @@ describe('executable Docker package-build shim', () => {
     fakeDockerPath = join(directory, 'real-docker');
     capturedArgvPath = join(directory, 'argv');
     capturedEnvPath = join(directory, 'env');
+    capturedProxyEnvPath = join(directory, 'proxy-env');
     buildxStatePath = join(directory, 'buildx-state');
     mkdirSync(buildxStatePath, { mode: 0o700 });
 
-    const executableShim = renderDockerBuildShim()
+    const executableShim = renderDockerBuildShim(APPLE_REGISTRY_PROXY_URL)
       .replace(`REAL_DOCKER=${DOCKER_BUILD_REAL_CLIENT}`, `REAL_DOCKER=${JSON.stringify(fakeDockerPath)}`)
       .replace(
         `BUILDX_STATE_DIR=${DOCKER_BUILDX_STATE_DIRECTORY}`,
@@ -119,6 +207,7 @@ describe('executable Docker package-build shim', () => {
 : > "$CAPTURE_ARGV"
 for arg in "$@"; do printf '%s\\0' "$arg" >> "$CAPTURE_ARGV"; done
 printf '%s\\0%s\\0%s\\0%s\\0' "\${DOCKER_CONFIG-}" "\${BUILDX_CONFIG-}" "\${DOCKER_HOST-}" "\${COMPOSE_MENU-}" > "$CAPTURE_ENV"
+printf '%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0%s\\0' "\${HTTP_PROXY-}" "\${HTTPS_PROXY-}" "\${http_proxy-}" "\${https_proxy-}" "\${NO_PROXY-}" "\${no_proxy-}" "\${ALL_PROXY-}" "\${all_proxy-}" > "$CAPTURE_PROXY_ENV"
 
 fake_args=("$@")
 if [[ "\${fake_args[0]-}" == buildx ]]; then
@@ -169,6 +258,7 @@ exit "\${FAKE_EXIT_STATUS:-0}"
     Object.assign(env, options.env);
     env.CAPTURE_ARGV = capturedArgvPath;
     env.CAPTURE_ENV = capturedEnvPath;
+    env.CAPTURE_PROXY_ENV = capturedProxyEnvPath;
     env.FAKE_EXIT_STATUS = String(options.exitStatus ?? 0);
 
     const result = spawnSync('/bin/bash', [shimPath, ...argv], { encoding: 'utf8', env });
@@ -178,7 +268,10 @@ exit "\${FAKE_EXIT_STATUS:-0}"
     const capturedEnv = existsSync(capturedEnvPath)
       ? readFileSync(capturedEnvPath).toString('utf8').split('\0').slice(0, -1)
       : undefined;
-    return { result, capturedArgv, capturedEnv };
+    const capturedProxyEnv = existsSync(capturedProxyEnvPath)
+      ? readFileSync(capturedProxyEnvPath).toString('utf8').split('\0').slice(0, -1)
+      : undefined;
+    return { result, capturedArgv, capturedEnv, capturedProxyEnv };
   }
 
   it.each([
@@ -195,11 +288,11 @@ exit "\${FAKE_EXIT_STATUS:-0}"
     expect(capturedArgv).toEqual(output);
     expect(capturedEnv?.[0]).toBe(DOCKER_BUILD_PROXY_CONFIG_DIRECTORY);
     expect(capturedEnv?.[1]).toBe(buildxStatePath);
-    expect(capturedEnv?.[2]).toBe(APPLE_VM_DAEMON_DOCKER_HOST);
+    expect(capturedEnv?.[2]).toBe(PRIVATE_DOCKER_HOST);
   });
 
   it('allows documented global options and the exact private daemon host', () => {
-    const input = ['--debug', '--log-level', 'warn', '--host', APPLE_VM_DAEMON_DOCKER_HOST, 'build', '--pull', '.'];
+    const input = ['--debug', '--log-level', 'warn', '--host', PRIVATE_DOCKER_HOST, 'build', '--pull', '.'];
     const { result, capturedArgv } = run(input);
     expect(result.status, result.stderr).toBe(0);
     expect(capturedArgv).toEqual([
@@ -207,11 +300,38 @@ exit "\${FAKE_EXIT_STATUS:-0}"
       '--log-level',
       'warn',
       '--host',
-      APPLE_VM_DAEMON_DOCKER_HOST,
+      PRIVATE_DOCKER_HOST,
       'build',
       '--network=host',
       '--pull',
       '.',
+    ]);
+  });
+
+  it('routes only the outer build client through the admitted registry proxy', () => {
+    const outerProxy = 'http://outer-agent-proxy.invalid:8080';
+    const { result, capturedProxyEnv } = run(['build', '.'], {
+      env: {
+        HTTP_PROXY: outerProxy,
+        HTTPS_PROXY: outerProxy,
+        http_proxy: outerProxy,
+        https_proxy: outerProxy,
+        NO_PROXY: 'auth.docker.io',
+        no_proxy: 'auth.docker.io',
+        ALL_PROXY: 'socks5://outer.invalid:1080',
+        all_proxy: 'socks5://outer.invalid:1080',
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(capturedProxyEnv).toEqual([
+      APPLE_REGISTRY_PROXY_URL,
+      APPLE_REGISTRY_PROXY_URL,
+      APPLE_REGISTRY_PROXY_URL,
+      APPLE_REGISTRY_PROXY_URL,
+      '',
+      '',
+      '',
+      '',
     ]);
   });
 
@@ -235,12 +355,7 @@ exit "\${FAKE_EXIT_STATUS:-0}"
       '--progress=plain',
       '.',
     ]);
-    expect(built.capturedEnv).toEqual([
-      DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
-      buildxStatePath,
-      APPLE_VM_DAEMON_DOCKER_HOST,
-      '',
-    ]);
+    expect(built.capturedEnv).toEqual([DOCKER_BUILD_PROXY_CONFIG_DIRECTORY, buildxStatePath, PRIVATE_DOCKER_HOST, '']);
   });
 
   it.each([['--network=none'], ['--network', 'none'], ['--network=host'], ['--network', 'host']])(
@@ -307,7 +422,7 @@ exit "\${FAKE_EXIT_STATUS:-0}"
     expect(rejected.result.status).toBe(64);
     expect(rejected.capturedArgv).toBeUndefined();
 
-    const accepted = run(['build', '.'], { env: { DOCKER_HOST: APPLE_VM_DAEMON_DOCKER_HOST } });
+    const accepted = run(['build', '.'], { env: { DOCKER_HOST: PRIVATE_DOCKER_HOST } });
     expect(accepted.result.status, accepted.result.stderr).toBe(0);
     expect(accepted.capturedArgv).toEqual(['build', '--network=host', '.']);
   });

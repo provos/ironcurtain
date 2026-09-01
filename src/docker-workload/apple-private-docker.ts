@@ -6,13 +6,17 @@ import type { ContainerRuntime, DockerExecResult, DockerImageInfo, DockerMount }
 import { parseDockerImageInfo } from '../docker/docker-image-inspect.js';
 import { verifySelectedAgentArtifactArchive, type SelectedAgentArtifact } from '../docker/selected-agent-artifact.js';
 import { getFrozenClientToolchainManifestPath } from '../docker/docker-workload-paths.js';
+import { loadClientToolchainManifest, type ClientToolchainPreflight } from './client-toolchain.js';
+import { createAppleVmDaemonPrivateDockerClient, type AppleVmDaemonExec } from './apple-vm-daemon.js';
 import {
-  CLIENT_TOOLCHAIN_PREFLIGHT_ARGVS,
-  loadClientToolchainManifest,
-  preflightClientToolchain,
-  type ClientToolchainPreflight,
-} from './client-toolchain.js';
-import { APPLE_VM_DAEMON_DOCKER_HOST, APPLE_VM_DAEMON_TOOLCHAIN_DIR } from './apple-vm-daemon.js';
+  PRIVATE_DOCKER_WORKLOAD_NETWORK,
+  PRIVATE_DOCKER_WORKLOAD_NETWORK_ENV,
+  createPrivateDockerWorkloadNetwork,
+  preflightPrivateDockerClient,
+  type ApplePrivateDockerImageObservation,
+  type PrivateDockerClient,
+  type PrivateDockerWorkloadNetwork,
+} from './private-docker.js';
 
 /** Guest-visible, read-only view of this lease's selected agent archive. */
 export const APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR = '/opt/ironcurtain/selected-agent-artifact';
@@ -22,20 +26,14 @@ export const APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR = '/opt/ironcurtain/selected-a
  * name can be constant because every admitted bundle owns a distinct VM-local
  * daemon; it therefore cannot collide across sessions or name a host resource.
  */
-export const APPLE_VM_DOCKER_WORKLOAD_NETWORK = 'ironcurtain';
+export const APPLE_VM_DOCKER_WORKLOAD_NETWORK = PRIVATE_DOCKER_WORKLOAD_NETWORK;
 
 /** Agent environment key naming the precreated inner workload bridge. */
-export const APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV = 'IRONCURTAIN_DOCKER_NETWORK';
+export const APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV = PRIVATE_DOCKER_WORKLOAD_NETWORK_ENV;
 
-const DOCKER_CLIENT = `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`;
-const RUNTIME_USER = 'codespace';
 const INSPECT_TIMEOUT_MS = 30_000;
 const LOAD_TIMEOUT_MS = 60 * 60_000;
 const MAX_ERROR_DETAIL = 2048;
-const MANAGED_NETWORK_LABEL_KEY = 'com.ironcurtain.managed-workload';
-const MANAGED_NETWORK_LABEL_VALUE = 'true';
-const MANAGED_NETWORK_LABEL = `${MANAGED_NETWORK_LABEL_KEY}=${MANAGED_NETWORK_LABEL_VALUE}`;
-const MAX_NETWORK_INSPECT_BYTES = 16 * 1024;
 
 /** Trusted host and guest paths needed by both container assembly and bootstrap. */
 export interface AppleVmDockerWorkloadBootstrapConfig {
@@ -45,22 +43,23 @@ export interface AppleVmDockerWorkloadBootstrapConfig {
   readonly clientToolchainManifestPath: string;
 }
 
-export interface AppleVmDockerWorkloadImageObservation {
-  readonly logicalName: string;
-  readonly immutableImageId: string;
-  readonly outerAppleImageId: string;
-  readonly buildHash: string;
-  readonly archiveSha256: string;
-}
+export type AppleVmDockerWorkloadImageObservation = ApplePrivateDockerImageObservation;
 
 export interface AppleVmDockerWorkloadProvisioning {
   readonly preflight: ClientToolchainPreflight;
   readonly image: AppleVmDockerWorkloadImageObservation;
 }
 
-export interface AppleVmDockerWorkloadNetwork {
-  readonly name: typeof APPLE_VM_DOCKER_WORKLOAD_NETWORK;
-  readonly id: string;
+export type AppleVmDockerWorkloadNetwork = PrivateDockerWorkloadNetwork;
+
+/** Apple adapter for the backend-neutral private-Docker command seam. */
+export function createAppleVmPrivateDockerClient(options: {
+  readonly outerRuntime: Pick<ContainerRuntime, 'exec'>;
+  readonly containerId: string;
+}): PrivateDockerClient {
+  const exec: AppleVmDaemonExec = async (argv, commandOptions) =>
+    options.outerRuntime.exec(options.containerId, argv, commandOptions.timeoutMs, commandOptions.user);
+  return createAppleVmDaemonPrivateDockerClient(exec, options.containerId);
 }
 
 /**
@@ -75,64 +74,7 @@ export async function createAppleVmDockerWorkloadNetwork(options: {
   readonly outerRuntime: Pick<ContainerRuntime, 'exec'>;
   readonly containerId: string;
 }): Promise<AppleVmDockerWorkloadNetwork> {
-  const execute = (args: readonly string[]): Promise<DockerExecResult> =>
-    options.outerRuntime.exec(
-      options.containerId,
-      [DOCKER_CLIENT, '--host', APPLE_VM_DAEMON_DOCKER_HOST, ...args],
-      INSPECT_TIMEOUT_MS,
-      RUNTIME_USER,
-    );
-  const created = await execute([
-    'network',
-    'create',
-    '--driver',
-    'bridge',
-    '--internal',
-    '--label',
-    MANAGED_NETWORK_LABEL,
-    APPLE_VM_DOCKER_WORKLOAD_NETWORK,
-  ]);
-  if (created.exitCode !== 0) throw privateDockerCommandError('managed network create', created);
-  const createdId = created.stdout.trim();
-  if (!/^[a-f0-9]{64}$/u.test(createdId)) {
-    throw new Error('private Docker managed network create returned an invalid network ID');
-  }
-
-  const inspected = await execute(['network', 'inspect', '--format', '{{json .}}', APPLE_VM_DOCKER_WORKLOAD_NETWORK]);
-  if (inspected.exitCode !== 0) throw privateDockerCommandError('managed network inspect', inspected);
-  if (Buffer.byteLength(inspected.stdout, 'utf8') > MAX_NETWORK_INSPECT_BYTES) {
-    throw new Error('private Docker managed network inspection exceeded the response limit');
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(inspected.stdout) as unknown;
-  } catch (error) {
-    throw new Error('private Docker managed network inspect returned invalid JSON', { cause: error });
-  }
-  const labels = (parsed as { Labels?: unknown } | null)?.Labels;
-  const containers = (parsed as { Containers?: unknown } | null)?.Containers;
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    (parsed as { Id?: unknown }).Id !== createdId ||
-    (parsed as { Name?: unknown }).Name !== APPLE_VM_DOCKER_WORKLOAD_NETWORK ||
-    (parsed as { Driver?: unknown }).Driver !== 'bridge' ||
-    (parsed as { Scope?: unknown }).Scope !== 'local' ||
-    (parsed as { Internal?: unknown }).Internal !== true ||
-    typeof labels !== 'object' ||
-    labels === null ||
-    Array.isArray(labels) ||
-    Object.keys(labels).length !== 1 ||
-    (labels as Record<string, unknown>)[MANAGED_NETWORK_LABEL_KEY] !== MANAGED_NETWORK_LABEL_VALUE ||
-    typeof containers !== 'object' ||
-    containers === null ||
-    Array.isArray(containers) ||
-    Object.keys(containers).length !== 0
-  ) {
-    throw new Error('private Docker managed network did not resolve to the required empty labeled internal bridge');
-  }
-  return { name: APPLE_VM_DOCKER_WORKLOAD_NETWORK, id: createdId };
+  return createPrivateDockerWorkloadNetwork(createAppleVmPrivateDockerClient(options));
 }
 
 /**
@@ -187,15 +129,14 @@ export async function provisionAppleVmDockerWorkload(options: {
   readonly containerId: string;
   readonly config: AppleVmDockerWorkloadBootstrapConfig;
 }): Promise<AppleVmDockerWorkloadProvisioning> {
+  const client = createAppleVmPrivateDockerClient(options);
   const runtime = createAppleVmPrivateDockerRuntime({
-    outerRuntime: options.outerRuntime,
-    containerId: options.containerId,
+    client,
     hostArtifactDirectory: options.config.hostArtifactDirectory,
     guestArtifactDirectory: options.config.guestArtifactDirectory,
   });
-  const preflight = await preflightClientToolchain({
-    runtime,
-    containerId: options.containerId,
+  const preflight = await preflightPrivateDockerClient({
+    client,
     manifest: loadClientToolchainManifest(options.config.clientToolchainManifestPath),
   });
 
@@ -225,41 +166,25 @@ export async function provisionAppleVmDockerWorkload(options: {
   return {
     preflight,
     image: {
+      transport: 'apple-archive',
       logicalName: artifact.logicalName,
-      immutableImageId: artifact.dockerImageId,
-      outerAppleImageId: artifact.appleImageId,
       buildHash: artifact.buildHash,
       archiveSha256: artifact.archiveSha256,
+      outerImageId: artifact.appleImageId,
+      innerImageId: artifact.dockerImageId,
     },
   };
 }
 
 /** Narrow adapter over the pinned in-VM Docker client and one fixed private API. */
 export function createAppleVmPrivateDockerRuntime(options: {
-  readonly outerRuntime: Pick<ContainerRuntime, 'exec'>;
-  readonly containerId: string;
+  readonly client: PrivateDockerClient;
   readonly hostArtifactDirectory: string;
   readonly guestArtifactDirectory: string;
-}): Pick<ContainerRuntime, 'exec' | 'inspectImage' | 'loadImageArchive'> {
-  const execute = (args: readonly string[], timeoutMs: number): Promise<DockerExecResult> =>
-    options.outerRuntime.exec(
-      options.containerId,
-      [DOCKER_CLIENT, '--host', APPLE_VM_DAEMON_DOCKER_HOST, ...args],
-      timeoutMs,
-      RUNTIME_USER,
-    );
-
+}): Pick<ContainerRuntime, 'inspectImage' | 'loadImageArchive'> {
   return {
-    async exec(containerId, command, timeoutMs) {
-      if (containerId !== options.containerId) throw new Error('private Docker adapter container ID mismatch');
-      if (!CLIENT_TOOLCHAIN_PREFLIGHT_ARGVS.some((allowed) => exactArgv(command, allowed))) {
-        throw new Error('private Docker adapter accepts only exact client-toolchain preflight commands');
-      }
-      return execute(command.slice(1), timeoutMs ?? INSPECT_TIMEOUT_MS);
-    },
-
     async inspectImage(ref): Promise<DockerImageInfo | undefined> {
-      const result = await execute(['image', 'inspect', ref], INSPECT_TIMEOUT_MS);
+      const result = await options.client.execute(['image', 'inspect', ref], INSPECT_TIMEOUT_MS);
       if (result.exitCode !== 0) {
         if (/not found|no such image/i.test(result.stderr)) return undefined;
         throw privateDockerCommandError('image inspect', result);
@@ -282,14 +207,10 @@ export function createAppleVmPrivateDockerRuntime(options: {
         options.hostArtifactDirectory,
         options.guestArtifactDirectory,
       );
-      const result = await execute(['image', 'load', '--input', guestPath], LOAD_TIMEOUT_MS);
+      const result = await options.client.execute(['image', 'load', '--input', guestPath], LOAD_TIMEOUT_MS);
       if (result.exitCode !== 0) throw privateDockerCommandError('image load', result);
     },
   };
-}
-
-function exactArgv(actual: readonly string[], expected: readonly string[]): boolean {
-  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
 
 function translateArtifactArchivePath(archivePath: string, hostDirectory: string, guestDirectory: string): string {

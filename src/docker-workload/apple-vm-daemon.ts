@@ -30,15 +30,26 @@
  * mechanism. A guard test enforces the non-import.
  */
 
-import { z } from 'zod';
+import {
+  PRIVATE_DOCKER_API_DIR,
+  PRIVATE_DOCKER_CLIENT,
+  PRIVATE_DOCKER_HOST,
+  PRIVATE_DOCKER_READINESS_TEXT_BOUNDS,
+  PRIVATE_DOCKER_SOCKET,
+  PRIVATE_DOCKER_TOOLCHAIN_DIR,
+  waitForPrivateDockerDaemonReady,
+  type PrivateDockerClient,
+  type PrivateDockerDaemonReadiness,
+  type WaitForPrivateDockerDaemonReadyOptions,
+} from './private-docker.js';
 /** VM-local Docker API directory (plan §4.2), created 0700 by the base image and owned by the runtime user. */
-export const APPLE_VM_DAEMON_API_DIR = '/run/ironcurtain-docker';
+export const APPLE_VM_DAEMON_API_DIR = PRIVATE_DOCKER_API_DIR;
 
 /** VM-local Docker API socket. Never bound to TCP and never published out of the VM. */
-export const APPLE_VM_DAEMON_SOCKET = `${APPLE_VM_DAEMON_API_DIR}/docker.sock`;
+export const APPLE_VM_DAEMON_SOCKET = PRIVATE_DOCKER_SOCKET;
 
 /** The `DOCKER_HOST` value the in-VM agent process receives. */
-export const APPLE_VM_DAEMON_DOCKER_HOST = `unix://${APPLE_VM_DAEMON_SOCKET}`;
+export const APPLE_VM_DAEMON_DOCKER_HOST = PRIVATE_DOCKER_HOST;
 
 /** Exact Apple file mount visible on both sides of rootlesskit's `/run` copy-up. */
 export const APPLE_VM_REGISTRY_EGRESS_SOCKET = '/tmp/ironcurtain-registry-egress.sock';
@@ -60,7 +71,7 @@ export const APPLE_VM_REGISTRY_EGRESS_CA_BUNDLE = '/etc/ironcurtain/ca-bundle.pe
  * containerd/runc live here and stay OFF the default PATH; only the `docker`
  * client is symlinked into a PATH directory.
  */
-export const APPLE_VM_DAEMON_TOOLCHAIN_DIR = '/usr/local/lib/ironcurtain-docker/bin';
+export const APPLE_VM_DAEMON_TOOLCHAIN_DIR = PRIVATE_DOCKER_TOOLCHAIN_DIR;
 
 /** Exact legacy helper selected on the trusted daemon bootstrap's private PATH. */
 export const APPLE_VM_DAEMON_IPTABLES = `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/iptables`;
@@ -309,20 +320,11 @@ export const APPLE_VM_DAEMON_LOG_TAIL_ARGV: readonly string[] = Object.freeze([
  * then throws a confusing schema exception at the audit emit instead of failing
  * closed here, where the value entered the host.
  */
-export const APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS = Object.freeze({
-  driverLength: 128,
-  serverVersionLength: 128,
-  securityOptionLength: 256,
-  securityOptionCount: 64,
-});
+export const APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS = PRIVATE_DOCKER_READINESS_TEXT_BOUNDS;
 
 const RUNTIME_EXEC_USER = 'codespace';
-const REQUIRED_STORAGE_DRIVER = 'vfs';
-const ROOTLESS_SECURITY_OPTION = 'name=rootless';
 const BOOTSTRAP_EXEC_TIMEOUT_MS = 30_000;
-const INFO_PROBE_EXEC_TIMEOUT_MS = 15_000;
 const LOG_TAIL_EXEC_TIMEOUT_MS = 5_000;
-const DEFAULT_POLL_INTERVAL_MS = 500;
 
 /** One `stat` line; anything longer is a tampered `stat`, not an observation. */
 const STAT_OBSERVATION_MAX_BYTES = 256;
@@ -334,8 +336,6 @@ const STAT_OBSERVATION_MAX_BYTES = 256;
  * `Error.message`. Sized to leave headroom under the 8192-character
  * `incident.detail` bound should a caller record the timeout as evidence.
  */
-const LOG_TAIL_MAX_BYTES = 4096;
-
 /** C0/C1 controls and DEL, except the tab and newline a log tail legitimately carries. */
 const CONTROL_CHARACTERS = /[^\P{Cc}\n\t]/gu;
 
@@ -357,37 +357,30 @@ export type AppleVmDaemonExec = (
 ) => Promise<AppleVmDaemonExecResult>;
 
 /** The adjudicated daemon configuration; the field set the `daemon-ready` evidence event records. */
-export interface AppleVmDaemonReadiness {
-  readonly driver: string;
-  readonly securityOptions: readonly string[];
-  readonly serverVersion: string;
-  readonly readinessMs: number;
+export type AppleVmDaemonReadiness = PrivateDockerDaemonReadiness;
+
+/** Bind the common private-Docker client to the Apple VM command seam once. */
+export function createAppleVmDaemonPrivateDockerClient(
+  exec: AppleVmDaemonExec,
+  containerId = 'apple-vm',
+): PrivateDockerClient {
+  return {
+    containerId,
+    execute: async (args, timeoutMs) => {
+      const result = await exec([PRIVATE_DOCKER_CLIENT, '--host', APPLE_VM_DAEMON_DOCKER_HOST, ...args], {
+        user: RUNTIME_EXEC_USER,
+        timeoutMs: timeoutMs ?? 15_000,
+      });
+      return { ...result, stderr: result.stderr ?? '' };
+    },
+  };
 }
 
-export interface WaitForAppleVmDaemonReadyOptions {
-  /** Readiness ceiling; supplied by the wiring layer (`APPLE_VM_DAEMON_READINESS_TIMEOUT_MS`). */
-  readonly timeoutMs: number;
-  readonly pollIntervalMs?: number;
-  readonly now?: () => number;
-  readonly sleep?: (milliseconds: number) => Promise<void>;
-}
-
-const dockerInfoSchema = z.object({
-  Driver: z.string().min(1),
-  SecurityOptions: z.array(z.string().min(1)).nullish(),
-  ServerVersion: z.string().min(1),
-});
-
-type AdjudicatedReadiness = Omit<AppleVmDaemonReadiness, 'readinessMs'>;
-
-/**
- * One `docker info` answer, classified before it is adjudicated. `daemon-silent`
- * means the client answered but the daemon did not, which is a liveness signal
- * and therefore the retryable outcome.
- */
-type DockerInfoAnswer =
-  | { readonly kind: 'daemon-silent' }
-  | { readonly kind: 'daemon-answered'; readonly readiness: AdjudicatedReadiness };
+/** Readiness ceiling and test seams retained under the Apple compatibility API. */
+export type WaitForAppleVmDaemonReadyOptions = Pick<
+  WaitForPrivateDockerDaemonReadyOptions,
+  'timeoutMs' | 'pollIntervalMs' | 'now' | 'sleep'
+>;
 
 /**
  * Assert the image-provided API directory is usable, then start the rootless
@@ -424,30 +417,15 @@ export async function waitForAppleVmDaemonReady(
   exec: AppleVmDaemonExec,
   options: WaitForAppleVmDaemonReadyOptions,
 ): Promise<AppleVmDaemonReadiness> {
-  const now = options.now ?? Date.now;
-  const sleep = options.sleep ?? defaultSleep;
-  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const startedAtMs = now();
-  const deadlineMs = startedAtMs + options.timeoutMs;
-
-  for (;;) {
-    const probe = await exec(APPLE_VM_DAEMON_INFO_ARGV, {
-      user: RUNTIME_EXEC_USER,
-      timeoutMs: INFO_PROBE_EXEC_TIMEOUT_MS,
-    });
-    if (probe.exitCode === 0) {
-      const answer = readDockerInfoAnswer(probe.stdout);
-      if (answer.kind === 'daemon-answered') {
-        return { ...answer.readiness, readinessMs: now() - startedAtMs };
-      }
-    }
-    if (now() >= deadlineMs) {
-      throw new Error(
-        `apple-vm daemon did not become ready within ${options.timeoutMs}ms; dockerd log tail:\n${await readDockerdLogTail(exec)}`,
-      );
-    }
-    await sleep(pollIntervalMs);
-  }
+  return waitForPrivateDockerDaemonReady(createAppleVmDaemonPrivateDockerClient(exec), {
+    ...options,
+    label: 'apple-vm daemon',
+    readLogTail: async () =>
+      exec(APPLE_VM_DAEMON_LOG_TAIL_ARGV, {
+        user: RUNTIME_EXEC_USER,
+        timeoutMs: LOG_TAIL_EXEC_TIMEOUT_MS,
+      }),
+  });
 }
 
 /**
@@ -484,110 +462,6 @@ async function execOrThrow(
   if (result.exitCode !== 0) throw new Error(`${description} failed with exit code ${result.exitCode}`);
 }
 
-/** Parse one successful probe, adjudicating only an answer the daemon produced. */
-function readDockerInfoAnswer(stdout: string): DockerInfoAnswer {
-  const parsed = parseDockerInfoJson(stdout);
-  if (!daemonAnswered(parsed)) return { kind: 'daemon-silent' };
-  return { kind: 'daemon-answered', readiness: adjudicateDockerInfo(parsed) };
-}
-
-/**
- * Whether the reply carries a server block at all.
- *
- * `docker info` reports the client's own view when it cannot reach a daemon:
- * `ServerErrors` lists the connection failure and the server fields come back
- * empty. Treating that as an unsupported configuration would fail a session for
- * a daemon that simply had not finished starting.
- */
-function daemonAnswered(parsed: unknown): boolean {
-  if (typeof parsed !== 'object' || parsed === null) return false;
-  const info = parsed as Record<string, unknown>;
-  if (Array.isArray(info.ServerErrors) && info.ServerErrors.length > 0) return false;
-  return isNonEmptyString(info.Driver) && isNonEmptyString(info.ServerVersion);
-}
-
-function isNonEmptyString(value: unknown): boolean {
-  return typeof value === 'string' && value.length > 0;
-}
-
-function adjudicateDockerInfo(parsed: unknown): AdjudicatedReadiness {
-  const info = validateDockerInfoShape(parsed);
-  assertBoundedDockerInfoText(info);
-  const securityOptions = info.SecurityOptions ?? [];
-  if (info.Driver !== REQUIRED_STORAGE_DRIVER) {
-    throw new Error(
-      `apple-vm daemon readiness rejected an unsupported storage driver: expected ${REQUIRED_STORAGE_DRIVER}, received ${info.Driver}`,
-    );
-  }
-  if (!securityOptions.includes(ROOTLESS_SECURITY_OPTION)) {
-    throw new Error(
-      `apple-vm daemon readiness rejected a non-rootless daemon: ${ROOTLESS_SECURITY_OPTION} missing from [${securityOptions.join(', ')}]`,
-    );
-  }
-  return { driver: info.Driver, securityOptions, serverVersion: info.ServerVersion };
-}
-
-function parseDockerInfoJson(stdout: string): unknown {
-  try {
-    return JSON.parse(stdout);
-  } catch {
-    throw new Error('apple-vm daemon readiness could not parse the docker info JSON');
-  }
-}
-
-function validateDockerInfoShape(parsed: unknown): z.infer<typeof dockerInfoSchema> {
-  const result = dockerInfoSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new Error('apple-vm daemon readiness received docker info JSON without Driver/SecurityOptions/ServerVersion');
-  }
-  return result.data;
-}
-
-/**
- * Reject in-VM text that exceeds what the evidence record can hold, BEFORE the
- * configuration checks quote it and before the caller records it. Failing here
- * keeps an oversized value from being adjudicated as a successful readiness and
- * then rejected by the audit schema, which reads as a host bug rather than the
- * fail-closed decision it is.
- */
-function assertBoundedDockerInfoText(info: z.infer<typeof dockerInfoSchema>): void {
-  const bounds = APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS;
-  assertBoundedField('Driver', info.Driver, bounds.driverLength);
-  assertBoundedField('ServerVersion', info.ServerVersion, bounds.serverVersionLength);
-  const securityOptions = info.SecurityOptions ?? [];
-  if (securityOptions.length > bounds.securityOptionCount) {
-    throw new Error(
-      `apple-vm daemon readiness rejected oversized docker info text: SecurityOptions has ${securityOptions.length} entries, bound is ${bounds.securityOptionCount}`,
-    );
-  }
-  securityOptions.forEach((option, index) =>
-    assertBoundedField(`SecurityOptions[${index}]`, option, bounds.securityOptionLength),
-  );
-}
-
-function assertBoundedField(field: string, value: string, maxLength: number): void {
-  if (value.length > maxLength) {
-    throw new Error(
-      `apple-vm daemon readiness rejected oversized docker info text: ${field} is ${value.length} characters, bound is ${maxLength}`,
-    );
-  }
-}
-
-/** One extra exec, itself failure-tolerant: a missing log must not mask the timeout. */
-async function readDockerdLogTail(exec: AppleVmDaemonExec): Promise<string> {
-  try {
-    const tail = await exec(APPLE_VM_DAEMON_LOG_TAIL_ARGV, {
-      user: RUNTIME_EXEC_USER,
-      timeoutMs: LOG_TAIL_EXEC_TIMEOUT_MS,
-    });
-    if (tail.exitCode !== 0) return '(dockerd log unavailable)';
-    const text = boundedDiagnostic(tail.stdout, LOG_TAIL_MAX_BYTES);
-    return text.length > 0 ? text : '(dockerd log is empty)';
-  } catch {
-    return '(dockerd log unavailable)';
-  }
-}
-
 /**
  * Make in-VM text safe to embed in a host-side error: drop control characters
  * (so a log line cannot inject terminal escapes into an operator's console) and
@@ -599,8 +473,4 @@ function boundedDiagnostic(text: string, maxBytes: number): string {
   const bytes = Buffer.from(sanitized, 'utf8');
   if (bytes.byteLength <= maxBytes) return sanitized;
   return `${bytes.subarray(0, maxBytes).toString('utf8')}… (truncated)`;
-}
-
-function defaultSleep(milliseconds: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
