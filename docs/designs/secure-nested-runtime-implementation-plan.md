@@ -1406,6 +1406,15 @@ attachments remain host-adjudicated operational inputs. It must not inherit iden
 with, a bundle-image qualification generation. Any future image-backed service receives mandatory
 pinning only after the design shows an analogous authority differential.
 
+The current Docker Desktop implementation attaches that trusted relay to Docker's default bridge so it
+can reach the host-gateway listener. This intentionally gives the relay a NAT-capable default route and
+L2 adjacency to other default-bridge containers; mediation on this hop therefore depends on the pinned
+relay binary and its adjudicated single-target configuration, not on an egress-denying uplink network.
+The untrusted agent and private daemon never join the default bridge. This is an accepted residual risk
+of the Docker Desktop backend. Replacing the default bridge requires a separately qualified uplink that
+both reaches the host gateway and proves the absence of public/LAN egress; a merely custom non-internal
+bridge is not such proof.
+
 Earlier text that described eight “trusted infrastructure” roles, catalog hashes as lease bindings,
 catalog mismatch as a security blocker, or refreeze as a product-start prerequisite is superseded by
 this section and retained only in Git history. The production

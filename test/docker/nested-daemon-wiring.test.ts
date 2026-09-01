@@ -1410,6 +1410,39 @@ describe('nested daemon — Docker Desktop agent capability', () => {
     expect(runtime.events.filter((event) => event.startsWith('create-network:'))).toHaveLength(1);
   });
 
+  it('preserves the first Desktop connectivity failure instead of retrying an activated workload lease', async () => {
+    const { runtime, handle } = await admitBundle({
+      exec: (argv) =>
+        argv.some((arg) => arg.includes('IRONCURTAIN_HEALTH/1'))
+          ? { exitCode: 1, stdout: '', stderr: 'scripted transport failure' }
+          : respondHealthyAppleVmDaemon(argv),
+    });
+    const activate = vi.spyOn(handle, 'activate');
+    const tcp = desktopTcpRuntime(runtime);
+    const base = makeCore(tcp.runtime, {
+      dockerWorkload: handle,
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+    });
+    const core: PreContainerInfrastructure = {
+      ...base,
+      topology: 'tcp-sidecar',
+      useTcp: true,
+      proxy: createMockProxy(base.proxy.socketPath, 31_080),
+      mitmAddr: { port: 31_083 },
+    };
+
+    const error = await createSessionContainers(core, makeConfig()).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/Internal network connectivity check failed: MCP round-trip exited 1/u);
+    expect((error as Error).message).not.toMatch(/outer resources may be requested only during admission/u);
+
+    expect(activate).toHaveBeenCalledOnce();
+    expect(tcp.configs).toHaveLength(2);
+    expect(runtime.events.filter((event) => event.startsWith('create-network:'))).toHaveLength(1);
+    expect(runtime.containers).toHaveLength(0);
+  });
+
   it('cleans up the batch agent, transport, and ordinary network when egress attachment fails', async () => {
     const { runtime, handle } = await admitBundle();
     const tcp = desktopTcpRuntime(runtime, { failAgentEgressConnect: true });

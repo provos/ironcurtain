@@ -179,6 +179,7 @@ export function createDockerWorkloadEgressListeners(
 }
 
 function registryEgressListenerOptions(options: CreateDockerWorkloadEgressListenersOptions): ResolvedRegistryEgress {
+  assertTcpListenerGuards(options);
   const transport = options.outboundTransport;
   // Written fail-closed so a transport that omits the capability is refused.
   if (transport.addressGuard !== 'local-resolver') {
@@ -223,4 +224,19 @@ function requiredListenTarget(
 ): DockerWorkloadEgressListenTarget {
   if (target === undefined) throw new Error(`${label} is enabled but no listen target was supplied`);
   return target;
+}
+
+function assertTcpListenerGuards(options: CreateDockerWorkloadEgressListenersOptions): void {
+  if (!options.workload.enabled) return;
+  const targets = [
+    options.registryListen,
+    ...(options.workload.networkAccess === 'packages' ? [options.packageListen] : []),
+  ];
+  if (!targets.some((target) => target?.listenPort !== undefined)) return;
+  if (options.allowRemoteAddress === undefined) {
+    throw new Error('Docker-workload TCP egress requires a source-admission guard');
+  }
+  if (!options.requiredProxyAuthorization) {
+    throw new Error('Docker-workload TCP egress requires per-bundle proxy authorization');
+  }
 }

@@ -13,7 +13,7 @@ import {
 import { isRuntimeAvailable } from '../helpers/container-runtimes.js';
 
 const enabled = process.env.DESKTOP_RELAY_INTEGRATION === '1';
-const ready = enabled && isRuntimeAvailable('docker');
+const ready = enabled && process.platform === 'darwin' && isRuntimeAvailable('docker');
 const REQUIRED_PROXY_AUTHORIZATION =
   'Basic aXJvbmN1cnRhaW46QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ==';
 

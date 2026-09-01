@@ -2718,7 +2718,14 @@ export async function createSessionContainers(
     await reconcileIronCurtainDockerResourcesBestEffort(core.docker, 'session startup');
   }
 
-  const maxAttempts = core.topology === 'tcp-sidecar' ? 4 : 1;
+  // The ordinary TCP transport can safely retry with another network because
+  // every attempt owns only its container, sidecar, and network. An admitted
+  // nested-Docker bundle also owns shared egress listeners and a workload
+  // lease that activation transitions out of admission. Reusing those
+  // authorities for attempt two would fail ledger precommit and mask the
+  // original connectivity error. PTY retries rebuild the full infrastructure;
+  // keep this batch path single-attempt until it can do the same.
+  const maxAttempts = core.topology === 'tcp-sidecar' && core.dockerWorkload === undefined ? 4 : 1;
   return withInternalNetworkAllocationRetry(
     {
       maxAttempts,

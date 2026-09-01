@@ -162,6 +162,36 @@ describe('Docker-workload egress gating', () => {
     );
   });
 
+  it('refuses TCP egress unless both source admission and per-bundle authorization are present', () => {
+    const base = {
+      workload: workload('images'),
+      ca,
+      outboundTransport: unreachableTransport(),
+      registryListen: { listenPort: 0 },
+    } satisfies CreateDockerWorkloadEgressListenersOptions;
+    const requiredProxyAuthorization = 'Basic aXJvbmN1cnRhaW46dGVzdC1idW5kbGU=';
+
+    expect(() =>
+      createDockerWorkloadEgressListeners({
+        ...base,
+        requiredProxyAuthorization,
+      }),
+    ).toThrow(/source-admission guard/u);
+    expect(() =>
+      createDockerWorkloadEgressListeners({
+        ...base,
+        allowRemoteAddress: () => true,
+      }),
+    ).toThrow(/per-bundle proxy authorization/u);
+    expect(() =>
+      resolveDockerWorkloadEgressListenerOptions({
+        ...base,
+        allowRemoteAddress: () => true,
+        requiredProxyAuthorization: '',
+      }),
+    ).toThrow(/per-bundle proxy authorization/u);
+  });
+
   it('refuses to build an enabled mode without a listen target', () => {
     expect(() =>
       createDockerWorkloadEgressListeners({
