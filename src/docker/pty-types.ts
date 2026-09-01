@@ -52,6 +52,28 @@ export interface SessionSnapshot {
   readonly resumable: boolean;
 }
 
+/** Runtime guard for snapshots loaded from mutable on-disk JSON. */
+export function isSessionSnapshot(value: unknown): value is SessionSnapshot {
+  if (typeof value !== 'object' || value === null) return false;
+  const snapshot = value as Partial<SessionSnapshot>;
+  return (
+    typeof snapshot.sessionId === 'string' &&
+    snapshot.sessionId.length > 0 &&
+    ['completed', 'crashed', 'auth-failure', 'user-exit'].includes(snapshot.status ?? '') &&
+    (snapshot.exitCode === null || typeof snapshot.exitCode === 'number') &&
+    typeof snapshot.lastActivity === 'string' &&
+    !Number.isNaN(Date.parse(snapshot.lastActivity)) &&
+    typeof snapshot.workspacePath === 'string' &&
+    snapshot.workspacePath.length > 0 &&
+    (snapshot.persona === undefined || typeof snapshot.persona === 'string') &&
+    (snapshot.providerProfileName === undefined || typeof snapshot.providerProfileName === 'string') &&
+    typeof snapshot.agent === 'string' &&
+    snapshot.agent.length > 0 &&
+    typeof snapshot.label === 'string' &&
+    typeof snapshot.resumable === 'boolean'
+  );
+}
+
 /** Well-known directory for PTY session registration files. */
 export const PTY_REGISTRY_DIR_NAME = 'pty-registry';
 

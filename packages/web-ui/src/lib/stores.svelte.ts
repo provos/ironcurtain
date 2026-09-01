@@ -35,6 +35,7 @@ import type {
   DockerWorkloadSettingsDto,
   PtySink,
   CreateSessionOptions,
+  ResumableSessionDto,
   StatisticsCapabilitiesDto,
   StatisticsSummaryQuery,
   StatisticsMetricSummaryDto,
@@ -612,6 +613,14 @@ export async function createSession(opts?: CreateSessionOptions): Promise<{ labe
   if (opts?.providerProfileName) params.providerProfileName = opts.providerProfileName;
   if (opts?.model) params.model = opts.model;
   return getWsClient().request<{ label: number }>('sessions.create', params);
+}
+
+export async function listResumableSessions(): Promise<ResumableSessionDto[]> {
+  return getWsClient().request<ResumableSessionDto[]>('sessions.listResumable');
+}
+
+export async function resumeSession(sessionId: string): Promise<{ label: number }> {
+  return getWsClient().request<{ label: number }>('sessions.resume', { sessionId });
 }
 
 export async function endSession(label: number): Promise<void> {

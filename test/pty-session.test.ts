@@ -410,6 +410,75 @@ describe('PTY resize via socat', () => {
   });
 });
 
+// --- stale PTY socket cleanup ---
+
+describe('removeStalePtySocket', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'pty-stale-socket-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a stale UDS inode so a replacement listener can bind', async () => {
+    const { removeStalePtySocket, waitForPtyReady } = await import('../src/docker/pty-session.js');
+    const sockPath = join(tempDir, 'pty.sock');
+    const listenerProgram = [
+      "const { createServer } = require('node:net');",
+      'const server = createServer();',
+      "server.listen(process.argv[1], () => process.stdout.write('ready\\n'));",
+    ].join('\n');
+    const stale = spawn(process.execPath, ['-e', listenerProgram, sockPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    await new Promise<void>((resolve, reject) => {
+      stale.once('error', reject);
+      stale.once('exit', (code, signal) => {
+        reject(new Error(`stale listener exited before binding (code=${code}, signal=${signal})`));
+      });
+      stale.stdout.once('data', () => resolve());
+    });
+    const staleExit = new Promise<void>((resolve) => stale.once('exit', () => resolve()));
+    stale.kill('SIGKILL');
+    await staleExit;
+    expect(existsSync(sockPath)).toBe(true);
+
+    removeStalePtySocket(sockPath);
+    expect(existsSync(sockPath)).toBe(false);
+
+    const { createServer } = await import('node:net');
+    const replacement = createServer();
+    await new Promise<void>((resolve, reject) => {
+      replacement.once('error', reject);
+      replacement.listen(sockPath, () => resolve());
+    });
+    try {
+      await expect(waitForPtyReady(sockPath)).resolves.toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => replacement.close(() => resolve()));
+    }
+  });
+
+  it('is a no-op when no stale path exists', async () => {
+    const { removeStalePtySocket } = await import('../src/docker/pty-session.js');
+    expect(() => removeStalePtySocket(join(tempDir, 'missing.sock'))).not.toThrow();
+  });
+
+  it('refuses to remove an unexpected non-socket path', async () => {
+    const { removeStalePtySocket } = await import('../src/docker/pty-session.js');
+    const path = join(tempDir, 'pty.sock');
+    writeFileSync(path, 'preserve me');
+
+    expect(() => removeStalePtySocket(path)).toThrow(/Refusing to replace non-socket PTY path/u);
+    expect(readFileSync(path, 'utf8')).toBe('preserve me');
+  });
+});
+
 // --- waitForPtyReady regression tests ---
 //
 // Regression: a connect-based probe against a `socat ...,fork` listener spawns

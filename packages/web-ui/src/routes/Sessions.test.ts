@@ -1,28 +1,37 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 
-const { mockAppState, mockCreateSession, mockListPersonas, mockGetModelProviders, mockSendPtyInput } = vi.hoisted(
-  () => ({
-    mockAppState: {
-      daemonStatus: null as Record<string, unknown> | null,
-      sessions: new Map(),
-      selectedSessionLabel: null as number | null,
-      selectedSession: null as {
-        label: number;
-        source: { kind: string };
-        status: string;
-        persona?: string;
-        turnCount: number;
-        budget: { estimatedCostUsd: number };
-      } | null,
-      escalationDismissedAt: 0,
-    },
-    mockCreateSession: vi.fn<(opts?: unknown) => Promise<{ label: number }>>(),
-    mockListPersonas: vi.fn<() => Promise<unknown[]>>(),
-    mockGetModelProviders: vi.fn<() => Promise<{ profiles: Record<string, unknown> }>>(),
-    mockSendPtyInput: vi.fn<(label: number, dataB64: string) => Promise<void>>(),
-  }),
-);
+const {
+  mockAppState,
+  mockCreateSession,
+  mockListPersonas,
+  mockGetModelProviders,
+  mockSendPtyInput,
+  mockListResumableSessions,
+  mockResumeSession,
+} = vi.hoisted(() => ({
+  mockAppState: {
+    connected: true,
+    daemonStatus: null as Record<string, unknown> | null,
+    sessions: new Map(),
+    selectedSessionLabel: null as number | null,
+    selectedSession: null as {
+      label: number;
+      source: { kind: string };
+      status: string;
+      persona?: string;
+      turnCount: number;
+      budget: { estimatedCostUsd: number };
+    } | null,
+    escalationDismissedAt: 0,
+  },
+  mockCreateSession: vi.fn<(opts?: unknown) => Promise<{ label: number }>>(),
+  mockListPersonas: vi.fn<() => Promise<unknown[]>>(),
+  mockGetModelProviders: vi.fn<() => Promise<{ profiles: Record<string, unknown> }>>(),
+  mockSendPtyInput: vi.fn<(label: number, dataB64: string) => Promise<void>>(),
+  mockListResumableSessions: vi.fn<() => Promise<unknown[]>>(),
+  mockResumeSession: vi.fn<(sessionId: string) => Promise<{ label: number }>>(),
+}));
 
 vi.mock('../lib/stores.svelte.js', () => ({
   appState: mockAppState,
@@ -39,6 +48,8 @@ vi.mock('../lib/stores.svelte.js', () => ({
   connectPtyTerminal: vi.fn(),
   disconnectPtyTerminal: vi.fn(),
   getModelProviders: mockGetModelProviders,
+  listResumableSessions: mockListResumableSessions,
+  resumeSession: mockResumeSession,
 }));
 
 vi.mock('$lib/components/features/terminal-console.svelte', async () => await import('../__test_stubs__/Stub.svelte'));
@@ -60,6 +71,7 @@ function makeStatus(sessionMode?: 'builtin' | 'container'): Record<string, unkno
 describe('Sessions create flow guards', () => {
   beforeEach(() => {
     mockAppState.daemonStatus = makeStatus('container');
+    mockAppState.connected = true;
     mockAppState.sessions = new Map();
     mockAppState.selectedSessionLabel = null;
     mockAppState.selectedSession = null;
@@ -72,6 +84,10 @@ describe('Sessions create flow guards', () => {
     mockGetModelProviders.mockResolvedValue({ profiles: { native: { type: 'native' } } });
     mockSendPtyInput.mockReset();
     mockSendPtyInput.mockResolvedValue(undefined);
+    mockListResumableSessions.mockReset();
+    mockListResumableSessions.mockResolvedValue([]);
+    mockResumeSession.mockReset();
+    mockResumeSession.mockResolvedValue({ label: 12 });
   });
 
   it('explains PTY shutdown and disables ending it again while stopping', () => {
@@ -149,7 +165,7 @@ describe('Sessions create flow guards', () => {
     await fireEvent.click(screen.getByTestId('launch-start'));
 
     expect(mockCreateSession).not.toHaveBeenCalled();
-    expect(screen.getByText(/daemon session-mode support/i)).toBeTruthy();
+    expect(screen.getByText(/web sessions require daemon session-mode support/i)).toBeTruthy();
     expect(screen.queryByText(/container mode enabled/i)).toBeNull();
   });
 
@@ -161,5 +177,88 @@ describe('Sessions create flow guards', () => {
 
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(screen.getByText(/container mode enabled/i)).toBeTruthy();
+  });
+
+  it('waits for daemon status before describing resume availability', () => {
+    mockAppState.daemonStatus = null;
+    render(Sessions);
+
+    expect(screen.getByTestId('resume-open')).toHaveProperty('disabled', true);
+    expect(screen.getByText(/daemon status is not available yet/i)).toBeTruthy();
+    expect(screen.queryByText(/session resume requires container mode/i)).toBeNull();
+  });
+
+  it('distinguishes unsupported and builtin daemon modes for resume', () => {
+    mockAppState.daemonStatus = makeStatus();
+    const rendered = render(Sessions);
+
+    expect(screen.getByText(/session resume requires daemon session-mode support/i)).toBeTruthy();
+
+    rendered.unmount();
+    mockAppState.daemonStatus = makeStatus('builtin');
+    render(Sessions);
+    expect(screen.getByText(/session resume requires container mode/i)).toBeTruthy();
+  });
+
+  it('loads resumable sessions on demand and selects the resumed terminal', async () => {
+    mockListResumableSessions.mockResolvedValue([
+      {
+        sessionId: 'saved-session-1234',
+        displayName: 'Claude Code session',
+        agent: 'claude-code',
+        status: 'user-exit',
+        lastActivity: new Date().toISOString(),
+        workspaceLabel: '~/src/project',
+        persona: 'reviewer',
+      },
+    ]);
+    render(Sessions);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume previous…' }));
+    expect(await screen.findByText('Claude Code session')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume Claude Code session' }));
+
+    expect(mockResumeSession).toHaveBeenCalledWith('saved-session-1234');
+    await waitFor(() => expect(mockAppState.selectedSessionLabel).toBe(12));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('keeps the resume dialog open with retry feedback after a failed request', async () => {
+    mockListResumableSessions
+      .mockRejectedValueOnce(new Error('Unable to read saved sessions'))
+      .mockResolvedValueOnce([]);
+    render(Sessions);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume previous…' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Unable to read saved sessions');
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(mockListResumableSessions).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('No resumable sessions')).toBeTruthy();
+  });
+
+  it('clears a stale resume-action error when refreshing the saved-session list', async () => {
+    mockListResumableSessions
+      .mockResolvedValueOnce([
+        {
+          sessionId: 'stale-session',
+          displayName: 'Stale session',
+          agent: 'claude-code',
+          status: 'user-exit',
+          lastActivity: new Date().toISOString(),
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    mockResumeSession.mockRejectedValueOnce(new Error('That session is already active'));
+    render(Sessions);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Resume previous…' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Resume Stale session' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('already active');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
+
+    expect(await screen.findByText('No resumable sessions')).toBeTruthy();
+    expect(screen.queryByText(/already active/i)).toBeNull();
   });
 });

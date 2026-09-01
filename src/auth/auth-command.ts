@@ -157,7 +157,7 @@ function importCredentials(args: string[]): void {
 
   // Ensure the oauth directory exists and copy the file
   const oauthDir = getOAuthDir();
-  mkdirSync(oauthDir, { recursive: true });
+  mkdirSync(oauthDir, { recursive: true, mode: 0o700 });
 
   const destPath = resolve(oauthDir, provider.credentialsFilename);
   try {

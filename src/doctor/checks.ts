@@ -9,11 +9,9 @@
 
 import { spawnSync } from 'node:child_process';
 import { arch, platform } from 'node:os';
-import { resolve } from 'node:path';
 import { checkSandboxViability } from '../utils/preflight-checks.js';
 import { checkDockerAvailable, type DockerAvailability } from '../docker/docker-probe.js';
 import { checkAppleContainerAvailable } from '../docker/apple-container-manager.js';
-import { inspectCertificateAuthority, repairCertificateAuthority } from '../docker/ca.js';
 import { resolveRuntimeKind, type ContainerRuntimeKind } from '../docker/container-runtime.js';
 import { detectAuthMethod, readOnlyCredentialSources } from '../docker/oauth-credentials.js';
 import {
@@ -35,7 +33,7 @@ import {
   type ProviderId,
 } from '../config/model-provider.js';
 import { loadGeneratedPolicy, getPackageGeneratedDir, findAnnotationServerDrift, loadConfig } from '../config/index.js';
-import { computeConstitutionHash, getIronCurtainHome } from '../config/paths.js';
+import { computeConstitutionHash } from '../config/paths.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
 import { isObjectWithProp } from '../utils/is-plain-object.js';
 import { probeServer, type ProbeResult } from './mcp-liveness.js';
@@ -129,77 +127,6 @@ export async function checkSandbox(): Promise<CheckResult> {
     message: result.message,
     hint: result.details,
   };
-}
-
-/**
- * Verifies the host CA storage without generating or migrating it. The
- * inspection shares the strict filesystem, manifest, and certificate
- * validators used by container-session startup.
- */
-export function checkCertificateAuthority(caDir = resolve(getIronCurtainHome(), 'ca')): CheckResult {
-  try {
-    const inspection = inspectCertificateAuthority(caDir);
-    if (inspection.state === 'uninitialized') {
-      return {
-        name: 'MITM CA storage',
-        status: 'ok',
-        message: 'not initialized — will be created by the first container session',
-      };
-    }
-    if (inspection.state === 'migration-required') {
-      return {
-        name: 'MITM CA storage',
-        status: 'warn',
-        message: 'valid legacy storage — will be migrated by the next container session',
-      };
-    }
-    return {
-      name: 'MITM CA storage',
-      status: 'ok',
-      message: `verified generation ${inspection.generation}`,
-    };
-  } catch (error) {
-    return {
-      name: 'MITM CA storage',
-      status: 'fail',
-      message: error instanceof Error ? error.message : String(error),
-      hint: `Run ironcurtain doctor --repair to quarantine unsafe state under ${caDir} and rotate any exposed CA key.`,
-    };
-  }
-}
-
-/** Repair CA storage only when explicitly requested by the doctor command. */
-export function repairCertificateAuthorityStorage(caDir = resolve(getIronCurtainHome(), 'ca')): CheckResult {
-  try {
-    const repair = repairCertificateAuthority(caDir);
-    if (repair.state === 'rotated') {
-      return {
-        name: 'MITM CA repair',
-        status: 'ok',
-        message:
-          `generated ${repair.generation}; quarantined previous state at ${repair.quarantineDirectory}. ` +
-          'Restart active container sessions so they trust the replacement CA.',
-      };
-    }
-    if (repair.state === 'migrated') {
-      return {
-        name: 'MITM CA repair',
-        status: 'ok',
-        message: `migrated valid legacy storage to generation ${repair.generation}`,
-      };
-    }
-    if (repair.state === 'hardened') {
-      return { name: 'MITM CA repair', status: 'ok', message: 'hardened storage permissions' };
-    }
-    return { name: 'MITM CA repair', status: 'ok', message: 'no repair needed' };
-  } catch (error) {
-    return {
-      name: 'MITM CA repair',
-      status: 'fail',
-      message: error instanceof Error ? error.message : String(error),
-      hint: `Preserve all CA and quarantine directories under ${resolve(caDir, '..')} for inspection.`,
-    };
-  }
 }
 
 /**

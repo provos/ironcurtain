@@ -49,6 +49,19 @@ test.describe('Sessions', () => {
     await waitForPtyTerminal(page);
   });
 
+  test('resumes a saved session into a selected PTY terminal', async ({ page }) => {
+    await navigateTo(page, 'Sessions');
+    await page.getByRole('button', { name: 'Resume previous…' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Resume a session' });
+    await expect(dialog.getByText('Claude Code — ironcurtain')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Resume Claude Code — ironcurtain' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByTestId('session-sidebar').locator('[data-testid^="session-item-"]')).toHaveCount(1);
+    await waitForPtyTerminal(page);
+  });
+
   test('sends a trusted prompt and echoes it into the terminal', async ({ page }) => {
     await createDefaultSession(page);
     await waitForPtyTerminal(page);

@@ -14,6 +14,8 @@
     createError,
     loadPersonasFn,
     loadProviderProfilesFn,
+    onresumeopen,
+    resumeDisabledReason,
   }: {
     sessions: Map<number, SessionDto>;
     selectedLabel: number | null;
@@ -24,6 +26,8 @@
     loadPersonasFn: () => Promise<PersonaListItem[]>;
     /** Loads selectable provider-profile names for the launch options. */
     loadProviderProfilesFn?: () => Promise<string[]>;
+    onresumeopen?: () => void;
+    resumeDisabledReason?: string;
   } = $props();
 
   let personas = $state<PersonaListItem[]>([]);
@@ -84,12 +88,15 @@
   }
 </script>
 
-<div data-testid="session-sidebar" class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0 min-h-0">
-  <div class="px-4 py-3 border-b border-border">
+<div
+  data-testid="session-sidebar"
+  class="flex max-h-[46dvh] min-h-0 w-full shrink-0 flex-col overflow-y-auto border-b border-border bg-sidebar md:max-h-none md:w-64 md:overflow-hidden md:border-b-0 md:border-r"
+>
+  <div class="shrink-0 px-4 py-3 border-b border-border">
     <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
   </div>
 
-  <div class="px-3 py-3 border-b border-border bg-card/40">
+  <div class="shrink-0 px-3 py-3 border-b border-border bg-card/40">
     <form data-testid="session-launch-form" class="space-y-2.5" onsubmit={handleLaunchSubmit}>
       <div class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Launch options</div>
       <label class="block">
@@ -151,6 +158,24 @@
       <Button data-testid="launch-start" type="submit" variant="default" size="sm" class="w-full" loading={creating}>
         {creating ? 'Starting...' : 'Start session'}
       </Button>
+      {#if onresumeopen}
+        <Button
+          data-testid="resume-open"
+          type="button"
+          variant="outline"
+          size="sm"
+          class="w-full"
+          disabled={creating || Boolean(resumeDisabledReason)}
+          title={resumeDisabledReason}
+          aria-describedby={resumeDisabledReason ? 'resume-disabled-reason' : undefined}
+          onclick={onresumeopen}
+        >
+          Resume previous…
+        </Button>
+        {#if resumeDisabledReason}
+          <p id="resume-disabled-reason" class="text-xs text-muted-foreground">{resumeDisabledReason}</p>
+        {/if}
+      {/if}
     </form>
   </div>
 
@@ -160,7 +185,7 @@
     </div>
   {/if}
 
-  <div class="flex-1 overflow-auto">
+  <div class="flex-none overflow-visible md:flex-1 md:overflow-auto">
     {#if creating}
       <div class="w-full text-left px-4 py-3 border-b border-border text-sm bg-accent/20 animate-pulse">
         <div class="flex items-center justify-between">

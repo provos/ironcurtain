@@ -11,7 +11,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
@@ -24,10 +24,11 @@ import { acquireProcessLock, ProcessLockBusyError } from '../docker-workload/pro
 export const IRONCURTAIN_MANAGED_LABEL = 'ironcurtain.managed';
 export const IRONCURTAIN_OWNER_PID_LABEL = 'ironcurtain.owner-pid';
 export const IRONCURTAIN_OWNER_TOKEN_LABEL = 'ironcurtain.owner-token';
+export const IRONCURTAIN_OWNER_SCOPE_LABEL = 'ironcurtain.owner-scope';
 export const IRONCURTAIN_CREATED_AT_LABEL = 'ironcurtain.created-at';
 export const IRONCURTAIN_RESOURCE_SCHEMA_LABEL = 'ironcurtain.resource-schema';
 const IRONCURTAIN_BUNDLE_LABEL = 'ironcurtain.bundle';
-const RESOURCE_SCHEMA = '2';
+const RESOURCE_SCHEMA = '3';
 // Current bundle slugs are 12 hex digits; pre-identity-refactor names used a
 // raw UUID substring and therefore contain a hyphen after eight digits.
 const LEGACY_NETWORK_RE = /^ironcurtain-(?:[a-f0-9]{12}|[a-f0-9]{8}-[a-f0-9]{3})$/;
@@ -91,6 +92,23 @@ function leaseRoot(): string {
   return resolve(getIronCurtainHome(), 'run', 'docker-owners');
 }
 
+/**
+ * Stable, non-sensitive namespace for one IronCurtain home. Docker inventory is
+ * host-global, while ownership leases live below IRONCURTAIN_HOME; without this
+ * label a test using a temporary home can mistake production resources for
+ * orphans because it cannot see their lease files.
+ */
+function currentOwnerScope(): string {
+  const resolvedHome = resolve(getIronCurtainHome());
+  let canonicalHome: string;
+  try {
+    canonicalHome = realpathSync(resolvedHome);
+  } catch {
+    canonicalHome = resolvedHome;
+  }
+  return createHash('sha256').update(canonicalHome).digest('hex').slice(0, 24);
+}
+
 function installExitHook(): void {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
@@ -139,6 +157,7 @@ export function managedResourceLabels(bundleId: BundleId | string): Record<strin
     [IRONCURTAIN_BUNDLE_LABEL]: bundleId,
     [IRONCURTAIN_OWNER_PID_LABEL]: String(lease.pid),
     [IRONCURTAIN_OWNER_TOKEN_LABEL]: lease.token,
+    [IRONCURTAIN_OWNER_SCOPE_LABEL]: currentOwnerScope(),
     [IRONCURTAIN_CREATED_AT_LABEL]: new Date().toISOString(),
     [IRONCURTAIN_RESOURCE_SCHEMA_LABEL]: RESOURCE_SCHEMA,
   };
@@ -167,15 +186,17 @@ function defaultPidAlive(pid: number): boolean {
   }
 }
 
-function ownerIsAlive(
+type OwnerLeaseStatus = 'alive' | 'dead' | 'unattributed';
+
+function ownerLeaseStatus(
   labels: Readonly<Record<string, string>>,
   pidAlive: (pid: number) => boolean,
   processIdentity: (pid: number) => ProcessIdentity | undefined,
   root = leaseRoot(),
-): boolean {
+): OwnerLeaseStatus {
   const pid = Number(labels[IRONCURTAIN_OWNER_PID_LABEL]);
   const token = labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !token || !pidAlive(pid)) return false;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !token || !pidAlive(pid)) return 'dead';
   try {
     const lease = JSON.parse(readFileSync(resolve(root, `${token}.json`), 'utf8')) as {
       token?: unknown;
@@ -188,17 +209,33 @@ function ownerIsAlive(
       typeof lease.identity?.bootId !== 'string' ||
       typeof lease.identity.startedAt !== 'string'
     ) {
-      return false;
+      return 'unattributed';
     }
     const currentIdentity = processIdentity(pid);
-    return (
-      currentIdentity !== undefined &&
-      currentIdentity.bootId === lease.identity.bootId &&
-      currentIdentity.startedAt === lease.identity.startedAt
-    );
+    if (currentIdentity === undefined) return 'unattributed';
+    return currentIdentity.bootId === lease.identity.bootId && currentIdentity.startedAt === lease.identity.startedAt
+      ? 'alive'
+      : 'dead';
   } catch {
-    return false;
+    return 'unattributed';
   }
+}
+
+/**
+ * Foreign-home resources are never ours to reclaim.
+ */
+function belongsToForeignScope(labels: Readonly<Partial<Record<string, string>>>, ownerScope: string): boolean {
+  const scope = labels[IRONCURTAIN_OWNER_SCOPE_LABEL];
+  return scope !== undefined && scope !== ownerScope;
+}
+
+/**
+ * A live PID with an unreadable or unverifiable lease is not proof that its
+ * resource is orphaned. Reconciliation is destructive, so ambiguous ownership
+ * must be retained for every schema generation, not only legacy resources.
+ */
+function ownerMayBeAlive(leaseStatus: OwnerLeaseStatus): boolean {
+  return leaseStatus === 'unattributed';
 }
 
 interface ReconcileOptions {
@@ -277,16 +314,25 @@ export async function reconcileIronCurtainDockerResources(
     const removedNetworks: string[] = [];
     const skippedUnsafeNetworks: string[] = [];
     const deadOwnerTokens = new Set<string>();
+    const ownerScope = currentOwnerScope();
     let retainedActiveResources = 0;
 
     const managedContainers = await docker.listContainers?.({ labelFilter: `${IRONCURTAIN_MANAGED_LABEL}=true` });
     for (const container of managedContainers ?? []) {
-      if (ownerIsAlive(container.labels, pidAlive, processIdentity)) {
+      if (belongsToForeignScope(container.labels, ownerScope)) {
+        retainedActiveResources++;
+        continue;
+      }
+      const leaseStatus = ownerLeaseStatus(container.labels, pidAlive, processIdentity);
+      if (leaseStatus === 'alive') {
+        retainedActiveResources++;
+        continue;
+      }
+      if (ownerMayBeAlive(leaseStatus)) {
         retainedActiveResources++;
         continue;
       }
       const ownerToken = container.labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
-      if (ownerToken) deadOwnerTokens.add(ownerToken);
       logger.warn(`[docker-gc] reclaiming orphaned container ${container.name}`);
       if (!options.dryRun) {
         await docker.remove(container.id);
@@ -296,6 +342,7 @@ export async function reconcileIronCurtainDockerResources(
         }
       }
       removedContainers.push(container.name);
+      if (ownerToken) deadOwnerTokens.add(ownerToken);
     }
 
     const removedContainerIds = new Set(
@@ -309,12 +356,20 @@ export async function reconcileIronCurtainDockerResources(
       const legacy = !managed && LEGACY_NETWORK_RE.test(network.name);
       if (!managed && !legacy) continue;
 
-      if (managed && ownerIsAlive(network.labels, pidAlive, processIdentity)) {
+      if (managed && belongsToForeignScope(network.labels, ownerScope)) {
+        retainedActiveResources++;
+        continue;
+      }
+      const leaseStatus = managed ? ownerLeaseStatus(network.labels, pidAlive, processIdentity) : 'dead';
+      if (managed && leaseStatus === 'alive') {
+        retainedActiveResources++;
+        continue;
+      }
+      if (managed && ownerMayBeAlive(leaseStatus)) {
         retainedActiveResources++;
         continue;
       }
       const ownerToken = network.labels[IRONCURTAIN_OWNER_TOKEN_LABEL];
-      if (managed && ownerToken) deadOwnerTokens.add(ownerToken);
       if (legacy) {
         const graceMs = options.legacyGraceMs ?? LEGACY_EMPTY_NETWORK_GRACE_MS;
         if (network.containerIds.length > 0 || resourceAgeMs(network.created, now) < graceMs) {
@@ -338,6 +393,7 @@ export async function reconcileIronCurtainDockerResources(
         }
       }
       removedNetworks.push(network.name);
+      if (managed && ownerToken) deadOwnerTokens.add(ownerToken);
     }
 
     if (!options.dryRun) {

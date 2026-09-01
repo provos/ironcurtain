@@ -7,9 +7,9 @@ import {
   formatRelativeTime,
   shortenHomePath,
   getWorkspaceLabel,
-} from '../src/mux/session-scanner.js';
+} from '../src/pty/session-scanner.js';
 import { getSessionSandboxDir, SESSION_STATE_FILENAME } from '../src/config/paths.js';
-import type { SessionSnapshot } from '../src/mux/session-scanner.js';
+import type { SessionSnapshot } from '../src/pty/session-scanner.js';
 
 describe('session-scanner', () => {
   const testDir = resolve('/tmp', `ironcurtain-scanner-test-${process.pid}`);
@@ -28,28 +28,80 @@ describe('session-scanner', () => {
   function writeSnapshot(sessionId: string, snapshot: SessionSnapshot): void {
     const dir = resolve(sessionsDir, sessionId);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(resolve(dir, SESSION_STATE_FILENAME), JSON.stringify(snapshot));
+    const persisted =
+      snapshot.workspacePath === '/workspace' ? { ...snapshot, workspacePath: resolve(dir, 'sandbox') } : snapshot;
+    mkdirSync(persisted.workspacePath, { recursive: true });
+    writeFileSync(resolve(dir, SESSION_STATE_FILENAME), JSON.stringify(persisted));
   }
 
   it('returns empty array when sessions dir does not exist', () => {
     rmSync(sessionsDir, { recursive: true, force: true });
-    expect(scanResumableSessions()).toEqual([]);
+    expect(scanResumableSessions([])).toEqual([]);
   });
 
   it('returns empty array when sessions dir is empty', () => {
-    expect(scanResumableSessions()).toEqual([]);
+    expect(scanResumableSessions([])).toEqual([]);
   });
 
   it('skips sessions without session-state.json', () => {
     mkdirSync(resolve(sessionsDir, 'orphan-session'), { recursive: true });
-    expect(scanResumableSessions()).toEqual([]);
+    expect(scanResumableSessions([])).toEqual([]);
   });
 
   it('skips sessions with invalid JSON', () => {
     const dir = resolve(sessionsDir, 'bad-json');
     mkdirSync(dir, { recursive: true });
     writeFileSync(resolve(dir, 'session-state.json'), 'not json');
-    expect(scanResumableSessions()).toEqual([]);
+    expect(scanResumableSessions([])).toEqual([]);
+  });
+
+  it('skips snapshots whose session ID does not match their directory', () => {
+    writeSnapshot('expected-session', {
+      sessionId: 'different-session',
+      status: 'user-exit',
+      exitCode: 0,
+      lastActivity: '2026-03-10T12:00:00Z',
+      workspacePath: '/workspace',
+      agent: 'claude-code',
+      label: 'Mismatched session',
+      resumable: true,
+    });
+
+    expect(scanResumableSessions([])).toEqual([]);
+  });
+
+  it('skips snapshots stored under an invalid session directory name', () => {
+    writeSnapshot('invalid id', {
+      sessionId: 'invalid id',
+      status: 'user-exit',
+      exitCode: 0,
+      lastActivity: '2026-03-10T12:00:00Z',
+      workspacePath: '/workspace',
+      agent: 'claude-code',
+      label: 'Invalid directory',
+      resumable: true,
+    });
+
+    expect(scanResumableSessions([])).toEqual([]);
+  });
+
+  it('skips resumable-looking snapshots with malformed required metadata', () => {
+    const dir = resolve(sessionsDir, 'malformed-session');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      resolve(dir, SESSION_STATE_FILENAME),
+      JSON.stringify({
+        sessionId: 'malformed-session',
+        status: 'made-up-status',
+        lastActivity: 42,
+        workspacePath: '/workspace',
+        agent: '',
+        label: 'Malformed',
+        resumable: true,
+      }),
+    );
+
+    expect(scanResumableSessions([])).toEqual([]);
   });
 
   it('skips non-resumable sessions', () => {
@@ -64,7 +116,7 @@ describe('session-scanner', () => {
       label: 'Claude Code (interactive)',
       resumable: false,
     });
-    expect(scanResumableSessions()).toEqual([]);
+    expect(scanResumableSessions([])).toEqual([]);
   });
 
   it('returns resumable sessions', () => {
@@ -80,7 +132,7 @@ describe('session-scanner', () => {
       resumable: true,
     });
 
-    const results = scanResumableSessions();
+    const results = scanResumableSessions([]);
     expect(results).toHaveLength(1);
     expect(results[0].sessionId).toBe('session-1');
     expect(results[0].resumable).toBe(true);
@@ -111,7 +163,7 @@ describe('session-scanner', () => {
       resumable: true,
     });
 
-    const results = scanResumableSessions();
+    const results = scanResumableSessions([]);
     expect(results).toHaveLength(2);
     expect(results[0].sessionId).toBe('new-session');
     expect(results[1].sessionId).toBe('old-session');
@@ -142,7 +194,7 @@ describe('session-scanner', () => {
       resumable: false,
     });
 
-    const results = scanResumableSessions();
+    const results = scanResumableSessions([]);
     expect(results).toHaveLength(1);
     expect(results[0].sessionId).toBe('resumable');
   });

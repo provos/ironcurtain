@@ -106,6 +106,16 @@ describe('auth import credential import', () => {
     expect(existsSync(resolve(tempDir, 'oauth'))).toBe(true);
   });
 
+  it('creates a missing IronCurtain home with owner-only permissions', async () => {
+    const sourceFile = resolve(sourceDir, 'creds.json');
+    writeFileSync(sourceFile, JSON.stringify({ client_id: 'test', client_secret: 'test' }));
+    rmSync(tempDir, { recursive: true });
+
+    await captureOutput(() => runAuthCommand(['import', 'google', sourceFile]));
+
+    expect(statSync(tempDir).mode & 0o777).toBe(0o700);
+  });
+
   it('shows Google setup guide when credentials file path is missing', async () => {
     const output = await captureOutput(() => runAuthCommand(['import', 'google']));
 

@@ -213,6 +213,15 @@ describe('loadUserConfig', () => {
     expect(content.anthropicApiKey).toBeUndefined();
   });
 
+  it('creates a missing IronCurtain home with owner-only permissions', () => {
+    const missingHome = resolve(testHome, 'missing-home');
+    process.env.IRONCURTAIN_HOME = missingHome;
+
+    loadUserConfig();
+
+    expect(statSync(missingHome).mode & 0o777).toBe(0o700);
+  });
+
   it('logs creation message to stderr when auto-creating', () => {
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
@@ -826,6 +835,15 @@ describe('saveUserConfig', () => {
 
     const onDisk = readConfigFromDisk();
     expect(onDisk.agentModelId).toBe('anthropic:claude-opus-4-6');
+  });
+
+  it('creates a missing save destination with owner-only permissions', () => {
+    const missingHome = resolve(testHome, 'missing-home');
+    process.env.IRONCURTAIN_HOME = missingHome;
+
+    saveUserConfig({ agentModelId: 'anthropic:claude-opus-4-6' });
+
+    expect(statSync(missingHome).mode & 0o777).toBe(0o700);
   });
 
   it('merges new fields into existing config', () => {

@@ -36,7 +36,7 @@ export function loadOAuthToken(providerId: string): StoredOAuthToken | null {
  */
 export function saveOAuthToken(providerId: string, token: StoredOAuthToken): void {
   const dir = getOAuthDir();
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const tokenPath = getOAuthTokenPath(providerId);
   writeFileSync(tokenPath, JSON.stringify(token, null, 2) + '\n', { mode: 0o600 });

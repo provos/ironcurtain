@@ -152,7 +152,7 @@ export class PolicyMutationAuditLog {
   /** Appends a single JSONL line (O_APPEND, mode 0600), rotating first if needed. */
   private writeLine(record: PolicyMutationRecord): void {
     const path = this.logPath();
-    mkdirSync(resolve(getIronCurtainHome(), 'audit'), { recursive: true });
+    mkdirSync(resolve(getIronCurtainHome(), 'audit'), { recursive: true, mode: 0o700 });
     this.rotateIfNeeded(path);
     const fd = openSync(path, 'a', 0o600);
     try {

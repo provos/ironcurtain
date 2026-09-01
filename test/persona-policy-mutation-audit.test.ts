@@ -67,6 +67,15 @@ describe('PolicyMutationAuditLog', () => {
     expect(mode).toBe(0o600);
   });
 
+  it('creates a missing IronCurtain home with owner-only permissions', () => {
+    rmSync(TEST_HOME, { recursive: true, force: true });
+    const log = new PolicyMutationAuditLog(randomBytes(32));
+
+    log.append('cli', 'createPersona', 'p');
+
+    expect(statSync(TEST_HOME).mode & 0o777).toBe(0o700);
+  });
+
   it('verifyAuditChain accepts an untampered chain', () => {
     const secret = randomBytes(32);
     const log = new PolicyMutationAuditLog(secret);
