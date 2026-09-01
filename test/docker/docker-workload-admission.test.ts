@@ -14,6 +14,11 @@ const createContainerRuntime = vi.fn();
 const resolveRuntimeKind = vi.fn();
 const checkAppleContainerAvailable = vi.fn();
 const checkDockerAvailable = vi.fn();
+const hostPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+if (hostPlatformDescriptor === undefined) {
+  throw new Error('process.platform descriptor is unavailable');
+}
 
 vi.mock('../../src/docker/agent-registry.js', () => ({
   registerBuiltinAdapters,
@@ -27,6 +32,12 @@ vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContai
 vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
 
 beforeEach(() => {
+  // These integration seams exercise Docker Desktop, which is admitted only
+  // on macOS. Keep that host assumption explicit when CI runs on Linux.
+  Object.defineProperty(process, 'platform', {
+    ...hostPlatformDescriptor,
+    value: 'darwin',
+  });
   vi.clearAllMocks();
   getAgent.mockImplementation(() => {
     throw new Error('adapter lookup must not run');
@@ -36,6 +47,10 @@ beforeEach(() => {
   });
   checkAppleContainerAvailable.mockResolvedValue({ available: true });
   checkDockerAvailable.mockResolvedValue({ available: true });
+});
+
+afterEach(() => {
+  Object.defineProperty(process, 'platform', hostPlatformDescriptor);
 });
 
 function admittedAppleConfig() {
