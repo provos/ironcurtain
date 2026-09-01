@@ -51,9 +51,10 @@ async function admitWithAgent(
     startHeartbeat: false,
   });
   await handle.attestWatchdog();
-  const grant = handle.requestOuterResource('container', 'agent');
+  const requestedName = 'agent-test';
+  const grant = handle.precommitOuterResource({ kind: 'container', role: 'agent', requestedName });
   const agentId = await runtime.runtime.create({
-    name: grant.requestedName,
+    name: requestedName,
     image: 'agent',
     mounts: [],
     network: 'none',

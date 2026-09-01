@@ -39,8 +39,9 @@
  * bounded derived metadata fetched through the same screened dialer.
  *
  * Production construction remains inert unless the resolved Docker-workload
- * configuration explicitly admits the corresponding mode. The Apple bundle
- * lifecycle owns the returned listeners. The obsolete current-Dockerfile
+ * configuration explicitly admits the corresponding mode. The bundle
+ * lifecycle owns the returned listeners; backend adapters choose only their
+ * UDS or TCP exposure. The obsolete current-Dockerfile
  * build-egress listener was deleted; package builds use the separate
  * credential-free strict package proxy.
  */
@@ -50,7 +51,12 @@ import type { CertificateAuthority } from './ca.js';
 import { getFrozenRegistryEgressManifestPath } from './docker-workload-paths.js';
 import { createMitmProxy, type MitmProxy, type MitmProxyOptions } from './mitm-proxy.js';
 import type { OutboundTransport } from './outbound-transport.js';
-import { createPackageEgressProxy, type PackageEgressPolicy, type PackageEgressProxy } from './package-egress-proxy.js';
+import {
+  createPackageEgressProxy,
+  type PackageEgressListenTarget,
+  type PackageEgressPolicy,
+  type PackageEgressProxy,
+} from './package-egress-proxy.js';
 import {
   createRegistryEgressGuard,
   type RegistryEgressGuard,
@@ -61,9 +67,7 @@ import {
  * Where a listener binds. Supplied by the caller: socket placement is a
  * topology decision this module deliberately does not make.
  */
-export type DockerWorkloadEgressListenTarget =
-  | { readonly socketPath: string; readonly listenPort?: never }
-  | { readonly socketPath?: never; readonly listenPort: number };
+export type DockerWorkloadEgressListenTarget = PackageEgressListenTarget;
 
 /** Exact egress authorities for one admitted mode; offline is `undefined`. */
 export type DockerWorkloadEgressSet<R, P> =
@@ -85,7 +89,7 @@ export type RegistryEgressAuthority = DockerWorkloadEgressAuthority<MitmProxy, R
 export type PackageEgressAuthority = DockerWorkloadEgressAuthority<
   PackageEgressProxy,
   import('./package-egress-ledger.js').PackageEgressLedgerSnapshot
->;
+> & { readonly listenTarget: DockerWorkloadEgressListenTarget };
 
 interface ResolvedRegistryEgress {
   readonly options: MitmProxyOptions;
@@ -105,6 +109,12 @@ export interface CreateDockerWorkloadEgressListenersOptions {
   readonly outboundTransport: OutboundTransport;
   /** Required when the workload admits registry image ingress. */
   readonly registryListen?: DockerWorkloadEgressListenTarget;
+  /** Required only for strict package mode. */
+  readonly packageListen?: DockerWorkloadEgressListenTarget;
+  /** Optional TCP source admission shared by the registry and package authorities. */
+  readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+  /** Exact per-bundle credential for the Docker Desktop TCP hop. */
+  readonly requiredProxyAuthorization?: string;
   /** Optional ordinary package policy, resolved exactly once by the caller. */
   readonly packagePolicy?: PackageEgressPolicy;
   /** Required only for strict package mode. */
@@ -122,9 +132,9 @@ export function resolveDockerWorkloadEgressListenerOptions(
   const { workload } = options;
   if (!workload.enabled || workload.networkAccess === 'offline') return undefined;
   const registry = registryEgressListenerOptions(options).options;
-  return workload.networkAccess === 'images'
-    ? { networkAccess: 'images', registry }
-    : { networkAccess: 'packages', registry, packages: true };
+  if (workload.networkAccess === 'images') return { networkAccess: 'images', registry };
+  requiredListenTarget(options.packageListen, 'package egress');
+  return { networkAccess: 'packages', registry, packages: true };
 }
 
 /**
@@ -150,13 +160,19 @@ export function createDockerWorkloadEgressListeners(
   if (options.packageAuditLogPath === undefined) {
     throw new Error('package egress is enabled but no per-bundle audit path was supplied');
   }
+  const packageListen = requiredListenTarget(options.packageListen, 'package egress');
   const packageListener = createPackageEgressProxy({
     ca: options.ca,
     auditLogPath: options.packageAuditLogPath,
     ...(options.packagePolicy === undefined ? {} : { policy: options.packagePolicy }),
+    ...(options.allowRemoteAddress === undefined ? {} : { allowRemoteAddress: options.allowRemoteAddress }),
+    ...(options.requiredProxyAuthorization === undefined
+      ? {}
+      : { requiredProxyAuthorization: options.requiredProxyAuthorization }),
   });
   const packages: PackageEgressAuthority = {
     listener: packageListener,
+    listenTarget: packageListen,
     snapshot: () => packageListener.snapshot,
   };
   return { networkAccess: 'packages', registry, packages };
@@ -185,6 +201,10 @@ function registryEgressListenerOptions(options: CreateDockerWorkloadEgressListen
       registryEgress: {
         guard,
       },
+      ...(options.allowRemoteAddress === undefined ? {} : { allowRemoteAddress: options.allowRemoteAddress }),
+      ...(options.requiredProxyAuthorization === undefined
+        ? {}
+        : { requiredProxyAuthorization: options.requiredProxyAuthorization }),
     },
   };
 }
@@ -193,6 +213,14 @@ function listenOptions(
   target: DockerWorkloadEgressListenTarget | undefined,
   label: string,
 ): Pick<MitmProxyOptions, 'socketPath' | 'listenPort'> {
-  if (target === undefined) throw new Error(`${label} is enabled but no listen target was supplied`);
+  target = requiredListenTarget(target, label);
   return target.socketPath !== undefined ? { socketPath: target.socketPath } : { listenPort: target.listenPort };
+}
+
+function requiredListenTarget(
+  target: DockerWorkloadEgressListenTarget | undefined,
+  label: string,
+): DockerWorkloadEgressListenTarget {
+  if (target === undefined) throw new Error(`${label} is enabled but no listen target was supplied`);
+  return target;
 }

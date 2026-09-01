@@ -364,6 +364,9 @@ function isAtLeastMinimumVersion(major: number, minor: number, patch: number): b
  * wiring bug, not a portable request.
  */
 export function buildAppleCreateArgs(config: DockerContainerConfig): string[] {
+  if (config.trustedCreateOptions !== undefined) {
+    throw new Error('apple-container does not support Docker-only trusted create options');
+  }
   if (config.extraHosts && config.extraHosts.length > 0) {
     throw new Error('apple-container does not support extra host mappings (--add-host)');
   }

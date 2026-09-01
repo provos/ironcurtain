@@ -298,13 +298,34 @@ func run(argv, env []string, policy runtimePolicy, exec execFunc) error {
 }
 
 func handoffRunc(argv, env []string, policy runtimePolicy, exec execFunc) error {
-	execArgv := make([]string, 0, len(argv)+1)
+	execArgv := make([]string, 0, len(argv)+2)
 	execArgv = append(execArgv, policy.realRuncPath)
 	execArgv = append(execArgv, argv...)
+	execArgv = ensureNoNewKeyring(execArgv)
 	if err := exec(policy.realRuncPath, execArgv, env); err != nil {
 		return fmt.Errorf("exec pinned runc: %w", err)
 	}
 	return errors.New("pinned runc unexpectedly returned")
+}
+
+// Keep the compatibility behavior in the common build-trust runtime so every
+// backend that selects it composes trust injection with the same runc handoff.
+func ensureNoNewKeyring(argv []string) []string {
+	for index, argument := range argv {
+		if argument != "create" && argument != "run" {
+			continue
+		}
+		for _, trailing := range argv[index+1:] {
+			if trailing == "--no-new-keyring" {
+				return argv
+			}
+		}
+		withFlag := make([]string, 0, len(argv)+1)
+		withFlag = append(withFlag, argv[:index+1]...)
+		withFlag = append(withFlag, "--no-new-keyring")
+		return append(withFlag, argv[index+1:]...)
+	}
+	return argv
 }
 
 func qualifiedBuildkitBundle(argv []string, policy runtimePolicy) (string, error) {

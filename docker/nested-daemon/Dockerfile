@@ -5,7 +5,8 @@ FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae538
 WORKDIR /src
 COPY runtime-shim/main.go ./main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/runc ./main.go \
-    && install -d -o 1000 -g 1000 -m 0700 /out/api
+    && install -d -o 1000 -g 1000 -m 0700 /out/api \
+    && install -d -o 0 -g 0 -m 0755 /out/build-trust /out/docker-toolchain
 
 # The stock rootless image is input bytes only. A scratch final stage clears
 # its inherited anonymous VOLUME declarations and exposed TCP ports so every
@@ -21,6 +22,13 @@ COPY --from=stock / /
 # the rootless UID without an initializer container or CAP_CHOWN.
 COPY --from=shim-build --chown=1000:1000 --chmod=0700 /out/api/ /run/ironcurtain-docker/
 COPY --from=shim-build --chown=0:0 --chmod=0555 /out/runc /usr/local/lib/ironcurtain/runc
+# The package-build profile reuses the same build-trust runtime as Apple.
+# Keep its byte-identical real runc at the common path expected by that
+# wrapper; the wrapper and per-session public trust files are mounted only in
+# package mode.
+COPY --from=shim-build /out/build-trust/ /opt/ironcurtain-build-trust/
+COPY --from=shim-build /out/docker-toolchain/ /usr/local/lib/ironcurtain-docker/bin/
+COPY --from=stock --chown=0:0 --chmod=0755 /usr/local/bin/runc /usr/local/lib/ironcurtain-docker/bin/runc
 
 ARG IRONCURTAIN_BUILD_HASH_SCHEMA=""
 ARG IRONCURTAIN_BUILD_HASH=""

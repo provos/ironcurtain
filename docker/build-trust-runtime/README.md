@@ -1,16 +1,18 @@
 # Build trust runtime
 
-This package is the hardened `runc` interposer for admitted Apple nested-Docker sessions with
+This package is the hardened `runc` interposer for admitted nested-Docker sessions with
 `networkAccess: packages`. The lifecycle verifies the checked package manifest, stages the wrapper and
-its immutable per-bundle contract before dockerd starts, selects it only on the private daemon's PATH,
-and runs a no-network BuildKit canary before releasing the agent. Other network modes stage no wrapper
-or trust source.
+its immutable per-bundle contract before dockerd starts, selects it only for the private daemon, and
+runs a no-network BuildKit canary before releasing the agent. Other network modes stage no wrapper or
+trust source.
 
 The wrapper recognizes the frozen embedded-BuildKit `runc run` argv, reads the immutable
 contract at `/opt/ironcurtain-build-trust/build-trust-contract.json`, verifies the exact mode, size, effective
 read-only backing, and digest of the real-runc and public-source bytes named by that contract, and injects read-only trust mounts
-beneath the OCI `/dev` tmpfs. All other supported runc operations are handed to the absolute pinned
-real-runc path without shell evaluation.
+beneath the OCI `/dev` tmpfs. Before every `create` or `run` handoff, it idempotently adds
+`--no-new-keyring`; this keeps the compatibility behavior shared by Apple and Docker Desktop instead of
+requiring a backend-specific package-mode wrapper. All supported runc operations are handed to the
+absolute pinned real-runc path without shell evaluation.
 
 The selected image owns that pinned real-runc inode as root:root. The same inode is observed as the
 overflow pair 65534:65534 inside the RootlessKit child where BuildKit invokes the wrapper. The contract

@@ -46,6 +46,7 @@ import { beginCaptureExchange, createResponseCaptureInlet, type CaptureExchangeH
 import { createDirectOutboundTransport, createGuardedLookup, type OutboundTransport } from './outbound-transport.js';
 import { connectionNominatedHeaderNames, HOP_BY_HOP_HEADERS } from './hop-by-hop-headers.js';
 import { handleRegistryEgressRequest, type RegistryEgressGuard } from './registry-egress-proxy.js';
+import { consumeProxyAuthorization } from './proxy-authorization.js';
 import {
   MetricsAttributionRegistry,
   parseMetricsProxyAuthorization,
@@ -241,6 +242,8 @@ export interface MitmProxyOptions {
    * (see src/docker/network-topology.ts). No effect in UDS mode.
    */
   readonly allowRemoteAddress?: (remoteAddress: string | undefined) => boolean;
+  /** Exact per-bundle credential required on Docker Desktop's shared host-gateway hop. */
+  readonly requiredProxyAuthorization?: string;
   /**
    * Initial session ID for token stream routing. When provided, token
    * events extracted from LLM API endpoints are published into the
@@ -1895,6 +1898,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   }
 
   outerServer.on('request', (req, res) => {
+    if (!consumeProxyAuthorization(req, options.requiredProxyAuthorization)) {
+      res.writeHead(407, { 'Content-Type': 'text/plain', Connection: 'close' });
+      res.end('Proxy Authentication Required');
+      return;
+    }
     // Side-effect-free round-trip probe for the macOS Docker sidecar. This
     // proves that traffic reached the host proxy, not merely the sidecar's
     // listening socket. The reserved host is never forwarded upstream.
@@ -1945,6 +1953,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   });
 
   outerServer.on('connect', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    if (!consumeProxyAuthorization(req, options.requiredProxyAuthorization)) {
+      clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+      return;
+    }
     const url = req.url ?? '';
     const registryAuthority = listenerMode.kind === 'registry-egress' ? parseRegistryConnectAuthority(url) : undefined;
     const colonIndex = url.lastIndexOf(':');
@@ -2130,6 +2142,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // through the proxy, the outer server emits an 'upgrade' event instead
   // of routing through the normal 'request' handler.
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    if (!consumeProxyAuthorization(req, options.requiredProxyAuthorization)) {
+      clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+      return;
+    }
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     const isWildcardEligible = passthroughEligible && !!parsed && allowAllHosts && !isKnownStaticHost(parsed.hostname);
     if (!passthroughEligible || !parsed || (!passthroughHosts.has(parsed.hostname) && !isWildcardEligible)) {

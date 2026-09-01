@@ -52,9 +52,10 @@ async function bringUp(
   });
   runtime.setLeasePath(handle.leasePath);
   await handle.attestWatchdog();
-  const grant = handle.requestOuterResource('container', 'nested-daemon');
+  const requestedName = 'nested-daemon-test';
+  const grant = handle.precommitOuterResource({ kind: 'container', role: 'nested-daemon', requestedName });
   const containerId = await runtime.runtime.create({
-    name: grant.requestedName,
+    name: requestedName,
     image: 'ironcurtain-nested-daemon',
     mounts: [],
     network: 'none',
@@ -64,7 +65,7 @@ async function bringUp(
   });
   grant.observed(containerId);
   await handle.activate();
-  return { handle, containerId, requestedName: grant.requestedName };
+  return { handle, containerId, requestedName };
 }
 
 describe('Docker-workload teardown (§8.3 order)', () => {

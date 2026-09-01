@@ -84,14 +84,15 @@ describe('Docker-workload admission (§8.2 order)', () => {
     handle.assertWatchdogFresh();
     expect(runtime.events).toEqual([]);
 
-    const grant = handle.requestOuterResource('container', 'nested-daemon');
+    const requestedName = 'nested-daemon-test';
+    const grant = handle.precommitOuterResource({ kind: 'container', role: 'nested-daemon', requestedName });
     const ledgered = loadDockerWorkloadLease(handle.leasePath).resources;
     expect(ledgered).toHaveLength(1);
-    expect(ledgered[0]).toMatchObject({ requestedName: grant.requestedName, observedId: null });
+    expect(ledgered[0]).toMatchObject({ requestedName, observedId: null });
     expect(runtime.events).toEqual([]);
 
     const containerId = await runtime.runtime.create({
-      name: grant.requestedName,
+      name: requestedName,
       image: 'ironcurtain-nested-daemon',
       mounts: [],
       network: 'none',
@@ -99,7 +100,7 @@ describe('Docker-workload admission (§8.2 order)', () => {
       command: [],
       labels: grant.labels,
     });
-    grant.observed(containerId, { args: ['create', grant.requestedName] });
+    grant.observed(containerId, { args: ['create', requestedName] });
     expect(loadDockerWorkloadLease(handle.leasePath).resources[0].observedId).toBe(containerId);
 
     await runtime.runtime.start(containerId);
@@ -145,7 +146,11 @@ describe('Docker-workload admission (§8.2 order)', () => {
     const supervisor = createFakeSupervisor({ clock: clock.clock });
     const handle = await admitDockerWorkloadBundle(baseOptions(clock, runtime, supervisor));
     await handle.attestWatchdog();
-    handle.requestOuterResource('container', 'nested-daemon');
+    handle.precommitOuterResource({
+      kind: 'container',
+      role: 'nested-daemon',
+      requestedName: 'nested-daemon-test',
+    });
     await expect(handle.activate()).rejects.toThrow(/before every requested outer resource is observed/u);
   });
 
@@ -168,9 +173,10 @@ describe('Docker-workload admission (§8.2 order)', () => {
     const handle = await admitDockerWorkloadBundle(baseOptions(clock, runtime, supervisor));
     runtime.setLeasePath(handle.leasePath);
     await handle.attestWatchdog();
-    const grant = handle.requestOuterResource('container', 'nested-daemon');
+    const requestedName = 'nested-daemon-test';
+    const grant = handle.precommitOuterResource({ kind: 'container', role: 'nested-daemon', requestedName });
     const id = await runtime.runtime.create({
-      name: grant.requestedName,
+      name: requestedName,
       image: 'nested-daemon',
       mounts: [],
       network: 'none',

@@ -66,14 +66,14 @@ OUTER_PACKAGE_RESPONSE_LIMIT = 512 * 1024
 PACKAGE_SHIM = Path("/usr/local/sbin/docker")
 PACKAGE_RUNC = Path("/usr/local/sbin/runc")
 REAL_RUNC = Path("/usr/local/lib/ironcurtain-docker/bin/runc")
-PACKAGE_CONFIG = Path("/run/ironcurtain-docker/package-build-client/config.json")
-PACKAGE_BUILDX_STATE = Path("/run/ironcurtain-docker/package-buildx")
+PACKAGE_CONFIG = Path("/run/ironcurtain-package-build/client/config.json")
+PACKAGE_BUILDX_STATE = Path("/run/ironcurtain-package-build/buildx")
 PACKAGE_CONTRACT_PARENT = Path("/opt/ironcurtain-build-trust")
 PACKAGE_CONTRACT = Path("/opt/ironcurtain-build-trust/build-trust-contract.json")
 PACKAGE_APT_CONFIG = Path("/opt/ironcurtain-build-trust/apt.conf")
 AGENT_CA_CERT = Path("/opt/ironcurtain-build-trust/ca-cert.pem")
 AGENT_CA_BUNDLE = Path("/opt/ironcurtain-build-trust/ca-bundle.pem")
-PACKAGE_RUNC_SHA256 = "d17e334a07d82df0ce25b8da44e60591ca7916cfa53bd941a523410555c74c91"
+PACKAGE_RUNC_SHA256 = "34be777c92032e4bb63f7c467e396e0b9c35d4bf981f3b54a434d09b608c370d"
 REAL_RUNC_SHA256 = "f0ed2d355945fe2697f11f89773e07b48de0ef239962c4a0e0ae900161a23b12"
 REAL_RUNC_SIZE = 16_641_104
 

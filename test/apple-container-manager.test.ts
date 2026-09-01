@@ -267,6 +267,17 @@ describe('buildAppleCreateArgs', () => {
     expect(() => buildAppleCreateArgs({ ...sampleConfig, ipv4Address: '172.31.44.2' })).toThrow(/static IPv4/u);
   });
 
+  it('throws on Docker-only trusted create controls', () => {
+    expect(() =>
+      buildAppleCreateArgs({
+        ...sampleConfig,
+        trustedCreateOptions: {
+          devices: [{ source: '/dev/net/tun', target: '/dev/net/tun', permissions: 'rwm' }],
+        },
+      }),
+    ).toThrow(/Docker-only trusted create options/u);
+  });
+
   it("emits '--network none' for the uds topology", () => {
     const args = buildAppleCreateArgs({ ...sampleConfig, network: 'none' });
     const idx = args.indexOf('--network');

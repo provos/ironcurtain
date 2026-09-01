@@ -305,6 +305,17 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
     ];
     args.push('--mount', options.join(','));
   }
+  for (const device of trusted?.devices ?? []) {
+    if (
+      !device.source.startsWith('/') ||
+      !device.target.startsWith('/') ||
+      device.source.includes(':') ||
+      device.target.includes(':')
+    ) {
+      throw new Error('trusted device mappings require colon-free absolute source and target paths');
+    }
+    args.push('--device', `${device.source}:${device.target}:${device.permissions}`);
+  }
   for (const tmpfs of trusted?.tmpfs ?? []) {
     args.push('--tmpfs', tmpfs);
   }
@@ -821,6 +832,10 @@ export function createDockerManager(
           labels: stringRecord(config.Labels),
         };
       });
+    },
+
+    async inspectContainerRaw(nameOrId: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+      return (await inspectDockerObjects(exec, 'container', [nameOrId])).at(0);
     },
 
     async removeNetwork(name: string): Promise<void> {

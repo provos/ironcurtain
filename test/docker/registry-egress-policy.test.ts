@@ -82,12 +82,33 @@ describe('authorizes a Docker Hub library/node base-image pull (frozen manifest)
     const authorized = authorizeValidatedRegistryEgressRequest(frozen, {
       method: 'GET',
       url: 'https://registry-1.docker.io/v2/library/node/manifests/22-trixie',
+      headers: {
+        accept: 'application/vnd.oci.image.manifest.v1+json',
+        baggage: 'build-id=client-controlled',
+        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+        tracestate: 'vendor=client-controlled',
+        'user-agent': 'buildkit/v0.26',
+      },
     });
     expect(authorized.operation).toBe('manifest-pull');
     expect(authorized.originId).toBe('docker-hub-registry');
     expect(authorized.repository).toBe('library/node');
     expect(authorized.reference).toBe('22-trixie');
     expect(authorized.requestedDigest).toBeUndefined();
+    expect(authorized.headers).toEqual({
+      accept: 'application/vnd.oci.image.manifest.v1+json',
+      'user-agent': 'buildkit/v0.26',
+    });
+  });
+
+  it('still denies unreviewed metadata instead of treating it as tracing telemetry', () => {
+    expect(() =>
+      authorizeValidatedRegistryEgressRequest(frozen, {
+        method: 'GET',
+        url: 'https://registry-1.docker.io/v2/library/node/manifests/22-trixie',
+        headers: { 'x-buildkit-metadata': 'client-controlled' },
+      }),
+    ).toThrow(/header is not allowed/u);
   });
 
   it('authorizes a by-digest manifest pull and records the requested digest as provenance', () => {

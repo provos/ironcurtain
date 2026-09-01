@@ -14,18 +14,28 @@ import {
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
   getDockerBuildShimStagingContract,
 } from '../../src/docker/docker-build-shim.js';
+import {
+  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+  APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+} from '../../src/docker-workload/apple-vm-daemon.js';
 
 const state = vi.hoisted<{
   infrastructure: unknown;
   startAppleVmDockerWorkload: ReturnType<typeof vi.fn<(options: unknown) => Promise<void>>>;
   execPty: ReturnType<typeof vi.fn<(containerId: string, command: readonly string[]) => Promise<number>>>;
   createdConfigs: DockerContainerConfig[];
+  networkConnections: Array<{ networkName: string; containerId: string }>;
+  lifecycleEvents: string[];
+  destroyedResources: unknown;
   prepareOptions: unknown;
 }>(() => ({
   infrastructure: undefined,
   startAppleVmDockerWorkload: vi.fn<(options: unknown) => Promise<void>>(),
   execPty: vi.fn<(containerId: string, command: readonly string[]) => Promise<number>>(),
   createdConfigs: [],
+  networkConnections: [],
+  lifecycleEvents: [],
+  destroyedResources: undefined,
   prepareOptions: undefined,
 }));
 
@@ -76,11 +86,14 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     return state.infrastructure;
   },
   buildAgentUidRemap: () => ({}),
+  buildDockerDesktopTransportCreateLimits: () => ({}),
+  buildNestedDockerAgentTrustedCreateOptions: (namedVolumeMounts: readonly unknown[]) =>
+    namedVolumeMounts.length === 0 ? undefined : { namedVolumeMounts },
   buildUdsSocketMounts: () => [],
   buildDockerWorkloadEgressMounts: (infra: {
     dockerWorkloadEgress?: { registry?: { socketPath: string }; packages?: { socketPath: string } };
   }) => [
-    ...(infra.dockerWorkloadEgress?.registry
+    ...(infra.dockerWorkloadEgress?.registry?.socketPath
       ? [
           {
             source: infra.dockerWorkloadEgress.registry.socketPath,
@@ -89,7 +102,7 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
           },
         ]
       : []),
-    ...(infra.dockerWorkloadEgress?.packages
+    ...(infra.dockerWorkloadEgress?.packages?.socketPath
       ? [
           {
             source: infra.dockerWorkloadEgress.packages.socketPath,
@@ -108,8 +121,12 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     infra.dockerBuildShim === undefined
       ? []
       : infra.dockerBuildShim.artifacts.map(({ source, target, readonly }) => ({ source, target, readonly })),
-  resolveNestedDockerAgentWiring: (infra: { dockerWorkload?: unknown }) => ({
-    appleNestedDaemon: infra.dockerWorkload,
+  resolveNestedDockerAgentWiring: (infra: {
+    dockerWorkload?: unknown;
+    runtimeKind: 'docker' | 'apple-container';
+    dockerDesktopAgentAccess?: { agentApiMount: unknown };
+  }) => ({
+    appleNestedDaemon: infra.runtimeKind === 'apple-container' ? infra.dockerWorkload : undefined,
     env:
       infra.dockerWorkload === undefined
         ? {}
@@ -117,11 +134,15 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
             DOCKER_HOST: 'unix:///run/ironcurtain-docker/docker.sock',
             IRONCURTAIN_DOCKER_NETWORK: 'ironcurtain',
           },
-    namedVolumeMounts: [],
+    namedVolumeMounts:
+      infra.runtimeKind === 'docker' && infra.dockerDesktopAgentAccess !== undefined
+        ? [infra.dockerDesktopAgentAccess.agentApiMount]
+        : [],
   }),
   resolveNestedDockerOuterAgentImage: (_infra: unknown, image: string) => image,
   activateNestedDockerWorkload: async (options: {
     runtime: unknown;
+    runtimeKind: 'docker' | 'apple-container';
     containerId: string;
     dockerWorkload?: unknown;
     bootstrap?: unknown;
@@ -132,7 +153,12 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     };
     dockerBuildShim?: { contract: unknown; buildTrustCanary: unknown };
   }) => {
-    if (options.dockerWorkload === undefined || options.bootstrap === undefined) return;
+    if (options.dockerWorkload === undefined) return;
+    if (options.runtimeKind === 'docker') {
+      state.lifecycleEvents.push('activate');
+      return;
+    }
+    if (options.bootstrap === undefined) return;
     await state.startAppleVmDockerWorkload({
       runtime: options.runtime,
       containerId: options.containerId,
@@ -160,9 +186,9 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     await egress?.registry?.listener.stop();
   },
   createLedgeredAgentContainer: async (options: {
-    deterministicName: string;
+    requestedName: string;
     create(name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string>;
-  }) => options.create(options.deterministicName, undefined),
+  }) => options.create(options.requestedName, undefined),
   dockerWorkloadSessionMetadata: vi.fn(() => ({
     leaseId: 'lease-pty-ordering',
     generation: 'generation-pty-ordering',
@@ -176,10 +202,21 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
   checkDockerContainerWritableStorage: vi.fn(async () => {}),
   checkHostOnlyConnectivity: vi.fn(async () => {}),
   checkInternalNetworkConnectivity: vi.fn(async () => {}),
+  attachDockerDesktopAgentEgressNetwork: async (
+    infra: {
+      docker: { connectNetwork(networkName: string, containerId: string): Promise<void> };
+      dockerDesktopAgentAccess?: { outerEgressNetworkName?: string };
+    },
+    containerId: string,
+  ) => {
+    const networkName = infra.dockerDesktopAgentAccess?.outerEgressNetworkName;
+    if (networkName !== undefined) await infra.docker.connectNetwork(networkName, containerId);
+  },
 }));
 
 vi.mock('../../src/docker/container-lifecycle.js', () => ({
   destroyBundleOuterResources: async (options: { dockerWorkload?: { teardown(): Promise<void> } }) => {
+    state.destroyedResources = options;
     await options.dockerWorkload?.teardown();
   },
 }));
@@ -213,6 +250,9 @@ describe('Apple nested Docker PTY startup ordering', () => {
     originalHome = process.env.IRONCURTAIN_HOME;
     process.env.IRONCURTAIN_HOME = homeDir;
     state.createdConfigs.length = 0;
+    state.networkConnections.length = 0;
+    state.lifecycleEvents.length = 0;
+    state.destroyedResources = undefined;
     state.startAppleVmDockerWorkload.mockReset();
     state.execPty.mockReset();
     state.execPty.mockResolvedValue(0);
@@ -235,19 +275,46 @@ describe('Apple nested Docker PTY startup ordering', () => {
 
   function installInfrastructure(
     workload: { status: string; teardown(): Promise<void> },
-    options: { networkAccess?: 'offline' | 'images' | 'packages' } = {},
+    options: {
+      networkAccess?: 'offline' | 'images' | 'packages';
+      runtimeKind?: 'apple-container' | 'docker';
+      failAgentEgressConnect?: boolean;
+    } = {},
   ): void {
+    const runtimeKind = options.runtimeKind ?? 'apple-container';
     const buildShimContract =
-      options.networkAccess === 'packages' ? getDockerBuildShimStagingContract('packages') : undefined;
+      options.networkAccess === 'packages'
+        ? getDockerBuildShimStagingContract(
+            'packages',
+            APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+            APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+          )
+        : undefined;
     const docker = {
       removeStaleContainer: vi.fn(async () => {}),
       create: vi.fn(async (config: DockerContainerConfig) => {
         state.createdConfigs.push(config);
-        return 'apple-container-id';
+        if (runtimeKind === 'docker') state.lifecycleEvents.push(`create:${config.name}`);
+        return runtimeKind === 'apple-container' ? 'apple-container-id' : `container-${state.createdConfigs.length}`;
       }),
-      start: vi.fn(async () => {}),
+      start: vi.fn(async (containerId: string) => {
+        if (runtimeKind === 'docker') state.lifecycleEvents.push(`start:${containerId}`);
+      }),
       exec: vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' })),
       execPty: state.execPty,
+      imageExists: vi.fn(async () => true),
+      pullImage: vi.fn(async () => {}),
+      createNetwork: vi.fn(async () => {}),
+      removeNetwork: vi.fn(async () => {}),
+      networkExists: vi.fn(async () => false),
+      connectNetwork: vi.fn(async (networkName: string, containerId: string) => {
+        state.networkConnections.push({ networkName, containerId });
+        state.lifecycleEvents.push(`connect:${containerId}:${networkName}`);
+        if (options.failAgentEgressConnect === true && networkName === 'ic-dw-egress-pty') {
+          throw new Error('scripted agent egress attachment failure');
+        }
+      }),
+      getContainerIp: vi.fn(async () => '172.31.44.6'),
     };
     state.infrastructure = {
       docker,
@@ -258,14 +325,18 @@ describe('Apple nested Docker PTY startup ordering', () => {
               networkAccess: options.networkAccess,
               registry: {
                 listener: { stop: vi.fn(async () => {}) },
-                socketPath: join(socketsDir, 'registry-egress.sock'),
+                ...(runtimeKind === 'docker'
+                  ? { port: 31_081 }
+                  : { socketPath: join(socketsDir, 'registry-egress.sock') }),
                 snapshot: () => ({ attempts: 0, totalBytes: 0, activeRequests: 0 }),
               },
               ...(options.networkAccess === 'packages'
                 ? {
                     packages: {
                       listener: { stop: vi.fn(async () => {}) },
-                      socketPath: join(socketsDir, 'package-egress.sock'),
+                      ...(runtimeKind === 'docker'
+                        ? { port: 31_082 }
+                        : { socketPath: join(socketsDir, 'package-egress.sock') }),
                       snapshot: () => ({
                         attempts: 0,
                         clientAttempts: 0,
@@ -338,19 +409,48 @@ describe('Apple nested Docker PTY startup ordering', () => {
                 aptConfigSha256: '3'.repeat(64),
               },
             },
-      dockerWorkloadBootstrap: {
-        hostCatalogDirectory: homeDir,
-        guestCatalogDirectory: '/run/ironcurtain-catalog',
-        outerAppleCatalogPath: join(homeDir, 'apple-catalog.json'),
-        innerDockerCatalogPath: join(homeDir, 'docker-catalog.json'),
-        selectedImageLogicalName: 'ironcurtain-claude-code:latest',
-        clientToolchainManifestPath: join(homeDir, 'toolchain.json'),
+      dockerWorkloadBootstrap:
+        runtimeKind === 'apple-container'
+          ? {
+              hostCatalogDirectory: homeDir,
+              guestCatalogDirectory: '/run/ironcurtain-catalog',
+              outerAppleCatalogPath: join(homeDir, 'apple-catalog.json'),
+              innerDockerCatalogPath: join(homeDir, 'docker-catalog.json'),
+              selectedImageLogicalName: 'ironcurtain-claude-code:latest',
+              clientToolchainManifestPath: join(homeDir, 'toolchain.json'),
+            }
+          : undefined,
+      dockerDesktopAgentAccess:
+        runtimeKind === 'docker'
+          ? {
+              dockerHost: 'unix:///run/ironcurtain-docker/docker.sock',
+              networkName: 'ironcurtain',
+              outerEgressNetworkName: 'ic-dw-egress-pty',
+              agentApiMount: {
+                name: 'ic-desktop-api-pty',
+                target: '/run/ironcurtain-docker',
+                readonly: true,
+                noCopy: true,
+              },
+            }
+          : undefined,
+      dockerDesktopResources:
+        runtimeKind === 'docker'
+          ? {
+              sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: 352 },
+              transport: { memoryMb: 64, cpus: 0.25, pidsLimit: 32 },
+              agent: { memoryMb: 960, cpus: 0.75, pidsLimit: 128 },
+            }
+          : undefined,
+      proxy: {
+        socketPath: join(socketsDir, 'mcp.sock'),
+        ...(runtimeKind === 'docker' ? { port: 31_080 } : {}),
+        stop: vi.fn(async () => {}),
       },
-      proxy: { socketPath: join(socketsDir, 'mcp.sock'), stop: vi.fn(async () => {}) },
       mitmProxy: { stop: vi.fn(async () => {}) },
-      useTcp: false,
-      runtimeKind: 'apple-container',
-      topology: 'uds',
+      useTcp: runtimeKind === 'docker',
+      runtimeKind,
+      topology: runtimeKind === 'docker' ? 'tcp-sidecar' : 'uds',
       setTokenSessionId: vi.fn(),
       beginCaptureSession: vi.fn(),
       endCaptureSession: vi.fn(async () => {}),
@@ -366,7 +466,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
       socketsDir,
       systemPrompt: 'test system prompt',
       image: 'ironcurtain-claude-code:latest',
-      mitmAddr: { socketPath: join(socketsDir, 'mitm.sock') },
+      mitmAddr: runtimeKind === 'docker' ? { port: 31_083 } : { socketPath: join(socketsDir, 'mitm.sock') },
     };
   }
 
@@ -466,7 +566,11 @@ describe('Apple nested Docker PTY startup ordering', () => {
     expect(state.startAppleVmDockerWorkload).toHaveBeenCalledWith(
       expect.objectContaining({
         networkAccess: 'packages',
-        dockerBuildShim: getDockerBuildShimStagingContract('packages'),
+        dockerBuildShim: getDockerBuildShimStagingContract(
+          'packages',
+          APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+          APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+        ),
       }),
     );
     expect(state.createdConfigs[0].env).not.toHaveProperty('DOCKER_CONFIG');
@@ -533,7 +637,11 @@ describe('Apple nested Docker PTY startup ordering', () => {
     expect(state.startAppleVmDockerWorkload).toHaveBeenCalledWith(
       expect.objectContaining({
         networkAccess: 'packages',
-        dockerBuildShim: getDockerBuildShimStagingContract('packages'),
+        dockerBuildShim: getDockerBuildShimStagingContract(
+          'packages',
+          APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+          APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+        ),
       }),
     );
   });
@@ -571,5 +679,80 @@ describe('Apple nested Docker PTY startup ordering', () => {
     );
     expect(state.createdConfigs[0].env).not.toHaveProperty('DOCKER_CONFIG');
     expect(state.createdConfigs[0].env).not.toHaveProperty('BUILDX_CONFIG');
+  });
+
+  it('attaches the PTY agent to ledgered Desktop egress before start while retaining the ordinary transport network', async () => {
+    const workload = { status: 'admitted', teardown: vi.fn(async () => {}) };
+    installInfrastructure(workload, { runtimeKind: 'docker', networkAccess: 'packages' });
+    const attach = vi.fn<PtyAttachFn>(async () => 0);
+
+    await runPtySession({
+      config: config(),
+      mode: { kind: 'docker', agent: 'claude-code' },
+      workspacePath: homeDir,
+      attach,
+    });
+
+    expect(state.createdConfigs).toHaveLength(2);
+    const [transport, agent] = state.createdConfigs;
+    const ordinaryNetwork = agent.network;
+    expect(transport.network).toBe('bridge');
+    expect(ordinaryNetwork).toMatch(/^ironcurtain-/u);
+    expect(state.networkConnections).toEqual([
+      { networkName: ordinaryNetwork, containerId: 'container-1' },
+      { networkName: 'ic-dw-egress-pty', containerId: 'container-2' },
+    ]);
+    expect(state.lifecycleEvents).toEqual([
+      expect.stringMatching(/^create:ironcurtain-sidecar-/u),
+      `start:container-1`,
+      `connect:container-1:${ordinaryNetwork}`,
+      expect.stringMatching(/^create:ironcurtain-pty-/u),
+      `connect:container-2:ic-dw-egress-pty`,
+      `start:container-2`,
+      'activate',
+    ]);
+    expect(transport.command.join(' ').replaceAll('\\', '')).toContain(`TCP:${agent.name}:19000`);
+    expect(attach).toHaveBeenCalledWith(
+      expect.objectContaining({
+        containerId: 'container-2',
+        target: { host: 'localhost', port: expect.any(Number) },
+      }),
+    );
+    expect(state.destroyedResources).toEqual(
+      expect.objectContaining({
+        containerId: 'container-2',
+        sidecarContainerId: 'container-1',
+        networkName: ordinaryNetwork,
+      }),
+    );
+  });
+
+  it('cleans up the PTY agent and ordinary transport resources when egress attachment fails', async () => {
+    const workload = { status: 'admitted', teardown: vi.fn(async () => {}) };
+    installInfrastructure(workload, {
+      runtimeKind: 'docker',
+      networkAccess: 'packages',
+      failAgentEgressConnect: true,
+    });
+
+    await expect(
+      runPtySession({
+        config: config(),
+        mode: { kind: 'docker', agent: 'claude-code' },
+        workspacePath: homeDir,
+        attach: async () => 0,
+      }),
+    ).rejects.toThrow(/scripted agent egress attachment failure/u);
+
+    expect(state.lifecycleEvents).not.toContain('start:container-2');
+    expect(state.lifecycleEvents).not.toContain('activate');
+    expect(workload.teardown).toHaveBeenCalledOnce();
+    expect(state.destroyedResources).toEqual(
+      expect.objectContaining({
+        containerId: 'container-2',
+        sidecarContainerId: 'container-1',
+        networkName: expect.stringMatching(/^ironcurtain-/u),
+      }),
+    );
   });
 });

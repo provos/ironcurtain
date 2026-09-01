@@ -1,52 +1,152 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   DOCKER_DESKTOP_RUNC_SHIM_PATH,
   DOCKER_DESKTOP_SIDECAR_API_ROOT,
-  DOCKER_DESKTOP_SIDECAR_DATA_MOUNT_ROOT,
   DOCKER_DESKTOP_SIDECAR_DATA_ROOT,
   DOCKER_DESKTOP_SIDECAR_DOCKER_HOST,
+  DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT,
   loadDockerDesktopP2SeccompProfile,
   parseDockerDesktopProfileCeiling,
   startDockerDesktopSidecar,
   type DockerDesktopSidecarCreateAuthority,
+  type DockerDesktopSidecarEgress,
   type DockerDesktopSidecarRuntime,
   type StartDockerDesktopSidecarOptions,
 } from '../../src/docker-workload/docker-desktop-sidecar.js';
-import {
-  APPLE_VM_DAEMON_DOCKER_HOST,
-  APPLE_VM_DAEMON_TOOLCHAIN_DIR,
-} from '../../src/docker-workload/apple-vm-daemon.js';
 import type {
   DockerContainerConfig,
   DockerExecResult,
   DockerImageInfo,
   DockerVolumeInfo,
 } from '../../src/docker/types.js';
-import { sha256Hex } from '../../src/hash.js';
+import { computeHash, sha256Hex } from '../../src/hash.js';
 import type { ExpandedOuterCreate } from '../../src/docker-workload/lifecycle-evidence.js';
+import { loadClientToolchainManifest } from '../../src/docker-workload/client-toolchain.js';
+import { getFrozenClientToolchainManifestPath } from '../../src/docker/docker-workload-paths.js';
 import {
-  createTestAppleVmDockerWorkloadBootstrap,
-  respondHealthyAppleVmDaemon,
-} from './helpers/infrastructure-harness.js';
+  DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+  DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+  DOCKER_BUILD_TRUST_CA_CERT_PATH,
+  DOCKER_BUILD_TRUST_CONTRACT_PATH,
+} from '../../src/docker/docker-build-shim.js';
+import type { PrivateDockerBootstrapObservation } from '../../src/docker-workload/private-docker.js';
 
 const SIDECAR_IMAGE_ID = `sha256:${'d'.repeat(64)}`;
 const SIDECAR_CONTAINER_ID = 'c'.repeat(64);
-const API_VOLUME_NAME = 'ic-desktop-api-test';
-const SIDECAR_NAME = 'ic-desktop-daemon-test';
+const DESKTOP_GENERATION = 'gen-desktop-test';
+const RESOURCE_SUFFIX = computeHash({ generation: DESKTOP_GENERATION }).slice(0, 16);
+const API_VOLUME_NAME = `ic-dw-daemon-api-${RESOURCE_SUFFIX}`;
+const SIDECAR_NAME = `ic-dw-nested-daemon-${RESOURCE_SUFFIX}`;
 const OWNERSHIP_LABELS = { 'com.ironcurtain.docker-workload.generation': 'gen-test' } as const;
+const OUTER_AGENT_IMAGE_ID = `sha256:${'a'.repeat(64)}`;
+const CANARY_IMAGE_ID = `sha256:${'e'.repeat(64)}`;
+const INNER_NETWORK_ID = 'f'.repeat(64);
+const CLIENT_MANIFEST = loadClientToolchainManifest(getFrozenClientToolchainManifestPath()).manifest;
+const REGISTRY_PROXY_URL = 'http://172.31.44.2:8443';
+const CA_MOUNT = {
+  source: '/host/ironcurtain/ca-bundle.pem',
+  target: '/opt/ironcurtain/ca-bundle.pem',
+  readonly: true,
+} as const;
+const BUILD_TRUST_MOUNTS = [
+  {
+    source: '/host/ironcurtain/build-trust/runc',
+    target: DOCKER_DESKTOP_RUNC_SHIM_PATH,
+    readonly: true,
+  },
+  {
+    source: '/host/ironcurtain/build-trust/build-trust-contract.json',
+    target: DOCKER_BUILD_TRUST_CONTRACT_PATH,
+    readonly: true,
+  },
+  {
+    source: '/host/ironcurtain/build-trust/ca-cert.pem',
+    target: DOCKER_BUILD_TRUST_CA_CERT_PATH,
+    readonly: true,
+  },
+  {
+    source: '/host/ironcurtain/build-trust/ca-bundle.pem',
+    target: DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
+    readonly: true,
+  },
+  {
+    source: '/host/ironcurtain/build-trust/apt.conf',
+    target: DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
+    readonly: true,
+  },
+] as const;
 
-let tempDirectory: string;
+function egressOptions(buildTrustMounts?: DockerDesktopSidecarEgress['buildTrustMounts']): DockerDesktopSidecarEgress {
+  return {
+    networkName: 'ic-dw-egress-test',
+    ipv4Address: '172.31.44.10',
+    registryProxyUrl: REGISTRY_PROXY_URL,
+    caMount: CA_MOUNT,
+    ...(buildTrustMounts === undefined ? {} : { buildTrustMounts }),
+  };
+}
 
-beforeEach(() => {
-  tempDirectory = realpathSync(mkdtempSync(join(tmpdir(), 'desktop-sidecar-')));
-});
-
-afterEach(() => {
-  rmSync(tempDirectory, { recursive: true, force: true });
-});
+function respondHealthyPrivateDocker(operation: readonly string[]): DockerExecResult {
+  if (operation.includes('info')) {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        Driver: 'vfs',
+        SecurityOptions: ['name=rootless'],
+        ServerVersion: CLIENT_MANIFEST.docker.daemonVersion,
+      }),
+      stderr: '',
+    };
+  }
+  if (operation.includes('version') && operation.includes('{{json .}}')) {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        Client: {
+          Version: CLIENT_MANIFEST.docker.cliVersion,
+          ApiVersion: CLIENT_MANIFEST.docker.clientApiVersion,
+          Os: 'linux',
+          Arch: CLIENT_MANIFEST.architecture,
+        },
+        Server: {
+          Version: CLIENT_MANIFEST.docker.daemonVersion,
+          ApiVersion: CLIENT_MANIFEST.docker.daemonApiVersion,
+          MinAPIVersion: CLIENT_MANIFEST.docker.minimumDaemonApiVersion,
+          Os: 'linux',
+          Arch: CLIENT_MANIFEST.architecture,
+        },
+      }),
+      stderr: '',
+    };
+  }
+  if (operation.includes('buildx')) {
+    return { exitCode: 0, stdout: `github.com/docker/buildx v${CLIENT_MANIFEST.buildxVersion}\n`, stderr: '' };
+  }
+  if (operation.includes('compose')) {
+    return { exitCode: 0, stdout: `${CLIENT_MANIFEST.composeVersion}\n`, stderr: '' };
+  }
+  if (operation.includes('network') && operation.includes('create')) {
+    return { exitCode: 0, stdout: `${INNER_NETWORK_ID}\n`, stderr: '' };
+  }
+  if (operation.includes('network') && operation.includes('inspect')) {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        Id: INNER_NETWORK_ID,
+        Name: 'ironcurtain',
+        Driver: 'bridge',
+        Scope: 'local',
+        Internal: true,
+        Labels: { 'com.ironcurtain.managed-workload': 'true' },
+        Containers: {},
+      }),
+      stderr: '',
+    };
+  }
+  return { exitCode: 0, stdout: '', stderr: '' };
+}
 
 interface RuntimeFixture {
   readonly runtime: DockerDesktopSidecarRuntime;
@@ -55,20 +155,30 @@ interface RuntimeFixture {
   readonly execs: (readonly string[])[];
   readonly volumeLabels: Map<string, Readonly<Record<string, string>>>;
   readonly expandedCreates: ExpandedOuterCreate[];
+  readonly bootstrapObservations: PrivateDockerBootstrapObservation[];
 }
 
 function runtimeFixture(
-  options: { readonly failBuild?: boolean; readonly failShim?: boolean; readonly wrongVolumeLabels?: boolean } = {},
+  options: {
+    readonly failBuild?: boolean;
+    readonly failShim?: boolean;
+    readonly wrongVolumeLabels?: boolean;
+    readonly wrongContainerProfile?: boolean;
+    readonly observedDevices?: readonly {
+      readonly PathOnHost: string;
+      readonly PathInContainer: string;
+      readonly CgroupPermissions: string;
+    }[];
+  } = {},
 ): RuntimeFixture {
   const events: string[] = [];
   const configs: DockerContainerConfig[] = [];
   const execs: (readonly string[])[] = [];
   const volumeLabels = new Map<string, Readonly<Record<string, string>>>();
   const expandedCreates: ExpandedOuterCreate[] = [];
+  const bootstrapObservations: PrivateDockerBootstrapObservation[] = [];
+  let canaryImageId: string | undefined;
   const runtime: DockerDesktopSidecarRuntime = {
-    async preflight(image) {
-      events.push(`preflight:${image}`);
-    },
     async inspectImage(reference): Promise<DockerImageInfo | undefined> {
       events.push(`outer-image-inspect:${reference}`);
       return {
@@ -82,6 +192,97 @@ function runtimeFixture(
       events.push('container:create');
       configs.push(config);
       return SIDECAR_CONTAINER_ID;
+    },
+    async inspectContainerRaw(id) {
+      events.push(`container:inspect:${id}`);
+      const config = configs.at(-1);
+      if (config === undefined) return undefined;
+      const trusted = config.trustedCreateOptions;
+      const namedMounts = trusted?.namedVolumeMounts ?? [];
+      const tmpfs = Object.fromEntries(
+        (trusted?.tmpfs ?? []).map((specification) => {
+          const separator = specification.indexOf(':');
+          return [specification.slice(0, separator), specification.slice(separator + 1)];
+        }),
+      );
+      return {
+        Id: id,
+        Name: `/${config.name}`,
+        Image: config.image,
+        State: { Status: 'created', Running: false },
+        Config: {
+          Image: config.image,
+          User: 'rootless',
+          WorkingDir: '/home/rootless',
+          Entrypoint: ['dockerd-entrypoint.sh'],
+          Cmd: config.command,
+          Env: [
+            'HOME=/home/rootless',
+            `DOCKER_VERSION=${CLIENT_MANIFEST.docker.cliVersion}`,
+            `DOCKER_BUILDX_VERSION=${CLIENT_MANIFEST.buildxVersion}`,
+            `DOCKER_COMPOSE_VERSION=${CLIENT_MANIFEST.composeVersion}`,
+            ...Object.entries(config.env).map(([key, value]) => `${key}=${value}`),
+          ],
+          Labels: {
+            'com.ironcurtain.docker-workload.image-role': 'nested-daemon',
+            ...config.labels,
+          },
+        },
+        HostConfig: {
+          NetworkMode: config.network,
+          Privileged: options.wrongContainerProfile === true,
+          ReadonlyRootfs: trusted?.readOnlyRootfs === true,
+          Init: true,
+          CapDrop: ['CAP_ALL'],
+          CapAdd: (config.capAdd ?? []).map((capability) => `CAP_${capability}`),
+          Memory: (config.resources?.memoryMb ?? 0) * 1024 * 1024,
+          NanoCpus: (config.resources?.cpus ?? 0) * 1_000_000_000,
+          PidsLimit: trusted?.pidsLimit,
+          PortBindings: {},
+          RestartPolicy: { Name: 'no' },
+          Binds: config.mounts.map((mount) => `${mount.source}:${mount.target}${mount.readonly ? ':ro' : ''}`),
+          Mounts: namedMounts.map((mount) => ({
+            Type: 'volume',
+            Source: mount.name,
+            Target: mount.target,
+            ReadOnly: mount.readonly === true,
+            VolumeOptions: { NoCopy: mount.noCopy === true },
+          })),
+          Tmpfs: tmpfs,
+          MaskedPaths: [],
+          ReadonlyPaths: [],
+          SecurityOpt: [`seccomp=${readFileSync(trusted?.seccompProfile ?? '', 'utf8')}`],
+          Devices:
+            options.observedDevices ??
+            (trusted?.devices ?? []).map((device) => ({
+              PathOnHost: device.source,
+              PathInContainer: device.target,
+              CgroupPermissions: device.permissions,
+            })),
+          ExtraHosts: config.network === 'none' ? null : ['host.docker.internal:host-gateway'],
+        },
+        NetworkSettings: {
+          Networks: {
+            [config.network]: {
+              IPAMConfig: config.ipv4Address === undefined ? null : { IPv4Address: config.ipv4Address },
+            },
+          },
+        },
+        Mounts: [
+          ...config.mounts.map((mount) => ({
+            Type: 'bind',
+            Source: mount.source,
+            Destination: mount.target,
+            RW: !mount.readonly,
+          })),
+          ...namedMounts.map((mount) => ({
+            Type: 'volume',
+            Name: mount.name,
+            Destination: mount.target,
+            RW: mount.readonly !== true,
+          })),
+        ],
+      };
     },
     async start(id) {
       events.push(`container:start:${id}`);
@@ -105,19 +306,28 @@ function runtimeFixture(
         if (operation[0] === 'container' && operation[1] === 'inspect') {
           return { exitCode: 1, stdout: '', stderr: `Error: No such container: ${operation.at(-1) ?? ''}` };
         }
+        if (operation[0] === 'image' && operation[1] === 'inspect') {
+          const reference = operation.at(-1);
+          const exists =
+            canaryImageId !== undefined &&
+            (reference === canaryImageId || reference?.startsWith('ironcurtain-desktop-build:') === true);
+          return exists
+            ? { exitCode: 0, stdout: `${canaryImageId}\n`, stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: `Error: No such image: ${reference ?? ''}` };
+        }
+        if (operation[0] === 'image' && operation[1] === 'rm') {
+          canaryImageId = undefined;
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
         if (operation[0] === 'run') events.push('canary:run');
         if (operation[0] === 'build') {
           events.push('canary:build');
           if (options.failBuild === true) {
             return { exitCode: 1, stdout: '', stderr: 'runc create failed: keyring denied' };
           }
+          canaryImageId = CANARY_IMAGE_ID;
         }
-        return respondHealthyAppleVmDaemon([
-          `${APPLE_VM_DAEMON_TOOLCHAIN_DIR}/docker`,
-          '--host',
-          APPLE_VM_DAEMON_DOCKER_HOST,
-          ...operation,
-        ]);
+        return respondHealthyPrivateDocker(operation);
       }
       return { exitCode: 0, stdout: '', stderr: '' };
     },
@@ -151,7 +361,7 @@ function runtimeFixture(
       volumeLabels.delete(name);
     },
   };
-  return { runtime, events, configs, execs, volumeLabels, expandedCreates };
+  return { runtime, events, configs, execs, volumeLabels, expandedCreates, bootstrapObservations };
 }
 
 function resourceAuthority(
@@ -160,29 +370,30 @@ function resourceAuthority(
 ): DockerDesktopSidecarCreateAuthority {
   return async (spec, create) => {
     events.push(`ledger:${spec.kind}:${spec.role}:${spec.launchesNestedDaemon === true}`);
-    const requestedName = spec.kind === 'volume' ? API_VOLUME_NAME : SIDECAR_NAME;
+    const requestedName = spec.requestedName;
     const created = await create(requestedName, OWNERSHIP_LABELS);
     if (created.expanded !== undefined) expandedCreates.push(created.expanded);
     events.push(`observed:${spec.kind}:${created.id}`);
-    return { id: created.id, requestedName };
+    await spec.adjudicateObserved?.(created.id);
+    return { id: created.id };
   };
 }
 
 function startOptions(fixture: RuntimeFixture): StartDockerDesktopSidecarOptions {
-  const bootstrap = createTestAppleVmDockerWorkloadBootstrap(tempDirectory);
   const events = fixture.events;
   return {
     runtime: fixture.runtime,
     sidecarImage: 'ironcurtain-nested-daemon:latest',
-    bootstrap,
+    outerAgentImageId: OUTER_AGENT_IMAGE_ID,
     resources: { memoryMb: 4096, cpus: 2, pidsLimit: 512 },
     createOuterResource: resourceAuthority(events, fixture.expandedCreates),
     activation: {
-      generation: 'gen-desktop-test',
+      generation: DESKTOP_GENERATION,
       recordDaemonReady() {
         events.push('record:daemon-ready');
       },
-      recordPrivateDockerBootstrap() {
+      recordPrivateDockerBootstrap(observation) {
+        fixture.bootstrapObservations.push(observation);
         events.push('record:private-docker');
       },
     },
@@ -220,6 +431,12 @@ describe('Docker Desktop sidecar frozen artifacts', () => {
     wrongScope.categories.mountMask.additions[0].scope = 'all-containers';
     expect(() => parseDockerDesktopProfileCeiling(wrongScope)).toThrow();
 
+    const wrongDevice = structuredClone(ceiling) as {
+      categories: { deviceAccess: { additions: Array<{ source: string }> } };
+    };
+    wrongDevice.categories.deviceAccess.additions[0].source = '/dev/kvm';
+    expect(() => parseDockerDesktopProfileCeiling(wrongDevice)).toThrow();
+
     const wrongStatus = structuredClone(ceiling) as { status: string };
     wrongStatus.status = 'qualified';
     expect(() => parseDockerDesktopProfileCeiling(wrongStatus)).toThrow();
@@ -227,7 +444,7 @@ describe('Docker Desktop sidecar frozen artifacts', () => {
 });
 
 describe('Docker Desktop sidecar lifecycle', () => {
-  it('creates the exact bounded profile and returns only after run and BuildKit canaries', async () => {
+  it('keeps the offline sidecar on network none with RootlessKit networking disabled', async () => {
     const fixture = runtimeFixture();
     const options = startOptions(fixture);
     const result = await startDockerDesktopSidecar(options);
@@ -245,6 +462,12 @@ describe('Docker Desktop sidecar lifecycle', () => {
       readiness: { driver: 'vfs', serverVersion: '29.2.1' },
       network: { name: 'ironcurtain' },
     });
+    expect(fixture.bootstrapObservations).toEqual([
+      expect.objectContaining({
+        image: { transport: 'docker-desktop-direct', outerImageId: OUTER_AGENT_IMAGE_ID },
+        network: { name: 'ironcurtain', id: INNER_NETWORK_ID },
+      }),
+    ]);
     expect(fixture.configs).toHaveLength(1);
     const config = fixture.configs[0];
     expect(config).toMatchObject({
@@ -256,7 +479,8 @@ describe('Docker Desktop sidecar lifecycle', () => {
       trustedCreateOptions: {
         namedVolumeMounts: [
           { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false, noCopy: false },
-          { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_MOUNT_ROOT, readonly: false, noCopy: true },
+          { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false, noCopy: true },
+          { name: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false, noCopy: true },
         ],
         readOnlyRootfs: true,
         securityOptions: ['systempaths=unconfined'],
@@ -269,22 +493,12 @@ describe('Docker Desktop sidecar lifecycle', () => {
       '/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000',
       '/home/rootless/.docker:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000',
     ]);
-    expect(config.mounts).toEqual([
-      {
-        source: options.bootstrap.hostArtifactDirectory,
-        target: options.bootstrap.guestArtifactDirectory,
-        readonly: true,
-      },
-    ]);
+    expect(config.mounts).toEqual([]);
     expect(fixture.expandedCreates).toHaveLength(1);
     expect(fixture.expandedCreates[0]?.mounts).toEqual([
       { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
-      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_MOUNT_ROOT, readonly: false },
-      {
-        source: options.bootstrap.hostArtifactDirectory,
-        target: options.bootstrap.guestArtifactDirectory,
-        readonly: true,
-      },
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
     ]);
     expect(config.env).toEqual({
       DOCKER_TLS_CERTDIR: '',
@@ -308,15 +522,16 @@ describe('Docker Desktop sidecar lifecycle', () => {
     ]);
     expect(config.ports).toBeUndefined();
     expect(config.extraHosts).toBeUndefined();
+    expect(config.ipv4Address).toBeUndefined();
+    expect(config.trustedCreateOptions?.devices).toBeUndefined();
 
     const build = fixture.events.indexOf('canary:build');
     const privateEvidence = fixture.events.indexOf('record:private-docker');
-    expect(fixture.events.indexOf('canary:run')).toBeGreaterThan(fixture.events.indexOf('record:daemon-ready'));
-    expect(build).toBeGreaterThan(fixture.events.indexOf('canary:run'));
-    expect(privateEvidence).toBeGreaterThan(build);
+    expect(build).toBeGreaterThan(fixture.events.indexOf('record:daemon-ready'));
+    expect(fixture.events.indexOf('canary:run')).toBeGreaterThan(build);
+    expect(privateEvidence).toBeGreaterThan(fixture.events.indexOf('canary:run'));
     expect(fixture.events).not.toContain(`container:stop:${SIDECAR_CONTAINER_ID}`);
     expect(fixture.events.slice(0, 10)).toEqual([
-      'preflight:ironcurtain-nested-daemon:latest',
       'outer-image-inspect:ironcurtain-nested-daemon:latest',
       'ledger:volume:daemon-api:false',
       `volume:create:${API_VOLUME_NAME}`,
@@ -325,10 +540,115 @@ describe('Docker Desktop sidecar lifecycle', () => {
       'ledger:container:nested-daemon:true',
       'container:create',
       `observed:container:${SIDECAR_CONTAINER_ID}`,
+      `container:inspect:${SIDECAR_CONTAINER_ID}`,
       `container:start:${SIDECAR_CONTAINER_ID}`,
     ]);
     expect(fixture.execs).toContainEqual(['/bin/sh', '-c', 'command -v runc']);
     expect(fixture.execs).toContainEqual([DOCKER_DESKTOP_RUNC_SHIM_PATH, '--version']);
+    expect(
+      fixture.execs.some((argv) =>
+        argv.includes(
+          'FROM scratch\nCOPY lib/ /lib/\nCOPY --chmod=0555 runc /runc\nRUN ["/runc","--version"]\nENTRYPOINT ["/runc"]\nCMD ["--version"]\n',
+        ),
+      ),
+    ).toBe(true);
+    expect(fixture.execs.some((argv) => argv.some((arg) => arg.includes('selected-agent')))).toBe(false);
+    expect(fixture.execs.some((argv) => argv.includes('load') || argv.includes('save') || argv.includes('pull'))).toBe(
+      false,
+    );
+  });
+
+  it('attaches image mode to the isolated relay network with a static address, slirp4netns, and public CA', async () => {
+    const fixture = runtimeFixture();
+    await startDockerDesktopSidecar({ ...startOptions(fixture), egress: egressOptions() });
+
+    const config = fixture.configs[0];
+    expect(config).toMatchObject({
+      network: 'ic-dw-egress-test',
+      ipv4Address: '172.31.44.10',
+      mounts: [CA_MOUNT],
+      env: {
+        DOCKERD_ROOTLESS_ROOTLESSKIT_NET: 'slirp4netns',
+        HTTP_PROXY: REGISTRY_PROXY_URL,
+        HTTPS_PROXY: REGISTRY_PROXY_URL,
+        http_proxy: REGISTRY_PROXY_URL,
+        https_proxy: REGISTRY_PROXY_URL,
+        SSL_CERT_FILE: CA_MOUNT.target,
+      },
+    });
+    expect(config.command).toContain(`--add-runtime=ic-no-new-keyring=${DOCKER_DESKTOP_RUNC_SHIM_PATH}`);
+    expect(config.command).toContain('--default-runtime=ic-no-new-keyring');
+    expect(config.trustedCreateOptions?.devices).toEqual([
+      { source: '/dev/net/tun', target: '/dev/net/tun', permissions: 'rwm' },
+    ]);
+    expect(config.ports).toBeUndefined();
+    expect(config.extraHosts).toBeUndefined();
+    expect(fixture.expandedCreates[0]?.mounts).toEqual([
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
+      CA_MOUNT,
+    ]);
+  });
+
+  it.each([
+    { label: 'missing', devices: [] },
+    {
+      label: 'extra',
+      devices: [
+        { PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun', CgroupPermissions: 'rwm' },
+        { PathOnHost: '/dev/kvm', PathInContainer: '/dev/kvm', CgroupPermissions: 'rwm' },
+      ],
+    },
+    {
+      label: 'wrong path',
+      devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/kvm', CgroupPermissions: 'rwm' }],
+    },
+    {
+      label: 'wrong permissions',
+      devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun', CgroupPermissions: 'rw' }],
+    },
+  ])('rejects $label effective online device access before sidecar start', async ({ devices }) => {
+    const fixture = runtimeFixture({ observedDevices: devices });
+
+    await expect(startDockerDesktopSidecar({ ...startOptions(fixture), egress: egressOptions() })).rejects.toThrow(
+      /device mappings/u,
+    );
+    expect(fixture.events).not.toContain(`container:start:${SIDECAR_CONTAINER_ID}`);
+    expect(fixture.events.slice(-2)).toEqual([
+      `container:remove:${SIDECAR_CONTAINER_ID}`,
+      `volume:remove:${API_VOLUME_NAME}`,
+    ]);
+  });
+
+  it('mounts the shared package build-trust contract over the default runtime path', async () => {
+    const fixture = runtimeFixture();
+    await startDockerDesktopSidecar({
+      ...startOptions(fixture),
+      egress: egressOptions(BUILD_TRUST_MOUNTS),
+    });
+
+    const config = fixture.configs[0];
+    expect(config.mounts).toEqual([CA_MOUNT, ...BUILD_TRUST_MOUNTS]);
+    expect(config.mounts).toContainEqual({
+      source: '/host/ironcurtain/build-trust/runc',
+      target: DOCKER_DESKTOP_RUNC_SHIM_PATH,
+      readonly: true,
+    });
+    expect(config.command).toContain(`--add-runtime=ic-no-new-keyring=${DOCKER_DESKTOP_RUNC_SHIM_PATH}`);
+    expect(config.command).toContain('--default-runtime=ic-no-new-keyring');
+    expect(config.env).toMatchObject({
+      DOCKERD_ROOTLESS_ROOTLESSKIT_NET: 'slirp4netns',
+      HTTP_PROXY: REGISTRY_PROXY_URL,
+      SSL_CERT_FILE: CA_MOUNT.target,
+    });
+    expect(fixture.expandedCreates[0]?.mounts).toEqual([
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_API_ROOT, readonly: false },
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_HOME_STATE_ROOT, readonly: false },
+      { source: API_VOLUME_NAME, target: DOCKER_DESKTOP_SIDECAR_DATA_ROOT, readonly: false },
+      CA_MOUNT,
+      ...BUILD_TRUST_MOUNTS,
+    ]);
   });
 
   it('fails closed and rolls back when PATH does not select the baked no-new-keyring shim', async () => {
@@ -345,6 +665,15 @@ describe('Docker Desktop sidecar lifecycle', () => {
     ]);
   });
 
+  it('rejects a mutable outer-agent image reference before provisioning', async () => {
+    const fixture = runtimeFixture();
+
+    await expect(
+      startDockerDesktopSidecar({ ...startOptions(fixture), outerAgentImageId: 'ironcurtain-agent:latest' }),
+    ).rejects.toThrow(/outer agent image ID is not immutable/u);
+    expect(fixture.events).toEqual([]);
+  });
+
   it('removes an API volume whose post-create inspection does not preserve exact ownership', async () => {
     const fixture = runtimeFixture({ wrongVolumeLabels: true });
 
@@ -359,15 +688,29 @@ describe('Docker Desktop sidecar lifecycle', () => {
     const fixture = runtimeFixture();
     const options = startOptions(fixture);
     const createOuterResource: DockerDesktopSidecarCreateAuthority = async (spec, create) => {
-      const requestedName = spec.kind === 'volume' ? API_VOLUME_NAME : SIDECAR_NAME;
+      const requestedName = spec.requestedName;
       const created = await create(requestedName, OWNERSHIP_LABELS);
       if (spec.kind === 'container') throw new Error('ledger observation rejected');
-      return { id: created.id, requestedName };
+      return { id: created.id };
     };
 
     await expect(startDockerDesktopSidecar({ ...options, createOuterResource })).rejects.toThrow(
       /ledger observation rejected/u,
     );
+    expect(fixture.events.slice(-3)).toEqual([
+      `container:stop:${SIDECAR_CONTAINER_ID}`,
+      `container:remove:${SIDECAR_CONTAINER_ID}`,
+      `volume:remove:${API_VOLUME_NAME}`,
+    ]);
+  });
+
+  it('adjudicates the stopped effective profile before starting the sidecar', async () => {
+    const fixture = runtimeFixture({ wrongContainerProfile: true });
+
+    await expect(startDockerDesktopSidecar(startOptions(fixture))).rejects.toThrow(
+      /effective profile mismatch: privileged mode/u,
+    );
+    expect(fixture.events).not.toContain(`container:start:${SIDECAR_CONTAINER_ID}`);
     expect(fixture.events.slice(-3)).toEqual([
       `container:stop:${SIDECAR_CONTAINER_ID}`,
       `container:remove:${SIDECAR_CONTAINER_ID}`,

@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createIronCurtainInternalNetwork,
+  ironCurtainInternalSubnetHostAddress,
   InternalNetworkConnectivityError,
   IRONCURTAIN_MANAGED_LABEL,
   IRONCURTAIN_OWNER_PID_LABEL,
@@ -12,6 +13,7 @@ import {
   reconcileIronCurtainDockerResources,
   reconcileIronCurtainDockerResourcesBestEffort,
   releaseManagedResourceLease,
+  selectIronCurtainInternalSubnet,
   withInternalNetworkAllocationRetry,
 } from '../src/docker/docker-resource-lifecycle.js';
 import type { ContainerRuntime, DockerContainerInfo, DockerNetworkInfo } from '../src/docker/types.js';
@@ -211,6 +213,29 @@ describe('IronCurtain Docker subnet allocator', () => {
         labels: expect.objectContaining({ [IRONCURTAIN_MANAGED_LABEL]: 'true' }),
       }),
     );
+  });
+
+  it('selects around Docker collisions without creating a network', async () => {
+    const name = 'ic-dw-egress-selection-test';
+    const baseline = await selectIronCurtainInternalSubnet(runtimeWithInventory({}), name, { hostCidrs: [] });
+    const createNetwork = vi.fn(async () => {});
+    const docker = runtimeWithInventory({
+      networks: [network({ name: 'unrelated-network', subnets: [baseline] })],
+      createNetwork,
+    });
+
+    const selected = await selectIronCurtainInternalSubnet(docker, name, { hostCidrs: [] });
+
+    expect(selected).toMatch(/\/29$/u);
+    expect(selected).not.toBe(baseline);
+    expect(createNetwork).not.toHaveBeenCalled();
+  });
+
+  it('derives only usable host addresses from allocator-selected /29 networks', () => {
+    expect(ironCurtainInternalSubnetHostAddress('172.24.10.8/29', 2)).toBe('172.24.10.10');
+    expect(ironCurtainInternalSubnetHostAddress('172.24.10.8/29', 4)).toBe('172.24.10.12');
+    expect(() => ironCurtainInternalSubnetHostAddress('172.24.10.0/24', 2)).toThrow(/IPv4 \/29/u);
+    expect(() => ironCurtainInternalSubnetHostAddress('172.24.10.8/29', 7)).toThrow(/six usable/u);
   });
 
   it('walks to another /29 when Docker reports an overlap race', async () => {

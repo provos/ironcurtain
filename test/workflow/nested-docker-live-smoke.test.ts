@@ -13,6 +13,7 @@ import {
 } from '../../src/docker-workload/apple-vm-daemon.js';
 import { APPLE_VM_DOCKER_WORKLOAD_NETWORK } from '../../src/docker-workload/apple-private-docker.js';
 import {
+  DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
   DOCKER_BUILD_PROXY_CONFIG_PATH,
   DOCKER_BUILD_SHIM_PATH,
   DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
@@ -25,6 +26,7 @@ import {
   DOCKER_BUILD_TRUST_WRAPPER_PATH,
   DOCKER_BUILD_TRUST_WRAPPER_SHA256,
   DOCKER_BUILDX_STATE_DIRECTORY,
+  DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY,
 } from '../../src/docker/docker-build-shim.js';
 import {
   PACKAGE_EGRESS_AUDIT_FILENAME,
@@ -3525,7 +3527,7 @@ assert calls == []
       { source: `${packageRoot}/docker`, target: '/usr/local/sbin/docker', readonly: true },
       {
         source: `${packageRoot}/package-build-client`,
-        target: '/run/ironcurtain-docker/package-build-client',
+        target: DOCKER_BUILD_PROXY_CONFIG_DIRECTORY,
         readonly: true,
       },
       { source: `${packageRoot}/runc`, target: '/usr/local/sbin/runc', readonly: true },
@@ -3619,8 +3621,8 @@ assert calls == []
         mount.target === '/usr/local/sbin/docker' ? { ...mount, target: '/usr/local/sbin' } : mount,
       ),
       valid.map((mount) =>
-        mount.target === '/run/ironcurtain-docker/package-build-client'
-          ? { ...mount, target: '/run/ironcurtain-docker' }
+        mount.target === DOCKER_BUILD_PROXY_CONFIG_DIRECTORY
+          ? { ...mount, target: DOCKER_PACKAGE_BUILD_RUNTIME_DIRECTORY }
           : mount,
       ),
       [...valid, { source: `${packageRoot}/extra`, target: '/tmp/extra', readonly: true }],

@@ -26,9 +26,10 @@ that verifies its stopped and running effective profiles; a live Engine-28 check
 forwarding, uplink-peer exclusion, relay-loss failure, and exact cleanup on an isolated dual-stack
 network. The Apple same-VM rootless daemon lifecycle and selected same-agent private-Docker image
 bootstrap are implemented. A fail-closed resolved-variant guard admits the exact Apple slice defined
-in §12 and the macOS Docker Desktop offline-only developer slice: a dedicated rootless daemon sidecar,
+in §12 and the macOS Docker Desktop developer slice: a dedicated rootless daemon sidecar,
 selected-current-agent transport, reviewed P2 seccomp and mount-mask exception, bounded aggregate
-resources, and lease-owned API volume. Both paths require live runtime-availability preflight.
+resources, lease-owned API volume, and—for online modes—one exact TUN device plus isolated fixed relays
+to bundle-authenticated host policy engines. Both paths require live runtime-availability preflight.
 `npm run smoke:nested:apple` exercises the built Apple CLI session/bootstrap/activation path,
 then an exact lease-bound private-Docker child and teardown. The complementary, manually invoked
 `npm run smoke:nested:apple:pty` drives the built `start --pty` entrypoint through the same node-pty
@@ -40,15 +41,22 @@ path. The replacement selected-current public-registry product-entrypoint gate p
 IP/public-DNS negatives, no published ports, and exact teardown. A newer deterministic production
 workflow gate passed both public (28 checks) and offline (17 checks) modes without an LLM, with exact
 cleanup after each run and graceful second-session admission in one isolated home. These smokes are not
-agent-turn/provider, full 0C, or preview qualification. Docker Desktop `images`/`packages`, native Linux,
-enforced-PID, bounded-disk, and preview variants remain rejected. No backend is
+agent-turn/provider, full 0C, or preview qualification. Native Linux, enforced-PID, bounded-disk, and
+preview variants remain rejected. No backend is
 implementation-qualified or preview-ready.
+**Amendment (2026-08-31, Docker Desktop online developer slice):** explicit opt-in on macOS may use
+`networkAccess: "images"` or `"packages"` through the independently pinned fixed-relay topology. The
+rootless daemon receives only `/dev/net/tun` (no `NET_ADMIN`, `SYS_ADMIN`, privileged mode, host runtime
+socket, or direct external network); each relay has one immutable destination, an isolated bundle
+address, and a per-bundle proxy credential required by the host policy engine. Effective sidecar and
+relay profiles are adjudicated before activation. This is narrowly supported developer functionality,
+not formal 0C qualification or preview readiness. It supersedes the offline-only restriction below.
 **Amendment (2026-08-25, Docker Desktop offline developer slice):** explicit opt-in on macOS may use
 the reviewed H3 sidecar topology before formal 0C/preview qualification. This is narrowly supported,
 not qualified: only `networkAccess: "offline"` is admitted, the outer sidecar remains `network=none`,
 and the agent receives only the read-only private API volume. Earlier statements that all Docker
 Desktop sessions were rejected or that the sidecar was unbuilt are superseded by this amendment.
-DD-PROXY and native Linux remain fail-closed future work.
+Native Linux remains fail-closed future work.
 **Amendment (2026-07-21, user-approved; image-class disposition superseded by §16.16):** workload-image
 registry egress is promoted from Phase 3 into 0F/0C scope. See §6.4, §7.1, and §16.5.
 **Amendment (2026-07-21, user-approved):** workload-registry mediation gates request and derived-
@@ -540,7 +548,7 @@ The deterministic vertical fixture uses pinned target and scanner digests, an ex
 
 ### 8.1 Resource envelope
 
-Expose one configured bundle budget with a coordinator-chosen reserve rather than asking the untrusted client to partition authority. On Desktop/Linux, statically partition outer agent/daemon/relay CPU, memory, and PIDs so their sum cannot exceed the bundle total. Qualification must prove every dockerd, BuildKit, shim, build, and child process remains under an immutable outer sidecar cgroup ancestor; probe inner `--cgroup-parent`, host cgroup namespace, delegation, migration, and direct cgroup writes. Any process observed outside the subtree, successful migration, or writable parent/ancestor cgroup is an immediate compatibility blocker. Inner delegation may reduce inner Docker semantics but never weaken the outer ceiling.
+Expose one configured bundle budget with a coordinator-chosen reserve rather than asking the untrusted client to partition authority. On Desktop/Linux, statically partition CPU, memory, and PIDs across the outer agent, private daemon, ordinary macOS session transport, and every enabled fixed relay so their sum cannot exceed the bundle total. Qualification must prove every dockerd, BuildKit, shim, build, and child process remains under an immutable outer sidecar cgroup ancestor; probe inner `--cgroup-parent`, host cgroup namespace, delegation, migration, and direct cgroup writes. Any process observed outside the subtree, successful migration, or writable parent/ancestor cgroup is an immediate compatibility blocker. Inner delegation may reduce inner Docker semantics but never weaken the outer ceiling.
 
 | Backend               | CPU                           | Memory                        | PIDs                                        | Disk                                                                 |
 | --------------------- | ----------------------------- | ----------------------------- | ------------------------------------------- | -------------------------------------------------------------------- |
@@ -1022,8 +1030,9 @@ unbound, or non-ready; reconciliation fencing alone is not treated as cleanup pr
 
 The explicit-opt-in DD-STRICT developer slice is implemented with its minimal recorded profile,
 lease-owned named-volume API/data root, `network=none`, selected-current-agent transport, and aggregate
-resource partition. It remains supported-not-qualified. DD-PROXY still requires its isolated-gateway
-network, independently pinned fixed relay, and complete network-policy evidence before admission.
+resource partition across the daemon, agent, ordinary session transport, and enabled fixed relays. The explicit-opt-in DD-PROXY developer slice adds only the exact TUN device required
+by rootless slirp networking plus an isolated-gateway network and independently pinned fixed relays to
+bundle-authenticated host policy engines. Both remain supported-not-qualified.
 
 **Exit:** the actual CLI, web/CLI launch, session-creation, agent entrypoint, and resume/rejection paths rerun the Desktop release suite and G1-G10 before Desktop preview. Every Phase 0 stop condition is a regression test. Failed preflight disables the capability without fallback.
 
@@ -1169,7 +1178,7 @@ fields are implementation invariants, not ordinary UI choices. The following are
 unsupported and rejected before feature-attributable runtime, image transport, proxy, lease, or
 filesystem provisioning:
 
-- native Linux outer runtimes, and Docker Desktop `images` or `packages` network access;
+- native Linux outer runtimes;
 - `tier: preview`, current-Dockerfile build egress, persistent daemon state,
   or host-port publishing;
 - `pids.required: true`, a numeric disk limit, or explicitly disabling acceptance of the admitted
@@ -1267,14 +1276,14 @@ decisions explain the current plan; superseded implementation diaries remain ava
   may use rootful Docker only inside its disposable per-session VM. Apple guest PID observations are
   advisory; hard disk claims require host enforcement, while the current observed-disk slice requires
   the pre-daemon watchdog.
-- DD-PROXY is a distinct future authority-bearing service: its fixed image digest, command,
+- DD-PROXY is a distinct authority-bearing service: its fixed image digest, command,
   destination, effective profile, and isolated network remain host-adjudicated because it receives an
   uplink unavailable to the bundle.
 - Public workload-image pulls moved into the fixed registry-egress path. Pulled bytes are untrusted;
   authorization applies to origins, operations, redirects, credentials, SSRF boundaries, and transfer
   ceilings. Exact derived CDN redirects are request-scoped and never become a reusable allowlist.
   Registry references and digests are provenance, not bundle-code attestation.
-- Dockerfile `RUN` fetches and daemon `FROM` pulls are different seams. Future package `RUN` traffic uses
+- Dockerfile `RUN` fetches and daemon `FROM` pulls are different seams. Package `RUN` traffic uses
   the dedicated TLS-terminating fixed-repository package MITM and grants bounded bundle-wide package
   authority; `FROM` pulls remain on registry egress and its bearer-token flow. The superseded generic-
   public opaque-CONNECT experiment is not a product path.

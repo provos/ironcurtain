@@ -9,20 +9,18 @@ import type { BundleId } from '../../src/session/types.js';
 import { assertDockerWorkloadVariantAdmitted, resolveDockerWorkloadConfig } from '../../src/docker-workload/config.js';
 
 const registerBuiltinAdapters = vi.fn();
+const getAgent = vi.fn();
+const createContainerRuntime = vi.fn();
 const resolveRuntimeKind = vi.fn();
 const checkAppleContainerAvailable = vi.fn();
 const checkDockerAvailable = vi.fn();
 
 vi.mock('../../src/docker/agent-registry.js', () => ({
   registerBuiltinAdapters,
-  getAgent: vi.fn(() => {
-    throw new Error('adapter lookup must not run');
-  }),
+  getAgent,
 }));
 vi.mock('../../src/docker/container-runtime.js', () => ({
-  createContainerRuntime: vi.fn(() => {
-    throw new Error('runtime creation must not run');
-  }),
+  createContainerRuntime,
   resolveRuntimeKind,
 }));
 vi.mock('../../src/docker/apple-container-manager.js', () => ({ checkAppleContainerAvailable }));
@@ -30,6 +28,12 @@ vi.mock('../../src/docker/docker-probe.js', () => ({ checkDockerAvailable }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getAgent.mockImplementation(() => {
+    throw new Error('adapter lookup must not run');
+  });
+  createContainerRuntime.mockImplementation(() => {
+    throw new Error('runtime creation must not run');
+  });
   checkAppleContainerAvailable.mockResolvedValue({ available: true });
   checkDockerAvailable.mockResolvedValue({ available: true });
 });
@@ -81,20 +85,6 @@ describe('secure nested Docker resolved-variant admission', () => {
     expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
   });
 
-  it('rejects Docker Desktop image mediation before adapter, image, relay, or sidecar work', async () => {
-    resolveRuntimeKind.mockResolvedValueOnce('docker');
-    const { ensureDockerImage } = await import('../../src/docker/docker-infrastructure.js');
-    await expect(
-      ensureDockerImage('claude-code', {
-        containerRuntime: 'auto',
-        dockerWorkload: admittedAppleConfig(),
-      } as ResolvedUserConfig),
-    ).rejects.toThrow(/supports only networkAccess "offline"/u);
-    expect(registerBuiltinAdapters).not.toHaveBeenCalled();
-    expect(checkDockerAvailable).toHaveBeenCalledOnce();
-    expect(checkAppleContainerAvailable).not.toHaveBeenCalled();
-  });
-
   it('preserves feature-off adapter-before-runtime error ordering', async () => {
     const { ensureDockerImage } = await import('../../src/docker/docker-infrastructure.js');
     await expect(
@@ -125,6 +115,94 @@ describe('secure nested Docker resolved-variant admission', () => {
     ).rejects.toThrow(/Apple runtime is unavailable: container services not running/u);
     expect(registerBuiltinAdapters).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { networkAccess: 'offline' as const, expectsRelay: false },
+    { networkAccess: 'images' as const, expectsRelay: true },
+    { networkAccess: 'packages' as const, expectsRelay: true },
+  ])(
+    'pins Docker Desktop agent identity for $networkAccess without Apple archive transport',
+    async ({ networkAccess, expectsRelay }) => {
+      const image = 'ironcurtain-claude-code:latest';
+      const relayImage = 'ironcurtain-fixed-relay:latest';
+      const immutableImageId = `sha256:${'a'.repeat(64)}`;
+      const relayImageId = `sha256:${'b'.repeat(64)}`;
+      const buildHashes = new Map<string, string>();
+      const getImageLabel = vi
+        .fn<(reference: string, label: string) => Promise<string | undefined>>()
+        .mockResolvedValue(undefined);
+      const buildImage = vi.fn(
+        async (tag: string, _dockerfile: string, _context: string, labels?: Record<string, string>) => {
+          const buildHash = labels?.['ironcurtain.build-hash'];
+          if (buildHash !== undefined) buildHashes.set(tag, buildHash);
+        },
+      );
+      const inspectImage = vi.fn(async (reference: string) => {
+        const buildHash = buildHashes.get(reference);
+        if (buildHash === undefined) return undefined;
+        if (reference === image) {
+          return {
+            id: immutableImageId,
+            repoTags: [image],
+            labels: { 'ironcurtain.build-hash': buildHash },
+            created: '2026-08-31T00:00:00.000Z',
+          };
+        }
+        if (reference === relayImage) {
+          return {
+            id: relayImageId,
+            repoTags: [relayImage],
+            labels: {
+              'ironcurtain.build-hash': buildHash,
+              'com.ironcurtain.docker-workload.component': 'fixed-relay',
+            },
+            created: '2026-08-31T00:00:00.000Z',
+          };
+        }
+        return undefined;
+      });
+      const saveImageArchive = vi.fn();
+      const tagImage = vi.fn();
+      const loadImageArchive = vi.fn();
+      const listImages = vi.fn();
+      const removeImage = vi.fn();
+      getAgent.mockReturnValue({ getImage: async () => image });
+      createContainerRuntime.mockReturnValue({
+        getImageLabel,
+        buildImage,
+        inspectImage,
+        saveImageArchive,
+        tagImage,
+        loadImageArchive,
+        listImages,
+        removeImage,
+      });
+      resolveRuntimeKind.mockResolvedValue('docker');
+      const { ensureDockerImage } = await import('../../src/docker/docker-infrastructure.js');
+
+      const resolution = await ensureDockerImage('claude-code', {
+        containerRuntime: 'docker',
+        dockerWorkload: resolveDockerWorkloadConfig({ enabled: true, networkAccess }),
+      } as ResolvedUserConfig);
+
+      expect(resolution).toMatchObject({
+        mode: 'build-if-stale',
+        logicalName: image,
+        imageRef: image,
+        immutableImageId,
+        buildHash: buildHashes.get(image),
+      });
+      expect(resolution.artifact).toBeUndefined();
+      expect(buildImage.mock.calls.some(([tag]) => tag === relayImage)).toBe(expectsRelay);
+      expect(getImageLabel.mock.calls.some(([reference]) => reference === relayImage)).toBe(expectsRelay);
+      expect(inspectImage.mock.calls.some(([reference]) => reference === relayImage)).toBe(expectsRelay);
+      expect(saveImageArchive).not.toHaveBeenCalled();
+      expect(tagImage).not.toHaveBeenCalled();
+      expect(loadImageArchive).not.toHaveBeenCalled();
+      expect(listImages).not.toHaveBeenCalled();
+      expect(removeImage).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('secure nested Docker admission — prepareDockerInfrastructure', () => {

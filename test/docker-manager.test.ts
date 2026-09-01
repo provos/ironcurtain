@@ -361,6 +361,7 @@ describe('DockerManager', () => {
             { name: 'ic-api-volume', target: '/run/user/1000', noCopy: true },
             { name: 'ic-stage-volume', target: '/staged', readonly: true, noCopy: true },
           ],
+          devices: [{ source: '/dev/net/tun', target: '/dev/net/tun', permissions: 'rwm' }],
           tmpfs: ['/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000'],
           readOnlyRootfs: true,
           securityOptions: ['no-new-privileges=true'],
@@ -371,6 +372,7 @@ describe('DockerManager', () => {
 
       expect(args).toContain('type=volume,src=ic-api-volume,dst=/run/user/1000,volume-nocopy');
       expect(args).toContain('type=volume,src=ic-stage-volume,dst=/staged,readonly,volume-nocopy');
+      expect(args).toContain('/dev/net/tun:/dev/net/tun:rwm');
       expect(args).toContain('/tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000');
       expect(args).toContain('--read-only');
       expect(args).toContain('no-new-privileges=true');
@@ -392,6 +394,14 @@ describe('DockerManager', () => {
           trustedCreateOptions: { pidsLimit: 0 },
         }),
       ).toThrow(/positive safe integer/u);
+      expect(() =>
+        buildCreateArgs({
+          ...sampleConfig,
+          trustedCreateOptions: {
+            devices: [{ source: 'dev/net/tun', target: '/dev/net/tun', permissions: 'rwm' }],
+          },
+        }),
+      ).toThrow(/colon-free absolute/u);
     });
   });
 
@@ -793,6 +803,19 @@ describe('DockerManager', () => {
         },
       ]);
       expect(mock.calls[0].args).toContain('label=ironcurtain.managed=true');
+    });
+
+    it('returns the unmodified Docker inspect object for stopped-profile adjudication', async () => {
+      const inspected = {
+        Id: 'container-id',
+        State: { Status: 'created', Running: false },
+        HostConfig: { Privileged: false, Devices: [] },
+      };
+      mock.setResponse(JSON.stringify([inspected]));
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.inspectContainerRaw?.('container-id')).resolves.toEqual(inspected);
+      expect(mock.calls[0].args).toEqual(['container', 'inspect', 'container-id']);
     });
 
     it('keeps containers that survive a concurrent ls/inspect deletion', async () => {

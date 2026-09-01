@@ -37,9 +37,11 @@ import { getInternalNetworkName } from './platform.js';
 import { destroyBundleOuterResources } from './container-lifecycle.js';
 import {
   buildAgentUidRemap,
+  buildDockerDesktopTransportCreateLimits,
   buildDockerBuildShimMounts,
   buildDockerWorkloadEgressMounts,
   buildUdsSocketMounts,
+  buildNestedDockerAgentTrustedCreateOptions,
   activateNestedDockerWorkload,
   createLedgeredAgentContainer,
   dockerWorkloadSessionMetadata,
@@ -296,6 +298,7 @@ async function runPtySessionAttempt(
     checkDockerContainerWritableStorage,
     checkHostOnlyConnectivity,
     checkInternalNetworkConnectivity,
+    attachDockerDesktopAgentEgressNetwork,
   } = await import('./docker-infrastructure.js');
 
   // When resuming, validate the snapshot and reuse the existing session directory
@@ -389,7 +392,7 @@ async function runPtySessionAttempt(
   let dockerWorkloadEgress: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['dockerWorkloadEgress'] | undefined;
   let useTcp: boolean;
   let networkName: string | null = null;
-  let allocatedNetworkSubnet: string | undefined;
+  let retryableNetworkSubnet: string | undefined;
   // Flushes the trajectory-capture session (clean, non-poisoned session-end)
   // before infra teardown. Assigned inside the try once the bundle exists;
   // invoked in finally. Undefined when capture is disabled. PTY mode tears
@@ -663,7 +666,7 @@ async function runPtySessionAttempt(
       const allocatedNetwork = await createIronCurtainInternalNetwork(docker, internalNetworkName, bundleId, {
         excludedSubnets,
       });
-      allocatedNetworkSubnet = allocatedNetwork.subnet;
+      retryableNetworkSubnet = allocatedNetwork.subnet;
       network = internalNetworkName;
       networkName = internalNetworkName;
       logger.info(`Allocated internal Docker network ${internalNetworkName} at ${allocatedNetwork.subnet}`);
@@ -694,6 +697,7 @@ async function runPtySessionAttempt(
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
+        ...buildDockerDesktopTransportCreateLimits(infra.dockerDesktopResources),
         // PTY sessions are standalone (no workflow/scope), so only the
         // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
         bundleLabel: bundleId,
@@ -854,10 +858,10 @@ async function runPtySessionAttempt(
         // nested daemon boot AND lets its runc mount procfs for inner
         // containers.
         fullyVisibleProc: nestedDaemon !== undefined,
-        trustedCreateOptions:
-          nestedDockerWiring.namedVolumeMounts.length === 0
-            ? undefined
-            : { namedVolumeMounts: nestedDockerWiring.namedVolumeMounts },
+        trustedCreateOptions: buildNestedDockerAgentTrustedCreateOptions(
+          nestedDockerWiring.namedVolumeMounts,
+          infra.dockerDesktopResources,
+        ),
         // Apple Container allocates the agent TTY on `container exec -it`;
         // the outer `sleep infinity` process does not need a second TTY.
         tty: nativePtyCommand === undefined,
@@ -871,7 +875,7 @@ async function runPtySessionAttempt(
       runtimeKind: infra.runtimeKind,
       runtime: docker,
       expectedImageId: infra.imageResolution?.immutableImageId,
-      deterministicName: mainContainerName,
+      requestedName: mainContainerName,
       baseLabels: resourceLabels,
       mounts: [
         ...mounts,
@@ -883,11 +887,12 @@ async function runPtySessionAttempt(
       ],
       create: createPtyContainer,
     });
+    await attachDockerDesktopAgentEgressNetwork(infra, containerId);
     await docker.start(containerId);
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
 
-    // Docker Desktop's daemon sidecar is already adjudicated. Activate the
-    // bundle immediately after the ledgered agent starts and before any exec.
+    // Docker Desktop's daemon sidecar is already adjudicated. Initialize and
+    // verify package-build state in the blocked agent, then activate the bundle.
     // Apple activation stays after its in-agent daemon bootstrap below.
     if (infra.runtimeKind === 'docker') {
       await activateNestedDockerWorkload({
@@ -919,8 +924,8 @@ async function runPtySessionAttempt(
       try {
         await checkInternalNetworkConnectivity(docker, containerId, proxy.port, mitmAddr.port);
       } catch (error) {
-        if (error instanceof InternalNetworkConnectivityError) {
-          throw new InternalNetworkConnectivityError(error.message, allocatedNetworkSubnet);
+        if (error instanceof InternalNetworkConnectivityError && retryableNetworkSubnet !== undefined) {
+          throw new InternalNetworkConnectivityError(error.message, retryableNetworkSubnet);
         }
         throw error;
       }
@@ -996,7 +1001,7 @@ async function runPtySessionAttempt(
       logger.info('PTY readiness check passed');
     }
 
-    initSpinner.succeed(chalk.dim('PTY session ready'));
+    initSpinner.succeed(chalk.dim(useTcp ? 'PTY relay initialized; connecting to agent' : 'PTY session ready'));
     process.stderr.write('\n');
 
     // Attach terminal via Node.js PTY proxy. Tests inject a stub via
@@ -1032,6 +1037,7 @@ async function runPtySessionAttempt(
     }
   } catch (error) {
     primaryError = normalizePtyError(error);
+    logger.error(`PTY setup failed: ${primaryError.message}`);
   } finally {
     // Stop spinner if still running (e.g. error during setup)
     if (initSpinner.isSpinning) {
@@ -1076,9 +1082,9 @@ async function runPtySessionAttempt(
     }
     try {
       if (docker) {
-        // §8.3: teardown-first for a Docker-workload bundle, then the
-        // belt-and-braces sweep for the non-ledgered sidecar/network, then release
-        // the managed-resource lease. See destroyBundleOuterResources.
+        // §8.3: tear the ledgered workload resources down first, then sweep the
+        // ordinary transport/network and release the managed-resource lease.
+        // See destroyBundleOuterResources.
         await destroyBundleOuterResources({
           docker,
           dockerWorkload,

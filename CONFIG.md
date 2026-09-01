@@ -106,9 +106,9 @@ with no prior choice remains unchanged until the first CLI or web enable, which 
 `packages`.
 
 On macOS, nested Docker admits a resolved Docker Desktop or Apple Container runtime and checks that the
-selected runtime is available before provisioning. Docker Desktop currently supports only `offline`;
-`images` and `packages` fail before a sidecar is created until the separate DD-PROXY mediation topology is
-implemented. A Docker resolution on another host fails closed. If an ordinary Docker resource is `null`,
+selected runtime is available before provisioning. Docker Desktop supports `offline`, `images`, and
+`packages`; its networked modes reuse the same registry/package policy engines as Apple Container through
+fixed-target, bundle-scoped relays. A Docker resolution on another host fails closed. If an ordinary Docker resource is `null`,
 nested Docker keeps its safe fallback instead of inheriting an unlimited value. The setting is global for
 Docker Agent execution: standalone sessions and each workflow infrastructure bundle receive their own
 private nested daemon when enabled.

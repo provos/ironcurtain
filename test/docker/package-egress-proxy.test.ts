@@ -19,6 +19,7 @@ import {
   type CreatePackageEgressProxyOptions,
   type PackageEgressDialRequest,
   type PackageEgressAuthorizer,
+  type PackageEgressListenTarget,
   type PackageEgressProxy,
 } from '../../src/docker/package-egress-proxy.js';
 
@@ -231,6 +232,81 @@ describe('strict package egress proxy', () => {
     const nearMiss = PACKAGE_EGRESS_HEALTH_REQUEST.replace('ironcurtain.invalid', 'Ironcurtain.invalid');
     expect(await rawUdsRequest(started.socketPath, nearMiss)).toContain('403');
     expect(started.proxy.snapshot.clientAttempts).toBe(2);
+  });
+
+  it('serves TCP clients admitted by the topology source guard', async () => {
+    const fixture = await startFixture((_request, response) => response.end('not reached'));
+    const allowRemoteAddress = vi.fn(() => true);
+    const proxy = createTestProxy(fixture.transport, { allowRemoteAddress });
+    resources.push(() => proxy.stop());
+    const address = await proxy.start({ listenPort: 0 });
+    if (address.port === undefined) throw new Error('expected package egress to bind TCP');
+
+    expect(await rawTcpOutcome(address.port, PACKAGE_EGRESS_HEALTH_REQUEST)).toContain('HTTP/1.1 200 OK');
+    await waitFor(() => proxy.snapshot.activeClients === 0);
+    expect(allowRemoteAddress).toHaveBeenCalledWith(expect.stringContaining('127.0.0.1'));
+    expect(proxy.snapshot.clientAttempts).toBe(1);
+  });
+
+  it('requires the exact per-bundle credential from an admitted TCP source', async () => {
+    const fixture = await startFixture((_request, response) => response.end('not reached'));
+    const requiredProxyAuthorization = 'Basic aXJvbmN1cnRhaW46dGVzdC1idW5kbGU=';
+    const proxy = createTestProxy(fixture.transport, {
+      allowRemoteAddress: () => true,
+      requiredProxyAuthorization,
+    });
+    resources.push(() => proxy.stop());
+    const address = await proxy.start({ listenPort: 0 });
+    if (address.port === undefined) throw new Error('expected package egress to bind TCP');
+
+    expect(await rawTcpOutcome(address.port, PACKAGE_EGRESS_HEALTH_REQUEST)).toContain('407');
+    expect(
+      await rawTcpOutcome(
+        address.port,
+        PACKAGE_EGRESS_HEALTH_REQUEST.replace(
+          'Connection: close',
+          `Proxy-Authorization: ${requiredProxyAuthorization}\r\nConnection: close`,
+        ),
+      ),
+    ).toContain('HTTP/1.1 200 OK');
+  });
+
+  it('rejects disallowed TCP sources before acquiring a ledger lease', async () => {
+    const fixture = await startFixture((_request, response) => response.end('not reached'));
+    const allowRemoteAddress = vi.fn(() => false);
+    const proxy = createTestProxy(fixture.transport, { allowRemoteAddress });
+    resources.push(() => proxy.stop());
+    const address = await proxy.start({ listenPort: 0 });
+    if (address.port === undefined) throw new Error('expected package egress to bind TCP');
+
+    expect(await rawTcpOutcome(address.port, PACKAGE_EGRESS_HEALTH_REQUEST)).toBe('');
+    expect(allowRemoteAddress).toHaveBeenCalledOnce();
+    expect(proxy.snapshot).toMatchObject({ clientAttempts: 0, activeClients: 0, activeUpstreams: 0 });
+  });
+
+  it('does not apply the TCP source guard to Apple-compatible UDS listeners', async () => {
+    const fixture = await startFixture((_request, response) => response.end('not reached'));
+    const allowRemoteAddress = vi.fn(() => false);
+    const started = await startProxy(fixture.transport, () => ({ status: 'allow', reason: 'fixture allow' }), {
+      allowRemoteAddress,
+    });
+
+    expect(await rawUdsRequest(started.socketPath, PACKAGE_EGRESS_HEALTH_REQUEST)).toContain('HTTP/1.1 200 OK');
+    expect(allowRemoteAddress).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ socketPath: 'relative.sock' }, /absolute UDS path/u],
+    [{ listenPort: -1 }, /TCP listen port/u],
+    [{ listenPort: 65_536 }, /TCP listen port/u],
+    [{ socketPath: '/tmp/listener.sock', listenPort: 0 }, /exactly one/u],
+  ] as const)('rejects an invalid explicit listen target %#', async (candidate, message) => {
+    const fixture = await startFixture((_request, response) => response.end('not reached'));
+    const proxy = createTestProxy(fixture.transport);
+    resources.push(() => proxy.stop());
+
+    await expect(proxy.start(candidate as PackageEgressListenTarget)).rejects.toThrow(message);
+    expect(proxy.snapshot).toMatchObject({ clientAttempts: 0, activeClients: 0 });
   });
 
   it('MITM-forwards only an authorized exact CONNECT/SNI/Host route with fixed outbound headers', async () => {
@@ -931,7 +1007,7 @@ describe('strict package egress proxy', () => {
     const path = join(directory, 'listener.sock');
     writeFileSync(path, 'do-not-replace');
 
-    await expect(proxy.start(path)).rejects.toThrow(/refuses to replace preexisting/u);
+    await expect(proxy.start({ socketPath: path })).rejects.toThrow(/refuses to replace preexisting/u);
     expect(readFileSync(path, 'utf8')).toBe('do-not-replace');
   });
 
@@ -946,7 +1022,7 @@ describe('strict package egress proxy', () => {
     await listenUds(owner, path);
     resources.push(() => closeServer(owner));
 
-    await expect(proxy.start(path)).rejects.toThrow(/preexisting/u);
+    await expect(proxy.start({ socketPath: path })).rejects.toThrow(/preexisting/u);
     expect(owner.listening).toBe(true);
   });
 
@@ -966,7 +1042,7 @@ describe('strict package egress proxy', () => {
       },
     });
     resources.push(() => chmodFailure.stop());
-    await expect(chmodFailure.start(chmodPath)).rejects.toThrow(/injected chmod/u);
+    await expect(chmodFailure.start({ socketPath: chmodPath })).rejects.toThrow(/injected chmod/u);
     expect(existsSync(chmodPath)).toBe(false);
 
     const racePath = join(directory, 'race.sock');
@@ -984,7 +1060,7 @@ describe('strict package egress proxy', () => {
       },
     });
     resources.push(() => raced.stop());
-    await expect(raced.start(racePath)).rejects.toThrow(/identity or mode changed/u);
+    await expect(raced.start({ socketPath: racePath })).rejects.toThrow(/identity or mode changed/u);
     expect(readFileSync(racePath, 'utf8')).toBe(replacement);
   });
 
@@ -1074,13 +1150,13 @@ describe('strict package egress proxy', () => {
     resources.push(() => rmSync(directory, { recursive: true, force: true }));
     const path = join(directory, 'listener.sock');
 
-    const starting = proxy.start(path);
+    const starting = proxy.start({ socketPath: path });
     const stopping = proxy.stop();
     await starting;
     await stopping;
     expect(existsSync(path)).toBe(false);
     expect(proxy.snapshot).toMatchObject({ stopped: true, activeClients: 0, activeUpstreams: 0 });
-    await expect(proxy.start(path)).rejects.toThrow(/cannot restart/u);
+    await expect(proxy.start({ socketPath: path })).rejects.toThrow(/cannot restart/u);
   });
 
   it('enforces charged client attempts and concurrency on health traffic', async () => {
@@ -1221,7 +1297,7 @@ async function startProxy(
 ): Promise<{ readonly proxy: PackageEgressProxy; readonly socketPath: string }> {
   const proxy = createTestProxy(transport, { ...overrides, authorize });
   const socketPath = join(tmpdir(), `ironcurtain-package-egress-${process.pid}-${socketCounter++}.sock`);
-  await proxy.start(socketPath);
+  await proxy.start({ socketPath });
   resources.push(() => proxy.stop());
   return { proxy, socketPath };
 }
@@ -1241,7 +1317,7 @@ async function startPolicyProxy(
     ...(options.limits === undefined ? {} : { limits: options.limits }),
   });
   const socketPath = join(tmpdir(), `ironcurtain-package-egress-${process.pid}-${socketCounter++}.sock`);
-  await proxy.start(socketPath);
+  await proxy.start({ socketPath });
   resources.push(() => proxy.stop());
   return { proxy, socketPath };
 }
@@ -1359,6 +1435,27 @@ function rawUdsHeldOpenRequest(socketPath: string, request: string): Promise<str
 function rawUdsOutcome(socketPath: string, request: string): Promise<string> {
   return new Promise((resolve) => {
     const socket = net.createConnection(socketPath);
+    let response = '';
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve(response);
+    };
+    socket.setEncoding('utf8');
+    socket.on('connect', () => socket.write(request));
+    socket.on('data', (chunk: string) => {
+      response += chunk;
+    });
+    socket.on('end', finish);
+    socket.on('close', finish);
+    socket.on('error', finish);
+  });
+}
+
+function rawTcpOutcome(port: number, request: string): Promise<string> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
     let response = '';
     let settled = false;
     const finish = (): void => {

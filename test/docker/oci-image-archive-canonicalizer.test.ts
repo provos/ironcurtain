@@ -40,6 +40,32 @@ describe('Docker-save archive canonicalizer', () => {
     expect(readFileSync(output).includes(legacy)).toBe(false);
   });
 
+  it('treats Docker source names as advisory and assigns the requested canonical name', async () => {
+    const directory = tempDirectory();
+    const entry = writeOciArchiveFixture({
+      directory,
+      logicalName: 'ironcurtain-claude-code:latest',
+      sourceReference: 'latest',
+      buildHash: '9'.repeat(64),
+      architecture: 'arm64',
+    });
+    const output = join(directory, 'canonical.tar');
+
+    const canonical = await canonicalizeDockerSaveArchive({
+      sourceArchivePath: join(directory, entry.archive.fileName),
+      outputArchivePath: output,
+      logicalName: entry.logicalName,
+      architecture: entry.architecture,
+      expectedLabels: entry.labels,
+    });
+
+    expect(canonical).toMatchObject({
+      manifestDigest: entry.manifestDigest,
+      configDigest: entry.configDigest,
+      archivePath: output,
+    });
+  });
+
   it('rejects source mutation and removes a partial output', async () => {
     const directory = tempDirectory();
     const entry = writeOciArchiveFixture({

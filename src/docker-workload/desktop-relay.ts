@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import type { ExecFileFn } from '../docker/docker-manager.js';
+import type { LedgeredOuterCreateAuthority } from './infrastructure.js';
 
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const RESOURCE_NAME = /^ic-[a-z0-9][a-z0-9_.-]{0,62}$/;
@@ -9,6 +10,10 @@ const IPV4_GATEWAY_MODE = 'com.docker.network.bridge.gateway_mode_ipv4';
 const IPV6_GATEWAY_MODE = 'com.docker.network.bridge.gateway_mode_ipv6';
 const ENABLE_IPV4 = 'com.docker.network.enable_ipv4';
 const RELAY_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+export const DESKTOP_RELAY_HOST_GATEWAY_ALIAS = 'host.docker.internal';
+export const DESKTOP_RELAY_UPLINK_NETWORK = 'bridge';
+const DESKTOP_RELAY_HOST_GATEWAY_MAPPING = `${DESKTOP_RELAY_HOST_GATEWAY_ALIAS}:host-gateway`;
+const PROXY_AUTHORIZATION = /^Basic [A-Za-z0-9+/]+={0,2}$/u;
 
 export const DESKTOP_RELAY_PROFILE = Object.freeze({
   memoryBytes: 64 * 1024 * 1024,
@@ -31,13 +36,53 @@ export interface DesktopRelayConfig {
   readonly ipv6Subnet: string;
   readonly relayIpv4Address: string;
   readonly listenPort: number;
-  readonly targetIpv4Address: string;
+  /** An IPv4 literal or the one frozen Docker Desktop host-gateway alias. */
+  readonly targetHost: string;
+  readonly targetPort: number;
+  /** Host policy hop credential injected by the relay, never disclosed to the bundle. */
+  readonly requiredProxyAuthorization: string;
+}
+
+export interface DesktopRelayEndpointConfig {
+  readonly containerName: string;
+  readonly relayIpv4Address: string;
+  readonly listenPort: number;
+  readonly targetHost: string;
   readonly targetPort: number;
 }
 
-export interface DesktopRelayResources {
+/** Narrow adapter view of the common ledgered outer-create capability. */
+export type DesktopRelayCreateAuthority = LedgeredOuterCreateAuthority<
+  'container' | 'network',
+  'fixed-relay' | 'network'
+>;
+
+export interface CreateDesktopRelayExposureOptions {
+  readonly bundleId: string;
+  readonly mode: 'images' | 'packages';
+  readonly imageId: string;
+  readonly isolatedNetworkName: string;
+  readonly uplinkNetworkName: string;
+  readonly ipv4Subnet: string;
+  readonly ipv6Subnet: string;
+  readonly requiredProxyAuthorization: string;
+  readonly registry: DesktopRelayEndpointConfig;
+  readonly package?: DesktopRelayEndpointConfig;
+  readonly createOuterResource: DesktopRelayCreateAuthority;
+}
+
+export interface DesktopRelayEndpoint {
   readonly containerId: string;
+  readonly proxyUrl: string;
+}
+
+export interface DesktopRelayExposure {
   readonly networkId: string;
+  readonly isolatedNetworkName: string;
+  readonly ipv4Subnet: string;
+  readonly ipv6Subnet: string;
+  readonly registry: DesktopRelayEndpoint;
+  readonly package?: DesktopRelayEndpoint;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -72,8 +117,15 @@ function stringArray(value: unknown): readonly string[] {
 
 function normalizeIpEndpoint(ip: string, port: number, field: string): string {
   if (isIP(ip) !== 4) throw new Error(`${field} must be an IPv4 literal`);
+  if (ipv4ToNumber(ip) === 0) throw new Error(`${field} must not be unspecified`);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`${field} port is invalid`);
   return `${ip}:${port}`;
+}
+
+function normalizeTargetEndpoint(host: string, port: number): string {
+  if (host !== DESKTOP_RELAY_HOST_GATEWAY_ALIAS) return normalizeIpEndpoint(host, port, 'relay target');
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('relay target port is invalid');
+  return `${host}:${port}`;
 }
 
 function parseIpv4Cidr(cidr: string): { readonly address: string; readonly prefix: number; readonly mask: number } {
@@ -99,12 +151,11 @@ function assertConfig(config: DesktopRelayConfig): void {
     ['bundleId', config.bundleId],
     ['containerName', config.containerName],
     ['isolatedNetworkName', config.isolatedNetworkName],
-    ['uplinkNetworkName', config.uplinkNetworkName],
   ] as const) {
     if (!RESOURCE_NAME.test(value)) throw new Error(`relay ${field} is not a canonical IronCurtain resource name`);
   }
-  if (config.isolatedNetworkName === config.uplinkNetworkName) {
-    throw new Error('relay isolated and uplink networks must be distinct');
+  if (config.uplinkNetworkName !== DESKTOP_RELAY_UPLINK_NETWORK) {
+    throw new Error(`relay uplink network must be the fixed ${DESKTOP_RELAY_UPLINK_NETWORK} network`);
   }
   if (!IMAGE_ID.test(config.imageId)) throw new Error('relay image must be an immutable sha256 image ID');
 
@@ -122,11 +173,39 @@ function assertConfig(config: DesktopRelayConfig): void {
     throw new Error('relay IPv6 subnet must be an explicit /64');
   }
   normalizeIpEndpoint(config.relayIpv4Address, config.listenPort, 'relay listen');
-  normalizeIpEndpoint(config.targetIpv4Address, config.targetPort, 'relay target');
+  normalizeTargetEndpoint(config.targetHost, config.targetPort);
+  if (!PROXY_AUTHORIZATION.test(config.requiredProxyAuthorization)) {
+    throw new Error('relay proxy authorization is not one canonical Basic credential');
+  }
 }
 
-export function buildDesktopRelayNetworkCreateArgs(config: DesktopRelayConfig): readonly string[] {
+function networkLabels(bundleId: string): Readonly<Record<string, string>> {
+  return { [RELAY_LABEL]: 'isolated-network', [BUNDLE_LABEL]: bundleId };
+}
+
+function containerLabels(bundleId: string): Readonly<Record<string, string>> {
+  return { [RELAY_LABEL]: 'fixed-relay', [BUNDLE_LABEL]: bundleId };
+}
+
+function assertRequiredLabels(
+  labels: Readonly<Record<string, string>>,
+  required: Readonly<Record<string, string>>,
+): void {
+  for (const [key, value] of Object.entries(required)) {
+    if (labels[key] !== value) throw new Error(`relay create authority changed required label ${key}`);
+  }
+}
+
+function renderLabels(labels: Readonly<Record<string, string>>): readonly string[] {
+  return Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
+}
+
+export function buildDesktopRelayNetworkCreateArgs(
+  config: DesktopRelayConfig,
+  labels: Readonly<Record<string, string>> = networkLabels(config.bundleId),
+): readonly string[] {
   assertConfig(config);
+  assertRequiredLabels(labels, networkLabels(config.bundleId));
   return [
     'network',
     'create',
@@ -142,16 +221,17 @@ export function buildDesktopRelayNetworkCreateArgs(config: DesktopRelayConfig): 
     `${IPV6_GATEWAY_MODE}=isolated`,
     '--opt',
     `${ENABLE_IPV4}=true`,
-    '--label',
-    `${RELAY_LABEL}=isolated-network`,
-    '--label',
-    `${BUNDLE_LABEL}=${config.bundleId}`,
+    ...renderLabels(labels),
     config.isolatedNetworkName,
   ];
 }
 
-export function buildDesktopRelayCreateArgs(config: DesktopRelayConfig): readonly string[] {
+export function buildDesktopRelayCreateArgs(
+  config: DesktopRelayConfig,
+  labels: Readonly<Record<string, string>> = containerLabels(config.bundleId),
+): readonly string[] {
   assertConfig(config);
+  assertRequiredLabels(labels, containerLabels(config.bundleId));
   return [
     'container',
     'create',
@@ -161,6 +241,9 @@ export function buildDesktopRelayCreateArgs(config: DesktopRelayConfig): readonl
     config.isolatedNetworkName,
     '--ip',
     config.relayIpv4Address,
+    ...(config.targetHost === DESKTOP_RELAY_HOST_GATEWAY_ALIAS
+      ? (['--add-host', DESKTOP_RELAY_HOST_GATEWAY_MAPPING] as const)
+      : []),
     '--read-only',
     '--cap-drop=ALL',
     '--security-opt',
@@ -189,15 +272,12 @@ export function buildDesktopRelayCreateArgs(config: DesktopRelayConfig): readonl
     'max-file=1',
     '--log-opt',
     'compress=false',
-    '--label',
-    `${RELAY_LABEL}=fixed-relay`,
-    '--label',
-    `${BUNDLE_LABEL}=${config.bundleId}`,
+    ...renderLabels(labels),
     config.imageId,
     '--listen',
     normalizeIpEndpoint(config.relayIpv4Address, config.listenPort, 'relay listen'),
     '--target',
-    normalizeIpEndpoint(config.targetIpv4Address, config.targetPort, 'relay target'),
+    normalizeTargetEndpoint(config.targetHost, config.targetPort),
     '--allow-cidr',
     config.ipv4Subnet,
     '--max-concurrent',
@@ -208,6 +288,8 @@ export function buildDesktopRelayCreateArgs(config: DesktopRelayConfig): readonl
     DESKTOP_RELAY_PROFILE.maxDuration,
     '--dial-timeout',
     DESKTOP_RELAY_PROFILE.dialTimeout,
+    '--proxy-authorization',
+    config.requiredProxyAuthorization,
   ];
 }
 
@@ -237,6 +319,7 @@ export function assertDesktopRelayContainerInspect(
   config: DesktopRelayConfig,
   expectedContainerId?: string,
   requireRunning = false,
+  requiredOwnershipLabels?: Readonly<Record<string, string>>,
 ): void {
   assertConfig(config);
   if (!isObject(raw)) throw new Error('relay container inspect must be an object');
@@ -266,6 +349,8 @@ export function assertDesktopRelayContainerInspect(
   if (labels[RELAY_LABEL] !== 'fixed-relay' || labels[BUNDLE_LABEL] !== config.bundleId) {
     throw new Error('relay ownership labels drift');
   }
+  if (requiredOwnershipLabels !== undefined)
+    assertRequiredLabels(labels as Record<string, string>, requiredOwnershipLabels);
   if (containerConfig.ExposedPorts !== null && containerConfig.ExposedPorts !== undefined) {
     throw new Error('relay image must expose no ports');
   }
@@ -284,6 +369,10 @@ export function assertDesktopRelayContainerInspect(
   if (integerAt(hostConfig, 'PidsLimit') !== DESKTOP_RELAY_PROFILE.pidsLimit) throw new Error('relay PID drift');
   if (stringAt(hostConfig, 'NetworkMode') !== config.isolatedNetworkName)
     throw new Error('relay primary network drift');
+  const expectedExtraHosts =
+    config.targetHost === DESKTOP_RELAY_HOST_GATEWAY_ALIAS ? [DESKTOP_RELAY_HOST_GATEWAY_MAPPING] : [];
+  const actualExtraHosts = hostConfig.ExtraHosts ?? [];
+  exactStringSet(actualExtraHosts, expectedExtraHosts, 'ExtraHosts');
   if (hostConfig.Binds !== null && (!Array.isArray(hostConfig.Binds) || hostConfig.Binds.length !== 0)) {
     throw new Error('relay must have no bind mount');
   }
@@ -343,6 +432,7 @@ export function assertDesktopRelayNetworkInspect(
   raw: unknown,
   config: DesktopRelayConfig,
   expectedNetworkId?: string,
+  requiredOwnershipLabels?: Readonly<Record<string, string>>,
 ): void {
   assertConfig(config);
   if (!isObject(raw)) throw new Error('relay network inspect must be an object');
@@ -357,6 +447,8 @@ export function assertDesktopRelayNetworkInspect(
   if (labels[RELAY_LABEL] !== 'isolated-network' || labels[BUNDLE_LABEL] !== config.bundleId) {
     throw new Error('relay network ownership labels drift');
   }
+  if (requiredOwnershipLabels !== undefined)
+    assertRequiredLabels(labels as Record<string, string>, requiredOwnershipLabels);
   const options = objectAt(raw, 'Options');
   if (options[IPV4_GATEWAY_MODE] !== 'isolated' || options[IPV6_GATEWAY_MODE] !== 'isolated') {
     throw new Error('relay isolated gateway mode drift');
@@ -417,6 +509,7 @@ async function waitForDesktopRelayReady(
   exec: ExecFileFn,
   config: DesktopRelayConfig,
   containerId: string,
+  requiredOwnershipLabels: Readonly<Record<string, string>>,
 ): Promise<void> {
   const deadline = Date.now() + 5_000;
   let pollDelayMs = 50;
@@ -429,7 +522,7 @@ async function waitForDesktopRelayReady(
       maxBuffer: 1024 * 1024,
     });
     if (hasDesktopRelayReadyMarker(logs)) {
-      assertDesktopRelayContainerInspect(inspected, config, containerId, true);
+      assertDesktopRelayContainerInspect(inspected, config, containerId, true, requiredOwnershipLabels);
       return;
     }
     const remainingMs = deadline - Date.now();
@@ -439,52 +532,181 @@ async function waitForDesktopRelayReady(
   }
 }
 
-export async function createDesktopRelay(exec: ExecFileFn, config: DesktopRelayConfig): Promise<DesktopRelayResources> {
-  assertConfig(config);
+function relayConfig(
+  options: CreateDesktopRelayExposureOptions,
+  endpoint: DesktopRelayEndpointConfig,
+): DesktopRelayConfig {
+  return {
+    bundleId: options.bundleId,
+    containerName: endpoint.containerName,
+    isolatedNetworkName: options.isolatedNetworkName,
+    uplinkNetworkName: options.uplinkNetworkName,
+    imageId: options.imageId,
+    ipv4Subnet: options.ipv4Subnet,
+    ipv6Subnet: options.ipv6Subnet,
+    relayIpv4Address: endpoint.relayIpv4Address,
+    listenPort: endpoint.listenPort,
+    targetHost: endpoint.targetHost,
+    targetPort: endpoint.targetPort,
+    requiredProxyAuthorization: options.requiredProxyAuthorization,
+  };
+}
+
+function assertExposureConfig(options: CreateDesktopRelayExposureOptions): {
+  readonly registry: DesktopRelayConfig;
+  readonly package?: DesktopRelayConfig;
+} {
+  if (options.mode === 'images' && options.package !== undefined) {
+    throw new Error('images relay exposure must not include a package relay');
+  }
+  if (options.mode === 'packages' && options.package === undefined) {
+    throw new Error('packages relay exposure requires a package relay');
+  }
+  const registry = relayConfig(options, options.registry);
+  const packageRelay = options.package === undefined ? undefined : relayConfig(options, options.package);
+  assertConfig(registry);
+  if (packageRelay !== undefined) {
+    assertConfig(packageRelay);
+    if (registry.containerName === packageRelay.containerName) {
+      throw new Error('registry and package relays must have distinct container names');
+    }
+    if (registry.relayIpv4Address === packageRelay.relayIpv4Address) {
+      throw new Error('registry and package relays must have distinct isolated IPv4 addresses');
+    }
+  }
+  return { registry, ...(packageRelay === undefined ? {} : { package: packageRelay }) };
+}
+
+function assertRawId(id: string, kind: 'container' | 'network'): string {
+  if (!/^[a-f0-9]{64}$/.test(id)) throw new Error(`Docker returned an invalid relay ${kind} ID`);
+  return id;
+}
+
+async function createRelayContainer(
+  exec: ExecFileFn,
+  options: CreateDesktopRelayExposureOptions,
+  config: DesktopRelayConfig,
+  rollbackContainerIds: string[],
+): Promise<string> {
+  const baseLabels = containerLabels(config.bundleId);
+  let rawContainerId: string | undefined;
+  let effectiveLabels: Readonly<Record<string, string>> | undefined;
+  const created = await options.createOuterResource(
+    {
+      kind: 'container',
+      role: 'fixed-relay',
+      requestedName: config.containerName,
+      baseLabels,
+      adjudicateObserved: async (containerId) => {
+        if (effectiveLabels === undefined) throw new Error('relay create authority omitted effective ownership labels');
+        assertDesktopRelayContainerInspect(
+          await inspectExact(exec, 'container', containerId),
+          config,
+          containerId,
+          false,
+          effectiveLabels,
+        );
+      },
+    },
+    async (requestedName, labels) => {
+      if (requestedName !== config.containerName) throw new Error('relay create authority changed the container name');
+      effectiveLabels = labels;
+      const container = await exec('docker', buildDesktopRelayCreateArgs(config, labels), {
+        timeout: 30_000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      const containerId = assertRawId(container.stdout.trim(), 'container');
+      rawContainerId = containerId;
+      rollbackContainerIds.push(containerId);
+      await exec('docker', ['network', 'connect', config.uplinkNetworkName, containerId], {
+        timeout: 10_000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      return { id: containerId };
+    },
+  );
+  if (rawContainerId === undefined || assertRawId(created.id, 'container') !== rawContainerId) {
+    throw new Error('relay container identity changed across create authority');
+  }
+  await exec('docker', ['container', 'start', rawContainerId], { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 });
+  if (effectiveLabels === undefined) throw new Error('relay create authority omitted effective ownership labels');
+  await waitForDesktopRelayReady(exec, config, rawContainerId, effectiveLabels);
+  return rawContainerId;
+}
+
+/**
+ * Create one bundle-scoped Docker Desktop egress exposure. The common bundle
+ * lease owns successful resources. This function only removes exact IDs when
+ * setup fails before the caller can continue the bundle lifecycle.
+ */
+export async function createDesktopRelayExposure(
+  exec: ExecFileFn,
+  options: CreateDesktopRelayExposureOptions,
+): Promise<DesktopRelayExposure> {
+  const configs = assertExposureConfig(options);
   let networkId: string | undefined;
-  let containerId: string | undefined;
+  const containerIds: string[] = [];
   try {
-    const network = await exec('docker', buildDesktopRelayNetworkCreateArgs(config), {
-      timeout: 30_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    networkId = network.stdout.trim();
-    if (!/^[a-f0-9]{64}$/.test(networkId)) throw new Error('Docker returned an invalid relay network ID');
+    const networkConfig = configs.registry;
+    const baseLabels = networkLabels(options.bundleId);
+    let effectiveNetworkLabels: Readonly<Record<string, string>> | undefined;
+    const network = await options.createOuterResource(
+      {
+        kind: 'network',
+        role: 'network',
+        requestedName: options.isolatedNetworkName,
+        baseLabels,
+        adjudicateObserved: async (id) => {
+          if (effectiveNetworkLabels === undefined) {
+            throw new Error('relay create authority omitted effective network ownership labels');
+          }
+          assertDesktopRelayNetworkInspect(
+            await inspectExact(exec, 'network', id),
+            networkConfig,
+            id,
+            effectiveNetworkLabels,
+          );
+        },
+      },
+      async (requestedName, labels) => {
+        if (requestedName !== options.isolatedNetworkName)
+          throw new Error('relay create authority changed the network name');
+        effectiveNetworkLabels = labels;
+        const created = await exec('docker', buildDesktopRelayNetworkCreateArgs(networkConfig, labels), {
+          timeout: 30_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        networkId = assertRawId(created.stdout.trim(), 'network');
+        return { id: networkId };
+      },
+    );
+    if (networkId === undefined || assertRawId(network.id, 'network') !== networkId) {
+      throw new Error('relay network identity changed across create authority');
+    }
 
-    const container = await exec('docker', buildDesktopRelayCreateArgs(config), {
-      timeout: 30_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    containerId = container.stdout.trim();
-    if (!/^[a-f0-9]{64}$/.test(containerId)) throw new Error('Docker returned an invalid relay container ID');
-
-    await exec('docker', ['network', 'connect', config.uplinkNetworkName, containerId], {
-      timeout: 10_000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    assertDesktopRelayNetworkInspect(await inspectExact(exec, 'network', networkId), config, networkId);
-    assertDesktopRelayContainerInspect(await inspectExact(exec, 'container', containerId), config, containerId);
-
-    await exec('docker', ['container', 'start', containerId], { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 });
-    await waitForDesktopRelayReady(exec, config, containerId);
-    return { containerId, networkId };
+    const registryContainerId = await createRelayContainer(exec, options, configs.registry, containerIds);
+    const packageConfig = configs.package;
+    const packageEndpoint =
+      packageConfig === undefined
+        ? undefined
+        : {
+            containerId: await createRelayContainer(exec, options, packageConfig, containerIds),
+            proxyUrl: `http://${packageConfig.relayIpv4Address}:${packageConfig.listenPort}`,
+          };
+    return {
+      networkId,
+      isolatedNetworkName: options.isolatedNetworkName,
+      ipv4Subnet: options.ipv4Subnet,
+      ipv6Subnet: options.ipv6Subnet,
+      registry: {
+        containerId: registryContainerId,
+        proxyUrl: `http://${configs.registry.relayIpv4Address}:${configs.registry.listenPort}`,
+      },
+      ...(packageEndpoint === undefined ? {} : { package: packageEndpoint }),
+    };
   } catch (error) {
-    if (containerId !== undefined) await removeBestEffort(exec, 'container', containerId);
+    for (const containerId of containerIds.reverse()) await removeBestEffort(exec, 'container', containerId);
     if (networkId !== undefined) await removeBestEffort(exec, 'network', networkId);
     throw error;
   }
-}
-
-export async function removeDesktopRelay(
-  exec: ExecFileFn,
-  config: DesktopRelayConfig,
-  resources: DesktopRelayResources,
-): Promise<void> {
-  const container = await inspectExact(exec, 'container', resources.containerId);
-  assertDesktopRelayContainerInspect(container, config, resources.containerId);
-  await removeBestEffort(exec, 'container', resources.containerId);
-
-  const network = await inspectExact(exec, 'network', resources.networkId);
-  assertDesktopRelayNetworkInspect(network, config, resources.networkId);
-  await removeBestEffort(exec, 'network', resources.networkId);
 }

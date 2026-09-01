@@ -18,7 +18,7 @@ export interface DockerWorkloadRevocationResult {
 /**
  * Revoke only resources whose immutable ID/name and generation label match the
  * host-only lease. The create-before-observation crash window is resolved by
- * the precommitted random name plus the exact generation label, then promoted
+ * the precommitted caller-selected name plus the exact generation label, then promoted
  * to an immutable-ID record before deletion.
  */
 export async function revokeDockerWorkloadOuterResources(

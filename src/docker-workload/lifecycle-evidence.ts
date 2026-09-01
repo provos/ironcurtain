@@ -33,7 +33,7 @@ import {
   timestampSchema,
   watchdogSampleSummarySchema as sampleSchema,
 } from '../zod-helpers.js';
-import { APPLE_VM_DAEMON_READINESS_TEXT_BOUNDS as READINESS_TEXT_BOUNDS } from './apple-vm-daemon.js';
+import { PRIVATE_DOCKER_READINESS_TEXT_BOUNDS as READINESS_TEXT_BOUNDS } from './private-docker.js';
 import {
   assertCleanupInventoryGap,
   cleanupInventoryGapMsSchema,
@@ -141,15 +141,24 @@ const dockerWorkloadAuditEventSchema = z.discriminatedUnion('kind', [
           compose: softwareVersionSchema,
         })
         .strict(),
-      artifact: z
-        .object({
-          logicalName: z.string().min(1).max(255),
-          buildHash: sha256Schema,
-          archiveSha256: sha256Schema,
-          outerAppleImageId: runtimeIdentitySchema,
-          innerDockerImageId: runtimeIdentitySchema,
-        })
-        .strict(),
+      image: z.discriminatedUnion('transport', [
+        z
+          .object({
+            transport: z.literal('apple-archive'),
+            logicalName: z.string().min(1).max(255),
+            buildHash: sha256Schema,
+            archiveSha256: sha256Schema,
+            outerImageId: runtimeIdentitySchema,
+            innerImageId: runtimeIdentitySchema,
+          })
+          .strict(),
+        z
+          .object({
+            transport: z.literal('docker-desktop-direct'),
+            outerImageId: runtimeIdentitySchema,
+          })
+          .strict(),
+      ]),
       network: z
         .object({
           name: resourceNameSchema,

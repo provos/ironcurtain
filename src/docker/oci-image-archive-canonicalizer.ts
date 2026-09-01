@@ -32,12 +32,6 @@ export interface CanonicalizeDockerSaveArchiveOptions {
   readonly logicalName: string;
   readonly architecture: 'amd64' | 'arm64';
   readonly expectedLabels: Readonly<Record<string, string>>;
-  /**
-   * Exact mutable references the source runtime may retain in its OCI
-   * annotation after a unique capture alias is created. These names are only
-   * structural metadata; the caller pins and inspects the alias before save.
-   */
-  readonly acceptedSourceReferences?: readonly string[];
 }
 
 export interface CanonicalizedDockerSaveArchive extends VerifiedOciImageArchive {
@@ -148,9 +142,6 @@ function validateOptions(options: CanonicalizeDockerSaveArchiveOptions): void {
   for (const [name, value] of Object.entries(options.expectedLabels)) {
     if (name.length === 0 || name.length > 512 || value.length > 4096)
       throw new Error('canonical image label is invalid');
-  }
-  for (const reference of options.acceptedSourceReferences ?? []) {
-    if (!validLogicalName(reference)) throw new Error('accepted Docker-save source reference is invalid');
   }
 }
 
@@ -290,16 +281,11 @@ function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options:
     throw new Error('Docker-save index descriptor is invalid');
   }
   assertDigest(topLevelDescriptor.digest, 'Docker-save index descriptor digest');
-  if (isObject(topLevelDescriptor.annotations)) {
-    const sourceName = topLevelDescriptor.annotations['org.opencontainers.image.ref.name'];
-    const acceptedSourceReferences = options.acceptedSourceReferences ?? [options.logicalName];
-    if (
-      sourceName !== undefined &&
-      !acceptedSourceReferences.some((reference) => sameLogicalImageReference(sourceName, reference))
-    ) {
-      throw new Error('Docker-save index logical name differs from the requested image');
-    }
-  }
+  // Source-runtime names are mutable, non-identity metadata. Docker Desktop
+  // may emit only "latest" here even when the saved image was selected by a
+  // fully qualified reference. The graph digests, platform, and labels below
+  // establish the selected content; the output index is assigned the caller's
+  // exact logical name when the canonical archive is written.
   let descriptor = topLevelDescriptor;
   if (topLevelDescriptor.mediaType === 'application/vnd.oci.image.index.v1+json') {
     const nestedEntry = requiredEntry(entries, blobPath(topLevelDescriptor.digest));
@@ -398,12 +384,11 @@ function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options:
     if (
       dockerItem.Config !== blobPath(configDigest) ||
       !Array.isArray(dockerItem.RepoTags) ||
-      dockerItem.RepoTags.length !== 1 ||
-      dockerItem.RepoTags[0] !== options.logicalName ||
+      dockerItem.RepoTags.some((reference) => typeof reference !== 'string') ||
       !Array.isArray(dockerItem.Layers) ||
       JSON.stringify(dockerItem.Layers) !== JSON.stringify(layers.map((layer) => blobPath(layer.digest)))
     ) {
-      throw new Error('Docker-save compatibility manifest differs from the OCI graph/logical name');
+      throw new Error('Docker-save compatibility manifest differs from the OCI graph');
     }
   }
   return {
@@ -413,21 +398,6 @@ function validateSourceGraph(entries: ReadonlyMap<string, SourceEntry>, options:
     config,
     layers,
   };
-}
-
-function sameLogicalImageReference(actual: unknown, expected: string): boolean {
-  if (typeof actual !== 'string') return false;
-  const normalize = (value: string): string => {
-    for (const prefix of ['docker.io/library/', 'localhost/']) {
-      if (value.startsWith(prefix)) return value.slice(prefix.length);
-    }
-    return value;
-  };
-  return normalize(actual) === normalize(expected);
-}
-
-function validLogicalName(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$/u.test(value) && value.includes(':');
 }
 
 function requiredEntry(entries: ReadonlyMap<string, SourceEntry>, name: string): SourceEntry {

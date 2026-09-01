@@ -156,8 +156,9 @@ vi.mock('../../src/docker/package-egress-proxy.js', async (importOriginal) => ({
     seam.lifecycle.push('construct-package');
     return {
       snapshot: {},
-      async start(socketPath: string) {
+      async start(target: { readonly socketPath: string }) {
         seam.lifecycle.push('bind-package');
+        const { socketPath } = target;
         seam.publicSocketPath = socketPath;
         if (seam.publicStartError !== undefined) throw seam.publicStartError;
         if (seam.publicCreateSocket) writeFileSync(socketPath, '');

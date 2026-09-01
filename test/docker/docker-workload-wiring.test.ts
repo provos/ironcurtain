@@ -25,6 +25,9 @@ import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assembleDockerInfrastructure,
+  buildDockerDesktopTransportCreateLimits,
+  buildNestedDockerAgentTrustedCreateOptions,
+  buildDockerWorkloadEgressMounts,
   createLedgeredAgentContainer,
   createSessionContainers,
   destroyDockerInfrastructure,
@@ -44,7 +47,12 @@ import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.
 import type { IronCurtainConfig } from '../../src/config/types.js';
 import type { BundleId } from '../../src/session/types.js';
 import type { ContainerRuntime } from '../../src/docker/types.js';
-import { APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV } from '../../src/docker-workload/apple-vm-daemon.js';
+import {
+  APPLE_VM_DAEMON_PACKAGE_EGRESS_START_ARGV,
+  APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+  APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+} from '../../src/docker-workload/apple-vm-daemon.js';
+import { DESKTOP_RELAY_PROFILE } from '../../src/docker-workload/desktop-relay.js';
 import {
   DOCKER_BUILD_TRUST_APT_CONFIG_PATH,
   DOCKER_BUILD_TRUST_CA_BUNDLE_PATH,
@@ -185,7 +193,11 @@ function makeConfig(): IronCurtainConfig {
 }
 
 function packageBuildShim(): NonNullable<PreContainerInfrastructure['dockerBuildShim']> {
-  const contract = getDockerBuildShimStagingContract('packages')!;
+  const contract = getDockerBuildShimStagingContract(
+    'packages',
+    APPLE_VM_PACKAGE_EGRESS_PROXY_URL,
+    APPLE_VM_REGISTRY_EGRESS_PROXY_URL,
+  )!;
   return {
     contract,
     artifacts: [
@@ -268,13 +280,14 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
     expect(lease.resources[0]).toMatchObject({
       kind: 'container',
       role: 'agent',
+      requestedName: result.containerName,
       observedId: result.containerId,
     });
     // The harness runtime throws if create runs before its ledger append, so
     // reaching here proves ledger-precedes-create; assert the ordered events.
     expect(runtime.events).toEqual([`create:${lease.resources[0].requestedName}`, `start:${result.containerId}`]);
-    // The created container carries the precommitted name, not the deterministic one.
-    expect(lease.resources[0].requestedName).not.toBe(result.containerName);
+    // Service discovery and cleanup share one caller-selected identity.
+    expect(lease.resources[0].requestedName).toBe(result.containerName);
   });
 
   it('observes the stopped Apple VM before accepting its prepared image descriptor', async () => {
@@ -293,7 +306,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
       runtimeKind: 'apple-container',
       runtime: runtime.runtime,
       expectedImageId,
-      deterministicName: 'unused',
+      requestedName: 'apple-agent',
       baseLabels: undefined,
       mounts: [],
       create: (name, labels) =>
@@ -323,7 +336,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
         dockerWorkload: handle,
         runtimeKind: 'apple-container',
         runtime: runtime.runtime,
-        deterministicName: 'unused',
+        requestedName: 'apple-agent',
         baseLabels: undefined,
         mounts: [],
         create: (name, labels) =>
@@ -358,7 +371,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
         runtimeKind: 'apple-container',
         runtime: runtime.runtime,
         expectedImageId: `sha256:${'a'.repeat(64)}`,
-        deterministicName: 'unused',
+        requestedName: 'apple-agent',
         baseLabels: undefined,
         mounts: [],
         create: (name, labels) =>
@@ -396,7 +409,7 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
       runtimeKind: 'docker',
       runtime: runtime.runtime,
       expectedImageId: immutableImageId,
-      deterministicName: 'docker-agent',
+      requestedName: 'docker-agent',
       baseLabels: undefined,
       mounts: [],
       create: () => {
@@ -412,6 +425,20 @@ describe('Docker-workload wiring — createSessionContainers (§8.2 step 1)', ()
 });
 
 describe('Docker-workload wiring — assembleDockerInfrastructure (§8.2 / §8.3)', () => {
+  it('does not turn Docker Desktop TCP egress endpoints into agent bind mounts', () => {
+    const stop = async (): Promise<void> => {};
+    expect(
+      buildDockerWorkloadEgressMounts({
+        runtimeKind: 'docker',
+        dockerWorkloadEgress: {
+          networkAccess: 'packages',
+          registry: { listener: { stop }, port: 31_081, snapshot: registrySnapshot },
+          packages: { listener: { stop }, port: 31_082, snapshot: packageSnapshot },
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('returns the lease activated by the shared bootstrap after every resource is observed', async () => {
     const clock = createFakeClock();
     const runtime = createEventRuntime();
@@ -728,7 +755,7 @@ describe('Docker-workload wiring — ledgerOuterResourceCreate watchdog gate (§
 
     const created = await ledgerOuterResourceCreate(
       handle,
-      { kind: 'container', role: 'nested-daemon' },
+      { kind: 'container', role: 'nested-daemon', requestedName: 'nested-daemon-test' },
       async (name, labels) => ({
         id: await runtime.runtime.create({
           name,
@@ -758,10 +785,14 @@ describe('Docker-workload wiring — ledgerOuterResourceCreate watchdog gate (§
 
     let createRan = false;
     await expect(
-      ledgerOuterResourceCreate(handle, { kind: 'container', role: 'nested-daemon' }, async () => {
-        createRan = true;
-        return { id: 'unreachable' };
-      }),
+      ledgerOuterResourceCreate(
+        handle,
+        { kind: 'container', role: 'nested-daemon', requestedName: 'nested-daemon-test' },
+        async () => {
+          createRan = true;
+          return { id: 'unreachable' };
+        },
+      ),
     ).rejects.toThrow(/watchdog supervisor status is missing/u);
 
     // The gate fired before the create AND before any ledger append.
@@ -779,7 +810,7 @@ describe('Docker-workload wiring — ledgerOuterResourceCreate watchdog gate (§
 
     const created = await ledgerOuterResourceCreate(
       handle,
-      { kind: 'container', role: 'agent' },
+      { kind: 'container', role: 'agent', requestedName: 'agent-test' },
       async (name, labels) => ({
         id: await runtime.runtime.create({
           name,
@@ -822,7 +853,7 @@ describe('Docker-workload wiring — ledgerOuterResourceCreate watchdog gate (§
 
     const creating = ledgerOuterResourceCreate(
       handle,
-      { kind: 'container', role: 'nested-daemon' },
+      { kind: 'container', role: 'nested-daemon', requestedName: 'nested-daemon-test' },
       async (name, labels) => {
         markCreateEntered();
         await createBarrier;
@@ -891,7 +922,7 @@ describe('Docker-workload wiring — ledgerOuterResourceCreate watchdog gate (§
 
       const creating = ledgerOuterResourceCreate(
         handle,
-        { kind: 'container', role: 'nested-daemon' },
+        { kind: 'container', role: 'nested-daemon', requestedName: 'nested-daemon-test' },
         async (name, labels) => {
           await vi.advanceTimersByTimeAsync(31_000);
           expect(Date.parse(loadDockerWorkloadLease(handle.leasePath).coordinator.heartbeatAt)).toBeGreaterThan(
@@ -981,43 +1012,91 @@ describe('Docker-workload wiring — outer resource envelope', () => {
     ).toEqual({ memoryMb: 2048, cpus: 1.5 });
   });
 
-  it('partitions the Docker Desktop aggregate without double-counting the sidecar', () => {
-    const partition = selectDockerDesktopResourcePartition(
-      {
-        dockerResources: { memoryMb: 7777, cpus: 7 },
-        dockerWorkload: {
-          enabled: true,
-          networkAccess: 'offline',
-          acceptObservedDiskRisk: true,
-          resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },
+  const relayMemoryMb = DESKTOP_RELAY_PROFILE.memoryBytes / (1024 * 1024);
+  const relayCpus = DESKTOP_RELAY_PROFILE.nanoCpus / 1_000_000_000;
+
+  it.each([
+    { networkAccess: 'offline', relayCount: 0, sidecarPids: 352, agentMemoryMb: 960, agentCpus: 0.75 },
+    { networkAccess: 'images', relayCount: 1, sidecarPids: 320, agentMemoryMb: 896, agentCpus: 0.5 },
+    { networkAccess: 'packages', relayCount: 2, sidecarPids: 288, agentMemoryMb: 832, agentCpus: 0.25 },
+  ] as const)(
+    'partitions the Docker Desktop $networkAccess aggregate across every outer container',
+    ({ networkAccess, relayCount, sidecarPids, agentMemoryMb, agentCpus }) => {
+      const partition = selectDockerDesktopResourcePartition(
+        {
+          dockerResources: { memoryMb: 7777, cpus: 7 },
+          dockerWorkload: {
+            enabled: true,
+            networkAccess,
+            acceptObservedDiskRisk: true,
+            resources: { memoryMb: 1536, cpus: 1.25, pids: { desired: 512, required: false }, diskMb: null },
+          },
         },
-      },
-      { cpus: 8, memoryMb: 16_384 },
-    );
+        { cpus: 8, memoryMb: 16_384 },
+      );
 
-    expect(partition).toEqual({
-      sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: 512 },
-      agent: { memoryMb: 1024, cpus: 1 },
-    });
-    expect(partition.sidecar.memoryMb + (partition.agent.memoryMb ?? 0)).toBe(1536);
-    expect(partition.sidecar.cpus + (partition.agent.cpus ?? 0)).toBe(1.25);
-  });
+      expect(partition).toEqual({
+        sidecar: { memoryMb: 512, cpus: 0.25, pidsLimit: sidecarPids },
+        transport: { memoryMb: relayMemoryMb, cpus: relayCpus, pidsLimit: DESKTOP_RELAY_PROFILE.pidsLimit },
+        agent: { memoryMb: agentMemoryMb, cpus: agentCpus, pidsLimit: 128 },
+      });
+      expect(
+        partition.sidecar.memoryMb +
+          partition.transport.memoryMb +
+          (partition.agent.memoryMb ?? 0) +
+          relayCount * relayMemoryMb,
+      ).toBe(1536);
+      expect(
+        partition.sidecar.cpus + partition.transport.cpus + (partition.agent.cpus ?? 0) + relayCount * relayCpus,
+      ).toBe(1.25);
+      expect(
+        partition.sidecar.pidsLimit +
+          partition.transport.pidsLimit +
+          partition.agent.pidsLimit +
+          relayCount * DESKTOP_RELAY_PROFILE.pidsLimit,
+      ).toBe(512);
+      expect(buildDockerDesktopTransportCreateLimits(partition)).toEqual({
+        resources: { memoryMb: relayMemoryMb, cpus: relayCpus },
+        trustedCreateOptions: { pidsLimit: DESKTOP_RELAY_PROFILE.pidsLimit },
+      });
+      expect(
+        buildNestedDockerAgentTrustedCreateOptions(
+          [{ name: 'daemon-api', target: '/run/ironcurtain-docker', readonly: true, noCopy: true }],
+          partition,
+        ),
+      ).toEqual({
+        namedVolumeMounts: [{ name: 'daemon-api', target: '/run/ironcurtain-docker', readonly: true, noCopy: true }],
+        pidsLimit: 128,
+      });
+    },
+  );
 
-  it('fails a Docker Desktop aggregate that cannot leave bounded resources for both containers', () => {
+  it.each([
+    { networkAccess: 'offline', minimumMemoryMb: 1088, minimumCpus: 0.75 },
+    { networkAccess: 'images', minimumMemoryMb: 1152, minimumCpus: 1 },
+    { networkAccess: 'packages', minimumMemoryMb: 1216, minimumCpus: 1.25 },
+  ] as const)('fails a $networkAccess aggregate that cannot cover every reserve', (minimum) => {
     expect(() =>
       selectDockerDesktopResourcePartition(
         {
           dockerResources: { memoryMb: 7777, cpus: 7 },
           dockerWorkload: {
             enabled: true,
-            networkAccess: 'offline',
+            networkAccess: minimum.networkAccess,
             acceptObservedDiskRisk: true,
-            resources: { memoryMb: 768, cpus: 0.4, pids: { desired: 512, required: false }, diskMb: null },
+            resources: {
+              memoryMb: minimum.minimumMemoryMb - 1,
+              cpus: minimum.minimumCpus - 0.01,
+              pids: { desired: 512, required: false },
+              diskMb: null,
+            },
           },
         },
         { cpus: 8, memoryMb: 16_384 },
       ),
-    ).toThrow(/requires at least 1024 MiB and 0\.5 CPU/u);
+    ).toThrow(
+      `Docker Desktop nested Docker ${minimum.networkAccess} mode requires at least ${minimum.minimumMemoryMb} MiB and ${minimum.minimumCpus} CPU`,
+    );
   });
 
   it('builds the purpose-built Desktop daemon once and reuses its hash-labeled image', async () => {

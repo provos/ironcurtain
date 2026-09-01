@@ -115,6 +115,7 @@ describe('Docker-workload egress gating', () => {
       ca,
       outboundTransport: unreachableTransport(),
       registryListen: { socketPath: socketPathIn(tempDirectory()) },
+      packageListen: { socketPath: socketPathIn(tempDirectory()) },
       packageAuditLogPath: join(tempDirectory(), 'package-egress-audit.jsonl'),
     });
     trackProxies(listeners);
@@ -122,6 +123,43 @@ describe('Docker-workload egress gating', () => {
     if (listeners?.networkAccess !== 'packages') throw new Error('expected package egress listeners');
     expect(listeners.registry).toBeDefined();
     expect(listeners.packages).toBeDefined();
+    expect(listeners.packages.listenTarget).toEqual({ socketPath: expect.stringMatching(/e\.sock$/u) });
+  });
+
+  it('refuses package mode without its distinct package listen target', () => {
+    expect(() =>
+      createDockerWorkloadEgressListeners({
+        workload: workload('packages'),
+        ca,
+        outboundTransport: unreachableTransport(),
+        registryListen: { socketPath: socketPathIn(tempDirectory()) },
+        packageAuditLogPath: join(tempDirectory(), 'package-egress-audit.jsonl'),
+      }),
+    ).toThrow(/package egress.*no listen target/u);
+  });
+
+  it('carries the Desktop TCP target and source admission through both authorities', () => {
+    const allowRemoteAddress = (): boolean => true;
+    const requiredProxyAuthorization = 'Basic aXJvbmN1cnRhaW46dGVzdC1idW5kbGU=';
+    const options = {
+      workload: workload('packages'),
+      ca,
+      outboundTransport: unreachableTransport(),
+      registryListen: { listenPort: 0 },
+      packageListen: { listenPort: 0 },
+      packageAuditLogPath: join(tempDirectory(), 'package-egress-audit.jsonl'),
+      allowRemoteAddress,
+      requiredProxyAuthorization,
+    } satisfies CreateDockerWorkloadEgressListenersOptions;
+
+    const listeners = createDockerWorkloadEgressListeners(options);
+    trackProxies(listeners);
+    if (listeners?.networkAccess !== 'packages') throw new Error('expected package egress listeners');
+    expect(listeners.packages.listenTarget).toEqual({ listenPort: 0 });
+    expect(resolveDockerWorkloadEgressListenerOptions(options)?.registry.allowRemoteAddress).toBe(allowRemoteAddress);
+    expect(resolveDockerWorkloadEgressListenerOptions(options)?.registry.requiredProxyAuthorization).toBe(
+      requiredProxyAuthorization,
+    );
   });
 
   it('refuses to build an enabled mode without a listen target', () => {
@@ -156,6 +194,33 @@ describe('frozen-manifest binding', () => {
 // ── 3. Admit / deny end-to-end through createMitmProxy ────────────────
 
 describe('registry-egress listener (end-to-end through createMitmProxy)', () => {
+  it('denies a sibling TCP client without the exact per-bundle credential', async () => {
+    const requiredProxyAuthorization = 'Basic aXJvbmN1cnRhaW46dGVzdC1idW5kbGU=';
+    const listeners = createDockerWorkloadEgressListeners({
+      workload: workload('images'),
+      ca,
+      outboundTransport: unreachableTransport(),
+      registryListen: { listenPort: 0 },
+      allowRemoteAddress: () => true,
+      requiredProxyAuthorization,
+    });
+    if (listeners === undefined) throw new Error('expected registry listener');
+    proxies.push(listeners.registry.listener);
+    const address = await listeners.registry.listener.start();
+    if (address.port === undefined) throw new Error('expected registry listener TCP port');
+    const health =
+      'GET http://ironcurtain.invalid/__ironcurtain/health HTTP/1.1\r\n' +
+      'Host: ironcurtain.invalid\r\nConnection: close\r\n\r\n';
+
+    expect(await rawTcpRequest(address.port, health)).toContain('407 Proxy Authentication Required');
+    expect(
+      await rawTcpRequest(
+        address.port,
+        health.replace('Connection: close', `Proxy-Authorization: ${requiredProxyAuthorization}\r\nConnection: close`),
+      ),
+    ).toContain('IRONCURTAIN_OK/1');
+  });
+
   it('changes the exported ledger snapshot for a denied zero-byte request', async () => {
     const transport = recordingTransport({});
     const socketPath = socketPathIn(tempDirectory());
@@ -447,6 +512,27 @@ interface RawResponse {
   readonly statusCode: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
+}
+
+function rawTcpRequest(port: number, request: string): Promise<string> {
+  return new Promise((done) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    let response = '';
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      done(response);
+    };
+    socket.setEncoding('utf8');
+    socket.on('connect', () => socket.write(request));
+    socket.on('data', (chunk: string) => {
+      response += chunk;
+    });
+    socket.on('end', finish);
+    socket.on('close', finish);
+    socket.on('error', finish);
+  });
 }
 
 /** Opens a CONNECT tunnel on the proxy's UDS and returns the tunneled socket. */

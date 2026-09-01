@@ -138,6 +138,59 @@ func TestRunPreservesArgvEnvironmentAndPinnedPath(t *testing.T) {
 	}
 }
 
+func TestHandoffComposesNoNewKeyringCompatibility(t *testing.T) {
+	policy := productionPolicy()
+	policy.realRuncPath = "/test/pinned/runc"
+	tests := []struct {
+		name string
+		argv []string
+		want []string
+	}{
+		{
+			name: "ordinary create",
+			argv: []string{"--root", "/run/docker/runtime", "create", "container-id"},
+			want: []string{policy.realRuncPath, "--root", "/run/docker/runtime", "create", "--no-new-keyring", "container-id"},
+		},
+		{
+			name: "BuildKit run",
+			argv: readArgvFixture(t),
+			want: []string{
+				policy.realRuncPath,
+				"--log", buildkitLogPath,
+				"--log-format", "json",
+				"run", "--no-new-keyring",
+				"--bundle", buildkitExecutorRoot + "/aaaaaaaaaaaaaaaaaaaaaaaaa",
+				"--keep", "aaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+		},
+		{
+			name: "existing flag",
+			argv: []string{"create", "--no-new-keyring", "container-id"},
+			want: []string{policy.realRuncPath, "create", "--no-new-keyring", "container-id"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original := append([]string(nil), test.argv...)
+			var got []string
+			sentinel := errors.New("exec sentinel")
+			err := handoffRunc(test.argv, nil, policy, func(_ string, argv, _ []string) error {
+				got = append([]string(nil), argv...)
+				return sentinel
+			})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("handoff error = %v, want sentinel", err)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("handoff argv = %#v, want %#v", got, test.want)
+			}
+			if !reflect.DeepEqual(test.argv, original) {
+				t.Fatalf("handoff mutated caller argv: %#v", test.argv)
+			}
+		})
+	}
+}
+
 func TestProductionPolicyKeepsRealRuncOwnersAndReadOnlyAuthority(t *testing.T) {
 	policy := productionPolicy()
 	if policy.effectiveReadOnly == nil {

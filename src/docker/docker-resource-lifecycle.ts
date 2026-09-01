@@ -482,16 +482,40 @@ export interface AllocatedInternalNetwork {
   readonly subnet: string;
 }
 
-/** Allocates a small internal subnet while never falling back into 192.168/16. */
-export async function createIronCurtainInternalNetwork(
+export interface SelectIronCurtainInternalSubnetOptions {
+  readonly excludedSubnets?: ReadonlySet<string>;
+  readonly hostCidrs?: readonly string[];
+}
+
+class NoAvailableIronCurtainSubnetError extends Error {
+  constructor(name: string, cause?: unknown) {
+    super(
+      `No collision-free IronCurtain Docker subnet is available for ${name}. ` +
+        `Reconciled the managed resources and searched /29 networks outside 192.168.0.0/16.`,
+      cause === undefined ? undefined : { cause },
+    );
+    this.name = 'NoAvailableIronCurtainSubnetError';
+  }
+}
+
+/** Resolves one usable host address from an allocator-selected /29. */
+export function ironCurtainInternalSubnetHostAddress(subnet: string, hostOffset: number): string {
+  const parsed = parseIpv4Cidr(subnet);
+  if (parsed?.prefix !== DOCKER_SUBNET_PREFIX) {
+    throw new Error(`IronCurtain internal subnet must be an IPv4 /${DOCKER_SUBNET_PREFIX}: ${subnet}`);
+  }
+  if (!Number.isSafeInteger(hostOffset) || hostOffset < 1 || hostOffset > 6) {
+    throw new Error('IronCurtain /29 host offset must select one of the six usable addresses');
+  }
+  return numberToIpv4((parsed.network + hostOffset) >>> 0);
+}
+
+/** Selects a collision-free /29 without mutating Docker state. */
+export async function selectIronCurtainInternalSubnet(
   docker: ContainerRuntime,
   name: string,
-  bundleId: BundleId | string,
-  options: {
-    readonly excludedSubnets?: ReadonlySet<string>;
-    readonly hostCidrs?: readonly string[];
-  } = {},
-): Promise<AllocatedInternalNetwork> {
+  options: SelectIronCurtainInternalSubnetOptions = {},
+): Promise<string> {
   const networks = (await docker.listNetworks?.()) ?? [];
   const sameNamedNetwork = networks.find((network) => network.name === name);
   if (sameNamedNetwork) {
@@ -510,7 +534,6 @@ export async function createIronCurtainInternalNetwork(
     .map(parseIpv4Cidr)
     .filter((cidr): cidr is Ipv4Cidr => cidr !== undefined);
 
-  let lastConflict: unknown;
   for (const subnet of candidateSubnets(name)) {
     const candidate = parseIpv4Cidr(subnet);
     if (
@@ -519,6 +542,32 @@ export async function createIronCurtainInternalNetwork(
       occupied.some((cidr) => cidrsOverlap(candidate, cidr))
     ) {
       continue;
+    }
+    return subnet;
+  }
+
+  throw new NoAvailableIronCurtainSubnetError(name);
+}
+
+/** Allocates a small internal subnet while never falling back into 192.168/16. */
+export async function createIronCurtainInternalNetwork(
+  docker: ContainerRuntime,
+  name: string,
+  bundleId: BundleId | string,
+  options: SelectIronCurtainInternalSubnetOptions = {},
+): Promise<AllocatedInternalNetwork> {
+  const excludedSubnets = new Set(options.excludedSubnets);
+  let lastConflict: unknown;
+  for (;;) {
+    let subnet: string;
+    try {
+      subnet = await selectIronCurtainInternalSubnet(docker, name, {
+        ...options,
+        excludedSubnets,
+      });
+    } catch (error) {
+      if (lastConflict === undefined || !(error instanceof NoAvailableIronCurtainSubnetError)) throw error;
+      throw new NoAvailableIronCurtainSubnetError(name, lastConflict);
     }
     try {
       await docker.createNetwork(name, {
@@ -530,13 +579,7 @@ export async function createIronCurtainInternalNetwork(
     } catch (error) {
       if (!allocationConflict(error)) throw error;
       lastConflict = error;
-      occupied.push(candidate);
+      excludedSubnets.add(subnet);
     }
   }
-
-  throw new Error(
-    `No collision-free IronCurtain Docker subnet is available for ${name}. ` +
-      `Reconciled the managed resources and searched /29 networks outside 192.168.0.0/16.`,
-    { cause: lastConflict },
-  );
 }

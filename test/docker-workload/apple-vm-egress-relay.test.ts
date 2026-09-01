@@ -334,7 +334,7 @@ describe('purpose-built Apple VM egress relay', () => {
       },
     });
     const socketPath = join(directory, 'package.sock');
-    await proxy.start(socketPath);
+    await proxy.start({ socketPath });
     cleanup.push(() => proxy.stop());
     const port = await reservePort();
     const relayEndpoint = {

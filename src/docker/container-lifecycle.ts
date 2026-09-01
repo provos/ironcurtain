@@ -80,20 +80,13 @@ export interface DestroyBundleOuterResourcesOptions {
  * path, and the PTY session `finally`.
  *
  * §8.3 ordering: an admitted Docker-workload bundle tears its LEDGERED outer
- * resources (the agent container, and any future ledgered network) down through
- * the lease first — `teardown()` removes them by exact identity with absence
- * proofs and closes the lease via the watchdog-supervisor handshake. It is
- * defended so a teardown fault cannot abort the belt-and-braces sweep below.
+ * resources (including the multi-homed agent and its egress network) down
+ * through the lease first, by exact identity with absence proofs.
  *
- * `cleanupContainers` then always runs. For an ordinary bundle it removes every
- * outer resource; for a Docker-workload bundle it is the belt-and-braces sweep
- * for anything the lease does not ledger — the `tcp-sidecar` socat sidecar and
- * its internal network. Both supported nested backends resolve to `uds` (the
- * agent container is the only outer create), but a non-uds topology must not
- * leak while the lease's cleanup proof only attests the ledgered set clean.
- * `cleanupContainers` is best-effort and tolerant of already-absent resources,
- * so re-removing the agent container `teardown()` just deleted is a harmless
- * no-op.
+ * `cleanupContainers` then performs the ordinary sweep for the MCP/MITM(/PTY)
+ * transport and its per-session network. The transport never joins the
+ * ledgered egress network, so detached watchdog cleanup cannot be blocked by an
+ * unledgered endpoint. Re-removing the agent is a harmless no-op.
  *
  * Finally the managed-resource owner lease is released unconditionally — a
  * genuine no-op for non-docker runtimes, which never acquire one.

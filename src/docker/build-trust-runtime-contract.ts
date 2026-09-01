@@ -3,7 +3,7 @@ export const BUILD_TRUST_RUNTIME_CONTRACT = {
   schemaVersion: 1,
   wrapper: {
     packagePath: 'docker/build-trust-runtime/bin/linux-arm64/ironcurtain-build-trust-runc',
-    sha256: 'd17e334a07d82df0ce25b8da44e60591ca7916cfa53bd941a523410555c74c91',
+    sha256: '34be777c92032e4bb63f7c467e396e0b9c35d4bf981f3b54a434d09b608c370d',
     size: 2752638,
     packageMode: '0755',
     guestMode: '0555',

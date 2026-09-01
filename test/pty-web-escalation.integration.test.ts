@@ -55,7 +55,17 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -207,7 +217,17 @@ describe.skipIf(!dockerReady)('web-UI PTY escalation forwarding (real container)
 
     // Reuse the host CA so the prebuilt image content-hash matches (no rebuild).
     // hostCaDir is non-null here (gated in dockerReady).
-    cpSync(hostCaDir as string, join(homeDir, 'ca'), { recursive: true });
+    const copiedCaDir = join(homeDir, 'ca');
+    cpSync(hostCaDir as string, copiedCaDir, { recursive: true });
+    // Node's recursive cp creates directories through the process umask instead
+    // of preserving their restrictive modes on every supported Node release.
+    // Restore the exact authority-directory contract before the child opens it.
+    const generationsDir = join(copiedCaDir, 'generations');
+    chmodSync(copiedCaDir, 0o700);
+    chmodSync(generationsDir, 0o700);
+    for (const generation of readdirSync(generationsDir)) {
+      chmodSync(join(generationsDir, generation), 0o700);
+    }
 
     // The child loads compiled policy from `~/.ironcurtain/generated/` first.
     // Policy content is irrelevant here (no tool calls are evaluated -- the

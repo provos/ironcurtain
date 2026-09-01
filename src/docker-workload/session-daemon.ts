@@ -49,6 +49,16 @@ import {
 } from '../docker/docker-build-shim.js';
 import type { RegistryEgressLedgerSnapshot } from '../docker/docker-workload-egress.js';
 import type { PackageEgressLedgerSnapshot } from '../docker/package-egress-ledger.js';
+import {
+  DOCKER_BUILD_SHIM_EXEC_USER,
+  DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+  DOCKER_BUILD_SHIM_ROOT_USER,
+  boundedBuildShimDiagnostic,
+  boundedBuildShimFailureDiagnostic,
+  dockerBuildShimExecFor,
+  execDockerBuildShimPreflight as execBuildShimPreflight,
+  preflightDockerBuildShimAgent,
+} from './docker-build-shim-preflight.js';
 
 /**
  * Readiness ceiling for the in-VM daemon: a generous upper bound on how long
@@ -60,11 +70,7 @@ import type { PackageEgressLedgerSnapshot } from '../docker/package-egress-ledge
  * An ordinary reviewed constant — change it by ordinary review.
  */
 export const APPLE_VM_DAEMON_READINESS_TIMEOUT_MS = 90_000;
-const APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS = 15_000;
 const APPLE_VM_BUILD_TRUST_CANARY_TIMEOUT_MS = 5 * 60_000;
-const APPLE_VM_BUILD_SHIM_EXEC_USER = 'codespace';
-const APPLE_VM_BUILD_TRUST_VALIDATION_USER = '0:0';
-const APPLE_VM_BUILD_SHIM_DIAGNOSTIC_MAX_BYTES = 512;
 const APPLE_VM_BUILD_TRUST_CANARY_ROOT = '/run/ironcurtain-docker/build-trust-canary';
 const APPLE_VM_BUILD_TRUST_CANARY_DOCKERFILE = `${APPLE_VM_BUILD_TRUST_CANARY_ROOT}/Dockerfile`;
 const APPLE_VM_BUILD_TRUST_CANARY_BASE_REPOSITORY = 'localhost/ironcurtain/build-trust-canary-base';
@@ -135,11 +141,6 @@ export function nestedDaemonAgentEnv(
       };
 }
 
-/** Adapt the container runtime's exec to the daemon module's single command seam. */
-export function appleVmDaemonExecFor(runtime: ContainerRuntime, containerId: string): AppleVmDaemonExec {
-  return (argv, options) => runtime.exec(containerId, argv, options.timeoutMs, options.user);
-}
-
 export interface StartAppleVmDockerWorkloadOptions {
   readonly runtime: ContainerRuntime;
   /** The already-started agent container, i.e. the VM the daemon runs inside. */
@@ -160,81 +161,11 @@ export interface StartAppleVmDockerWorkloadOptions {
   readonly pollIntervalMs?: number;
 }
 
-function boundedBuildShimDiagnostic(value: string, maxBytes = APPLE_VM_BUILD_SHIM_DIAGNOSTIC_MAX_BYTES): string {
-  const normalized = value.trim();
-  const encoded = Buffer.from(normalized, 'utf8');
-  if (encoded.byteLength <= maxBytes) return normalized;
-  const suffix = '...';
-  const clipped = encoded
-    .subarray(0, maxBytes - Buffer.byteLength(suffix))
-    .toString('utf8')
-    .replace(/\uFFFD$/u, '');
-  return `${clipped}${suffix}`;
-}
-
-function boundedBuildShimFailureValue(value: string, maxBytes: number): string {
-  const encoded = Buffer.from(value, 'utf8');
-  if (encoded.byteLength <= maxBytes) return value;
-
-  const separator = ' ... ';
-  const separatorBytes = Buffer.byteLength(separator);
-  if (maxBytes <= separatorBytes) {
-    return encoded
-      .subarray(0, maxBytes)
-      .toString('utf8')
-      .replace(/\uFFFD$/u, '');
-  }
-
-  const contentBudget = maxBytes - separatorBytes;
-  const headBudget = Math.floor(contentBudget / 3);
-  const tailBudget = contentBudget - headBudget;
-  const head = encoded
-    .subarray(0, headBudget)
-    .toString('utf8')
-    .replace(/\uFFFD$/u, '');
-  const tail = encoded
-    .subarray(encoded.byteLength - tailBudget)
-    .toString('utf8')
-    .replace(/^\uFFFD+/u, '');
-  return `${head}${separator}${tail}`;
-}
-
-/**
- * Preserve both trusted-preflight output channels without ever embedding the
- * argv, environment, or an unbounded blob in an error/evidence record.
- */
-function boundedBuildShimFailureDiagnostic(
-  stdout: string,
-  stderr = '',
-  annotations: readonly { readonly label: string; readonly value: string }[] = [],
-): string {
-  const streams = [{ label: 'stdout', value: stdout }, { label: 'stderr', value: stderr }, ...annotations].filter(
-    ({ value }) => value.trim() !== '',
-  );
-  if (streams.length === 0) return '';
-
-  const separator = '; ';
-  const labelBytes = streams.reduce((total, { label }) => total + Buffer.byteLength(`[${label}] `), 0);
-  const separatorBytes = Buffer.byteLength(separator) * (streams.length - 1);
-  const valueBudget = Math.floor(
-    (APPLE_VM_BUILD_SHIM_DIAGNOSTIC_MAX_BYTES - labelBytes - separatorBytes) / streams.length,
-  );
-  return streams
-    .map(({ label, value }) => {
-      const singleLine = value
-        .trim()
-        .replace(/\s+/gu, ' ')
-        .replace(/\p{Cc}/gu, '?');
-      return `[${label}] ${boundedBuildShimFailureValue(singleLine, valueBudget)}`;
-    })
-    .join(separator);
-}
-
 async function clearBuildTrustFailureDiagnostic(exec: AppleVmDaemonExec): Promise<boolean> {
   try {
     const result = await exec([DOCKER_BUILD_TRUST_WRAPPER_PATH, DOCKER_BUILD_TRUST_FAILURE_CLEAR_COMMAND], {
-      user: APPLE_VM_BUILD_TRUST_VALIDATION_USER,
-      timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+      user: DOCKER_BUILD_SHIM_ROOT_USER,
+      timeoutMs: DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
     });
     return result.exitCode === 0 && result.stdout === '' && result.stderr === '';
   } catch {
@@ -245,8 +176,8 @@ async function clearBuildTrustFailureDiagnostic(exec: AppleVmDaemonExec): Promis
 async function readBuildTrustFailureDiagnostic(exec: AppleVmDaemonExec): Promise<string> {
   try {
     const result = await exec([DOCKER_BUILD_TRUST_WRAPPER_PATH, DOCKER_BUILD_TRUST_FAILURE_READ_COMMAND], {
-      user: APPLE_VM_BUILD_TRUST_VALIDATION_USER,
-      timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+      user: DOCKER_BUILD_SHIM_ROOT_USER,
+      timeoutMs: DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
     });
     if (result.exitCode !== 0 || result.stderr !== '') return DOCKER_BUILD_TRUST_FAILURE_UNAVAILABLE_CODE;
     const value = result.stdout.endsWith('\n') ? result.stdout.slice(0, -1) : result.stdout;
@@ -277,70 +208,13 @@ function trustContractMetadataIsQualified(
   return uid <= 0xffff_ffff && gid <= 0xffff_ffff && mode === expected.mode && nlink === expected.nlink;
 }
 
-async function execBuildShimPreflight(
-  exec: AppleVmDaemonExec,
-  argv: readonly string[],
-  description: string,
-  user = APPLE_VM_BUILD_SHIM_EXEC_USER,
-): Promise<string> {
-  const result = await exec(argv, {
-    user,
-    timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
-  });
-  if (result.exitCode !== 0) {
-    const detail = boundedBuildShimFailureDiagnostic(result.stdout, result.stderr);
-    throw new Error(`${description} failed with exit code ${result.exitCode}${detail === '' ? '' : `: ${detail}`}`);
-  }
-  return boundedBuildShimDiagnostic(result.stdout);
-}
-
 /** Create and verify package-build state, then prove PATH selects the staged shim and runc wrapper. */
 export async function preflightAppleVmDockerBuildShim(
   exec: AppleVmDaemonExec,
   contract: DockerBuildShimStagingContract,
   canary: DockerBuildTrustCanaryContract,
 ): Promise<void> {
-  for (const directory of contract.writableDirectories) {
-    const mode = directory.mode.toString(8).padStart(3, '0');
-    await execBuildShimPreflight(
-      exec,
-      ['/bin/mkdir', '--parents', directory.path],
-      `nested-Docker build state directory create (${directory.path})`,
-    );
-    await execBuildShimPreflight(
-      exec,
-      ['/bin/chmod', mode, directory.path],
-      `nested-Docker build state directory mode (${directory.path})`,
-    );
-    const observed = await execBuildShimPreflight(
-      exec,
-      ['/usr/bin/stat', '--format=%F:%u:%g:%a', directory.path],
-      `nested-Docker build state directory inspect (${directory.path})`,
-    );
-    const expected = `directory:1000:1000:${mode.replace(/^0+/u, '')}`;
-    if (observed !== expected) {
-      throw new Error(
-        `nested-Docker build state directory ${directory.path} failed its owner/mode check: ` +
-          `expected "${expected}", observed "${observed}"`,
-      );
-    }
-  }
-
-  const resolvedPath = await execBuildShimPreflight(
-    exec,
-    ['/bin/sh', '-c', `command -v ${contract.preflight.executable}`],
-    'nested-Docker build shim PATH resolution',
-  );
-  if (resolvedPath !== contract.preflight.expectedPath) {
-    throw new Error(
-      `nested-Docker build shim PATH resolution selected "${resolvedPath}"; ` +
-        `expected "${contract.preflight.expectedPath}"`,
-    );
-  }
-  if (contract.preflight.argv[0] !== contract.preflight.executable) {
-    throw new Error('nested-Docker build shim preflight argv does not invoke the PATH-resolved executable');
-  }
-  await execBuildShimPreflight(exec, contract.preflight.argv, 'nested-Docker build shim version preflight');
+  await preflightDockerBuildShimAgent(exec, contract);
 
   const runtimePath = await execBuildShimPreflight(
     exec,
@@ -427,7 +301,7 @@ export async function preflightAppleVmDockerBuildShim(
     exec,
     runtimeVersionArgv,
     'nested-Docker build-trust runtime version preflight',
-    APPLE_VM_BUILD_TRUST_VALIDATION_USER,
+    DOCKER_BUILD_SHIM_ROOT_USER,
   );
   if (!runtimeVersion.startsWith(contract.buildTrustPreflight.expectedVersionPrefix.trimEnd())) {
     throw new Error(
@@ -466,7 +340,7 @@ async function inspectBuildTrustCanaryImage(exec: AppleVmDaemonExec, reference: 
       '{{.Id}}',
       reference,
     ],
-    { user: APPLE_VM_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS },
+    { user: DOCKER_BUILD_SHIM_EXEC_USER, timeoutMs: DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS },
   );
   if (result.exitCode === 0) {
     const observed = boundedBuildShimDiagnostic(result.stdout);
@@ -496,7 +370,7 @@ async function removeBuildTrustCanaryImage(exec: AppleVmDaemonExec, reference: s
       '--force',
       reference,
     ],
-    { user: APPLE_VM_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS },
+    { user: DOCKER_BUILD_SHIM_EXEC_USER, timeoutMs: DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS },
   );
   if (result.exitCode !== 0) {
     const detail = boundedBuildShimFailureDiagnostic(result.stdout, result.stderr);
@@ -632,7 +506,7 @@ async function runAppleVmDockerBuildTrustCanary(
         APPLE_VM_BUILD_TRUST_CANARY_DOCKERFILE,
         APPLE_VM_BUILD_TRUST_CANARY_ROOT,
       ],
-      { user: APPLE_VM_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_TRUST_CANARY_TIMEOUT_MS },
+      { user: DOCKER_BUILD_SHIM_EXEC_USER, timeoutMs: APPLE_VM_BUILD_TRUST_CANARY_TIMEOUT_MS },
     );
     let buildFailure: Error | undefined;
     if (built.exitCode !== 0) {
@@ -716,8 +590,8 @@ async function runAppleVmDockerBuildTrustCanary(
   });
   await recordCleanup('nested-Docker build-trust canary context cleanup failed', async () => {
     const contextCleanup = await exec(['/bin/rm', '-rf', APPLE_VM_BUILD_TRUST_CANARY_ROOT], {
-      user: APPLE_VM_BUILD_SHIM_EXEC_USER,
-      timeoutMs: APPLE_VM_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
+      user: DOCKER_BUILD_SHIM_EXEC_USER,
+      timeoutMs: DOCKER_BUILD_SHIM_PREFLIGHT_TIMEOUT_MS,
     });
     if (contextCleanup.exitCode !== 0) throw new Error(`context cleanup exited ${contextCleanup.exitCode}`);
   });
@@ -770,7 +644,7 @@ async function runAppleVmDockerBuildTrustCanary(
  * abort-and-teardown path is the only outcome of any failure.
  */
 export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWorkloadOptions): Promise<void> {
-  const exec = appleVmDaemonExecFor(options.runtime, options.containerId);
+  const exec = dockerBuildShimExecFor(options.runtime, options.containerId);
   await bootstrapAppleVmDaemon(exec, { networkAccess: options.networkAccess });
   const readiness = await waitForAppleVmDaemonReady(exec, {
     timeoutMs: options.timeoutMs ?? APPLE_VM_DAEMON_READINESS_TIMEOUT_MS,
@@ -798,7 +672,7 @@ export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWork
     await runAppleVmDockerBuildTrustCanary(
       exec,
       provisioning.image.logicalName,
-      provisioning.image.immutableImageId,
+      provisioning.image.innerImageId,
       options.nestedDaemon.generation,
       options.dockerBuildTrustCanary,
       options.egressLedgers,
@@ -808,6 +682,10 @@ export async function startAppleVmDockerWorkload(options: StartAppleVmDockerWork
     outerRuntime: options.runtime,
     containerId: options.containerId,
   });
-  options.nestedDaemon.recordPrivateDockerBootstrap(provisioning, network);
+  options.nestedDaemon.recordPrivateDockerBootstrap({
+    preflight: provisioning.preflight,
+    image: provisioning.image,
+    network,
+  });
   await options.nestedDaemon.activate();
 }

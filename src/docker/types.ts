@@ -188,6 +188,14 @@ export interface DockerNamedVolumeMount {
   readonly noCopy?: boolean;
 }
 
+/** A host device mapping selected exclusively by the trusted coordinator. */
+export interface DockerTrustedDeviceMapping {
+  readonly source: string;
+  readonly target: string;
+  /** Keep the current exception narrow: Docker's complete read/write/mknod mapping. */
+  readonly permissions: 'rwm';
+}
+
 /**
  * Docker-only create controls for trusted infrastructure containers.
  * Callers must supply frozen, coordinator-owned values rather than forwarding
@@ -195,6 +203,7 @@ export interface DockerNamedVolumeMount {
  */
 export interface DockerTrustedCreateOptions {
   readonly namedVolumeMounts?: readonly DockerNamedVolumeMount[];
+  readonly devices?: readonly DockerTrustedDeviceMapping[];
   /** Exact Docker tmpfs specifications, for example `/run:rw,nosuid,size=64m`. */
   readonly tmpfs?: readonly string[];
   readonly readOnlyRootfs?: boolean;
@@ -419,6 +428,13 @@ export interface ContainerRuntime {
 
   /** Enumerate Docker containers, including stopped containers. Optional for non-Docker runtimes. */
   listContainers?(options?: { readonly labelFilter?: string }): Promise<readonly DockerContainerInfo[]>;
+
+  /**
+   * Return Docker's unmodified container-inspect object. Optional because its
+   * shape is Docker-specific; trusted infrastructure uses it to adjudicate a
+   * stopped container's complete effective create profile before start.
+   */
+  inspectContainerRaw?(nameOrId: string): Promise<Readonly<Record<string, unknown>> | undefined>;
 
   /** Remove a Docker network. Ignores errors (e.g., already removed). */
   removeNetwork(name: string): Promise<void>;

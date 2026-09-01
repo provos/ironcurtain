@@ -17,6 +17,7 @@ import {
   APPLE_VM_DOCKER_WORKLOAD_NETWORK,
   APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
   createAppleVmDockerWorkloadNetwork,
+  createAppleVmPrivateDockerClient,
   createAppleVmPrivateDockerRuntime,
   provisionAppleVmDockerWorkload,
   stageAppleVmDockerWorkloadBootstrap,
@@ -297,7 +298,9 @@ describe('private Docker Engine adapter and provisioning', () => {
           clientToolchainManifestPath: manifest.path,
         },
       }),
-    ).resolves.toMatchObject({ image: { logicalName, immutableImageId: entry.runtimeImageId } });
+    ).resolves.toMatchObject({
+      image: { transport: 'apple-archive', logicalName, innerImageId: entry.runtimeImageId },
+    });
 
     expect(archiveExistedDuringLoad).toBe(true);
     expect(existsSync(resolve(tempDirectory, entry.archive.fileName))).toBe(false);
@@ -314,11 +317,13 @@ describe('private Docker Engine adapter and provisioning', () => {
   it('translates only direct selected-artifact archive children to the read-only guest mount', async () => {
     const commands: (readonly string[])[] = [];
     const runtime = createAppleVmPrivateDockerRuntime({
-      outerRuntime: execRuntime((argv) => {
-        commands.push([...argv]);
-        return { exitCode: 0, stdout: '', stderr: '' };
+      client: createAppleVmPrivateDockerClient({
+        outerRuntime: execRuntime((argv) => {
+          commands.push([...argv]);
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }),
+        containerId: 'outer-vm',
       }),
-      containerId: 'outer-vm',
       hostArtifactDirectory: '/trusted/artifact',
       guestArtifactDirectory: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
     });
@@ -338,28 +343,15 @@ describe('private Docker Engine adapter and provisioning', () => {
 
   it('treats only an explicit image-not-found response as absence', async () => {
     const runtime = createAppleVmPrivateDockerRuntime({
-      outerRuntime: execRuntime(() => ({ exitCode: 125, stdout: '', stderr: 'permission denied' })),
-      containerId: 'outer-vm',
+      client: createAppleVmPrivateDockerClient({
+        outerRuntime: execRuntime(() => ({ exitCode: 125, stdout: '', stderr: 'permission denied' })),
+        containerId: 'outer-vm',
+      }),
       hostArtifactDirectory: '/trusted/artifact',
       guestArtifactDirectory: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
     });
 
     await expect(runtime.inspectImage('ironcurtain-base:latest')).rejects.toThrow(/image inspect failed/u);
-  });
-
-  it('rejects arbitrary commands, extra flags, and the wrong outer container', async () => {
-    const runtime = createAppleVmPrivateDockerRuntime({
-      outerRuntime: execRuntime(() => ({ exitCode: 0, stdout: '', stderr: '' })),
-      containerId: 'outer-vm',
-      hostArtifactDirectory: '/trusted/artifact',
-      guestArtifactDirectory: APPLE_VM_SELECTED_AGENT_ARTIFACT_DIR,
-    });
-
-    await expect(runtime.exec('outer-vm', ['docker', 'pull', 'alpine'])).rejects.toThrow(/exact client-toolchain/u);
-    await expect(runtime.exec('outer-vm', ['docker', 'version', '--format', '{{json .}}', '--debug'])).rejects.toThrow(
-      /exact client-toolchain/u,
-    );
-    await expect(runtime.exec('wrong-vm', ['docker', 'buildx', 'version'])).rejects.toThrow(/container ID mismatch/u);
   });
 });
 
