@@ -35,15 +35,15 @@ import {
 import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
 import {
   CONTAINER_SCRIPTS_DIR,
-  CONTAINER_WORKSPACE_DIR,
   type AgentAdapter,
   type AgentId,
   type ConversationStateConfig,
 } from './agent-adapter.js';
+import { buildContainerWorkspaceMount, CONTAINER_WORKSPACE_DIR } from './container-workspace.js';
 import type { ResolvedUserConfig } from '../config/user-config.js';
 import { OPENROUTER_HOST, resolveActiveProfile } from '../config/user-config.js';
 import type { DockerProxy } from './code-mode-proxy.js';
-import { defaultExecFile } from './docker-manager.js';
+import { defaultExecFile, IRONCURTAIN_LABEL_BUNDLE } from './docker-manager.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { TrajectoryCaptureWriter } from './trajectory-capture.js';
 import type { CertificateAuthority } from './ca.js';
@@ -63,6 +63,8 @@ import {
   releaseManagedResourceLease,
   selectIronCurtainInternalSubnet,
   withInternalNetworkAllocationRetry,
+  type AllocatedInternalNetwork,
+  type SelectIronCurtainInternalSubnetOptions,
 } from './docker-resource-lifecycle.js';
 import { clampDockerResources } from './resource-limits.js';
 import type { EffectiveDockerResources, HostResources } from './resource-limits.js';
@@ -1581,6 +1583,7 @@ export async function prepareDockerInfrastructure(
         runtime: requireDockerDesktopSidecarRuntime(docker),
         sidecarImage: dockerDesktopSidecarImage,
         outerAgentImageId: dockerWorkloadImageResolution.immutableImageId,
+        workspaceRoot: workspaceDir,
         resources: dockerDesktopResources.sidecar,
         ...(sidecarEgress === undefined ? {} : { egress: sidecarEgress }),
         createOuterResource: (spec, create) => ledgerOuterResourceCreate(dockerWorkload, spec, create),
@@ -2004,29 +2007,46 @@ export function removeBundleRuntimeRoot(bundleId: BundleId, context: string): vo
  * See `docs/designs/workflow-session-identity.md` §7.
  */
 export function buildBundleLabels(
-  core: Pick<PreContainerInfrastructure, 'bundleId' | 'workflowId' | 'scope' | 'runtimeKind'>,
+  core: Pick<PreContainerInfrastructure, 'bundleId' | 'workflowId' | 'scope' | 'runtimeKind' | 'dockerWorkload'>,
 ): {
   bundleLabel: string;
   workflowLabel?: string;
   scopeLabel?: string;
   labels?: Readonly<Record<string, string>>;
 } {
-  const managedLabels = core.runtimeKind === 'docker' ? managedResourceLabels(core.bundleId) : undefined;
-  const labels = managedLabels
-    ? Object.fromEntries(Object.entries(managedLabels).filter(([key]) => key !== 'ironcurtain.bundle'))
-    : undefined;
+  const ownership = buildDockerOwnershipLabels(core);
   if (core.workflowId !== undefined) {
     return {
-      bundleLabel: core.bundleId,
+      ...ownership,
       workflowLabel: core.workflowId,
       // Resolved scope is set by the orchestrator on every workflow
       // bundle; default-fall back to DEFAULT_CONTAINER_SCOPE so that a
       // workflow bundle always carries a scope label.
       scopeLabel: core.scope ?? DEFAULT_CONTAINER_SCOPE,
-      labels,
     };
   }
-  return { bundleLabel: core.bundleId, labels };
+  return ownership;
+}
+
+/** Select exactly one Docker resource owner for both batch and PTY creates. */
+export function buildDockerOwnershipLabels(options: {
+  readonly bundleId: BundleId;
+  readonly runtimeKind: ContainerRuntimeKind;
+  readonly dockerWorkload?: DockerWorkloadBundleHandle;
+}): { readonly bundleLabel: string; readonly labels?: Readonly<Record<string, string>> } {
+  // A secure Docker-workload lease is already the durable, crash-recoverable
+  // owner. Do not mint a second process-owner lease for the same resources:
+  // after a coordinator SIGKILL the detached watchdog would remove the runtime
+  // objects, leaving no generic object from which startup GC could discover
+  // and retire that redundant owner token.
+  const managedLabels =
+    options.runtimeKind === 'docker' && options.dockerWorkload === undefined
+      ? managedResourceLabels(options.bundleId)
+      : undefined;
+  const labels = managedLabels
+    ? Object.fromEntries(Object.entries(managedLabels).filter(([key]) => key !== 'ironcurtain.bundle'))
+    : undefined;
+  return { bundleLabel: options.bundleId, labels };
 }
 
 // ---------------------------------------------------------------------------
@@ -2088,6 +2108,83 @@ export async function ledgerOuterResourceCreate(
     await spec.adjudicateObserved?.(id);
     return { id };
   });
+}
+
+/**
+ * Allocate the ordinary isolated MCP/MITM transport network under the secure
+ * Docker-workload lease when one exists. Ordinary Docker sessions retain the
+ * historical process-owner-label path.
+ */
+export async function createDockerSessionTransportNetwork(options: {
+  readonly runtime: ContainerRuntime;
+  readonly dockerWorkload: DockerWorkloadBundleHandle | undefined;
+  readonly bundleId: BundleId;
+  readonly requestedName: string;
+  readonly allocation?: SelectIronCurtainInternalSubnetOptions;
+}): Promise<AllocatedInternalNetwork> {
+  if (options.dockerWorkload === undefined) {
+    return createIronCurtainInternalNetwork(
+      options.runtime,
+      options.requestedName,
+      options.bundleId,
+      options.allocation,
+    );
+  }
+
+  let allocated: AllocatedInternalNetwork | undefined;
+  await ledgerOuterResourceCreate(
+    options.dockerWorkload,
+    {
+      kind: 'network',
+      role: 'transport-network',
+      requestedName: options.requestedName,
+      baseLabels: { [IRONCURTAIN_LABEL_BUNDLE]: options.bundleId },
+    },
+    async (requestedName, labels) => {
+      allocated = await createIronCurtainInternalNetwork(options.runtime, requestedName, options.bundleId, {
+        ...options.allocation,
+        labels,
+      });
+      const networks = await options.runtime.listNetworks?.();
+      if (networks === undefined) {
+        throw new Error('selected Docker runtime cannot observe the created transport network');
+      }
+      const matching = networks.filter((network) => network.name === requestedName);
+      if (matching.length !== 1) {
+        throw new Error(`created transport network ${requestedName} did not resolve to one immutable ID`);
+      }
+      const network = matching[0];
+      if (Object.entries(labels).some(([key, value]) => network.labels[key] !== value)) {
+        throw new Error(`created transport network ${requestedName} lost its ownership labels`);
+      }
+      return { id: network.id };
+    },
+  );
+  if (allocated === undefined) throw new Error('transport network allocation completed without a result');
+  return allocated;
+}
+
+/** Create the TCP transport proxy through the same lifecycle as its agent. */
+export async function createDockerSessionTransportProxy(options: {
+  readonly dockerWorkload: DockerWorkloadBundleHandle | undefined;
+  readonly requestedName: string;
+  readonly baseLabels?: Readonly<Record<string, string>>;
+  readonly create: (requestedName: string, labels: Readonly<Record<string, string>> | undefined) => Promise<string>;
+}): Promise<string> {
+  if (options.dockerWorkload === undefined) {
+    return options.create(options.requestedName, options.baseLabels);
+  }
+  const { id } = await ledgerOuterResourceCreate(
+    options.dockerWorkload,
+    {
+      kind: 'container',
+      role: 'proxy',
+      requestedName: options.requestedName,
+      baseLabels: options.baseLabels,
+    },
+    async (requestedName, labels) => ({ id: await options.create(requestedName, labels) }),
+  );
+  return id;
 }
 
 export interface CreateAgentContainerOptions {
@@ -2778,7 +2875,7 @@ async function createSessionContainersAttempt(
     // workspace and the orientation dir. Mode-specific mounts (apt proxy
     // config, sockets dir, conversation state) are appended below.
     const mounts: { source: string; target: string; readonly: boolean }[] = [
-      { source: core.workspaceDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+      buildContainerWorkspaceMount(core.workspaceDir),
       { source: core.orientationDir, target: '/etc/ironcurtain', readonly: true },
     ];
     // Same-VM nested daemon (§4.4 variant 1): present only for an admitted
@@ -2848,8 +2945,12 @@ async function createSessionContainersAttempt(
 
       const baseNetworkName = getInternalNetworkName(shortId);
       const networkName = attempt === 1 ? baseNetworkName : `${baseNetworkName}-a${attempt}`;
-      const allocatedNetwork = await createIronCurtainInternalNetwork(core.docker, networkName, core.bundleId, {
-        excludedSubnets,
+      const allocatedNetwork = await createDockerSessionTransportNetwork({
+        runtime: core.docker,
+        dockerWorkload: core.dockerWorkload,
+        bundleId: core.bundleId,
+        requestedName: networkName,
+        allocation: { excludedSubnets },
       });
       allocatedNetworkSubnet = allocatedNetwork.subnet;
       internalNetwork = networkName;
@@ -2869,22 +2970,29 @@ async function createSessionContainersAttempt(
       // Remove stale sidecar from a crashed previous session (TCP mode only).
       await core.docker.removeStaleContainer(sidecarName);
 
-      sidecarContainerId = await core.docker.create({
-        image: socatImage,
-        name: sidecarName,
-        network: 'bridge',
-        mounts: [],
-        env: {},
-        entrypoint: '/bin/sh',
-        ...buildDockerDesktopTransportCreateLimits(core.dockerDesktopResources),
-        ...bundleLabels,
-        command: [
-          '-c',
-          quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mcpPort}`]) +
-            ' & ' +
-            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mitmPort}`]) +
-            ' & wait',
-        ],
+      sidecarContainerId = await createDockerSessionTransportProxy({
+        dockerWorkload: core.dockerWorkload,
+        requestedName: sidecarName,
+        baseLabels: bundleLabels.labels,
+        create: (requestedName, labels) =>
+          core.docker.create({
+            image: socatImage,
+            name: requestedName,
+            network: 'bridge',
+            mounts: [],
+            env: {},
+            entrypoint: '/bin/sh',
+            ...buildDockerDesktopTransportCreateLimits(core.dockerDesktopResources),
+            ...bundleLabels,
+            labels,
+            command: [
+              '-c',
+              quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mcpPort}`]) +
+                ' & ' +
+                quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mitmPort}`]) +
+                ' & wait',
+            ],
+          }),
       });
       await core.docker.start(sidecarContainerId);
 

@@ -26,6 +26,7 @@ const state = vi.hoisted<{
   createdConfigs: DockerContainerConfig[];
   networkConnections: Array<{ networkName: string; containerId: string }>;
   lifecycleEvents: string[];
+  transportLedgerRoles: string[];
   destroyedResources: unknown;
   prepareOptions: unknown;
 }>(() => ({
@@ -35,6 +36,7 @@ const state = vi.hoisted<{
   createdConfigs: [],
   networkConnections: [],
   lifecycleEvents: [],
+  transportLedgerRoles: [],
   destroyedResources: undefined,
   prepareOptions: undefined,
 }));
@@ -86,6 +88,7 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     return state.infrastructure;
   },
   buildAgentUidRemap: () => ({}),
+  buildDockerOwnershipLabels: (options: { bundleId: string }) => ({ bundleLabel: options.bundleId }),
   buildDockerDesktopTransportCreateLimits: () => ({}),
   buildNestedDockerAgentTrustedCreateOptions: (namedVolumeMounts: readonly unknown[]) =>
     namedVolumeMounts.length === 0 ? undefined : { namedVolumeMounts },
@@ -189,6 +192,38 @@ vi.mock('../../src/docker/docker-infrastructure.js', () => ({
     requestedName: string;
     create(name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string>;
   }) => options.create(options.requestedName, undefined),
+  createDockerSessionTransportNetwork: async (options: {
+    runtime: { createNetwork(name: string, options: { labels: Readonly<Record<string, string>> }): Promise<void> };
+    dockerWorkload?: unknown;
+    bundleId: string;
+    requestedName: string;
+  }) => {
+    if (options.dockerWorkload !== undefined) state.transportLedgerRoles.push('network');
+    await options.runtime.createNetwork(options.requestedName, {
+      labels:
+        options.dockerWorkload === undefined
+          ? { 'ironcurtain.managed': 'true' }
+          : {
+              'ironcurtain.bundle': options.bundleId,
+              'com.ironcurtain.docker-workload.generation': 'generation-pty-ordering',
+            },
+    });
+    return { name: options.requestedName, subnet: '172.31.44.0/29' };
+  },
+  createDockerSessionTransportProxy: async (options: {
+    dockerWorkload?: unknown;
+    requestedName: string;
+    baseLabels?: Readonly<Record<string, string>>;
+    create(name: string, labels: Readonly<Record<string, string>> | undefined): Promise<string>;
+  }) => {
+    if (options.dockerWorkload !== undefined) state.transportLedgerRoles.push('proxy');
+    return options.create(
+      options.requestedName,
+      options.dockerWorkload === undefined
+        ? options.baseLabels
+        : { ...options.baseLabels, 'com.ironcurtain.docker-workload.generation': 'generation-pty-ordering' },
+    );
+  },
   dockerWorkloadSessionMetadata: vi.fn(() => ({
     leaseId: 'lease-pty-ordering',
     generation: 'generation-pty-ordering',
@@ -252,6 +287,7 @@ describe('Apple nested Docker PTY startup ordering', () => {
     state.createdConfigs.length = 0;
     state.networkConnections.length = 0;
     state.lifecycleEvents.length = 0;
+    state.transportLedgerRoles.length = 0;
     state.destroyedResources = undefined;
     state.startAppleVmDockerWorkload.mockReset();
     state.execPty.mockReset();
@@ -697,6 +733,11 @@ describe('Apple nested Docker PTY startup ordering', () => {
     const [transport, agent] = state.createdConfigs;
     const ordinaryNetwork = agent.network;
     expect(transport.network).toBe('bridge');
+    expect(state.transportLedgerRoles).toEqual(['network', 'proxy']);
+    expect(transport.labels).toEqual({
+      'com.ironcurtain.docker-workload.generation': 'generation-pty-ordering',
+    });
+    expect(transport.labels).not.toHaveProperty('ironcurtain.managed');
     expect(ordinaryNetwork).toMatch(/^ironcurtain-/u);
     expect(state.networkConnections).toEqual([
       { networkName: ordinaryNetwork, containerId: 'container-1' },

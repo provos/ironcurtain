@@ -1615,7 +1615,7 @@ const DOCKER_NETWORK_ACCESS_PRESENTATION = {
   },
   offline: {
     label: 'Offline',
-    hint: 'Only preloaded images and hermetic builds work',
+    hint: 'Only locally loaded images and hermetic builds work',
   },
 } as const satisfies Readonly<Record<DockerWorkloadNetworkAccess, { readonly label: string; readonly hint: string }>>;
 const DOCKER_NETWORK_ACCESS_OPTIONS = Object.entries(DOCKER_NETWORK_ACCESS_PRESENTATION).map(
@@ -1719,7 +1719,10 @@ async function handleNestedDocker(
   pending: UserConfig,
   requestedDockerWorkload: UserConfig['dockerWorkload'],
 ): Promise<void> {
-  p.note('Currently requires macOS on Apple silicon with Apple Container installed.', 'Availability');
+  p.note(
+    'Currently requires macOS with Docker Desktop or, on Apple silicon, Apple Container installed.',
+    'Availability',
+  );
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const current = currentNestedDocker(resolved, pending, requestedDockerWorkload);

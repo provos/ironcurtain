@@ -543,6 +543,15 @@ export interface SelectIronCurtainInternalSubnetOptions {
   readonly hostCidrs?: readonly string[];
 }
 
+export interface CreateIronCurtainInternalNetworkOptions extends SelectIronCurtainInternalSubnetOptions {
+  /**
+   * Exact caller-owned labels for lifecycles that already provide durable
+   * ownership. Omit for ordinary Docker sessions, which retain the generic
+   * process-owner lease and its managed-resource labels.
+   */
+  readonly labels?: Readonly<Record<string, string>>;
+}
+
 class NoAvailableIronCurtainSubnetError extends Error {
   constructor(name: string, cause?: unknown) {
     super(
@@ -610,7 +619,7 @@ export async function createIronCurtainInternalNetwork(
   docker: ContainerRuntime,
   name: string,
   bundleId: BundleId | string,
-  options: SelectIronCurtainInternalSubnetOptions = {},
+  options: CreateIronCurtainInternalNetworkOptions = {},
 ): Promise<AllocatedInternalNetwork> {
   const excludedSubnets = new Set(options.excludedSubnets);
   let lastConflict: unknown;
@@ -629,7 +638,7 @@ export async function createIronCurtainInternalNetwork(
       await docker.createNetwork(name, {
         internal: true,
         subnet,
-        labels: managedResourceLabels(bundleId),
+        labels: options.labels ?? managedResourceLabels(bundleId),
       });
       return { name, subnet };
     } catch (error) {

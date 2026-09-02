@@ -196,6 +196,8 @@ describe('Claude Code Adapter', () => {
       nestedDocker: { networkName: 'ironcurtain', networkAccess: 'offline' },
     });
     expect(offline).toContain('Docker builds in Offline mode');
+    expect(offline).toContain('private image store starts empty');
+    expect(offline).toContain('docker image load --input /workspace/<archive>.tar');
     expect(offline).toContain('Dockerfile `FROM` cannot pull');
     expect(offline).toContain('an absent image');
     expect(offline).not.toContain('Docker Hub/GHCR');

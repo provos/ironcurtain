@@ -9,7 +9,8 @@
  */
 
 import { existsSync, lstatSync, rmSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import { getBundleRuntimeRootForHome } from '../config/paths.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import type { ResourceWatchdogCleanupProof } from '../docker/resource-watchdog.js';
 import { inventoryOwnedResourceIds } from './bundle-revocation.js';
@@ -25,14 +26,18 @@ export function assertExactTargetIdentity(lease: DockerWorkloadLease, device: nu
 
 /** Remove exactly the bundle-owned host-only paths, longest-first, never touching the workspace or the lease. */
 export function removeExactBundleState(lease: DockerWorkloadLease, leasePath: string): void {
+  const bundleRuntimeRoot = resolveLeaseBundleRuntimeRoot(lease);
   const paths = [
+    bundleRuntimeRoot,
     lease.paths.apiRoot,
     lease.paths.exchangeRoot,
     lease.paths.runtimeRoot,
     lease.paths.stagingRoot,
     lease.paths.stateRoot,
   ];
-  const unique = [...new Set(paths)].sort((left, right) => right.length - left.length);
+  const unique = [...new Set(paths.filter((path): path is string => path !== undefined))].sort(
+    (left, right) => right.length - left.length,
+  );
   for (const path of unique) {
     assertSafeCleanupPath(path, lease.paths.workspaceRoot, leasePath);
     rmSync(path, { recursive: true, force: true });
@@ -78,7 +83,33 @@ export async function captureCleanupProof(
     throw new Error('watchdog supervisor cleanup inventories are not empty');
   }
   if (existsSync(lease.paths.stateRoot)) throw new Error('watchdog supervisor state root still exists after cleanup');
+  const bundleRuntimeRoot = resolveLeaseBundleRuntimeRoot(lease);
+  if (bundleRuntimeRoot !== undefined && existsSync(bundleRuntimeRoot)) {
+    throw new Error('watchdog supervisor bundle runtime root still exists after cleanup');
+  }
   return { exactOuterResourcesAbsent: true, stateRootAbsent: true, inventories: [first, second] };
+}
+
+/** Bind runtime cleanup to the lease's selected home, never the current process environment. */
+function resolveLeaseBundleRuntimeRoot(lease: DockerWorkloadLease): string | undefined {
+  const stateDirectory = dirname(lease.paths.stateRoot);
+  const workloadRoot = dirname(stateDirectory);
+  const ironCurtainHome = dirname(workloadRoot);
+  const canonicalStateRoot = resolve(ironCurtainHome, 'docker-workload', 'state', lease.leaseId);
+  if (lease.paths.stateRoot !== canonicalStateRoot) {
+    if (lease.paths.bundleRuntimeRoot !== undefined) {
+      throw new Error('watchdog supervisor bundle runtime root is not bound to its state root');
+    }
+    // Version-1 unit fixtures and historical standalone leases predate this
+    // path. Their nested-Docker state remains recoverable without inventing an
+    // ambient-home deletion target.
+    return undefined;
+  }
+  const expected = getBundleRuntimeRootForHome(ironCurtainHome, lease.bundleId);
+  if (lease.paths.bundleRuntimeRoot !== undefined && lease.paths.bundleRuntimeRoot !== expected) {
+    throw new Error('watchdog supervisor bundle runtime root binding mismatch');
+  }
+  return lease.paths.bundleRuntimeRoot ?? expected;
 }
 
 /** Translate a lease cleanup proof into the watchdog state machine's proof shape. */

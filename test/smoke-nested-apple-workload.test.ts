@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
+  DOCKER_DESKTOP_OFFLINE_ARCHIVE,
   PUBLIC_REGISTRY_SMOKE_IMAGE,
   assertDefaultBridgeUnavailable,
   assertDefaultContainerHasNoUsableNetwork,
@@ -14,6 +15,8 @@ import {
   bindPublicRegistryWorkloadNetwork,
   buildNestedAppleSmokeWorkloadConfig,
   buildPublicRegistryWorkloadPlan,
+  dockerDesktopSmokeNetworkAccess,
+  isDockerDesktopSmokeMode,
   isExactSmokeNonceResponse,
   parseNestedAppleSmokeMode,
 } from '../scripts/smoke-nested-apple-workload.js';
@@ -23,13 +26,19 @@ describe('nested Apple smoke invocation', () => {
     expect(parseNestedAppleSmokeMode([])).toBe('batch');
     expect(parseNestedAppleSmokeMode(['--pty'])).toBe('pty');
     expect(parseNestedAppleSmokeMode(['--public-registry'])).toBe('public-registry');
+    expect(parseNestedAppleSmokeMode(['--docker-desktop-disabled'])).toBe('docker-desktop-disabled');
+    expect(parseNestedAppleSmokeMode(['--docker-desktop-pty'])).toBe('docker-desktop-pty');
+    expect(parseNestedAppleSmokeMode(['--docker-desktop-offline'])).toBe('docker-desktop-offline');
+    expect(parseNestedAppleSmokeMode(['--docker-desktop-images'])).toBe('docker-desktop-images');
     expect(parseNestedAppleSmokeMode(['--docker-desktop-packages'])).toBe('docker-desktop-packages');
+    expect(parseNestedAppleSmokeMode(['--docker-desktop-recovery'])).toBe('docker-desktop-recovery');
   });
 
   it.each([
     ['--pty', '--public-registry'],
     ['--public-registry', '--pty'],
     ['--docker-desktop-packages', '--public-registry'],
+    ['--docker-desktop-offline', '--docker-desktop-images'],
     ['--unknown'],
   ])('rejects ambiguous or unknown arguments: %j', (...argv) => {
     expect(() => parseNestedAppleSmokeMode(argv)).toThrow(/usage/u);
@@ -40,6 +49,7 @@ describe('nested Apple public-registry acceptance plan', () => {
   const nonce = '0123456789abcdef0123456789abcdef';
 
   it('uses canonical explicit Images and Offline requests', () => {
+    expect(DOCKER_DESKTOP_OFFLINE_ARCHIVE).toBe('images/ironcurtain-offline-fixture.tar');
     expect(buildNestedAppleSmokeWorkloadConfig('public-registry')).toEqual({
       enabled: true,
       networkAccess: 'images',
@@ -56,6 +66,29 @@ describe('nested Apple public-registry acceptance plan', () => {
       enabled: true,
       networkAccess: 'packages',
     });
+    expect(buildNestedAppleSmokeWorkloadConfig('docker-desktop-images')).toEqual({
+      enabled: true,
+      networkAccess: 'images',
+    });
+    expect(buildNestedAppleSmokeWorkloadConfig('docker-desktop-offline')).toEqual({
+      enabled: true,
+      networkAccess: 'offline',
+    });
+    expect(buildNestedAppleSmokeWorkloadConfig('docker-desktop-recovery')).toEqual({
+      enabled: true,
+      networkAccess: 'offline',
+    });
+    expect(buildNestedAppleSmokeWorkloadConfig('docker-desktop-pty')).toEqual({
+      enabled: true,
+      networkAccess: 'offline',
+    });
+    expect(buildNestedAppleSmokeWorkloadConfig('docker-desktop-disabled')).toEqual({ enabled: false });
+    expect(isDockerDesktopSmokeMode('public-registry')).toBe(false);
+    expect(isDockerDesktopSmokeMode('docker-desktop-images')).toBe(true);
+    expect(dockerDesktopSmokeNetworkAccess('batch')).toBeUndefined();
+    expect(dockerDesktopSmokeNetworkAccess('docker-desktop-recovery')).toBe('offline');
+    expect(dockerDesktopSmokeNetworkAccess('docker-desktop-pty')).toBe('offline');
+    expect(dockerDesktopSmokeNetworkAccess('docker-desktop-disabled')).toBeUndefined();
   });
 
   it('uses one reviewed image, the managed bridge, exact nonces, and no ordinary publish flag', () => {

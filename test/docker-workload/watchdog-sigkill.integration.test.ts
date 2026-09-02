@@ -31,6 +31,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { getBundleRuntimeRoot } from '../../src/config/paths.js';
+import type { BundleId } from '../../src/session/types.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import {
   loadResourceWatchdogSupervisorStatus,
@@ -47,6 +49,10 @@ const entrypointPath = join(repoRoot, 'src', 'docker-workload', 'resource-watchd
 const GENERATION = 'generation-sigkill-cross-001';
 const CONTAINER_ID = `cafe${'0123456789abcdef'.repeat(3)}baseddecafc0ffee`;
 const CONTAINER_NAME = 'ironcurtain-sigkill-agent-001';
+const PROXY_CONTAINER_ID = `face${'fedcba9876543210'.repeat(3)}cafe0123456789`;
+const PROXY_CONTAINER_NAME = 'ironcurtain-sigkill-proxy-001';
+const NETWORK_ID = `beef${'0011223344556677'.repeat(3)}feed89abcdef01`;
+const NETWORK_NAME = 'ironcurtain-sigkill-network-001';
 const LABEL_KEY = 'ironcurtain.workload.generation';
 
 const template: WatchdogPolicyTemplate = {
@@ -90,27 +96,48 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
     const stubDir = join(directory, 'stub');
     mkdirSync(binDir);
     mkdirSync(stubDir);
-    const stateRoot = join(directory, 'state');
+    const ironCurtainHome = join(directory, 'home');
+    const stateRoot = join(ironCurtainHome, 'docker-workload', 'state', 'lease-sigkill-cross-001');
     const leasePath = join(directory, 'lease.json');
     const statusPath = join(directory, 'status.json');
     const resultPath = join(directory, 'coordinator-result.json');
     const configPath = join(stubDir, 'config.json');
     const logPath = join(stubDir, 'invocations.log');
+    const bundleId = 'bundle-sigkill-cross-001';
+    const bundleRuntimeRoot = withIronCurtainHome(ironCurtainHome, () => getBundleRuntimeRoot(bundleId as BundleId));
+    const neighboringRuntimeRoot = withIronCurtainHome(ironCurtainHome, () =>
+      getBundleRuntimeRoot('neighbor-sigkill-cross-001' as BundleId),
+    );
+    const workspaceRoot = join(directory, 'workspace');
+    mkdirSync(bundleRuntimeRoot, { recursive: true });
+    mkdirSync(neighboringRuntimeRoot, { recursive: true });
+    mkdirSync(workspaceRoot, { recursive: true });
+    writeFileSync(join(bundleRuntimeRoot, 'runtime-marker'), 'owned by the crashed bundle\n');
+    const neighboringMarker = join(neighboringRuntimeRoot, 'unrelated-marker');
+    const workspaceMarker = join(workspaceRoot, 'workspace-marker');
+    writeFileSync(neighboringMarker, 'owned by another bundle\n');
+    writeFileSync(workspaceMarker, 'workspace data\n');
 
     writeFileSync(
       configPath,
       `${JSON.stringify({
         controlDir: directory,
         leaseId: 'lease-sigkill-cross-001',
-        bundleId: 'bundle-sigkill-cross-001',
+        bundleId,
         generation: GENERATION,
         containerId: CONTAINER_ID,
         containerName: CONTAINER_NAME,
+        proxyContainerId: PROXY_CONTAINER_ID,
+        proxyContainerName: PROXY_CONTAINER_NAME,
+        networkId: NETWORK_ID,
+        networkName: NETWORK_NAME,
         labelKey: LABEL_KEY,
         labelValue: GENERATION,
         template,
         logPath,
-        removedMarkerPath: join(stubDir, 'removed.marker'),
+        removedMarkerPath: join(stubDir, 'agent-removed.marker'),
+        proxyRemovedMarkerPath: join(stubDir, 'proxy-removed.marker'),
+        networkRemovedMarkerPath: join(stubDir, 'network-removed.marker'),
       })}\n`,
       { mode: 0o600 },
     );
@@ -127,6 +154,7 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
     delete childEnv.VSCODE_INSPECTOR_OPTIONS;
     delete childEnv.VSCODE_INJECTION;
     childEnv.NODE_OPTIONS = '--import tsx';
+    childEnv.IRONCURTAIN_HOME = ironCurtainHome;
     childEnv.IRONCURTAIN_WATCHDOG_DOCKER_STUB_CONFIG = configPath;
     childEnv.PATH = `${binDir}:${process.env.PATH ?? ''}`;
 
@@ -238,14 +266,30 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
         status: 'closed',
         cleanup: { exactOuterResourcesAbsent: true, stateRootAbsent: true },
       });
-      expect(lease.resources).toEqual([
-        expect.objectContaining({
-          requestId: 'agent-container-001',
-          observedId: CONTAINER_ID,
-          removal: expect.objectContaining({ proof: 'immutable-id-absent', identity: CONTAINER_ID }),
-        }),
-      ]);
+      expect(lease.resources).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            requestId: 'agent-container-001',
+            observedId: CONTAINER_ID,
+            removal: expect.objectContaining({ proof: 'immutable-id-absent', identity: CONTAINER_ID }),
+          }),
+          expect.objectContaining({
+            requestId: 'transport-proxy-001',
+            observedId: PROXY_CONTAINER_ID,
+            removal: expect.objectContaining({ proof: 'immutable-id-absent', identity: PROXY_CONTAINER_ID }),
+          }),
+          expect.objectContaining({
+            requestId: 'transport-network-001',
+            observedId: NETWORK_ID,
+            removal: expect.objectContaining({ proof: 'immutable-id-absent', identity: NETWORK_ID }),
+          }),
+        ]),
+      );
       expect(existsSync(stateRoot)).toBe(false);
+      expect(existsSync(bundleRuntimeRoot)).toBe(false);
+      expect(existsSync(neighboringMarker)).toBe(true);
+      expect(existsSync(workspaceMarker)).toBe(true);
+      expect(existsSync(leasePath)).toBe(true);
 
       // The docker stub proves the runtime side of revocation was exercised
       // with the exact leased identity.
@@ -253,16 +297,28 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line) as string[]);
-      expect(invocations).toContainEqual(['container', 'inspect', CONTAINER_ID]);
+      expect(
+        invocations.some((args) => args[0] === 'container' && args[1] === 'inspect' && args.includes(CONTAINER_ID)),
+      ).toBe(true);
+      expect(
+        invocations.some(
+          (args) => args[0] === 'container' && args[1] === 'inspect' && args.includes(PROXY_CONTAINER_ID),
+        ),
+      ).toBe(true);
       expect(invocations).toContainEqual(['stop', '-t', '10', CONTAINER_ID]);
+      expect(invocations).toContainEqual(['stop', '-t', '10', PROXY_CONTAINER_ID]);
       expect(invocations).toContainEqual(['rm', '-f', CONTAINER_ID]);
+      expect(invocations).toContainEqual(['rm', '-f', PROXY_CONTAINER_ID]);
+      expect(invocations).toContainEqual(['network', 'rm', NETWORK_ID]);
       const stopIndex = invocations.findIndex((args) => args[0] === 'stop');
       const removeIndex = invocations.findIndex((args) => args[0] === 'rm');
+      const networkRemoveIndex = invocations.findIndex((args) => args[0] === 'network' && args[1] === 'rm');
       const postRemoveInventoryIndex = invocations.findIndex(
-        (args, index) => index > removeIndex && args[0] === 'container' && args[1] === 'ls',
+        (args, index) => index > networkRemoveIndex && args[0] === 'container' && args[1] === 'ls',
       );
       expect(stopIndex).toBeLessThan(removeIndex);
-      expect(removeIndex).toBeLessThan(postRemoveInventoryIndex);
+      expect(removeIndex).toBeLessThan(networkRemoveIndex);
+      expect(networkRemoveIndex).toBeLessThan(postRemoveInventoryIndex);
       expect(invocations[postRemoveInventoryIndex]).toEqual(['container', 'ls', '--all', '--no-trunc', '--quiet']);
       expect(invocations.slice(removeIndex + 1)).not.toContainEqual(['inspect', CONTAINER_ID]);
       const inventoryCalls = invocations.filter((args) => args[0] === 'container' && args[1] === 'ls');
@@ -288,6 +344,17 @@ describe('resource watchdog supervisor across a coordinator SIGKILL', () => {
     }
   }, 60_000);
 });
+
+function withIronCurtainHome<T>(home: string, operation: () => T): T {
+  const previous = process.env.IRONCURTAIN_HOME;
+  process.env.IRONCURTAIN_HOME = home;
+  try {
+    return operation();
+  } finally {
+    if (previous === undefined) delete process.env.IRONCURTAIN_HOME;
+    else process.env.IRONCURTAIN_HOME = previous;
+  }
+}
 
 function watchExit(child: ChildProcess): { exited: boolean } {
   const state = { exited: false };

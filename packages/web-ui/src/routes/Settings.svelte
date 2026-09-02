@@ -497,7 +497,8 @@
                 Enable Docker inside agent sessions
                 <span class="block text-xs text-muted-foreground mt-1">
                   Gives new container sessions a private, ephemeral Docker daemon. It does not expose the host Docker
-                  socket or host ports. Currently requires macOS on Apple silicon with Apple Container installed.
+                  socket or host ports. Currently requires macOS with Docker Desktop or, on Apple silicon, Apple
+                  Container installed.
                 </span>
               </span>
             </label>
@@ -526,7 +527,7 @@
                   Docker Hub and GHCR pulls work; Dockerfile RUN networking is offline.
                 </p>
               {:else}
-                <p class="text-xs text-muted-foreground">Only preloaded images and hermetic builds work.</p>
+                <p class="text-xs text-muted-foreground">Only locally loaded images and hermetic builds work.</p>
               {/if}
               <p class="text-xs text-amber-600 dark:text-amber-400" data-testid="docker-workload-package-warning">
                 Packages permits any process in this nested-Docker session to send bounded workspace or build data

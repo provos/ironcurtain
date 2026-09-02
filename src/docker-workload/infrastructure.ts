@@ -17,10 +17,12 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  getBundleRuntimeRootForHome,
   getDockerWorkloadLeaseDir,
   getDockerWorkloadLeasesRoot,
   getDockerWorkloadRoot,
   getDockerWorkloadStateRoot,
+  getIronCurtainHome,
 } from '../config/paths.js';
 import type { ContainerRuntime } from '../docker/types.js';
 import type { ContainerRuntimeKind } from '../docker/container-runtime.js';
@@ -89,7 +91,14 @@ const ADMISSION_LOCK_ACQUIRE_ATTEMPTS = 16;
 
 export type DockerWorkloadRuntimeKind = ContainerRuntimeKind;
 export type OuterResourceKind = DockerWorkloadOuterResource['kind'];
-export type OuterResourceRole = 'agent' | 'nested-daemon' | 'daemon-api' | 'fixed-relay' | 'proxy' | 'network';
+export type OuterResourceRole =
+  | 'agent'
+  | 'nested-daemon'
+  | 'daemon-api'
+  | 'fixed-relay'
+  | 'proxy'
+  | 'network'
+  | 'transport-network';
 
 /**
  * A precommitted outer-resource ledger entry. The caller creates the runtime
@@ -265,7 +274,7 @@ export async function admitDockerWorkloadBundle(
       bundleId: options.bundleId,
       generation,
       runtimeKind: options.runtimeKind,
-      paths: leasePathsFor(options.workspaceRoot, stateRoot),
+      paths: leasePathsFor(options.workspaceRoot, stateRoot, options.bundleId),
       bindings: { watchdogPolicySha256: loadedPolicy.sha256 },
       cleanupInventoryGapMs: loadedPolicy.policy.cleanupInventoryGapMs,
       coordinatorPid: process.pid,
@@ -1038,10 +1047,11 @@ function describeFencedLease(leasePath: string, leaseId: string, error: unknown)
   }
 }
 
-function leasePathsFor(workspaceRoot: string, stateRoot: string) {
+function leasePathsFor(workspaceRoot: string, stateRoot: string, bundleId: string) {
   return {
     workspaceRoot,
     stateRoot,
+    bundleRuntimeRoot: getBundleRuntimeRootForHome(getIronCurtainHome(), bundleId),
     runtimeRoot: join(stateRoot, 'daemon'),
     apiRoot: join(stateRoot, 'api'),
     exchangeRoot: join(stateRoot, 'exchange'),

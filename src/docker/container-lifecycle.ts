@@ -83,10 +83,11 @@ export interface DestroyBundleOuterResourcesOptions {
  * resources (including the multi-homed agent and its egress network) down
  * through the lease first, by exact identity with absence proofs.
  *
- * `cleanupContainers` then performs the ordinary sweep for the MCP/MITM(/PTY)
- * transport and its per-session network. The transport never joins the
- * ledgered egress network, so detached watchdog cleanup cannot be blocked by an
- * unledgered endpoint. Re-removing the agent is a harmless no-op.
+ * For an admitted Docker-workload bundle, the MCP/MITM(/PTY) transport and its
+ * per-session network share that same ledger, so the detached watchdog can
+ * remove every outer resource after a coordinator crash. `cleanupContainers`
+ * remains a harmless belt-and-braces sweep and owns the transport lifecycle for
+ * ordinary Docker sessions, which have no workload lease.
  *
  * Finally the managed-resource owner lease is released unconditionally — a
  * genuine no-op for non-docker runtimes, which never acquire one.

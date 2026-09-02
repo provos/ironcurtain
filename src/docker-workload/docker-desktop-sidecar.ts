@@ -2,16 +2,18 @@
  * Rootless nested-Docker daemon sidecar for the macOS Docker Desktop backend.
  *
  * The outer runtime remains the authority for isolation: the sidecar has no
- * host runtime socket, host namespace, broad bind, or generic device access.
+ * host runtime socket, host namespace, broad host bind, or generic device access.
  * Online mode alone maps `/dev/net/tun:rwm` so rootless slirp4netns can create
  * its tap; the outer network is still the isolated fixed-relay network.
- * Its only writable shared authority is a generation-scoped API volume, mounted
- * read-only into the agent before final lease activation. The runc compatibility
- * wrapper is part of the immutable daemon image and selected from one fixed
- * PATH prefix. Qualification builds a tiny `FROM scratch` image from stock runc
- * already in that image; it never exports or loads the outer agent image and
- * never pulls from a registry. Stock runc is dynamically linked only to the
- * image's musl loader, so the context copies that one local file too.
+ * The generation-scoped API volume is the only shared authority-bearing state;
+ * it is writable in the daemon and read-only in the agent before final lease
+ * activation. The exact session workspace is writable in both containers as bundle compatibility
+ * state; it grants no path outside that already agent-controlled directory. The
+ * runc compatibility wrapper is part of the immutable daemon image and selected
+ * from one fixed PATH prefix. Qualification builds a tiny `FROM scratch` image
+ * from stock runc already in that image; it never exports or loads the outer
+ * agent image and never pulls from a registry. Stock runc is dynamically linked
+ * only to the image's musl loader, so the context copies that one local file too.
  *
  * This module deliberately does not own lease implementation details. The
  * caller supplies one ledgered-create capability so volume/container
@@ -55,6 +57,7 @@ import {
   type ClientToolchainManifest,
 } from './client-toolchain.js';
 import type { LedgeredOuterCreateAuthority } from './infrastructure.js';
+import { buildContainerWorkspaceMount } from '../docker/container-workspace.js';
 
 export const DOCKER_DESKTOP_SIDECAR_API_ROOT = PRIVATE_DOCKER_API_DIR;
 export const DOCKER_DESKTOP_SIDECAR_DOCKER_HOST = PRIVATE_DOCKER_HOST;
@@ -206,6 +209,8 @@ interface DockerDesktopActivationHandle {
 export interface StartDockerDesktopSidecarOptions {
   readonly runtime: DockerDesktopSidecarRuntime;
   readonly sidecarImage: string;
+  /** Already-canonical host workspace source shared exactly with the outer agent. */
+  readonly workspaceRoot: string;
   /** Immutable image ID that the outer agent create will consume directly. */
   readonly outerAgentImageId: string;
   readonly resources: DockerDesktopSidecarResources;
@@ -297,6 +302,7 @@ export async function startDockerDesktopSidecar(
   options: StartDockerDesktopSidecarOptions,
 ): Promise<DockerDesktopSidecarHandle> {
   validateResources(options.resources);
+  const workspaceMount = buildContainerWorkspaceMount(options.workspaceRoot);
   if (!IMMUTABLE_ID.test(options.outerAgentImageId)) {
     throw new Error('Docker Desktop outer agent image ID is not immutable');
   }
@@ -362,6 +368,7 @@ export async function startDockerDesktopSidecar(
           name,
           labels,
           apiVolumeName: ownedApiVolumeName,
+          workspaceMount,
           egress: options.egress,
           profile,
           resources: options.resources,
@@ -468,6 +475,7 @@ function buildSidecarConfig(options: {
   readonly name: string;
   readonly labels: Readonly<Record<string, string>>;
   readonly apiVolumeName: string;
+  readonly workspaceMount: DockerMount;
   readonly egress?: DockerDesktopSidecarEgress;
   readonly profile: DockerDesktopP2SeccompProfile;
   readonly resources: DockerDesktopSidecarResources;
@@ -476,7 +484,10 @@ function buildSidecarConfig(options: {
   return {
     image: options.imageId,
     name: options.name,
-    mounts: egress === undefined ? [] : [egress.caMount, ...(egress.buildTrustMounts ?? [])],
+    mounts: [
+      options.workspaceMount,
+      ...(egress === undefined ? [] : [egress.caMount, ...(egress.buildTrustMounts ?? [])]),
+    ],
     network: egress?.networkName ?? 'none',
     ...(egress === undefined ? {} : { ipv4Address: egress.ipv4Address }),
     env: {
@@ -594,6 +605,7 @@ function assertStoppedSidecarProfile(
   if (hostConfig.Privileged !== false) mismatch('privileged mode');
   if (hostConfig.ReadonlyRootfs !== true) mismatch('read-only root filesystem');
   if (hostConfig.Init !== true) mismatch('init process');
+  assertNoSharedNamespaces(hostConfig, mismatch);
   assertCapabilitySet(hostConfig.CapDrop, ['ALL'], 'dropped capabilities', mismatch);
   assertCapabilitySet(hostConfig.CapAdd, config.capAdd ?? [], 'added capabilities', mismatch);
   if (hostConfig.Memory !== (config.resources?.memoryMb ?? 0) * 1024 * 1024) mismatch('memory limit');
@@ -691,6 +703,24 @@ function assertStoppedSidecarProfile(
   } else {
     const ipam = asRecord(endpoint.IPAMConfig, 'network IPAM', mismatch);
     if (ipam.IPv4Address !== config.ipv4Address) mismatch('static IPv4');
+  }
+}
+
+/** Admit only Engine-default isolated namespace spellings. */
+function assertNoSharedNamespaces(
+  hostConfig: Readonly<Record<string, unknown>>,
+  mismatch: (field: string) => never,
+): void {
+  for (const [field, label, admitted] of [
+    ['PidMode', 'PID', ['']],
+    ['IpcMode', 'IPC', ['', 'private']],
+    ['UTSMode', 'UTS', ['']],
+    ['UsernsMode', 'user', ['']],
+    ['CgroupnsMode', 'cgroup', ['', 'private']],
+  ] as const) {
+    const mode = hostConfig[field];
+    if (typeof mode !== 'string' || !(admitted as readonly string[]).includes(mode))
+      mismatch(`${label} namespace mode`);
   }
 }
 

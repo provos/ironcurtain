@@ -44,7 +44,7 @@ const getHome = useDockerWorkloadHome();
 interface SeedResource {
   readonly requestId: string;
   readonly kind: 'container' | 'network';
-  readonly role: 'agent' | 'nested-daemon' | 'fixed-relay' | 'proxy' | 'network';
+  readonly role: 'agent' | 'nested-daemon' | 'fixed-relay' | 'proxy' | 'network' | 'transport-network';
   readonly name: string;
   readonly observedId?: string;
 }

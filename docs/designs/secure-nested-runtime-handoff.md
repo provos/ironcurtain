@@ -1,7 +1,7 @@
 # Secure Nested Runtime Handoff
 
 **Updated:** 2026-09-01
-**Baseline:** `master` at `64affbc1e98ab6ab6cb413abd8823fa1f6bc4acd` (PR #454)
+**Baseline:** `master` at `f7bd3e1`
 **Primary design:** [`secure-nested-runtime-implementation-plan.md`](./secure-nested-runtime-implementation-plan.md)
 **Package-network design:**
 [`secure-nested-runtime-public-network.md`](./secure-nested-runtime-public-network.md)
@@ -26,8 +26,8 @@ route from the untrusted agent or private daemon.
 The 2026-08-15 threat-model correction treats every bundle image as untrusted and keeps host
 create/profile, proxy, watchdog, and cleanup controls as the authority. Obsolete catalog generation,
 pairing, and freshness tooling is removed; Git history retains that qualification experiment. The Docker
-substrate is implemented, but the controlled IronCurtain-inside-IronCurtain provider/child-session gate,
-full backend qualification, and preview qualification are incomplete.
+substrate and its Docker Desktop developer release gate are implemented. The controlled
+IronCurtain-inside-IronCurtain provider/child-session gate and preview qualification remain separate work.
 
 ## Current Working State
 
@@ -41,16 +41,24 @@ build-shim contracts, activation ordering, and exact cleanup. Their unavoidable 
 
 - Apple runs rootless Docker inside the per-session VM and transports the selected current-agent image
   into that daemon with a verified archive.
-- Docker Desktop runs a separately constrained rootless daemon sidecar, shares only a lease-owned Docker
-  API volume with the agent, and uses independently pinned fixed relays for networked modes.
+- Docker Desktop runs a separately constrained rootless daemon sidecar, shares a lease-owned Docker API
+  volume and the exact session workspace with the agent, and uses independently pinned fixed relays for
+  networked modes. The workspace is compatibility state inside the already-colluding bundle, not a host
+  authority boundary.
 - Docker Desktop relay containers join the default bridge only for their host-gateway hop. The agent and
   daemon do not. The pinned relay plus exact target configuration is the enforcement point; default-bridge
   NAT/L2 adjacency is an accepted residual risk recorded in the primary design.
 
-The supported product envelope is still developer-only: daemon state is ephemeral; host publication is
-disabled; package authority is limited to fixed public repositories; private/authenticated registries and
-package sources are unavailable; disk enforcement is watchdog-observed rather than a hard quota; and the
-macOS backends remain supported-but-not-formally-qualified for preview.
+The supported product envelope is still developer-only:
+
+- daemon and image-cache state is ephemeral between sessions;
+- host publication is disabled, so nested `-p` does not publish to the Mac;
+- package authority is limited to fixed public repositories;
+- private/authenticated registries and package sources are unavailable;
+- Compose may run already-built images on the managed network, but Compose builds that would bypass the
+  supported direct/default-Buildx package shim are rejected;
+- disk enforcement is watchdog-observed rather than a hard quota; and
+- native Linux, IronCurtain-in-IronCurtain, and preview/stable qualification are separate work.
 
 ## What Is Implemented
 
@@ -106,10 +114,15 @@ macOS backends remain supported-but-not-formally-qualified for preview.
 - Listener/relay creation, daemon bootstrap, build canary, workload activation, and PTY attachment are
   ordered so the agent is not released before the private daemon is admitted.
 - Listener shutdown participates in batch, PTY, prepare-failure, and exact bundle teardown paths.
-- Leases, watchdog supervision, serialized cleanup ownership, incident recovery, exact immutable outer IDs, generation labels, and two empty cleanup inventories remain the host authority.
-- Shared lifecycle tests and the Apple workflow smokes prove exact owned-resource cleanup while preserving
-  foreign objects. The Docker Desktop operator smoke proves pull/build/run behavior; its full no-skip
-  release cleanup matrix remains an explicit qualification task below.
+- Leases, watchdog supervision, serialized cleanup ownership, incident recovery, exact immutable outer
+  IDs, generation labels, and two empty cleanup inventories remain the host authority. On Docker Desktop,
+  the agent, daemon, fixed relays, ordinary TCP transport proxy, and both transport/egress networks share
+  this one authority instead of overlapping generic owner records.
+- The detached watchdog removes the exact ordinary bundle runtime tree as well as the nested-Docker state.
+  Stdio MCP relays treat controlling-pipe EOF as owner loss and reap their backend subprocesses, so a killed
+  coordinator does not retain host helpers or hold the qualification runner open.
+- Shared lifecycle tests, Apple workflow smokes, and the Docker Desktop release suite prove exact
+  owned-resource cleanup while preserving foreign objects.
 
 ### Catalog retirement and selected-current disposition
 
@@ -152,6 +165,33 @@ tsx src/cli.ts mux
 ```
 
 Create a session with `/new`. Inside the Claude session, `docker info` should report the private rootless daemon. Workload servers are reachable from sibling containers on an inner Docker network, not from the Mac host.
+
+### Offline image import
+
+Docker Desktop deliberately starts every private daemon with an empty image store. `offline` means no
+registry or package route; it does not automatically copy the multi-gigabyte outer agent image into the
+private daemon. Put any required image archive in the session or persona host workspace before or while
+the offline session runs. For example, on the Mac:
+
+```bash
+workspace_path=/absolute/path/to/ironcurtain-workspace
+mkdir -p "$workspace_path/images"
+docker image save --output "$workspace_path/images/alpine-3.23.tar" alpine:3.23
+```
+
+The workspace appears at the identical `/workspace` path in the agent and Docker Desktop daemon
+sidecar. Load and use the archive without a pull inside the session:
+
+```bash
+docker image load --input /workspace/images/alpine-3.23.tar
+docker run --pull=never --rm alpine:3.23 echo nested-docker-offline-ok
+docker build --pull=false --network=none --tag local-hermetic /workspace/path/to/context
+```
+
+This is an explicit operator data path, not automatic OCI staging or an artifact-trust decision. The
+archive and loaded image are untrusted bundle inputs. `docker load` performs no registry request; the
+offline qualification gate stages a small deterministic fixture archive in `/workspace`, loads it, runs
+it with `--pull=never`, and proves a hermetic build while registry and package listeners remain absent.
 
 ### Agent orientation and the managed inner network
 
@@ -266,7 +306,7 @@ matrix reproducible and do not rely on an agent choosing commands. PTY testing r
 the transport-specific delta (activation-before-attach, environment/orientation delivery, terminal bytes,
 signal handling, and cleanup), not for duplicating the Docker functional matrix through an LLM.
 
-### Docker Desktop packages smoke
+### Docker Desktop developer release qualification
 
 On 2026-09-01, the built Docker Desktop developer path passed the operator smoke after the shared
 lifecycle, relay, PTY target, and build-state initialization fixes:
@@ -281,37 +321,63 @@ Hello, world!
 ```
 
 The session pulled an absent public image through registry mediation and completed a Debian package build
-through the package policy engine. This is current product-path evidence for Docker Desktop `packages`,
-not a no-skip backend release suite or formal 0C/preview qualification. The current deterministic
-packages/images/offline workflow driver is still Apple-specific.
+through the package policy engine.
+
+On 2026-09-01, `npm run qualify:docker-desktop` then passed from the current checkout:
+
+```text
+DOCKER DESKTOP RELEASE SUITE PASSED: 238 tests passed, 6 live gates passed, zero reporter-visible skips.
+```
+
+The fixed source-controlled suite covers backend wiring, stopped-create adjudication, relay/PTY cleanup,
+prepare failures, reconciliation, watchdog supervision, cross-process SIGKILL recovery, and MCP child
+reaping. Its real built-CLI gates cover coordinator death plus readmission, feature disabled, a real
+Docker Desktop PTY/Claude-TUI activation and graceful exit, explicit offline archive load/run/build with
+shared-workspace positive and outside-workspace negative binds, mediated image pulls, and an uncached
+Debian package build. The PTY gate also proves that its sole published port is the fixed container PTY
+port mapped to one dynamically allocated `127.0.0.1` host port. Each gate proves exact resource cleanup
+and an empty smoke process group. This is developer release evidence, not the broader preview G1-G10/0C
+matrix.
 
 ### Recorded selected-current validation
 
 At PR #454 merge, focused nested-daemon/egress regressions, the full backend and web suites, TypeScript
 build, lint, formatting, cycle checks, the generated build-trust runtime check, CodeQL, Semgrep, and both
 macOS/Ubuntu Node matrices passed. The exact Apple and Docker Desktop results above remain runtime
-evidence; this green merge does not substitute for the missing backend release/0C gates.
+evidence; this green merge does not substitute for the broader preview/0C gates.
 
 ## Important Boundaries: Do Not Overclaim
 
 1. **No real Claude provider turn is required for functional acceptance.** The current workflow gate runs fixed Python commands inside the real admitted workflow bundle. It exercises production workflow/infrastructure lifecycle without asking an LLM to choose or issue Docker commands.
-2. **PTY/mux is not a completion blocker.** `npm run smoke:nested:apple:pty` remains available for the node-pty/Claude-TUI path, which has prior manual coverage. The deterministic workflow owns the functional Docker matrix. Rerun PTY only after a PTY-specific change or a reported regression; do not require a provider turn to qualify nested-Docker functionality.
-3. **No host access to the server.** Host port publishing is explicitly forbidden. The implemented use case is target/scanner or service/sibling communication inside the bundle. Safely exposing a server to the Mac is a separate design and implementation slice.
+2. **PTY/mux is transport qualification, not the Docker functional matrix.** The Docker Desktop release
+   suite includes a deterministic node-pty/Claude-TUI activation and graceful-exit gate without a real
+   provider turn; Apple retains `npm run smoke:nested:apple:pty`. Fixed workflow commands remain the
+   functional Docker acceptance path.
+3. **No host access to inner workload servers.** Agent and inner-container port publication remains
+   forbidden. Docker Desktop PTY mode has one narrow control-plane exception: the transport relay maps
+   only `19000/tcp` to one dynamically allocated `127.0.0.1` host port. Exposing an arbitrary inner
+   server to the Mac is a separate design and implementation slice.
 4. **No durable pull-provenance sink yet.** Policy enforcement exists, but successful registry provenance is not yet persisted as complete host session evidence.
 5. **No hard Apple disk quota.** Enabling the admitted developer slice accepts the host-watchdog-observed disk policy; the risk remains even though the UI hides that implementation detail.
 6. **macOS developer support, not cross-platform support.** Apple Container and Docker Desktop are
    implemented independently; native Linux remains fail closed until its own proof and product slice land.
-7. **Not preview-qualified.** Full G1-G10/0C release evidence, a no-skip Docker Desktop release suite,
-   broader failure injection, and backend-specific product-entrypoint reruns remain incomplete.
+7. **Not preview-qualified.** The no-skip Docker Desktop developer release suite passes, but the broader
+   G1-G10/0C evidence and failure-injection matrix remain incomplete.
 8. **Replacement public and offline gates passed.** The selected-current-agent public-registry session
    smoke passed on 2026-08-15. Deterministic public and offline production workflows passed on 2026-08-21
    with exact cleanup. A catalog refreeze is neither required nor a substitute for these gates.
 9. **Private Docker is not yet the full self-hosting gate.** No current acceptance starts an inner
    IronCurtain instance, creates its normal Docker child, and proves the provider fake-key cascade through
    both MITMs. The fixed-parent outbound transport exists as a tested primitive, but product construction
-   does not yet select it for an inner instance. Docker Desktop also needs an exact shared-path design for
-   inner `/workspace` binds and inner proxy sockets because its daemon lives in a separate sidecar mount
-   namespace.
+   does not yet select it for an inner instance. Docker Desktop now shares the exact `/workspace` bind
+   between agent and daemon; self-hosting still needs the separate bundle-scoped proxy-exchange path
+   because the daemon lives in a different mount namespace.
+10. **Offline is explicit import, not preload.** Docker Desktop begins with an empty private image store.
+    Usable offline work requires archives under `/workspace` and `docker load`; IronCurtain does not
+    automatically export or stage the selected outer agent image.
+11. **Compose build/package interception is intentionally narrow.** Compose can orchestrate prebuilt
+    containers on the managed external network. Compose builds, custom/remote BuildKit workers, and
+    alternate Docker contexts are outside the supported package-network surface.
 
 ## Recommended Next Work
 
@@ -324,12 +390,17 @@ outer MITMs, write through the exact `/workspace` mount, and prove exact cleanup
 call. Wire the tested fixed-parent outbound transport through a trusted nested-session bootstrap and map
 the inner provider's real-key slot only to the outer fake sentinel.
 
-Apple can reuse its same-VM path equivalence. Docker Desktop must first give the colluding agent/daemon
-bundle an exact shared workspace and bundle-scoped proxy-exchange path, or select an equally constrained
-TCP transport, because its private daemon is a separate sidecar. This is compatibility plumbing inside the
-already-colluding bundle, not a new host authority grant.
+Apple can reuse its same-VM path equivalence. Docker Desktop now gives the colluding agent/daemon bundle
+the exact shared workspace; it still needs a bundle-scoped proxy-exchange path, or an equally constrained
+TCP transport, because its private daemon is a separate sidecar. This is compatibility plumbing inside
+the already-colluding bundle, not a new host authority grant.
 
-### 2. Complete backend qualification of the three-state package-network design
+### 2. Maintain backend qualification of the three-state package-network design
+
+Docker Desktop now has a source-controlled no-skip release command covering feature-off plus all three
+network modes and crash recovery. Keep `npm run qualify:docker-desktop` mandatory for changes to shared
+nested-Docker lifecycle, transport, workspace, resource, or package-network code. The larger preview
+G1-G10/0C matrix remains distinct from this developer gate.
 
 Registry mediation lets a nested build resolve and pull its `FROM` image. Current `master` implements
 the governing
@@ -425,9 +496,9 @@ evidence, not a clean run or qualification. Later deterministic
 [host-network](./evidence/ca-injection-buildkit-oci-envelope-host.md) captures both passed with exact
 cleanup. Their checked comparison shows one structural delta: host mode omits only the pathless OCI
 `network` namespace. The hardened wrapper maps its enforced structure to both summary hashes and
-deliberately makes no byte-frozen claim for omitted seccomp bodies or non-`/dev` mounts. Remaining release
-qualification should exercise hostile OCI specs, residue, supported package clients, and exact cleanup
-through the integrated entrypoints; the focused gates cover lock-serialized CA generations under the
+deliberately makes no byte-frozen claim for omitted seccomp bodies or non-`/dev` mounts. Preview
+qualification should continue to exercise hostile OCI specs, residue, every supported package client,
+and exact cleanup through the integrated entrypoints; the focused gates cover lock-serialized CA generations under the
 trusted owner-only host parent, no-follow leaf files, certificate/key equality, and bounded source-owned
 derived requests. As the governing design records, concurrent filesystem replacement by another process
 with the same host UID is outside the nested-container threat model.
@@ -441,11 +512,13 @@ same exact cleanup proof. Keep crash recovery distinct from graceful next-sessio
 
 Persist a bounded host-owned record of authorized registry requests and resolved destinations. Never store authorization headers, tokens, cookies, or unbounded query/body data. Bind the record to the lease, policy/manifest hash, and session metadata; selected-image observations may be included as provenance but are not authority.
 
-### 5. Crash-recovery gate
+### 5. Keep the crash-recovery gate
 
-Graceful next-session recovery passed when the public and offline workflows ran sequentially in one
-isolated home. The remaining recovery evidence is an injected coordinator/process death followed by a
-second workflow proving watchdog cleanup or startup reconciliation closes the old lease before admission.
+Docker Desktop now injects coordinator SIGKILL, proves the detached watchdog removes every lease-owned
+container/network and exact state/runtime root before readmission, verifies stdio MCP relays reap backend
+children on owner EOF, and admits/closes a second session in the same isolated home. The qualifier also
+fails and reaps a live gate whose detached process group is not empty. Preserve this gate as lifecycle code
+evolves; Apple still has its separate graceful workflow sequence and cross-process watchdog tests.
 
 ### 6. Trusted outer inspect evidence
 

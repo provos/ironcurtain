@@ -433,6 +433,13 @@ export function createEventRuntime(initial?: CreateEventRuntimeOptions): EventRu
     },
     async createNetwork(name: string, options?: { labels?: Readonly<Record<string, string>> }) {
       events.push(`create-network:${name}`);
+      if (leasePath !== undefined) {
+        const lease = loadDockerWorkloadLease(leasePath);
+        const ledgered = lease.resources.some(
+          (resource) => resource.kind === 'network' && resource.requestedName === name && resource.observedId === null,
+        );
+        if (!ledgered) throw new Error(`createNetwork(${name}) ran before its ledger append`);
+      }
       sequence += 1;
       networks.push({
         id: `network-id-${sequence}`,

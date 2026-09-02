@@ -401,6 +401,10 @@ describe('config-command', () => {
       resources: { diskMb: null },
     });
     expect(mocks.note).toHaveBeenCalledWith(DOCKER_WORKLOAD_PACKAGE_NETWORK_WARNING, 'Package network warning');
+    expect(mocks.note).toHaveBeenCalledWith(
+      'Currently requires macOS with Docker Desktop or, on Apple silicon, Apple Container installed.',
+      'Availability',
+    );
     type MenuOption = { value: string; label?: string; hint?: string; disabled?: boolean };
     const menus = mocks.select.mock.calls.map((call) => call[0] as { message?: string; options?: MenuOption[] });
     const nestedMenus = menus.filter((call) => call.message === 'Nested Docker');
@@ -485,7 +489,7 @@ describe('config-command', () => {
       {
         value: 'offline',
         label: 'Offline',
-        hint: 'Only preloaded images and hermetic builds work',
+        hint: 'Only locally loaded images and hermetic builds work',
       },
     ]);
   });

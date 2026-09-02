@@ -811,6 +811,7 @@ async function main(): Promise<void> {
 
   // ── Transport selection ───────────────────────────────────────────
   const transportConfig = selectTransportConfig();
+  let shuttingDown = false;
   let transport: Transport;
   if (transportConfig.kind === 'tcp') {
     const tcpTransport = new TcpServerTransport('0.0.0.0', transportConfig.port);
@@ -827,11 +828,21 @@ async function main(): Promise<void> {
   } else {
     guardStdioStreamErrors();
     transport = new StdioServerTransport();
+    // Stdio is the relay's ownership channel. A graceful parent close and an
+    // uncatchable parent crash both surface as EOF here; route either through
+    // the same teardown that signals and reaps every backend subprocess.
+    // Register before connect() starts reading so an already-buffered EOF
+    // cannot race the listener installation.
+    process.stdin.once('end', () => void shutdown());
+    process.stdin.once('close', () => void shutdown());
   }
   await server.connect(transport);
 
   // ── Shutdown handler ──────────────────────────────────────────────
   async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
     // Stop token refreshers before closing clients
     for (const refresher of tokenRefreshers.values()) {
       refresher.stop();

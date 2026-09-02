@@ -14,7 +14,7 @@
  * adjudicated configuration rather than a "some daemon answered" flag.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -52,6 +52,7 @@ import {
 } from '../../src/docker-workload/lifecycle-evidence.js';
 import { loadDockerWorkloadLease } from '../../src/docker-workload/bundle-lease.js';
 import type { IronCurtainConfig } from '../../src/config/types.js';
+import { getBundleRuntimeRoot } from '../../src/config/paths.js';
 import { getBundleShortId, type BundleId } from '../../src/session/types.js';
 import type { ContainerRuntimeKind } from '../../src/docker/container-runtime.js';
 import { getInternalNetworkName } from '../../src/docker/platform.js';
@@ -126,6 +127,7 @@ interface Bundle {
 async function admitBundle(options?: {
   readonly statusMode?: 'ready' | 'absent';
   readonly exec?: CreateEventRuntimeOptions['exec'];
+  readonly runtimeKind?: ContainerRuntimeKind;
 }): Promise<Bundle> {
   const clock = createFakeClock();
   const runtime = createEventRuntime({ exec: options?.exec });
@@ -137,7 +139,7 @@ async function admitBundle(options?: {
   const audit = createRecordingDockerWorkloadAuditSink();
   const handle = await admitDockerWorkloadBundle({
     runtime: runtime.runtime,
-    runtimeKind: 'apple-container',
+    runtimeKind: options?.runtimeKind ?? 'apple-container',
     bundleId: BUNDLE_ID,
     workspaceRoot: join(getHome(), 'workspace'),
     configHash: ADMISSION_CONFIG_HASH,
@@ -405,7 +407,6 @@ function desktopTcpRuntime(
     async create(config) {
       configs.push(config);
       lifecycleEvents.push(`create:${config.name}`);
-      if (config.name.includes('sidecar')) return 'transport-sidecar-id';
       return runtime.runtime.create(config);
     },
     async start(containerId) {
@@ -1363,8 +1364,8 @@ describe('nested daemon — Docker Desktop agent capability', () => {
     );
   });
 
-  it('attaches the batch agent to ledgered Desktop egress before start while retaining the ordinary transport network', async () => {
-    const { runtime, handle } = await admitBundle();
+  it('ledgers the batch TCP transport with the workload and creates no duplicate process-owner lease', async () => {
+    const { runtime, handle } = await admitBundle({ runtimeKind: 'docker' });
     const tcp = desktopTcpRuntime(runtime);
     const activate = handle.activate.bind(handle);
     vi.spyOn(handle, 'activate').mockImplementation(async () => {
@@ -1393,25 +1394,77 @@ describe('nested daemon — Docker Desktop agent capability', () => {
     expect(transport).toMatchObject({ name: expect.stringContaining('sidecar'), network: 'bridge' });
     expect(ordinaryNetwork).toBe(expectedOrdinaryNetwork);
     expect(tcp.networkConnections).toEqual([
-      { networkName: ordinaryNetwork, containerId: 'transport-sidecar-id' },
+      { networkName: ordinaryNetwork, containerId: resources.sidecarContainerId! },
       { networkName: TEST_DESKTOP_EGRESS_NETWORK, containerId: resources.containerId },
     ]);
     expect(tcp.lifecycleEvents).toEqual([
       expect.stringMatching(/^create:ironcurtain-sidecar-/u),
-      'start:transport-sidecar-id',
-      `connect:transport-sidecar-id:${ordinaryNetwork}`,
+      `start:${resources.sidecarContainerId}`,
+      `connect:${resources.sidecarContainerId}:${ordinaryNetwork}`,
       expect.stringMatching(/^create:ironcurtain-/u),
       `connect:${resources.containerId}:${TEST_DESKTOP_EGRESS_NETWORK}`,
       `start:${resources.containerId}`,
       'activate',
     ]);
-    expect(resources.sidecarContainerId).toBe('transport-sidecar-id');
     expect(resources.internalNetwork).toBe(ordinaryNetwork);
     expect(runtime.events.filter((event) => event.startsWith('create-network:'))).toHaveLength(1);
+    const lease = loadDockerWorkloadLease(handle.leasePath);
+    expect(lease.paths.bundleRuntimeRoot).toBe(getBundleRuntimeRoot(BUNDLE_ID as BundleId));
+    expect(lease.resources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'network',
+          role: 'transport-network',
+          requestedName: ordinaryNetwork,
+          observedId: expect.stringMatching(/^network-id-/u),
+        }),
+        expect.objectContaining({
+          kind: 'container',
+          role: 'proxy',
+          requestedName: transport.name,
+          observedId: resources.sidecarContainerId,
+        }),
+        expect.objectContaining({
+          kind: 'container',
+          role: 'agent',
+          requestedName: agent.name,
+          observedId: resources.containerId,
+        }),
+      ]),
+    );
+    expect(transport.labels).toMatchObject({
+      'com.ironcurtain.docker-workload.generation': handle.generation,
+    });
+    expect(transport.labels).not.toHaveProperty('ironcurtain.managed');
+    expect(runtime.networks[0]?.labels).toMatchObject({
+      'com.ironcurtain.docker-workload.generation': handle.generation,
+      'ironcurtain.bundle': BUNDLE_ID,
+    });
+    expect(runtime.networks[0]?.labels).not.toHaveProperty('ironcurtain.managed');
+    expect(agent.labels).not.toHaveProperty('ironcurtain.managed');
+    const genericOwnerRoot = join(getHome(), 'run', 'docker-owners');
+    expect(
+      existsSync(genericOwnerRoot) ? readdirSync(genericOwnerRoot).filter((name) => name.endsWith('.json')) : [],
+    ).toEqual([]);
+
+    await handle.teardown();
+
+    expect(runtime.containers).toEqual([]);
+    expect(runtime.networks).toEqual([]);
+    expect(loadDockerWorkloadLease(handle.leasePath).resources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'proxy', removal: expect.objectContaining({ proof: 'immutable-id-absent' }) }),
+        expect.objectContaining({
+          role: 'transport-network',
+          removal: expect.objectContaining({ proof: 'immutable-id-absent' }),
+        }),
+      ]),
+    );
   });
 
   it('preserves the first Desktop connectivity failure instead of retrying an activated workload lease', async () => {
     const { runtime, handle } = await admitBundle({
+      runtimeKind: 'docker',
       exec: (argv) =>
         argv.some((arg) => arg.includes('IRONCURTAIN_HEALTH/1'))
           ? { exitCode: 1, stdout: '', stderr: 'scripted transport failure' }
@@ -1444,7 +1497,7 @@ describe('nested daemon — Docker Desktop agent capability', () => {
   });
 
   it('cleans up the batch agent, transport, and ordinary network when egress attachment fails', async () => {
-    const { runtime, handle } = await admitBundle();
+    const { runtime, handle } = await admitBundle({ runtimeKind: 'docker' });
     const tcp = desktopTcpRuntime(runtime, { failAgentEgressConnect: true });
     const activate = vi.spyOn(handle, 'activate');
     const base = makeCore(tcp.runtime, {
@@ -1465,7 +1518,11 @@ describe('nested daemon — Docker Desktop agent capability', () => {
     );
 
     expect(activate).not.toHaveBeenCalled();
-    expect(tcp.lifecycleEvents.some((event) => event.startsWith('start:container-id-'))).toBe(false);
+    const failedAgentConnection = tcp.networkConnections.find(
+      ({ networkName }) => networkName === TEST_DESKTOP_EGRESS_NETWORK,
+    );
+    expect(failedAgentConnection).toBeDefined();
+    expect(tcp.lifecycleEvents).not.toContain(`start:${failedAgentConnection?.containerId}`);
     expect(runtime.containers).toHaveLength(0);
     expect(runtime.events).toContain(
       `remove-network:${getInternalNetworkName(getBundleShortId(BUNDLE_ID as BundleId))}`,
@@ -1482,6 +1539,11 @@ describe('nested daemon — Docker Desktop agent capability', () => {
     expect(capturing.config().image).toBe(core.imageResolution?.immutableImageId);
     expect(capturing.config().env.DOCKER_HOST).toBe(DOCKER_DESKTOP_SIDECAR_DOCKER_HOST);
     expect(capturing.config().env[APPLE_VM_DOCKER_WORKLOAD_NETWORK_ENV]).toBe(APPLE_VM_DOCKER_WORKLOAD_NETWORK);
+    expect(capturing.config().mounts).toContainEqual({
+      source: core.workspaceDir,
+      target: '/workspace',
+      readonly: false,
+    });
     expect(capturing.config().trustedCreateOptions?.namedVolumeMounts).toEqual([
       {
         name: 'ic-desktop-api-test',

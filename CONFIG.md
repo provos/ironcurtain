@@ -91,6 +91,13 @@ to `offline` to use only images already available to the private runtime:
 }
 ```
 
+Docker Desktop starts each private daemon with an empty, ephemeral image store. Place a Docker image
+archive in the configured session or persona host workspace before or while the offline session runs.
+Inside the session, load it with `docker image load --input /workspace/images/example.tar`, then use
+`docker run --pull=never` and `docker build --pull=false --network=none`. This explicit workspace import
+does not contact a registry; IronCurtain does not automatically export the outer agent image into the
+private daemon.
+
 | Field                          | Type            | Default when enabled     | Description                                                                        |
 | ------------------------------ | --------------- | ------------------------ | ---------------------------------------------------------------------------------- |
 | `dockerWorkload.enabled`       | boolean         | `false`                  | Enable private nested Docker for Docker Agent sessions.                            |
@@ -112,6 +119,13 @@ fixed-target, bundle-scoped relays. A Docker resolution on another host fails cl
 nested Docker keeps its safe fallback instead of inheriting an unlimited value. The setting is global for
 Docker Agent execution: standalone sessions and each workflow infrastructure bundle receive their own
 private nested daemon when enabled.
+
+The macOS developer capability intentionally does not include persistent daemon/image cache state,
+private or authenticated registries and package sources, or host-published ports. Compose can run
+already-built images with the managed external network below; Compose builds that bypass the supported
+direct/default-Buildx package path, custom/remote BuildKit workers, and alternate Docker contexts are not
+supported. Native Linux and IronCurtain-in-IronCurtain are separate implementation and qualification
+slices.
 
 ### Connecting nested containers
 

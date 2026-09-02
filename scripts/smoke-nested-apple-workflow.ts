@@ -41,6 +41,7 @@ import {
 } from '../src/config/paths.js';
 import type { BundleId } from '../src/session/types.js';
 import { appendBoundedOutput } from './smoke-nested-apple-tui.js';
+import { waitForSmokeChild } from './smoke-child-process.js';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..');
@@ -138,12 +139,6 @@ const MODE_CHECK_IDS: Readonly<Record<SmokeMode, readonly string[]>> = {
   ],
 };
 
-interface ChildExit {
-  readonly code: number | null;
-  readonly signal: NodeJS.Signals | null;
-  readonly timedOut: boolean;
-}
-
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -237,7 +232,7 @@ async function runMode(options: {
   });
   child.stdin.end();
 
-  const exit = await waitForChild(child, CHILD_TIMEOUT_MS);
+  const exit = await waitForSmokeChild(child, CHILD_TIMEOUT_MS);
   const resultPath = resolve(workspace, '.workflow', 'nested-docker-result.json');
   let result: WorkflowProbeResult | undefined;
   let resultReadFailure: Error | undefined;
@@ -361,24 +356,6 @@ function childEnvironment(home: string): NodeJS.ProcessEnv {
     ANTHROPIC_API_KEY: FAKE_API_KEY,
     NO_COLOR: '1',
   };
-}
-
-async function waitForChild(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<ChildExit> {
-  const exitPromise = new Promise<ChildExit>((resolvePromise, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => resolvePromise({ code, signal, timedOut: false }));
-  });
-  const first = await Promise.race([exitPromise, delay(timeoutMs, undefined, { ref: false }).then(() => undefined)]);
-  if (first !== undefined) return first;
-
-  child.kill('SIGTERM');
-  const afterTerm = await Promise.race([exitPromise, delay(60_000, undefined, { ref: false }).then(() => undefined)]);
-  if (afterTerm !== undefined) return { ...afterTerm, timedOut: true };
-
-  child.kill('SIGKILL');
-  const afterKill = await Promise.race([exitPromise, delay(10_000, undefined, { ref: false }).then(() => undefined)]);
-  if (afterKill === undefined) throw new Error(`workflow child survived SIGKILL after exceeding ${timeoutMs}ms`);
-  return { ...afterKill, timedOut: true };
 }
 
 function listLeasePaths(home: string): readonly string[] {

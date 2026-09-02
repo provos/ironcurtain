@@ -139,8 +139,11 @@ registry mediation. Dockerfile \`RUN\` steps have no package network access.`;
 
 #### Docker builds in Offline mode
 
-Only preloaded images and hermetic builds work. Dockerfile \`FROM\` cannot pull
-an absent image, and Dockerfile \`RUN\` steps have no package network access.`;
+Only locally available images and hermetic builds work. On Docker Desktop the
+private image store starts empty; load an archive already under \`/workspace\`
+with \`docker image load --input /workspace/<archive>.tar\`.
+Dockerfile \`FROM\` cannot pull an absent image, and Dockerfile \`RUN\` steps
+have no package network access.`;
       break;
   }
 

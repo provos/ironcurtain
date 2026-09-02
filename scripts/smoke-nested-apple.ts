@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
 
-/** Production-entrypoint smoke for the admitted Apple secure-nested-Docker slice. */
+/** Production-entrypoint smoke for the admitted macOS secure-nested-Docker backends. */
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile as execFileCallback, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
@@ -20,8 +20,13 @@ import { createServer, get as httpGet, type Server } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { loadDockerWorkloadLease, type DockerWorkloadLease } from '../src/docker-workload/bundle-lease.js';
-import { dockerWorkloadConfigHash, resolveDockerWorkloadConfig } from '../src/docker-workload/config.js';
+import {
+  dockerWorkloadConfigHash,
+  resolveDockerWorkloadConfig,
+  type DockerWorkloadNetworkAccess,
+} from '../src/docker-workload/config.js';
 import { getProcessStartIdentity } from '../src/docker-workload/process-lock.js';
 import { APPLE_VM_DOCKER_WORKLOAD_NETWORK } from '../src/docker-workload/apple-private-docker.js';
 import type { DockerWorkloadAuditEvent } from '../src/docker-workload/lifecycle-evidence.js';
@@ -32,6 +37,9 @@ import {
 } from '../src/docker-workload/private-docker.js';
 import { loadResourceWatchdogSupervisorStatus } from '../src/docker-workload/resource-watchdog-supervisor.js';
 import { createContainerRuntime, type ContainerRuntimeKind } from '../src/docker/container-runtime.js';
+import { CONTAINER_WORKSPACE_DIR } from '../src/docker/container-workspace.js';
+import { IRONCURTAIN_LABEL_BUNDLE } from '../src/docker/docker-manager.js';
+import { DEFAULT_PTY_PORT } from '../src/docker/pty-types.js';
 import {
   getBundleControlSocketPath,
   getBundleMitmControlSocketPath,
@@ -51,6 +59,11 @@ import {
 } from './smoke-nested-apple-tui.js';
 import {
   DENIED_REGISTRY_SMOKE_IMAGE,
+  DOCKER_DESKTOP_OFFLINE_ARCHIVE,
+  DOCKER_DESKTOP_OFFLINE_MARKER,
+  DOCKER_DESKTOP_WORKSPACE_INPUT,
+  DOCKER_DESKTOP_WORKSPACE_OUTPUT,
+  PUBLIC_REGISTRY_SMOKE_IMAGE,
   assertDefaultBridgeUnavailable,
   assertDefaultContainerHasNoUsableNetwork,
   assertEmptyInternalBridge,
@@ -63,6 +76,8 @@ import {
   assertRegistryPolicyDenied,
   buildNestedAppleSmokeWorkloadConfig,
   buildPublicRegistryWorkloadPlan,
+  dockerDesktopSmokeNetworkAccess,
+  isDockerDesktopSmokeMode,
   isExactSmokeNonceResponse,
   parseNestedAppleSmokeMode,
   type NestedAppleSmokeMode,
@@ -76,6 +91,8 @@ const TIMEOUT_MS = 60 * 60_000;
 const PTY_ACTIVATION_TIMEOUT_MS = 15 * 60_000;
 const PTY_TUI_TIMEOUT_MS = 60_000;
 const PTY_GRACEFUL_EXIT_TIMEOUT_MS = 30_000;
+const SMOKE_DOCKER_RESOURCES = { memoryMb: 4096, cpus: 2 } as const;
+const SMOKE_DOCKER_PIDS = 512;
 const FAKE_API_KEY = 'sk-ant-api03-IRONCURTAIN-SMOKE-FAKE-ONLY';
 const MACOS_SUN_PATH_BYTES = 104;
 const SOCKET_PATH_PROBE_BUNDLE = 'ffffffff-ffff-4fff-8fff-ffffffffffff' as BundleId;
@@ -94,19 +111,33 @@ interface SmokeEnvironment {
   readonly runtimeKind: ContainerRuntimeKind;
 }
 
+interface OfflineFixture {
+  readonly image: string;
+  readonly archivePath: string;
+  readonly workspaceInputPath: string;
+  readonly workspaceOutputPath: string;
+  readonly hostWorkspaceOutputPath: string;
+  readonly excludedHostPath: string;
+}
+
+interface SmokeCliProcess {
+  readonly child: ChildProcessWithoutNullStreams;
+  output(): { readonly stdout: string; readonly stderr: string };
+}
+
 async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
-  const { smokeRoot, smokeHome, workspace, expectedConfigHash, runtimeKind } = prepareSmokeEnvironment(mode);
+  const environment = prepareSmokeEnvironment(mode);
+  if (mode === 'docker-desktop-disabled') {
+    await mainDockerDesktopDisabled(environment);
+    return;
+  }
+  const { smokeRoot, smokeHome, workspace, expectedConfigHash, runtimeKind } = environment;
   try {
+    const offlineFixture =
+      mode === 'docker-desktop-offline' ? await stageDockerDesktopOfflineFixture(smokeRoot, workspace) : undefined;
     const argv = [CLI_PATH, 'start', '--agent', 'claude-code', '--workspace', workspace];
-    const child = spawn(process.execPath, argv, {
-      cwd: dirname(smokeRoot),
-      env: smokeChildEnvironment(smokeHome, runtimeKind),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
+    const smokeCli = startSmokeCli(environment);
+    const child = smokeCli.child;
     process.stderr.write(
       `nested ${runtimeKind} smoke argv=${JSON.stringify([process.execPath, ...argv])} cwd=${dirname(smokeRoot)}\n`,
     );
@@ -149,10 +180,46 @@ async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
       const before = await innerDocker(runtime, outerId, ['container', 'ls', '--all', '--quiet']);
       if (before.stdout.trim() !== '') throw new Error('private Docker inventory was not empty before smoke child');
 
-      if (mode === 'docker-desktop-packages') {
-        await verifyDockerDesktopOuterTopology(runtime, outerId, active.lease, active.sessionId as BundleId);
+      const desktopNetworkAccess = dockerDesktopSmokeNetworkAccess(mode);
+      if (desktopNetworkAccess !== undefined) {
+        await verifyDockerDesktopOuterTopology(
+          runtime,
+          outerId,
+          active.lease,
+          active.sessionId as BundleId,
+          desktopNetworkAccess,
+        );
+      }
+      if (mode === 'docker-desktop-recovery') {
+        child.kill('SIGKILL');
+        await waitForExit(child, 10_000);
+        await verifyClosedBundle({
+          runtime,
+          active,
+          outerId,
+          smokeHome,
+          supervisorStatusPath,
+          supervisorPid: supervisor.supervisorPid,
+          supervisorIdentity,
+          leaseTimeoutMs: 180_000,
+        });
+        assertNoProviderRequest(resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'));
+        await verifyPostCrashReadmission({
+          smokeRoot,
+          smokeHome,
+          workspace,
+          expectedConfigHash,
+          previousLeaseId: active.lease.leaseId,
+        });
+        succeeded = true;
+        process.stderr.write(`nested docker crash-recovery smoke passed (session=${active.sessionId})\n`);
+        return;
+      } else if (mode === 'docker-desktop-offline') {
+        if (offlineFixture === undefined) throw new Error('Docker Desktop offline fixture was not staged');
+        await verifyDockerDesktopOfflineWorkload(runtime, outerId, offlineFixture);
+      } else if (mode === 'docker-desktop-packages') {
         await verifyDockerDesktopPackageBuild(runtime, outerId);
-      } else if (mode === 'public-registry') {
+      } else if (mode === 'public-registry' || mode === 'docker-desktop-images') {
         await verifyPublicRegistryWorkload(runtime, outerId);
       } else {
         await innerDocker(runtime, outerId, [
@@ -179,7 +246,10 @@ async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
       child.stdin.write('/quit\n');
       child.stdin.end();
       const exitCode = await waitForExit(child, 90_000);
-      if (exitCode !== 0) throw new Error(`CLI exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+      if (exitCode !== 0) {
+        const output = smokeCli.output();
+        throw new Error(`CLI exited ${exitCode}\nstdout:\n${output.stdout}\nstderr:\n${output.stderr}`);
+      }
 
       await verifyClosedBundle({
         runtime,
@@ -200,19 +270,7 @@ async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
       );
     } finally {
       try {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.stdin.write('/quit\n');
-          child.stdin.end();
-          await waitForExit(child, 60_000).catch(() => {});
-          if (child.exitCode === null && child.signalCode === null) {
-            child.kill('SIGTERM');
-          }
-          await waitForExit(child, 60_000).catch(() => {});
-          if (child.exitCode === null && child.signalCode === null) {
-            child.kill('SIGKILL');
-            await waitForExit(child, 10_000).catch(() => {});
-          }
-        }
+        await terminateSmokeCli(child);
         const cleanupLeasePath = activeBundle?.leasePath ?? discoverSoleLeasePath(smokeHome);
         if (!succeeded && cleanupLeasePath !== undefined) {
           // A detached watchdog must close an orphaned bundle after a forced CLI
@@ -221,15 +279,97 @@ async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
         }
       } finally {
         if (succeeded) rmSync(smokeRoot, { recursive: true, force: true });
-        else
+        else {
+          const output = smokeCli.output();
           process.stderr.write(
-            `nested Apple smoke retained diagnostics at ${smokeRoot}\nstdout:\n${redact(stdout)}\nstderr:\n${redact(stderr)}\n`,
+            `nested Docker smoke retained diagnostics at ${smokeRoot}\nstdout:\n${redact(output.stdout)}\nstderr:\n${redact(output.stderr)}\n`,
           );
+        }
       }
     }
   } catch (error) {
-    process.stderr.write(`nested Apple smoke failed; diagnostics retained at ${smokeRoot}\n`);
+    process.stderr.write(`nested Docker smoke failed; diagnostics retained at ${smokeRoot}\n`);
     throw error;
+  }
+}
+
+/** Prove the real product path creates no nested-Docker authority when disabled. */
+async function mainDockerDesktopDisabled(environment: SmokeEnvironment): Promise<void> {
+  const { smokeRoot, smokeHome } = environment;
+  const runtime = createContainerRuntime('docker');
+  const smokeCli = startSmokeCli(environment);
+  const child = smokeCli.child;
+  let sessionId: string | undefined;
+  let succeeded = false;
+  try {
+    const disabled = await poll('feature-disabled Docker session', async () => {
+      assertChildRunning(child, 'while waiting for the feature-disabled session');
+      const sessionsRoot = resolve(smokeHome, 'sessions');
+      if (!existsSync(sessionsRoot)) return undefined;
+      for (const candidate of readdirSync(sessionsRoot)) {
+        const metadataPath = resolve(sessionsRoot, candidate, 'session-metadata.json');
+        if (!existsSync(metadataPath)) continue;
+        const metadata = JSON.parse(readFileSync(metadataPath, 'utf8')) as SessionMetadata;
+        if (metadata.dockerWorkload !== undefined) {
+          throw new Error('feature-disabled session persisted nested-Docker metadata');
+        }
+        if (runtime.listContainers === undefined) throw new Error('Docker runtime cannot inventory containers');
+        const owned = await runtime.listContainers({ labelFilter: `${IRONCURTAIN_LABEL_BUNDLE}=${candidate}` });
+        const agentName = `ironcurtain-${getBundleShortId(candidate as BundleId)}`;
+        const agent = owned.find((container) => container.name === agentName && container.running);
+        if (agent !== undefined) return { sessionId: candidate, outerId: agent.id };
+      }
+      return undefined;
+    });
+    sessionId = disabled.sessionId;
+    const environmentResult = await runtime.exec(disabled.outerId, ['/usr/bin/env'], 10_000, 'codespace');
+    if (environmentResult.exitCode !== 0) {
+      throw new Error(`feature-disabled environment inspection failed: ${boundedDiagnostic(environmentResult.stderr)}`);
+    }
+    if (/^(?:DOCKER_HOST|IRONCURTAIN_DOCKER_NETWORK)=/mu.test(environmentResult.stdout)) {
+      throw new Error('feature-disabled agent received nested-Docker environment authority');
+    }
+    if (discoverSoleLeasePath(smokeHome) !== undefined) {
+      throw new Error('feature-disabled session created a Docker-workload lease');
+    }
+
+    child.stdin.end('/quit\n');
+    const exitCode = await waitForExit(child, 90_000);
+    if (exitCode !== 0) {
+      const output = smokeCli.output();
+      throw new Error(
+        `feature-disabled CLI exited ${exitCode}; stdout=${redact(output.stdout)} stderr=${redact(output.stderr)}`,
+      );
+    }
+    if (runtime.listContainers === undefined) throw new Error('Docker runtime cannot inventory containers');
+    await poll(
+      'feature-disabled outer cleanup',
+      async () => {
+        const owned = await runtime.listContainers!({
+          labelFilter: `${IRONCURTAIN_LABEL_BUNDLE}=${disabled.sessionId}`,
+        });
+        return owned.length === 0 ? true : undefined;
+      },
+      180_000,
+    );
+    assertNoProviderRequest(resolve(smokeHome, 'sessions', disabled.sessionId, 'audit.jsonl'));
+    succeeded = true;
+    process.stderr.write(`nested docker feature-disabled smoke passed (session=${disabled.sessionId})\n`);
+  } finally {
+    await terminateSmokeCli(child);
+    const cleanupLeasePath = discoverSoleLeasePath(smokeHome);
+    if (!succeeded && cleanupLeasePath !== undefined) {
+      await waitForClosedLeaseWithin(cleanupLeasePath, 180_000);
+    }
+    if (succeeded) rmSync(smokeRoot, { recursive: true, force: true });
+    else {
+      const output = smokeCli.output();
+      process.stderr.write(
+        `nested Docker feature-disabled smoke retained diagnostics at ${smokeRoot}` +
+          `${sessionId === undefined ? '' : ` (session=${sessionId})`}\n` +
+          `stdout:\n${redact(output.stdout)}\nstderr:\n${redact(output.stderr)}\n`,
+      );
+    }
   }
 }
 
@@ -248,16 +388,15 @@ function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: s
     mkdirSync(workspace, { mode: 0o700 });
     assertSmokeSocketPathBudget(smokeHome);
     const requestedWorkload = buildNestedAppleSmokeWorkloadConfig(mode);
-    const runtimeKind: ContainerRuntimeKind = mode === 'docker-desktop-packages' ? 'docker' : 'apple-container';
-    const smokeDockerResources = { memoryMb: 4096, cpus: 2 } as const;
-    const resolvedWorkload = resolveDockerWorkloadConfig(requestedWorkload, smokeDockerResources);
+    const runtimeKind: ContainerRuntimeKind = isDockerDesktopSmokeMode(mode) ? 'docker' : 'apple-container';
+    const resolvedWorkload = resolveDockerWorkloadConfig(requestedWorkload, SMOKE_DOCKER_RESOURCES);
     const expectedConfigHash = dockerWorkloadConfigHash(resolvedWorkload);
     writePrivateJson(resolve(smokeHome, 'config.json'), {
       anthropicApiKey: FAKE_API_KEY,
       preferredMode: 'container',
       preferredDockerAgent: 'claude-code',
       containerRuntime: runtimeKind,
-      dockerResources: smokeDockerResources,
+      dockerResources: SMOKE_DOCKER_RESOURCES,
       dockerWorkload: requestedWorkload,
       ...(providerBaseUrl === undefined ? {} : { anthropicBaseUrl: providerBaseUrl }),
     });
@@ -268,8 +407,137 @@ function prepareSmokeEnvironment(mode: NestedAppleSmokeMode, providerBaseUrl?: s
   }
 }
 
+/**
+ * Build one tiny, test-only Linux image without a registry and save it into the
+ * ordinary workspace. This deliberately does not export the selected agent or
+ * any other production image. The Offline gate later consumes only this file.
+ */
+async function stageDockerDesktopOfflineFixture(smokeRoot: string, workspace: string): Promise<OfflineFixture> {
+  const goArchitecture = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'amd64' : undefined;
+  if (goArchitecture === undefined) throw new Error(`Docker Desktop offline fixture does not support ${process.arch}`);
+
+  const contextDirectory = resolve(smokeRoot, 'offline-fixture-context');
+  const sourcePath = resolve(contextDirectory, 'main.go');
+  const binaryPath = resolve(contextDirectory, 'probe');
+  const archivePath = resolve(workspace, DOCKER_DESKTOP_OFFLINE_ARCHIVE);
+  const hostWorkspaceInputPath = resolve(workspace, DOCKER_DESKTOP_WORKSPACE_INPUT);
+  const hostWorkspaceOutputPath = resolve(workspace, DOCKER_DESKTOP_WORKSPACE_OUTPUT);
+  const excludedHostPath = resolve(smokeRoot, 'host-only-workspace-sentinel');
+  const image = `localhost/ironcurtain-offline-smoke:${randomBytes(12).toString('hex')}`;
+  let imageCreated = false;
+  mkdirSync(contextDirectory, { mode: 0o700 });
+  mkdirSync(dirname(archivePath), { mode: 0o700 });
+  writeFileSync(
+    sourcePath,
+    [
+      'package main',
+      'import ("fmt"; "os")',
+      'func main() {',
+      `  if len(os.Args) == 4 && os.Args[1] == "workspace" {`,
+      '    value, err := os.ReadFile(os.Args[2]); if err != nil { panic(err) }',
+      `    if string(value) != ${JSON.stringify(`${DOCKER_DESKTOP_OFFLINE_MARKER}\n`)} { panic("workspace marker mismatch") }`,
+      '    if err := os.WriteFile(os.Args[3], value, 0644); err != nil { panic(err) }',
+      '    return',
+      '  }',
+      `  fmt.Println(${JSON.stringify(DOCKER_DESKTOP_OFFLINE_MARKER)})`,
+      '}',
+      '',
+    ].join('\n'),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    resolve(contextDirectory, 'Dockerfile'),
+    'FROM scratch\nCOPY --chmod=0555 probe /probe\nENTRYPOINT ["/probe"]\n',
+    { mode: 0o600 },
+  );
+
+  try {
+    await runHostCommand(
+      'go',
+      ['build', '-trimpath', '-ldflags=-s -w -buildid=', '-o', binaryPath, sourcePath],
+      120_000,
+      { CGO_ENABLED: '0', GOOS: 'linux', GOARCH: goArchitecture },
+    );
+    await runHostCommand(
+      'docker',
+      ['build', '--pull=false', '--network=none', '--tag', image, contextDirectory],
+      300_000,
+    );
+    imageCreated = true;
+    await runHostCommand('docker', ['image', 'save', '--output', archivePath, image], 120_000);
+    chmodSync(archivePath, 0o644);
+    writeFileSync(hostWorkspaceInputPath, `${DOCKER_DESKTOP_OFFLINE_MARKER}\n`, { mode: 0o644 });
+    writeFileSync(excludedHostPath, 'must-not-be-visible-to-the-nested-daemon\n', { mode: 0o600 });
+    return {
+      image,
+      archivePath: `${CONTAINER_WORKSPACE_DIR}/${DOCKER_DESKTOP_OFFLINE_ARCHIVE}`,
+      workspaceInputPath: `${CONTAINER_WORKSPACE_DIR}/${DOCKER_DESKTOP_WORKSPACE_INPUT}`,
+      workspaceOutputPath: `${CONTAINER_WORKSPACE_DIR}/${DOCKER_DESKTOP_WORKSPACE_OUTPUT}`,
+      hostWorkspaceOutputPath,
+      excludedHostPath,
+    };
+  } finally {
+    if (imageCreated) await runHostCommand('docker', ['image', 'rm', '--force', image], 60_000);
+  }
+}
+
+async function runHostCommand(
+  executable: string,
+  args: readonly string[],
+  timeoutMs: number,
+  environment?: Readonly<Record<string, string>>,
+): Promise<void> {
+  const execFile = promisify(execFileCallback);
+  try {
+    await execFile(executable, [...args], {
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+      env: environment === undefined ? process.env : { ...process.env, ...environment },
+    });
+  } catch (error) {
+    const failure = error as Error & { readonly stdout?: unknown; readonly stderr?: unknown };
+    const stdout = typeof failure.stdout === 'string' ? failure.stdout : '';
+    const stderr = typeof failure.stderr === 'string' ? failure.stderr : '';
+    throw new Error(
+      `${executable} ${args[0] ?? '<empty>'} failed: stdout=${boundedDiagnostic(stdout)} stderr=${boundedDiagnostic(stderr)}`,
+      { cause: error },
+    );
+  }
+}
+
 function smokeChildEnvironment(smokeHome: string, runtimeKind: ContainerRuntimeKind): NodeJS.ProcessEnv {
   return { ...process.env, ...smokeEnvironmentValues(smokeHome, runtimeKind) };
+}
+
+function startSmokeCli(environment: SmokeEnvironment): SmokeCliProcess {
+  const argv = [CLI_PATH, 'start', '--agent', 'claude-code', '--workspace', environment.workspace];
+  const child = spawn(process.execPath, argv, {
+    cwd: dirname(environment.smokeRoot),
+    env: smokeChildEnvironment(environment.smokeHome, environment.runtimeKind),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdout = appendBoundedOutput(stdout, chunk.toString('utf8'));
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr = appendBoundedOutput(stderr, chunk.toString('utf8'));
+  });
+  return { child, output: () => ({ stdout, stderr }) };
+}
+
+async function terminateSmokeCli(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.stdin.write('/quit\n');
+  child.stdin.end();
+  await waitForExit(child, 60_000).catch(() => {});
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+  await waitForExit(child, 60_000).catch(() => {});
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGKILL');
+    await waitForExit(child, 10_000).catch(() => {});
+  }
 }
 
 function smokeEnvironmentValues(
@@ -291,17 +559,17 @@ function smokeEnvironmentValues(
  * does not connect to the agent socket itself; doing so would cause socat,fork
  * to launch another agent and would no longer test production startup.
  */
-async function mainPty(): Promise<void> {
+async function mainPty(mode: 'pty' | 'docker-desktop-pty'): Promise<void> {
   const providerSink = await startRejectingProviderSink();
   let environment: SmokeEnvironment;
   try {
-    environment = prepareSmokeEnvironment('pty', providerSink.url);
+    environment = prepareSmokeEnvironment(mode, providerSink.url);
   } catch (error) {
     await closeServer(providerSink.server);
     throw error;
   }
-  const { smokeRoot, smokeHome, workspace, expectedConfigHash } = environment;
-  const restoreEnvironment = installSmokeProcessEnvironment(smokeHome);
+  const { smokeRoot, smokeHome, workspace, expectedConfigHash, runtimeKind } = environment;
+  const restoreEnvironment = installSmokeProcessEnvironment(smokeHome, runtimeKind);
   let bridge: PtyBridge | undefined;
   let unsubscribeOutput: (() => void) | undefined;
   let activeBundle: ActiveBundle | undefined;
@@ -326,7 +594,7 @@ async function mainPty(): Promise<void> {
       if (collectPostActivation && chunk.length > 0) receivedPostActivationOutput = true;
     });
     process.stderr.write(
-      `nested Apple PTY smoke argv=${JSON.stringify([
+      `nested ${runtimeKind} PTY smoke argv=${JSON.stringify([
         process.execPath,
         CLI_PATH,
         'start',
@@ -342,7 +610,7 @@ async function mainPty(): Promise<void> {
       smokeHome,
       () => assertBridgeRunning(bridge!, 'while waiting for persisted lease activation'),
       expectedConfigHash,
-      'apple-container',
+      runtimeKind,
       PTY_ACTIVATION_TIMEOUT_MS,
     );
     activeBundle = active;
@@ -384,14 +652,24 @@ async function mainPty(): Promise<void> {
       PTY_TUI_TIMEOUT_MS,
     );
 
-    const runtime = createContainerRuntime('apple-container');
+    const runtime = createContainerRuntime(runtimeKind);
     await verifyAgentDockerEnvironment(runtime, outerId);
     await verifyPrivateDockerBaseline(
       runtime,
       outerId,
       resolve(smokeHome, 'sessions', active.sessionId, 'audit.jsonl'),
-      'apple-container',
+      runtimeKind,
     );
+    if (runtimeKind === 'docker') {
+      await verifyDockerDesktopOuterTopology(
+        runtime,
+        outerId,
+        active.lease,
+        active.sessionId as BundleId,
+        'offline',
+        'pty',
+      );
+    }
 
     // `/exit` is Claude Code's graceful TUI command. Success requires the
     // node-pty child to exit on its own; forced termination is cleanup-only.
@@ -418,7 +696,7 @@ async function mainPty(): Promise<void> {
       throw new Error(`PTY smoke observed ${providerSink.requestCount()} unexpected provider request(s)`);
     }
     succeeded = true;
-    process.stderr.write(`nested Apple PTY smoke passed (session=${active.sessionId}, outer=${outerId})\n`);
+    process.stderr.write(`nested ${runtimeKind} PTY smoke passed (session=${active.sessionId}, outer=${outerId})\n`);
   } finally {
     unsubscribeOutput?.();
     try {
@@ -448,7 +726,7 @@ async function mainPty(): Promise<void> {
       if (succeeded) rmSync(smokeRoot, { recursive: true, force: true });
       else
         process.stderr.write(
-          `nested Apple PTY smoke retained diagnostics at ${smokeRoot}\nPTY output tail:\n${redact(diagnosticOutput)}\n`,
+          `nested ${runtimeKind} PTY smoke retained diagnostics at ${smokeRoot}\nPTY output tail:\n${redact(diagnosticOutput)}\n`,
         );
     }
   }
@@ -488,8 +766,8 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-function installSmokeProcessEnvironment(smokeHome: string): () => void {
-  const values = smokeEnvironmentValues(smokeHome);
+function installSmokeProcessEnvironment(smokeHome: string, runtimeKind: ContainerRuntimeKind): () => void {
+  const values = smokeEnvironmentValues(smokeHome, runtimeKind);
   const previous = new Map<string, string | undefined>();
   for (const [name, value] of Object.entries(values)) {
     previous.set(name, process.env[name]);
@@ -570,13 +848,69 @@ async function waitForActiveBundle(
         }
         if (lease.status === 'incident')
           throw new Error(`Docker-workload activation entered incident: ${lease.incident?.detail}`);
-        if (lease.status !== 'active') return undefined;
+        if (lease.status !== 'active') continue;
         return { sessionId, leasePath, lease };
       }
       return undefined;
     },
     timeoutMs,
   );
+}
+
+/** A killed coordinator must not prevent a subsequent admission in the same isolated home. */
+async function verifyPostCrashReadmission(options: {
+  readonly smokeRoot: string;
+  readonly smokeHome: string;
+  readonly workspace: string;
+  readonly expectedConfigHash: string;
+  readonly previousLeaseId: string;
+}): Promise<void> {
+  const smokeCli = startSmokeCli({
+    smokeRoot: options.smokeRoot,
+    smokeHome: options.smokeHome,
+    workspace: options.workspace,
+    expectedConfigHash: options.expectedConfigHash,
+    runtimeKind: 'docker',
+  });
+  const child = smokeCli.child;
+  let active: ActiveBundle | undefined;
+  try {
+    active = await waitForActiveBundle(
+      options.smokeHome,
+      () => assertChildRunning(child, 'while waiting for post-crash readmission'),
+      options.expectedConfigHash,
+      'docker',
+    );
+    if (active.lease.leaseId === options.previousLeaseId) {
+      throw new Error('post-crash admission reused the closed lease identity');
+    }
+    const outerId = requireAgentOuterId(active.lease);
+    const supervisorStatusPath = resolve(dirname(active.leasePath), 'status.json');
+    const supervisor = loadResourceWatchdogSupervisorStatus(supervisorStatusPath);
+    const supervisorIdentity = getProcessStartIdentity(supervisor.supervisorPid);
+    if (supervisorIdentity === undefined) throw new Error('post-crash watchdog supervisor is not alive');
+    child.stdin.end('/quit\n');
+    const exitCode = await waitForExit(child, 90_000);
+    if (exitCode !== 0) {
+      const output = smokeCli.output();
+      throw new Error(
+        `post-crash CLI exited ${exitCode}; stdout=${redact(output.stdout)} stderr=${redact(output.stderr)}`,
+      );
+    }
+    await verifyClosedBundle({
+      runtime: createContainerRuntime('docker'),
+      active,
+      outerId,
+      smokeHome: options.smokeHome,
+      supervisorStatusPath,
+      supervisorPid: supervisor.supervisorPid,
+      supervisorIdentity,
+      leaseTimeoutMs: 180_000,
+    });
+  } finally {
+    await terminateSmokeCli(child);
+    if (active !== undefined) await waitForClosedLeaseWithin(active.leasePath, 180_000);
+  }
 }
 
 function requireAgentOuterId(lease: DockerWorkloadLease): string {
@@ -613,6 +947,8 @@ async function verifyDockerDesktopOuterTopology(
   outerId: string,
   lease: DockerWorkloadLease,
   bundleId: BundleId,
+  networkAccess: DockerWorkloadNetworkAccess,
+  transportMode: 'batch' | 'pty' = 'batch',
 ): Promise<void> {
   if (runtime.inspectContainerRaw === undefined) {
     throw new Error('Docker Desktop topology smoke requires raw container inspect');
@@ -620,46 +956,69 @@ async function verifyDockerDesktopOuterTopology(
   const egressNetworks = lease.resources.filter(
     (resource) => resource.kind === 'network' && resource.role === 'network' && resource.observedId !== null,
   );
+  const transportNetworks = lease.resources.filter(
+    (resource) => resource.kind === 'network' && resource.role === 'transport-network' && resource.observedId !== null,
+  );
   const daemons = lease.resources.filter(
     (resource) => resource.kind === 'container' && resource.role === 'nested-daemon' && resource.observedId !== null,
   );
   const relays = lease.resources.filter(
     (resource) => resource.kind === 'container' && resource.role === 'fixed-relay' && resource.observedId !== null,
   );
-  if (egressNetworks.length !== 1 || daemons.length !== 1 || relays.length !== 2) {
-    throw new Error('Docker Desktop packages lease omitted its exact egress network, daemon, or fixed relays');
+  const transportProxies = lease.resources.filter(
+    (resource) => resource.kind === 'container' && resource.role === 'proxy' && resource.observedId !== null,
+  );
+  const expectedRelayCount = networkAccess === 'packages' ? 2 : networkAccess === 'images' ? 1 : 0;
+  const expectedEgressNetworkCount = networkAccess === 'offline' ? 0 : 1;
+  if (
+    egressNetworks.length !== expectedEgressNetworkCount ||
+    transportNetworks.length !== 1 ||
+    daemons.length !== 1 ||
+    relays.length !== expectedRelayCount ||
+    transportProxies.length !== 1
+  ) {
+    throw new Error(`Docker Desktop ${networkAccess} lease has an incomplete or extra outer topology`);
   }
-  const egressName = egressNetworks[0].requestedName;
   const agentRaw = await runtime.inspectContainerRaw(outerId);
   const agentNetworks = inspectNetworkNames(agentRaw, 'agent');
-  const ordinaryNetworks = agentNetworks.filter((name) => name !== egressName);
-  if (ordinaryNetworks.length !== 1) {
-    throw new Error(`Docker Desktop agent does not have exactly one ordinary network beside ${egressName}`);
-  }
-  const ordinaryName = ordinaryNetworks[0];
-  assertExactNetworkNames(agentNetworks, [ordinaryName, egressName], 'agent');
+  const egressName = egressNetworks[0]?.requestedName;
+  const ordinaryName = transportNetworks[0]!.requestedName;
+  assertExactNetworkNames(
+    agentNetworks,
+    egressName === undefined ? [ordinaryName] : [ordinaryName, egressName],
+    'agent',
+  );
 
   const transportName = `ironcurtain-sidecar-${getBundleShortId(bundleId)}`;
-  assertExactNetworkNames(
-    inspectNetworkNames(await runtime.inspectContainerRaw(transportName), 'transport'),
-    ['bridge', ordinaryName],
-    'transport',
-  );
+  if (transportProxies[0]!.requestedName !== transportName) {
+    throw new Error('Docker Desktop lease recorded the wrong ordinary transport proxy');
+  }
+  const transportRaw = await runtime.inspectContainerRaw(transportProxies[0]!.observedId!);
+  assertExactNetworkNames(inspectNetworkNames(transportRaw, 'transport'), ['bridge', ordinaryName], 'transport');
   const daemonId = daemons[0].observedId;
   if (daemonId === null) throw new Error('Docker Desktop private daemon is not observed');
+  const daemonRaw = await runtime.inspectContainerRaw(daemonId);
   assertExactNetworkNames(
-    inspectNetworkNames(await runtime.inspectContainerRaw(daemonId), 'private daemon'),
-    [egressName],
+    inspectNetworkNames(daemonRaw, 'private daemon'),
+    networkAccess === 'offline' ? ['none'] : [egressName!],
     'private daemon',
   );
+  const effectiveProfiles = [
+    inspectBoundedOuterProfile(agentRaw, 'agent'),
+    inspectBoundedOuterProfile(transportRaw, 'transport', transportMode === 'pty' ? 'loopback-pty' : 'none'),
+    inspectBoundedOuterProfile(daemonRaw, 'private daemon'),
+  ];
   for (const relay of relays) {
     if (relay.observedId === null) throw new Error(`Docker Desktop relay ${relay.requestedName} is not observed`);
+    const relayRaw = await runtime.inspectContainerRaw(relay.observedId);
     assertExactNetworkNames(
-      inspectNetworkNames(await runtime.inspectContainerRaw(relay.observedId), `relay ${relay.requestedName}`),
+      inspectNetworkNames(relayRaw, `relay ${relay.requestedName}`),
       ['bridge', egressName],
       `relay ${relay.requestedName}`,
     );
+    effectiveProfiles.push(inspectBoundedOuterProfile(relayRaw, `relay ${relay.requestedName}`));
   }
+  assertAggregateOuterResources(effectiveProfiles);
 
   const directEgress = await runtime.exec(
     outerId,
@@ -669,6 +1028,129 @@ async function verifyDockerDesktopOuterTopology(
   );
   if (directEgress.exitCode === 0) {
     throw new Error('Docker Desktop agent unexpectedly reached the internet without a policy proxy');
+  }
+  const daemonProbeTool = await runtime.exec(daemonId, ['/bin/sh', '-c', 'command -v wget'], 5_000, 'rootless');
+  if (daemonProbeTool.exitCode !== 0 || daemonProbeTool.stdout.trim() === '') {
+    throw new Error('Docker Desktop private daemon lacks the fixed direct-egress probe tool');
+  }
+  const daemonDirectEgress = await runtime.exec(
+    daemonId,
+    [
+      '/bin/sh',
+      '-c',
+      'unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy; exec wget -Y off -T 3 -qO- http://1.1.1.1/',
+    ],
+    5_000,
+    'rootless',
+  );
+  if (daemonDirectEgress.exitCode === 0) {
+    throw new Error('Docker Desktop private daemon unexpectedly reached the internet without a policy proxy');
+  }
+}
+
+interface BoundedOuterProfile {
+  readonly memoryBytes: number;
+  readonly nanoCpus: number;
+  readonly pidsLimit: number;
+}
+
+function inspectBoundedOuterProfile(
+  raw: unknown,
+  label: string,
+  portPolicy: 'none' | 'loopback-pty' = 'none',
+): BoundedOuterProfile {
+  const root = inspectObject(raw, `${label} root`);
+  const hostConfig = inspectObject(root.HostConfig, `${label} HostConfig`);
+  if (hostConfig.Privileged !== false) throw new Error(`${label} unexpectedly runs privileged`);
+  assertOuterPortBindings(hostConfig.PortBindings, label, portPolicy);
+  if (hostConfig.Binds !== null && !Array.isArray(hostConfig.Binds)) {
+    throw new Error(`${label} bind evidence is missing`);
+  }
+  const binds = Array.isArray(hostConfig.Binds) ? hostConfig.Binds : [];
+  if (
+    binds.some(
+      (bind) =>
+        typeof bind !== 'string' ||
+        bind.split(':', 1)[0] === '/' ||
+        bind.startsWith('/var/run/docker.sock:') ||
+        bind.startsWith('/run/docker.sock:'),
+    )
+  ) {
+    throw new Error(`${label} exposes a prohibited host bind`);
+  }
+  for (const [field, admitted] of [
+    ['PidMode', ['']],
+    ['IpcMode', ['', 'private']],
+    ['UTSMode', ['']],
+    ['UsernsMode', ['']],
+    ['CgroupnsMode', ['', 'private']],
+  ] as const) {
+    const mode = hostConfig[field];
+    if (typeof mode !== 'string' || !(admitted as readonly string[]).includes(mode)) {
+      throw new Error(`${label} has unsafe ${field}`);
+    }
+  }
+  return {
+    memoryBytes: positiveInteger(hostConfig.Memory, `${label} memory`),
+    nanoCpus: positiveInteger(hostConfig.NanoCpus, `${label} CPU`),
+    pidsLimit: positiveInteger(hostConfig.PidsLimit, `${label} PID limit`),
+  };
+}
+
+function assertOuterPortBindings(value: unknown, label: string, policy: 'none' | 'loopback-pty'): void {
+  const bindings = value === null ? {} : inspectObject(value, `${label} PortBindings`);
+  const entries = Object.entries(bindings);
+  if (policy === 'none') {
+    if (entries.length !== 0) throw new Error(`${label} unexpectedly publishes a host port`);
+    return;
+  }
+  if (entries.length !== 1 || entries[0]![0] !== `${DEFAULT_PTY_PORT}/tcp`) {
+    throw new Error(`${label} must publish only the PTY transport port`);
+  }
+  const published = entries[0]![1];
+  if (!Array.isArray(published) || published.length !== 1) {
+    throw new Error(`${label} PTY port binding is malformed`);
+  }
+  const binding = inspectObject(published[0], `${label} PTY port binding`);
+  const hostPort = typeof binding.HostPort === 'string' ? Number.parseInt(binding.HostPort, 10) : Number.NaN;
+  if (
+    binding.HostIp !== '127.0.0.1' ||
+    !Number.isSafeInteger(hostPort) ||
+    hostPort <= 0 ||
+    hostPort > 65_535 ||
+    String(hostPort) !== binding.HostPort
+  ) {
+    throw new Error(`${label} PTY port is not bound to one explicit loopback port`);
+  }
+}
+
+function positiveInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) throw new Error(`${label} is not enforced`);
+  return value as number;
+}
+
+function assertAggregateOuterResources(profiles: readonly BoundedOuterProfile[]): void {
+  const totals = profiles.reduce(
+    (sum, profile) => ({
+      memoryBytes: sum.memoryBytes + profile.memoryBytes,
+      nanoCpus: sum.nanoCpus + profile.nanoCpus,
+      pidsLimit: sum.pidsLimit + profile.pidsLimit,
+    }),
+    { memoryBytes: 0, nanoCpus: 0, pidsLimit: 0 },
+  );
+  const expected = {
+    memoryBytes: SMOKE_DOCKER_RESOURCES.memoryMb * 1024 * 1024,
+    nanoCpus: SMOKE_DOCKER_RESOURCES.cpus * 1_000_000_000,
+    pidsLimit: SMOKE_DOCKER_PIDS,
+  };
+  if (
+    totals.memoryBytes !== expected.memoryBytes ||
+    totals.nanoCpus !== expected.nanoCpus ||
+    totals.pidsLimit !== expected.pidsLimit
+  ) {
+    throw new Error(
+      `Docker Desktop aggregate resource drift: expected ${JSON.stringify(expected)}, got ${JSON.stringify(totals)}`,
+    );
   }
 }
 
@@ -723,6 +1205,131 @@ async function agentDocker(
         `stdout=${boundedDiagnostic(result.stdout)}; stderr=${boundedDiagnostic(result.stderr)}`,
     );
   }
+  return result;
+}
+
+/** Exercise the documented Offline workflow through the agent-visible client. */
+async function verifyDockerDesktopOfflineWorkload(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  fixture: OfflineFixture,
+): Promise<void> {
+  const deniedPull = await expectAgentDockerFailure(runtime, outerId, ['image', 'pull', PUBLIC_REGISTRY_SMOKE_IMAGE]);
+  if (deniedPull.stdout.includes('Downloaded newer image')) {
+    throw new Error('Docker Desktop Offline unexpectedly downloaded a public image');
+  }
+  const deniedInventory = await innerDocker(runtime, outerId, ['image', 'ls', '--quiet', PUBLIC_REGISTRY_SMOKE_IMAGE]);
+  if (deniedInventory.stdout.trim() !== '') {
+    throw new Error('Docker Desktop Offline denied pull left a public image behind');
+  }
+
+  await agentDocker(runtime, outerId, ['image', 'load', '--input', fixture.archivePath], 120_000);
+  const loaded = await agentDocker(
+    runtime,
+    outerId,
+    ['image', 'inspect', '--format', '{{.Id}}', fixture.image],
+    30_000,
+  );
+  const imageId = loaded.stdout.trim();
+  if (!/^sha256:[a-f0-9]{64}$/u.test(imageId)) {
+    throw new Error(`Docker Desktop Offline loaded image has an invalid immutable ID: ${boundedDiagnostic(imageId)}`);
+  }
+
+  const suffix = randomBytes(12).toString('hex');
+  const contextDirectory = `/tmp/ic-desktop-offline-smoke-${suffix}`;
+  const derivedImage = `localhost/ironcurtain-offline-derived:${suffix}`;
+  const dockerfile = `FROM ${fixture.image}\nLABEL org.opencontainers.image.title="ironcurtain-offline-derived"\n`;
+  try {
+    const output = await agentDocker(
+      runtime,
+      outerId,
+      ['run', '--rm', '--pull=never', '--network=none', imageId],
+      60_000,
+    );
+    if (output.stdout.trim() !== DOCKER_DESKTOP_OFFLINE_MARKER) {
+      throw new Error(`offline loaded image returned unexpected output: ${boundedDiagnostic(output.stdout)}`);
+    }
+    await expectAgentDockerFailure(runtime, outerId, [
+      'run',
+      '--rm',
+      '--pull=never',
+      '--network=none',
+      '--mount',
+      `type=bind,src=${fixture.excludedHostPath},dst=/host-only`,
+      imageId,
+    ]);
+    if (readFileSync(fixture.excludedHostPath, 'utf8') !== 'must-not-be-visible-to-the-nested-daemon\n') {
+      throw new Error('nested Docker altered a host path outside the shared workspace');
+    }
+    await agentDocker(
+      runtime,
+      outerId,
+      [
+        'run',
+        '--rm',
+        '--pull=never',
+        '--network=none',
+        '--mount',
+        `type=bind,src=${CONTAINER_WORKSPACE_DIR},dst=${CONTAINER_WORKSPACE_DIR}`,
+        imageId,
+        'workspace',
+        fixture.workspaceInputPath,
+        fixture.workspaceOutputPath,
+      ],
+      60_000,
+    );
+    if (
+      !existsSync(fixture.hostWorkspaceOutputPath) ||
+      readFileSync(fixture.hostWorkspaceOutputPath, 'utf8') !== `${DOCKER_DESKTOP_OFFLINE_MARKER}\n`
+    ) {
+      throw new Error('nested Docker /workspace bind did not round-trip its exact host marker');
+    }
+    const context = await runtime.exec(
+      outerId,
+      [
+        '/bin/sh',
+        '-eu',
+        '-c',
+        'umask 077; mkdir "$1"; printf %s "$2" > "$1/Dockerfile"',
+        'sh',
+        contextDirectory,
+        dockerfile,
+      ],
+      10_000,
+      'codespace',
+    );
+    if (context.exitCode !== 0) {
+      throw new Error(`agent could not create the offline build context: ${boundedDiagnostic(context.stderr)}`);
+    }
+    await agentDocker(
+      runtime,
+      outerId,
+      ['build', '--pull=false', '--network=none', '--tag', derivedImage, contextDirectory],
+      120_000,
+    );
+    const derived = await agentDocker(
+      runtime,
+      outerId,
+      ['run', '--rm', '--pull=never', '--network=none', derivedImage],
+      60_000,
+    );
+    if (derived.stdout.trim() !== DOCKER_DESKTOP_OFFLINE_MARKER) {
+      throw new Error(`offline derived image returned unexpected output: ${boundedDiagnostic(derived.stdout)}`);
+    }
+  } finally {
+    await innerDocker(runtime, outerId, ['image', 'rm', '--force', derivedImage]).catch(() => {});
+    await innerDocker(runtime, outerId, ['image', 'rm', '--force', fixture.image]).catch(() => {});
+  }
+}
+
+async function expectAgentDockerFailure(
+  runtime: ReturnType<typeof createContainerRuntime>,
+  outerId: string,
+  args: readonly string[],
+  timeoutMs = 30_000,
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  const result = await runtime.exec(outerId, ['docker', ...args], timeoutMs, 'codespace');
+  if (result.exitCode === 0) throw new Error(`agent docker ${args[0]} unexpectedly succeeded`);
   return result;
 }
 
@@ -1198,6 +1805,26 @@ async function verifyClosedBundle(options: {
     labelFilter: `${outerResource.ownershipLabelKey}=${outerResource.ownershipLabelValue}`,
   });
   if (owned.length !== 0) throw new Error('generation-owned Apple VM inventory is not empty');
+  if (closed.runtimeKind === 'docker') {
+    const bundleLabel = `${IRONCURTAIN_LABEL_BUNDLE}=${options.active.sessionId}`;
+    const bundleContainers = await options.runtime.listContainers({ labelFilter: bundleLabel });
+    if (bundleContainers.length !== 0) {
+      throw new Error(
+        `closed Docker Desktop bundle retained containers: ${bundleContainers.map(({ id }) => id).join(',')}`,
+      );
+    }
+    if (options.runtime.listNetworks === undefined) {
+      throw new Error('Docker Desktop runtime cannot inventory bundle networks');
+    }
+    const bundleNetworks = (await options.runtime.listNetworks()).filter(
+      ({ labels }) => labels[IRONCURTAIN_LABEL_BUNDLE] === options.active.sessionId,
+    );
+    if (bundleNetworks.length !== 0) {
+      throw new Error(
+        `closed Docker Desktop bundle retained networks: ${bundleNetworks.map(({ id }) => id).join(',')}`,
+      );
+    }
+  }
   if (existsSync(closed.paths.stateRoot)) throw new Error('revocable state root still exists');
   const runtimeRoot = withIronCurtainHome(options.smokeHome, () =>
     getBundleRuntimeRoot(options.active.sessionId as BundleId),
@@ -1328,5 +1955,5 @@ function redact(value: string): string {
 }
 
 const mode = parseNestedAppleSmokeMode(process.argv.slice(2));
-if (mode === 'pty') await mainPty();
+if (mode === 'pty' || mode === 'docker-desktop-pty') await mainPty(mode);
 else await main(mode);

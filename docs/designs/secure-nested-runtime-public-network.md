@@ -1,6 +1,6 @@
 # Secure Nested Runtime Package Network
 
-**Status:** implemented macOS developer capability; formal backend qualification remains
+**Status:** implemented macOS developer capability; Docker Desktop developer release-qualified
 **Updated:** 2026-09-01
 **Applies to:** the Apple Container and Docker Desktop developer-only nested-Docker runtimes
 **Related:**
@@ -13,7 +13,7 @@ IronCurtain will expose one meaningful nested-Docker **Network access** control 
 
 | Value      | Public image pulls                             | Package network                                              | Intended use                                      |
 | ---------- | ---------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------- |
-| `offline`  | no                                             | no                                                           | Preloaded images and hermetic builds only         |
+| `offline`  | no                                             | no                                                           | Locally loaded images and hermetic builds only    |
 | `images`   | Docker Hub and GHCR through registry mediation | no                                                           | Public image pulls with offline Dockerfile `RUN`s |
 | `packages` | Docker Hub and GHCR through registry mediation | fixed public apt, npm, PyPI, and Cargo repositories via MITM | Ordinary project package installation             |
 
@@ -156,7 +156,9 @@ friendly build wiring, wrapper interception, and CA possession are not authoriza
 
 ### 5.3 Authority granted by each mode
 
-- `offline`: selected/preloaded image bytes and bundle-private sibling networking only.
+- `offline`: locally available image bytes and bundle-private sibling networking only. Apple loads the
+  selected current-agent transport image; Docker Desktop begins empty and accepts explicit
+  `docker image load --input /workspace/<archive>.tar` imports from the shared workspace.
 - `images`: `offline` plus the existing Docker Hub/GHCR image-registry capability on `18081`.
 - `packages`: `images` plus GET/HEAD access on `18082` to the fixed package grammars in §7, mediated by
   host TLS termination and request authorization.
@@ -175,7 +177,7 @@ Network access
   Public images only
     Docker Hub and GHCR pulls work; Dockerfile RUN networking is offline.
   Offline
-    Only preloaded images and hermetic builds work.
+    Only locally loaded images and hermetic builds work.
 ```
 
 Immediately adjacent to the selector, CLI and web MUST render this exact sentence:
@@ -798,23 +800,23 @@ by this design.
 ## 13. Deterministic acceptance
 
 The developer implementation has landed. This matrix records current implementation evidence separately
-from the remaining formal backend release qualification.
+from the broader preview qualification matrix.
 
-| Area                 | Release requirement                                                           | Current implementation evidence                                                                                 | Status                        |
-| -------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| Product authority    | no generic CONNECT; fixed package MITM is the only `18082` authority          | generic public path removed; dedicated listener and Apple/Desktop fixed relays are product-wired                | landed                        |
-| Package policy       | positive npm/PyPI/apt/Cargo plus exact hostile negatives                      | hermetic client/negative suites and deterministic Apple packages workflow; Docker Desktop apt smoke             | landed; Desktop suite pending |
-| Address and ledger   | all denied destinations, attempts, limits, aborts, and shutdown are hermetic  | package address policy, request ledger, bounded transport, abort, and shutdown suites                           | landed                        |
-| Runc seam            | static pinned wrapper, hostile-spec tests, exact version qualification        | checked-in Go wrapper/runtime, generated diagnostic contract, hostile-spec tests, and startup canary            | landed                        |
-| Ordinary Dockerfiles | no source edit for supported package managers and local-default Buildx        | direct/default-Buildx shim forms cover npm, pip, apt, and Cargo; Compose builds remain explicitly unsupported   | landed                        |
-| Secret provisioning  | no host credential/private key is provisioned; credential fields are rejected | public-only mounts, credential rejection, archive/VFS CA-SPKI residue checks, and persisted mount evidence      | landed                        |
-| Cache                | fresh per-session data root and explicit no-revalidation nonclaim             | cache-hit behavior is tested; exact bundle teardown removes the private data root/volume                        | landed                        |
-| Residue              | successful/failed exports and snapshots contain no automatic trust residue    | deterministic image archive and VFS graphdriver scans run in the Apple packages workflow                        | landed; Desktop rerun pending |
-| Lifecycle            | batch/workflow/PTY failure rollback and exact reconciliation                  | shared lifecycle and focused failure tests; graceful next admission passed; process-death workflow gate remains | landed; crash gate pending    |
-| Configuration        | complete three-enum migration and CLI/web parity                              | config normalization plus CLI/web settings and warning tests cover all three modes                              | landed                        |
+| Area                 | Release requirement                                                           | Current implementation evidence                                                                                             | Status                                                  |
+| -------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Product authority    | no generic CONNECT; fixed package MITM is the only `18082` authority          | generic public path removed; dedicated listener and Apple/Desktop fixed relays are product-wired                            | landed                                                  |
+| Package policy       | positive npm/PyPI/apt/Cargo plus exact hostile negatives                      | hermetic client/negative suites and deterministic Apple packages workflow; Docker Desktop release suite plus live apt build | developer-qualified; broader live client matrix remains |
+| Address and ledger   | all denied destinations, attempts, limits, aborts, and shutdown are hermetic  | package address policy, request ledger, bounded transport, abort, and shutdown suites                                       | landed                                                  |
+| Runc seam            | static pinned wrapper, hostile-spec tests, exact version qualification        | checked-in Go wrapper/runtime, generated diagnostic contract, hostile-spec tests, and startup canary                        | landed                                                  |
+| Ordinary Dockerfiles | no source edit for supported package managers and local-default Buildx        | direct/default-Buildx shim forms cover npm, pip, apt, and Cargo; Compose builds remain explicitly unsupported               | landed                                                  |
+| Secret provisioning  | no host credential/private key is provisioned; credential fields are rejected | public-only mounts, credential rejection, archive/VFS CA-SPKI residue checks, and persisted mount evidence                  | landed                                                  |
+| Cache                | fresh per-session data root and explicit no-revalidation nonclaim             | cache-hit behavior is tested; exact bundle teardown removes the private data root/volume                                    | landed                                                  |
+| Residue              | successful/failed exports and snapshots contain no automatic trust residue    | deterministic image archive and VFS graphdriver scans run in the Apple packages workflow                                    | landed; Desktop preview rerun remains                   |
+| Lifecycle            | batch/workflow/PTY failure rollback and exact reconciliation                  | shared lifecycle/failure tests plus Docker Desktop coordinator-death, exact cleanup, child reaping, and readmission gates   | developer-qualified                                     |
+| Configuration        | complete three-enum migration and CLI/web parity                              | config normalization plus CLI/web settings and warning tests cover all three modes                                          | landed                                                  |
 
-`packages` is admitted only as developer functionality. A no-skip Docker Desktop release suite, full
-G1-G10/0C reruns for each macOS backend, and preview qualification remain open.
+`packages` is admitted only as developer functionality. The no-skip Docker Desktop release suite passes;
+full G1-G10/0C reruns for each macOS backend and preview qualification remain open.
 
 ### 13.1 Strict package proxy
 
@@ -1056,9 +1058,9 @@ select the removed generic authority.
    load-before-canary, and image/VFS residue checks are implemented in the deterministic Apple workflow.
 5. **Atomic product integration — complete:** migration, CLI/web warning, shared batch/PTY lifecycle, and
    Compose/alternate-selector rejection landed together.
-6. **Backend release qualification — open:** Apple has the deterministic packages/images/offline workflow;
-   Docker Desktop has the current packages operator smoke but still needs its no-skip release suite and
-   full three-mode product-entrypoint rerun before preview.
+6. **Docker Desktop developer release qualification — complete:** the fixed suite plus real built-CLI
+   feature-off, crash-recovery, PTY/Claude-TUI, offline, images, and packages gates pass with zero skips.
+7. **Preview qualification — open:** full G1-G10/0C reruns for both macOS backends remain separate.
 
 Retire the generic `public-network-proxy` product path, ClientHello-only opaque CONNECT behavior, and
 `networkAccess: "public"` output. Reusable reviewed address-policy and ledger modules may remain under
@@ -1173,4 +1175,5 @@ backend 0C/G1-G10 or preview qualification; those open release gates are recorde
       clean green run.
 - [x] The deterministic Apple packages/images/offline workflow, hostile proxy/wrapper tests,
       layer/snapshot residue scans, and exact cleanup pass for developer admission. Docker Desktop's
-      packages operator smoke passes; its full three-mode release rerun remains the separate §13/§14 gate.
+      no-skip suite and feature-off/crash/offline/images/packages product-entrypoint gates pass; broader
+      preview residue and multi-client reruns remain the separate §13/§14 work.
