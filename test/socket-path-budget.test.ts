@@ -12,7 +12,8 @@
  * bundle directory, CI fails here before the path escapes to production.
  */
 
-import { describe, it, expect } from 'vitest';
+import { resolve } from 'node:path';
+import { afterEach, describe, it, expect } from 'vitest';
 import {
   getBundleControlSocketPath,
   getBundleHostOnlyDir,
@@ -20,7 +21,9 @@ import {
   getBundleMitmProxySocketPath,
   getBundleProxySocketPath,
   getBundleRuntimeRoot,
+  getBundleRuntimeRootForHome,
   getBundleSocketsDir,
+  getIronCurtainHome,
 } from '../src/config/paths.js';
 import type { BundleId } from '../src/session/types.js';
 
@@ -32,6 +35,26 @@ const SUN_PATH_MACOS_LIMIT = 104;
 // A full-length UUID is the worst case the helpers will ever see — smaller
 // `BundleId` inputs can only shrink the assembled path.
 const FULL_UUID_BUNDLE_ID = 'eaa0f084-feed-48c2-ab40-bed3600fe55a' as BundleId;
+const ORIGINAL_IRONCURTAIN_HOME = process.env.IRONCURTAIN_HOME;
+
+afterEach(() => {
+  if (ORIGINAL_IRONCURTAIN_HOME === undefined) delete process.env.IRONCURTAIN_HOME;
+  else process.env.IRONCURTAIN_HOME = ORIGINAL_IRONCURTAIN_HOME;
+});
+
+describe('IronCurtain home normalization', () => {
+  it('normalizes a trailing slash before deriving strict bundle paths', () => {
+    const expectedHome = resolve(process.cwd(), '.ironcurtain-home-normalization-test');
+    const configuredHome = `${expectedHome}/./`;
+    process.env.IRONCURTAIN_HOME = configuredHome;
+
+    expect(getIronCurtainHome()).toBe(expectedHome);
+    expect(getBundleRuntimeRoot(FULL_UUID_BUNDLE_ID)).toBe(
+      getBundleRuntimeRootForHome(expectedHome, FULL_UUID_BUNDLE_ID),
+    );
+    expect(() => getBundleRuntimeRootForHome(configuredHome, FULL_UUID_BUNDLE_ID)).toThrow(/Invalid IronCurtain home/u);
+  });
+});
 
 describe('per-bundle socket path budget', () => {
   it('every host-side UDS path stays under macOS sun_path cap with full-length UUIDs', () => {

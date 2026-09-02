@@ -308,6 +308,9 @@ signal handling, and cleanup), not for duplicating the Docker functional matrix 
 
 ### Docker Desktop developer release qualification
 
+Prerequisites are a running Docker Desktop daemon, a host Go toolchain for the deterministic scratch-image
+fixture, the built IronCurtain agent image, and network access for the `images` and `packages` gates.
+
 On 2026-09-01, the built Docker Desktop developer path passed the operator smoke after the shared
 lifecycle, relay, PTY target, and build-state initialization fixes:
 

@@ -125,7 +125,7 @@ interface SmokeCliProcess {
   output(): { readonly stdout: string; readonly stderr: string };
 }
 
-async function main(mode: Exclude<NestedAppleSmokeMode, 'pty'>): Promise<void> {
+async function main(mode: Exclude<NestedAppleSmokeMode, 'pty' | 'docker-desktop-pty'>): Promise<void> {
   const environment = prepareSmokeEnvironment(mode);
   if (mode === 'docker-desktop-disabled') {
     await mainDockerDesktopDisabled(environment);

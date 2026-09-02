@@ -109,6 +109,9 @@ function resolveLeaseBundleRuntimeRoot(lease: DockerWorkloadLease): string | und
   if (lease.paths.bundleRuntimeRoot !== undefined && lease.paths.bundleRuntimeRoot !== expected) {
     throw new Error('watchdog supervisor bundle runtime root binding mismatch');
   }
+  // Canonical historical leases implicitly owned this exact deterministic
+  // path before the field was persisted. Re-derive it only from the home and
+  // bundle identity already bound into the lease; never consult ambient state.
   return lease.paths.bundleRuntimeRoot ?? expected;
 }
 

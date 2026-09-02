@@ -40,7 +40,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Defaults to ~/.ironcurtain, overridable via IRONCURTAIN_HOME env var.
  */
 export function getIronCurtainHome(): string {
-  return process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain');
+  return resolve(process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain'));
 }
 
 /**

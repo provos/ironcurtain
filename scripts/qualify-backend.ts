@@ -93,7 +93,13 @@ async function runLiveSmoke(
       if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
     }
   };
-  if (child.pid === undefined) throw new Error('live qualification gate has no process group ID');
+  if (child.pid === undefined) {
+    // A failed spawn reports through an asynchronous `error` event. Retain a
+    // listener after this synchronous guard throws so that failure cannot
+    // surface later as an uncaught event in the qualification runner.
+    child.once('error', () => undefined);
+    throw new Error('live qualification gate has no process group ID');
+  }
   let exit: Awaited<ReturnType<typeof waitForSmokeChild>> | undefined;
   let waitFailure: unknown;
   try {
